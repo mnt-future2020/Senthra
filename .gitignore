@@ -1,0 +1,29 @@
+# Root ignores for the Senthra project.
+# Per-project rules live in backend/.gitignore and frontend/.gitignore.
+
+# Dependencies (defensive — should not exist at the root)
+node_modules/
+
+# OS junk (patterns without a slash apply to every subfolder)
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# Qodo AI workspace (local, regenerated)
+.qodo/
+
+# Logs
+*.log
+
+# Safety net: never commit real secrets anywhere in the tree.
+# (.env.example templates are still allowed.)
+.env
+.env.*
+!.env.example

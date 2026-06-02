@@ -1,0 +1,23 @@
+# Normalize line endings across all platforms: store LF in the repo for every
+# text file, and check out LF (keeps JS/TS tooling — ESLint, Prettier — happy
+# and avoids noisy CRLF diffs between Windows and Linux/CI).
+* text=auto eol=lf
+
+# Shell scripts must stay LF.
+*.sh text eol=lf
+
+# Binary assets — never normalize.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.webp binary
+*.woff  binary
+*.woff2 binary
+*.ttf  binary
+*.eot  binary
+*.pdf  binary
+
+# Lockfiles: treat as text but don't show in diffs (reduce noise).
+pnpm-lock.yaml -diff

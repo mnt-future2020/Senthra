@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Environment variables — keep secrets (DB URL, JWT/refresh/encryption keys,
+# admin password) OUT of version control. The template stays committed.
+.env
+.env.*
+!.env.example
+
+# TypeScript build output
+dist/
+*.tsbuildinfo
+
+# Prisma generated client (only when a custom output path is configured)
+/generated/prisma
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test / coverage output
+coverage/

@@ -1,0 +1,193 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+:root {
+  --accent: #7b6ef0;
+  --radius: 18px;
+
+  /* Dynamic Opacity Accents built securely via CSS color-mix */
+  --accent-12: color-mix(in srgb, var(--accent) 12%, transparent);
+  --accent-10: color-mix(in srgb, var(--accent) 10%, transparent);
+  --accent-6: color-mix(in srgb, var(--accent) 6%, transparent);
+  --accent-3: color-mix(in srgb, var(--accent) 3%, transparent);
+
+  /* Grey neutral premium aesthetic matched with the dashboard image */
+  --bg: #f4f4f6;
+  --surface: #ffffff;
+  --surface-2: #fafafa;
+  --ink: #09090b;
+  --muted: #71717a;
+  --faint: #a1a1aa;
+  --border: #e4e4e7;
+  --border-2: #f4f5f7;
+  --pos: #10b981;
+  --neg: #ef4444;
+  --warn: #f5a623;
+  --shadow: 0 1px 2px rgba(9, 9, 11, 0.04), 0 8px 24px rgba(9, 9, 11, 0.05);
+  --shadow-lg: 0 2px 6px rgba(9, 9, 11, 0.05), 0 18px 40px rgba(9, 9, 11, 0.08);
+  --pad: 22px;
+  --gap: 20px;
+}
+
+[data-theme="dark"] {
+  --bg: #09090b;
+  --surface: #18181b;
+  --surface-2: #27272a;
+  --ink: #fafafa;
+  --muted: #a1a1aa;
+  --faint: #71717a;
+  --border: #27272a;
+  --border-2: #1e1e21;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.2), 0 10px 26px rgba(0, 0, 0, 0.28);
+  --shadow-lg: 0 2px 8px rgba(0, 0, 0, 0.28), 0 22px 48px rgba(0, 0, 0, 0.4);
+}
+
+[data-density="compact"] {
+  --pad: 16px;
+  --gap: 14px;
+}
+
+body {
+  font-family: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+  background-color: var(--bg);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  transition: background-color 0.25s cubic-bezier(0.16, 1, 0.3, 1), color 0.15s ease;
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 99px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--faint);
+}
+
+/* CSS transition for interactive tweaks */
+.tweak-transition {
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Glow effects centered around active accent color */
+.accent-glow {
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* Lightweight fade-in used by dropdowns/menus */
+.anim-fade-in {
+  animation: senthra-fade-in 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes senthra-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Tabular figures for numeric values */
+.num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+/* =====================================================================
+   shadcn/ui layer — ISOLATED with --sh-* variable names so it never
+   collides with the Senthra dashboard tokens (--accent / --border / --radius).
+   Themed to match the dashboard: primary = the Senthra purple (#7b6ef0).
+   Use these for NEW pages via shadcn components; the dashboard is untouched.
+   ===================================================================== */
+@custom-variant dark (&:is(.dark *, [data-theme="dark"] *));
+
+@theme inline {
+  --color-background: var(--sh-background);
+  --color-foreground: var(--sh-foreground);
+  --color-card: var(--sh-card);
+  --color-card-foreground: var(--sh-card-foreground);
+  --color-popover: var(--sh-popover);
+  --color-popover-foreground: var(--sh-popover-foreground);
+  --color-primary: var(--sh-primary);
+  --color-primary-foreground: var(--sh-primary-foreground);
+  --color-secondary: var(--sh-secondary);
+  --color-secondary-foreground: var(--sh-secondary-foreground);
+  --color-muted: var(--sh-muted);
+  --color-muted-foreground: var(--sh-muted-foreground);
+  --color-accent: var(--sh-accent);
+  --color-accent-foreground: var(--sh-accent-foreground);
+  --color-destructive: var(--sh-destructive);
+  --color-destructive-foreground: var(--sh-destructive-foreground);
+  --color-border: var(--sh-border);
+  --color-input: var(--sh-input);
+  --color-ring: var(--sh-ring);
+
+  --radius-sm: calc(var(--sh-radius) - 4px);
+  --radius-md: calc(var(--sh-radius) - 2px);
+  --radius-lg: var(--sh-radius);
+  --radius-xl: calc(var(--sh-radius) + 4px);
+}
+
+:root {
+  --sh-radius: 0.75rem;
+  --sh-background: #ffffff;
+  --sh-foreground: #09090b;
+  --sh-card: #ffffff;
+  --sh-card-foreground: #09090b;
+  --sh-popover: #ffffff;
+  --sh-popover-foreground: #09090b;
+  --sh-primary: #7b6ef0;
+  --sh-primary-foreground: #ffffff;
+  --sh-secondary: #f4f4f5;
+  --sh-secondary-foreground: #18181b;
+  --sh-muted: #f4f4f5;
+  --sh-muted-foreground: #71717a;
+  --sh-accent: #f4f4f5;
+  --sh-accent-foreground: #18181b;
+  --sh-destructive: #ef4444;
+  --sh-destructive-foreground: #ffffff;
+  --sh-border: #e4e4e7;
+  --sh-input: #e4e4e7;
+  --sh-ring: #7b6ef0;
+}
+
+.dark {
+  --sh-background: #09090b;
+  --sh-foreground: #fafafa;
+  --sh-card: #18181b;
+  --sh-card-foreground: #fafafa;
+  --sh-popover: #18181b;
+  --sh-popover-foreground: #fafafa;
+  --sh-primary: #8b7ff2;
+  --sh-primary-foreground: #0b0b0f;
+  --sh-secondary: #27272a;
+  --sh-secondary-foreground: #fafafa;
+  --sh-muted: #27272a;
+  --sh-muted-foreground: #a1a1aa;
+  --sh-accent: #27272a;
+  --sh-accent-foreground: #fafafa;
+  --sh-destructive: #ef4444;
+  --sh-destructive-foreground: #fafafa;
+  --sh-border: #27272a;
+  --sh-input: #27272a;
+  --sh-ring: #8b7ff2;
+}
