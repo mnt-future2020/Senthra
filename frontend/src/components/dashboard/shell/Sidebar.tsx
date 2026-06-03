@@ -19,6 +19,8 @@ import {
 
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
+import { useBranding } from "@/hooks/useBranding";
+import { BrandMark } from "@/components/branding/BrandMark";
 
 type NavItem = {
   href: string;
@@ -50,6 +52,7 @@ export function Sidebar({
   onCloseMobile: () => void;
 }) {
   const { admin, logout } = useAuth();
+  const { brandName } = useBranding();
   const router = useRouter();
   const pathname = usePathname();
   const d = useDashboard();
@@ -122,16 +125,14 @@ export function Sidebar({
             collapsed ? "px-1 justify-center" : "px-2"
           }`}
         >
-          <div className="w-9 h-9 rounded-xl font-black bg-gradient-to-br from-[var(--accent)] to-indigo-600 text-white flex items-center justify-center text-lg shadow-md accent-glow select-none flex-shrink-0">
-            S
-          </div>
+          <BrandMark className="w-9 h-9 rounded-xl text-lg shadow-md accent-glow select-none" />
           <div
             className={`leading-none transition-all duration-300 overflow-hidden whitespace-nowrap ${
               collapsed ? "w-0 opacity-0 pointer-events-none" : "w-32 opacity-100"
             }`}
           >
             <h2 className="font-extrabold text-base tracking-tight text-[var(--ink)]">
-              Senthra
+              {brandName}
             </h2>
             <span className="text-[10px] uppercase font-bold tracking-widest text-[var(--faint)] mt-0.5 block">
               Admin Suite

@@ -47,6 +47,19 @@ model Settings {
   smtpFromName       String?
   smtpFromEmail      String?
 
+  // --- Cloudinary (image CDN) — UI-configurable; secret encrypted at rest ---
+  cloudinaryCloudName String?
+  cloudinaryApiKey    String?
+  cloudinaryApiSecret String?  // never returned to the client
+
+  // --- Branding (all public; logo/favicon are Cloudinary URLs) ---
+  brandName          String?
+  logoUrl            String?
+  faviconUrl         String?
+  footerText         String?
+  loginHeadline      String?
+  loginSubtext       String?
+
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 }

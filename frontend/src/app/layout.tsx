@@ -1,22 +1,52 @@
 import type { Metadata } from "next";
+import type { CSSProperties } from "react";
+import { cookies } from "next/headers";
 import "./globals.css";
 
 import { AuthProvider } from "@/providers/AuthProvider";
+import { BrandingProvider } from "@/providers/BrandingProvider";
+import { APPEARANCE_COOKIE, parseAppearance } from "@/lib/appearance";
+import { brandTitle, fetchBranding } from "@/lib/branding";
 
-export const metadata: Metadata = {
-  title: "Senthra — Admin Dashboard",
-  description: "Senthra admin & analytics dashboard",
-};
+// Dynamic title + favicon from the configured branding. fetchBranding is wrapped
+// in React.cache, so this call and the RootLayout call below share one request.
+export async function generateMetadata(): Promise<Metadata> {
+  const branding = await fetchBranding();
+  return {
+    title: brandTitle(branding.brandName),
+    description: `${branding.brandName} admin & analytics dashboard`,
+    ...(branding.faviconUrl ? { icons: { icon: branding.faviconUrl } } : {}),
+  };
+}
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // Read the saved appearance on the server so the very first paint already has
+  // the right theme/accent/density/radius — no flash of the default theme.
+  const store = await cookies();
+  const appearance = parseAppearance(store.get(APPEARANCE_COOKIE)?.value);
+  const branding = await fetchBranding();
+
   return (
-    <html lang="en">
+    <html
+      lang="en"
+      data-theme={appearance.theme}
+      data-density={appearance.density}
+      style={
+        {
+          "--accent": appearance.accent,
+          "--radius": `${appearance.radius}px`,
+        } as CSSProperties
+      }
+      suppressHydrationWarning
+    >
       <body className="antialiased">
-        <AuthProvider>{children}</AuthProvider>
+        <BrandingProvider branding={branding}>
+          <AuthProvider>{children}</AuthProvider>
+        </BrandingProvider>
       </body>
     </html>
   );

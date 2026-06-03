@@ -1,4 +1,9 @@
-export type Section = "account" | "appearance" | "integrations" | "email";
+export type Section =
+  | "account"
+  | "branding"
+  | "appearance"
+  | "integrations"
+  | "email";
 
 export type Msg = { type: "success" | "error"; text: string } | null;
 

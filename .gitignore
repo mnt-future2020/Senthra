@@ -22,6 +22,16 @@ Desktop.ini
 # Logs
 *.log
 
+# Binary client / reference docs — keep the .md summaries tracked, ignore the
+# source binaries (PDFs, Word, Excel: client inputs, job packs, samples, etc.)
+*.pdf
+*.docx
+*.doc
+*.xlsx
+*.xls
+*.pptx
+*.ppt
+
 # Safety net: never commit real secrets anywhere in the tree.
 # (.env.example templates are still allowed.)
 .env

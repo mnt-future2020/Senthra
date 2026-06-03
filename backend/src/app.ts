@@ -14,7 +14,8 @@ app.use(
     credentials: true,
   }),
 );
-app.use(express.json());
+// Larger limit so base64 logo/favicon uploads fit in the JSON body.
+app.use(express.json({ limit: "5mb" }));
 app.use(cookieParser());
 
 // Application routes (health check + feature routers).

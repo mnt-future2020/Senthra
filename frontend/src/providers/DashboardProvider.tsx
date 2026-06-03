@@ -9,6 +9,10 @@ import {
   NotificationItem,
 } from "@/types/dashboard";
 import { INITIAL_CHANNELS, INITIAL_TXN, INITIAL_NOTIFICATIONS } from "@/data/dashboard";
+import {
+  readAppearanceCookie,
+  writeAppearanceCookie,
+} from "@/lib/appearance";
 
 type Tier = "Super Admin" | "Pro Member" | "Enterprise Owner";
 type ToastType = "success" | "info" | "alert";
@@ -63,10 +67,15 @@ export type DashboardContextValue = {
 export const DashboardContext = React.createContext<DashboardContextValue | null>(null);
 
 export function DashboardProvider({ children }: { children: React.ReactNode }) {
-  const [accent, setAccent] = React.useState("#7b6ef0");
-  const [theme, setTheme] = React.useState<"light" | "dark">("light");
-  const [density, setDensity] = React.useState<"compact" | "regular">("regular");
-  const [radius, setRadius] = React.useState(18);
+  // Initialise from the saved cookie (matches what the server rendered on <html>).
+  const [accent, setAccent] = React.useState(() => readAppearanceCookie().accent);
+  const [theme, setTheme] = React.useState<"light" | "dark">(
+    () => readAppearanceCookie().theme,
+  );
+  const [density, setDensity] = React.useState<"compact" | "regular">(
+    () => readAppearanceCookie().density,
+  );
+  const [radius, setRadius] = React.useState(() => readAppearanceCookie().radius);
 
   const [searchQuery, setSearchQuery] = React.useState("");
   const [revRange, setRevRange] = React.useState(12);
@@ -100,13 +109,15 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  // Keep CSS variables in sync with the appearance settings.
+  // Keep CSS variables in sync with the appearance settings, and persist the
+  // choice to the cookie so it survives reloads (and SSRs correctly next time).
   React.useEffect(() => {
     const doc = document.documentElement;
     doc.style.setProperty("--accent", accent);
     doc.style.setProperty("--radius", `${radius}px`);
     doc.dataset.theme = theme;
     doc.dataset.density = density;
+    writeAppearanceCookie({ theme, accent, density, radius });
   }, [accent, theme, density, radius]);
 
   // Stat cards recomputed from the live transaction list.
