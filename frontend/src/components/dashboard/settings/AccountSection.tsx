@@ -1,14 +1,15 @@
 "use client";
 
 import * as React from "react";
-import { Loader2, User } from "lucide-react";
+import { Loader2, ShieldCheck, User } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
 import * as authService from "@/services/auth.service";
 import { SettingsCard } from "./ui/SettingsCard";
 import { Notice } from "./ui/Notice";
 import { PasswordInput } from "./ui/PasswordInput";
-import { inputCls, labelCls, primaryBtn } from "./ui/styles";
+import { Field } from "./ui/Field";
+import { inputCls, primaryBtn } from "./ui/styles";
 import type { Msg } from "./types";
 
 export function AccountSection() {
@@ -49,28 +50,38 @@ export function AccountSection() {
     <SettingsCard
       icon={User}
       title="Account"
-      desc="Update the email you use to sign in. Your current password confirms the change."
+      badge={
+        <span className="inline-flex items-center gap-1 rounded-full border border-[var(--accent)]/30 bg-[var(--accent-10)] px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-wider text-[var(--accent)]">
+          <ShieldCheck className="h-3 w-3" />
+          Super Admin
+        </span>
+      }
+      desc="This is the Super Admin account — the primary login for the system. Update the email you sign in with; your current password confirms the change."
     >
       <form onSubmit={save} className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-2">
-          <div>
-            <label className={labelCls}>Email address</label>
+          <Field
+            label="Email address"
+            hint="The address you sign in with. Security notifications are sent here."
+          >
             <input
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               className={inputCls}
             />
-          </div>
-          <div>
-            <label className={labelCls}>Current password</label>
+          </Field>
+          <Field
+            label="Current password"
+            hint="Confirms it's really you before the email is changed."
+          >
             <PasswordInput
               value={currentPassword}
               onChange={(e) => setCurrentPassword(e.target.value)}
               placeholder="Required to confirm"
               autoComplete="current-password"
             />
-          </div>
+          </Field>
         </div>
         <Notice msg={msg} />
         <div className="flex justify-end">

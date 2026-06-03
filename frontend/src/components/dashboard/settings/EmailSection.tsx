@@ -8,7 +8,8 @@ import { SettingsCard } from "./ui/SettingsCard";
 import { Notice } from "./ui/Notice";
 import { Toggle } from "./ui/Toggle";
 import { PasswordInput } from "./ui/PasswordInput";
-import { inputCls, labelCls, primaryBtn } from "./ui/styles";
+import { Field } from "./ui/Field";
+import { inputCls, primaryBtn } from "./ui/styles";
 import type { Msg } from "./types";
 
 // Common providers — selecting one auto-fills host/port/encryption.
@@ -170,8 +171,10 @@ export function EmailSection() {
         </div>
 
         {/* Provider preset */}
-        <div>
-          <label className={labelCls}>Provider preset</label>
+        <Field
+          label="Provider preset"
+          hint="Pick a known provider to auto-fill host, port and encryption."
+        >
           <select
             value={provider}
             onChange={(e) => onProviderChange(e.target.value)}
@@ -183,25 +186,28 @@ export function EmailSection() {
               </option>
             ))}
           </select>
-        </div>
+        </Field>
 
         {/* Host + Port */}
         <div className="grid gap-4 sm:grid-cols-3">
           <div className="sm:col-span-2">
-            <label className={labelCls}>SMTP host</label>
-            <input
-              type="text"
-              value={host}
-              onChange={(e) => {
-                setHost(e.target.value);
-                setProvider(detectProvider(e.target.value));
-              }}
-              placeholder="smtp.example.com"
-              className={inputCls}
-            />
+            <Field
+              label="SMTP host"
+              hint="Your mail server's address, e.g. smtp.gmail.com."
+            >
+              <input
+                type="text"
+                value={host}
+                onChange={(e) => {
+                  setHost(e.target.value);
+                  setProvider(detectProvider(e.target.value));
+                }}
+                placeholder="smtp.example.com"
+                className={inputCls}
+              />
+            </Field>
           </div>
-          <div>
-            <label className={labelCls}>Port</label>
+          <Field label="Port" hint="587 for STARTTLS, 465 for SSL/TLS.">
             <input
               type="number"
               value={port}
@@ -209,12 +215,14 @@ export function EmailSection() {
               placeholder="587"
               className={inputCls}
             />
-          </div>
+          </Field>
         </div>
 
         {/* Encryption */}
-        <div>
-          <label className={labelCls}>Encryption</label>
+        <Field
+          label="Encryption"
+          hint="Match this to the port — 587 uses STARTTLS, 465 uses SSL/TLS."
+        >
           <div className="flex gap-3">
             <button
               type="button"
@@ -231,11 +239,13 @@ export function EmailSection() {
               SSL / TLS · 465
             </button>
           </div>
-        </div>
+        </Field>
 
         {/* Auth */}
-        <div>
-          <label className={labelCls}>Username</label>
+        <Field
+          label="Username"
+          hint="Usually the full email address of the sending account."
+        >
           <input
             type="text"
             value={username}
@@ -244,23 +254,25 @@ export function EmailSection() {
             autoComplete="off"
             className={inputCls}
           />
-        </div>
-        <div>
-          <label className={labelCls}>
-            Password {passwordSet && "(saved — leave blank to keep)"}
-          </label>
+        </Field>
+        <Field
+          label={<>Password {passwordSet && "(saved — leave blank to keep)"}</>}
+          hint="For Gmail or Outlook, use an app password — not your login password."
+        >
           <PasswordInput
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             placeholder={passwordSet ? "•••••••• (saved)" : "SMTP password / app password"}
             autoComplete="off"
           />
-        </div>
+        </Field>
 
         {/* From identity */}
         <div className="grid gap-4 sm:grid-cols-2">
-          <div>
-            <label className={labelCls}>From name</label>
+          <Field
+            label="From name"
+            hint="The sender name recipients see, e.g. your company."
+          >
             <input
               type="text"
               value={fromName}
@@ -268,9 +280,11 @@ export function EmailSection() {
               placeholder="Your Company"
               className={inputCls}
             />
-          </div>
-          <div>
-            <label className={labelCls}>From email</label>
+          </Field>
+          <Field
+            label="From email"
+            hint="The address emails are sent from. Some providers require it to match the username."
+          >
             <input
               type="email"
               value={fromEmail}
@@ -278,7 +292,7 @@ export function EmailSection() {
               placeholder="no-reply@example.com"
               className={inputCls}
             />
-          </div>
+          </Field>
         </div>
 
         <Notice msg={msg} />
@@ -292,33 +306,33 @@ export function EmailSection() {
 
         {/* Test email */}
         <div className="border-t border-[var(--border-2)] pt-4">
-          <label className={labelCls}>Send a test email</label>
-          <div className="flex flex-col gap-3 sm:flex-row">
-            <input
-              type="email"
-              value={testTo}
-              onChange={(e) => setTestTo(e.target.value)}
-              placeholder="you@example.com"
-              className={inputCls}
-            />
-            <button
-              type="button"
-              onClick={sendTest}
-              disabled={testing}
-              className="flex shrink-0 items-center justify-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-5 py-2.5 text-xs font-extrabold text-[var(--ink)] transition-all hover:border-[var(--accent)] disabled:opacity-60"
-            >
-              {testing ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Send className="h-3.5 w-3.5" />
-              )}
-              Send test
-            </button>
-          </div>
-          <p className="mt-2 text-[11px] text-[var(--faint)]">
-            Uses the values above (or your saved settings). A blank password falls
-            back to the saved one.
-          </p>
+          <Field
+            label="Send a test email"
+            hint="Uses the values above (or your saved settings). A blank password falls back to the saved one."
+          >
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <input
+                type="email"
+                value={testTo}
+                onChange={(e) => setTestTo(e.target.value)}
+                placeholder="you@example.com"
+                className={inputCls}
+              />
+              <button
+                type="button"
+                onClick={sendTest}
+                disabled={testing}
+                className="flex shrink-0 items-center justify-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-5 py-2.5 text-xs font-extrabold text-[var(--ink)] transition-all hover:border-[var(--accent)] disabled:opacity-60"
+              >
+                {testing ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Send className="h-3.5 w-3.5" />
+                )}
+                Send test
+              </button>
+            </div>
+          </Field>
         </div>
       </form>
     </SettingsCard>

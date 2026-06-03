@@ -25,6 +25,12 @@ const envSchema = z.object({
   FRONTEND_URL: z.url().default("http://localhost:3000"),
   COOKIE_DOMAIN: z.string().optional(),
 
+  // Cloudinary (image CDN) for branding logo/favicon uploads. Optional — image
+  // upload is disabled until all three are set; the rest of branding still works.
+  CLOUDINARY_CLOUD_NAME: z.string().optional(),
+  CLOUDINARY_API_KEY: z.string().optional(),
+  CLOUDINARY_API_SECRET: z.string().optional(),
+
   // Initial admin seeded on first startup (optional — seed is skipped if unset).
   ADMIN_EMAIL: z.email().optional(),
   ADMIN_PASSWORD: z.string().min(1).optional(),

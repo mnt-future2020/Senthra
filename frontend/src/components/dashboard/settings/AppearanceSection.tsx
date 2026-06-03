@@ -4,7 +4,8 @@ import { RotateCcw, Palette } from "lucide-react";
 
 import { AVAILABLE_ACCENTS } from "@/data/dashboard";
 import { SettingsCard } from "./ui/SettingsCard";
-import { labelCls } from "./ui/styles";
+import { Field } from "./ui/Field";
+import { hintCls, labelCls } from "./ui/styles";
 import type { AppearanceProps } from "./types";
 
 export function AppearanceSection({
@@ -40,8 +41,7 @@ export function AppearanceSection({
       desc="Customize the look of your dashboard. Changes apply instantly."
     >
       <div className="space-y-6">
-        <div>
-          <label className={labelCls}>Theme</label>
+        <Field label="Theme" hint="Switch between a light and dark dashboard.">
           <div className="grid grid-cols-2 gap-3">
             <button onClick={() => setTheme("light")} className={segBtn(theme === "light")}>
               Light
@@ -50,10 +50,12 @@ export function AppearanceSection({
               Dark
             </button>
           </div>
-        </div>
+        </Field>
 
-        <div>
-          <label className={labelCls}>Accent color</label>
+        <Field
+          label="Accent color"
+          hint="The highlight color used for buttons, links and active items."
+        >
           <div className="flex flex-wrap gap-2.5">
             {AVAILABLE_ACCENTS.map((acc) => (
               <button
@@ -73,10 +75,12 @@ export function AppearanceSection({
               </button>
             ))}
           </div>
-        </div>
+        </Field>
 
-        <div>
-          <label className={labelCls}>Density</label>
+        <Field
+          label="Density"
+          hint="Compact tightens spacing to fit more on screen; Regular is roomier."
+        >
           <div className="grid grid-cols-2 gap-3">
             <button onClick={() => setDensity("compact")} className={segBtn(density === "compact")}>
               Compact
@@ -85,7 +89,7 @@ export function AppearanceSection({
               Regular
             </button>
           </div>
-        </div>
+        </Field>
 
         <div>
           <div className="mb-1.5 flex items-center justify-between">
@@ -100,6 +104,9 @@ export function AppearanceSection({
             onChange={(e) => setRadius(parseInt(e.target.value))}
             className="w-full accent-[var(--accent)]"
           />
+          <p className={hintCls}>
+            How rounded cards, buttons and inputs appear across the dashboard.
+          </p>
         </div>
 
         <div className="flex justify-end border-t border-[var(--border-2)] pt-4">

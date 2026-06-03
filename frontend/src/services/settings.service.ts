@@ -15,6 +15,15 @@ export interface SettingsUpdate {
   smtpFromName?: string;
   smtpFromEmail?: string;
   smtpPassword?: string;
+  cloudinaryCloudName?: string;
+  cloudinaryApiKey?: string;
+  cloudinaryApiSecret?: string;
+  brandName?: string;
+  logoUrl?: string;
+  faviconUrl?: string;
+  footerText?: string;
+  loginHeadline?: string;
+  loginSubtext?: string;
 }
 
 export function getSettings(): Promise<Settings> {

@@ -7,7 +7,8 @@ import * as authService from "@/services/auth.service";
 import { SettingsCard } from "./ui/SettingsCard";
 import { Notice } from "./ui/Notice";
 import { PasswordInput } from "./ui/PasswordInput";
-import { labelCls, primaryBtn } from "./ui/styles";
+import { Field } from "./ui/Field";
+import { primaryBtn } from "./ui/styles";
 import type { Msg } from "./types";
 
 export function SecuritySection() {
@@ -57,33 +58,39 @@ export function SecuritySection() {
     >
       <form onSubmit={save} className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-3">
-          <div>
-            <label className={labelCls}>Current password</label>
+          <Field
+            label="Current password"
+            hint="Verify it's you before setting a new one."
+          >
             <PasswordInput
               value={currentPassword}
               onChange={(e) => setCurrentPassword(e.target.value)}
               placeholder="Enter current password"
               autoComplete="current-password"
             />
-          </div>
-          <div>
-            <label className={labelCls}>New password</label>
+          </Field>
+          <Field
+            label="New password"
+            hint="At least 8 characters. Mix letters, numbers & symbols."
+          >
             <PasswordInput
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
               placeholder="Enter new password"
               autoComplete="new-password"
             />
-          </div>
-          <div>
-            <label className={labelCls}>Confirm new password</label>
+          </Field>
+          <Field
+            label="Confirm new password"
+            hint="Re-type the new password to rule out typos."
+          >
             <PasswordInput
               value={confirm}
               onChange={(e) => setConfirm(e.target.value)}
               placeholder="Re-enter new password"
               autoComplete="new-password"
             />
-          </div>
+          </Field>
         </div>
         <Notice msg={msg} />
         <div className="flex justify-end">

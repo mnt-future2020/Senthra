@@ -1,13 +1,71 @@
 import type { Prisma, Settings } from "@prisma/client";
 
+import { env } from "../config/env.js";
+import { uploadToCloudinary, type CloudinaryCreds } from "../lib/cloudinary.js";
 import { sendMail } from "../lib/mailer.js";
 import * as settingsRepo from "../repositories/settings.repository.js";
 import { decryptSecret, encryptSecret } from "../utils/crypto.js";
 import { badRequest } from "../utils/http-error.js";
 
+// Resolve Cloudinary credentials: UI-configured (DB) takes precedence, then env.
+// Returns null when neither is fully configured.
+function resolveCloudinaryCreds(s: Settings): CloudinaryCreds | null {
+  const dbSecret = s.cloudinaryApiSecret ? decryptSecret(s.cloudinaryApiSecret) : null;
+  if (s.cloudinaryCloudName && s.cloudinaryApiKey && dbSecret) {
+    return {
+      cloudName: s.cloudinaryCloudName,
+      apiKey: s.cloudinaryApiKey,
+      apiSecret: dbSecret,
+    };
+  }
+  if (env.CLOUDINARY_CLOUD_NAME && env.CLOUDINARY_API_KEY && env.CLOUDINARY_API_SECRET) {
+    return {
+      cloudName: env.CLOUDINARY_CLOUD_NAME,
+      apiKey: env.CLOUDINARY_API_KEY,
+      apiSecret: env.CLOUDINARY_API_SECRET,
+    };
+  }
+  return null;
+}
+
+// --- Branding (all public) ---
+export interface PublicBranding {
+  brandName: string;
+  logoUrl: string;
+  faviconUrl: string;
+  footerText: string;
+  loginHeadline: string;
+  loginSubtext: string;
+}
+
+// Map a Settings row to public branding, filling sensible defaults so a fresh
+// install still looks complete.
+function brandingFrom(s: Settings): PublicBranding {
+  const brandName = (s.brandName && s.brandName.trim()) || "Senthra";
+  return {
+    brandName,
+    logoUrl: s.logoUrl || "",
+    faviconUrl: s.faviconUrl || "",
+    footerText:
+      s.footerText ||
+      `© ${new Date().getFullYear()} ${brandName}. All rights reserved.`,
+    loginHeadline:
+      s.loginHeadline || "Effortlessly manage your business and operations.",
+    loginSubtext:
+      s.loginSubtext ||
+      "Sign in to access your admin dashboard and run everything from one place.",
+  };
+}
+
+// Public branding for the login page etc. (no auth required).
+export async function getBranding(): Promise<PublicBranding> {
+  const s = await settingsRepo.getOrCreate();
+  return brandingFrom(s);
+}
+
 // Never send secrets (Google client secret, SMTP password) to the browser —
 // only whether one is set.
-export interface PublicSettings {
+export interface PublicSettings extends PublicBranding {
   googleEnabled: boolean;
   googleClientId: string;
   googleClientSecretSet: boolean;
@@ -19,6 +77,10 @@ export interface PublicSettings {
   smtpFromName: string;
   smtpFromEmail: string;
   smtpPasswordSet: boolean;
+  cloudinaryCloudName: string;
+  cloudinaryApiKey: string;
+  cloudinaryApiSecretSet: boolean;
+  cloudinaryConfigured: boolean;
 }
 
 function publicSettings(s: Settings): PublicSettings {
@@ -37,6 +99,15 @@ function publicSettings(s: Settings): PublicSettings {
     smtpFromName: s.smtpFromName || "",
     smtpFromEmail: s.smtpFromEmail || "",
     smtpPasswordSet: Boolean(s.smtpPassword),
+
+    // Cloudinary (image CDN)
+    cloudinaryCloudName: s.cloudinaryCloudName || "",
+    cloudinaryApiKey: s.cloudinaryApiKey || "",
+    cloudinaryApiSecretSet: Boolean(s.cloudinaryApiSecret),
+    cloudinaryConfigured: resolveCloudinaryCreds(s) !== null,
+
+    // Branding
+    ...brandingFrom(s),
   };
 }
 
@@ -57,6 +128,15 @@ export interface UpdateSettingsParams {
   smtpFromName?: string;
   smtpFromEmail?: string;
   smtpPassword?: string;
+  cloudinaryCloudName?: string;
+  cloudinaryApiKey?: string;
+  cloudinaryApiSecret?: string;
+  brandName?: string;
+  logoUrl?: string;
+  faviconUrl?: string;
+  footerText?: string;
+  loginHeadline?: string;
+  loginSubtext?: string;
 }
 
 export async function updateSettings(input: UpdateSettingsParams): Promise<PublicSettings> {
@@ -93,13 +173,57 @@ export async function updateSettings(input: UpdateSettingsParams): Promise<Publi
   if (typeof input.smtpFromEmail === "string") {
     data.smtpFromEmail = input.smtpFromEmail.trim() || null;
   }
-  // Same blank-to-keep behaviour for the SMTP password. Encrypted before storage.
+  // Same blank-to-keep behaviour for the SMTP password. Trimmed (a stray
+  // trailing space/newline from a paste would silently break SMTP auth) then
+  // encrypted before storage — consistent with the other secrets above.
   if (typeof input.smtpPassword === "string" && input.smtpPassword.trim()) {
-    data.smtpPassword = encryptSecret(input.smtpPassword);
+    data.smtpPassword = encryptSecret(input.smtpPassword.trim());
+  }
+
+  // --- Cloudinary (cloud name + key plaintext; secret encrypted, blank-to-keep) ---
+  if (typeof input.cloudinaryCloudName === "string") {
+    data.cloudinaryCloudName = input.cloudinaryCloudName.trim() || null;
+  }
+  if (typeof input.cloudinaryApiKey === "string") {
+    data.cloudinaryApiKey = input.cloudinaryApiKey.trim() || null;
+  }
+  if (typeof input.cloudinaryApiSecret === "string" && input.cloudinaryApiSecret.trim()) {
+    data.cloudinaryApiSecret = encryptSecret(input.cloudinaryApiSecret.trim());
+  }
+
+  // --- Branding (empty string clears the field back to its default) ---
+  if (typeof input.brandName === "string") data.brandName = input.brandName.trim() || null;
+  if (typeof input.logoUrl === "string") data.logoUrl = input.logoUrl.trim() || null;
+  if (typeof input.faviconUrl === "string") data.faviconUrl = input.faviconUrl.trim() || null;
+  if (typeof input.footerText === "string") data.footerText = input.footerText.trim() || null;
+  if (typeof input.loginHeadline === "string") {
+    data.loginHeadline = input.loginHeadline.trim() || null;
+  }
+  if (typeof input.loginSubtext === "string") {
+    data.loginSubtext = input.loginSubtext.trim() || null;
   }
 
   const updated = await settingsRepo.update(s.id, data);
   return publicSettings(updated);
+}
+
+// Upload a logo/favicon image to Cloudinary and save its URL on the settings row.
+export async function uploadBrandingImage(
+  type: "logo" | "favicon",
+  image: string,
+): Promise<{ url: string; settings: PublicSettings }> {
+  const s = await settingsRepo.getOrCreate();
+  const creds = resolveCloudinaryCreds(s);
+  if (!creds) {
+    throw badRequest(
+      "Cloudinary isn't configured. Add your Cloudinary credentials in Settings → Integrations (or set CLOUDINARY_* in the backend env).",
+    );
+  }
+  const url = await uploadToCloudinary(image, type, creds);
+  const data: Prisma.SettingsUpdateInput =
+    type === "logo" ? { logoUrl: url } : { faviconUrl: url };
+  const updated = await settingsRepo.update(s.id, data);
+  return { url, settings: publicSettings(updated) };
 }
 
 export interface TestEmailParams {
@@ -133,7 +257,7 @@ export async function sendTestEmail(
   const username = pick(input.smtpUsername, s.smtpUsername);
   const password =
     typeof input.smtpPassword === "string" && input.smtpPassword.trim()
-      ? input.smtpPassword
+      ? input.smtpPassword.trim()
       : decryptSecret(s.smtpPassword);
   const fromName = pick(input.smtpFromName, s.smtpFromName);
   const fromEmail = pick(input.smtpFromEmail, s.smtpFromEmail);
@@ -159,7 +283,7 @@ export async function sendTestEmail(
       },
       {
         to,
-        subject: "SMTP test email",
+        subject: `${s.brandName?.trim() || "Senthra"} — SMTP test email`,
         text: "This is a test email to verify your SMTP configuration. If you received this, your settings are working correctly.",
         html: "<p>This is a <strong>test email</strong> to verify your SMTP configuration.</p><p>If you received this, your settings are working correctly. ✅</p>",
       },

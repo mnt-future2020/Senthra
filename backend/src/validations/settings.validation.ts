@@ -1,5 +1,19 @@
 import { z } from "zod";
 
+// A network port is empty (clear it), or an integer 1–65535. Accepts the value
+// as a string (from a form input) or a number. Used by both the settings patch
+// and the test-email payload.
+const portSchema = z
+  .union([z.string(), z.number()])
+  .optional()
+  .refine(
+    (v) =>
+      v === undefined ||
+      v === "" ||
+      (Number.isInteger(Number(v)) && Number(v) >= 1 && Number(v) <= 65535),
+    "Port must be a whole number between 1 and 65535.",
+  );
+
 // All fields optional — the settings update is a partial patch. Unknown keys are
 // stripped by default. Business rules (e.g. required SMTP fields for a test send)
 // live in the service, since they depend on merged saved + override values.
@@ -9,19 +23,51 @@ export const updateSettingsSchema = z.object({
   googleClientSecret: z.string().optional(),
   smtpEnabled: z.boolean().optional(),
   smtpHost: z.string().optional(),
-  smtpPort: z.union([z.string(), z.number()]).optional(),
+  smtpPort: portSchema,
   smtpSecure: z.boolean().optional(),
   smtpUsername: z.string().optional(),
   smtpFromName: z.string().optional(),
   smtpFromEmail: z.string().optional(),
   smtpPassword: z.string().optional(),
+  // Cloudinary (image CDN) credentials — UI-configurable.
+  cloudinaryCloudName: z.string().optional(),
+  cloudinaryApiKey: z.string().optional(),
+  cloudinaryApiSecret: z.string().optional(),
+  // Branding (all public). Logo/favicon are normally set via the upload endpoint,
+  // but accepting the URL here lets the UI clear them (send "").
+  brandName: z.string().max(60).optional(),
+  logoUrl: z.string().optional(),
+  faviconUrl: z.string().optional(),
+  footerText: z.string().max(200).optional(),
+  loginHeadline: z.string().max(120).optional(),
+  loginSubtext: z.string().max(200).optional(),
 });
 export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;
 
+// Logo / favicon upload — the image arrives as a base64 data URI and is streamed
+// to Cloudinary; only the resulting URL is stored. We bound the size and restrict
+// the MIME type so an authenticated caller can't push an arbitrary/oversized blob
+// to the (paid) CDN. base64 inflates bytes by ~33%, so ~3 MB of characters caps
+// the binary at roughly 2.2 MB — comfortably above the 2 MB the UI allows.
+const MAX_IMAGE_DATA_URI_CHARS = 3 * 1024 * 1024;
+export const uploadBrandingSchema = z.object({
+  type: z.enum(["logo", "favicon"]),
+  image: z
+    .string()
+    .max(MAX_IMAGE_DATA_URI_CHARS, "Image is too large (max ~2 MB).")
+    .regex(
+      /^data:image\/(png|jpe?g|gif|webp|svg\+xml|x-icon|vnd\.microsoft\.icon);base64,/i,
+      "Image must be a base64 data URI of a supported type (PNG, JPG, GIF, WEBP, SVG or ICO).",
+    ),
+});
+export type UploadBrandingInput = z.infer<typeof uploadBrandingSchema>;
+
 export const testEmailSchema = z.object({
-  to: z.string().optional(),
+  // Empty string is allowed so the service can return its friendly
+  // "recipient required" message; a non-empty value must be a valid email.
+  to: z.union([z.literal(""), z.string().email("Enter a valid email address.")]).optional(),
   smtpHost: z.string().optional(),
-  smtpPort: z.union([z.string(), z.number()]).optional(),
+  smtpPort: portSchema,
   smtpSecure: z.boolean().optional(),
   smtpUsername: z.string().optional(),
   smtpPassword: z.string().optional(),

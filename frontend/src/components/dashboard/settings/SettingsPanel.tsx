@@ -1,12 +1,14 @@
 "use client";
 
 import * as React from "react";
-import { ShieldCheck, Palette, Plug, Mail } from "lucide-react";
+import { ShieldCheck, Palette, Plug, Mail, Sparkles } from "lucide-react";
 
 import { AccountSection } from "./AccountSection";
 import { SecuritySection } from "./SecuritySection";
+import { BrandingSection } from "./BrandingSection";
 import { AppearanceSection } from "./AppearanceSection";
 import { IntegrationsSection } from "./IntegrationsSection";
+import { CloudinarySection } from "./CloudinarySection";
 import { EmailSection } from "./EmailSection";
 import type { AppearanceProps, Section } from "./types";
 
@@ -22,6 +24,7 @@ const NAV: {
     icon: ShieldCheck,
     desc: "Email & password",
   },
+  { id: "branding", label: "Branding", icon: Sparkles, desc: "Logo, name & theme text" },
   { id: "appearance", label: "Appearance", icon: Palette, desc: "Theme & layout" },
   { id: "integrations", label: "Integrations", icon: Plug, desc: "Google Sign-In" },
   { id: "email", label: "Email", icon: Mail, desc: "SMTP & delivery" },
@@ -74,8 +77,14 @@ export function SettingsPanel(appearance: AppearanceProps) {
               <SecuritySection />
             </>
           )}
+          {section === "branding" && <BrandingSection />}
           {section === "appearance" && <AppearanceSection {...appearance} />}
-          {section === "integrations" && <IntegrationsSection />}
+          {section === "integrations" && (
+            <>
+              <IntegrationsSection />
+              <CloudinarySection />
+            </>
+          )}
           {section === "email" && <EmailSection />}
         </div>
       </div>

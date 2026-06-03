@@ -8,7 +8,8 @@ import { SettingsCard } from "./ui/SettingsCard";
 import { Notice } from "./ui/Notice";
 import { PasswordInput } from "./ui/PasswordInput";
 import { Toggle } from "./ui/Toggle";
-import { inputCls, labelCls, primaryBtn } from "./ui/styles";
+import { Field } from "./ui/Field";
+import { inputCls, primaryBtn } from "./ui/styles";
 import type { Msg } from "./types";
 
 export function IntegrationsSection() {
@@ -80,8 +81,10 @@ export function IntegrationsSection() {
           />
         </div>
         <div className="grid gap-4 sm:grid-cols-2">
-          <div>
-            <label className={labelCls}>Client ID</label>
+          <Field
+            label="Client ID"
+            hint="From Google Cloud Console → APIs & Services → Credentials."
+          >
             <input
               type="text"
               value={clientId}
@@ -89,18 +92,20 @@ export function IntegrationsSection() {
               placeholder="xxxxx.apps.googleusercontent.com"
               className={inputCls}
             />
-          </div>
-          <div>
-            <label className={labelCls}>
-              Client secret {secretSet && "(saved — leave blank to keep)"}
-            </label>
+          </Field>
+          <Field
+            label={
+              <>Client secret {secretSet && "(saved — leave blank to keep)"}</>
+            }
+            hint="Generated with the Client ID. Stored encrypted, never shown again."
+          >
             <PasswordInput
               value={clientSecret}
               onChange={(e) => setClientSecret(e.target.value)}
               placeholder={secretSet ? "•••••••• (saved)" : "Client secret"}
               autoComplete="off"
             />
-          </div>
+          </Field>
         </div>
         <Notice msg={msg} />
         <div className="flex justify-end">
