@@ -1,3 +1,7 @@
+import type { CookieOptions, Response } from "express";
+
+import { env, isProduction } from "../config/env.js";
+
 export const ACCESS_COOKIE = "senthra_access";
 export const REFRESH_COOKIE = "senthra_refresh";
 
@@ -8,19 +12,24 @@ const REFRESH_PATH = "/auth/refresh";
 const ACCESS_MAX_AGE = 60 * 60 * 1000; // 1h (slightly longer than the token, harmless)
 const REFRESH_MAX_AGE = 7 * 24 * 60 * 60 * 1000; // 7d
 
-function baseOptions() {
-  const opts = {
+function baseOptions(): CookieOptions {
+  const opts: CookieOptions = {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    secure: isProduction,
     sameSite: "lax",
   };
-  if (process.env.COOKIE_DOMAIN) opts.domain = process.env.COOKIE_DOMAIN;
+  if (env.COOKIE_DOMAIN) opts.domain = env.COOKIE_DOMAIN;
   return opts;
 }
 
 // Set both auth cookies. `remember = false` makes the refresh cookie a session
 // cookie (cleared when the browser closes).
-export function setAuthCookies(res, accessToken, refreshToken, remember = true) {
+export function setAuthCookies(
+  res: Response,
+  accessToken: string,
+  refreshToken: string,
+  remember = true,
+): void {
   res.cookie(ACCESS_COOKIE, accessToken, {
     ...baseOptions(),
     path: "/",
@@ -33,7 +42,7 @@ export function setAuthCookies(res, accessToken, refreshToken, remember = true) 
   });
 }
 
-export function clearAuthCookies(res) {
+export function clearAuthCookies(res: Response): void {
   res.clearCookie(ACCESS_COOKIE, { ...baseOptions(), path: "/" });
   res.clearCookie(REFRESH_COOKIE, { ...baseOptions(), path: REFRESH_PATH });
 }

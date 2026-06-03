@@ -3,8 +3,8 @@
 import * as React from "react";
 import { Loader2, User } from "lucide-react";
 
-import { useAuth } from "@/lib/auth";
-import { api } from "@/lib/api";
+import { useAuth } from "@/hooks/useAuth";
+import * as authService from "@/services/auth.service";
 import { SettingsCard } from "./ui/SettingsCard";
 import { Notice } from "./ui/Notice";
 import { PasswordInput } from "./ui/PasswordInput";
@@ -31,10 +31,7 @@ export function AccountSection() {
     }
     setSaving(true);
     try {
-      await api("/auth/credentials", {
-        method: "PATCH",
-        body: { currentPassword, email },
-      });
+      await authService.changeEmail(currentPassword, email);
       await refresh();
       setCurrentPassword("");
       setMsg({ type: "success", text: "Email updated successfully." });

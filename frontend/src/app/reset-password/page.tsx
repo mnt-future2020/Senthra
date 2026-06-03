@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowLeft, CheckCircle2, Eye, EyeOff, Loader2 } from "lucide-react";
 
-import { api } from "@/lib/api";
+import * as authService from "@/services/auth.service";
 import { AuthLayout } from "@/components/auth/AuthLayout";
 import { authInputCls, authPrimaryBtn } from "@/components/auth/authStyles";
 
@@ -59,6 +59,7 @@ function ResetPasswordInner() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    if (!token) return;
     if (password.length < 8) {
       setError("Password must be at least 8 characters.");
       return;
@@ -69,10 +70,7 @@ function ResetPasswordInner() {
     }
     setSubmitting(true);
     try {
-      await api("/auth/reset-password", {
-        method: "POST",
-        body: { token, newPassword: password },
-      });
+      await authService.resetPassword(token, password);
       setDone(true);
       // Send them to login shortly after confirming success.
       setTimeout(() => router.replace("/login"), 2500);

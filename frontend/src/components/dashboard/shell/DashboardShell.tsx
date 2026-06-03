@@ -2,7 +2,7 @@
 
 import * as React from "react";
 
-import { useDashboard } from "../DashboardProvider";
+import { useDashboard } from "@/hooks/useDashboard";
 import ReceiptModal from "../modals/ReceiptModal";
 import AddTxnModal from "../modals/AddTxnModal";
 import UpgradeModal from "../modals/UpgradeModal";

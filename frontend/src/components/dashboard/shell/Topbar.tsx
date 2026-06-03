@@ -4,8 +4,8 @@ import * as React from "react";
 import { usePathname } from "next/navigation";
 import { Menu, Search, Calendar, Bell, Plus } from "lucide-react";
 
-import { useAuth } from "@/lib/auth";
-import { useDashboard } from "../DashboardProvider";
+import { useAuth } from "@/hooks/useAuth";
+import { useDashboard } from "@/hooks/useDashboard";
 
 export function Topbar({ onToggleSidebar }: { onToggleSidebar: () => void }) {
   const { admin } = useAuth();

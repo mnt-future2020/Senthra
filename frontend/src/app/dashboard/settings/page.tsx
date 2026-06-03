@@ -1,7 +1,7 @@
 "use client";
 
 import { SettingsPanel } from "@/components/dashboard/settings/SettingsPanel";
-import { useDashboard } from "@/components/dashboard/DashboardProvider";
+import { useDashboard } from "@/hooks/useDashboard";
 
 export default function SettingsPage() {
   const d = useDashboard();

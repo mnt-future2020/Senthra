@@ -3,7 +3,7 @@
 import * as React from "react";
 import { useRouter } from "next/navigation";
 
-import { useAuth } from "@/lib/auth";
+import { useAuth } from "@/hooks/useAuth";
 
 // Wrap protected pages. Redirects to /login when not authenticated.
 export function AuthGuard({ children }: { children: React.ReactNode }) {

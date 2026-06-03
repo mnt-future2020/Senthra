@@ -1,20 +1,17 @@
-import "dotenv/config";
-
+import { env } from "./config/env.js";
 import { app } from "./app.js";
+import { seedDatabase } from "./db/seed.js";
 import { prisma } from "./lib/prisma.js";
-import { seedDatabase } from "./lib/seed.js";
 
-const PORT = process.env.PORT || 8000;
-
-async function start() {
+async function start(): Promise<void> {
   // Ensure the admin + settings exist before accepting requests.
   await seedDatabase();
 
-  const server = app.listen(PORT, () => {
-    console.log(`Server listening on http://localhost:${PORT}`);
+  const server = app.listen(env.PORT, () => {
+    console.log(`Server listening on http://localhost:${env.PORT}`);
   });
 
-  const shutdown = async () => {
+  const shutdown = async (): Promise<void> => {
     await prisma.$disconnect();
     server.close(() => process.exit(0));
   };

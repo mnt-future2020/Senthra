@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 
-import { AuthProvider } from "@/lib/auth";
+import { AuthProvider } from "@/providers/AuthProvider";
 
 export const metadata: Metadata = {
   title: "Senthra — Admin Dashboard",

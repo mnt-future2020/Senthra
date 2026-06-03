@@ -1,4 +1,4 @@
-import { StatItem, ChannelItem, Transaction, RevenueData, ActivityData, NotificationItem } from './types';
+import { StatItem, ChannelItem, Transaction, RevenueData, ActivityData, NotificationItem } from '@/types/dashboard';
 
 export const INITIAL_STATS: StatItem[] = [
   {

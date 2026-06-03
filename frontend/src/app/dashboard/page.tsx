@@ -1,7 +1,7 @@
 "use client";
 
 import OverviewTab from "@/components/dashboard/tabs/OverviewTab";
-import { useDashboard } from "@/components/dashboard/DashboardProvider";
+import { useDashboard } from "@/hooks/useDashboard";
 
 export default function OverviewPage() {
   const d = useDashboard();

@@ -1,5 +1,5 @@
 import { AuthGuard } from "@/components/auth/AuthGuard";
-import { DashboardProvider } from "@/components/dashboard/DashboardProvider";
+import { DashboardProvider } from "@/providers/DashboardProvider";
 import { DashboardShell } from "@/components/dashboard/shell/DashboardShell";
 
 // Shared shell + state for every /dashboard/* route.

@@ -1,6 +1,6 @@
 "use client";
 import React, { useState } from 'react';
-import { Transaction } from '../types';
+import { Transaction } from '@/types/dashboard';
 import { Search, Download, Trash2, Mail, ShieldAlert } from 'lucide-react';
 
 interface InvoicesTabProps {

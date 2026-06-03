@@ -3,7 +3,7 @@
 import * as React from "react";
 import { Loader2, Lock } from "lucide-react";
 
-import { api } from "@/lib/api";
+import * as authService from "@/services/auth.service";
 import { SettingsCard } from "./ui/SettingsCard";
 import { Notice } from "./ui/Notice";
 import { PasswordInput } from "./ui/PasswordInput";
@@ -34,10 +34,7 @@ export function SecuritySection() {
     }
     setSaving(true);
     try {
-      await api("/auth/credentials", {
-        method: "PATCH",
-        body: { currentPassword, newPassword },
-      });
+      await authService.changePassword(currentPassword, newPassword);
       setCurrentPassword("");
       setNewPassword("");
       setConfirm("");

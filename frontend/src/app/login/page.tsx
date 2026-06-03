@@ -5,8 +5,8 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Eye, EyeOff, Loader2 } from "lucide-react";
 
-import { useAuth } from "@/lib/auth";
-import { api } from "@/lib/api";
+import { useAuth } from "@/hooks/useAuth";
+import * as authService from "@/services/auth.service";
 
 // Minimal typing for the Google Identity Services global.
 type GoogleId = {
@@ -72,9 +72,7 @@ export default function LoginPage() {
     let cancelled = false;
     (async () => {
       try {
-        const cfg = await api<{ enabled: boolean; clientId: string | null }>(
-          "/auth/google/config",
-        );
+        const cfg = await authService.getGoogleConfig();
         if (cancelled) return;
         if (cfg.enabled && cfg.clientId) {
           setGoogleClientId(cfg.clientId);

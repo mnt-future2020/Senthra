@@ -1,0 +1,46 @@
+import rateLimit from "express-rate-limit";
+
+const json = (error: string) => ({ error });
+
+// Brute-force protection on the auth-sensitive endpoints.
+export const loginLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: json("Too many attempts. Please try again in a few minutes."),
+});
+
+export const refreshLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  limit: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: json("Too many refresh attempts."),
+});
+
+// Password-reset endpoints: throttle to curb abuse / email spam.
+export const forgotPasswordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: json("Too many requests. Please try again later."),
+});
+
+export const resetPasswordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: json("Too many attempts. Please try again later."),
+});
+
+// Throttle the test-email endpoint so it can't be used to spam.
+export const testEmailLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: json("Too many test emails. Please wait a few minutes."),
+});

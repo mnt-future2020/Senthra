@@ -2,7 +2,7 @@
 
 import { RotateCcw, Palette } from "lucide-react";
 
-import { AVAILABLE_ACCENTS } from "../data";
+import { AVAILABLE_ACCENTS } from "@/data/dashboard";
 import { SettingsCard } from "./ui/SettingsCard";
 import { labelCls } from "./ui/styles";
 import type { AppearanceProps } from "./types";

@@ -1,6 +1,6 @@
 "use client";
 import React, { useState } from 'react';
-import { Transaction } from '../types';
+import { Transaction } from '@/types/dashboard';
 import { X, DollarSign, User, Mail, AlertCircle, Sparkles } from 'lucide-react';
 
 interface AddTxnModalProps {

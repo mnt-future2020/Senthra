@@ -17,8 +17,8 @@ import {
   LogOut,
 } from "lucide-react";
 
-import { useAuth } from "@/lib/auth";
-import { useDashboard } from "../DashboardProvider";
+import { useAuth } from "@/hooks/useAuth";
+import { useDashboard } from "@/hooks/useDashboard";
 
 type NavItem = {
   href: string;

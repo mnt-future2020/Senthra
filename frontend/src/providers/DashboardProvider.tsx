@@ -7,14 +7,14 @@ import {
   StatItem,
   ChannelItem,
   NotificationItem,
-} from "./types";
-import { INITIAL_CHANNELS, INITIAL_TXN, INITIAL_NOTIFICATIONS } from "./data";
+} from "@/types/dashboard";
+import { INITIAL_CHANNELS, INITIAL_TXN, INITIAL_NOTIFICATIONS } from "@/data/dashboard";
 
 type Tier = "Super Admin" | "Pro Member" | "Enterprise Owner";
 type ToastType = "success" | "info" | "alert";
 type Toast = { id: string; msg: string; type: ToastType };
 
-type DashboardContextValue = {
+export type DashboardContextValue = {
   // Appearance (synced to CSS variables)
   accent: string;
   setAccent: (v: string) => void;
@@ -60,7 +60,7 @@ type DashboardContextValue = {
   upgradeTier: (tier: string) => void;
 };
 
-const DashboardContext = React.createContext<DashboardContextValue | null>(null);
+export const DashboardContext = React.createContext<DashboardContextValue | null>(null);
 
 export function DashboardProvider({ children }: { children: React.ReactNode }) {
   const [accent, setAccent] = React.useState("#7b6ef0");
@@ -270,12 +270,4 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
       {children}
     </DashboardContext.Provider>
   );
-}
-
-export function useDashboard() {
-  const ctx = React.useContext(DashboardContext);
-  if (!ctx) {
-    throw new Error("useDashboard must be used within a DashboardProvider");
-  }
-  return ctx;
 }

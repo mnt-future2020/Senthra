@@ -4,7 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { ArrowLeft, Loader2, MailCheck } from "lucide-react";
 
-import { api } from "@/lib/api";
+import * as authService from "@/services/auth.service";
 import { AuthLayout } from "@/components/auth/AuthLayout";
 import { authInputCls, authPrimaryBtn } from "@/components/auth/authStyles";
 
@@ -19,10 +19,7 @@ export default function ForgotPasswordPage() {
     setError(null);
     setSubmitting(true);
     try {
-      await api("/auth/forgot-password", {
-        method: "POST",
-        body: { email },
-      });
+      await authService.forgotPassword(email);
       // The API always responds generically (no email enumeration), so success
       // here just means the request was accepted.
       setSent(true);

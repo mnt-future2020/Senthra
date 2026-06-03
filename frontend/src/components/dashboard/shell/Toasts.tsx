@@ -2,7 +2,7 @@
 
 import { CheckCircle2, X } from "lucide-react";
 
-import { useDashboard } from "../DashboardProvider";
+import { useDashboard } from "@/hooks/useDashboard";
 
 export function Toasts() {
   const d = useDashboard();

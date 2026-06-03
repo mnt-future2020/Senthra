@@ -1,6 +1,6 @@
 "use client";
 import React from 'react';
-import { Transaction } from '../types';
+import { Transaction } from '@/types/dashboard';
 import { X, Receipt, Download, CheckCircle2, AlertTriangle, HelpCircle, Mail, RotateCcw, ShieldCheck } from 'lucide-react';
 
 interface ReceiptModalProps {

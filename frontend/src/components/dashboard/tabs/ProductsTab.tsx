@@ -1,6 +1,6 @@
 "use client";
 import React, { useState } from 'react';
-import { DEMO_PRODUCTS } from '../data';
+import { DEMO_PRODUCTS } from '@/data/dashboard';
 import { Search, Plus, ShoppingBag, Server, Notebook, Sparkles } from 'lucide-react';
 
 export default function ProductsTab() {

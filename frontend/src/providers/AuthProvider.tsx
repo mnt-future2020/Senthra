@@ -2,25 +2,19 @@
 
 import * as React from "react";
 
-import { api } from "./api";
+import * as authService from "@/services/auth.service";
+import type { Admin } from "@/types/auth";
 
-export type Admin = {
-  id: string;
-  email: string;
-  name: string | null;
-  googleEmail: string | null;
-};
-
-type AuthState = {
+export interface AuthState {
   admin: Admin | null;
   loading: boolean;
   login: (email: string, password: string, remember?: boolean) => Promise<void>;
   loginWithGoogle: (credential: string) => Promise<void>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
-};
+}
 
-const AuthContext = React.createContext<AuthState | null>(null);
+export const AuthContext = React.createContext<AuthState | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [admin, setAdmin] = React.useState<Admin | null>(null);
@@ -29,8 +23,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // Re-read the current session (cookies are sent automatically).
   const refresh = React.useCallback(async () => {
     try {
-      const { admin: me } = await api<{ admin: Admin }>("/auth/me");
-      setAdmin(me);
+      setAdmin(await authService.getCurrentAdmin());
     } catch {
       setAdmin(null);
     }
@@ -40,9 +33,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // token has expired, so this works even after the short access token lapses.
   React.useEffect(() => {
     let active = true;
-    api<{ admin: Admin }>("/auth/me")
-      .then((d) => {
-        if (active) setAdmin(d.admin);
+    authService
+      .getCurrentAdmin()
+      .then((me) => {
+        if (active) setAdmin(me);
       })
       .catch(() => {
         if (active) setAdmin(null);
@@ -57,26 +51,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const login = React.useCallback(
     async (email: string, password: string, remember = true) => {
-      const { admin: me } = await api<{ admin: Admin }>("/auth/login", {
-        method: "POST",
-        body: { email, password, remember },
-      });
-      setAdmin(me);
+      setAdmin(await authService.login(email, password, remember));
     },
     [],
   );
 
   const loginWithGoogle = React.useCallback(async (credential: string) => {
-    const { admin: me } = await api<{ admin: Admin }>("/auth/google", {
-      method: "POST",
-      body: { credential },
-    });
-    setAdmin(me);
+    setAdmin(await authService.loginWithGoogle(credential));
   }, []);
 
   const logout = React.useCallback(async () => {
     try {
-      await api("/auth/logout", { method: "POST" });
+      await authService.logout();
     } catch {
       // ignore — we clear local state regardless
     }
@@ -90,10 +76,4 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       {children}
     </AuthContext.Provider>
   );
-}
-
-export function useAuth() {
-  const ctx = React.useContext(AuthContext);
-  if (!ctx) throw new Error("useAuth must be used within an AuthProvider");
-  return ctx;
 }

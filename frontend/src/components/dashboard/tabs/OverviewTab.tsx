@@ -1,8 +1,8 @@
 "use client";
 import React, { useRef, useState, useEffect } from 'react';
-import { StatItem, ChannelItem, Transaction, RevenueData } from '../types';
+import { StatItem, ChannelItem, Transaction, RevenueData } from '@/types/dashboard';
 import { TrendingUp, TrendingDown, ArrowUpRight, Search, Plus, RefreshCw, SlidersHorizontal, Trash2, Eye } from 'lucide-react';
-import { REVENUE_DATA, ACTIVITY_DATA } from '../data';
+import { REVENUE_DATA, ACTIVITY_DATA } from '@/data/dashboard';
 
 interface OverviewTabProps {
   stats: StatItem[];

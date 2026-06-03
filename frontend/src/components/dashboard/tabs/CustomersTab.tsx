@@ -1,6 +1,6 @@
 "use client";
 import React, { useState } from 'react';
-import { DEMO_CUSTOMERS } from '../data';
+import { DEMO_CUSTOMERS } from '@/data/dashboard';
 import { Search, UserPlus, Mail, Users } from 'lucide-react';
 
 export default function CustomersTab() {

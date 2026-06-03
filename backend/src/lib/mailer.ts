@@ -1,8 +1,27 @@
-import nodemailer from "nodemailer";
+import nodemailer, { type Transporter } from "nodemailer";
+
+// Plain SMTP configuration consumed by the transport. Nullable settings from the
+// database are normalized to empty strings by callers before reaching here.
+export interface SmtpConfig {
+  host: string;
+  port: number;
+  secure: boolean;
+  username: string;
+  password: string;
+  fromName: string;
+  fromEmail: string;
+}
+
+export interface MailMessage {
+  to: string;
+  subject: string;
+  text: string;
+  html: string;
+}
 
 // Build a nodemailer transport from a plain SMTP config object.
 // `secure: true` uses implicit TLS (port 465); `false` upgrades via STARTTLS (587).
-export function buildTransport(cfg) {
+export function buildTransport(cfg: SmtpConfig): Transporter {
   return nodemailer.createTransport({
     host: cfg.host,
     port: Number(cfg.port),
@@ -17,20 +36,19 @@ export function buildTransport(cfg) {
 }
 
 // Format the "From" header — `"Name" <email>` when a name is set, else the address.
-function formatFrom(cfg) {
-  if (cfg.fromName) return `"${cfg.fromName}" <${cfg.fromEmail}>`;
-  return cfg.fromEmail;
+function formatFrom(cfg: SmtpConfig): string {
+  return cfg.fromName ? `"${cfg.fromName}" <${cfg.fromEmail}>` : cfg.fromEmail;
 }
 
 // Verify the SMTP credentials/connection without sending anything.
-export async function verifyTransport(cfg) {
+export async function verifyTransport(cfg: SmtpConfig): Promise<boolean> {
   const transport = buildTransport(cfg);
   await transport.verify();
   return true;
 }
 
 // Send an email using the given SMTP config.
-export async function sendMail(cfg, { to, subject, text, html }) {
+export function sendMail(cfg: SmtpConfig, message: MailMessage) {
   const transport = buildTransport(cfg);
-  return transport.sendMail({ from: formatFrom(cfg), to, subject, text, html });
+  return transport.sendMail({ from: formatFrom(cfg), ...message });
 }
