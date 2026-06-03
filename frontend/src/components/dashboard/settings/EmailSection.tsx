@@ -3,24 +3,13 @@
 import * as React from "react";
 import { Loader2, Send } from "lucide-react";
 
-import { api } from "@/lib/api";
+import * as settingsService from "@/services/settings.service";
 import { SettingsCard } from "./ui/SettingsCard";
 import { Notice } from "./ui/Notice";
 import { Toggle } from "./ui/Toggle";
 import { PasswordInput } from "./ui/PasswordInput";
 import { inputCls, labelCls, primaryBtn } from "./ui/styles";
 import type { Msg } from "./types";
-
-type SettingsData = {
-  smtpEnabled: boolean;
-  smtpHost: string;
-  smtpPort: number | null;
-  smtpSecure: boolean;
-  smtpUsername: string;
-  smtpFromName: string;
-  smtpFromEmail: string;
-  smtpPasswordSet: boolean;
-};
 
 // Common providers — selecting one auto-fills host/port/encryption.
 const PROVIDERS: Record<
@@ -66,7 +55,7 @@ export function EmailSection() {
   React.useEffect(() => {
     (async () => {
       try {
-        const { settings } = await api<{ settings: SettingsData }>("/settings");
+        const settings = await settingsService.getSettings();
         setEnabled(settings.smtpEnabled);
         setHost(settings.smtpHost);
         setPort(settings.smtpPort != null ? String(settings.smtpPort) : "");
@@ -110,10 +99,7 @@ export function EmailSection() {
     setMsg(null);
     setSaving(true);
     try {
-      const { settings } = await api<{ settings: SettingsData }>("/settings", {
-        method: "PUT",
-        body: smtpPayload(),
-      });
+      const settings = await settingsService.updateSettings(smtpPayload());
       setPasswordSet(settings.smtpPasswordSet);
       setPassword("");
       setMsg({ type: "success", text: "Email settings saved." });
@@ -135,11 +121,9 @@ export function EmailSection() {
     }
     setTesting(true);
     try {
-      const res = await api<{ message: string }>("/settings/email/test", {
-        method: "POST",
-        body: { ...smtpPayload(), to: testTo.trim() },
-        // SMTP connect + send can take longer than a normal API call.
-        timeout: 45_000,
+      const res = await settingsService.sendTestEmail({
+        ...smtpPayload(),
+        to: testTo.trim(),
       });
       setMsg({ type: "success", text: res.message || "Test email sent." });
     } catch (err) {

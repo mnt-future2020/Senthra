@@ -148,13 +148,9 @@ export async function logout(adminId: string): Promise<void> {
   await adminRepo.update(adminId, { tokenInvalidatedAt: new Date() });
 }
 
-// Email a password reset link. No-op (silent) when the email isn't registered so
-// the caller can always return the same generic response (avoids enumeration).
-export async function forgotPassword(email: string): Promise<void> {
-  const normalized = email.trim().toLowerCase();
-  const admin = await adminRepo.findByEmail(normalized);
-  if (!admin) return;
-
+// Persist a reset token and email the link. Kept separate so forgotPassword can
+// run it fire-and-forget without blocking the response.
+async function issueResetEmail(admin: Admin): Promise<void> {
   // Raw token goes in the email link; only its hash is stored. Valid for 1 hour.
   const token = crypto.randomBytes(32).toString("hex");
   await adminRepo.update(admin.id, {
@@ -163,24 +159,36 @@ export async function forgotPassword(email: string): Promise<void> {
   });
 
   const link = `${env.FRONTEND_URL}/reset-password?token=${token}`;
-  try {
-    await sendConfiguredEmail({
-      to: admin.email,
-      subject: "Reset your password",
-      text:
-        `We received a request to reset your password.\n\n` +
-        `Use this link (valid for 1 hour):\n${link}\n\n` +
-        `If you didn't request this, you can safely ignore this email.`,
-      html:
-        `<p>We received a request to reset your password.</p>` +
-        `<p><a href="${link}" style="display:inline-block;padding:10px 18px;background:#7b6ef0;color:#fff;border-radius:8px;text-decoration:none;font-weight:600">Reset password</a></p>` +
-        `<p style="color:#666;font-size:12px">This link is valid for 1 hour. If you didn't request this, you can safely ignore this email.</p>` +
-        `<p style="color:#999;font-size:12px;word-break:break-all">${link}</p>`,
-    });
-  } catch (e) {
-    // Don't leak details to the client; surface server-side for diagnosis.
-    console.error("Password reset email failed to send:", e instanceof Error ? e.message : e);
-  }
+  await sendConfiguredEmail({
+    to: admin.email,
+    subject: "Reset your password",
+    text:
+      `We received a request to reset your password.\n\n` +
+      `Use this link (valid for 1 hour):\n${link}\n\n` +
+      `If you didn't request this, you can safely ignore this email.`,
+    html:
+      `<p>We received a request to reset your password.</p>` +
+      `<p><a href="${link}" style="display:inline-block;padding:10px 18px;background:#7b6ef0;color:#fff;border-radius:8px;text-decoration:none;font-weight:600">Reset password</a></p>` +
+      `<p style="color:#666;font-size:12px">This link is valid for 1 hour. If you didn't request this, you can safely ignore this email.</p>` +
+      `<p style="color:#999;font-size:12px;word-break:break-all">${link}</p>`,
+  });
+}
+
+// Email a password reset link. No-op (silent) when the email isn't registered.
+// Responds immediately and identically whether or not the email exists: the token
+// write + SMTP send run fire-and-forget, so neither the message nor the response
+// timing reveals registered accounts, and a slow/unreachable SMTP server never
+// blocks the response.
+export async function forgotPassword(email: string): Promise<void> {
+  const normalized = email.trim().toLowerCase();
+  const admin = await adminRepo.findByEmail(normalized);
+  if (!admin) return;
+
+  // Fire-and-forget. The .catch() keeps a failed send from becoming an
+  // unhandled rejection; details are surfaced server-side, never to the client.
+  void issueResetEmail(admin).catch((e) =>
+    console.error("Password reset email failed to send:", e instanceof Error ? e.message : e),
+  );
 }
 
 // Set a new password using the emailed token. Single-use: clears the token and

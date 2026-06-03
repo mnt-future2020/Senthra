@@ -3,19 +3,13 @@
 import * as React from "react";
 import { Loader2, Plug } from "lucide-react";
 
-import { api } from "@/lib/api";
+import * as settingsService from "@/services/settings.service";
 import { SettingsCard } from "./ui/SettingsCard";
 import { Notice } from "./ui/Notice";
 import { PasswordInput } from "./ui/PasswordInput";
 import { Toggle } from "./ui/Toggle";
 import { inputCls, labelCls, primaryBtn } from "./ui/styles";
 import type { Msg } from "./types";
-
-type SettingsData = {
-  googleEnabled: boolean;
-  googleClientId: string;
-  googleClientSecretSet: boolean;
-};
 
 export function IntegrationsSection() {
   const [googleEnabled, setGoogleEnabled] = React.useState(false);
@@ -28,7 +22,7 @@ export function IntegrationsSection() {
   React.useEffect(() => {
     (async () => {
       try {
-        const { settings } = await api<{ settings: SettingsData }>("/settings");
+        const settings = await settingsService.getSettings();
         setGoogleEnabled(settings.googleEnabled);
         setClientId(settings.googleClientId);
         setSecretSet(settings.googleClientSecretSet);
@@ -43,13 +37,10 @@ export function IntegrationsSection() {
     setMsg(null);
     setSaving(true);
     try {
-      const { settings } = await api<{ settings: SettingsData }>("/settings", {
-        method: "PUT",
-        body: {
-          googleEnabled,
-          googleClientId: clientId,
-          googleClientSecret: clientSecret || undefined,
-        },
+      const settings = await settingsService.updateSettings({
+        googleEnabled,
+        googleClientId: clientId,
+        googleClientSecret: clientSecret || undefined,
       });
       setSecretSet(settings.googleClientSecretSet);
       setClientSecret("");
