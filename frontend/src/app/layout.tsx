@@ -25,7 +25,9 @@ export default async function RootLayout({
   children: React.ReactNode;
 }>) {
   // Read the saved appearance on the server so the very first paint already has
-  // the right theme/accent/density/radius — no flash of the default theme.
+  // the right theme/density/radius — no flash of the default theme. The accent is
+  // the *global* brand color (from branding), not the per-device cookie, so it
+  // matches the dashboard and sent emails.
   const store = await cookies();
   const appearance = parseAppearance(store.get(APPEARANCE_COOKIE)?.value);
   const branding = await fetchBranding();
@@ -37,7 +39,7 @@ export default async function RootLayout({
       data-density={appearance.density}
       style={
         {
-          "--accent": appearance.accent,
+          "--accent": branding.brandColor,
           "--radius": `${appearance.radius}px`,
         } as CSSProperties
       }

@@ -24,3 +24,6 @@ yarn-error.log*
 
 # Test / coverage output
 coverage/
+
+# local dev server log
+dev.log

@@ -40,6 +40,7 @@ export const requireAuth: RequestHandler = async (req, res, next) => {
       }
     }
     req.adminId = admin.id;
+    req.adminEmail = admin.email;
     next();
   } catch (err) {
     next(err);

@@ -1,12 +1,19 @@
 import cookieParser from "cookie-parser";
 import cors from "cors";
 import express from "express";
+import helmet from "helmet";
 
 import { env } from "./config/env.js";
 import { errorHandler, notFound } from "./middleware/error.middleware.js";
 import routes from "./routes/index.js";
 
 export const app = express();
+
+// Security headers (HSTS, nosniff, frameguard, referrer-policy, hides
+// x-powered-by, etc.). CORP is relaxed to cross-origin because the API is
+// consumed by the separate-origin SPA — actual access is still governed by the
+// CORS policy below.
+app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
 
 app.use(
   cors({

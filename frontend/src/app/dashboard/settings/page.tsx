@@ -7,8 +7,6 @@ export default function SettingsPage() {
   const d = useDashboard();
   return (
     <SettingsPanel
-      accent={d.accent}
-      setAccent={d.setAccent}
       theme={d.theme}
       setTheme={d.setTheme}
       density={d.density}

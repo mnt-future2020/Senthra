@@ -19,6 +19,7 @@ export interface SettingsUpdate {
   cloudinaryApiKey?: string;
   cloudinaryApiSecret?: string;
   brandName?: string;
+  brandColor?: string;
   logoUrl?: string;
   faviconUrl?: string;
   footerText?: string;

@@ -54,6 +54,7 @@ model Settings {
 
   // --- Branding (all public; logo/favicon are Cloudinary URLs) ---
   brandName          String?
+  brandColor         String?  // hex accent used across the app + sent emails
   logoUrl            String?
   faviconUrl         String?
   footerText         String?
@@ -62,4 +63,107 @@ model Settings {
 
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
+}
+
+// A role a user can be assigned. Seeded with the Senthra domain roles (system
+// roles, non-deletable). `permissions` is reserved for a future RBAC phase and
+// is intentionally empty for now — assigning a role grants no permissions yet.
+model Role {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  key         String   @unique // stable machine key, e.g. "field_engineer"
+  name        String // display name, e.g. "Field Engineer"
+  description String?
+  isSystem    Boolean  @default(false) // seeded role → cannot be deleted
+  permissions String[] @default([]) // RESERVED for future RBAC (empty for now)
+  sortOrder   Int      @default(0)
+  users       User[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// A person the Super Admin creates from the admin panel. Created with a secure
+// temporary password (bcrypt hash, never returned to the client). Login + RBAC
+// for these users is a later phase — the auth fields below are ready for it.
+model User {
+  id              String  @id @default(auto()) @map("_id") @db.ObjectId
+  firstName       String
+  lastName        String
+  email           String  @unique
+  phone           String?
+  roleId          String? @db.ObjectId
+  role            Role?   @relation(fields: [roleId], references: [id])
+  status          String  @default("active") // active | inactive | suspended
+  profileImageUrl String?
+  notes           String?
+
+  // Auth — set at creation, never sent to the browser.
+  passwordHash      String
+  mustResetPassword Boolean @default(true)
+  // Reserved for the future first-login "set your password" flow (SHA-256 hash
+  // of the emailed token + its expiry — never the raw token).
+  resetTokenHash      String?
+  resetTokenExpiresAt DateTime?
+
+  deletedAt DateTime? // soft delete — excluded from listings
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([roleId])
+  @@index([status])
+}
+
+// A dynamic, admin-editable email template. Every email the app sends is
+// rendered from one of these (no hardcoded email content). `isSystem` templates
+// ship a built-in default that can be restored but not deleted.
+model EmailTemplate {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  key         String   @unique // event key, e.g. "user.created"
+  name        String // "User Created"
+  category    String // account | security | notification
+  subject     String
+  htmlContent String
+  textContent String
+  variables   String[] @default([]) // supported {{vars}} (for UI hints)
+  enabled     Boolean  @default(true)
+  isSystem    Boolean  @default(false) // has a built-in default → restore / no-delete
+  version     Int      @default(1) // bumps on each edit
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// Delivery log for every email send (templated or test). Failed-email tracking
+// = rows where status = "failed"; retry-ready for a later phase.
+model EmailLog {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  to          String
+  subject     String
+  templateKey String? // null for ad-hoc sends (e.g. a test email)
+  status      String // sent | failed
+  error       String?
+  messageId   String?
+  createdAt   DateTime @default(now())
+
+  @@index([templateKey])
+  @@index([status])
+  @@index([createdAt])
+}
+
+// Immutable audit trail. The actor is snapshotted (id + email) so the entry
+// stays meaningful even if that account is later renamed or removed.
+model AuditLog {
+  id          String   @id @default(auto()) @map("_id") @db.ObjectId
+  actorId     String?
+  actorType   String   @default("admin") // admin | user | system
+  actorEmail  String?
+  action      String // "user.created", "role.deleted", ...
+  targetType  String? // user | role | email_template
+  targetId    String?
+  targetLabel String? // snapshot, e.g. the user's email / role name
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  @@index([action])
+  @@index([targetType, targetId])
+  @@index([createdAt])
 }

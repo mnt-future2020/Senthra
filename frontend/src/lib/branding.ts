@@ -11,6 +11,7 @@ export function brandTitle(brandName: string): string {
 
 export const DEFAULT_BRANDING: Branding = {
   brandName: "Senthra",
+  brandColor: "#7b6ef0",
   logoUrl: "",
   faviconUrl: "",
   footerText: `© ${new Date().getFullYear()} Senthra. All rights reserved.`,

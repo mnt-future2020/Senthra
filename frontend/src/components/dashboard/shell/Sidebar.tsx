@@ -11,6 +11,7 @@ import {
   Settings,
   MessageSquare,
   ShoppingBag,
+  UserCog,
   X,
   ChevronDown,
   Award,
@@ -20,6 +21,7 @@ import {
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useBranding } from "@/hooks/useBranding";
+import { useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import { BrandMark } from "@/components/branding/BrandMark";
 
 type NavItem = {
@@ -35,6 +37,10 @@ const MENU: NavItem[] = [
   { href: "/dashboard/customers", label: "Customers", icon: Users },
   { href: "/dashboard/invoices", label: "Invoices", icon: Receipt },
   { href: "/dashboard/products", label: "Products", icon: ShoppingBag },
+];
+
+const ADMIN: NavItem[] = [
+  { href: "/dashboard/users", label: "Users & Roles", icon: UserCog },
 ];
 
 const WORKSPACE: NavItem[] = [
@@ -56,6 +62,7 @@ export function Sidebar({
   const router = useRouter();
   const pathname = usePathname();
   const d = useDashboard();
+  const guard = useNavigationGuard();
   const [showProfileDropdown, setShowProfileDropdown] = React.useState(false);
 
   const pendingCount = d.transactions.filter((t) => t.status === "pending").length;
@@ -75,6 +82,12 @@ export function Sidebar({
         <Link
           key={item.href}
           href={item.href}
+          onNavigate={(e) => {
+            // Don't lose unsaved edits when navigating to another page.
+            if (active || !guard.anyDirty()) return;
+            e.preventDefault();
+            guard.attemptLeave(() => router.push(item.href));
+          }}
           onClick={onCloseMobile}
           title={collapsed ? item.label : undefined}
           className={`w-full flex items-center border-l-4 border-transparent rounded-xl text-xs font-bold transition-all duration-300 cursor-pointer text-left
@@ -157,6 +170,16 @@ export function Sidebar({
               Console Menu
             </span>
             <nav className="space-y-0.5">{renderNav(MENU)}</nav>
+          </div>
+          <div>
+            <span
+              className={`text-[10px] font-extrabold text-[var(--faint)] uppercase tracking-wider px-3 block mb-2 transition-all duration-300 overflow-hidden whitespace-nowrap ${
+                collapsed ? "max-h-0 opacity-0 mb-0" : "max-h-6 opacity-100"
+              }`}
+            >
+              Administration
+            </span>
+            <nav className="space-y-0.5">{renderNav(ADMIN)}</nav>
           </div>
           <div>
             <span
@@ -248,7 +271,7 @@ export function Sidebar({
                 onClick={(e) => {
                   e.stopPropagation();
                   setShowProfileDropdown(false);
-                  handleSignOut();
+                  guard.attemptLeave(handleSignOut);
                 }}
                 className="w-full px-3 py-2 text-left hover:bg-[var(--surface-2)] text-red-500 flex items-center justify-between cursor-pointer border-t border-[var(--border-2)]"
               >

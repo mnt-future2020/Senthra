@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ShieldCheck, Palette, Plug, Mail, Sparkles } from "lucide-react";
+import { ShieldCheck, Palette, Plug, Mail, MailCheck, Sparkles } from "lucide-react";
 
 import { AccountSection } from "./AccountSection";
 import { SecuritySection } from "./SecuritySection";
@@ -10,6 +10,8 @@ import { AppearanceSection } from "./AppearanceSection";
 import { IntegrationsSection } from "./IntegrationsSection";
 import { CloudinarySection } from "./CloudinarySection";
 import { EmailSection } from "./EmailSection";
+import { EmailTemplatesSection } from "./EmailTemplatesSection";
+import { useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import type { AppearanceProps, Section } from "./types";
 
 const NAV: {
@@ -28,10 +30,24 @@ const NAV: {
   { id: "appearance", label: "Appearance", icon: Palette, desc: "Theme & layout" },
   { id: "integrations", label: "Integrations", icon: Plug, desc: "Google Sign-In" },
   { id: "email", label: "Email", icon: Mail, desc: "SMTP & delivery" },
+  {
+    id: "email-templates",
+    label: "Email Templates",
+    icon: MailCheck,
+    desc: "Customize sent emails",
+  },
 ];
 
 export function SettingsPanel(appearance: AppearanceProps) {
   const [section, setSection] = React.useState<Section>("account");
+  const guard = useNavigationGuard();
+
+  // Switching sections unmounts the current one, so confirm first if it has
+  // unsaved edits (the guard is a no-op when nothing is dirty).
+  const requestSection = (target: Section) => {
+    if (target === section) return;
+    guard.attemptLeave(() => setSection(target));
+  };
 
   return (
     <div className="w-full">
@@ -49,7 +65,7 @@ export function SettingsPanel(appearance: AppearanceProps) {
               return (
                 <button
                   key={item.id}
-                  onClick={() => setSection(item.id)}
+                  onClick={() => requestSection(item.id)}
                   className={`flex shrink-0 items-center gap-3 rounded-xl px-3.5 py-2.5 text-left transition-all ${
                     active
                       ? "bg-[var(--accent-10)] text-[var(--accent)]"
@@ -86,6 +102,7 @@ export function SettingsPanel(appearance: AppearanceProps) {
             </>
           )}
           {section === "email" && <EmailSection />}
+          {section === "email-templates" && <EmailTemplatesSection />}
         </div>
       </div>
     </div>

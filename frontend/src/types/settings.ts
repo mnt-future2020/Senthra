@@ -1,6 +1,8 @@
 // Public branding (brand name, logo/favicon URLs, footer + login copy).
 export interface Branding {
   brandName: string;
+  // Brand accent (hex). Drives the dashboard accent and the branding of sent emails.
+  brandColor: string;
   logoUrl: string;
   faviconUrl: string;
   footerText: string;

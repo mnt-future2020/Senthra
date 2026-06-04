@@ -8,11 +8,13 @@ export default function DashboardLayout({
 }: {
   children: React.ReactNode;
 }) {
+  // AuthGuard wraps the whole shell so an unauthenticated visitor never sees the
+  // dashboard chrome (sidebar/topbar/nav) flash before being redirected to /login.
   return (
-    <AuthGuard>
-      <DashboardProvider>
+    <DashboardProvider>
+      <AuthGuard>
         <DashboardShell>{children}</DashboardShell>
-      </DashboardProvider>
-    </AuthGuard>
+      </AuthGuard>
+    </DashboardProvider>
   );
 }
