@@ -19,6 +19,10 @@ Desktop.ini
 # Qodo AI workspace (local, regenerated)
 .qodo/
 
+# Claude Code — ignore only the per-machine local config; the shared
+# .claude/ config and CLAUDE.md stay tracked.
+.claude/settings.local.json
+
 # Logs
 *.log
 
