@@ -3,14 +3,15 @@ export type Section =
   | "branding"
   | "appearance"
   | "integrations"
-  | "email";
+  | "email"
+  | "email-templates";
 
 export type Msg = { type: "success" | "error"; text: string } | null;
 
-// Props the dashboard passes down so the Appearance section can edit the theme.
+// Props the dashboard passes down so the Appearance section can edit personal
+// display preferences. The brand/accent color lives in Branding (it's global and
+// used in emails), so it isn't here.
 export type AppearanceProps = {
-  accent: string;
-  setAccent: (v: string) => void;
   theme: "light" | "dark";
   setTheme: (v: "light" | "dark") => void;
   density: "compact" | "regular";

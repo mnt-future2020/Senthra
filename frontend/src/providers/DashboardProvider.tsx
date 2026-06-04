@@ -13,15 +13,16 @@ import {
   readAppearanceCookie,
   writeAppearanceCookie,
 } from "@/lib/appearance";
+import { useBranding } from "@/hooks/useBranding";
 
 type Tier = "Super Admin" | "Pro Member" | "Enterprise Owner";
 type ToastType = "success" | "info" | "alert";
 type Toast = { id: string; msg: string; type: ToastType };
 
 export type DashboardContextValue = {
-  // Appearance (synced to CSS variables)
+  // Appearance (synced to CSS variables). The accent follows the global brand
+  // color (Settings → Branding); theme/density/radius are personal preferences.
   accent: string;
-  setAccent: (v: string) => void;
   theme: "light" | "dark";
   setTheme: (v: "light" | "dark") => void;
   density: "compact" | "regular";
@@ -67,8 +68,14 @@ export type DashboardContextValue = {
 export const DashboardContext = React.createContext<DashboardContextValue | null>(null);
 
 export function DashboardProvider({ children }: { children: React.ReactNode }) {
-  // Initialise from the saved cookie (matches what the server rendered on <html>).
-  const [accent, setAccent] = React.useState(() => readAppearanceCookie().accent);
+  // The accent is the *global* brand color (Settings → Branding, stored
+  // server-side), so the dashboard, login page and sent emails share one source
+  // of truth. It's derived straight from branding — no local state to drift — so
+  // a brand-color save updates the live --accent (below) with no reload, and it
+  // matches the SSR'd <html> accent (no hydration flash). Theme/density/radius
+  // stay per-device (cookie).
+  const branding = useBranding();
+  const accent = branding.brandColor;
   const [theme, setTheme] = React.useState<"light" | "dark">(
     () => readAppearanceCookie().theme,
   );
@@ -109,8 +116,9 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  // Keep CSS variables in sync with the appearance settings, and persist the
-  // choice to the cookie so it survives reloads (and SSRs correctly next time).
+  // Keep CSS variables in sync, and persist the personal prefs (theme/density/
+  // radius) to the cookie so they survive reloads and SSR correctly next time.
+  // The accent comes from server branding, so it isn't sourced from the cookie.
   React.useEffect(() => {
     const doc = document.documentElement;
     doc.style.setProperty("--accent", accent);
@@ -243,7 +251,6 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
 
   const value: DashboardContextValue = {
     accent,
-    setAccent,
     theme,
     setTheme,
     density,

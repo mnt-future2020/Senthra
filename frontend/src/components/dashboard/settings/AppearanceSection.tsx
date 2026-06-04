@@ -2,15 +2,12 @@
 
 import { RotateCcw, Palette } from "lucide-react";
 
-import { AVAILABLE_ACCENTS } from "@/data/dashboard";
 import { SettingsCard } from "./ui/SettingsCard";
 import { Field } from "./ui/Field";
 import { hintCls, labelCls } from "./ui/styles";
 import type { AppearanceProps } from "./types";
 
 export function AppearanceSection({
-  accent,
-  setAccent,
   theme,
   setTheme,
   density,
@@ -20,7 +17,6 @@ export function AppearanceSection({
   pushToast,
 }: AppearanceProps) {
   const reset = () => {
-    setAccent("#7b6ef0");
     setTheme("light");
     setDensity("regular");
     setRadius(18);
@@ -49,31 +45,6 @@ export function AppearanceSection({
             <button onClick={() => setTheme("dark")} className={segBtn(theme === "dark")}>
               Dark
             </button>
-          </div>
-        </Field>
-
-        <Field
-          label="Accent color"
-          hint="The highlight color used for buttons, links and active items."
-        >
-          <div className="flex flex-wrap gap-2.5">
-            {AVAILABLE_ACCENTS.map((acc) => (
-              <button
-                key={acc.hex}
-                onClick={() => setAccent(acc.hex)}
-                className="flex items-center gap-1.5 rounded-xl border px-3.5 py-2.5 text-xs font-bold transition-all hover:scale-105"
-                style={{
-                  borderColor: accent === acc.hex ? "var(--accent)" : "var(--border)",
-                  backgroundColor: accent === acc.hex ? "var(--accent-6)" : "var(--surface)",
-                }}
-              >
-                <span
-                  className="inline-block h-3.5 w-3.5 rounded-full"
-                  style={{ backgroundColor: acc.hex }}
-                />
-                <span className="text-[var(--ink)]">{acc.name}</span>
-              </button>
-            ))}
           </div>
         </Field>
 

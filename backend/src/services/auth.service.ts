@@ -19,7 +19,7 @@ import {
   signRefreshToken,
   verifyRefreshToken,
 } from "../utils/jwt.js";
-import { sendConfiguredEmail } from "./email.service.js";
+import { sendTemplatedEmail } from "./email.service.js";
 
 // Shape returned to the client (never includes the password hash or secrets).
 export interface PublicAdmin {
@@ -158,24 +158,17 @@ async function issueResetEmail(admin: Admin): Promise<void> {
     resetTokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
   });
 
-  // Use the configured brand name (dynamic — never a hardcoded product name).
-  const settings = await settingsRepo.getOrCreate();
-  const brand = settings.brandName?.trim() || "Senthra";
-
-  const link = `${env.FRONTEND_URL}/reset-password?token=${token}`;
-  await sendConfiguredEmail({
-    to: admin.email,
-    subject: `Reset your ${brand} password`,
-    text:
-      `We received a request to reset your ${brand} password.\n\n` +
-      `Use this link (valid for 1 hour):\n${link}\n\n` +
-      `If you didn't request this, you can safely ignore this email.`,
-    html:
-      `<p>We received a request to reset your ${brand} password.</p>` +
-      `<p><a href="${link}" style="display:inline-block;padding:10px 18px;background:#7b6ef0;color:#fff;border-radius:8px;text-decoration:none;font-weight:600">Reset password</a></p>` +
-      `<p style="color:#666;font-size:12px">This link is valid for 1 hour. If you didn't request this, you can safely ignore this email.</p>` +
-      `<p style="color:#999;font-size:12px;word-break:break-all">${link}</p>`,
-  });
+  // Rendered from the editable "auth.password_reset" template (brand name +
+  // styling live there). Forced: a disabled template must never block a
+  // security-critical reset email.
+  const firstName = admin.name?.trim().split(/\s+/)[0] || "there";
+  const resetPasswordLink = `${env.FRONTEND_URL}/reset-password?token=${token}`;
+  await sendTemplatedEmail(
+    "auth.password_reset",
+    admin.email,
+    { firstName, resetPasswordLink },
+    { force: true },
+  );
 }
 
 // Email a password reset link. No-op (silent) when the email isn't registered.

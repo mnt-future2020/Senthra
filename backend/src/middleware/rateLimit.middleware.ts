@@ -44,3 +44,14 @@ export const testEmailLimiter = rateLimit({
   legacyHeaders: false,
   message: json("Too many test emails. Please wait a few minutes."),
 });
+
+// General throttle for admin write operations (create/update/delete of users,
+// roles, templates). Generous for normal admin use, but caps a runaway script
+// or a compromised session. Read endpoints are intentionally not limited.
+export const writeLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: json("Too many changes in a short time. Please slow down."),
+});

@@ -36,6 +36,20 @@ export const updateSettingsSchema = z.object({
   // Branding (all public). Logo/favicon are normally set via the upload endpoint,
   // but accepting the URL here lets the UI clear them (send "").
   brandName: z.string().max(60).optional(),
+  // Brand accent — a hex color used across the app and in emails. Empty clears it
+  // back to the default.
+  brandColor: z
+    .string()
+    .trim()
+    // Only valid CSS hex lengths (3, 4, 6 or 8 digits). The previous {3,8} range
+    // accepted 5/7-digit values that aren't valid colors and silently break the
+    // `--accent` custom property across the dashboard.
+    .regex(
+      /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/,
+      "Brand color must be a hex value like #7b6ef0.",
+    )
+    .or(z.literal(""))
+    .optional(),
   logoUrl: z.string().optional(),
   faviconUrl: z.string().optional(),
   footerText: z.string().max(200).optional(),

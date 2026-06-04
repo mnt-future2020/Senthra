@@ -5,6 +5,7 @@ import { uploadToCloudinary, type CloudinaryCreds } from "../lib/cloudinary.js";
 import { sendMail } from "../lib/mailer.js";
 import * as settingsRepo from "../repositories/settings.repository.js";
 import { decryptSecret, encryptSecret } from "../utils/crypto.js";
+import { safeBrandColor } from "../utils/email-html.js";
 import { badRequest } from "../utils/http-error.js";
 
 // Resolve Cloudinary credentials: UI-configured (DB) takes precedence, then env.
@@ -28,9 +29,18 @@ function resolveCloudinaryCreds(s: Settings): CloudinaryCreds | null {
   return null;
 }
 
+// Resolve the active Cloudinary credentials (DB-configured, else env). Exposed so
+// other features (e.g. user profile-image uploads) reuse the same resolution as
+// branding instead of duplicating it. Returns null when not configured.
+export async function getCloudinaryCreds(): Promise<CloudinaryCreds | null> {
+  const s = await settingsRepo.getOrCreate();
+  return resolveCloudinaryCreds(s);
+}
+
 // --- Branding (all public) ---
 export interface PublicBranding {
   brandName: string;
+  brandColor: string;
   logoUrl: string;
   faviconUrl: string;
   footerText: string;
@@ -44,6 +54,7 @@ function brandingFrom(s: Settings): PublicBranding {
   const brandName = (s.brandName && s.brandName.trim()) || "Senthra";
   return {
     brandName,
+    brandColor: safeBrandColor(s.brandColor),
     logoUrl: s.logoUrl || "",
     faviconUrl: s.faviconUrl || "",
     footerText:
@@ -132,6 +143,7 @@ export interface UpdateSettingsParams {
   cloudinaryApiKey?: string;
   cloudinaryApiSecret?: string;
   brandName?: string;
+  brandColor?: string;
   logoUrl?: string;
   faviconUrl?: string;
   footerText?: string;
@@ -193,6 +205,11 @@ export async function updateSettings(input: UpdateSettingsParams): Promise<Publi
 
   // --- Branding (empty string clears the field back to its default) ---
   if (typeof input.brandName === "string") data.brandName = input.brandName.trim() || null;
+  // Only persist a well-formed hex; an empty string clears it back to the default.
+  if (typeof input.brandColor === "string") {
+    const c = input.brandColor.trim();
+    data.brandColor = c ? safeBrandColor(c) : null;
+  }
   if (typeof input.logoUrl === "string") data.logoUrl = input.logoUrl.trim() || null;
   if (typeof input.faviconUrl === "string") data.faviconUrl = input.faviconUrl.trim() || null;
   if (typeof input.footerText === "string") data.footerText = input.footerText.trim() || null;

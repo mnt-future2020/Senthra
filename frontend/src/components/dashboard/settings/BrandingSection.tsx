@@ -10,10 +10,17 @@ import type { Branding, Settings } from "@/types/settings";
 import { SettingsCard } from "./ui/SettingsCard";
 import { Notice } from "./ui/Notice";
 import { Field } from "./ui/Field";
-import { inputCls, labelCls, primaryBtn } from "./ui/styles";
+import { inputCls, labelCls } from "./ui/styles";
+import { SaveBar } from "./ui/SaveBar";
 import type { Msg } from "./types";
+import { useReportDirty } from "@/providers/NavigationGuardProvider";
 
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024; // 2 MB — logos/favicons are tiny
+
+// The brand accent applied when none is chosen. Kept in sync with the backend's
+// DEFAULT_BRAND_COLOR (backend/src/utils/email-html.ts) so the UI and sent emails
+// agree on the fallback.
+const DEFAULT_BRAND_COLOR = "#7b6ef0";
 
 // Image types the backend accepts. Mirrors the upload validation server-side so
 // the user gets an instant, friendly rejection instead of a round-trip error.
@@ -30,6 +37,7 @@ const ALLOWED_IMAGE_TYPES = new Set([
 function brandingFromSettings(s: Settings): Branding {
   return {
     brandName: s.brandName,
+    brandColor: s.brandColor,
     logoUrl: s.logoUrl,
     faviconUrl: s.faviconUrl,
     footerText: s.footerText,
@@ -125,11 +133,32 @@ export function BrandingSection() {
   const { setBranding } = useBranding();
 
   const [brandName, setBrandName] = React.useState("");
+  const [brandColor, setBrandColor] = React.useState(DEFAULT_BRAND_COLOR);
   const [logoUrl, setLogoUrl] = React.useState("");
   const [faviconUrl, setFaviconUrl] = React.useState("");
   const [footerText, setFooterText] = React.useState("");
   const [loginHeadline, setLoginHeadline] = React.useState("");
   const [loginSubtext, setLoginSubtext] = React.useState("");
+
+  // Snapshot of the last-persisted text fields. Logo & favicon save immediately
+  // on upload/remove, so they aren't part of this form's unsaved state — only
+  // these five fields are. Drives the dirty check + the leave-without-saving guard.
+  const [saved, setSaved] = React.useState({
+    brandName: "",
+    brandColor: DEFAULT_BRAND_COLOR,
+    footerText: "",
+    loginHeadline: "",
+    loginSubtext: "",
+  });
+
+  const isDirty =
+    brandName !== saved.brandName ||
+    brandColor !== saved.brandColor ||
+    footerText !== saved.footerText ||
+    loginHeadline !== saved.loginHeadline ||
+    loginSubtext !== saved.loginSubtext;
+
+  useReportDirty("branding", isDirty);
 
   const [saving, setSaving] = React.useState(false);
   const [uploading, setUploading] = React.useState<"logo" | "favicon" | null>(null);
@@ -140,11 +169,19 @@ export function BrandingSection() {
       try {
         const s = await settingsService.getSettings();
         setBrandName(s.brandName);
+        setBrandColor(s.brandColor);
         setLogoUrl(s.logoUrl);
         setFaviconUrl(s.faviconUrl);
         setFooterText(s.footerText);
         setLoginHeadline(s.loginHeadline);
         setLoginSubtext(s.loginSubtext);
+        setSaved({
+          brandName: s.brandName,
+          brandColor: s.brandColor,
+          footerText: s.footerText,
+          loginHeadline: s.loginHeadline,
+          loginSubtext: s.loginSubtext,
+        });
       } catch {
         // ignore — leave fields blank
       }
@@ -214,15 +251,24 @@ export function BrandingSection() {
     try {
       const settings = await settingsService.updateSettings({
         brandName,
+        brandColor,
         footerText,
         loginHeadline,
         loginSubtext,
       });
       setBranding(brandingFromSettings(settings));
       setBrandName(settings.brandName);
+      setBrandColor(settings.brandColor);
       setFooterText(settings.footerText);
       setLoginHeadline(settings.loginHeadline);
       setLoginSubtext(settings.loginSubtext);
+      setSaved({
+        brandName: settings.brandName,
+        brandColor: settings.brandColor,
+        footerText: settings.footerText,
+        loginHeadline: settings.loginHeadline,
+        loginSubtext: settings.loginSubtext,
+      });
       setMsg({ type: "success", text: "Branding saved." });
     } catch (err) {
       setMsg({
@@ -252,6 +298,38 @@ export function BrandingSection() {
             placeholder="Senthra"
             className={inputCls}
           />
+        </Field>
+
+        <Field
+          label="Brand color"
+          hint="The accent colour used in your emails — the header bar and links."
+        >
+          <div className="flex items-center gap-3">
+            <input
+              type="color"
+              value={brandColor}
+              onChange={(e) => setBrandColor(e.target.value)}
+              aria-label="Brand color"
+              className="h-10 w-14 shrink-0 cursor-pointer rounded-lg border border-[var(--border)] bg-[var(--surface-2)] p-1"
+            />
+            <input
+              type="text"
+              value={brandColor}
+              onChange={(e) => setBrandColor(e.target.value)}
+              placeholder={DEFAULT_BRAND_COLOR}
+              className={`${inputCls} max-w-[160px] font-mono`}
+            />
+            {brandColor.toLowerCase() !== DEFAULT_BRAND_COLOR && (
+              <button
+                type="button"
+                onClick={() => setBrandColor(DEFAULT_BRAND_COLOR)}
+                disabled={saving}
+                className="shrink-0 text-xs font-bold text-[var(--muted)] underline-offset-2 transition-colors hover:text-[var(--accent)] hover:underline disabled:opacity-60"
+              >
+                Reset to default
+              </button>
+            )}
+          </div>
         </Field>
 
         <div className="grid gap-5 sm:grid-cols-2">
@@ -314,12 +392,7 @@ export function BrandingSection() {
 
         <Notice msg={msg} />
 
-        <div className="flex justify-end">
-          <button type="submit" disabled={saving} className={primaryBtn}>
-            {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-            Save branding
-          </button>
-        </div>
+        <SaveBar isDirty={isDirty} saving={saving} label="Save branding" />
       </form>
     </SettingsCard>
   );
