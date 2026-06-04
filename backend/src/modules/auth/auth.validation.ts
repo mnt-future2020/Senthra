@@ -28,6 +28,17 @@ export const changeCredentialsSchema = z.object({
 });
 export type ChangeCredentialsInput = z.infer<typeof changeCredentialsSchema>;
 
+// Staff user changing their own password (first-login forced change + voluntary).
+// currentPassword is optional: the first-login change is authorised by the active
+// session; a voluntary change re-verifies it (enforced in the service).
+export const changePasswordSchema = z.object({
+  currentPassword: z.string().optional(),
+  newPassword: z
+    .string({ error: "New password is required." })
+    .min(8, "New password must be at least 8 characters."),
+});
+export type ChangePasswordInput = z.infer<typeof changePasswordSchema>;
+
 export const forgotPasswordSchema = z.object({
   email: z.string({ error: "Email is required." }).min(1, "Email is required."),
 });

@@ -3,13 +3,17 @@
 import * as React from "react";
 
 import * as authService from "@/services/auth.service";
-import type { Admin } from "@/types/auth";
+import type { AdminPrincipal, Principal, UserPrincipal } from "@/types/auth";
 
 export interface AuthState {
-  admin: Admin | null;
+  // The authenticated principal (admin or staff user), or null.
+  principal: Principal | null;
+  // Convenience accessors, each non-null only for the matching principal type.
+  admin: AdminPrincipal | null;
+  user: UserPrincipal | null;
   loading: boolean;
-  login: (email: string, password: string, remember?: boolean) => Promise<void>;
-  loginWithGoogle: (credential: string) => Promise<void>;
+  login: (email: string, password: string, remember?: boolean) => Promise<Principal>;
+  loginWithGoogle: (credential: string) => Promise<Principal>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
 }
@@ -17,15 +21,15 @@ export interface AuthState {
 export const AuthContext = React.createContext<AuthState | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [admin, setAdmin] = React.useState<Admin | null>(null);
+  const [principal, setPrincipal] = React.useState<Principal | null>(null);
   const [loading, setLoading] = React.useState(true);
 
   // Re-read the current session (cookies are sent automatically).
   const refresh = React.useCallback(async () => {
     try {
-      setAdmin(await authService.getCurrentAdmin());
+      setPrincipal(await authService.getCurrentPrincipal());
     } catch {
-      setAdmin(null);
+      setPrincipal(null);
     }
   }, []);
 
@@ -34,12 +38,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     let active = true;
     authService
-      .getCurrentAdmin()
+      .getCurrentPrincipal()
       .then((me) => {
-        if (active) setAdmin(me);
+        if (active) setPrincipal(me);
       })
       .catch(() => {
-        if (active) setAdmin(null);
+        if (active) setPrincipal(null);
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -51,13 +55,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const login = React.useCallback(
     async (email: string, password: string, remember = true) => {
-      setAdmin(await authService.login(email, password, remember));
+      const next = await authService.login(email, password, remember);
+      setPrincipal(next);
+      return next;
     },
     [],
   );
 
   const loginWithGoogle = React.useCallback(async (credential: string) => {
-    setAdmin(await authService.loginWithGoogle(credential));
+    const next = await authService.loginWithGoogle(credential);
+    setPrincipal(next);
+    return next;
   }, []);
 
   const logout = React.useCallback(async () => {
@@ -66,12 +74,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch {
       // ignore — we clear local state regardless
     }
-    setAdmin(null);
+    setPrincipal(null);
   }, []);
+
+  const admin = principal?.type === "admin" ? principal : null;
+  const user = principal?.type === "user" ? principal : null;
 
   return (
     <AuthContext.Provider
-      value={{ admin, loading, login, loginWithGoogle, logout, refresh }}
+      value={{ principal, admin, user, loading, login, loginWithGoogle, logout, refresh }}
     >
       {children}
     </AuthContext.Provider>

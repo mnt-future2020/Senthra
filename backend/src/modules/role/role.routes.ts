@@ -1,14 +1,15 @@
 import { Router } from "express";
 
 import * as roleController from "./role.controller.js";
-import { requireAuth } from "../../middleware/auth.middleware.js";
+import { requireAdmin, requireAuth } from "../../middleware/auth.middleware.js";
 import { writeLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import { createRoleSchema, updateRoleSchema } from "./role.validation.js";
 
 const router = Router();
 
-router.use(requireAuth);
+// Role management is super-admin only.
+router.use(requireAuth, requireAdmin);
 
 router.get("/", roleController.listRoles);
 router.post("/", writeLimiter, validateBody(createRoleSchema), roleController.createRole);

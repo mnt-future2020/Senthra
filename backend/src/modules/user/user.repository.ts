@@ -63,6 +63,23 @@ export function findByEmailIncludingDeleted(email: string): Promise<User | null>
   return prisma.user.findUnique({ where: { email } });
 }
 
+// Login lookup: a non-deleted user by email, with role + auth fields. Status is
+// checked by the caller so a suspended account can be messaged clearly.
+export function findActiveByEmail(email: string): Promise<UserWithRole | null> {
+  return prisma.user.findFirst({
+    where: { email, deletedAt: null },
+    include: { role: true },
+  });
+}
+
+// Password-reset lookup (non-deleted), with role.
+export function findByResetTokenHash(resetTokenHash: string): Promise<UserWithRole | null> {
+  return prisma.user.findFirst({
+    where: { resetTokenHash, deletedAt: null },
+    include: { role: true },
+  });
+}
+
 export function create(data: Prisma.UserCreateInput): Promise<UserWithRole> {
   // Always persist deletedAt as an explicit null (not an absent field). MongoDB
   // treats a missing field differently from null, so without this the

@@ -1,7 +1,7 @@
 import { Router } from "express";
 
 import * as authController from "./auth.controller.js";
-import { requireAuth } from "../../middleware/auth.middleware.js";
+import { requireAdmin, requireAuth } from "../../middleware/auth.middleware.js";
 import {
   forgotPasswordLimiter,
   loginLimiter,
@@ -11,6 +11,7 @@ import {
 import { validateBody } from "../../middleware/validate.middleware.js";
 import {
   changeCredentialsSchema,
+  changePasswordSchema,
   forgotPasswordSchema,
   googleLoginSchema,
   loginSchema,
@@ -36,11 +37,20 @@ router.post(
   authController.resetPassword,
 );
 router.get("/me", requireAuth, authController.me);
+// Super-admin account email/password (Settings → Account).
 router.patch(
   "/credentials",
   requireAuth,
+  requireAdmin,
   validateBody(changeCredentialsSchema),
   authController.changeCredentials,
+);
+// Staff user: change own password (first-login forced change + voluntary).
+router.post(
+  "/password",
+  requireAuth,
+  validateBody(changePasswordSchema),
+  authController.changePassword,
 );
 router.post("/logout", requireAuth, authController.logout);
 

@@ -7,6 +7,7 @@ import { Eye, EyeOff, Loader2 } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
 import * as authService from "@/services/auth.service";
+import { homeFor } from "@/types/auth";
 import { AuthLayout } from "@/components/auth/AuthLayout";
 
 // Minimal typing for the Google Identity Services global.
@@ -31,7 +32,7 @@ const inputCls =
   "w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3.5 py-2.5 text-sm text-[var(--ink)] outline-none transition-all placeholder:text-[var(--faint)] focus:border-[var(--accent)]";
 
 export default function LoginPage() {
-  const { admin, loading, login, loginWithGoogle } = useAuth();
+  const { principal, loading, login, loginWithGoogle } = useAuth();
   const router = useRouter();
 
   const [email, setEmail] = React.useState("");
@@ -49,18 +50,18 @@ export default function LoginPage() {
   const [googleChecked, setGoogleChecked] = React.useState(false);
   const googleBtnRef = React.useRef<HTMLDivElement>(null);
 
-  // Already logged in → go to the dashboard.
+  // Already logged in → go to the right home for the account type.
   React.useEffect(() => {
-    if (!loading && admin) router.replace("/dashboard");
-  }, [loading, admin, router]);
+    if (!loading && principal) router.replace(homeFor(principal));
+  }, [loading, principal, router]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     setSubmitting(true);
     try {
-      await login(email, password, remember);
-      router.replace("/dashboard");
+      const next = await login(email, password, remember);
+      router.replace(homeFor(next));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed.");
     } finally {
@@ -123,8 +124,8 @@ export default function LoginPage() {
       callback: async (resp) => {
         setError(null);
         try {
-          await loginWithGoogle(resp.credential);
-          router.replace("/dashboard");
+          const next = await loginWithGoogle(resp.credential);
+          router.replace(homeFor(next));
         } catch (err) {
           setError(
             err instanceof Error ? err.message : "Google sign-in failed.",

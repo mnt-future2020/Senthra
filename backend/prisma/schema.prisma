@@ -99,8 +99,10 @@ model User {
   // Auth — set at creation, never sent to the browser.
   passwordHash      String
   mustResetPassword Boolean @default(true)
-  // Reserved for the future first-login "set your password" flow (SHA-256 hash
-  // of the emailed token + its expiry — never the raw token).
+  // Tokens issued before this time are rejected (set on logout / password change).
+  tokenInvalidatedAt DateTime?
+  // First-login "set your password" + forgot-password flow: SHA-256 hash of the
+  // emailed token + its expiry (never the raw token).
   resetTokenHash      String?
   resetTokenExpiresAt DateTime?
 

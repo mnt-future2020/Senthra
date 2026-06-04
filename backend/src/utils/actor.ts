@@ -3,8 +3,10 @@ import type { Request } from "express";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 
 // Build the audit actor from the authenticated request. requireAuth populates
-// req.adminId / req.adminEmail; snapshotting the email keeps audit entries
-// meaningful over time.
+// req.principal (admin or staff user); snapshotting the id + email keeps audit
+// entries meaningful even if that account is later renamed or removed.
 export function actorFrom(req: Request): AuditActor {
-  return { id: req.adminId ?? null, email: req.adminEmail ?? null, type: "admin" };
+  const principal = req.principal;
+  if (!principal) return { id: null, email: null, type: "admin" };
+  return { id: principal.id, email: principal.email, type: principal.type };
 }
