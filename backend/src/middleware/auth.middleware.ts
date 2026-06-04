@@ -1,6 +1,6 @@
 import type { RequestHandler } from "express";
 
-import * as adminRepo from "../repositories/admin.repository.js";
+import * as adminRepo from "#modules/auth/admin.repository.js";
 import { ACCESS_COOKIE } from "../utils/cookies.js";
 import { verifyAccessToken } from "../utils/jwt.js";
 

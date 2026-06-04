@@ -1,6 +1,6 @@
 import type { Prisma } from "@prisma/client";
 
-import * as auditLogRepo from "../repositories/auditLog.repository.js";
+import * as auditLogRepo from "./auditLog.repository.js";
 
 // Actor is snapshotted (id + email) so an entry stays meaningful even if that
 // account is later renamed or removed.

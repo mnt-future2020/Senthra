@@ -1,9 +1,9 @@
 import { env } from "../config/env.js";
-import * as adminRepo from "../repositories/admin.repository.js";
-import * as emailTemplateRepo from "../repositories/emailTemplate.repository.js";
-import * as roleRepo from "../repositories/role.repository.js";
-import * as settingsRepo from "../repositories/settings.repository.js";
-import { DEFAULT_EMAIL_TEMPLATES } from "../services/email-templates.defaults.js";
+import * as adminRepo from "#modules/auth/admin.repository.js";
+import * as emailTemplateRepo from "#modules/email/emailTemplate.repository.js";
+import * as roleRepo from "#modules/role/role.repository.js";
+import * as settingsRepo from "#modules/settings/settings.repository.js";
+import { DEFAULT_EMAIL_TEMPLATES } from "#modules/email/email-templates.defaults.js";
 import { renderBodyToHtml } from "../utils/email-html.js";
 import { hashPassword } from "../utils/password.js";
 

@@ -2,17 +2,17 @@ import crypto from "node:crypto";
 
 import type { Prisma } from "@prisma/client";
 
-import { uploadToCloudinary } from "../lib/cloudinary.js";
-import * as roleRepo from "../repositories/role.repository.js";
-import * as userRepo from "../repositories/user.repository.js";
-import type { UserWithRole } from "../repositories/user.repository.js";
-import { generateTempPassword } from "../utils/generate-password.js";
-import { badRequest, conflict, notFound } from "../utils/http-error.js";
-import { hashPassword } from "../utils/password.js";
-import * as audit from "./audit.service.js";
-import type { AuditActor } from "./audit.service.js";
-import { sendTemplatedEmail } from "./email.service.js";
-import { getCloudinaryCreds } from "./settings.service.js";
+import { uploadToCloudinary } from "../../lib/cloudinary.js";
+import * as roleRepo from "#modules/role/role.repository.js";
+import * as userRepo from "./user.repository.js";
+import type { UserWithRole } from "./user.repository.js";
+import { generateTempPassword } from "../../utils/generate-password.js";
+import { badRequest, conflict, notFound } from "../../utils/http-error.js";
+import { hashPassword } from "../../utils/password.js";
+import * as audit from "#modules/audit/audit.service.js";
+import type { AuditActor } from "#modules/audit/audit.service.js";
+import { sendTemplatedEmail } from "#modules/email/email.service.js";
+import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 
 const STATUSES = ["active", "inactive", "suspended"] as const;
 export type UserStatus = (typeof STATUSES)[number];

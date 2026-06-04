@@ -1,6 +1,6 @@
 import type { Request } from "express";
 
-import type { AuditActor } from "../services/audit.service.js";
+import type { AuditActor } from "#modules/audit/audit.service.js";
 
 // Build the audit actor from the authenticated request. requireAuth populates
 // req.adminId / req.adminEmail; snapshotting the email keeps audit entries

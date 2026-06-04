@@ -1,10 +1,10 @@
-import * as settingsService from "../services/settings.service.js";
-import { asyncHandler } from "../utils/async-handler.js";
+import * as settingsService from "./settings.service.js";
+import { asyncHandler } from "../../utils/async-handler.js";
 import type {
   TestEmailInput,
   UpdateSettingsInput,
   UploadBrandingInput,
-} from "../validations/settings.validation.js";
+} from "./settings.validation.js";
 
 // GET /settings  (protected)
 export const getSettings = asyncHandler(async (_req, res) => {

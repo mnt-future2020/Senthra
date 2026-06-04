@@ -1,8 +1,8 @@
-import * as roleService from "../services/role.service.js";
-import { actorFrom } from "../utils/actor.js";
-import { asyncHandler } from "../utils/async-handler.js";
-import { param } from "../utils/request.js";
-import type { CreateRoleInput, UpdateRoleInput } from "../validations/role.validation.js";
+import * as roleService from "./role.service.js";
+import { actorFrom } from "../../utils/actor.js";
+import { asyncHandler } from "../../utils/async-handler.js";
+import { param } from "../../utils/request.js";
+import type { CreateRoleInput, UpdateRoleInput } from "./role.validation.js";
 
 // GET /roles  (protected)
 export const listRoles = asyncHandler(async (_req, res) => {

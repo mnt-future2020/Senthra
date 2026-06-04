@@ -1,6 +1,6 @@
 import type { Admin, Prisma } from "@prisma/client";
 
-import { prisma } from "../lib/prisma.js";
+import { prisma } from "../../lib/prisma.js";
 
 // Data-access layer for the Admin model. This is the ONLY place that talks to
 // Prisma for admins — services depend on these functions, never on Prisma directly.

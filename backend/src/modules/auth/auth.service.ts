@@ -3,23 +3,23 @@ import crypto from "node:crypto";
 import { OAuth2Client } from "google-auth-library";
 import type { Admin, Prisma } from "@prisma/client";
 
-import { env } from "../config/env.js";
-import * as adminRepo from "../repositories/admin.repository.js";
-import * as settingsRepo from "../repositories/settings.repository.js";
+import { env } from "../../config/env.js";
+import * as adminRepo from "./admin.repository.js";
+import * as settingsRepo from "#modules/settings/settings.repository.js";
 import {
   badRequest,
   conflict,
   forbidden,
   notFound,
   unauthorized,
-} from "../utils/http-error.js";
-import { hashPassword, verifyPassword } from "../utils/password.js";
+} from "../../utils/http-error.js";
+import { hashPassword, verifyPassword } from "../../utils/password.js";
 import {
   signAccessToken,
   signRefreshToken,
   verifyRefreshToken,
-} from "../utils/jwt.js";
-import { sendTemplatedEmail } from "./email.service.js";
+} from "../../utils/jwt.js";
+import { sendTemplatedEmail } from "#modules/email/email.service.js";
 
 // Shape returned to the client (never includes the password hash or secrets).
 export interface PublicAdmin {

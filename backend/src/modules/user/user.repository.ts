@@ -1,6 +1,6 @@
 import type { Prisma, Role, User } from "@prisma/client";
 
-import { prisma } from "../lib/prisma.js";
+import { prisma } from "../../lib/prisma.js";
 
 // Data-access layer for the User model. The ONLY place Prisma is touched for
 // users. Soft-deleted users (deletedAt set) are excluded from normal reads.

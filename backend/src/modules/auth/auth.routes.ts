@@ -1,21 +1,21 @@
 import { Router } from "express";
 
-import * as authController from "../controllers/auth.controller.js";
-import { requireAuth } from "../middleware/auth.middleware.js";
+import * as authController from "./auth.controller.js";
+import { requireAuth } from "../../middleware/auth.middleware.js";
 import {
   forgotPasswordLimiter,
   loginLimiter,
   refreshLimiter,
   resetPasswordLimiter,
-} from "../middleware/rateLimit.middleware.js";
-import { validateBody } from "../middleware/validate.middleware.js";
+} from "../../middleware/rateLimit.middleware.js";
+import { validateBody } from "../../middleware/validate.middleware.js";
 import {
   changeCredentialsSchema,
   forgotPasswordSchema,
   googleLoginSchema,
   loginSchema,
   resetPasswordSchema,
-} from "../validations/auth.validation.js";
+} from "./auth.validation.js";
 
 const router = Router();
 

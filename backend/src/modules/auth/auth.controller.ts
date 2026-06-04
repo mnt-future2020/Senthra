@@ -1,14 +1,14 @@
-import * as authService from "../services/auth.service.js";
-import { asyncHandler } from "../utils/async-handler.js";
-import { clearAuthCookies, REFRESH_COOKIE, setAuthCookies } from "../utils/cookies.js";
-import { unauthorized } from "../utils/http-error.js";
+import * as authService from "./auth.service.js";
+import { asyncHandler } from "../../utils/async-handler.js";
+import { clearAuthCookies, REFRESH_COOKIE, setAuthCookies } from "../../utils/cookies.js";
+import { unauthorized } from "../../utils/http-error.js";
 import type {
   ChangeCredentialsInput,
   ForgotPasswordInput,
   GoogleLoginInput,
   LoginInput,
   ResetPasswordInput,
-} from "../validations/auth.validation.js";
+} from "./auth.validation.js";
 
 // POST /auth/login
 export const login = asyncHandler(async (req, res) => {
