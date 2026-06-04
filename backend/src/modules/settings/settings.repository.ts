@@ -1,6 +1,6 @@
 import type { Prisma, Settings } from "@prisma/client";
 
-import { prisma } from "../lib/prisma.js";
+import { prisma } from "../../lib/prisma.js";
 
 // Data-access layer for the Settings singleton.
 

@@ -1,11 +1,11 @@
-import { env } from "../config/env.js";
-import { sendMail, type MailMessage } from "../lib/mailer.js";
-import * as emailLogRepo from "../repositories/emailLog.repository.js";
-import * as emailTemplateRepo from "../repositories/emailTemplate.repository.js";
-import * as settingsRepo from "../repositories/settings.repository.js";
-import { decryptSecret } from "../utils/crypto.js";
-import { buildEmailHeaderRow, renderBodyToHtml, safeBrandColor } from "../utils/email-html.js";
-import { renderEmail, type TemplateVars } from "../utils/template-render.js";
+import { env } from "../../config/env.js";
+import { sendMail, type MailMessage } from "../../lib/mailer.js";
+import * as emailLogRepo from "./emailLog.repository.js";
+import * as emailTemplateRepo from "./emailTemplate.repository.js";
+import * as settingsRepo from "#modules/settings/settings.repository.js";
+import { decryptSecret } from "../../utils/crypto.js";
+import { buildEmailHeaderRow, renderBodyToHtml, safeBrandColor } from "../../utils/email-html.js";
+import { renderEmail, type TemplateVars } from "../../utils/template-render.js";
 import { findDefaultTemplate } from "./email-templates.defaults.js";
 
 // Send an email using the SMTP settings configured in the dashboard (Settings ->

@@ -1,10 +1,10 @@
 import { Router } from "express";
 
-import * as roleController from "../controllers/role.controller.js";
-import { requireAuth } from "../middleware/auth.middleware.js";
-import { writeLimiter } from "../middleware/rateLimit.middleware.js";
-import { validateBody } from "../middleware/validate.middleware.js";
-import { createRoleSchema, updateRoleSchema } from "../validations/role.validation.js";
+import * as roleController from "./role.controller.js";
+import { requireAuth } from "../../middleware/auth.middleware.js";
+import { writeLimiter } from "../../middleware/rateLimit.middleware.js";
+import { validateBody } from "../../middleware/validate.middleware.js";
+import { createRoleSchema, updateRoleSchema } from "./role.validation.js";
 
 const router = Router();
 

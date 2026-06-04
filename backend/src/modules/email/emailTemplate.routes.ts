@@ -1,16 +1,16 @@
 import { Router } from "express";
 
-import * as templateController from "../controllers/emailTemplate.controller.js";
-import { requireAuth } from "../middleware/auth.middleware.js";
-import { testEmailLimiter, writeLimiter } from "../middleware/rateLimit.middleware.js";
-import { validateBody } from "../middleware/validate.middleware.js";
+import * as templateController from "./emailTemplate.controller.js";
+import { requireAuth } from "../../middleware/auth.middleware.js";
+import { testEmailLimiter, writeLimiter } from "../../middleware/rateLimit.middleware.js";
+import { validateBody } from "../../middleware/validate.middleware.js";
 import {
   createTemplateSchema,
   previewTemplateSchema,
   setEnabledSchema,
   testTemplateSchema,
   updateTemplateSchema,
-} from "../validations/emailTemplate.validation.js";
+} from "./emailTemplate.validation.js";
 
 const router = Router();
 

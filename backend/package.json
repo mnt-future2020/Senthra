@@ -4,11 +4,17 @@
   "description": "Senthra backend — Express + Prisma (MongoDB) API, layered TypeScript architecture.",
   "main": "dist/server.js",
   "type": "module",
+  "imports": {
+    "#modules/*": {
+      "development": "./src/modules/*",
+      "default": "./dist/modules/*"
+    }
+  },
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "dev": "tsx watch src/server.ts",
+    "dev": "tsx watch --conditions=development src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",

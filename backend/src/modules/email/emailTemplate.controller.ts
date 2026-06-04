@@ -1,14 +1,14 @@
-import * as templateService from "../services/emailTemplate.service.js";
-import { actorFrom } from "../utils/actor.js";
-import { asyncHandler } from "../utils/async-handler.js";
-import { param } from "../utils/request.js";
+import * as templateService from "./emailTemplate.service.js";
+import { actorFrom } from "../../utils/actor.js";
+import { asyncHandler } from "../../utils/async-handler.js";
+import { param } from "../../utils/request.js";
 import type {
   CreateTemplateInput,
   PreviewTemplateInput,
   SetEnabledInput,
   TestTemplateInput,
   UpdateTemplateInput,
-} from "../validations/emailTemplate.validation.js";
+} from "./emailTemplate.validation.js";
 
 // GET /email-templates  (protected)
 export const listTemplates = asyncHandler(async (_req, res) => {

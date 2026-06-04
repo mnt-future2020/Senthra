@@ -1,12 +1,12 @@
 import type { EmailTemplate, Prisma } from "@prisma/client";
 
-import * as emailTemplateRepo from "../repositories/emailTemplate.repository.js";
-import { badRequest, forbidden, notFound } from "../utils/http-error.js";
-import { renderBodyToHtml } from "../utils/email-html.js";
-import { extractVariables, renderEmail, type TemplateVars } from "../utils/template-render.js";
-import { slugify } from "../utils/slugify.js";
-import * as audit from "./audit.service.js";
-import type { AuditActor } from "./audit.service.js";
+import * as emailTemplateRepo from "./emailTemplate.repository.js";
+import { badRequest, forbidden, notFound } from "../../utils/http-error.js";
+import { renderBodyToHtml } from "../../utils/email-html.js";
+import { extractVariables, renderEmail, type TemplateVars } from "../../utils/template-render.js";
+import { slugify } from "../../utils/slugify.js";
+import * as audit from "#modules/audit/audit.service.js";
+import type { AuditActor } from "#modules/audit/audit.service.js";
 import { resolveBrandVars, sendAndLog } from "./email.service.js";
 import { findDefaultTemplate, requiredVariablesFor } from "./email-templates.defaults.js";
 

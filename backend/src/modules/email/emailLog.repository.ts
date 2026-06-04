@@ -1,6 +1,6 @@
 import type { EmailLog, Prisma } from "@prisma/client";
 
-import { prisma } from "../lib/prisma.js";
+import { prisma } from "../../lib/prisma.js";
 
 // Data-access layer for the EmailLog model (email delivery log).
 

@@ -1,11 +1,11 @@
 import type { Prisma, Role } from "@prisma/client";
 
-import * as roleRepo from "../repositories/role.repository.js";
-import * as userRepo from "../repositories/user.repository.js";
-import { badRequest, conflict, forbidden, notFound } from "../utils/http-error.js";
-import { slugify } from "../utils/slugify.js";
-import * as audit from "./audit.service.js";
-import type { AuditActor } from "./audit.service.js";
+import * as roleRepo from "./role.repository.js";
+import * as userRepo from "#modules/user/user.repository.js";
+import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
+import { slugify } from "../../utils/slugify.js";
+import * as audit from "#modules/audit/audit.service.js";
+import type { AuditActor } from "#modules/audit/audit.service.js";
 
 export interface PublicRole {
   id: string;

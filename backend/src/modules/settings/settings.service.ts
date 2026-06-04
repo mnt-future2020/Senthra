@@ -1,12 +1,12 @@
 import type { Prisma, Settings } from "@prisma/client";
 
-import { env } from "../config/env.js";
-import { uploadToCloudinary, type CloudinaryCreds } from "../lib/cloudinary.js";
-import { sendMail } from "../lib/mailer.js";
-import * as settingsRepo from "../repositories/settings.repository.js";
-import { decryptSecret, encryptSecret } from "../utils/crypto.js";
-import { safeBrandColor } from "../utils/email-html.js";
-import { badRequest } from "../utils/http-error.js";
+import { env } from "../../config/env.js";
+import { uploadToCloudinary, type CloudinaryCreds } from "../../lib/cloudinary.js";
+import { sendMail } from "../../lib/mailer.js";
+import * as settingsRepo from "./settings.repository.js";
+import { decryptSecret, encryptSecret } from "../../utils/crypto.js";
+import { safeBrandColor } from "../../utils/email-html.js";
+import { badRequest } from "../../utils/http-error.js";
 
 // Resolve Cloudinary credentials: UI-configured (DB) takes precedence, then env.
 // Returns null when neither is fully configured.

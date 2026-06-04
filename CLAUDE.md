@@ -31,12 +31,14 @@ There is **no backend test runner** (`pnpm test` is a placeholder). Verify chang
 
 Fully documented in [backend/README.md](backend/README.md). Key invariants to respect when editing:
 
-- **Strict layering**: `route → middleware (rateLimit → requireAuth → validateBody) → controller → service → repository → Prisma`. Controllers hold no business logic; services return data or `throw new HttpError(status, message)`; the error middleware turns thrown errors into JSON (only 5xx logged).
-- **Repositories are the ONLY place Prisma is touched** — one module per model. Never call Prisma from a controller or service.
+- **Domain-module layout**: code is organized by domain under `src/modules/<domain>/`, each folder holding that domain's full vertical slice — `<domain>.controller.ts`, `.service.ts`, `.repository.ts`, `.validation.ts`, `.routes.ts`. Current modules: `auth` (incl. `admin.repository.ts`), `user`, `role`, `settings`, `email` (sending infra + `emailTemplate.*` CRUD + `email-templates.defaults.ts`), `audit`. Cross-cutting code stays at `src/` top level: `config/`, `lib/`, `middleware/`, `utils/`, `types/`, `db/`, and the route aggregator `routes/index.ts` (mounts each module's `*.routes.ts`).
+- **Strict layering** (within and across modules): `route → middleware (rateLimit → requireAuth → validateBody) → controller → service → repository → Prisma`. Controllers hold no business logic; services return data or `throw new HttpError(status, message)`; the error middleware turns thrown errors into JSON (only 5xx logged).
+- **Repositories are the ONLY place Prisma is touched** — one repository per model, living in the owning module. Never call Prisma from a controller or service. A service may import another module's repository/service via `../<other-domain>/...`.
 - **`config/env.ts` is the ONLY place `process.env` is read** — validated with zod at startup; add new env vars there.
 - **Auth boundary**: tokens are generated in the *service* and returned; cookies are set in the *controller*. JWT access + refresh; Google OAuth supported.
-- **File naming**: `domain.layer.ts` (e.g. `user.controller.ts`, `user.service.ts`, `user.repository.ts`, `user.validation.ts`).
+- **File naming**: `domain.layer.ts` (e.g. `user.controller.ts`, `user.service.ts`, `user.repository.ts`, `user.validation.ts`), grouped in `modules/<domain>/`.
 - **ESM / NodeNext**: relative imports MUST include the `.js` extension (e.g. `import { env } from "../config/env.js"`) even though the source is `.ts`.
+- **`#modules/*` import alias**: cross-module and into-module imports use the Node subpath alias `#modules/<domain>/...` (still with the `.js` extension) instead of `../<domain>/...`. Same-module imports stay relative (`./auth.service.js`); shared dirs stay relative (`../../config/env.js`). The alias is a conditional map in `package.json` `imports`: the `development` condition points at `./src/modules/*`, `default` at `./dist/modules/*`. So **`pnpm dev` runs `tsx --conditions=development`** and `pnpm typecheck`/`build` use `customConditions: ["development"]` in `tsconfig.json` to resolve against source; `pnpm start` (plain `node dist/`) gets `default` → the compiled `dist/`. If you add a new top-level code dir that modules import from, alias it the same way.
 
 ## Frontend architecture
 

@@ -1,10 +1,10 @@
 import { Router } from "express";
 
-import authRoutes from "./auth.routes.js";
-import emailTemplateRoutes from "./emailTemplate.routes.js";
-import roleRoutes from "./role.routes.js";
-import settingsRoutes from "./settings.routes.js";
-import userRoutes from "./user.routes.js";
+import authRoutes from "#modules/auth/auth.routes.js";
+import emailTemplateRoutes from "#modules/email/emailTemplate.routes.js";
+import roleRoutes from "#modules/role/role.routes.js";
+import settingsRoutes from "#modules/settings/settings.routes.js";
+import userRoutes from "#modules/user/user.routes.js";
 
 const router = Router();
 

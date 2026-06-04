@@ -1,12 +1,12 @@
-import * as userService from "../services/user.service.js";
-import { actorFrom } from "../utils/actor.js";
-import { asyncHandler } from "../utils/async-handler.js";
-import { param } from "../utils/request.js";
+import * as userService from "./user.service.js";
+import { actorFrom } from "../../utils/actor.js";
+import { asyncHandler } from "../../utils/async-handler.js";
+import { param } from "../../utils/request.js";
 import type {
   CreateUserInput,
   UpdateUserInput,
   UpdateUserStatusInput,
-} from "../validations/user.validation.js";
+} from "./user.validation.js";
 
 const toNum = (v: unknown): number | undefined => {
   const n = typeof v === "string" ? parseInt(v, 10) : NaN;
