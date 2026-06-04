@@ -3,23 +3,9 @@
 import * as React from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import {
-  BarChart3,
-  Users,
-  Receipt,
-  LayoutDashboard,
-  Settings,
-  MessageSquare,
-  ShoppingBag,
-  UserCog,
-  X,
-  ChevronDown,
-  Award,
-  LogOut,
-} from "lucide-react";
+import { Settings, UserCog, X, ChevronDown, LogOut } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
-import { useDashboard } from "@/hooks/useDashboard";
 import { useBranding } from "@/hooks/useBranding";
 import { useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import { BrandMark } from "@/components/branding/BrandMark";
@@ -28,23 +14,10 @@ type NavItem = {
   href: string;
   label: string;
   icon: React.ElementType;
-  badge?: number;
 };
 
-const MENU: NavItem[] = [
-  { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
-  { href: "/dashboard/analytics", label: "Analytics", icon: BarChart3 },
-  { href: "/dashboard/customers", label: "Customers", icon: Users },
-  { href: "/dashboard/invoices", label: "Invoices", icon: Receipt },
-  { href: "/dashboard/products", label: "Products", icon: ShoppingBag },
-];
-
-const ADMIN: NavItem[] = [
+const NAV: NavItem[] = [
   { href: "/dashboard/users", label: "Users & Roles", icon: UserCog },
-];
-
-const WORKSPACE: NavItem[] = [
-  { href: "/dashboard/messages", label: "Messages", icon: MessageSquare, badge: 3 },
   { href: "/dashboard/settings", label: "Settings", icon: Settings },
 ];
 
@@ -61,11 +34,8 @@ export function Sidebar({
   const { brandName } = useBranding();
   const router = useRouter();
   const pathname = usePathname();
-  const d = useDashboard();
   const guard = useNavigationGuard();
   const [showProfileDropdown, setShowProfileDropdown] = React.useState(false);
-
-  const pendingCount = d.transactions.filter((t) => t.status === "pending").length;
 
   const handleSignOut = async () => {
     await logout();
@@ -76,8 +46,6 @@ export function Sidebar({
     items.map((item) => {
       const Icon = item.icon;
       const active = pathname === item.href;
-      const badge =
-        item.href === "/dashboard/invoices" ? pendingCount : item.badge;
       return (
         <Link
           key={item.href}
@@ -110,17 +78,6 @@ export function Sidebar({
           >
             {item.label}
           </span>
-          {badge ? (
-            <span
-              className={`px-1.5 py-0.5 bg-[var(--accent)] text-white text-[9px] font-black rounded-full select-none num transition-all duration-300 overflow-hidden ${
-                collapsed
-                  ? "w-0 opacity-0 p-0 pointer-events-none"
-                  : "opacity-100 ml-1"
-              }`}
-            >
-              {badge}
-            </span>
-          ) : null}
         </Link>
       );
     });
@@ -167,60 +124,15 @@ export function Sidebar({
                 collapsed ? "max-h-0 opacity-0 mb-0" : "max-h-6 opacity-100"
               }`}
             >
-              Console Menu
+              Menu
             </span>
-            <nav className="space-y-0.5">{renderNav(MENU)}</nav>
-          </div>
-          <div>
-            <span
-              className={`text-[10px] font-extrabold text-[var(--faint)] uppercase tracking-wider px-3 block mb-2 transition-all duration-300 overflow-hidden whitespace-nowrap ${
-                collapsed ? "max-h-0 opacity-0 mb-0" : "max-h-6 opacity-100"
-              }`}
-            >
-              Administration
-            </span>
-            <nav className="space-y-0.5">{renderNav(ADMIN)}</nav>
-          </div>
-          <div>
-            <span
-              className={`text-[10px] font-extrabold text-[var(--faint)] uppercase tracking-wider px-3 block mb-2 transition-all duration-300 overflow-hidden whitespace-nowrap ${
-                collapsed ? "max-h-0 opacity-0 mb-0" : "max-h-6 opacity-100"
-              }`}
-            >
-              Workspace
-            </span>
-            <nav className="space-y-0.5">{renderNav(WORKSPACE)}</nav>
+            <nav className="space-y-0.5">{renderNav(NAV)}</nav>
           </div>
         </div>
       </div>
 
-      {/* Footer: upsell + profile */}
+      {/* Footer: profile */}
       <div className="space-y-4">
-        {d.userTier !== "Enterprise Owner" && (
-          <div
-            className={`bg-gradient-to-br from-[var(--surface-2)] to-[var(--bg)] border border-[var(--border)] rounded-2xl text-xs flex flex-col gap-1.5 shadow-xs relative overflow-hidden group transition-all duration-300 ${
-              collapsed
-                ? "max-h-0 p-0 border-none opacity-0 pointer-events-none"
-                : "max-h-48 p-3.5 opacity-100"
-            }`}
-          >
-            <div className="absolute top-0 right-0 w-8 h-8 bg-[var(--accent)] opacity-5 rounded-bl-full group-hover:scale-150 transition-all"></div>
-            <h4 className="font-extrabold text-[var(--ink)] flex items-center gap-1.5 whitespace-nowrap">
-              Upgrade to Pro{" "}
-              <Award className="w-3.5 h-3.5 text-amber-500 fill-amber-500" />
-            </h4>
-            <p className="text-[11px] text-[var(--muted)] leading-relaxed">
-              Unlock automated accounting forecasting & dedicated nodes slots.
-            </p>
-            <button
-              onClick={() => d.setShowUpgradeModal(true)}
-              className="w-full py-2 bg-[var(--accent)] text-white rounded-lg font-extrabold text-[11px] hover:opacity-90 transition-all cursor-pointer shadow-xs"
-            >
-              Learn Specs
-            </button>
-          </div>
-        )}
-
         <div
           onClick={() => setShowProfileDropdown(!showProfileDropdown)}
           className={`flex items-center hover:bg-[var(--surface-2)] rounded-xl cursor-pointer select-none transition-all duration-300 relative border border-transparent hover:border-[var(--border-2)] ${
@@ -239,7 +151,7 @@ export function Sidebar({
               {admin?.name || admin?.email || "Super Admin"}
             </span>
             <span className="text-[10px] text-[var(--faint)] font-bold uppercase tracking-wider block mt-0.5 whitespace-nowrap">
-              {d.userTier}
+              Super Admin
             </span>
           </div>
           <ChevronDown
@@ -259,21 +171,10 @@ export function Sidebar({
               <button
                 onClick={(e) => {
                   e.stopPropagation();
-                  d.setShowUpgradeModal(true);
-                  setShowProfileDropdown(false);
-                }}
-                className="w-full px-3 py-2 text-left hover:bg-[var(--surface-2)] font-bold text-[var(--accent)] flex items-center justify-between cursor-pointer"
-              >
-                <span>System Upgrade</span>
-                <Award className="w-3.5 h-3.5" />
-              </button>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
                   setShowProfileDropdown(false);
                   guard.attemptLeave(handleSignOut);
                 }}
-                className="w-full px-3 py-2 text-left hover:bg-[var(--surface-2)] text-red-500 flex items-center justify-between cursor-pointer border-t border-[var(--border-2)]"
+                className="w-full px-3 py-2 text-left hover:bg-[var(--surface-2)] text-red-500 flex items-center justify-between cursor-pointer"
               >
                 <span>Sign Out</span>
                 <LogOut className="w-3.5 h-3.5" />
