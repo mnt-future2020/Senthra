@@ -1,4 +1,5 @@
 import { api } from "@/lib/api";
+import { registerClientCache } from "@/lib/clientCache";
 import type { DeviceSession, Principal } from "@/types/auth";
 
 // Typed wrappers around the backend auth endpoints. Components and providers call
@@ -67,8 +68,19 @@ export function changePassword(
 }
 
 // --- Device sessions ---
+// Cached so the Devices card renders the last-known list instantly on revisit
+// instead of flashing its skeleton; the card still refetches to revalidate.
+let sessionsCache: DeviceSession[] | null = null;
+registerClientCache(() => {
+  sessionsCache = null;
+});
+export const getCachedSessions = (): DeviceSession[] | null => sessionsCache;
+
 export function getSessions(): Promise<DeviceSession[]> {
-  return api<{ sessions: DeviceSession[] }>("/auth/sessions").then((r) => r.sessions);
+  return api<{ sessions: DeviceSession[] }>("/auth/sessions").then((r) => {
+    sessionsCache = r.sessions;
+    return r.sessions;
+  });
 }
 
 export function revokeOtherSessions(): Promise<void> {

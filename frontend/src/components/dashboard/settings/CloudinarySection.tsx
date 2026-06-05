@@ -4,7 +4,9 @@ import * as React from "react";
 import { Cloud, Loader2 } from "lucide-react";
 
 import * as settingsService from "@/services/settings.service";
+import { useAuth } from "@/hooks/useAuth";
 import { SettingsCard } from "./ui/SettingsCard";
+import { ReadOnlyNotice } from "./ui/ReadOnlyNotice";
 import { Notice } from "./ui/Notice";
 import { PasswordInput } from "./ui/PasswordInput";
 import { Field } from "./ui/Field";
@@ -12,6 +14,8 @@ import { inputCls, primaryBtn } from "./ui/styles";
 import type { Msg } from "./types";
 
 export function CloudinarySection() {
+  const { can } = useAuth();
+  const canManage = can("settings.manage");
   const [cloudName, setCloudName] = React.useState("");
   const [apiKey, setApiKey] = React.useState("");
   const [apiSecret, setApiSecret] = React.useState("");
@@ -81,6 +85,8 @@ export function CloudinarySection() {
       desc="Powers logo & favicon uploads in the Branding tab. Find these in your Cloudinary dashboard. The API secret is encrypted and never shown again. A CLOUDINARY_* backend env config is used as a fallback."
     >
       <form onSubmit={save} className="space-y-4">
+        {!canManage && <ReadOnlyNotice />}
+        <fieldset disabled={!canManage} className="min-w-0 space-y-4">
         <Field
           label="Cloud name"
           hint="Found in your Cloudinary dashboard under Product Environment."
@@ -132,6 +138,7 @@ export function CloudinarySection() {
             Save Cloudinary settings
           </button>
         </div>
+        </fieldset>
       </form>
     </SettingsCard>
   );

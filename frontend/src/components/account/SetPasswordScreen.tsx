@@ -15,7 +15,7 @@ import type { Msg } from "@/components/dashboard/settings/types";
 
 // First-login forced password set. There's no current password — the active
 // session authorises the change. On success the principal is refreshed and the
-// user is sent to their real home (dashboard if permissioned, else the portal).
+// user continues into the dashboard (their first section, or the no-access home).
 export function SetPasswordScreen() {
   const { user, logout, refresh } = useAuth();
   const { brandName } = useBranding();

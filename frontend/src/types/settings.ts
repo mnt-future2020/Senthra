@@ -28,4 +28,7 @@ export interface Settings extends Branding {
   cloudinaryApiKey: string;
   cloudinaryApiSecretSet: boolean;
   cloudinaryConfigured: boolean;
+  // Code prefixed to new staff IDs (e.g. "SNT" → SNT-0007). Effective value
+  // (default-filled by the backend). Only affects newly-created staff.
+  employeeIdPrefix: string;
 }

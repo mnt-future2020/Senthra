@@ -1,15 +1,16 @@
 "use client";
 
 import * as React from "react";
+import { useRouter } from "next/navigation";
 import { Lock, Pencil, Plus, Shield, Trash2, Users } from "lucide-react";
 
 import { useDashboard } from "@/hooks/useDashboard";
+import { useAuth } from "@/hooks/useAuth";
 import * as roleService from "@/services/role.service";
 import type { Role } from "@/types/role";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { Pagination } from "./Pagination";
-import { RoleFormModal } from "./RoleFormModal";
 
 const PAGE_SIZE = 12;
 
@@ -57,13 +58,21 @@ function RolesTableSkeleton() {
 
 export function RolesView() {
   const { pushToast } = useDashboard();
-  const [roles, setRoles] = React.useState<Role[]>([]);
+  const { admin, can } = useAuth();
+  const router = useRouter();
+  const canCreate = can("roles.create");
+  // Seed from the SWR cache so returning from a role form renders instantly.
+  const cachedRoles = roleService.getCachedRoles();
+  // A delegate can edit/delete only a role whose permissions are all within its
+  // own (no managing a role more powerful than yourself); the super-admin can
+  // manage any role. System roles are never deletable and are admin-only to edit.
+  const manageable = (r: Role) => Boolean(admin) || r.permissions.every((p) => can(p));
+  const editable = (r: Role) => (r.isSystem ? Boolean(admin) : can("roles.edit") && manageable(r));
+  const deletable = (r: Role) => !r.isSystem && (Boolean(admin) || (can("roles.delete") && manageable(r)));
+
+  const [roles, setRoles] = React.useState<Role[]>(cachedRoles ?? []);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
-  const [form, setForm] = React.useState<{ open: boolean; role: Role | null }>({
-    open: false,
-    role: null,
-  });
   const [confirm, setConfirm] = React.useState<{ open: boolean; role: Role | null }>({
     open: false,
     role: null,
@@ -87,12 +96,6 @@ export function RolesView() {
       setLoading(false);
     })();
   }, [load]);
-
-  const onSaved = () => {
-    setForm({ open: false, role: null });
-    load();
-    pushToast("Role saved.", "success");
-  };
 
   const doDelete = async () => {
     if (!confirm.role) return;
@@ -128,16 +131,18 @@ export function RolesView() {
             Roles you can assign to users. Built-in roles can&apos;t be deleted.
           </p>
         </div>
-        <button
-          onClick={() => setForm({ open: true, role: null })}
-          className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90"
-        >
-          <Plus className="h-4 w-4" /> Add role
-        </button>
+        {canCreate && (
+          <button
+            onClick={() => router.push("/dashboard/roles/new")}
+            className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90"
+          >
+            <Plus className="h-4 w-4" /> Add role
+          </button>
+        )}
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-xs">
-        {loading ? (
+        {loading && roles.length === 0 ? (
           <div className="min-h-0 flex-1 overflow-auto">
             <RolesTableSkeleton />
           </div>
@@ -206,15 +211,17 @@ export function RolesView() {
                     </td>
                     <td className="px-5 py-3">
                       <div className="flex items-center justify-end gap-1">
-                        <button
-                          onClick={() => setForm({ open: true, role: r })}
-                          className="rounded-lg p-1.5 text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--accent)]"
-                          title="Edit role"
-                          aria-label="Edit role"
-                        >
-                          <Pencil className="h-3.5 w-3.5" />
-                        </button>
-                        {!r.isSystem && (
+                        {editable(r) && (
+                          <button
+                            onClick={() => router.push(`/dashboard/roles/${r.key}/edit`)}
+                            className="rounded-lg p-1.5 text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--accent)]"
+                            title="Edit role"
+                            aria-label="Edit role"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        {deletable(r) && (
                           <button
                             onClick={() => setConfirm({ open: true, role: r })}
                             className="rounded-lg p-1.5 text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--neg)]"
@@ -223,6 +230,9 @@ export function RolesView() {
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                           </button>
+                        )}
+                        {!editable(r) && !deletable(r) && (
+                          <span className="text-xs text-[var(--faint)]">—</span>
                         )}
                       </div>
                     </td>
@@ -244,14 +254,6 @@ export function RolesView() {
             onPage={setPage}
           />
         </div>
-      )}
-
-      {form.open && (
-        <RoleFormModal
-          role={form.role}
-          onClose={() => setForm({ open: false, role: null })}
-          onSaved={onSaved}
-        />
       )}
 
       <ConfirmDialog

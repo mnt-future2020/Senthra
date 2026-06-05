@@ -12,21 +12,22 @@ import {
 
 const router = Router();
 
-// User management requires the users.manage permission (the super-admin always
-// has it).
-router.use(requireAuth, requirePermission("users.manage"));
+// All user routes require auth; each method then requires its own granular
+// permission (the super-admin always passes).
+router.use(requireAuth);
 
-router.get("/", userController.listUsers);
-router.post("/", writeLimiter, validateBody(createUserSchema), userController.createUser);
-router.get("/:id", userController.getUser);
-router.put("/:id", writeLimiter, validateBody(updateUserSchema), userController.updateUser);
+router.get("/", requirePermission("users.view"), userController.listUsers);
+router.post("/", requirePermission("users.create"), writeLimiter, validateBody(createUserSchema), userController.createUser);
+router.get("/:id", requirePermission("users.view"), userController.getUser);
+router.put("/:id", requirePermission("users.edit"), writeLimiter, validateBody(updateUserSchema), userController.updateUser);
 router.patch(
   "/:id/status",
+  requirePermission("users.edit"),
   writeLimiter,
   validateBody(updateUserStatusSchema),
   userController.setUserStatus,
 );
-router.post("/:id/resend-invite", writeLimiter, userController.resendInvite);
-router.delete("/:id", writeLimiter, userController.deleteUser);
+router.post("/:id/resend-invite", requirePermission("users.edit"), writeLimiter, userController.resendInvite);
+router.delete("/:id", requirePermission("users.delete"), writeLimiter, userController.deleteUser);
 
 export default router;

@@ -14,12 +14,12 @@ export function AuthLayout({ children }: { children: React.ReactNode }) {
     <div className="flex min-h-screen">
       {/* Left brand panel (desktop only) */}
       <div className="relative hidden w-1/2 flex-col justify-between bg-gradient-to-br from-[var(--accent)] to-indigo-700 p-12 text-white lg:flex">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-4">
           <BrandMark
-            className="h-10 w-10 rounded-xl text-lg"
+            className="h-16 w-16 rounded-2xl text-3xl shadow-lg ring-1 ring-white/20"
             variant="translucent"
           />
-          <span className="text-xl font-extrabold tracking-tight">{brandName}</span>
+          <span className="text-2xl font-extrabold tracking-tight">{brandName}</span>
         </div>
 
         <div>
@@ -43,9 +43,9 @@ export function AuthLayout({ children }: { children: React.ReactNode }) {
       <div className="flex w-full items-center justify-center bg-[var(--surface)] px-6 py-12 lg:w-1/2">
         <div className="w-full max-w-sm">
           {/* Mobile brand */}
-          <div className="mb-8 flex items-center justify-center gap-2 lg:hidden">
-            <BrandMark className="h-9 w-9 rounded-xl" />
-            <span className="text-lg font-extrabold text-[var(--ink)]">
+          <div className="mb-8 flex items-center justify-center gap-2.5 lg:hidden">
+            <BrandMark className="h-12 w-12 rounded-2xl text-xl shadow-sm" />
+            <span className="text-xl font-extrabold text-[var(--ink)]">
               {brandName}
             </span>
           </div>

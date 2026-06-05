@@ -15,20 +15,22 @@ const router = Router();
 // Public — branding for the login page / first paint (no auth).
 router.get("/branding", settingsController.getBranding);
 
-// Everything below requires the settings.manage permission (the super-admin
-// always has it).
-router.use(requireAuth, requirePermission("settings.manage"));
+// Everything below requires auth; reading needs settings.view, mutating needs
+// settings.manage (the super-admin always passes both).
+router.use(requireAuth);
 
-router.get("/", settingsController.getSettings);
-router.put("/", validateBody(updateSettingsSchema), settingsController.updateSettings);
+router.get("/", requirePermission("settings.view"), settingsController.getSettings);
+router.put("/", requirePermission("settings.manage"), validateBody(updateSettingsSchema), settingsController.updateSettings);
 router.post(
   "/email/test",
+  requirePermission("settings.manage"),
   testEmailLimiter,
   validateBody(testEmailSchema),
   settingsController.sendTestEmail,
 );
 router.post(
   "/branding/upload",
+  requirePermission("settings.manage"),
   validateBody(uploadBrandingSchema),
   settingsController.uploadBrandingImage,
 );

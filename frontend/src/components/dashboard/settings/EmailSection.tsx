@@ -4,7 +4,9 @@ import * as React from "react";
 import { Loader2, Send } from "lucide-react";
 
 import * as settingsService from "@/services/settings.service";
+import { useAuth } from "@/hooks/useAuth";
 import { SettingsCard } from "./ui/SettingsCard";
+import { ReadOnlyNotice } from "./ui/ReadOnlyNotice";
 import { Notice } from "./ui/Notice";
 import { Toggle } from "./ui/Toggle";
 import { PasswordInput } from "./ui/PasswordInput";
@@ -37,6 +39,8 @@ function detectProvider(host: string): string {
 }
 
 export function EmailSection() {
+  const { can } = useAuth();
+  const canManage = can("settings.manage");
   const [enabled, setEnabled] = React.useState(false);
   const [provider, setProvider] = React.useState("custom");
   const [host, setHost] = React.useState("");
@@ -151,6 +155,8 @@ export function EmailSection() {
       desc="Configure the SMTP server used to send emails — notifications, alerts and reports. The password is stored securely and never shown again."
     >
       <form onSubmit={save} className="space-y-4">
+        {!canManage && <ReadOnlyNotice />}
+        <fieldset disabled={!canManage} className="min-w-0 space-y-4">
         {/* Enable */}
         <div className="flex items-center justify-between gap-4 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-4 py-3.5">
           <div className="min-w-0">
@@ -334,6 +340,7 @@ export function EmailSection() {
             </div>
           </Field>
         </div>
+        </fieldset>
       </form>
     </SettingsCard>
   );

@@ -1,11 +1,12 @@
 "use client";
 
 import * as React from "react";
-import { Loader2, LogOut, MonitorSmartphone } from "lucide-react";
+import { Loader2, LogOut, Monitor, MonitorSmartphone, Smartphone } from "lucide-react";
 
 import * as authService from "@/services/auth.service";
 import type { DeviceSession } from "@/types/auth";
-import { SettingsCard } from "@/components/dashboard/settings/ui/SettingsCard";
+import { Skeleton } from "@/components/ui/skeleton";
+import { AccountCard } from "./AccountCard";
 
 // Best-effort, dependency-free user-agent label (e.g. "Chrome on Windows").
 function deviceLabel(ua: string | null): string {
@@ -35,6 +36,11 @@ function deviceLabel(ua: string | null): string {
   return os ? `${browser} on ${os}` : browser;
 }
 
+// Phone-shaped glyph for mobile user-agents, monitor for everything else.
+function isMobile(ua: string | null): boolean {
+  return !!ua && /Android|iPhone|iPad|iOS|Mobile/i.test(ua);
+}
+
 function relativeTime(iso: string): string {
   const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
   if (mins < 1) return "just now";
@@ -45,8 +51,12 @@ function relativeTime(iso: string): string {
   return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
-export function SessionsCard() {
-  const [sessions, setSessions] = React.useState<DeviceSession[] | null>(null);
+export function SessionsCard({ style }: { style?: React.CSSProperties }) {
+  // Seed from the cache so a revisit shows the last-known devices instantly (no
+  // skeleton); the effect below still refetches to revalidate.
+  const [sessions, setSessions] = React.useState<DeviceSession[] | null>(
+    () => authService.getCachedSessions(),
+  );
   const [revoking, setRevoking] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
@@ -91,59 +101,95 @@ export function SessionsCard() {
   };
 
   return (
-    <SettingsCard
+    <AccountCard
       icon={MonitorSmartphone}
       title="Devices"
-      desc="Where you're signed in. You can be signed in on up to 2 devices at once — a new sign-in signs out the oldest."
+      desc="Where you're signed in. You can use up to 2 devices — a new sign-in signs out the oldest."
+      style={style}
+      action={
+        sessions && sessions.length > 0 ? (
+          <span className="rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-2.5 py-1 text-[11px] font-extrabold tabular-nums text-[var(--muted)]">
+            {sessions.length}/2
+          </span>
+        ) : null
+      }
     >
       {sessions === null ? (
-        <div className="flex items-center gap-2 py-2 text-xs text-[var(--faint)]">
-          <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading devices…
+        <div className="space-y-2.5">
+          {[0, 1].map((i) => (
+            <div
+              key={i}
+              className="flex items-center gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-4 py-3"
+            >
+              <Skeleton className="h-9 w-9 rounded-lg" />
+              <div className="flex-1 space-y-1.5">
+                <Skeleton className="h-3 w-32 rounded" />
+                <Skeleton className="h-2.5 w-44 rounded" />
+              </div>
+            </div>
+          ))}
         </div>
+      ) : sessions.length === 0 ? (
+        <p className="py-2 text-xs text-[var(--faint)]">No active devices.</p>
       ) : (
         <div className="space-y-3">
-          <div className="space-y-2">
-            {sessions.map((s) => (
-              <div
-                key={s.id}
-                className="flex items-center justify-between gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-4 py-3"
-              >
-                <div className="min-w-0">
-                  <p className="flex items-center gap-2 text-sm font-bold text-[var(--ink)]">
-                    <span className="truncate">{deviceLabel(s.userAgent)}</span>
-                    {s.current && (
-                      <span className="shrink-0 rounded-full bg-[var(--pos)]/10 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-[var(--pos)]">
-                        This device
-                      </span>
-                    )}
-                  </p>
-                  <p className="mt-0.5 truncate text-xs text-[var(--muted)]">
-                    {s.ip || "Unknown IP"} · Active {relativeTime(s.lastUsedAt)}
-                  </p>
+          <div className="space-y-2.5">
+            {sessions.map((s) => {
+              const Icon = isMobile(s.userAgent) ? Smartphone : Monitor;
+              return (
+                <div
+                  key={s.id}
+                  className="flex items-center gap-3.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-4 py-3 transition-colors hover:border-[var(--border-2)]"
+                >
+                  <span
+                    className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${
+                      s.current
+                        ? "bg-[var(--accent-10)] text-[var(--accent)]"
+                        : "bg-[var(--surface)] text-[var(--muted)]"
+                    }`}
+                  >
+                    <Icon className="h-4 w-4" />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="flex items-center gap-2 text-sm font-bold text-[var(--ink)]">
+                      <span className="truncate">{deviceLabel(s.userAgent)}</span>
+                      {s.current && (
+                        <span className="shrink-0 rounded-full bg-[var(--pos)]/10 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-[var(--pos)]">
+                          This device
+                        </span>
+                      )}
+                    </p>
+                    <p className="mt-0.5 truncate text-xs text-[var(--muted)]">
+                      {s.ip || "Unknown IP"} · Active {relativeTime(s.lastUsedAt)}
+                    </p>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
+
           {others > 0 && (
-            <button
-              type="button"
-              onClick={revokeOthers}
-              disabled={revoking}
-              className="flex items-center gap-2 rounded-xl border border-[var(--border)] px-3.5 py-2 text-xs font-bold text-[var(--muted)] transition-all hover:border-[var(--neg)] hover:text-[var(--neg)] disabled:opacity-60"
-            >
-              {revoking ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <LogOut className="h-3.5 w-3.5" />
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+              <button
+                type="button"
+                onClick={revokeOthers}
+                disabled={revoking}
+                className="flex items-center gap-2 rounded-xl border border-[var(--border)] px-3.5 py-2 text-xs font-bold text-[var(--muted)] transition-all hover:border-[var(--neg)] hover:text-[var(--neg)] disabled:opacity-60"
+              >
+                {revoking ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <LogOut className="h-3.5 w-3.5" />
+                )}
+                Sign out other device{others === 1 ? "" : "s"} ({others})
+              </button>
+              {error && (
+                <p className="text-xs font-semibold text-[var(--neg)]">{error}</p>
               )}
-              Sign out other device{others === 1 ? "" : "s"} ({others})
-            </button>
-          )}
-          {error && (
-            <p className="text-xs font-semibold text-[var(--neg)]">{error}</p>
+            </div>
           )}
         </div>
       )}
-    </SettingsCard>
+    </AccountCard>
   );
 }

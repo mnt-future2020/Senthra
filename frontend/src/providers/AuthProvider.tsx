@@ -3,6 +3,7 @@
 import * as React from "react";
 
 import * as authService from "@/services/auth.service";
+import { clearAllClientCaches } from "@/lib/clientCache";
 import {
   principalCan,
   type AdminPrincipal,
@@ -81,6 +82,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch {
       // ignore — we clear local state regardless
     }
+    // Drop every cached list/record so the next user on this tab never sees the
+    // previous user's data (most importantly their device sessions).
+    clearAllClientCaches();
     setPrincipal(null);
   }, []);
 

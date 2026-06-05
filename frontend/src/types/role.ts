@@ -12,10 +12,17 @@ export interface Role {
   sortOrder: number;
 }
 
-// One entry in the permission catalog (for the role editor).
-export interface PermissionDef {
+// One assignable permission — a single action within a module group.
+export interface PermissionAction {
   key: string;
-  group: string;
+  action: string; // matrix column label, e.g. "Create"
+  description: string;
+}
+
+// A module group of related permissions (one row-block in the role-editor matrix).
+export interface PermissionGroup {
+  key: string;
   label: string;
   description: string;
+  permissions: PermissionAction[];
 }

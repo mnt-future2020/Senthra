@@ -1,13 +1,15 @@
 "use client";
 
 import * as React from "react";
-import { Image as ImageIcon, Loader2, Sparkles, Trash2, Upload } from "lucide-react";
+import { Image as ImageIcon, Loader2, Paintbrush, Trash2, Upload } from "lucide-react";
 
 import { useBranding } from "@/hooks/useBranding";
+import { useAuth } from "@/hooks/useAuth";
 import * as brandingService from "@/services/branding.service";
 import * as settingsService from "@/services/settings.service";
 import type { Branding, Settings } from "@/types/settings";
 import { SettingsCard } from "./ui/SettingsCard";
+import { ReadOnlyNotice } from "./ui/ReadOnlyNotice";
 import { Notice } from "./ui/Notice";
 import { Field } from "./ui/Field";
 import { inputCls, labelCls } from "./ui/styles";
@@ -131,6 +133,8 @@ function ImageUploader({
 
 export function BrandingSection() {
   const { setBranding } = useBranding();
+  const { can } = useAuth();
+  const canManage = can("settings.manage");
 
   const [brandName, setBrandName] = React.useState("");
   const [brandColor, setBrandColor] = React.useState(DEFAULT_BRAND_COLOR);
@@ -139,16 +143,18 @@ export function BrandingSection() {
   const [footerText, setFooterText] = React.useState("");
   const [loginHeadline, setLoginHeadline] = React.useState("");
   const [loginSubtext, setLoginSubtext] = React.useState("");
+  const [employeeIdPrefix, setEmployeeIdPrefix] = React.useState("");
 
   // Snapshot of the last-persisted text fields. Logo & favicon save immediately
   // on upload/remove, so they aren't part of this form's unsaved state — only
-  // these five fields are. Drives the dirty check + the leave-without-saving guard.
+  // these text fields are. Drives the dirty check + the leave-without-saving guard.
   const [saved, setSaved] = React.useState({
     brandName: "",
     brandColor: DEFAULT_BRAND_COLOR,
     footerText: "",
     loginHeadline: "",
     loginSubtext: "",
+    employeeIdPrefix: "",
   });
 
   const isDirty =
@@ -156,7 +162,8 @@ export function BrandingSection() {
     brandColor !== saved.brandColor ||
     footerText !== saved.footerText ||
     loginHeadline !== saved.loginHeadline ||
-    loginSubtext !== saved.loginSubtext;
+    loginSubtext !== saved.loginSubtext ||
+    employeeIdPrefix !== saved.employeeIdPrefix;
 
   useReportDirty("branding", isDirty);
 
@@ -175,12 +182,14 @@ export function BrandingSection() {
         setFooterText(s.footerText);
         setLoginHeadline(s.loginHeadline);
         setLoginSubtext(s.loginSubtext);
+        setEmployeeIdPrefix(s.employeeIdPrefix);
         setSaved({
           brandName: s.brandName,
           brandColor: s.brandColor,
           footerText: s.footerText,
           loginHeadline: s.loginHeadline,
           loginSubtext: s.loginSubtext,
+          employeeIdPrefix: s.employeeIdPrefix,
         });
       } catch {
         // ignore — leave fields blank
@@ -247,6 +256,12 @@ export function BrandingSection() {
   const saveText = async (e: React.FormEvent) => {
     e.preventDefault();
     setMsg(null);
+    // Empty is allowed (resets to the default); otherwise enforce 2–5 letters so the
+    // user gets an instant message instead of a round-trip 400.
+    if (employeeIdPrefix && !/^[A-Z]{2,5}$/.test(employeeIdPrefix)) {
+      setMsg({ type: "error", text: "Employee ID prefix must be 2–5 letters." });
+      return;
+    }
     setSaving(true);
     try {
       const settings = await settingsService.updateSettings({
@@ -255,6 +270,7 @@ export function BrandingSection() {
         footerText,
         loginHeadline,
         loginSubtext,
+        employeeIdPrefix,
       });
       setBranding(brandingFromSettings(settings));
       setBrandName(settings.brandName);
@@ -262,12 +278,14 @@ export function BrandingSection() {
       setFooterText(settings.footerText);
       setLoginHeadline(settings.loginHeadline);
       setLoginSubtext(settings.loginSubtext);
+      setEmployeeIdPrefix(settings.employeeIdPrefix);
       setSaved({
         brandName: settings.brandName,
         brandColor: settings.brandColor,
         footerText: settings.footerText,
         loginHeadline: settings.loginHeadline,
         loginSubtext: settings.loginSubtext,
+        employeeIdPrefix: settings.employeeIdPrefix,
       });
       setMsg({ type: "success", text: "Branding saved." });
     } catch (err) {
@@ -282,11 +300,13 @@ export function BrandingSection() {
 
   return (
     <SettingsCard
-      icon={Sparkles}
+      icon={Paintbrush}
       title="Branding"
       desc="Make the app your own — brand name, logo, favicon, footer and login text. Logo & favicon are uploaded to Cloudinary and applied everywhere."
     >
       <form onSubmit={saveText} className="space-y-5">
+        {!canManage && <ReadOnlyNotice />}
+        <fieldset disabled={!canManage} className="min-w-0 space-y-5">
         <Field
           label="Brand name"
           hint="Appears in the sidebar, the browser tab and the login screen."
@@ -329,6 +349,33 @@ export function BrandingSection() {
                 Reset to default
               </button>
             )}
+          </div>
+        </Field>
+
+        <Field
+          label="Employee ID prefix"
+          hint="The code on new staff IDs. 2–5 letters. Changing it only affects staff created from now on — existing IDs never change."
+        >
+          <div className="flex flex-wrap items-center gap-3">
+            <input
+              type="text"
+              value={employeeIdPrefix}
+              onChange={(e) =>
+                setEmployeeIdPrefix(
+                  e.target.value.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 5),
+                )
+              }
+              placeholder="SNT"
+              maxLength={5}
+              spellCheck={false}
+              className={`${inputCls} max-w-[140px] font-mono uppercase tracking-widest`}
+            />
+            <span className="text-xs text-[var(--faint)]">
+              Next ID looks like{" "}
+              <span className="font-mono font-bold text-[var(--muted)]">
+                {(employeeIdPrefix || "SNT")}-0007
+              </span>
+            </span>
           </div>
         </Field>
 
@@ -393,6 +440,7 @@ export function BrandingSection() {
         <Notice msg={msg} />
 
         <SaveBar isDirty={isDirty} saving={saving} label="Save branding" />
+        </fieldset>
       </form>
     </SettingsCard>
   );

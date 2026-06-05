@@ -14,33 +14,35 @@ import {
 
 const router = Router();
 
-// Email-template management requires the email_templates.manage permission (the
-// super-admin always has it).
-router.use(requireAuth, requirePermission("email_templates.manage"));
+// All template routes require auth; reading needs email_templates.view, mutating
+// (and sending a test) needs email_templates.manage. The super-admin always passes.
+router.use(requireAuth);
 
-router.get("/", templateController.listTemplates);
-router.post("/", writeLimiter, validateBody(createTemplateSchema), templateController.createTemplate);
-router.get("/:id", templateController.getTemplate);
-router.put("/:id", writeLimiter, validateBody(updateTemplateSchema), templateController.updateTemplate);
+const canView = requirePermission("email_templates.view");
+const canManage = requirePermission("email_templates.manage");
+
+router.get("/", canView, templateController.listTemplates);
+router.get("/:id", canView, templateController.getTemplate);
+router.post("/:id/preview", canView, validateBody(previewTemplateSchema), templateController.previewTemplate);
+
+router.post("/", canManage, writeLimiter, validateBody(createTemplateSchema), templateController.createTemplate);
+router.put("/:id", canManage, writeLimiter, validateBody(updateTemplateSchema), templateController.updateTemplate);
 router.patch(
   "/:id/enabled",
+  canManage,
   writeLimiter,
   validateBody(setEnabledSchema),
   templateController.setEnabled,
 );
-router.post("/:id/duplicate", writeLimiter, templateController.duplicateTemplate);
-router.post("/:id/restore", writeLimiter, templateController.restoreDefault);
-router.post(
-  "/:id/preview",
-  validateBody(previewTemplateSchema),
-  templateController.previewTemplate,
-);
+router.post("/:id/duplicate", canManage, writeLimiter, templateController.duplicateTemplate);
+router.post("/:id/restore", canManage, writeLimiter, templateController.restoreDefault);
 router.post(
   "/:id/test",
+  canManage,
   testEmailLimiter,
   validateBody(testTemplateSchema),
   templateController.sendTest,
 );
-router.delete("/:id", writeLimiter, templateController.deleteTemplate);
+router.delete("/:id", canManage, writeLimiter, templateController.deleteTemplate);
 
 export default router;

@@ -3,6 +3,7 @@ import * as adminRepo from "#modules/auth/admin.repository.js";
 import * as emailTemplateRepo from "#modules/email/emailTemplate.repository.js";
 import * as roleRepo from "#modules/role/role.repository.js";
 import * as settingsRepo from "#modules/settings/settings.repository.js";
+import { LEGACY_PERMISSION_EXPANSION } from "#modules/role/permissions.js";
 import { DEFAULT_EMAIL_TEMPLATES } from "#modules/email/email-templates.defaults.js";
 import { renderBodyToHtml } from "../utils/email-html.js";
 import { hashPassword } from "../utils/password.js";
@@ -12,8 +13,9 @@ import { hashPassword } from "../utils/password.js";
 // permanently protected by key in role.service). The other eight are ordinary
 // roles the admin fully controls — rename or delete them from the UI. Seeded only
 // on a fresh DB (see below), so admin edits are never overwritten on restart.
-// Default permissions: super_admin holds everything ("*"), system_admin can manage
-// users (IT/HR onboarding); the rest start empty and gain permissions as modules ship.
+// Default permissions: super_admin holds everything ("*"), system_admin gets the
+// granular Users permissions + roles.view (IT/HR onboarding); the rest start empty
+// and gain permissions as feature modules ship.
 const SEED_ROLES: {
   key: string;
   name: string;
@@ -22,7 +24,7 @@ const SEED_ROLES: {
   permissions: string[];
 }[] = [
   { key: "super_admin", name: "Super Admin", description: "Full system owner. Manages users, roles and all settings.", sortOrder: 0, permissions: ["*"] },
-  { key: "system_admin", name: "System Admin", description: "IT / HR administrator who creates and manages user accounts.", sortOrder: 1, permissions: ["users.manage"] },
+  { key: "system_admin", name: "System Admin", description: "IT / HR administrator who creates and manages user accounts.", sortOrder: 1, permissions: ["users.view", "users.create", "users.edit", "users.delete", "roles.view"] },
   { key: "project_manager", name: "Project Manager", description: "Creates job packs, authorises dispatch and tracks projects.", sortOrder: 2, permissions: [] },
   { key: "project_coordinator", name: "Project Coordinator", description: "Supports project managers with day-to-day coordination.", sortOrder: 3, permissions: [] },
   { key: "warehouse_manager", name: "Warehouse Manager", description: "Receives goods, scans stock in/out and manages a warehouse.", sortOrder: 4, permissions: [] },
@@ -57,6 +59,32 @@ export async function seedDatabase(): Promise<void> {
       });
     }
     console.log(`Seeded ${SEED_ROLES.length} roles.`);
+  }
+
+  // Migrate any role still holding a pre-granular "coarse" permission (e.g.
+  // "users.manage") to the new per-action keys. Idempotent: "*" (super-admin) is
+  // left alone and a role is only rewritten when its expanded set actually differs,
+  // so this is a no-op on every boot after the one-time upgrade.
+  let migratedRoles = 0;
+  for (const role of await roleRepo.findMany()) {
+    if (role.permissions.includes("*")) continue;
+    const expanded = new Set<string>();
+    for (const perm of role.permissions) {
+      const mapped = LEGACY_PERMISSION_EXPANSION[perm];
+      if (mapped) mapped.forEach((p) => expanded.add(p));
+      else expanded.add(perm);
+    }
+    const next = [...expanded];
+    const unchanged =
+      next.length === role.permissions.length &&
+      next.every((p) => role.permissions.includes(p));
+    if (!unchanged) {
+      await roleRepo.update(role.id, { permissions: { set: next } });
+      migratedRoles++;
+    }
+  }
+  if (migratedRoles > 0) {
+    console.log(`Migrated ${migratedRoles} role(s) to granular permissions.`);
   }
 
   const templatesBefore = await emailTemplateRepo.count();

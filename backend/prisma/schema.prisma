@@ -58,6 +58,10 @@ model Settings {
   footerText         String?
   loginHeadline      String?
   loginSubtext       String?
+  // Code prefixed to new staff references (e.g. "SNT" -> SNT-0007). Decoupled from
+  // brandName on purpose: renaming the brand must not silently change permanent
+  // employee IDs. Null falls back to the default. Only affects NEW staff.
+  employeeIdPrefix   String?
 
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
@@ -79,9 +83,9 @@ model Role {
   updatedAt   DateTime @updatedAt
 }
 
-// A person the Super Admin creates from the admin panel. Created with a secure
-// temporary password (bcrypt hash, never returned to the client). Login + RBAC
-// for these users is a later phase — the auth fields below are ready for it.
+// A staff member the Super Admin (or a delegate with users.create) adds from the
+// admin panel. Created with a secure temporary password (bcrypt hash, never sent
+// to the client); logs in and is governed by RBAC via the assigned role.
 model User {
   id              String  @id @default(auto()) @map("_id") @db.ObjectId
   firstName       String
@@ -93,6 +97,22 @@ model User {
   status          String  @default("active") // active | inactive | suspended
   profileImageUrl String?
   notes           String?
+
+  // Employment record.
+  employeeId    String?   @unique // human staff reference, auto-generated (e.g. SNT-0007)
+  jobTitle      String? // designation, e.g. "Field Engineer"
+  department    String? // team, e.g. "Operations"
+  dateOfJoining DateTime?
+
+  // Personal details (optional).
+  gender      String? // male | female | other | unspecified
+  dateOfBirth DateTime?
+
+  // Address (UK).
+  addressLine1 String?
+  addressLine2 String?
+  city         String?
+  postcode     String?
 
   // Auth — set at creation, never sent to the browser.
   passwordHash      String

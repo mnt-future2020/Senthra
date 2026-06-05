@@ -14,12 +14,13 @@ import { hashPassword } from "../../utils/password.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { sendTemplatedEmail } from "#modules/email/email.service.js";
-import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
+import { getCloudinaryCreds, getEmployeeIdPrefix } from "#modules/settings/settings.service.js";
 
 const STATUSES = ["active", "inactive", "suspended"] as const;
 export type UserStatus = (typeof STATUSES)[number];
 
 // Shape returned to the client — never includes the password hash or any token.
+// Dates are serialised as ISO strings (or null).
 export interface PublicUser {
   id: string;
   firstName: string;
@@ -31,6 +32,19 @@ export interface PublicUser {
   notes: string | null;
   mustResetPassword: boolean;
   role: { id: string; key: string; name: string } | null;
+  // Employment
+  employeeId: string | null;
+  jobTitle: string | null;
+  department: string | null;
+  dateOfJoining: string | null;
+  // Personal
+  gender: string | null;
+  dateOfBirth: string | null;
+  // Address (UK)
+  addressLine1: string | null;
+  addressLine2: string | null;
+  city: string | null;
+  postcode: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -47,6 +61,16 @@ function publicUser(u: UserWithRole): PublicUser {
     notes: u.notes,
     mustResetPassword: u.mustResetPassword,
     role: u.role ? { id: u.role.id, key: u.role.key, name: u.role.name } : null,
+    employeeId: u.employeeId,
+    jobTitle: u.jobTitle,
+    department: u.department,
+    dateOfJoining: isoOrNull(u.dateOfJoining),
+    gender: u.gender,
+    dateOfBirth: isoOrNull(u.dateOfBirth),
+    addressLine1: u.addressLine1,
+    addressLine2: u.addressLine2,
+    city: u.city,
+    postcode: u.postcode,
     createdAt: u.createdAt.toISOString(),
     updatedAt: u.updatedAt.toISOString(),
   };
@@ -57,6 +81,21 @@ function normalizeStatus(status?: string): UserStatus {
     ? (status as UserStatus)
     : "active";
 }
+
+// Trim a string field to its stored form: a non-empty trimmed value, or null.
+function trimToNull(v?: string | null): string | null {
+  const t = typeof v === "string" ? v.trim() : "";
+  return t.length ? t : null;
+}
+
+// Parse an optional date-string field to a Date, or null when blank.
+function dateOrNull(v?: string | null): Date | null {
+  const t = typeof v === "string" ? v.trim() : "";
+  return t.length ? new Date(t) : null;
+}
+
+const isoOrNull = (d: Date | null): string | null => (d ? d.toISOString() : null);
+
 
 // Escalation guard: an actor must not assign a role that grants more than the
 // actor itself holds. Anyone holding full access ("*") — the super-admin account
@@ -122,21 +161,46 @@ export async function listUsers(params: ListUsersParams = {}): Promise<PagedUser
   return { users: users.map(publicUser), total, page, pageSize, totalPages };
 }
 
-export async function getUser(id: string): Promise<PublicUser> {
-  const u = await userRepo.findById(id);
+// A 24-char hex string is a Mongo ObjectId; anything else is treated as the human
+// employee reference (e.g. "STR-0007"). The two formats never overlap (employee
+// refs always contain a "-"), so resolution is unambiguous.
+const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
+
+// Resolve a user by either its database id OR its employeeId, so callers (the edit
+// page) can use the friendly reference in the URL while still working for legacy
+// rows that have no employeeId (those fall back to the id).
+export async function getUser(idOrEmployeeId: string): Promise<PublicUser> {
+  const u = OBJECT_ID_RE.test(idOrEmployeeId)
+    ? await userRepo.findById(idOrEmployeeId)
+    : await userRepo.findByEmployeeIdWithRole(idOrEmployeeId);
   if (!u) throw notFound("User not found.");
   return publicUser(u);
 }
 
-export interface CreateUserInput {
-  firstName: string;
-  lastName: string;
-  email: string;
+// Optional profile fields shared by create + update. Dates arrive as ISO /
+// "YYYY-MM-DD" strings; an empty string means "clear". employeeId is server-managed
+// (auto-generated, read-only) and never accepted from the client.
+export interface ProfileFieldsInput {
   phone?: string;
-  roleId?: string;
   status?: string;
   notes?: string;
   profileImage?: string; // data URI
+  jobTitle?: string;
+  department?: string;
+  dateOfJoining?: string;
+  gender?: string;
+  dateOfBirth?: string;
+  addressLine1?: string;
+  addressLine2?: string;
+  city?: string;
+  postcode?: string;
+}
+
+export interface CreateUserInput extends ProfileFieldsInput {
+  firstName: string;
+  lastName: string;
+  email: string;
+  roleId?: string;
 }
 
 // The temporary password is returned ONCE so the admin can copy/relay it; it is
@@ -156,15 +220,17 @@ export async function createUser(
   if (!firstName || !lastName) throw badRequest("First and last name are required.");
   if (!email) throw badRequest("Email is required.");
 
-  // The super-admin account owns its email — a staff user can't reuse it, since at
-  // login the admin is matched first and would shadow the user.
-  if (await adminRepo.findByEmail(email)) {
+  // Both email checks are independent DB reads — run them together. The super-admin
+  // owns its email (login matches the admin first and would shadow a staff user); an
+  // ACTIVE user with this email is a real conflict, while a SOFT-DELETED one is
+  // revived below (re-adding a removed user reuses the record + a new password).
+  const [adminWithEmail, existing] = await Promise.all([
+    adminRepo.findByEmail(email),
+    userRepo.findByEmailIncludingDeleted(email),
+  ]);
+  if (adminWithEmail) {
     throw conflict("That email belongs to the administrator account. Use a different one.");
   }
-
-  // An ACTIVE user with this email is a real conflict. A SOFT-DELETED one is
-  // revived below (re-adding a removed user reuses the record + a new password).
-  const existing = await userRepo.findByEmailIncludingDeleted(email);
   if (existing && !existing.deletedAt) {
     throw conflict("A user with that email already exists.");
   }
@@ -178,37 +244,54 @@ export async function createUser(
   }
 
   const temporaryPassword = generateTempPassword();
-  // Hashing (CPU-bound) and the avatar upload (network) are independent — run them
-  // concurrently instead of serially.
-  const [passwordHash, profileImageUrl] = await Promise.all([
+  // The password hash (CPU-bound bcrypt), avatar upload (network) and prefix lookup
+  // (DB) are independent — run them concurrently rather than serially. The employeeId
+  // itself is allocated by the repository at write time (race-safe against the unique
+  // index), using this configured prefix.
+  const [passwordHash, profileImageUrl, employeeIdPrefix] = await Promise.all([
     hashPassword(temporaryPassword),
     input.profileImage ? uploadAvatar(input.profileImage) : Promise.resolve(null),
+    getEmployeeIdPrefix(),
   ]);
 
   const fields = {
     firstName,
     lastName,
     email,
-    phone: input.phone?.trim() || null,
+    phone: trimToNull(input.phone),
     status: normalizeStatus(input.status),
-    notes: input.notes?.trim() || null,
+    notes: trimToNull(input.notes),
     profileImageUrl,
+    jobTitle: trimToNull(input.jobTitle),
+    department: trimToNull(input.department),
+    dateOfJoining: dateOrNull(input.dateOfJoining),
+    gender: input.gender || null,
+    dateOfBirth: dateOrNull(input.dateOfBirth),
+    addressLine1: trimToNull(input.addressLine1),
+    addressLine2: trimToNull(input.addressLine2),
+    city: trimToNull(input.city),
+    postcode: trimToNull(input.postcode),
     passwordHash,
     mustResetPassword: true,
   };
 
   let created: UserWithRole;
   if (existing) {
-    // Revive: clear deletedAt and overwrite the record with the new details.
-    created = await userRepo.update(existing.id, {
-      ...fields,
-      deletedAt: null,
-      role: roleId ? { connect: { id: roleId } } : { disconnect: true },
-    });
+    // Revive: clear deletedAt and overwrite the record with the new details. The
+    // repository re-allocates a collision-safe employeeId as part of the write.
+    created = await userRepo.reviveWithEmployeeId(
+      existing.id,
+      {
+        ...fields,
+        deletedAt: null,
+        role: roleId ? { connect: { id: roleId } } : { disconnect: true },
+      },
+      employeeIdPrefix,
+    );
   } else {
-    const data: Prisma.UserCreateInput = { ...fields };
+    const data: Omit<Prisma.UserCreateInput, "employeeId"> = { ...fields };
     if (roleId) data.role = { connect: { id: roleId } };
-    created = await userRepo.create(data);
+    created = await userRepo.createWithEmployeeId(data, employeeIdPrefix);
   }
 
   audit.record({
@@ -240,15 +323,11 @@ export async function createUser(
   return { user: publicUser(created), temporaryPassword };
 }
 
-export interface UpdateUserInput {
+export interface UpdateUserInput extends ProfileFieldsInput {
   firstName?: string;
   lastName?: string;
   email?: string;
-  phone?: string;
   roleId?: string | null;
-  status?: string;
-  notes?: string;
-  profileImage?: string; // new image to upload
   removeProfileImage?: boolean;
 }
 
@@ -278,9 +357,21 @@ export async function updateUser(
       data.email = email;
     }
   }
-  if (typeof input.phone === "string") data.phone = input.phone.trim() || null;
-  if (typeof input.notes === "string") data.notes = input.notes.trim() || null;
+  if (typeof input.phone === "string") data.phone = trimToNull(input.phone);
+  if (typeof input.notes === "string") data.notes = trimToNull(input.notes);
   if (typeof input.status === "string") data.status = normalizeStatus(input.status);
+  // Employment
+  if (typeof input.jobTitle === "string") data.jobTitle = trimToNull(input.jobTitle);
+  if (typeof input.department === "string") data.department = trimToNull(input.department);
+  if (typeof input.dateOfJoining === "string") data.dateOfJoining = dateOrNull(input.dateOfJoining);
+  // Personal
+  if (input.gender !== undefined) data.gender = input.gender || null;
+  if (typeof input.dateOfBirth === "string") data.dateOfBirth = dateOrNull(input.dateOfBirth);
+  // Address (UK)
+  if (typeof input.addressLine1 === "string") data.addressLine1 = trimToNull(input.addressLine1);
+  if (typeof input.addressLine2 === "string") data.addressLine2 = trimToNull(input.addressLine2);
+  if (typeof input.city === "string") data.city = trimToNull(input.city);
+  if (typeof input.postcode === "string") data.postcode = trimToNull(input.postcode);
 
   if (input.roleId !== undefined) {
     if (!input.roleId) {
