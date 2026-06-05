@@ -2,16 +2,11 @@ import type { Request, RequestHandler } from "express";
 
 import * as adminRepo from "#modules/auth/admin.repository.js";
 import * as userRepo from "#modules/user/user.repository.js";
+import * as sessionService from "#modules/auth/session.service.js";
+import { roleGrants } from "#modules/role/permissions.js";
 import { ACCESS_COOKIE } from "../utils/cookies.js";
 import { verifyAccessToken } from "../utils/jwt.js";
 import { adminPrincipal, userPrincipal } from "../types/principal.js";
-
-// A token is revoked when it was issued before the account's invalidation time
-// (set on logout / password change).
-function isRevoked(invalidatedAt: Date | null, issuedAtSec?: number): boolean {
-  if (!invalidatedAt || !issuedAtSec) return false;
-  return issuedAtSec < Math.floor(invalidatedAt.getTime() / 1000);
-}
 
 // Access token from the httpOnly cookie first, then an Authorization: Bearer header.
 function readAccessToken(req: Request): string | undefined {
@@ -40,6 +35,14 @@ export const requireAuth: RequestHandler = async (req, res, next) => {
   }
 
   try {
+    // The session must still exist — it doesn't after logout, a password change,
+    // or eviction by the 2-device cap, so this is where those take effect.
+    if (!(await sessionService.isActive(payload.sid))) {
+      res.status(401).json({ error: "Session expired. Please log in again." });
+      return;
+    }
+    req.sessionId = payload.sid;
+
     if (payload.actor === "user") {
       // findById already excludes soft-deleted users and includes the role.
       const user = await userRepo.findById(payload.sub);
@@ -51,10 +54,6 @@ export const requireAuth: RequestHandler = async (req, res, next) => {
         res.status(401).json({
           error: "Your account is not active. Contact an administrator.",
         });
-        return;
-      }
-      if (isRevoked(user.tokenInvalidatedAt, payload.iat)) {
-        res.status(401).json({ error: "Session expired. Please log in again." });
         return;
       }
       req.principal = userPrincipal(user);
@@ -69,10 +68,6 @@ export const requireAuth: RequestHandler = async (req, res, next) => {
       res.status(401).json({ error: "Unauthorized" });
       return;
     }
-    if (isRevoked(admin.tokenInvalidatedAt, payload.iat)) {
-      res.status(401).json({ error: "Session expired. Please log in again." });
-      return;
-    }
     req.principal = adminPrincipal(admin);
     req.adminId = admin.id;
     req.adminEmail = admin.email;
@@ -82,9 +77,9 @@ export const requireAuth: RequestHandler = async (req, res, next) => {
   }
 };
 
-// Restrict a route to the super-admin account. Staff users get 403. This is the
-// interim guard that keeps admin-only features (users, roles, settings, email
-// templates) closed to staff until per-permission RBAC lands.
+// Restrict a route to the super-admin account. Staff users get 403. Used for the
+// most sensitive surfaces (role + permission configuration, the admin's own
+// account) which are never delegated.
 export const requireAdmin: RequestHandler = (req, res, next) => {
   if (req.principal?.type !== "admin") {
     res.status(403).json({ error: "Administrator access required." });
@@ -92,3 +87,32 @@ export const requireAdmin: RequestHandler = (req, res, next) => {
   }
   next();
 };
+
+// Restrict a route to principals holding a specific permission. The super-admin
+// account always passes; a staff user passes if their role grants it (or "*").
+export function requirePermission(permission: string): RequestHandler {
+  return (req, res, next) => {
+    const principal = req.principal;
+    if (!principal) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    if (principal.type === "admin") {
+      next();
+      return;
+    }
+    // A staff user who hasn't completed the forced first-login password set is
+    // walled off from every feature surface until they do. This makes the reset a
+    // real server-side boundary, not just the portal's UI funnel — a direct API
+    // call with the temp-password session can't reach anything permissioned.
+    if (principal.mustResetPassword) {
+      res.status(403).json({ error: "Set your password before continuing." });
+      return;
+    }
+    if (roleGrants(principal.permissions, permission)) {
+      next();
+      return;
+    }
+    res.status(403).json({ error: "You don't have permission to do that." });
+  };
+}

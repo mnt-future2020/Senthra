@@ -12,40 +12,46 @@ import { CloudinarySection } from "./CloudinarySection";
 import { EmailSection } from "./EmailSection";
 import { EmailTemplatesSection } from "./EmailTemplatesSection";
 import { useNavigationGuard } from "@/providers/NavigationGuardProvider";
+import { useAuth } from "@/hooks/useAuth";
+import { SessionsCard } from "@/components/account/SessionsCard";
 import type { AppearanceProps, Section } from "./types";
 
+// Each section is gated: "account" (the super-admin's own login) is admin-only;
+// the rest need the matching permission. The super-admin holds everything.
 const NAV: {
   id: Section;
   label: string;
   icon: React.ElementType;
   desc: string;
+  requires: "admin" | "settings.manage" | "email_templates.manage";
 }[] = [
-  {
-    id: "account",
-    label: "Account & Security",
-    icon: ShieldCheck,
-    desc: "Email & password",
-  },
-  { id: "branding", label: "Branding", icon: Sparkles, desc: "Logo, name & theme text" },
-  { id: "appearance", label: "Appearance", icon: Palette, desc: "Theme & layout" },
-  { id: "integrations", label: "Integrations", icon: Plug, desc: "Google Sign-In" },
-  { id: "email", label: "Email", icon: Mail, desc: "SMTP & delivery" },
-  {
-    id: "email-templates",
-    label: "Email Templates",
-    icon: MailCheck,
-    desc: "Customize sent emails",
-  },
+  { id: "account", label: "Account & Security", icon: ShieldCheck, desc: "Email & password", requires: "admin" },
+  { id: "branding", label: "Branding", icon: Sparkles, desc: "Logo, name & theme text", requires: "settings.manage" },
+  { id: "appearance", label: "Appearance", icon: Palette, desc: "Theme & layout", requires: "settings.manage" },
+  { id: "integrations", label: "Integrations", icon: Plug, desc: "Google Sign-In", requires: "settings.manage" },
+  { id: "email", label: "Email", icon: Mail, desc: "SMTP & delivery", requires: "settings.manage" },
+  { id: "email-templates", label: "Email Templates", icon: MailCheck, desc: "Customize sent emails", requires: "email_templates.manage" },
 ];
 
 export function SettingsPanel(appearance: AppearanceProps) {
   const [section, setSection] = React.useState<Section>("account");
   const guard = useNavigationGuard();
+  const { admin, can } = useAuth();
+
+  // Only the sections this principal may use.
+  const visible = NAV.filter((item) =>
+    item.requires === "admin" ? Boolean(admin) : can(item.requires),
+  );
+  // The current section, falling back to the first visible one (so a staff user
+  // who can't see "Account" still lands on a section they can use).
+  const activeSection: Section = visible.some((s) => s.id === section)
+    ? section
+    : visible[0]?.id ?? "account";
 
   // Switching sections unmounts the current one, so confirm first if it has
   // unsaved edits (the guard is a no-op when nothing is dirty).
   const requestSection = (target: Section) => {
-    if (target === section) return;
+    if (target === activeSection) return;
     guard.attemptLeave(() => setSection(target));
   };
 
@@ -60,8 +66,8 @@ export function SettingsPanel(appearance: AppearanceProps) {
           style={{ borderRadius: "var(--radius)" }}
         >
           <div className="flex gap-1 overflow-x-auto lg:sticky lg:top-2 lg:flex-col lg:overflow-visible">
-            {NAV.map((item) => {
-              const active = section === item.id;
+            {visible.map((item) => {
+              const active = activeSection === item.id;
               return (
                 <button
                   key={item.id}
@@ -87,22 +93,23 @@ export function SettingsPanel(appearance: AppearanceProps) {
 
         {/* Active section */}
         <div className="min-w-0 flex-1 space-y-6">
-          {section === "account" && (
+          {activeSection === "account" && (
             <>
               <AccountSection />
               <SecuritySection />
+              <SessionsCard />
             </>
           )}
-          {section === "branding" && <BrandingSection />}
-          {section === "appearance" && <AppearanceSection {...appearance} />}
-          {section === "integrations" && (
+          {activeSection === "branding" && <BrandingSection />}
+          {activeSection === "appearance" && <AppearanceSection {...appearance} />}
+          {activeSection === "integrations" && (
             <>
               <IntegrationsSection />
               <CloudinarySection />
             </>
           )}
-          {section === "email" && <EmailSection />}
-          {section === "email-templates" && <EmailTemplatesSection />}
+          {activeSection === "email" && <EmailSection />}
+          {activeSection === "email-templates" && <EmailTemplatesSection />}
         </div>
       </div>
     </div>

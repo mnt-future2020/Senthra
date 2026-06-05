@@ -1,7 +1,7 @@
 import { Router } from "express";
 
 import * as settingsController from "./settings.controller.js";
-import { requireAdmin, requireAuth } from "../../middleware/auth.middleware.js";
+import { requireAuth, requirePermission } from "../../middleware/auth.middleware.js";
 import { testEmailLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import {
@@ -15,8 +15,9 @@ const router = Router();
 // Public — branding for the login page / first paint (no auth).
 router.get("/branding", settingsController.getBranding);
 
-// Everything below is super-admin only.
-router.use(requireAuth, requireAdmin);
+// Everything below requires the settings.manage permission (the super-admin
+// always has it).
+router.use(requireAuth, requirePermission("settings.manage"));
 
 router.get("/", settingsController.getSettings);
 router.put("/", validateBody(updateSettingsSchema), settingsController.updateSettings);

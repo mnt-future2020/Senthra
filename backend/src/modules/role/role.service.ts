@@ -6,6 +6,7 @@ import { badRequest, conflict, forbidden, notFound } from "../../utils/http-erro
 import { slugify } from "../../utils/slugify.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
+import { PERMISSIONS, sanitizePermissions, type PermissionDef } from "./permissions.js";
 
 export interface PublicRole {
   id: string;
@@ -13,6 +14,7 @@ export interface PublicRole {
   name: string;
   description: string | null;
   isSystem: boolean;
+  permissions: string[];
   userCount: number;
   sortOrder: number;
 }
@@ -24,6 +26,7 @@ function toPublicRole(role: Role, userCount: number): PublicRole {
     name: role.name,
     description: role.description,
     isSystem: role.isSystem,
+    permissions: role.permissions,
     userCount,
     sortOrder: role.sortOrder,
   };
@@ -35,9 +38,15 @@ export async function listRoles(): Promise<PublicRole[]> {
   return roles.map((role) => toPublicRole(role, counts[role.id] ?? 0));
 }
 
+// The permission catalog, for the role-config UI (super-admin only at the route).
+export function listPermissions(): PermissionDef[] {
+  return PERMISSIONS;
+}
+
 export interface CreateRoleInput {
   name: string;
   description?: string;
+  permissions?: string[];
 }
 
 export async function createRole(
@@ -58,11 +67,18 @@ export async function createRole(
   let key = baseKey;
   for (let n = 2; await roleRepo.findByKey(key); n++) key = `${baseKey}_${n}`;
 
+  const { valid, unknown } = sanitizePermissions(input.permissions ?? []);
+  if (unknown.length) {
+    throw badRequest(
+      `Unknown permission${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}.`,
+    );
+  }
   const created = await roleRepo.create({
     key,
     name,
     description: input.description?.trim() || null,
     isSystem: false,
+    permissions: valid,
   });
   audit.record({
     actor,
@@ -77,6 +93,7 @@ export async function createRole(
 export interface UpdateRoleInput {
   name?: string;
   description?: string;
+  permissions?: string[];
 }
 
 export async function updateRole(
@@ -98,6 +115,17 @@ export async function updateRole(
   }
   if (typeof input.description === "string") {
     data.description = input.description.trim() || null;
+  }
+  // Permissions are editable for any role except super_admin, which always holds
+  // full access ("*").
+  if (input.permissions && role.key !== "super_admin") {
+    const { valid, unknown } = sanitizePermissions(input.permissions);
+    if (unknown.length) {
+      throw badRequest(
+        `Unknown permission${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}.`,
+      );
+    }
+    data.permissions = { set: valid };
   }
 
   const updated = await roleRepo.update(id, data);

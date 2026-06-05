@@ -22,6 +22,8 @@ export interface UserPrincipal {
   status: string;
   mustResetPassword: boolean;
   role: { id: string; key: string; name: string } | null;
+  // Effective permissions (the assigned role's permissions; "*" = all).
+  permissions: string[];
 }
 
 export type Principal = AdminPrincipal | UserPrincipal;
@@ -42,5 +44,6 @@ export function userPrincipal(user: UserWithRole): UserPrincipal {
     role: user.role
       ? { id: user.role.id, key: user.role.key, name: user.role.name }
       : null,
+    permissions: user.role?.permissions ?? [],
   };
 }

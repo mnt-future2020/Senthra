@@ -1,5 +1,9 @@
 import { z } from "zod";
 
+// Permission keys are validated against the catalog in the service (so the error
+// can list the unknown ones); here we just bound the shape.
+const permissionsField = z.array(z.string()).max(50).optional();
+
 export const createRoleSchema = z.object({
   name: z
     .string({ error: "Role name is required." })
@@ -7,11 +11,13 @@ export const createRoleSchema = z.object({
     .min(1, "Role name is required.")
     .max(60),
   description: z.string().trim().max(300).optional(),
+  permissions: permissionsField,
 });
 export type CreateRoleInput = z.infer<typeof createRoleSchema>;
 
 export const updateRoleSchema = z.object({
   name: z.string().trim().min(1, "Role name can't be empty.").max(60).optional(),
   description: z.string().trim().max(300).optional(),
+  permissions: permissionsField,
 });
 export type UpdateRoleInput = z.infer<typeof updateRoleSchema>;

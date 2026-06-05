@@ -4,10 +4,12 @@ import type { Prisma } from "@prisma/client";
 
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
 import * as roleRepo from "#modules/role/role.repository.js";
+import * as adminRepo from "#modules/auth/admin.repository.js";
+import { ALL_PERMISSIONS } from "#modules/role/permissions.js";
 import * as userRepo from "./user.repository.js";
 import type { UserWithRole } from "./user.repository.js";
 import { generateTempPassword } from "../../utils/generate-password.js";
-import { badRequest, conflict, notFound } from "../../utils/http-error.js";
+import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
 import { hashPassword } from "../../utils/password.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
@@ -54,6 +56,27 @@ function normalizeStatus(status?: string): UserStatus {
   return status && (STATUSES as readonly string[]).includes(status)
     ? (status as UserStatus)
     : "active";
+}
+
+// Escalation guard: an actor must not assign a role that grants more than the
+// actor itself holds. Anyone holding full access ("*") — the super-admin account
+// or a staff user with a full-access role — may assign any role; everyone else is
+// held to a strict no-escalation rule (subset of their own permissions).
+function assertCanAssignRole(rolePermissions: string[], actor?: AuditActor): void {
+  const granted = new Set(actor?.permissions ?? []);
+  if (granted.has(ALL_PERMISSIONS)) return;
+
+  // A delegated actor can never grant full access (mint another super-user)...
+  if (rolePermissions.includes(ALL_PERMISSIONS)) {
+    throw forbidden("You can't assign a role with full access. Ask a super-admin.");
+  }
+  // ...nor grant any individual permission it doesn't itself hold.
+  const escalated = rolePermissions.filter((p) => !granted.has(p));
+  if (escalated.length) {
+    throw forbidden(
+      `You can't assign a role that grants permissions you don't have: ${escalated.join(", ")}.`,
+    );
+  }
 }
 
 // Upload a profile image to Cloudinary (random public id, "users" folder) and
@@ -133,6 +156,12 @@ export async function createUser(
   if (!firstName || !lastName) throw badRequest("First and last name are required.");
   if (!email) throw badRequest("Email is required.");
 
+  // The super-admin account owns its email — a staff user can't reuse it, since at
+  // login the admin is matched first and would shadow the user.
+  if (await adminRepo.findByEmail(email)) {
+    throw conflict("That email belongs to the administrator account. Use a different one.");
+  }
+
   // An ACTIVE user with this email is a real conflict. A SOFT-DELETED one is
   // revived below (re-adding a removed user reuses the record + a new password).
   const existing = await userRepo.findByEmailIncludingDeleted(email);
@@ -144,6 +173,7 @@ export async function createUser(
   if (input.roleId) {
     const role = await roleRepo.findById(input.roleId);
     if (!role) throw badRequest("Selected role does not exist.");
+    assertCanAssignRole(role.permissions, actor);
     roleId = role.id;
   }
 
@@ -240,6 +270,9 @@ export async function updateUser(
   if (typeof input.email === "string" && input.email.trim()) {
     const email = input.email.trim().toLowerCase();
     if (email !== user.email) {
+      if (await adminRepo.findByEmail(email)) {
+        throw conflict("That email belongs to the administrator account.");
+      }
       const clash = await userRepo.findByEmailIncludingDeleted(email);
       if (clash && clash.id !== id) throw conflict("A user with that email already exists.");
       data.email = email;
@@ -255,6 +288,7 @@ export async function updateUser(
     } else {
       const role = await roleRepo.findById(input.roleId);
       if (!role) throw badRequest("Selected role does not exist.");
+      assertCanAssignRole(role.permissions, actor);
       data.role = { connect: { id: role.id } };
     }
   }

@@ -1,5 +1,5 @@
 import { api } from "@/lib/api";
-import type { Principal } from "@/types/auth";
+import type { DeviceSession, Principal } from "@/types/auth";
 
 // Typed wrappers around the backend auth endpoints. Components and providers call
 // these instead of hitting `api()` with raw URLs.
@@ -64,6 +64,15 @@ export function changePassword(
     method: "PATCH",
     body: { currentPassword, newPassword },
   }).then(() => undefined);
+}
+
+// --- Device sessions ---
+export function getSessions(): Promise<DeviceSession[]> {
+  return api<{ sessions: DeviceSession[] }>("/auth/sessions").then((r) => r.sessions);
+}
+
+export function revokeOtherSessions(): Promise<void> {
+  return api("/auth/sessions/revoke-others", { method: "POST" }).then(() => undefined);
 }
 
 // --- Staff user own password — /auth/password ---

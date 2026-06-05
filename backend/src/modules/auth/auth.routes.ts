@@ -54,4 +54,8 @@ router.post(
 );
 router.post("/logout", requireAuth, authController.logout);
 
+// Device sessions for the current principal.
+router.get("/sessions", requireAuth, authController.listSessions);
+router.post("/sessions/revoke-others", requireAuth, authController.revokeOtherSessions);
+
 export default router;

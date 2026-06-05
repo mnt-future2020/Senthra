@@ -14,6 +14,8 @@ declare global {
       adminEmail?: string;
       userId?: string;
       userEmail?: string;
+      // The current session id (device) from the access token.
+      sessionId?: string;
     }
   }
 }

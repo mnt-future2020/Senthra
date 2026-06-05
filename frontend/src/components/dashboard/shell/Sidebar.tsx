@@ -3,7 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Settings, UserCog, X, ChevronDown, LogOut } from "lucide-react";
+import { Settings, UserCog, UserRound, X, ChevronDown, LogOut } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
 import { useBranding } from "@/hooks/useBranding";
@@ -14,11 +14,18 @@ type NavItem = {
   href: string;
   label: string;
   icon: React.ElementType;
+  // Visible if the principal holds ANY of these permissions (admin holds all).
+  perms: string[];
 };
 
 const NAV: NavItem[] = [
-  { href: "/dashboard/users", label: "Users & Roles", icon: UserCog },
-  { href: "/dashboard/settings", label: "Settings", icon: Settings },
+  { href: "/dashboard/users", label: "Users & Roles", icon: UserCog, perms: ["users.manage"] },
+  {
+    href: "/dashboard/settings",
+    label: "Settings",
+    icon: Settings,
+    perms: ["settings.manage", "email_templates.manage"],
+  },
 ];
 
 export function Sidebar({
@@ -30,7 +37,7 @@ export function Sidebar({
   mobileOpen: boolean;
   onCloseMobile: () => void;
 }) {
-  const { admin, logout } = useAuth();
+  const { principal, can, logout } = useAuth();
   const { brandName } = useBranding();
   const router = useRouter();
   const pathname = usePathname();
@@ -41,6 +48,22 @@ export function Sidebar({
     await logout();
     router.replace("/login");
   };
+
+  // Only the nav the principal is allowed to see.
+  const nav = NAV.filter((item) => item.perms.some((p) => can(p)));
+
+  // Profile chip — works for both the super-admin and a staff user.
+  const isUser = principal?.type === "user";
+  const initials =
+    principal?.type === "user"
+      ? `${principal.firstName[0] ?? ""}${principal.lastName[0] ?? ""}`.toUpperCase() || "U"
+      : "SA";
+  const displayName =
+    principal?.type === "user"
+      ? `${principal.firstName} ${principal.lastName}`.trim() || principal.email
+      : principal?.name || principal?.email || "Super Admin";
+  const roleLabel =
+    principal?.type === "user" ? principal.role?.name ?? "Staff" : "Super Admin";
 
   const renderNav = (items: NavItem[]) =>
     items.map((item) => {
@@ -117,18 +140,20 @@ export function Sidebar({
         </div>
 
         {/* Nav */}
-        <div className="space-y-5">
-          <div>
-            <span
-              className={`text-[10px] font-extrabold text-[var(--faint)] uppercase tracking-wider px-3 block mb-2 transition-all duration-300 overflow-hidden whitespace-nowrap ${
-                collapsed ? "max-h-0 opacity-0 mb-0" : "max-h-6 opacity-100"
-              }`}
-            >
-              Menu
-            </span>
-            <nav className="space-y-0.5">{renderNav(NAV)}</nav>
+        {nav.length > 0 && (
+          <div className="space-y-5">
+            <div>
+              <span
+                className={`text-[10px] font-extrabold text-[var(--faint)] uppercase tracking-wider px-3 block mb-2 transition-all duration-300 overflow-hidden whitespace-nowrap ${
+                  collapsed ? "max-h-0 opacity-0 mb-0" : "max-h-6 opacity-100"
+                }`}
+              >
+                Menu
+              </span>
+              <nav className="space-y-0.5">{renderNav(nav)}</nav>
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       {/* Footer: profile */}
@@ -140,7 +165,7 @@ export function Sidebar({
           }`}
         >
           <div className="w-9 h-9 rounded-full bg-gradient-to-tr from-[#5b8def] to-[var(--accent)] text-white flex items-center justify-center font-bold text-xs select-none shadow-sm flex-none">
-            SA
+            {initials}
           </div>
           <div
             className={`leading-tight min-w-0 flex-1 transition-all duration-300 overflow-hidden ${
@@ -148,10 +173,10 @@ export function Sidebar({
             }`}
           >
             <span className="text-xs font-extrabold block text-[var(--ink)] truncate">
-              {admin?.name || admin?.email || "Super Admin"}
+              {displayName}
             </span>
-            <span className="text-[10px] text-[var(--faint)] font-bold uppercase tracking-wider block mt-0.5 whitespace-nowrap">
-              Super Admin
+            <span className="text-[10px] text-[var(--faint)] font-bold uppercase tracking-wider block mt-0.5 truncate">
+              {roleLabel}
             </span>
           </div>
           <ChevronDown
@@ -163,11 +188,24 @@ export function Sidebar({
           {showProfileDropdown && (
             <div className="absolute bottom-12 left-0 w-full bg-[var(--surface)] text-[var(--ink)] rounded-xl shadow-2xl border border-[var(--border)] py-1.5 z-50 text-xs anim-fade-in block">
               <div className="px-3 py-2 border-b border-[var(--border-2)]">
-                <p className="font-semibold text-[var(--ink)]">User Reference</p>
-                <p className="text-[10px] text-[var(--faint)] font-mono">
-                  {admin?.email}
+                <p className="font-semibold text-[var(--ink)]">Signed in as</p>
+                <p className="text-[10px] text-[var(--faint)] font-mono truncate">
+                  {principal?.email}
                 </p>
               </div>
+              {isUser && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowProfileDropdown(false);
+                    guard.attemptLeave(() => router.push("/dashboard/account"));
+                  }}
+                  className="w-full px-3 py-2 text-left hover:bg-[var(--surface-2)] font-bold text-[var(--ink)] flex items-center justify-between cursor-pointer"
+                >
+                  <span>My account</span>
+                  <UserRound className="w-3.5 h-3.5" />
+                </button>
+              )}
               <button
                 onClick={(e) => {
                   e.stopPropagation();

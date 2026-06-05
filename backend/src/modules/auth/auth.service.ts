@@ -1,12 +1,12 @@
 import crypto from "node:crypto";
 
 import { OAuth2Client } from "google-auth-library";
-import type { Admin, Prisma } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
 
 import { env } from "../../config/env.js";
 import * as adminRepo from "./admin.repository.js";
+import * as sessionService from "./session.service.js";
 import * as userRepo from "#modules/user/user.repository.js";
-import type { UserWithRole } from "#modules/user/user.repository.js";
 import * as settingsRepo from "#modules/settings/settings.repository.js";
 import * as auditService from "#modules/audit/audit.service.js";
 import { sendTemplatedEmail } from "#modules/email/email.service.js";
@@ -39,29 +39,22 @@ export interface AuthResult extends SessionTokens {
   principal: Principal;
 }
 
-// Request context recorded alongside a login, for the audit trail.
+// Request context recorded alongside a login, for the audit trail + session.
 export interface AuthMeta {
   ip?: string;
   userAgent?: string;
 }
 
-function issueTokens(sub: string, actor: Actor): SessionTokens {
+function issueTokens(sub: string, actor: Actor, sid: string): SessionTokens {
   return {
-    accessToken: signAccessToken(sub, actor),
-    refreshToken: signRefreshToken(sub, actor),
+    accessToken: signAccessToken(sub, actor, sid),
+    refreshToken: signRefreshToken(sub, actor, sid),
   };
 }
 
 // SHA-256 hash of a reset token — only the hash is stored, never the raw token.
 function hashResetToken(token: string): string {
   return crypto.createHash("sha256").update(token).digest("hex");
-}
-
-// A token is revoked when it was issued before the account's invalidation time
-// (set on logout / password change).
-function isRevoked(invalidatedAt: Date | null, issuedAtSec?: number): boolean {
-  if (!invalidatedAt || !issuedAtSec) return false;
-  return issuedAtSec < Math.floor(invalidatedAt.getTime() / 1000);
 }
 
 // Audit login/logout. Fire-and-forget (record() never throws to the caller).
@@ -79,6 +72,19 @@ function recordAuth(
   });
 }
 
+// Open a new device session (enforcing the 2-device cap) and mint its tokens.
+async function startAndIssue(
+  sub: string,
+  actor: Actor,
+  meta?: AuthMeta,
+): Promise<SessionTokens> {
+  const sid = await sessionService.startSession(sub, actor, {
+    userAgent: meta?.userAgent,
+    ip: meta?.ip,
+  });
+  return issueTokens(sub, actor, sid);
+}
+
 // Unified login: the super-admin account first, then an active staff user. An
 // unknown email and a wrong password return the same generic error (no account
 // enumeration); a correct password on a non-active user gets a specific message.
@@ -93,17 +99,17 @@ export async function login(
   if (admin && (await verifyPassword(password, admin.passwordHash))) {
     const principal = adminPrincipal(admin);
     recordAuth("auth.login", principal, meta);
-    return { principal, ...issueTokens(admin.id, "admin") };
+    return { principal, ...(await startAndIssue(admin.id, "admin", meta)) };
   }
 
-  const user = await userRepo.findActiveByEmail(normalized);
+  const user = await userRepo.findByEmailWithRole(normalized);
   if (user && (await verifyPassword(password, user.passwordHash))) {
     if (user.status !== "active") {
       throw forbidden("Your account is not active. Contact an administrator.");
     }
     const principal = userPrincipal(user);
     recordAuth("auth.login", principal, meta);
-    return { principal, ...issueTokens(user.id, "user") };
+    return { principal, ...(await startAndIssue(user.id, "user", meta)) };
   }
 
   throw unauthorized("Invalid email or password.");
@@ -116,11 +122,15 @@ interface ChangeCredentialsParams {
 }
 
 // Super-admin: change email and/or password (Settings → Account). Changing the
-// password revokes existing sessions, then re-issues one so the device stays in.
+// password signs out every OTHER device and re-issues tokens so this one stays in.
 export async function changeCredentials(
   adminId: string,
   params: ChangeCredentialsParams,
+  currentSid: string,
 ): Promise<{ principal: Principal; tokens: SessionTokens | null }> {
+  // requireAuth always populates a live sid; bail rather than let an empty one
+  // fall through to endOthers (which would wipe every session) + an unusable token.
+  if (!currentSid) throw unauthorized("Session expired. Please log in again.");
   const admin = await adminRepo.findById(adminId);
   if (!admin) throw notFound("Admin not found.");
   if (!(await verifyPassword(params.currentPassword, admin.passwordHash))) {
@@ -134,6 +144,12 @@ export async function changeCredentials(
     if (normalized !== admin.email) {
       const existing = await adminRepo.findByEmail(normalized);
       if (existing) throw conflict("That email is already in use.");
+      // Keep the admin/staff email namespaces disjoint. A staff user — even a
+      // soft-deleted one, which can be revived under the same email — holding this
+      // address would be shadowed by login's admin-first match, so block it.
+      if (await userRepo.findByEmailIncludingDeleted(normalized)) {
+        throw conflict("That email belongs to a staff user. Use a different one.");
+      }
       data.email = normalized;
       data.googleEmail = normalized;
     }
@@ -148,21 +164,28 @@ export async function changeCredentials(
   if (Object.keys(data).length === 0) {
     throw badRequest("Nothing to update.");
   }
-  if (passwordChanged) data.tokenInvalidatedAt = new Date();
 
   const updated = await adminRepo.update(admin.id, data);
-  const tokens = passwordChanged ? issueTokens(updated.id, "admin") : null;
+  let tokens: SessionTokens | null = null;
+  if (passwordChanged) {
+    await sessionService.endOthers(admin.id, "admin", currentSid);
+    tokens = issueTokens(admin.id, "admin", currentSid);
+  }
   return { principal: adminPrincipal(updated), tokens };
 }
 
 // Staff user: change own password — the first-login forced change and voluntary
-// changes. Clears mustResetPassword, revokes other sessions, and re-issues tokens
+// changes. Clears mustResetPassword, signs out other devices, and re-issues tokens
 // for the current device.
 export async function changeUserPassword(
   userId: string,
   currentPassword: string | undefined,
   newPassword: string,
+  currentSid: string,
 ): Promise<{ tokens: SessionTokens; principal: Principal }> {
+  // requireAuth always populates a live sid; bail rather than let an empty one
+  // fall through to endOthers (which would wipe every session) + an unusable token.
+  if (!currentSid) throw unauthorized("Session expired. Please log in again.");
   const user = await userRepo.findById(userId);
   if (!user) throw notFound("Account not found.");
   // The first-login forced change is authorised by the session itself (the temp
@@ -179,12 +202,13 @@ export async function changeUserPassword(
   const updated = await userRepo.update(userId, {
     passwordHash: await hashPassword(newPassword),
     mustResetPassword: false,
-    tokenInvalidatedAt: new Date(),
   });
-  return { tokens: issueTokens(userId, "user"), principal: userPrincipal(updated) };
+  await sessionService.endOthers(userId, "user", currentSid);
+  return { tokens: issueTokens(userId, "user", currentSid), principal: userPrincipal(updated) };
 }
 
-// Rotate tokens using a refresh token (admin or user, per its `actor` claim).
+// Rotate tokens using a refresh token (admin or user). The session must still be
+// live (it isn't after logout, a password change, or eviction by the device cap).
 // Throws on any failure; the caller clears the auth cookies when this rejects.
 export async function refreshSession(refreshToken: string): Promise<AuthResult> {
   let payload;
@@ -194,63 +218,49 @@ export async function refreshSession(refreshToken: string): Promise<AuthResult> 
     throw unauthorized("Invalid or expired refresh token.");
   }
 
+  if (!(await sessionService.isActive(payload.sid))) {
+    throw unauthorized("Session expired. Please log in again.");
+  }
+
   if (payload.actor === "user") {
     const user = await userRepo.findById(payload.sub);
     if (!user || user.status !== "active") throw unauthorized("Unauthorized.");
-    if (isRevoked(user.tokenInvalidatedAt, payload.iat)) {
-      throw unauthorized("Session expired. Please log in again.");
-    }
-    return { principal: userPrincipal(user), ...issueTokens(user.id, "user") };
+    await sessionService.touch(payload.sid);
+    return { principal: userPrincipal(user), ...issueTokens(user.id, "user", payload.sid) };
   }
 
   const admin = await adminRepo.findById(payload.sub);
   if (!admin) throw unauthorized("Unauthorized.");
-  if (isRevoked(admin.tokenInvalidatedAt, payload.iat)) {
-    throw unauthorized("Session expired. Please log in again.");
-  }
-  return { principal: adminPrincipal(admin), ...issueTokens(admin.id, "admin") };
+  await sessionService.touch(payload.sid);
+  return { principal: adminPrincipal(admin), ...issueTokens(admin.id, "admin", payload.sid) };
 }
 
-export async function logout(principal: Principal): Promise<void> {
-  if (principal.type === "user") {
-    await userRepo.update(principal.id, { tokenInvalidatedAt: new Date() });
-  } else {
-    await adminRepo.update(principal.id, { tokenInvalidatedAt: new Date() });
-  }
+// Sign out the current device only (other devices stay logged in).
+export async function logout(principal: Principal, sid: string): Promise<void> {
+  await sessionService.endSession(sid);
   recordAuth("auth.logout", principal);
 }
 
-// Persist a reset token + email the link. The raw token goes in the link; only
-// its hash is stored. Valid for 1 hour. Rendered from the editable
-// "auth.password_reset" template; forced so a disabled template never blocks a
-// security-critical reset email.
-async function issueAdminResetEmail(admin: Admin): Promise<void> {
+// Persist a reset token + email the link, for either account type. The raw token
+// goes in the link; only its hash is stored. Valid for 1 hour. Rendered from the
+// editable "auth.password_reset" template; forced so a disabled template never
+// blocks a security-critical reset email. `persist` writes the hash+expiry to the
+// owning collection (admin or user), keeping the two flows a single code path.
+async function issueResetEmail(
+  email: string,
+  firstName: string,
+  persist: (data: { resetTokenHash: string; resetTokenExpiresAt: Date }) => Promise<unknown>,
+): Promise<void> {
   const token = crypto.randomBytes(32).toString("hex");
-  await adminRepo.update(admin.id, {
+  await persist({
     resetTokenHash: hashResetToken(token),
     resetTokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
   });
-  const firstName = admin.name?.trim().split(/\s+/)[0] || "there";
   const resetPasswordLink = `${env.FRONTEND_URL}/reset-password?token=${token}`;
   await sendTemplatedEmail(
     "auth.password_reset",
-    admin.email,
+    email,
     { firstName, resetPasswordLink },
-    { force: true },
-  );
-}
-
-async function issueUserResetEmail(user: UserWithRole): Promise<void> {
-  const token = crypto.randomBytes(32).toString("hex");
-  await userRepo.update(user.id, {
-    resetTokenHash: hashResetToken(token),
-    resetTokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
-  });
-  const resetPasswordLink = `${env.FRONTEND_URL}/reset-password?token=${token}`;
-  await sendTemplatedEmail(
-    "auth.password_reset",
-    user.email,
-    { firstName: user.firstName, resetPasswordLink },
     { force: true },
   );
 }
@@ -270,17 +280,22 @@ export async function forgotPassword(email: string): Promise<void> {
 
   const admin = await adminRepo.findByEmail(normalized);
   if (admin) {
-    void issueAdminResetEmail(admin).catch(onError);
+    const firstName = admin.name?.trim().split(/\s+/)[0] || "there";
+    void issueResetEmail(admin.email, firstName, (d) => adminRepo.update(admin.id, d)).catch(
+      onError,
+    );
     return;
   }
-  const user = await userRepo.findActiveByEmail(normalized);
+  const user = await userRepo.findByEmailWithRole(normalized);
   if (user && user.status === "active") {
-    void issueUserResetEmail(user).catch(onError);
+    void issueResetEmail(user.email, user.firstName, (d) => userRepo.update(user.id, d)).catch(
+      onError,
+    );
   }
 }
 
 // Set a new password using the emailed token (admin or user). Single-use: clears
-// the token and revokes every existing session.
+// the token and signs out every device (they re-log-in with the new password).
 export async function resetPassword(token: string, newPassword: string): Promise<void> {
   const tokenHash = hashResetToken(token);
 
@@ -294,8 +309,8 @@ export async function resetPassword(token: string, newPassword: string): Promise
       passwordHash: await hashPassword(newPassword),
       resetTokenHash: null,
       resetTokenExpiresAt: null,
-      tokenInvalidatedAt: new Date(),
     });
+    await sessionService.endAll(admin.id, "admin");
     return;
   }
 
@@ -310,8 +325,8 @@ export async function resetPassword(token: string, newPassword: string): Promise
       mustResetPassword: false,
       resetTokenHash: null,
       resetTokenExpiresAt: null,
-      tokenInvalidatedAt: new Date(),
     });
+    await sessionService.endAll(user.id, "user");
     return;
   }
 
@@ -363,5 +378,15 @@ export async function googleLogin(credential: string, meta?: AuthMeta): Promise<
   }
   const principal = adminPrincipal(admin);
   recordAuth("auth.login", principal, meta);
-  return { principal, ...issueTokens(admin.id, "admin") };
+  return { principal, ...(await startAndIssue(admin.id, "admin", meta)) };
+}
+
+// --- device sessions (Settings → Account / portal) ---
+
+export function listSessions(principal: Principal, currentSid: string) {
+  return sessionService.listSessions(principal.id, principal.type, currentSid);
+}
+
+export function revokeOtherSessions(principal: Principal, currentSid: string): Promise<void> {
+  return sessionService.endOthers(principal.id, principal.type, currentSid);
 }

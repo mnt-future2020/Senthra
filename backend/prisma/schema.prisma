@@ -18,8 +18,6 @@ model Admin {
   name         String?
   // Optional Google account email allowed to sign in (defaults to `email`).
   googleEmail  String?
-  // Tokens issued before this time are rejected (set on logout / password change).
-  tokenInvalidatedAt DateTime?
   // Password reset: SHA-256 hash of the emailed token + its expiry (never the raw token).
   resetTokenHash     String?
   resetTokenExpiresAt DateTime?
@@ -65,9 +63,9 @@ model Settings {
   updatedAt          DateTime @updatedAt
 }
 
-// A role a user can be assigned. Seeded with the Senthra domain roles (system
-// roles, non-deletable). `permissions` is reserved for a future RBAC phase and
-// is intentionally empty for now — assigning a role grants no permissions yet.
+// A role a user can be assigned. Seeded with the Senthra domain roles.
+// `permissions` holds the delegatable permission keys the role grants
+// ("*" = full access); the super-admin configures them.
 model Role {
   id          String   @id @default(auto()) @map("_id") @db.ObjectId
   key         String   @unique // stable machine key, e.g. "field_engineer"
@@ -99,8 +97,6 @@ model User {
   // Auth — set at creation, never sent to the browser.
   passwordHash      String
   mustResetPassword Boolean @default(true)
-  // Tokens issued before this time are rejected (set on logout / password change).
-  tokenInvalidatedAt DateTime?
   // First-login "set your password" + forgot-password flow: SHA-256 hash of the
   // emailed token + its expiry (never the raw token).
   resetTokenHash      String?
@@ -168,4 +164,22 @@ model AuditLog {
   @@index([action])
   @@index([targetType, targetId])
   @@index([createdAt])
+}
+
+// An active login session = one signed-in device. Tokens carry the `sid`, and
+// requireAuth + refresh validate that the session row still exists — so logout
+// and the 2-device cap (evicting the oldest session on a 3rd sign-in) take effect
+// immediately. Rows are deleted on logout / password change.
+model Session {
+  id            String   @id @default(auto()) @map("_id") @db.ObjectId
+  sid           String   @unique // embedded in the access + refresh tokens
+  principalId   String // the admin or user id (no FK — points at either collection)
+  principalType String // "admin" | "user"
+  userAgent     String?
+  ip            String?
+  createdAt     DateTime @default(now())
+  lastUsedAt    DateTime @default(now())
+  expiresAt     DateTime // matches the refresh token's expiry
+
+  @@index([principalId, principalType])
 }

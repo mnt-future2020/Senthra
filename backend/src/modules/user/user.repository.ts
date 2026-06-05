@@ -63,9 +63,10 @@ export function findByEmailIncludingDeleted(email: string): Promise<User | null>
   return prisma.user.findUnique({ where: { email } });
 }
 
-// Login lookup: a non-deleted user by email, with role + auth fields. Status is
-// checked by the caller so a suspended account can be messaged clearly.
-export function findActiveByEmail(email: string): Promise<UserWithRole | null> {
+// Login / forgot-password lookup: a non-deleted user by email, with role + auth
+// fields. Does NOT filter by status — the caller checks it, so a suspended account
+// can be messaged clearly (login) or silently skipped (reset email).
+export function findByEmailWithRole(email: string): Promise<UserWithRole | null> {
   return prisma.user.findFirst({
     where: { email, deletedAt: null },
     include: { role: true },

@@ -41,6 +41,7 @@ export const changeCredentials = asyncHandler(async (req, res) => {
   const { principal, tokens } = await authService.changeCredentials(
     req.adminId!,
     req.body as ChangeCredentialsInput,
+    req.sessionId ?? "",
   );
   // Re-issue a fresh session if the password changed (keeps the device signed in).
   if (tokens) setAuthCookies(res, tokens.accessToken, tokens.refreshToken, true);
@@ -55,6 +56,7 @@ export const changePassword = asyncHandler(async (req, res) => {
     req.userId!,
     currentPassword,
     newPassword,
+    req.sessionId ?? "",
   );
   setAuthCookies(res, tokens.accessToken, tokens.refreshToken, true);
   res.json({ principal });
@@ -76,10 +78,22 @@ export const refresh = asyncHandler(async (req, res) => {
   res.json({ token: result.accessToken, principal: result.principal });
 });
 
-// POST /auth/logout  (protected) — revoke sessions + clear cookies.
+// POST /auth/logout  (protected) — sign out the current device + clear cookies.
 export const logout = asyncHandler(async (req, res) => {
-  if (req.principal) await authService.logout(req.principal);
+  if (req.principal) await authService.logout(req.principal, req.sessionId ?? "");
   clearAuthCookies(res);
+  res.json({ ok: true });
+});
+
+// GET /auth/sessions  (protected) — the principal's active devices.
+export const listSessions = asyncHandler(async (req, res) => {
+  const sessions = await authService.listSessions(req.principal!, req.sessionId ?? "");
+  res.json({ sessions });
+});
+
+// POST /auth/sessions/revoke-others  (protected) — sign out all other devices.
+export const revokeOtherSessions = asyncHandler(async (req, res) => {
+  await authService.revokeOtherSessions(req.principal!, req.sessionId ?? "");
   res.json({ ok: true });
 });
 

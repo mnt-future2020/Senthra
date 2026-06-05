@@ -1,7 +1,7 @@
 import { Router } from "express";
 
 import * as templateController from "./emailTemplate.controller.js";
-import { requireAdmin, requireAuth } from "../../middleware/auth.middleware.js";
+import { requireAuth, requirePermission } from "../../middleware/auth.middleware.js";
 import { testEmailLimiter, writeLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import {
@@ -14,8 +14,9 @@ import {
 
 const router = Router();
 
-// Email-template management is super-admin only.
-router.use(requireAuth, requireAdmin);
+// Email-template management requires the email_templates.manage permission (the
+// super-admin always has it).
+router.use(requireAuth, requirePermission("email_templates.manage"));
 
 router.get("/", templateController.listTemplates);
 router.post("/", writeLimiter, validateBody(createTemplateSchema), templateController.createTemplate);

@@ -9,10 +9,11 @@ import { useAuth } from "@/hooks/useAuth";
 const TITLES: Record<string, string> = {
   settings: "Settings",
   users: "Users & Roles",
+  account: "My Account",
 };
 
 export function Topbar({ onToggleSidebar }: { onToggleSidebar: () => void }) {
-  const { admin } = useAuth();
+  const { principal } = useAuth();
   const pathname = usePathname();
 
   const segment = pathname.split("/")[2] ?? "";
@@ -33,7 +34,7 @@ export function Topbar({ onToggleSidebar }: { onToggleSidebar: () => void }) {
             {title}
           </h1>
           <p className="text-xs text-[var(--muted)] hidden sm:block">
-            {admin?.email} &middot;{" "}
+            {principal?.email} &middot;{" "}
             {new Date().toLocaleDateString("en-US", {
               weekday: "long",
               month: "short",
