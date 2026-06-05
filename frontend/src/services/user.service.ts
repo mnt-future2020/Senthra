@@ -1,4 +1,5 @@
 import { api } from "@/lib/api";
+import { registerClientCache } from "@/lib/clientCache";
 import type { User, UserStatus } from "@/types/user";
 
 // Typed wrappers around the backend /users endpoints.
@@ -19,26 +20,36 @@ export interface PagedUsers {
   totalPages: number;
 }
 
-export interface CreateUserPayload {
-  firstName: string;
-  lastName: string;
-  email: string;
+// Optional profile fields common to create + update. Dates are "YYYY-MM-DD"
+// strings; an empty string clears the field on update.
+export interface ProfileFieldsPayload {
   phone?: string;
-  roleId?: string;
   status?: UserStatus;
   notes?: string;
   profileImage?: string; // data URI
+  jobTitle?: string;
+  department?: string;
+  dateOfJoining?: string;
+  gender?: string;
+  dateOfBirth?: string;
+  addressLine1?: string;
+  addressLine2?: string;
+  city?: string;
+  postcode?: string;
 }
 
-export interface UpdateUserPayload {
+export interface CreateUserPayload extends ProfileFieldsPayload {
+  firstName: string;
+  lastName: string;
+  email: string;
+  roleId?: string;
+}
+
+export interface UpdateUserPayload extends ProfileFieldsPayload {
   firstName?: string;
   lastName?: string;
   email?: string;
-  phone?: string;
   roleId?: string | null;
-  status?: UserStatus;
-  notes?: string;
-  profileImage?: string;
   removeProfileImage?: boolean;
 }
 
@@ -58,8 +69,22 @@ function qs(params: UserListParams): string {
   return s ? `?${s}` : "";
 }
 
+// Stale-while-revalidate cache (module-level, survives route navigation), keyed by
+// the query, so returning to the list — e.g. right after creating a user — renders
+// the previous page instantly instead of flashing a skeleton while it refetches.
+const usersListCache = new Map<string, PagedUsers>();
+registerClientCache(() => usersListCache.clear());
+const listCacheKey = (p: UserListParams): string =>
+  `${p.page ?? 1}|${p.pageSize ?? ""}|${p.search ?? ""}|${p.status ?? ""}|${p.roleId ?? ""}`;
+
+export const getCachedUsers = (params: UserListParams = {}): PagedUsers | undefined =>
+  usersListCache.get(listCacheKey(params));
+
 export function listUsers(params: UserListParams = {}): Promise<PagedUsers> {
-  return api<PagedUsers>(`/users${qs(params)}`);
+  return api<PagedUsers>(`/users${qs(params)}`).then((r) => {
+    usersListCache.set(listCacheKey(params), r);
+    return r;
+  });
 }
 
 export function getUser(id: string): Promise<User> {

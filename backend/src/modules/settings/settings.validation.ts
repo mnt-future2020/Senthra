@@ -55,6 +55,14 @@ export const updateSettingsSchema = z.object({
   footerText: z.string().max(200).optional(),
   loginHeadline: z.string().max(120).optional(),
   loginSubtext: z.string().max(200).optional(),
+  // Staff-ID prefix: 2–5 letters (case-insensitive; the service uppercases it).
+  // Empty string clears it back to the default. Not tied to brandName.
+  employeeIdPrefix: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z]{2,5}$/, "Employee ID prefix must be 2–5 letters.")
+    .or(z.literal(""))
+    .optional(),
 });
 export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;
 

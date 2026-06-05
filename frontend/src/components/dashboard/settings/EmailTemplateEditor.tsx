@@ -14,8 +14,10 @@ import {
 } from "lucide-react";
 
 import * as templateService from "@/services/emailTemplate.service";
+import { useAuth } from "@/hooks/useAuth";
 import type { EmailPreview, EmailTemplate } from "@/types/emailTemplate";
 import { Field } from "./ui/Field";
+import { ReadOnlyNotice } from "./ui/ReadOnlyNotice";
 import { Notice } from "./ui/Notice";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "./ui/styles";
 import type { Msg } from "./types";
@@ -23,7 +25,7 @@ import type { Msg } from "./types";
 type EditorTab = "message" | "preview";
 
 const monoCls =
-  "w-full rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3.5 font-mono text-xs leading-relaxed text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]";
+  "w-full rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3.5 font-mono text-xs leading-relaxed text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-60";
 
 export function EmailTemplateEditor({
   template,
@@ -34,6 +36,8 @@ export function EmailTemplateEditor({
   onBack: () => void;
   onChanged: () => void;
 }) {
+  const { can } = useAuth();
+  const canManage = can("email_templates.manage");
   const [name, setName] = React.useState(template.name);
   const [subject, setSubject] = React.useState(template.subject);
   // The admin edits one plain-text "message"; the branded HTML is generated from
@@ -223,9 +227,19 @@ export function EmailTemplateEditor({
       </div>
 
       <div className="space-y-4">
+        {!canManage && (
+          <ReadOnlyNotice>
+            Read-only — you can view this template but don&apos;t have permission to change it.
+          </ReadOnlyNotice>
+        )}
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label="Template name">
-            <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} />
+            <input
+              className={inputCls}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              disabled={!canManage}
+            />
           </Field>
           <Field label="Subject" hint="The email subject line. Variables are allowed.">
             <input
@@ -234,6 +248,7 @@ export function EmailTemplateEditor({
               value={subject}
               onFocus={() => (lastFocused.current = "subject")}
               onChange={(e) => setSubject(e.target.value)}
+              disabled={!canManage}
             />
           </Field>
         </div>
@@ -248,7 +263,8 @@ export function EmailTemplateEditor({
                   key={v}
                   type="button"
                   onClick={() => insertVariable(v)}
-                  className="rounded-md border border-[var(--accent)]/30 bg-[var(--accent-10)] px-2 py-1 font-mono text-[11px] font-bold text-[var(--accent)] transition-all hover:bg-[var(--accent)] hover:text-white"
+                  disabled={!canManage}
+                  className="rounded-md border border-[var(--accent)]/30 bg-[var(--accent-10)] px-2 py-1 font-mono text-[11px] font-bold text-[var(--accent)] transition-all hover:bg-[var(--accent)] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {`{{${v}}}`}
                 </button>
@@ -287,6 +303,7 @@ export function EmailTemplateEditor({
                 onFocus={() => (lastFocused.current = "message")}
                 onChange={(e) => setMessage(e.target.value)}
                 spellCheck
+                disabled={!canManage}
                 placeholder="Type the email message in plain text… a blank line starts a new paragraph."
               />
               <p className="mt-1.5 text-[11px] leading-relaxed text-[var(--faint)]">
@@ -337,7 +354,8 @@ export function EmailTemplateEditor({
 
         <Notice msg={msg} />
 
-        {/* Actions */}
+        {/* Actions — hidden for view-only users (the API enforces this too). */}
+        {canManage && (
         <div className="flex flex-wrap items-center gap-2 border-t border-[var(--border-2)] pt-4">
           <button onClick={save} disabled={saving} className={primaryBtn}>
             {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
@@ -396,6 +414,7 @@ export function EmailTemplateEditor({
             </button>
           </div>
         </div>
+        )}
       </div>
     </section>
   );

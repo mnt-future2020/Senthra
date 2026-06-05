@@ -6,7 +6,14 @@ import { badRequest, conflict, forbidden, notFound } from "../../utils/http-erro
 import { slugify } from "../../utils/slugify.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
-import { PERMISSIONS, sanitizePermissions, type PermissionDef } from "./permissions.js";
+import {
+  ALL_PERMISSIONS,
+  PERMISSION_GROUPS,
+  applyImpliedPermissions,
+  escalationViolations,
+  sanitizePermissions,
+  type PermissionGroup,
+} from "./permissions.js";
 
 export interface PublicRole {
   id: string;
@@ -38,9 +45,22 @@ export async function listRoles(): Promise<PublicRole[]> {
   return roles.map((role) => toPublicRole(role, counts[role.id] ?? 0));
 }
 
-// The permission catalog, for the role-config UI (super-admin only at the route).
-export function listPermissions(): PermissionDef[] {
-  return PERMISSIONS;
+// The grouped permission catalog, for the role-editor matrix.
+export function listPermissionGroups(): PermissionGroup[] {
+  return PERMISSION_GROUPS;
+}
+
+// Resolve a role by either its database id (24-hex) or its stable key (e.g.
+// "user_managers"), so pages can route by the readable key. The two formats never
+// collide (keys are name-derived slugs), so resolution is unambiguous.
+const ROLE_OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
+
+export async function getRole(idOrKey: string): Promise<PublicRole> {
+  const role = ROLE_OBJECT_ID_RE.test(idOrKey)
+    ? await roleRepo.findById(idOrKey)
+    : await roleRepo.findByKey(idOrKey);
+  if (!role) throw notFound("Role not found.");
+  return toPublicRole(role, await userRepo.countByRole(role.id));
 }
 
 export interface CreateRoleInput {
@@ -67,11 +87,19 @@ export async function createRole(
   let key = baseKey;
   for (let n = 2; await roleRepo.findByKey(key); n++) key = `${baseKey}_${n}`;
 
-  const { valid, unknown } = sanitizePermissions(input.permissions ?? []);
+  const { valid: sanitized, unknown } = sanitizePermissions(input.permissions ?? []);
   if (unknown.length) {
     throw badRequest(
       `Unknown permission${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}.`,
     );
+  }
+  // Granting any action also grants its module's view (manage implies view).
+  const valid = applyImpliedPermissions(sanitized);
+  // No-escalation: a delegate can only grant permissions it holds (the super-admin
+  // holds "*" and may grant anything).
+  const escalated = escalationViolations(valid, actor?.permissions ?? []);
+  if (escalated.length) {
+    throw forbidden(`You can't grant permissions you don't have: ${escalated.join(", ")}.`);
   }
   const created = await roleRepo.create({
     key,
@@ -104,6 +132,13 @@ export async function updateRole(
   const role = await roleRepo.findById(id);
   if (!role) throw notFound("Role not found.");
 
+  // System roles are configuration-critical — only the super-admin account (a "*"
+  // holder) may edit them at all; a delegate is refused even if it holds roles.edit.
+  const actorHasAll = (actor?.permissions ?? []).includes(ALL_PERMISSIONS);
+  if (role.isSystem && !actorHasAll) {
+    throw forbidden("Only the super-admin can edit system roles.");
+  }
+
   const data: Prisma.RoleUpdateInput = {};
   // System roles keep a stable name/key; only their description is editable.
   if (typeof input.name === "string" && input.name.trim() && !role.isSystem) {
@@ -119,11 +154,16 @@ export async function updateRole(
   // Permissions are editable for any role except super_admin, which always holds
   // full access ("*").
   if (input.permissions && role.key !== "super_admin") {
-    const { valid, unknown } = sanitizePermissions(input.permissions);
+    const { valid: sanitized, unknown } = sanitizePermissions(input.permissions);
     if (unknown.length) {
       throw badRequest(
         `Unknown permission${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}.`,
       );
+    }
+    const valid = applyImpliedPermissions(sanitized);
+    const escalated = escalationViolations(valid, actor?.permissions ?? []);
+    if (escalated.length) {
+      throw forbidden(`You can't grant permissions you don't have: ${escalated.join(", ")}.`);
     }
     data.permissions = { set: valid };
   }
@@ -143,6 +183,13 @@ export async function deleteRole(id: string, actor?: AuditActor): Promise<void> 
   const role = await roleRepo.findById(id);
   if (!role) throw notFound("Role not found.");
   if (role.isSystem) throw forbidden("System roles can't be deleted.");
+
+  // Only someone who could manage this role may delete it: a delegate can't remove
+  // a role that grants permissions it doesn't itself hold (the super-admin can).
+  const escalated = escalationViolations(role.permissions, actor?.permissions ?? []);
+  if (escalated.length) {
+    throw forbidden("You can't delete a role that grants permissions you don't have.");
+  }
 
   const assigned = await userRepo.countByRole(id);
   if (assigned > 0) {

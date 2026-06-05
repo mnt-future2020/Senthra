@@ -116,3 +116,30 @@ export function requirePermission(permission: string): RequestHandler {
     res.status(403).json({ error: "You don't have permission to do that." });
   };
 }
+
+// Restrict a route to principals holding ANY ONE of the given permissions. Used
+// where a surface is reachable from more than one capability — e.g. the roles
+// list, needed both by role-managers (roles.view) and by the user form's role
+// picker (users.create / users.edit). The super-admin always passes.
+export function requireAnyPermission(...permissions: string[]): RequestHandler {
+  return (req, res, next) => {
+    const principal = req.principal;
+    if (!principal) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    if (principal.type === "admin") {
+      next();
+      return;
+    }
+    if (principal.mustResetPassword) {
+      res.status(403).json({ error: "Set your password before continuing." });
+      return;
+    }
+    if (permissions.some((p) => roleGrants(principal.permissions, p))) {
+      next();
+      return;
+    }
+    res.status(403).json({ error: "You don't have permission to do that." });
+  };
+}

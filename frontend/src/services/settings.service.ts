@@ -1,4 +1,5 @@
 import { api } from "@/lib/api";
+import { registerClientCache } from "@/lib/clientCache";
 import type { Settings } from "@/types/settings";
 
 // Fields accepted by the settings update + test-email endpoints. All optional —
@@ -25,17 +26,51 @@ export interface SettingsUpdate {
   footerText?: string;
   loginHeadline?: string;
   loginSubtext?: string;
+  employeeIdPrefix?: string;
+}
+
+// Stale-while-revalidate cache (module-level, survives route navigation): switching
+// between settings sections / revisiting Settings serves the cached value instantly,
+// refreshing in the background. Concurrent callers (Integrations + Cloudinary mount
+// together) share one in-flight request instead of firing /settings twice.
+let settingsCache: Settings | null = null;
+let settingsInflight: Promise<Settings> | null = null;
+registerClientCache(() => {
+  settingsCache = null;
+  settingsInflight = null;
+});
+
+export const getCachedSettings = (): Settings | null => settingsCache;
+
+function revalidateSettings(): Promise<Settings> {
+  if (settingsInflight) return settingsInflight;
+  settingsInflight = api<{ settings: Settings }>("/settings")
+    .then((r) => {
+      settingsCache = r.settings;
+      return r.settings;
+    })
+    .finally(() => {
+      settingsInflight = null;
+    });
+  return settingsInflight;
 }
 
 export function getSettings(): Promise<Settings> {
-  return api<{ settings: Settings }>("/settings").then((r) => r.settings);
+  if (settingsCache) {
+    void revalidateSettings(); // serve cache now, refresh for next time
+    return Promise.resolve(settingsCache);
+  }
+  return revalidateSettings();
 }
 
 export function updateSettings(payload: SettingsUpdate): Promise<Settings> {
   return api<{ settings: Settings }>("/settings", {
     method: "PUT",
     body: payload,
-  }).then((r) => r.settings);
+  }).then((r) => {
+    settingsCache = r.settings; // keep the cache fresh after a save
+    return r.settings;
+  });
 }
 
 // SMTP connect + send can take longer than a normal API call.

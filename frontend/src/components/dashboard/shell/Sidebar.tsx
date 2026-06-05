@@ -9,6 +9,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { useBranding } from "@/hooks/useBranding";
 import { useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import { BrandMark } from "@/components/branding/BrandMark";
+import { optimizeCloudinaryUrl } from "@/lib/utils";
 
 type NavItem = {
   href: string;
@@ -19,12 +20,12 @@ type NavItem = {
 };
 
 const NAV: NavItem[] = [
-  { href: "/dashboard/users", label: "Users & Roles", icon: UserCog, perms: ["users.manage"] },
+  { href: "/dashboard/users", label: "Users & Roles", icon: UserCog, perms: ["users.view", "roles.view"] },
   {
     href: "/dashboard/settings",
     label: "Settings",
     icon: Settings,
-    perms: ["settings.manage", "email_templates.manage"],
+    perms: ["settings.view", "email_templates.view"],
   },
 ];
 
@@ -64,6 +65,7 @@ export function Sidebar({
       : principal?.name || principal?.email || "Super Admin";
   const roleLabel =
     principal?.type === "user" ? principal.role?.name ?? "Staff" : "Super Admin";
+  const avatarUrl = principal?.type === "user" ? principal.profileImageUrl : null;
 
   const renderNav = (items: NavItem[]) =>
     items.map((item) => {
@@ -164,9 +166,18 @@ export function Sidebar({
             collapsed ? "p-1.5 justify-center" : "p-2 gap-3"
           }`}
         >
-          <div className="w-9 h-9 rounded-full bg-gradient-to-tr from-[#5b8def] to-[var(--accent)] text-white flex items-center justify-center font-bold text-xs select-none shadow-sm flex-none">
-            {initials}
-          </div>
+          {avatarUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={optimizeCloudinaryUrl(avatarUrl)}
+              alt={displayName}
+              className="w-9 h-9 rounded-full object-cover shadow-sm flex-none"
+            />
+          ) : (
+            <div className="w-9 h-9 rounded-full bg-gradient-to-tr from-[#5b8def] to-[var(--accent)] text-white flex items-center justify-center font-bold text-xs select-none shadow-sm flex-none">
+              {initials}
+            </div>
+          )}
           <div
             className={`leading-tight min-w-0 flex-1 transition-all duration-300 overflow-hidden ${
               collapsed ? "w-0 opacity-0 pointer-events-none" : "w-full opacity-100"

@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Shield, Users2 } from "lucide-react";
 
 import { RolesView } from "./RolesView";
@@ -15,16 +16,21 @@ const TABS: { id: Tab; label: string; icon: React.ElementType }[] = [
 ];
 
 export function UsersRolesPanel() {
-  const [tab, setTab] = React.useState<Tab>("users");
-  const { admin, can } = useAuth();
+  // The active tab lives in ?tab= so it survives a refresh and is shareable, and so
+  // returning from a role form page lands back on the Roles tab.
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const { can } = useAuth();
 
-  // Role configuration is super-admin only; the Users tab needs users.manage.
+  // Both tabs are permission-gated: the Users tab needs users.view, the Roles tab
+  // needs roles.view (the super-admin holds both).
   const visibleTabs = TABS.filter((t) =>
-    t.id === "roles" ? Boolean(admin) : can("users.manage"),
+    can(t.id === "roles" ? "roles.view" : "users.view"),
   );
-  const activeTab: Tab = visibleTabs.some((t) => t.id === tab)
-    ? tab
-    : visibleTabs[0]?.id ?? "users";
+  const requested = searchParams.get("tab");
+  const activeTab: Tab =
+    visibleTabs.find((t) => t.id === requested)?.id ?? visibleTabs[0]?.id ?? "users";
+  const selectTab = (t: Tab) => router.replace(`/dashboard/users?tab=${t}`, { scroll: false });
 
   return (
     <div className="flex h-full flex-col gap-6">
@@ -45,7 +51,7 @@ export function UsersRolesPanel() {
             {visibleTabs.map((t) => (
               <button
                 key={t.id}
-                onClick={() => setTab(t.id)}
+                onClick={() => selectTab(t.id)}
                 className={`flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-bold transition-all ${
                   activeTab === t.id
                     ? "bg-[var(--accent)] text-white shadow-xs"

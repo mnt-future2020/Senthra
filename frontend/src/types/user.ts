@@ -18,6 +18,19 @@ export interface User {
   notes: string | null;
   mustResetPassword: boolean;
   role: UserRoleRef | null;
+  // Employment
+  employeeId: string | null;
+  jobTitle: string | null;
+  department: string | null;
+  dateOfJoining: string | null;
+  // Personal
+  gender: string | null;
+  dateOfBirth: string | null;
+  // Address (UK)
+  addressLine1: string | null;
+  addressLine2: string | null;
+  city: string | null;
+  postcode: string | null;
   createdAt: string;
   updatedAt: string;
 }

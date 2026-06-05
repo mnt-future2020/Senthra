@@ -1,4 +1,5 @@
 import { api } from "@/lib/api";
+import { registerClientCache } from "@/lib/clientCache";
 import type { EmailPreview, EmailTemplate } from "@/types/emailTemplate";
 
 // Typed wrappers around the backend /email-templates endpoints.
@@ -17,8 +18,19 @@ export interface PreviewPayload {
   textContent?: string;
 }
 
+// Cached so the templates list renders instantly on revisit instead of flashing a
+// skeleton; the section still refetches to revalidate (and after any edit).
+let templatesCache: EmailTemplate[] | null = null;
+registerClientCache(() => {
+  templatesCache = null;
+});
+export const getCachedTemplates = (): EmailTemplate[] | null => templatesCache;
+
 export function listTemplates(): Promise<EmailTemplate[]> {
-  return api<{ templates: EmailTemplate[] }>("/email-templates").then((r) => r.templates);
+  return api<{ templates: EmailTemplate[] }>("/email-templates").then((r) => {
+    templatesCache = r.templates;
+    return r.templates;
+  });
 }
 
 export function getTemplate(id: string): Promise<EmailTemplate> {

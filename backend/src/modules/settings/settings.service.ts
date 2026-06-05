@@ -37,6 +37,26 @@ export async function getCloudinaryCreds(): Promise<CloudinaryCreds | null> {
   return resolveCloudinaryCreds(s);
 }
 
+// --- Employee ID prefix (authenticated settings, NOT public branding) ---
+// The default staff-reference prefix when none is configured. Deliberately not
+// derived from brandName — a permanent identifier must not change when the brand's
+// display name is renamed.
+export const DEFAULT_EMPLOYEE_ID_PREFIX = "SNT";
+
+// Clean a stored/configured prefix into a usable code: uppercase, letters only,
+// 2–5 chars. Anything shorter/invalid falls back to the default, so employee-ID
+// generation always has a sane prefix even for legacy/blank rows.
+function normalizeEmployeeIdPrefix(raw?: string | null): string {
+  const clean = (raw ?? "").trim().toUpperCase().replace(/[^A-Z]/g, "");
+  return clean.length >= 2 ? clean.slice(0, 5) : DEFAULT_EMPLOYEE_ID_PREFIX;
+}
+
+// The effective staff-ID prefix, for the user module's employee-ID allocation.
+export async function getEmployeeIdPrefix(): Promise<string> {
+  const s = await settingsRepo.getOrCreate();
+  return normalizeEmployeeIdPrefix(s.employeeIdPrefix);
+}
+
 // --- Branding (all public) ---
 export interface PublicBranding {
   brandName: string;
@@ -92,6 +112,7 @@ export interface PublicSettings extends PublicBranding {
   cloudinaryApiKey: string;
   cloudinaryApiSecretSet: boolean;
   cloudinaryConfigured: boolean;
+  employeeIdPrefix: string;
 }
 
 function publicSettings(s: Settings): PublicSettings {
@@ -116,6 +137,9 @@ function publicSettings(s: Settings): PublicSettings {
     cloudinaryApiKey: s.cloudinaryApiKey || "",
     cloudinaryApiSecretSet: Boolean(s.cloudinaryApiSecret),
     cloudinaryConfigured: resolveCloudinaryCreds(s) !== null,
+
+    // Staff-ID prefix (effective value, default-filled).
+    employeeIdPrefix: normalizeEmployeeIdPrefix(s.employeeIdPrefix),
 
     // Branding
     ...brandingFrom(s),
@@ -149,6 +173,7 @@ export interface UpdateSettingsParams {
   footerText?: string;
   loginHeadline?: string;
   loginSubtext?: string;
+  employeeIdPrefix?: string;
 }
 
 export async function updateSettings(input: UpdateSettingsParams): Promise<PublicSettings> {
@@ -218,6 +243,11 @@ export async function updateSettings(input: UpdateSettingsParams): Promise<Publi
   }
   if (typeof input.loginSubtext === "string") {
     data.loginSubtext = input.loginSubtext.trim() || null;
+  }
+  // Stored uppercased; empty clears it back to the default. Validation already
+  // bounded it to 2–5 letters.
+  if (typeof input.employeeIdPrefix === "string") {
+    data.employeeIdPrefix = input.employeeIdPrefix.trim().toUpperCase() || null;
   }
 
   const updated = await settingsRepo.update(s.id, data);

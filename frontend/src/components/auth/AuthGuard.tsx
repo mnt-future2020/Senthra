@@ -5,24 +5,27 @@ import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
-import { canAccessDashboard, homeFor } from "@/types/auth";
+import { homeFor } from "@/types/auth";
 
-// Gate a protected area. While the session is verified — or once it's found to be
+// Gate a protected area. While the session is being verified — or once it's found
 // invalid / not allowed here (until the redirect lands) — we render a neutral
-// full-screen loader, NOT the app chrome, so a visitor never sees content they
-// shouldn't. Redirects to /login when unauthenticated.
+// placeholder, NOT the app chrome, so a visitor never sees content they shouldn't.
+// Redirects to /login when unauthenticated.
 //
-//  - requireType: exact account type (used by the staff portal).
-//  - requireDashboard: admin OR a staff user with any dashboard permission
-//    (permission-less staff are sent to /portal).
+//  - No flags: requires an authenticated principal (admin or staff). The dashboard
+//    shell is shared by everyone; per-section access is enforced inside it.
+//  - requireType: also require an exact account type; a mismatch is sent to its home.
+//  - fallback: what to show while gating. Defaults to a centered spinner; the
+//    dashboard passes a shell-shaped skeleton so the verified shell mounts with no
+//    layout shift (no bare spinner → skeleton hop).
 export function AuthGuard({
   children,
   requireType,
-  requireDashboard,
+  fallback,
 }: {
   children: React.ReactNode;
   requireType?: "admin" | "user";
-  requireDashboard?: boolean;
+  fallback?: React.ReactNode;
 }) {
   const { principal, loading } = useAuth();
   const router = useRouter();
@@ -33,21 +36,15 @@ export function AuthGuard({
       router.replace("/login");
       return;
     }
-    if (requireDashboard && !canAccessDashboard(principal)) {
-      router.replace("/portal");
-      return;
-    }
     if (requireType && principal.type !== requireType) {
       router.replace(homeFor(principal));
     }
-  }, [loading, principal, requireType, requireDashboard, router]);
+  }, [loading, principal, requireType, router]);
 
-  const allowed =
-    principal &&
-    (!requireType || principal.type === requireType) &&
-    (!requireDashboard || canAccessDashboard(principal));
+  const allowed = principal && (!requireType || principal.type === requireType);
 
   if (loading || !allowed) {
+    if (fallback) return <>{fallback}</>;
     return (
       <div className="flex min-h-screen items-center justify-center bg-[var(--bg)]">
         <Loader2 className="h-6 w-6 animate-spin text-[var(--muted)]" />

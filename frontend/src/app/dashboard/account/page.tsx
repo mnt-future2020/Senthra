@@ -9,7 +9,8 @@ import { AccountPanel } from "@/components/account/AccountPanel";
 // "My Account" for a staff user, rendered inside the dashboard shell. The
 // super-admin account manages its own email/password under Settings → Account, so
 // an admin who lands here is redirected there. AuthGuard (in the dashboard layout)
-// already keeps unauthenticated visitors and permission-less staff out.
+// keeps unauthenticated visitors out; this page is intentionally open to ANY staff
+// user (it's their own account), so it needs no permission gate.
 export default function AccountPage() {
   const { admin } = useAuth();
   const router = useRouter();
@@ -20,9 +21,5 @@ export default function AccountPage() {
 
   if (admin) return null;
 
-  return (
-    <div className="mx-auto w-full max-w-3xl">
-      <AccountPanel />
-    </div>
-  );
+  return <AccountPanel />;
 }

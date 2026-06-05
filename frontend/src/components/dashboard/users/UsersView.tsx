@@ -2,11 +2,10 @@
 
 import * as React from "react";
 import { createPortal } from "react-dom";
+import { useRouter } from "next/navigation";
 import {
   Ban,
-  Check,
   CheckCircle2,
-  Copy,
   MoreHorizontal,
   Pencil,
   Search,
@@ -17,18 +16,17 @@ import {
 } from "lucide-react";
 
 import { useDashboard } from "@/hooks/useDashboard";
+import { useAuth } from "@/hooks/useAuth";
 import * as roleService from "@/services/role.service";
 import * as userService from "@/services/user.service";
 import type { Role } from "@/types/role";
 import type { User, UserStatus } from "@/types/user";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ghostBtn, labelCls, primaryBtn } from "@/components/dashboard/settings/ui/styles";
 import { Avatar } from "./Avatar";
 import { ConfirmDialog } from "./ConfirmDialog";
-import { Modal } from "./Modal";
 import { Pagination } from "./Pagination";
 import { StatusBadge } from "./StatusBadge";
-import { UserFormModal } from "./UserFormModal";
+import { TempPasswordModal } from "./TempPasswordModal";
 
 const PAGE_SIZE = 20;
 
@@ -58,12 +56,16 @@ function MenuItem({
 
 function RowActions({
   user,
+  canEdit,
+  canDelete,
   onEdit,
   onToggleStatus,
   onResend,
   onDelete,
 }: {
   user: User;
+  canEdit: boolean;
+  canDelete: boolean;
   onEdit: () => void;
   onToggleStatus: () => void;
   onResend: () => void;
@@ -107,6 +109,9 @@ function RowActions({
     };
   }, [open]);
 
+  // Nothing this principal can do to the row → render an empty cell.
+  if (!canEdit && !canDelete) return null;
+
   return (
     <div className="flex justify-end">
       <button
@@ -126,87 +131,35 @@ function RowActions({
               className="anim-fade-in fixed z-[60] w-44 rounded-xl border border-[var(--border)] bg-[var(--surface)] py-1 shadow-2xl"
               style={{ top: pos.top, bottom: pos.bottom, right: pos.right }}
             >
-              <MenuItem icon={Pencil} onClick={() => { close(); onEdit(); }}>
-                Edit
-              </MenuItem>
-              <MenuItem
-                icon={activate ? CheckCircle2 : Ban}
-                onClick={() => { close(); onToggleStatus(); }}
-              >
-                {activate ? "Activate" : "Suspend"}
-              </MenuItem>
-              <MenuItem icon={Send} onClick={() => { close(); onResend(); }}>
-                Resend invite
-              </MenuItem>
-              <div className="my-1 border-t border-[var(--border-2)]" />
-              <MenuItem icon={Trash2} danger onClick={() => { close(); onDelete(); }}>
-                Delete
-              </MenuItem>
+              {canEdit && (
+                <>
+                  <MenuItem icon={Pencil} onClick={() => { close(); onEdit(); }}>
+                    Edit
+                  </MenuItem>
+                  <MenuItem
+                    icon={activate ? CheckCircle2 : Ban}
+                    onClick={() => { close(); onToggleStatus(); }}
+                  >
+                    {activate ? "Activate" : "Suspend"}
+                  </MenuItem>
+                  <MenuItem icon={Send} onClick={() => { close(); onResend(); }}>
+                    Resend invite
+                  </MenuItem>
+                </>
+              )}
+              {canEdit && canDelete && (
+                <div className="my-1 border-t border-[var(--border-2)]" />
+              )}
+              {canDelete && (
+                <MenuItem icon={Trash2} danger onClick={() => { close(); onDelete(); }}>
+                  Delete
+                </MenuItem>
+              )}
             </div>
           </>,
           document.body,
         )}
     </div>
-  );
-}
-
-function TempPasswordModal({
-  open,
-  email,
-  password,
-  isResend,
-  onClose,
-}: {
-  open: boolean;
-  email: string;
-  password: string;
-  isResend: boolean;
-  onClose: () => void;
-}) {
-  const [copied, setCopied] = React.useState(false);
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(password);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // clipboard may be unavailable — the value is visible to copy manually
-    }
-  };
-
-  return (
-    <Modal
-      open={open}
-      onClose={onClose}
-      size="md"
-      title={isResend ? "Invite re-sent" : "User created"}
-      subtitle={email}
-      footer={
-        <button onClick={onClose} className={primaryBtn}>
-          Done
-        </button>
-      }
-    >
-      <div className="space-y-4">
-        <p className="text-sm leading-relaxed text-[var(--muted)]">
-          An account email has been sent to{" "}
-          <strong className="text-[var(--ink)]">{email}</strong>. You can share the
-          temporary password securely if needed — it won&apos;t be shown again.
-        </p>
-        <div>
-          <label className={labelCls}>Temporary password</label>
-          <div className="flex items-center gap-2">
-            <code className="flex-1 truncate rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3.5 py-2.5 font-mono text-sm text-[var(--ink)]">
-              {password}
-            </code>
-            <button onClick={copy} className={ghostBtn}>
-              {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-              {copied ? "Copied" : "Copy"}
-            </button>
-          </div>
-        </div>
-      </div>
-    </Modal>
   );
 }
 
@@ -258,11 +211,19 @@ function UsersTableSkeleton() {
 
 export function UsersView() {
   const { pushToast } = useDashboard();
+  const { can } = useAuth();
+  const router = useRouter();
+  const canCreate = can("users.create");
+  const canEdit = can("users.edit");
+  const canDelete = can("users.delete");
 
-  const [users, setUsers] = React.useState<User[]>([]);
-  const [roles, setRoles] = React.useState<Role[]>([]);
-  const [total, setTotal] = React.useState(0);
-  const [totalPages, setTotalPages] = React.useState(1);
+  // Seed from the SWR caches so a remount (e.g. returning right after creating a
+  // user) renders the previous data instantly; the effects below revalidate.
+  const cachedInitial = userService.getCachedUsers({ page: 1, pageSize: PAGE_SIZE });
+  const [users, setUsers] = React.useState<User[]>(cachedInitial?.users ?? []);
+  const [roles, setRoles] = React.useState<Role[]>(() => roleService.getCachedRoles() ?? []);
+  const [total, setTotal] = React.useState(cachedInitial?.total ?? 0);
+  const [totalPages, setTotalPages] = React.useState(cachedInitial?.totalPages ?? 1);
   const [page, setPage] = React.useState(1);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
@@ -273,11 +234,6 @@ export function UsersView() {
   const [roleFilter, setRoleFilter] = React.useState<string>("all");
   const [refreshKey, setRefreshKey] = React.useState(0);
 
-  const [form, setForm] = React.useState<{ open: boolean; mode: "create" | "edit"; user: User | null }>({
-    open: false,
-    mode: "create",
-    user: null,
-  });
   const [confirm, setConfirm] = React.useState<{ open: boolean; user: User | null }>({
     open: false,
     user: null,
@@ -318,15 +274,23 @@ export function UsersView() {
   React.useEffect(() => {
     let active = true;
     (async () => {
+      const params = {
+        page,
+        pageSize: PAGE_SIZE,
+        search: debouncedSearch || undefined,
+        status: statusFilter === "all" ? undefined : statusFilter,
+        roleId: roleFilter === "all" ? undefined : roleFilter,
+      };
+      // Show cached data for this exact query immediately (no skeleton), then refetch.
+      const cached = userService.getCachedUsers(params);
+      if (active && cached) {
+        setUsers(cached.users);
+        setTotal(cached.total);
+        setTotalPages(cached.totalPages);
+      }
       setLoading(true);
       try {
-        const res = await userService.listUsers({
-          page,
-          pageSize: PAGE_SIZE,
-          search: debouncedSearch || undefined,
-          status: statusFilter === "all" ? undefined : statusFilter,
-          roleId: roleFilter === "all" ? undefined : roleFilter,
-        });
+        const res = await userService.listUsers(params);
         if (!active) return;
         setUsers(res.users);
         setTotal(res.total);
@@ -357,23 +321,6 @@ export function UsersView() {
   const onRoleChange = (v: string) => {
     setRoleFilter(v);
     setPage(1);
-  };
-
-  const handleSaved = (result: { user: User; temporaryPassword?: string }) => {
-    setForm({ open: false, mode: "create", user: null });
-    if (result.temporaryPassword) {
-      setPage(1); // a new user sorts to the top
-      refresh();
-      setTempPw({
-        open: true,
-        email: result.user.email,
-        password: result.temporaryPassword,
-        isResend: false,
-      });
-    } else {
-      refresh();
-      pushToast("User updated.", "success");
-    }
   };
 
   const toggleStatus = async (user: User) => {
@@ -452,12 +399,14 @@ export function UsersView() {
             </option>
           ))}
         </select>
-        <button
-          onClick={() => setForm({ open: true, mode: "create", user: null })}
-          className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 sm:ml-auto"
-        >
-          <UserPlus className="h-4 w-4" /> Add user
-        </button>
+        {canCreate && (
+          <button
+            onClick={() => router.push("/dashboard/users/new")}
+            className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 sm:ml-auto"
+          >
+            <UserPlus className="h-4 w-4" /> Add user
+          </button>
+        )}
       </div>
 
       {/* Table */}
@@ -536,7 +485,9 @@ export function UsersView() {
                     <td className="px-5 py-3">
                       <RowActions
                         user={u}
-                        onEdit={() => setForm({ open: true, mode: "edit", user: u })}
+                        canEdit={canEdit}
+                        canDelete={canDelete}
+                        onEdit={() => router.push(`/dashboard/users/${u.employeeId ?? u.id}/edit`)}
                         onToggleStatus={() => toggleStatus(u)}
                         onResend={() => resend(u)}
                         onDelete={() => setConfirm({ open: true, user: u })}
@@ -560,16 +511,6 @@ export function UsersView() {
             onPage={setPage}
           />
         </div>
-      )}
-
-      {form.open && (
-        <UserFormModal
-          mode={form.mode}
-          user={form.user}
-          roles={roles}
-          onClose={() => setForm({ open: false, mode: "create", user: null })}
-          onSaved={handleSaved}
-        />
       )}
 
       <ConfirmDialog

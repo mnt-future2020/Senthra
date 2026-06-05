@@ -2,7 +2,7 @@ import { Router } from "express";
 
 import * as roleController from "./role.controller.js";
 import {
-  requireAdmin,
+  requireAnyPermission,
   requireAuth,
   requirePermission,
 } from "../../middleware/auth.middleware.js";
@@ -14,15 +14,17 @@ const router = Router();
 
 router.use(requireAuth);
 
-// Reading the roles list (e.g. to populate the user role dropdown) needs
-// users.manage; the super-admin always passes.
-router.get("/", requirePermission("users.manage"), roleController.listRoles);
+// The roles list + permission catalog are read both by role-managers and by the
+// user form's role picker, so any of these capabilities can read them.
+router.get("/", requireAnyPermission("roles.view", "users.create", "users.edit"), roleController.listRoles);
+router.get("/permissions", requireAnyPermission("roles.view", "roles.create", "roles.edit"), roleController.listPermissions);
+router.get("/:id", requireAnyPermission("roles.view", "roles.edit"), roleController.getRole);
 
-// The permission catalog + every role mutation are super-admin only — role and
-// permission configuration is never delegated.
-router.get("/permissions", requireAdmin, roleController.listPermissions);
-router.post("/", requireAdmin, writeLimiter, validateBody(createRoleSchema), roleController.createRole);
-router.put("/:id", requireAdmin, writeLimiter, validateBody(updateRoleSchema), roleController.updateRole);
-router.delete("/:id", requireAdmin, writeLimiter, roleController.deleteRole);
+// Role mutations are delegatable (roles.create / roles.edit / roles.delete) but
+// escalation-guarded in role.service: a delegate can't grant permissions it lacks,
+// grant full access ("*"), or touch a system role. The super-admin always passes.
+router.post("/", requirePermission("roles.create"), writeLimiter, validateBody(createRoleSchema), roleController.createRole);
+router.put("/:id", requirePermission("roles.edit"), writeLimiter, validateBody(updateRoleSchema), roleController.updateRole);
+router.delete("/:id", requirePermission("roles.delete"), writeLimiter, roleController.deleteRole);
 
 export default router;

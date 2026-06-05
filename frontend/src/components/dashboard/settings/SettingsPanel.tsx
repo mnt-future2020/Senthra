@@ -1,7 +1,8 @@
 "use client";
 
 import * as React from "react";
-import { ShieldCheck, Palette, Plug, Mail, MailCheck, Sparkles } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { ShieldCheck, Palette, Plug, Mail, MailCheck, Paintbrush } from "lucide-react";
 
 import { AccountSection } from "./AccountSection";
 import { SecuritySection } from "./SecuritySection";
@@ -23,36 +24,40 @@ const NAV: {
   label: string;
   icon: React.ElementType;
   desc: string;
-  requires: "admin" | "settings.manage" | "email_templates.manage";
+  requires: "admin" | "settings.view" | "email_templates.view";
 }[] = [
   { id: "account", label: "Account & Security", icon: ShieldCheck, desc: "Email & password", requires: "admin" },
-  { id: "branding", label: "Branding", icon: Sparkles, desc: "Logo, name & theme text", requires: "settings.manage" },
-  { id: "appearance", label: "Appearance", icon: Palette, desc: "Theme & layout", requires: "settings.manage" },
-  { id: "integrations", label: "Integrations", icon: Plug, desc: "Google Sign-In", requires: "settings.manage" },
-  { id: "email", label: "Email", icon: Mail, desc: "SMTP & delivery", requires: "settings.manage" },
-  { id: "email-templates", label: "Email Templates", icon: MailCheck, desc: "Customize sent emails", requires: "email_templates.manage" },
+  { id: "branding", label: "Branding", icon: Paintbrush, desc: "Logo, name & theme text", requires: "settings.view" },
+  { id: "appearance", label: "Appearance", icon: Palette, desc: "Theme & layout", requires: "settings.view" },
+  { id: "integrations", label: "Integrations", icon: Plug, desc: "Google Sign-In", requires: "settings.view" },
+  { id: "email", label: "Email", icon: Mail, desc: "SMTP & delivery", requires: "settings.view" },
+  { id: "email-templates", label: "Email Templates", icon: MailCheck, desc: "Customize sent emails", requires: "email_templates.view" },
 ];
 
 export function SettingsPanel(appearance: AppearanceProps) {
-  const [section, setSection] = React.useState<Section>("account");
   const guard = useNavigationGuard();
   const { admin, can } = useAuth();
+  const router = useRouter();
+  const searchParams = useSearchParams();
 
   // Only the sections this principal may use.
   const visible = NAV.filter((item) =>
     item.requires === "admin" ? Boolean(admin) : can(item.requires),
   );
-  // The current section, falling back to the first visible one (so a staff user
-  // who can't see "Account" still lands on a section they can use).
-  const activeSection: Section = visible.some((s) => s.id === section)
-    ? section
-    : visible[0]?.id ?? "account";
+  // The active section comes from ?section= so it survives a refresh and is
+  // shareable/bookmarkable, falling back to the first section this principal can
+  // actually use (so a staff user who can't see "Account" still lands somewhere valid).
+  const requested = searchParams.get("section");
+  const activeSection: Section =
+    visible.find((s) => s.id === requested)?.id ?? visible[0]?.id ?? "account";
 
-  // Switching sections unmounts the current one, so confirm first if it has
-  // unsaved edits (the guard is a no-op when nothing is dirty).
+  // Switching sections updates the URL. The current one may have unsaved edits, so
+  // confirm first (the guard is a no-op when nothing is dirty).
   const requestSection = (target: Section) => {
     if (target === activeSection) return;
-    guard.attemptLeave(() => setSection(target));
+    guard.attemptLeave(() =>
+      router.replace(`/dashboard/settings?section=${target}`, { scroll: false }),
+    );
   };
 
   return (

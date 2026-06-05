@@ -1,9 +1,10 @@
 "use client";
 
 import * as React from "react";
-import { Mail, Pencil } from "lucide-react";
+import { Eye, Mail, Pencil } from "lucide-react";
 
 import * as templateService from "@/services/emailTemplate.service";
+import { useAuth } from "@/hooks/useAuth";
 import type { EmailTemplate } from "@/types/emailTemplate";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmailTemplateEditor } from "./EmailTemplateEditor";
@@ -44,7 +45,12 @@ function TemplatesSkeleton() {
 }
 
 export function EmailTemplatesSection() {
-  const [templates, setTemplates] = React.useState<EmailTemplate[]>([]);
+  const { can } = useAuth();
+  const canManage = can("email_templates.manage");
+  // Seed from the cache so a revisit renders instantly instead of the skeleton.
+  const [templates, setTemplates] = React.useState<EmailTemplate[]>(
+    () => templateService.getCachedTemplates() ?? [],
+  );
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [editingId, setEditingId] = React.useState<string | null>(null);
@@ -101,7 +107,7 @@ export function EmailTemplatesSection() {
       title="Email Templates"
       desc="Customise every email the app sends — content, subject and styling. Variables like {{firstName}} are filled in automatically. Disable a template to stop that email (account & security emails always send)."
     >
-      {loading ? (
+      {loading && templates.length === 0 ? (
         <TemplatesSkeleton />
       ) : error ? (
         <div className="py-10 text-center text-sm text-[var(--neg)]">{error}</div>
@@ -122,14 +128,19 @@ export function EmailTemplatesSection() {
                     <Toggle
                       checked={t.enabled}
                       onChange={() => toggleEnabled(t)}
+                      disabled={!canManage}
                       aria-label={`Enable ${t.name}`}
                     />
                     <button
                       onClick={() => setEditingId(t.id)}
                       className="flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-1.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)]"
                     >
-                      <Pencil className="h-3.5 w-3.5" />
-                      Edit
+                      {canManage ? (
+                        <Pencil className="h-3.5 w-3.5" />
+                      ) : (
+                        <Eye className="h-3.5 w-3.5" />
+                      )}
+                      {canManage ? "Edit" : "View"}
                     </button>
                   </div>
                 ))}

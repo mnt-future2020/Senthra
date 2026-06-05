@@ -4,7 +4,9 @@ import * as React from "react";
 import { Loader2, Plug } from "lucide-react";
 
 import * as settingsService from "@/services/settings.service";
+import { useAuth } from "@/hooks/useAuth";
 import { SettingsCard } from "./ui/SettingsCard";
+import { ReadOnlyNotice } from "./ui/ReadOnlyNotice";
 import { Notice } from "./ui/Notice";
 import { PasswordInput } from "./ui/PasswordInput";
 import { Toggle } from "./ui/Toggle";
@@ -13,6 +15,8 @@ import { inputCls, primaryBtn } from "./ui/styles";
 import type { Msg } from "./types";
 
 export function IntegrationsSection() {
+  const { can } = useAuth();
+  const canManage = can("settings.manage");
   const [googleEnabled, setGoogleEnabled] = React.useState(false);
   const [clientId, setClientId] = React.useState("");
   const [clientSecret, setClientSecret] = React.useState("");
@@ -63,6 +67,8 @@ export function IntegrationsSection() {
       desc="Configure Google OAuth so you can sign in with Google. Credentials come from the Google Cloud Console; the secret is stored securely and never shown again."
     >
       <form onSubmit={save} className="space-y-4">
+        {!canManage && <ReadOnlyNotice />}
+        <fieldset disabled={!canManage} className="min-w-0 space-y-4">
         <div className="flex items-center justify-between gap-4 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-4 py-3.5">
           <div className="min-w-0">
             <span className="block text-sm font-bold text-[var(--ink)]">
@@ -114,6 +120,7 @@ export function IntegrationsSection() {
             Save Google settings
           </button>
         </div>
+        </fieldset>
       </form>
     </SettingsCard>
   );

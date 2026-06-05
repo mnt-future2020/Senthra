@@ -20,6 +20,7 @@ export interface UserPrincipal {
   email: string;
   firstName: string;
   lastName: string;
+  profileImageUrl: string | null;
   status: string;
   mustResetPassword: boolean;
   role: UserRoleRef | null;
@@ -32,16 +33,6 @@ export type Principal = AdminPrincipal | UserPrincipal;
 // Back-compat alias for admin-facing components that read `useAuth().admin`.
 export type Admin = AdminPrincipal;
 
-// The permissions that map to an actual dashboard screen. A staff user holding
-// ANY of these can enter the dashboard; otherwise they land on the staff portal.
-// (audit.view is a valid, assignable permission but has no screen yet, so it
-// doesn't grant dashboard entry on its own — add it back when an audit page ships.)
-export const DASHBOARD_PERMISSIONS = [
-  "users.manage",
-  "settings.manage",
-  "email_templates.manage",
-] as const;
-
 // Does a principal hold a permission? The super-admin account holds everything.
 export function principalCan(principal: Principal | null, permission: string): boolean {
   if (!principal) return false;
@@ -49,19 +40,37 @@ export function principalCan(principal: Principal | null, permission: string): b
   return principal.permissions.includes("*") || principal.permissions.includes(permission);
 }
 
-// Can this principal reach the dashboard (admin area) at all?
-export function canAccessDashboard(principal: Principal | null): boolean {
-  if (!principal) return false;
-  if (principal.type === "admin") return true;
-  // A staff user must set their own password before anything else — until then
-  // they're held on the portal (the set-password screen), never the dashboard.
-  if (principal.mustResetPassword) return false;
-  return DASHBOARD_PERMISSIONS.some((p) => principalCan(principal, p));
+// The dashboard sections, in landing-priority order, each with the permission(s)
+// that reveal it. Every authenticated user enters the same shell; the first section
+// they're allowed to see becomes their landing, and a user with none gets the
+// no-access home. (audit.view has no screen yet, so it isn't a section.)
+export const DASHBOARD_SECTIONS: { path: string; anyOf: string[] }[] = [
+  { path: "/dashboard/settings", anyOf: ["settings.view", "email_templates.view"] },
+  { path: "/dashboard/users", anyOf: ["users.view", "roles.view"] },
+];
+
+// The first dashboard section this principal can open, or null if they have none.
+export function firstDashboardPath(principal: Principal | null): string | null {
+  if (!principal) return null;
+  for (const section of DASHBOARD_SECTIONS) {
+    if (section.anyOf.some((p) => principalCan(principal, p))) return section.path;
+  }
+  return null;
 }
 
-// Where each principal lands after authentication.
-export function homeFor(principal: Principal): string {
-  return canAccessDashboard(principal) ? "/dashboard" : "/portal";
+// Does this principal have access to at least one dashboard section?
+export function canAccessDashboard(principal: Principal | null): boolean {
+  return firstDashboardPath(principal) !== null;
+}
+
+// Where to send a principal after authentication. Everyone enters the unified
+// dashboard shell: the shell intercepts a first-login user with the set-password
+// screen, and the dashboard landing routes on to their first section (or the
+// no-access home). The principal is kept in the signature so this stays the single
+// place that decides post-auth routing, even though it's the same shell for all.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export function homeFor(_principal: Principal): string {
+  return "/dashboard";
 }
 
 // An active device session for the current principal.

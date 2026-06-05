@@ -1,4 +1,6 @@
-import type { Prisma, Role, User } from "@prisma/client";
+import crypto from "node:crypto";
+
+import { Prisma, type Role, type User } from "@prisma/client";
 
 import { prisma } from "../../lib/prisma.js";
 
@@ -63,6 +65,26 @@ export function findByEmailIncludingDeleted(email: string): Promise<User | null>
   return prisma.user.findUnique({ where: { email } });
 }
 
+// Uniqueness check for auto-generated employee IDs (matches soft-deleted rows too,
+// since employeeId is a unique index across every row).
+export function findByEmployeeId(employeeId: string): Promise<User | null> {
+  return prisma.user.findUnique({ where: { employeeId } });
+}
+
+// Lookup by the human employee reference (e.g. "STR-0007"), non-deleted, with role —
+// used when a page routes by employeeId instead of the database id.
+export function findByEmployeeIdWithRole(employeeId: string): Promise<UserWithRole | null> {
+  return prisma.user.findFirst({
+    where: { employeeId, deletedAt: null },
+    include: { role: true },
+  });
+}
+
+// Total user rows including soft-deleted — the base for the next employee-ID number.
+export function countAll(): Promise<number> {
+  return prisma.user.count();
+}
+
 // Login / forgot-password lookup: a non-deleted user by email, with role + auth
 // fields. Does NOT filter by status — the caller checks it, so a suspended account
 // can be messaged clearly (login) or silently skipped (reset email).
@@ -90,6 +112,82 @@ export function create(data: Prisma.UserCreateInput): Promise<UserWithRole> {
 
 export function update(id: string, data: Prisma.UserUpdateInput): Promise<UserWithRole> {
   return prisma.user.update({ where: { id }, data, include: { role: true } });
+}
+
+// --- Employee ID allocation -------------------------------------------------
+//
+// Auto-generate a unique, readable staff reference (e.g. "SNT-0007"). The `prefix`
+// comes from settings (resolved by the caller) so it isn't hardcoded to one brand.
+// The number tracks the total row count (soft-deleted rows included, so numbers are
+// never reused). Generation is best-effort — the WRITE is what guarantees
+// uniqueness: the create/update is retried against the `employeeId` unique index,
+// so two concurrent creates that pick the same number can't both win (the DB
+// rejects the second and we regenerate). A random suffix on the final attempt
+// guarantees the loop terminates.
+
+// A unique-constraint violation we should retry (regenerate the employeeId).
+// `meta.target` names the offending index — when it points at employeeId, retry.
+// When the engine omits target (rare), treat it as an employeeId clash too: email
+// is already pre-checked before this allocation loop, so employeeId is the only
+// unique field set here whose collision is expected. A real concurrent email clash
+// still carries `target: ["email"]`, so it's excluded and surfaces as a 409.
+function isEmployeeIdConflict(e: unknown): boolean {
+  if (!(e instanceof Prisma.PrismaClientKnownRequestError) || e.code !== "P2002") {
+    return false;
+  }
+  const target = (e.meta as { target?: unknown } | undefined)?.target;
+  if (target == null) return true;
+  return String(target).includes("employeeId");
+}
+
+async function withEmployeeId<T>(
+  prefix: string,
+  write: (employeeId: string) => Promise<T>,
+): Promise<T> {
+  for (let attempt = 0; attempt < 6; attempt++) {
+    // Re-count each attempt: a retry means a concurrent create just committed, so a
+    // fresh count steps past it instead of re-picking the same contended number.
+    const base = await prisma.user.count();
+    const employeeId =
+      attempt < 5
+        ? `${prefix}-${String(base + 1 + attempt).padStart(4, "0")}`
+        : `${prefix}-${crypto.randomUUID().slice(0, 6).toUpperCase()}`;
+    try {
+      return await write(employeeId);
+    } catch (e) {
+      if (isEmployeeIdConflict(e)) continue; // a concurrent create took it — retry
+      throw e;
+    }
+  }
+  throw new Error("Could not allocate a unique employee ID.");
+}
+
+// Create a new user with a freshly-allocated, collision-safe employeeId.
+export function createWithEmployeeId(
+  data: Omit<Prisma.UserCreateInput, "employeeId">,
+  prefix: string,
+): Promise<UserWithRole> {
+  return withEmployeeId(prefix, (employeeId) =>
+    prisma.user.create({
+      data: { deletedAt: null, ...data, employeeId },
+      include: { role: true },
+    }),
+  );
+}
+
+// Revive (overwrite) a soft-deleted user, re-allocating a collision-safe employeeId.
+export function reviveWithEmployeeId(
+  id: string,
+  data: Omit<Prisma.UserUpdateInput, "employeeId">,
+  prefix: string,
+): Promise<UserWithRole> {
+  return withEmployeeId(prefix, (employeeId) =>
+    prisma.user.update({
+      where: { id },
+      data: { ...data, employeeId },
+      include: { role: true },
+    }),
+  );
 }
 
 export function softDelete(id: string): Promise<User> {

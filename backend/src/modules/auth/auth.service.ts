@@ -345,7 +345,10 @@ export async function getGoogleConfig(): Promise<{
   return { enabled: true, clientId: settings.googleClientId };
 }
 
-// Verify the Google ID token and start a session for the authorized admin.
+// Verify the Google ID token and start a session for the matching account: the
+// super-admin (via its configured Google email) or an active staff user whose
+// account email is the verified Google email. Mirrors the password login's order,
+// so Google sign-in works for everyone RBAC already knows — not just the admin.
 export async function googleLogin(credential: string, meta?: AuthMeta): Promise<AuthResult> {
   const settings = await settingsRepo.findFirst();
   if (!settings?.googleEnabled || !settings.googleClientId) {
@@ -369,16 +372,35 @@ export async function googleLogin(credential: string, meta?: AuthMeta): Promise<
     throw unauthorized("Google account email is not verified.");
   }
 
+  // 1) Super-admin — matched on its configured Google email (or its login email).
   const admin = await adminRepo.findFirst();
-  if (!admin) throw notFound("No admin account exists.");
-
-  const allowed = (admin.googleEmail ?? admin.email).toLowerCase();
-  if (googleEmail !== allowed) {
-    throw forbidden("This Google account is not authorized.");
+  if (admin && googleEmail === (admin.googleEmail ?? admin.email).toLowerCase()) {
+    const principal = adminPrincipal(admin);
+    recordAuth("auth.login", principal, meta);
+    return { principal, ...(await startAndIssue(admin.id, "admin", meta)) };
   }
-  const principal = adminPrincipal(admin);
-  recordAuth("auth.login", principal, meta);
-  return { principal, ...(await startAndIssue(admin.id, "admin", meta)) };
+
+  // 2) A registered staff user whose account email is the verified Google email.
+  // RBAC is unchanged: the user signs in as themselves, with their role's permissions.
+  const user = await userRepo.findByEmailWithRole(googleEmail);
+  if (user) {
+    if (user.status !== "active") {
+      throw forbidden("Your account is not active. Contact an administrator.");
+    }
+    // The verified Google identity is itself proof of ownership, so a first-ever
+    // Google sign-in also satisfies the one-time temp-password wall — clear it so SSO
+    // users aren't forced to set a password they'll never use (they can still set one
+    // later via "forgot password" if they want a password fallback).
+    const account = user.mustResetPassword
+      ? await userRepo.update(user.id, { mustResetPassword: false })
+      : user;
+    const principal = userPrincipal(account);
+    recordAuth("auth.login", principal, meta);
+    return { principal, ...(await startAndIssue(account.id, "user", meta)) };
+  }
+
+  // 3) The verified email belongs to neither the admin nor any staff user.
+  throw forbidden("This Google account is not authorized.");
 }
 
 // --- device sessions (Settings → Account / portal) ---
