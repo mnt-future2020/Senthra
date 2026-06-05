@@ -1,5 +1,10 @@
 import { UsersRolesPanel } from "@/components/dashboard/users/UsersRolesPanel";
+import { PermissionGate } from "@/components/auth/PermissionGate";
 
 export default function UsersPage() {
-  return <UsersRolesPanel />;
+  return (
+    <PermissionGate anyOf={["users.manage"]}>
+      <UsersRolesPanel />
+    </PermissionGate>
+  );
 }

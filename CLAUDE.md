@@ -46,7 +46,7 @@ Fully documented in [backend/README.md](backend/README.md). Key invariants to re
 
 - **API access goes through `src/lib/api.ts`** — a thin axios wrapper that sends the auth cookies, **silently refreshes once on a 401 and replays the request**, and throws an `Error` carrying the server's message. Never call axios/fetch directly from components.
 - **`src/services/*.service.ts`** are typed, per-domain wrappers around `api()` (e.g. `user.service.ts`). Components call services, not `api()` directly.
-- **Global state via React Context providers** mounted in the root layout: `AuthProvider` (validates the session via `getCurrentAdmin()` on mount), `DashboardProvider`, `BrandingProvider`. Consume them through the `useAuth` / `useDashboard` / `useBranding` hooks — never `useContext` directly.
+- **Global state via React Context providers** mounted in the root layout: `AuthProvider` (validates the session via `getCurrentPrincipal()` on mount), `DashboardProvider`, `BrandingProvider`. Consume them through the `useAuth` / `useDashboard` / `useBranding` hooks — never `useContext` directly.
 - **Route protection**: `AuthGuard` wraps the dashboard shell and redirects to `/login`; while the session is verified (or found invalid) it shows a neutral full-screen loader instead of the shell, so an unauthenticated visitor never sees the app chrome/nav.
 - **Appearance** (theme / accent / density / radius) is persisted to a cookie and applied to `<html>` during SSR to avoid a flash — set via `DashboardProvider`, read with `lib/appearance.ts`.
 - **UI**: shadcn-style components in `src/components/ui/` with the `cn()` helper from `lib/utils.ts`; Tailwind v4; `lucide-react` icons; `recharts`, `@dnd-kit`, `@base-ui/react`/Radix for richer widgets.

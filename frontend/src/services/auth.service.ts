@@ -1,5 +1,5 @@
 import { api } from "@/lib/api";
-import type { Admin } from "@/types/auth";
+import type { DeviceSession, Principal } from "@/types/auth";
 
 // Typed wrappers around the backend auth endpoints. Components and providers call
 // these instead of hitting `api()` with raw URLs.
@@ -9,22 +9,22 @@ export interface GoogleConfig {
   clientId: string | null;
 }
 
-export function getCurrentAdmin(): Promise<Admin> {
-  return api<{ admin: Admin }>("/auth/me").then((r) => r.admin);
+export function getCurrentPrincipal(): Promise<Principal> {
+  return api<{ principal: Principal }>("/auth/me").then((r) => r.principal);
 }
 
-export function login(email: string, password: string, remember = true): Promise<Admin> {
-  return api<{ admin: Admin }>("/auth/login", {
+export function login(email: string, password: string, remember = true): Promise<Principal> {
+  return api<{ principal: Principal }>("/auth/login", {
     method: "POST",
     body: { email, password, remember },
-  }).then((r) => r.admin);
+  }).then((r) => r.principal);
 }
 
-export function loginWithGoogle(credential: string): Promise<Admin> {
-  return api<{ admin: Admin }>("/auth/google", {
+export function loginWithGoogle(credential: string): Promise<Principal> {
+  return api<{ principal: Principal }>("/auth/google", {
     method: "POST",
     body: { credential },
-  }).then((r) => r.admin);
+  }).then((r) => r.principal);
 }
 
 export function logout(): Promise<void> {
@@ -48,7 +48,7 @@ export function resetPassword(token: string, newPassword: string): Promise<void>
   }).then(() => undefined);
 }
 
-// Both email and password changes go through the same protected endpoint.
+// --- Super-admin account (Settings → Account) — /auth/credentials ---
 export function changeEmail(currentPassword: string, email: string): Promise<void> {
   return api("/auth/credentials", {
     method: "PATCH",
@@ -64,4 +64,26 @@ export function changePassword(
     method: "PATCH",
     body: { currentPassword, newPassword },
   }).then(() => undefined);
+}
+
+// --- Device sessions ---
+export function getSessions(): Promise<DeviceSession[]> {
+  return api<{ sessions: DeviceSession[] }>("/auth/sessions").then((r) => r.sessions);
+}
+
+export function revokeOtherSessions(): Promise<void> {
+  return api("/auth/sessions/revoke-others", { method: "POST" }).then(() => undefined);
+}
+
+// --- Staff user own password — /auth/password ---
+// First-login forced change omits currentPassword (the session authorises it);
+// a voluntary change passes it. Returns the refreshed principal.
+export function changeUserPassword(
+  newPassword: string,
+  currentPassword?: string,
+): Promise<Principal> {
+  return api<{ principal: Principal }>("/auth/password", {
+    method: "POST",
+    body: { newPassword, currentPassword },
+  }).then((r) => r.principal);
 }

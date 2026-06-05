@@ -1,41 +1,68 @@
+import type { Request } from "express";
+
 import * as authService from "./auth.service.js";
+import type { AuthMeta } from "./auth.service.js";
 import { asyncHandler } from "../../utils/async-handler.js";
 import { clearAuthCookies, REFRESH_COOKIE, setAuthCookies } from "../../utils/cookies.js";
 import { unauthorized } from "../../utils/http-error.js";
 import type {
   ChangeCredentialsInput,
+  ChangePasswordInput,
   ForgotPasswordInput,
   GoogleLoginInput,
   LoginInput,
   ResetPasswordInput,
 } from "./auth.validation.js";
 
-// POST /auth/login
+// IP + user-agent snapshot recorded with a login (audit trail).
+function authMeta(req: Request): AuthMeta {
+  return { ip: req.ip, userAgent: req.get("user-agent") ?? undefined };
+}
+
+// POST /auth/login — unified: super-admin account or an active staff user.
 export const login = asyncHandler(async (req, res) => {
   const { email, password, remember } = req.body as LoginInput;
-  const { admin, accessToken, refreshToken } = await authService.login(email, password);
+  const { principal, accessToken, refreshToken } = await authService.login(
+    email,
+    password,
+    authMeta(req),
+  );
   setAuthCookies(res, accessToken, refreshToken, remember !== false);
-  res.json({ token: accessToken, admin });
+  res.json({ token: accessToken, principal });
 });
 
-// GET /auth/me  (protected)
+// GET /auth/me  (protected) — the resolved principal (admin or user).
 export const me = asyncHandler(async (req, res) => {
-  const admin = await authService.getCurrentAdmin(req.adminId!);
-  res.json({ admin });
+  res.json({ principal: req.principal });
 });
 
-// PATCH /auth/credentials  (protected) — change email and/or password.
+// PATCH /auth/credentials  (admin only) — change the super-admin email/password.
 export const changeCredentials = asyncHandler(async (req, res) => {
-  const { admin, tokens } = await authService.changeCredentials(
+  const { principal, tokens } = await authService.changeCredentials(
     req.adminId!,
     req.body as ChangeCredentialsInput,
+    req.sessionId ?? "",
   );
   // Re-issue a fresh session if the password changed (keeps the device signed in).
   if (tokens) setAuthCookies(res, tokens.accessToken, tokens.refreshToken, true);
-  res.json({ admin });
+  res.json({ principal });
 });
 
-// POST /auth/refresh — rotate tokens using the refresh cookie.
+// POST /auth/password  (protected, staff user) — change own password. Powers the
+// first-login forced change and voluntary changes; re-issues the session.
+export const changePassword = asyncHandler(async (req, res) => {
+  const { currentPassword, newPassword } = req.body as ChangePasswordInput;
+  const { tokens, principal } = await authService.changeUserPassword(
+    req.userId!,
+    currentPassword,
+    newPassword,
+    req.sessionId ?? "",
+  );
+  setAuthCookies(res, tokens.accessToken, tokens.refreshToken, true);
+  res.json({ principal });
+});
+
+// POST /auth/refresh — rotate tokens using the refresh cookie (admin or user).
 export const refresh = asyncHandler(async (req, res) => {
   const token = (req.cookies?.[REFRESH_COOKIE] as string | undefined) ?? req.body?.refreshToken;
   if (!token) throw unauthorized("No refresh token.");
@@ -48,17 +75,29 @@ export const refresh = asyncHandler(async (req, res) => {
     throw err;
   }
   setAuthCookies(res, result.accessToken, result.refreshToken, true);
-  res.json({ token: result.accessToken, admin: result.admin });
+  res.json({ token: result.accessToken, principal: result.principal });
 });
 
-// POST /auth/logout  (protected) — revoke sessions + clear cookies.
+// POST /auth/logout  (protected) — sign out the current device + clear cookies.
 export const logout = asyncHandler(async (req, res) => {
-  await authService.logout(req.adminId!);
+  if (req.principal) await authService.logout(req.principal, req.sessionId ?? "");
   clearAuthCookies(res);
   res.json({ ok: true });
 });
 
-// POST /auth/forgot-password — email a reset link.
+// GET /auth/sessions  (protected) — the principal's active devices.
+export const listSessions = asyncHandler(async (req, res) => {
+  const sessions = await authService.listSessions(req.principal!, req.sessionId ?? "");
+  res.json({ sessions });
+});
+
+// POST /auth/sessions/revoke-others  (protected) — sign out all other devices.
+export const revokeOtherSessions = asyncHandler(async (req, res) => {
+  await authService.revokeOtherSessions(req.principal!, req.sessionId ?? "");
+  res.json({ ok: true });
+});
+
+// POST /auth/forgot-password — email a reset link (admin or staff user).
 // Always returns the same generic response to avoid email enumeration.
 export const forgotPassword = asyncHandler(async (req, res) => {
   const { email } = req.body as ForgotPasswordInput;
@@ -83,7 +122,10 @@ export const googleConfig = asyncHandler(async (_req, res) => {
 // POST /auth/google — verify the Google ID token and start a session.
 export const googleLogin = asyncHandler(async (req, res) => {
   const { credential, remember } = req.body as GoogleLoginInput;
-  const { admin, accessToken, refreshToken } = await authService.googleLogin(credential);
+  const { principal, accessToken, refreshToken } = await authService.googleLogin(
+    credential,
+    authMeta(req),
+  );
   setAuthCookies(res, accessToken, refreshToken, remember !== false);
-  res.json({ token: accessToken, admin });
+  res.json({ token: accessToken, principal });
 });

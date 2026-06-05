@@ -1,7 +1,7 @@
 import { Router } from "express";
 
 import * as userController from "./user.controller.js";
-import { requireAuth } from "../../middleware/auth.middleware.js";
+import { requireAuth, requirePermission } from "../../middleware/auth.middleware.js";
 import { writeLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import {
@@ -12,8 +12,9 @@ import {
 
 const router = Router();
 
-// All user-management endpoints require an authenticated (Super Admin) session.
-router.use(requireAuth);
+// User management requires the users.manage permission (the super-admin always
+// has it).
+router.use(requireAuth, requirePermission("users.manage"));
 
 router.get("/", userController.listUsers);
 router.post("/", writeLimiter, validateBody(createUserSchema), userController.createUser);

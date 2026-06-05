@@ -8,11 +8,13 @@ export default function DashboardLayout({
 }: {
   children: React.ReactNode;
 }) {
-  // AuthGuard wraps the whole shell so an unauthenticated visitor never sees the
-  // dashboard chrome (sidebar/topbar/nav) flash before being redirected to /login.
+  // AuthGuard (dashboard access) wraps the whole shell: the super-admin and any
+  // staff user holding a dashboard permission get in; permission-less staff are
+  // redirected to /portal and unauthenticated visitors to /login — so the chrome
+  // never flashes to someone who shouldn't see it.
   return (
     <DashboardProvider>
-      <AuthGuard>
+      <AuthGuard requireDashboard>
         <DashboardShell>{children}</DashboardShell>
       </AuthGuard>
     </DashboardProvider>
