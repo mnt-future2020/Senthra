@@ -14,6 +14,7 @@ import { Avatar } from "./Avatar";
 import { StatusBadge } from "./StatusBadge";
 import { FormAsideCard, FormPageHeader, FormSection } from "./FormScaffold";
 import { TempPasswordModal } from "./TempPasswordModal";
+import { DepartmentCombobox } from "./DepartmentCombobox";
 
 const USERS_LIST = "/dashboard/users";
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024; // 2 MB
@@ -266,7 +267,7 @@ export function UserForm({
               </div>
               <div>
                 <label className={labelCls}>Department</label>
-                <input className={inputCls} value={department} onChange={(e) => setDepartment(e.target.value)} placeholder="Operations" />
+                <DepartmentCombobox value={department} onChange={setDepartment} />
               </div>
               <div>
                 <label className={labelCls}>Date of joining</label>

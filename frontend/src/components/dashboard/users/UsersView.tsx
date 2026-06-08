@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import {
   Ban,
   CheckCircle2,
+  Eye,
   MoreHorizontal,
   Pencil,
   Search,
@@ -58,6 +59,7 @@ function RowActions({
   user,
   canEdit,
   canDelete,
+  onView,
   onEdit,
   onToggleStatus,
   onResend,
@@ -66,6 +68,7 @@ function RowActions({
   user: User;
   canEdit: boolean;
   canDelete: boolean;
+  onView: () => void;
   onEdit: () => void;
   onToggleStatus: () => void;
   onResend: () => void;
@@ -109,9 +112,6 @@ function RowActions({
     };
   }, [open]);
 
-  // Nothing this principal can do to the row → render an empty cell.
-  if (!canEdit && !canDelete) return null;
-
   return (
     <div className="flex justify-end">
       <button
@@ -131,6 +131,12 @@ function RowActions({
               className="anim-fade-in fixed z-[60] w-44 rounded-xl border border-[var(--border)] bg-[var(--surface)] py-1 shadow-2xl"
               style={{ top: pos.top, bottom: pos.bottom, right: pos.right }}
             >
+              <MenuItem icon={Eye} onClick={() => { close(); onView(); }}>
+                View
+              </MenuItem>
+              {(canEdit || canDelete) && (
+                <div className="my-1 border-t border-[var(--border-2)]" />
+              )}
               {canEdit && (
                 <>
                   <MenuItem icon={Pencil} onClick={() => { close(); onEdit(); }}>
@@ -232,6 +238,7 @@ export function UsersView() {
   const [debouncedSearch, setDebouncedSearch] = React.useState("");
   const [statusFilter, setStatusFilter] = React.useState<"all" | UserStatus>("all");
   const [roleFilter, setRoleFilter] = React.useState<string>("all");
+  const [sort, setSort] = React.useState<"newest" | "oldest" | "name">("newest");
   const [refreshKey, setRefreshKey] = React.useState(0);
 
   const [confirm, setConfirm] = React.useState<{ open: boolean; user: User | null }>({
@@ -280,6 +287,8 @@ export function UsersView() {
         search: debouncedSearch || undefined,
         status: statusFilter === "all" ? undefined : statusFilter,
         roleId: roleFilter === "all" ? undefined : roleFilter,
+        // "newest" is the server default → omit it so the cache key matches the seed.
+        sort: sort === "newest" ? undefined : sort,
       };
       // Show cached data for this exact query immediately (no skeleton), then refetch.
       const cached = userService.getCachedUsers(params);
@@ -305,7 +314,7 @@ export function UsersView() {
     return () => {
       active = false;
     };
-  }, [page, debouncedSearch, statusFilter, roleFilter, refreshKey]);
+  }, [page, debouncedSearch, statusFilter, roleFilter, sort, refreshKey]);
 
   const refresh = () => setRefreshKey((k) => k + 1);
 
@@ -320,6 +329,10 @@ export function UsersView() {
   };
   const onRoleChange = (v: string) => {
     setRoleFilter(v);
+    setPage(1);
+  };
+  const onSortChange = (v: "newest" | "oldest" | "name") => {
+    setSort(v);
     setPage(1);
   };
 
@@ -398,6 +411,16 @@ export function UsersView() {
               {r.name}
             </option>
           ))}
+        </select>
+        <select
+          value={sort}
+          onChange={(e) => onSortChange(e.target.value as "newest" | "oldest" | "name")}
+          className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+          title="Sort"
+        >
+          <option value="newest">Newest first</option>
+          <option value="oldest">Oldest first</option>
+          <option value="name">Name (A–Z)</option>
         </select>
         {canCreate && (
           <button
@@ -487,6 +510,7 @@ export function UsersView() {
                         user={u}
                         canEdit={canEdit}
                         canDelete={canDelete}
+                        onView={() => router.push(`/dashboard/users/${u.employeeId ?? u.id}`)}
                         onEdit={() => router.push(`/dashboard/users/${u.employeeId ?? u.id}/edit`)}
                         onToggleStatus={() => toggleStatus(u)}
                         onResend={() => resend(u)}

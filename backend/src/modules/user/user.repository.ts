@@ -31,17 +31,32 @@ function buildWhere(filters: UserListFilters): Prisma.UserWhereInput {
   return where;
 }
 
-// One page of matching users (most-recent first). Pagination is done in the
-// database (skip/take) so the API never loads the whole collection.
+// Server-side ordering for the user list. Unknown/absent → newest first (default).
+function userOrderBy(
+  sort?: string,
+): Prisma.UserOrderByWithRelationInput | Prisma.UserOrderByWithRelationInput[] {
+  switch (sort) {
+    case "oldest":
+      return { createdAt: "asc" };
+    case "name":
+      return [{ firstName: "asc" }, { lastName: "asc" }];
+    default:
+      return { createdAt: "desc" };
+  }
+}
+
+// One page of matching users. Pagination + ordering are done in the database
+// (skip/take/orderBy) so the API never loads the whole collection.
 export function findMany(
   filters: UserListFilters = {},
   skip = 0,
   take = 20,
+  sort?: string,
 ): Promise<UserWithRole[]> {
   return prisma.user.findMany({
     where: buildWhere(filters),
     include: { role: true },
-    orderBy: { createdAt: "desc" },
+    orderBy: userOrderBy(sort),
     skip,
     take,
   });
@@ -218,4 +233,20 @@ export async function countByRoleMap(): Promise<Record<string, number>> {
 // so this is enforced in the application layer.
 export function clearRole(roleId: string): Promise<Prisma.BatchPayload> {
   return prisma.user.updateMany({ where: { roleId }, data: { roleId: null } });
+}
+
+// Cascade a department rename to EVERY user holding the old name (including
+// soft-deleted ones). User.department is the denormalized department NAME, not a
+// reference, so a rename must be written across all rows carrying the old value —
+// otherwise existing staff keep the stale name. MongoDB has no FK cascade, so this
+// is enforced in the application layer.
+export function renameDepartment(
+  oldName: string,
+  newName: string,
+  client: Prisma.TransactionClient = prisma,
+): Promise<Prisma.BatchPayload> {
+  return client.user.updateMany({
+    where: { department: oldName },
+    data: { department: newName },
+  });
 }

@@ -2,17 +2,19 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Shield, Users2 } from "lucide-react";
+import { Building2, Shield, Users2 } from "lucide-react";
 
 import { RolesView } from "./RolesView";
 import { UsersView } from "./UsersView";
+import { DepartmentsView } from "./DepartmentsView";
 import { useAuth } from "@/hooks/useAuth";
 
-type Tab = "users" | "roles";
+type Tab = "users" | "roles" | "departments";
 
 const TABS: { id: Tab; label: string; icon: React.ElementType }[] = [
   { id: "users", label: "Users", icon: Users2 },
   { id: "roles", label: "Roles", icon: Shield },
+  { id: "departments", label: "Departments", icon: Building2 },
 ];
 
 export function UsersRolesPanel() {
@@ -22,8 +24,8 @@ export function UsersRolesPanel() {
   const searchParams = useSearchParams();
   const { can } = useAuth();
 
-  // Both tabs are permission-gated: the Users tab needs users.view, the Roles tab
-  // needs roles.view (the super-admin holds both).
+  // Tabs are permission-gated: the Roles tab needs roles.view; the Users and
+  // Departments tabs (employee data) need users.view. The super-admin holds all.
   const visibleTabs = TABS.filter((t) =>
     can(t.id === "roles" ? "roles.view" : "users.view"),
   );
@@ -67,7 +69,13 @@ export function UsersRolesPanel() {
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col">
-        {activeTab === "users" ? <UsersView /> : <RolesView />}
+        {activeTab === "users" ? (
+          <UsersView />
+        ) : activeTab === "roles" ? (
+          <RolesView />
+        ) : (
+          <DepartmentsView />
+        )}
       </div>
     </div>
   );
