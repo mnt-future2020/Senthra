@@ -10,6 +10,7 @@ export interface UserListParams {
   roleId?: string;
   page?: number;
   pageSize?: number;
+  sort?: string;
 }
 
 export interface PagedUsers {
@@ -63,6 +64,7 @@ function qs(params: UserListParams): string {
   if (params.search) sp.set("search", params.search);
   if (params.status) sp.set("status", params.status);
   if (params.roleId) sp.set("roleId", params.roleId);
+  if (params.sort) sp.set("sort", params.sort);
   if (params.page) sp.set("page", String(params.page));
   if (params.pageSize) sp.set("pageSize", String(params.pageSize));
   const s = sp.toString();
@@ -75,7 +77,7 @@ function qs(params: UserListParams): string {
 const usersListCache = new Map<string, PagedUsers>();
 registerClientCache(() => usersListCache.clear());
 const listCacheKey = (p: UserListParams): string =>
-  `${p.page ?? 1}|${p.pageSize ?? ""}|${p.search ?? ""}|${p.status ?? ""}|${p.roleId ?? ""}`;
+  `${p.page ?? 1}|${p.pageSize ?? ""}|${p.search ?? ""}|${p.status ?? ""}|${p.roleId ?? ""}|${p.sort ?? ""}`;
 
 export const getCachedUsers = (params: UserListParams = {}): PagedUsers | undefined =>
   usersListCache.get(listCacheKey(params));

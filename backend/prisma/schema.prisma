@@ -83,6 +83,24 @@ model Role {
   updatedAt   DateTime @updatedAt
 }
 
+// Employee master-data: a department a staff member belongs to (e.g. "Operations").
+// Managed (create/rename/delete) from Users & Roles; the user form picks from this
+// list or creates one inline. User.department stores the chosen NAME (denormalized),
+// so existing records stay valid and removing a department never orphans a user.
+model Department {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  // Display name exactly as typed ("Operations"). Not unique on its own — the
+  // case-insensitive guard lives on `nameLower` so "Operations" and "operations"
+  // can't both exist.
+  name      String
+  // Lowercased `name`, kept in sync by the repository on every write. The @unique
+  // index here is what actually enforces case-insensitive uniqueness at the DB —
+  // the application pre-check is just for a friendly message.
+  nameLower String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 // A staff member the Super Admin (or a delegate with users.create) adds from the
 // admin panel. Created with a secure temporary password (bcrypt hash, never sent
 // to the client); logs in and is governed by RBAC via the assigned role.

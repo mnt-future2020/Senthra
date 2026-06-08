@@ -24,6 +24,7 @@ export interface PublicRole {
   permissions: string[];
   userCount: number;
   sortOrder: number;
+  createdAt: string;
 }
 
 function toPublicRole(role: Role, userCount: number): PublicRole {
@@ -36,6 +37,7 @@ function toPublicRole(role: Role, userCount: number): PublicRole {
     permissions: role.permissions,
     userCount,
     sortOrder: role.sortOrder,
+    createdAt: role.createdAt.toISOString(),
   };
 }
 

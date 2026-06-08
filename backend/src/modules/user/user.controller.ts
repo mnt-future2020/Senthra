@@ -16,11 +16,12 @@ const toNum = (v: unknown): number | undefined => {
 // GET /users  (protected) — paginated. Query: ?search=&status=&roleId=&page=&pageSize=
 // Returns { users, total, page, pageSize, totalPages }.
 export const listUsers = asyncHandler(async (req, res) => {
-  const { search, status, roleId, page, pageSize } = req.query;
+  const { search, status, roleId, sort, page, pageSize } = req.query;
   const result = await userService.listUsers({
     search: typeof search === "string" ? search : undefined,
     status: typeof status === "string" ? status : undefined,
     roleId: typeof roleId === "string" ? roleId : undefined,
+    sort: typeof sort === "string" ? sort : undefined,
     page: toNum(page),
     pageSize: toNum(pageSize),
   });

@@ -10,6 +10,7 @@ export interface Role {
   permissions: string[];
   userCount: number;
   sortOrder: number;
+  createdAt: string;
 }
 
 // One assignable permission — a single action within a module group.

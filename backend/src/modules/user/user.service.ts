@@ -136,6 +136,7 @@ export interface ListUsersParams {
   roleId?: string;
   page?: number;
   pageSize?: number;
+  sort?: string; // newest (default) | oldest | name
 }
 
 export interface PagedUsers {
@@ -157,7 +158,7 @@ export async function listUsers(params: ListUsersParams = {}): Promise<PagedUser
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   // Clamp the requested page so an out-of-range page returns the last page.
   const page = Math.min(Math.max(Math.trunc(params.page ?? 1), 1), totalPages);
-  const users = await userRepo.findMany(filters, (page - 1) * pageSize, pageSize);
+  const users = await userRepo.findMany(filters, (page - 1) * pageSize, pageSize, params.sort);
   return { users: users.map(publicUser), total, page, pageSize, totalPages };
 }
 

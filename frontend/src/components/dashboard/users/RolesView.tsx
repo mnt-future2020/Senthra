@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { Lock, Pencil, Plus, Shield, Trash2, Users } from "lucide-react";
+import { Eye, Lock, Pencil, Plus, Search, Shield, Trash2, Users } from "lucide-react";
 
 import { useDashboard } from "@/hooks/useDashboard";
 import { useAuth } from "@/hooks/useAuth";
@@ -79,6 +79,8 @@ export function RolesView() {
   });
   const [deleting, setDeleting] = React.useState(false);
   const [page, setPage] = React.useState(1);
+  const [search, setSearch] = React.useState("");
+  const [sort, setSort] = React.useState<"newest" | "oldest" | "name">("name");
 
   const load = React.useCallback(async () => {
     try {
@@ -116,29 +118,71 @@ export function RolesView() {
     }
   };
 
-  // Roles are bounded master-data — load all once and paginate the list on the
+  // Roles are bounded master-data — load all once, then filter + paginate on the
   // client to keep it compact as it grows.
-  const totalPages = Math.max(1, Math.ceil(roles.length / PAGE_SIZE));
+  const q = search.trim().toLowerCase();
+  const filtered = q
+    ? roles.filter(
+        (r) =>
+          r.name.toLowerCase().includes(q) || (r.description ?? "").toLowerCase().includes(q),
+      )
+    : roles;
+  // Sort client-side (ISO createdAt strings compare chronologically).
+  const sorted = [...filtered].sort((a, b) =>
+    sort === "name"
+      ? a.name.localeCompare(b.name)
+      : sort === "oldest"
+        ? a.createdAt.localeCompare(b.createdAt)
+        : b.createdAt.localeCompare(a.createdAt),
+  );
+  const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
-  const pageRoles = roles.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+  const pageRoles = sorted.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
   return (
     <div className="flex h-full flex-col gap-5">
-      <div className="flex shrink-0 items-center justify-between gap-4 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs">
+      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <h3 className="text-sm font-extrabold text-[var(--ink)]">Roles</h3>
           <p className="text-xs text-[var(--muted)]">
             Roles you can assign to users. Built-in roles can&apos;t be deleted.
           </p>
         </div>
-        {canCreate && (
-          <button
-            onClick={() => router.push("/dashboard/roles/new")}
-            className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90"
+        <div className="flex items-center gap-2">
+          <div className="relative w-full sm:w-60">
+            <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
+            <input
+              value={search}
+              onChange={(e) => {
+                setSearch(e.target.value);
+                setPage(1);
+              }}
+              placeholder="Search roles…"
+              className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
+            />
+          </div>
+          <select
+            value={sort}
+            onChange={(e) => {
+              setSort(e.target.value as "newest" | "oldest" | "name");
+              setPage(1);
+            }}
+            className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+            title="Sort"
           >
-            <Plus className="h-4 w-4" /> Add role
-          </button>
-        )}
+            <option value="newest">Newest</option>
+            <option value="oldest">Oldest</option>
+            <option value="name">Name (A–Z)</option>
+          </select>
+          {canCreate && (
+            <button
+              onClick={() => router.push("/dashboard/roles/new")}
+              className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90"
+            >
+              <Plus className="h-4 w-4" /> Add role
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-xs">
@@ -157,6 +201,12 @@ export function RolesView() {
             <p className="mt-1 text-xs text-[var(--muted)]">
               Add your first role to get started.
             </p>
+          </div>
+        ) : filtered.length === 0 ? (
+          <div className="flex flex-1 flex-col items-center justify-center p-12 text-center">
+            <Search className="mb-3 h-10 w-10 text-[var(--faint)]" />
+            <p className="font-extrabold text-[var(--ink)]">No roles match</p>
+            <p className="mt-1 text-xs text-[var(--muted)]">Try a different search.</p>
           </div>
         ) : (
           <div className="min-h-0 flex-1 overflow-auto">
@@ -211,6 +261,14 @@ export function RolesView() {
                     </td>
                     <td className="px-5 py-3">
                       <div className="flex items-center justify-end gap-1">
+                        <button
+                          onClick={() => router.push(`/dashboard/roles/${r.key}`)}
+                          className="rounded-lg p-1.5 text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--accent)]"
+                          title="View role"
+                          aria-label="View role"
+                        >
+                          <Eye className="h-3.5 w-3.5" />
+                        </button>
                         {editable(r) && (
                           <button
                             onClick={() => router.push(`/dashboard/roles/${r.key}/edit`)}
@@ -231,9 +289,6 @@ export function RolesView() {
                             <Trash2 className="h-3.5 w-3.5" />
                           </button>
                         )}
-                        {!editable(r) && !deletable(r) && (
-                          <span className="text-xs text-[var(--faint)]">—</span>
-                        )}
                       </div>
                     </td>
                   </tr>
@@ -244,12 +299,12 @@ export function RolesView() {
         )}
       </div>
 
-      {!loading && !error && roles.length > 0 && (
+      {!loading && !error && filtered.length > 0 && (
         <div className="shrink-0">
           <Pagination
             page={safePage}
             totalPages={totalPages}
-            total={roles.length}
+            total={filtered.length}
             label="roles"
             onPage={setPage}
           />
