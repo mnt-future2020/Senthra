@@ -3,7 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Settings, UserCog, UserRound, X, ChevronDown, LogOut } from "lucide-react";
+import { Building2, Settings, UserCog, UserRound, X, ChevronDown, LogOut } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
 import { useBranding } from "@/hooks/useBranding";
@@ -21,6 +21,7 @@ type NavItem = {
 
 const NAV: NavItem[] = [
   { href: "/dashboard/users", label: "Users & Roles", icon: UserCog, perms: ["users.view", "roles.view"] },
+  { href: "/dashboard/customers", label: "Customers", icon: Building2, perms: ["customers.view"] },
   {
     href: "/dashboard/settings",
     label: "Settings",

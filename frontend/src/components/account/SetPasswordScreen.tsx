@@ -15,9 +15,11 @@ import type { Msg } from "@/components/ui/types";
 
 // First-login forced password set. There's no current password — the active
 // session authorises the change. On success the principal is refreshed and the
-// user continues into the dashboard (their first section, or the no-access home).
+// account continues to its home (a staff user's first section / no-access home, or
+// a customer's portal). Shared by the staff FirstLoginGate and the customer portal
+// gate; the backend's POST /auth/password dispatches by principal type.
 export function SetPasswordScreen() {
-  const { user, logout, refresh } = useAuth();
+  const { principal, logout, refresh } = useAuth();
   const { brandName } = useBranding();
   const router = useRouter();
 
@@ -31,7 +33,12 @@ export function SetPasswordScreen() {
     router.replace("/login");
   };
 
-  if (!user) return null;
+  if (!principal) return null;
+
+  // A friendly first name: a staff user's given name, or a customer's contact /
+  // company name.
+  const greetingName =
+    principal.type === "user" ? principal.firstName : principal.type === "customer" ? principal.name : "";
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -62,7 +69,7 @@ export function SetPasswordScreen() {
           <div className="leading-tight">
             <h1 className="text-lg font-extrabold text-[var(--ink)]">Welcome to {brandName}</h1>
             <p className="text-sm text-[var(--muted)]">
-              Hi {user.firstName} — set a password to finish signing in.
+              {greetingName ? `Hi ${greetingName} — ` : ""}set a password to finish signing in.
             </p>
           </div>
         </div>

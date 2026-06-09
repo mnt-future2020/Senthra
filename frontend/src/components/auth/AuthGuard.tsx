@@ -12,9 +12,11 @@ import { homeFor } from "@/lib/auth";
 // placeholder, NOT the app chrome, so a visitor never sees content they shouldn't.
 // Redirects to /login when unauthenticated.
 //
-//  - No flags: requires an authenticated principal (admin or staff). The dashboard
-//    shell is shared by everyone; per-section access is enforced inside it.
+//  - No flags: requires an authenticated admin or staff user — the shared dashboard
+//    shell. A customer is NOT allowed here (they have their own /customer portal)
+//    and is bounced to their home, so the admin chrome never renders for them.
 //  - requireType: also require an exact account type; a mismatch is sent to its home.
+//    (The /customer portal passes requireType="customer".)
 //  - fallback: what to show while gating. Defaults to a centered spinner; the
 //    dashboard passes a shell-shaped skeleton so the verified shell mounts with no
 //    layout shift (no bare spinner → skeleton hop).
@@ -24,11 +26,19 @@ export function AuthGuard({
   fallback,
 }: {
   children: React.ReactNode;
-  requireType?: "admin" | "user";
+  requireType?: "admin" | "user" | "customer";
   fallback?: React.ReactNode;
 }) {
   const { principal, loading } = useAuth();
   const router = useRouter();
+
+  // Allowed iff: signed in AND (matches requireType, when set) AND (when no
+  // requireType — the shared dashboard — the principal is not a customer).
+  const typeOk = principal
+    ? requireType
+      ? principal.type === requireType
+      : principal.type !== "customer"
+    : false;
 
   React.useEffect(() => {
     if (loading) return;
@@ -36,12 +46,12 @@ export function AuthGuard({
       router.replace("/login");
       return;
     }
-    if (requireType && principal.type !== requireType) {
+    if (!typeOk) {
       router.replace(homeFor(principal));
     }
-  }, [loading, principal, requireType, router]);
+  }, [loading, principal, typeOk, router]);
 
-  const allowed = principal && (!requireType || principal.type === requireType);
+  const allowed = principal && typeOk;
 
   if (loading || !allowed) {
     if (fallback) return <>{fallback}</>;
