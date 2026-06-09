@@ -23,7 +23,7 @@ export function Pagination({
   return (
     <div className="flex flex-col items-center justify-between gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 py-3 shadow-xs sm:flex-row">
       <span className="text-xs font-bold text-[var(--faint)]">
-        {total} {total === 1 ? label.replace(/s$/, "") : label}
+        Total: {total} {total === 1 ? label.replace(/s$/, "") : label}
       </span>
       {totalPages > 1 && (
         <div className="flex items-center gap-2">

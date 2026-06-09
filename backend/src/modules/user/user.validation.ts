@@ -1,6 +1,12 @@
 import { z } from "zod";
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+// UK phone only (client is UK telecom field-services): national "0" + 9–10 digits
+// (e.g. 07700 900000, 020 1234 5678) or international "+44" with an optional "(0)" +
+// 9–10 digits, after stripping spaces/hyphens/parens. Mirrors the front-end so both
+// layers agree (defence in depth).
+const UK_PHONE_RE = /^(?:\+440?|0)\d{9,10}$/;
+const isValidPhone = (v: string): boolean => UK_PHONE_RE.test(v.replace(/[\s()-]/g, ""));
 const statusEnum = z.enum(["active", "inactive", "suspended"]);
 const genderEnum = z.enum(["male", "female", "other", "unspecified"]);
 const profileImage = z
@@ -28,7 +34,12 @@ const optionalGender = genderEnum.or(z.literal("")).optional();
 // Profile fields shared by create + update (all optional). The service converts
 // empty strings to null (clear) and parses the date strings.
 const sharedProfileFields = {
-  phone: z.string().trim().max(40).optional(),
+  phone: z
+    .string()
+    .trim()
+    .max(40)
+    .refine((v) => v === "" || isValidPhone(v), "Enter a valid phone number.")
+    .optional(),
   status: statusEnum.optional(),
   notes: z.string().trim().max(1000).optional(),
   profileImage: profileImage.optional(),
@@ -58,8 +69,31 @@ export const createUserSchema = z.object({
     .min(1, "Last name is required.")
     .max(60),
   email: emailField(),
-  roleId: z.string().trim().optional(),
   ...sharedProfileFields,
+  // Required for new staff — these override the shared optional fields. (Gender,
+  // date of birth and address stay optional.)
+  roleId: z.string({ error: "Role is required." }).trim().min(1, "Role is required."),
+  phone: z
+    .string({ error: "Phone number is required." })
+    .trim()
+    .min(1, "Phone number is required.")
+    .max(40)
+    .refine(isValidPhone, "Enter a valid phone number."),
+  jobTitle: z
+    .string({ error: "Job title is required." })
+    .trim()
+    .min(1, "Job title is required.")
+    .max(80),
+  department: z
+    .string({ error: "Department is required." })
+    .trim()
+    .min(1, "Department is required.")
+    .max(80),
+  dateOfJoining: z
+    .string({ error: "Date of joining is required." })
+    .trim()
+    .min(1, "Date of joining is required.")
+    .refine((v) => !Number.isNaN(Date.parse(v)), "Enter a valid date."),
 });
 export type CreateUserInput = z.infer<typeof createUserSchema>;
 
