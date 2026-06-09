@@ -9,7 +9,7 @@ import { useDashboard } from "@/hooks/useDashboard";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import type { PermissionGroup, Role } from "@/types/role";
 import { inputCls, labelCls, primaryBtn } from "@/components/dashboard/settings/ui/styles";
-import { FormAsideCard, FormPageHeader, FormSection } from "./FormScaffold";
+import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "./FormScaffold";
 
 const ROLES_LIST = "/dashboard/users?tab=roles";
 
@@ -35,6 +35,7 @@ export function RoleForm({ mode, role }: { mode: "create" | "edit"; role?: Role 
   const [saving, setSaving] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const [errors, setErrors] = React.useState<Record<string, string>>({});
 
   React.useEffect(() => {
     let active = true;
@@ -85,13 +86,26 @@ export function RoleForm({ mode, role }: { mode: "create" | "edit"; role?: Role 
 
   const goBack = () => guard.attemptLeave(() => router.push(ROLES_LIST));
 
+  // Surface errors as a toast (instant, scroll-independent) as well as inline — the
+  // Save button is in the sticky header, far from the inline message at the bottom.
+  const showError = (msg: string) => {
+    setError(msg);
+    pushToast(msg, "alert");
+  };
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    if (!name.trim()) {
-      setError("Role name is required.");
+    const trimmed = name.trim();
+    const fieldErrors: Record<string, string> = {};
+    if (!trimmed) fieldErrors.name = "Role name is required.";
+    else if (trimmed.length > 60) fieldErrors.name = "Keep this under 60 characters.";
+    if (Object.keys(fieldErrors).length > 0) {
+      setErrors(fieldErrors);
+      pushToast("Please fix the highlighted fields.", "alert");
       return;
     }
+    setErrors({});
     setSaving(true);
     try {
       const payload = {
@@ -105,7 +119,7 @@ export function RoleForm({ mode, role }: { mode: "create" | "edit"; role?: Role 
       pushToast(mode === "edit" ? "Role saved." : "Role created.", "success");
       router.push(ROLES_LIST);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Save failed.");
+      showError(err instanceof Error ? err.message : "Save failed.");
       setSaving(false);
     }
   };
@@ -147,14 +161,32 @@ export function RoleForm({ mode, role }: { mode: "create" | "edit"; role?: Role 
           <FormSection title="Details">
             <div className="space-y-4">
               <div>
-                <label className={labelCls}>Role name</label>
+                <label className={labelCls}>
+                  Role name
+                  {!isSystem && <RequiredMark />}
+                </label>
                 <input
                   className={inputCls}
                   value={name}
-                  onChange={(e) => setName(e.target.value)}
+                  onChange={(e) => {
+                    setName(e.target.value);
+                    if (errors.name) setErrors({});
+                  }}
                   placeholder="e.g. Site Supervisor"
                   disabled={isSystem}
+                  maxLength={60}
+                  aria-required={!isSystem}
+                  aria-invalid={Boolean(errors.name)}
+                  aria-describedby={errors.name ? "role-name-error" : undefined}
                 />
+                {errors.name && (
+                  <p
+                    id="role-name-error"
+                    className="mt-1.5 text-[11px] font-semibold text-[var(--neg)]"
+                  >
+                    {errors.name}
+                  </p>
+                )}
                 {isSystem && (
                   <p className="mt-1.5 text-[11px] text-[var(--faint)]">
                     This is a built-in role — its name is fixed, but you can edit the description.

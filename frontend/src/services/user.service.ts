@@ -43,7 +43,13 @@ export interface CreateUserPayload extends ProfileFieldsPayload {
   firstName: string;
   lastName: string;
   email: string;
-  roleId?: string;
+  // Required for new staff — matches the backend createUserSchema (narrows the
+  // optional shared fields so the submit can't pass undefined for these).
+  phone: string;
+  roleId: string;
+  jobTitle: string;
+  department: string;
+  dateOfJoining: string;
 }
 
 export interface UpdateUserPayload extends ProfileFieldsPayload {

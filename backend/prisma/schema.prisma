@@ -101,6 +101,19 @@ model Department {
   updatedAt DateTime @updatedAt
 }
 
+// Employee master-data: a job title / designation (e.g. "Field Engineer"). Managed
+// from Users & Roles; the user form picks from this list or creates one inline.
+// User.jobTitle stores the chosen NAME (denormalized), so a rename cascades and a
+// removal never orphans a user. Case-insensitive uniqueness via nameLower (same
+// pattern as Department).
+model JobTitle {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  name      String
+  nameLower String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
 // A staff member the Super Admin (or a delegate with users.create) adds from the
 // admin panel. Created with a secure temporary password (bcrypt hash, never sent
 // to the client); logs in and is governed by RBAC via the assigned role.
@@ -220,4 +233,17 @@ model Session {
   expiresAt     DateTime // matches the refresh token's expiry
 
   @@index([principalId, principalType])
+}
+
+// A named, atomically-incrementing sequence. Used to hand out gap-free, collision-free
+// running numbers — currently the employeeId suffix, one sequence per prefix. `key` is
+// the sequence name (the employeeId prefix, e.g. "STR"); `seq` is the last value handed
+// out. Allocation is a single atomic $inc on this one document, so concurrent callers
+// can never receive the same number (no retry, no random fallback). On first use of a
+// prefix the row is seeded from the highest existing id so it never reuses a number.
+model Counter {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  key       String   @unique // sequence name, e.g. the employeeId prefix "STR"
+  seq       Int      @default(0) // last value handed out
+  updatedAt DateTime @updatedAt
 }

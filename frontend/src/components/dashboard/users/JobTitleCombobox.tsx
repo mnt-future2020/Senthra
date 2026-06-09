@@ -5,16 +5,16 @@ import { useRouter } from "next/navigation";
 import { ArrowRight, Check, ChevronDown, Loader2, Plus, Settings2 } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
-import * as departmentService from "@/services/department.service";
-import type { Department } from "@/types/department";
+import * as jobTitleService from "@/services/jobTitle.service";
+import type { JobTitle } from "@/types/jobTitle";
 import { inputCls } from "@/components/dashboard/settings/ui/styles";
 import { useNavigationGuard } from "@/providers/NavigationGuardProvider";
 
-// A creatable combobox for the user form's Department field: pick an existing
-// department from the managed list, or type a new name and create it inline (the
-// "mahal" pattern). The committed value is the department NAME (a string), matching
-// how User.department is stored — so existing free-text values still display fine.
-export function DepartmentCombobox({
+// A creatable combobox for the user form's Job title field: pick an existing title
+// from the managed list, or type a new name and create it inline. The committed value
+// is the title NAME (a string), matching how User.jobTitle is stored — so existing
+// free-text values still display fine.
+export function JobTitleCombobox({
   value,
   onChange,
   disabled,
@@ -30,22 +30,19 @@ export function DepartmentCombobox({
   describedBy?: string;
 }) {
   const { can } = useAuth();
-  // Adding a department is part of creating/editing staff, so either user permission
-  // unlocks inline create (the backend gates it the same way).
   const canCreate = can("users.create") || can("users.edit");
-  // Rename/delete are deliberate, global actions, so they live in the Departments
-  // tab — the picker just links there for anyone who can manage the list.
+  // Rename/delete are deliberate, global actions, so they live in the Job titles tab —
+  // the picker just links there for anyone who can manage the list.
   const canManage = can("users.edit") || can("users.delete");
   const router = useRouter();
   const guard = useNavigationGuard();
   const openManage = () => {
     setOpen(false);
-    // Respect the form's unsaved-changes guard before leaving for the manage tab.
-    guard.attemptLeave(() => router.push("/dashboard/users?tab=departments"));
+    guard.attemptLeave(() => router.push("/dashboard/users?tab=jobTitles"));
   };
 
-  const [departments, setDepartments] = React.useState<Department[]>(
-    () => departmentService.getCachedDepartments() ?? [],
+  const [jobTitles, setJobTitles] = React.useState<JobTitle[]>(
+    () => jobTitleService.getCachedJobTitles() ?? [],
   );
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
@@ -53,11 +50,10 @@ export function DepartmentCombobox({
   const wrapRef = React.useRef<HTMLDivElement>(null);
   const listboxId = React.useId();
 
-  // Cache-first, then revalidate so the list is fresh without a loading flash.
   React.useEffect(() => {
     let alive = true;
-    departmentService.listDepartments().then(
-      (rows) => alive && setDepartments(rows),
+    jobTitleService.listJobTitles().then(
+      (rows) => alive && setJobTitles(rows),
       () => {},
     );
     return () => {
@@ -65,7 +61,6 @@ export function DepartmentCombobox({
     };
   }, []);
 
-  // Close on outside click.
   React.useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
@@ -80,9 +75,9 @@ export function DepartmentCombobox({
 
   const q = query.trim();
   const filtered = q
-    ? departments.filter((d) => d.name.toLowerCase().includes(q.toLowerCase()))
-    : departments;
-  const exact = departments.find((d) => d.name.toLowerCase() === q.toLowerCase());
+    ? jobTitles.filter((d) => d.name.toLowerCase().includes(q.toLowerCase()))
+    : jobTitles;
+  const exact = jobTitles.find((d) => d.name.toLowerCase() === q.toLowerCase());
   const showCreate = canCreate && q.length > 0 && !exact;
 
   const commit = (name: string) => {
@@ -95,13 +90,13 @@ export function DepartmentCombobox({
     if (!q || creating) return;
     setCreating(true);
     try {
-      const dept = await departmentService.createDepartment(q);
-      setDepartments((prev) =>
-        prev.some((d) => d.id === dept.id)
+      const jt = await jobTitleService.createJobTitle(q);
+      setJobTitles((prev) =>
+        prev.some((d) => d.id === jt.id)
           ? prev
-          : [...prev, dept].sort((a, b) => a.name.localeCompare(b.name)),
+          : [...prev, jt].sort((a, b) => a.name.localeCompare(b.name)),
       );
-      commit(dept.name);
+      commit(jt.name);
     } catch {
       // Leave the dropdown open so the user can retry or pick an existing one;
       // the backend's uniqueness/permission errors are the authoritative guard.
@@ -125,7 +120,7 @@ export function DepartmentCombobox({
         className={`${inputCls} flex items-center justify-between gap-2 text-left`}
       >
         <span className={`truncate ${value ? "text-[var(--ink)]" : "text-[var(--faint)]"}`}>
-          {value || "No department"}
+          {value || "No job title"}
         </span>
         <ChevronDown className="h-4 w-4 shrink-0 text-[var(--faint)]" />
       </button>
@@ -158,7 +153,7 @@ export function DepartmentCombobox({
               onClick={() => commit("")}
               className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm text-[var(--muted)] hover:bg-[var(--surface-2)]"
             >
-              <span className="truncate italic">No department</span>
+              <span className="truncate italic">No job title</span>
               {!value && <Check className="h-3.5 w-3.5 shrink-0 text-[var(--accent)]" />}
             </button>
 
@@ -192,10 +187,10 @@ export function DepartmentCombobox({
 
             {filtered.length === 0 && !showCreate && (
               <p className="px-3 py-3 text-center text-xs text-[var(--muted)]">
-                {departments.length === 0
+                {jobTitles.length === 0
                   ? canCreate
-                    ? "No departments yet — type a name to create one."
-                    : "No departments yet."
+                    ? "No job titles yet — type a name to create one."
+                    : "No job titles yet."
                   : "No match."}
               </p>
             )}
@@ -209,7 +204,7 @@ export function DepartmentCombobox({
                 className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs font-semibold text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--ink)]"
               >
                 <Settings2 className="h-3.5 w-3.5 shrink-0" />
-                Manage departments
+                Manage job titles
                 <ArrowRight className="ml-auto h-3.5 w-3.5 shrink-0" />
               </button>
             </div>

@@ -1,5 +1,3 @@
-import crypto from "node:crypto";
-
 import { Prisma, type Role, type User } from "@prisma/client";
 
 import { prisma } from "../../lib/prisma.js";
@@ -95,11 +93,6 @@ export function findByEmployeeIdWithRole(employeeId: string): Promise<UserWithRo
   });
 }
 
-// Total user rows including soft-deleted — the base for the next employee-ID number.
-export function countAll(): Promise<number> {
-  return prisma.user.count();
-}
-
 // Login / forgot-password lookup: a non-deleted user by email, with role + auth
 // fields. Does NOT filter by status — the caller checks it, so a suspended account
 // can be messaged clearly (login) or silently skipped (reset email).
@@ -133,18 +126,26 @@ export function update(id: string, data: Prisma.UserUpdateInput): Promise<UserWi
 //
 // Auto-generate a unique, readable staff reference (e.g. "SNT-0007"). The `prefix`
 // comes from settings (resolved by the caller) so it isn't hardcoded to one brand.
-// The number tracks the total row count (soft-deleted rows included, so numbers are
-// never reused). Generation is best-effort — the WRITE is what guarantees
-// uniqueness: the create/update is retried against the `employeeId` unique index,
-// so two concurrent creates that pick the same number can't both win (the DB
-// rejects the second and we regenerate). A random suffix on the final attempt
-// guarantees the loop terminates.
+//
+// The running number is handed out by an ATOMIC COUNTER (the `Counter` collection, one
+// row per prefix) — the same mechanism databases use for sequences and apps use for
+// invoice / order numbers. Each allocation is a single `$inc` on one document, so the
+// database serializes concurrent creates and no two ever receive the same number: no
+// retry needed, no collision, and no random fallback that would break the "-0007"
+// format. On first use of a prefix the counter is seeded from the highest existing id
+// for that prefix, so switching the prefix or hard-deleting users never reuses a number
+// nor jumps onto an occupied one.
+//
+// The `employeeId` unique index on User stays as defence-in-depth. A number can only
+// collide if an id was written OUT-OF-BAND above the counter (data import, manual fix,
+// restored backup); we then fast-forward the counter past the real max and retry. We
+// never fall back to a random id — on the (otherwise impossible) exhaustion we throw,
+// so a bad state surfaces loudly instead of being papered over with an unreadable id.
 
-// A unique-constraint violation we should retry (regenerate the employeeId).
-// `meta.target` names the offending index — when it points at employeeId, retry.
-// When the engine omits target (rare), treat it as an employeeId clash too: email
-// is already pre-checked before this allocation loop, so employeeId is the only
-// unique field set here whose collision is expected. A real concurrent email clash
+// True for a unique-constraint violation on the employeeId index (the only User clash
+// we retry). `meta.target` names the offending index; when the engine omits it (rare),
+// treat it as employeeId — email is pre-checked before allocation, so employeeId is the
+// only unique field set here whose clash is expected. A real concurrent email clash
 // still carries `target: ["email"]`, so it's excluded and surfaces as a 409.
 function isEmployeeIdConflict(e: unknown): boolean {
   if (!(e instanceof Prisma.PrismaClientKnownRequestError) || e.code !== "P2002") {
@@ -155,23 +156,95 @@ function isEmployeeIdConflict(e: unknown): boolean {
   return String(target).includes("employeeId");
 }
 
+// P2025 — an `update` matched no row (here: this prefix has no counter yet).
+function isRecordNotFound(e: unknown): boolean {
+  return e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2025";
+}
+
+// P2002 — a unique-constraint violation (here: a concurrent request seeded the counter
+// for this prefix first).
+function isUniqueConflict(e: unknown): boolean {
+  return e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002";
+}
+
+// Highest numeric suffix currently used for `prefix` (e.g. "STR" → 12 for "STR-0012"),
+// scanning ALL rows incl. soft-deleted (their IDs still hold a slot in the unique
+// index, so the number must not be reused). Returns 0 when the prefix has no numbered
+// IDs yet. Random-suffix legacy ids like "STR-E2C231" carry no number, so they're
+// skipped — they never block or inflate the sequence. Used only to SEED / re-sync the
+// counter, not on every allocation.
+async function highestEmployeeNumber(prefix: string): Promise<number> {
+  const head = `${prefix}-`;
+  const rows = await prisma.user.findMany({
+    where: { employeeId: { startsWith: head } },
+    select: { employeeId: true },
+  });
+  let max = 0;
+  for (const { employeeId } of rows) {
+    const suffix = employeeId?.slice(head.length) ?? "";
+    if (!/^\d+$/.test(suffix)) continue; // only purely-numeric suffixes count
+    const n = Number(suffix);
+    if (Number.isSafeInteger(n) && n > max) max = n;
+  }
+  return max;
+}
+
+// Atomically hand out the next number for `prefix`. Steady state is a single `$inc`.
+// The first allocation for a brand-new prefix seeds the counter from the highest
+// existing id, race-safely: a concurrent seeder just makes our create throw P2002 and
+// we fall through to the same `$inc`.
+async function nextSequence(prefix: string): Promise<number> {
+  try {
+    const c = await prisma.counter.update({
+      where: { key: prefix },
+      data: { seq: { increment: 1 } },
+      select: { seq: true },
+    });
+    return c.seq;
+  } catch (e) {
+    if (!isRecordNotFound(e)) throw e; // anything but "no counter yet" is a real error
+  }
+  // Seed at the current high-water mark so the first `$inc` below yields max + 1 (never
+  // an occupied number); created STR-0012 → counter starts at 12 → first id is STR-0013.
+  const start = await highestEmployeeNumber(prefix);
+  try {
+    await prisma.counter.create({ data: { key: prefix, seq: start } });
+  } catch (e) {
+    if (!isUniqueConflict(e)) throw e; // a concurrent request seeded it first — fine
+  }
+  const c = await prisma.counter.update({
+    where: { key: prefix },
+    data: { seq: { increment: 1 } },
+    select: { seq: true },
+  });
+  return c.seq;
+}
+
+// Self-heal for the rare out-of-band collision: push the counter up to the real max so
+// the next `$inc` clears every existing id. Best-effort — the allocation loop re-checks.
+async function fastForwardCounter(prefix: string): Promise<void> {
+  const max = await highestEmployeeNumber(prefix);
+  await prisma.counter.upsert({
+    where: { key: prefix },
+    create: { key: prefix, seq: max },
+    update: { seq: max },
+  });
+}
+
 async function withEmployeeId<T>(
   prefix: string,
   write: (employeeId: string) => Promise<T>,
 ): Promise<T> {
-  for (let attempt = 0; attempt < 6; attempt++) {
-    // Re-count each attempt: a retry means a concurrent create just committed, so a
-    // fresh count steps past it instead of re-picking the same contended number.
-    const base = await prisma.user.count();
-    const employeeId =
-      attempt < 5
-        ? `${prefix}-${String(base + 1 + attempt).padStart(4, "0")}`
-        : `${prefix}-${crypto.randomUUID().slice(0, 6).toUpperCase()}`;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const seq = await nextSequence(prefix);
+    const employeeId = `${prefix}-${String(seq).padStart(4, "0")}`;
     try {
       return await write(employeeId);
     } catch (e) {
-      if (isEmployeeIdConflict(e)) continue; // a concurrent create took it — retry
-      throw e;
+      if (!isEmployeeIdConflict(e)) throw e;
+      // The counter handed out a live number → an id exists out-of-band above it.
+      // Re-sync past the real max and retry. Never a random id.
+      await fastForwardCounter(prefix);
     }
   }
   throw new Error("Could not allocate a unique employee ID.");
@@ -248,5 +321,18 @@ export function renameDepartment(
   return client.user.updateMany({
     where: { department: oldName },
     data: { department: newName },
+  });
+}
+
+// Cascade a job-title rename to EVERY user holding the old name (denormalized
+// User.jobTitle). Same pattern as renameDepartment.
+export function renameJobTitle(
+  oldName: string,
+  newName: string,
+  client: Prisma.TransactionClient = prisma,
+): Promise<Prisma.BatchPayload> {
+  return client.user.updateMany({
+    where: { jobTitle: oldName },
+    data: { jobTitle: newName },
   });
 }

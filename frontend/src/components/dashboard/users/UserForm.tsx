@@ -12,9 +12,10 @@ import type { User, UserStatus } from "@/types/user";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/dashboard/settings/ui/styles";
 import { Avatar } from "./Avatar";
 import { StatusBadge } from "./StatusBadge";
-import { FormAsideCard, FormPageHeader, FormSection } from "./FormScaffold";
+import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "./FormScaffold";
 import { TempPasswordModal } from "./TempPasswordModal";
 import { DepartmentCombobox } from "./DepartmentCombobox";
+import { JobTitleCombobox } from "./JobTitleCombobox";
 
 const USERS_LIST = "/dashboard/users";
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024; // 2 MB
@@ -30,6 +31,77 @@ function readFileAsDataUrl(file: File): Promise<string> {
 
 // An ISO timestamp → the "YYYY-MM-DD" a <input type="date"> expects (or "").
 const toDateInput = (iso: string | null | undefined): string => (iso ? iso.slice(0, 10) : "");
+
+// --- Client-side validation (UK-aware). Gives instant, field-level feedback before
+// the request; the backend stays the source of truth (defence in depth). ---
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Standard UK postcode shape, e.g. "EC1A 1BB", "M1 1AE", "GU16 7HF".
+const UK_POSTCODE_RE = /^[A-Za-z]{1,2}\d[A-Za-z\d]?\s*\d[A-Za-z]{2}$/;
+// UK phone only: national "0" + 9–10 digits (e.g. 07700 900000) or international
+// "+44" with an optional "(0)" + 9–10 digits, after stripping spaces/hyphens/parens.
+const UK_PHONE_RE = /^(?:\+440?|0)\d{9,10}$/;
+
+function validateUserForm(v: {
+  firstName: string;
+  lastName: string;
+  email: string;
+  phone: string;
+  roleId: string;
+  jobTitle: string;
+  department: string;
+  dateOfJoining: string;
+  dateOfBirth: string;
+  postcode: string;
+}): Record<string, string> {
+  const errs: Record<string, string> = {};
+  const first = v.firstName.trim();
+  const last = v.lastName.trim();
+  const email = v.email.trim();
+
+  if (!first) errs.firstName = "First name is required.";
+  else if (first.length > 50) errs.firstName = "Keep this under 50 characters.";
+
+  if (!last) errs.lastName = "Last name is required.";
+  else if (last.length > 50) errs.lastName = "Keep this under 50 characters.";
+
+  if (!email) errs.email = "Email address is required.";
+  else if (!EMAIL_RE.test(email)) errs.email = "Enter a valid email address.";
+
+  // Phone: required + UK format (national 07… / 020… or international +44…).
+  const phone = v.phone.trim();
+  if (!phone) errs.phone = "Phone number is required.";
+  else if (!UK_PHONE_RE.test(phone.replace(/[\s()-]/g, ""))) {
+    errs.phone = "Enter a valid UK phone number (e.g. 07700 900000 or +44 7700 900000).";
+  }
+
+  if (!v.roleId) errs.roleId = "Role is required.";
+  if (!v.jobTitle.trim()) errs.jobTitle = "Job title is required.";
+  if (!v.department.trim()) errs.department = "Department is required.";
+  if (!v.dateOfJoining) errs.dateOfJoining = "Date of joining is required.";
+
+  if (v.dateOfBirth) {
+    const dob = new Date(v.dateOfBirth);
+    if (Number.isNaN(dob.getTime())) errs.dateOfBirth = "Enter a valid date.";
+    else if (dob.getTime() > Date.now()) errs.dateOfBirth = "Date of birth can't be in the future.";
+    else if (dob.getFullYear() < 1900) errs.dateOfBirth = "Enter a valid date of birth.";
+  }
+
+  if (v.postcode.trim() && !UK_POSTCODE_RE.test(v.postcode.trim())) {
+    errs.postcode = "Enter a valid UK postcode (e.g. EC1A 1BB).";
+  }
+
+  return errs;
+}
+
+// One field's validation message, linked to its input via aria-describedby.
+function FieldError({ id, message }: { id: string; message?: string }) {
+  if (!message) return null;
+  return (
+    <p id={id} className="mt-1.5 text-[11px] font-semibold text-[var(--neg)]">
+      {message}
+    </p>
+  );
+}
 
 // Full-page Add/Edit user form: full-width two-column layout (form + a sticky
 // photo/summary aside), nav-guarded against losing edits, and (on create) reveals
@@ -69,6 +141,7 @@ export function UserForm({
   const [saving, setSaving] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const [errors, setErrors] = React.useState<Record<string, string>>({});
   const [tempPw, setTempPw] = React.useState<{ email: string; password: string } | null>(null);
   const fileRef = React.useRef<HTMLInputElement>(null);
 
@@ -97,10 +170,26 @@ export function UserForm({
 
   const goBack = () => guard.attemptLeave(() => router.push(USERS_LIST));
 
+  // Surface errors as a toast (instant, scroll-independent) as well as inline — the
+  // Save button is in the sticky header, far from the inline message at the bottom.
+  const showError = (msg: string) => {
+    setError(msg);
+    pushToast(msg, "alert");
+  };
+
+  // Clear a field's validation error as the user edits it.
+  const clearError = (name: string) =>
+    setErrors((prev) => {
+      if (!prev[name]) return prev;
+      const next = { ...prev };
+      delete next[name];
+      return next;
+    });
+
   const pickImage = async (file: File) => {
     setError(null);
     if (file.size > MAX_IMAGE_BYTES) {
-      setError("Image must be under 2 MB.");
+      showError("Image must be under 2 MB.");
       return;
     }
     const data = await readFileAsDataUrl(file);
@@ -118,14 +207,24 @@ export function UserForm({
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    if (!firstName.trim() || !lastName.trim()) {
-      setError("First and last name are required.");
+    const fieldErrors = validateUserForm({
+      firstName,
+      lastName,
+      email,
+      phone,
+      roleId,
+      jobTitle,
+      department,
+      dateOfJoining,
+      dateOfBirth,
+      postcode,
+    });
+    if (Object.keys(fieldErrors).length > 0) {
+      setErrors(fieldErrors);
+      pushToast("Please fix the highlighted fields.", "alert");
       return;
     }
-    if (!email.trim()) {
-      setError("Email is required.");
-      return;
-    }
+    setErrors({});
     setSaving(true);
     try {
       if (mode === "create") {
@@ -133,14 +232,14 @@ export function UserForm({
           firstName: firstName.trim(),
           lastName: lastName.trim(),
           email: email.trim(),
-          phone: phone.trim() || undefined,
-          roleId: roleId || undefined,
+          phone: phone.trim(),
+          roleId,
           status,
           gender: gender || undefined,
           dateOfBirth: dateOfBirth || undefined,
-          jobTitle: jobTitle.trim() || undefined,
-          department: department.trim() || undefined,
-          dateOfJoining: dateOfJoining || undefined,
+          jobTitle: jobTitle.trim(),
+          department: department.trim(),
+          dateOfJoining,
           addressLine1: addressLine1.trim() || undefined,
           addressLine2: addressLine2.trim() || undefined,
           city: city.trim() || undefined,
@@ -177,7 +276,7 @@ export function UserForm({
         router.push(USERS_LIST);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Save failed.");
+      showError(err instanceof Error ? err.message : "Save failed.");
       setSaving(false);
     }
   };
@@ -221,20 +320,75 @@ export function UserForm({
           <FormSection title="Identity" description="Who this person is and how to reach them.">
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
-                <label className={labelCls}>First name</label>
-                <input className={inputCls} value={firstName} onChange={(e) => setFirstName(e.target.value)} placeholder="Alex" />
+                <label className={labelCls}>First name<RequiredMark /></label>
+                <input
+                  className={inputCls}
+                  value={firstName}
+                  onChange={(e) => {
+                    setFirstName(e.target.value);
+                    clearError("firstName");
+                  }}
+                  placeholder="Alex"
+                  maxLength={50}
+                  aria-required={true}
+                  aria-invalid={Boolean(errors.firstName)}
+                  aria-describedby={errors.firstName ? "firstName-error" : undefined}
+                />
+                <FieldError id="firstName-error" message={errors.firstName} />
               </div>
               <div>
-                <label className={labelCls}>Last name</label>
-                <input className={inputCls} value={lastName} onChange={(e) => setLastName(e.target.value)} placeholder="Morgan" />
+                <label className={labelCls}>Last name<RequiredMark /></label>
+                <input
+                  className={inputCls}
+                  value={lastName}
+                  onChange={(e) => {
+                    setLastName(e.target.value);
+                    clearError("lastName");
+                  }}
+                  placeholder="Morgan"
+                  maxLength={50}
+                  aria-required={true}
+                  aria-invalid={Boolean(errors.lastName)}
+                  aria-describedby={errors.lastName ? "lastName-error" : undefined}
+                />
+                <FieldError id="lastName-error" message={errors.lastName} />
               </div>
               <div>
-                <label className={labelCls}>Email address</label>
-                <input type="email" className={inputCls} value={email} onChange={(e) => setEmail(e.target.value)} placeholder="alex@company.com" autoComplete="off" />
+                <label className={labelCls}>Email address<RequiredMark /></label>
+                <input
+                  type="email"
+                  className={inputCls}
+                  value={email}
+                  onChange={(e) => {
+                    setEmail(e.target.value);
+                    clearError("email");
+                  }}
+                  placeholder="alex@company.com"
+                  autoComplete="off"
+                  maxLength={120}
+                  aria-required={true}
+                  aria-invalid={Boolean(errors.email)}
+                  aria-describedby={errors.email ? "email-error" : undefined}
+                />
+                <FieldError id="email-error" message={errors.email} />
               </div>
               <div>
-                <label className={labelCls}>Phone</label>
-                <input type="tel" className={inputCls} value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+44 7700 900000" />
+                <label className={labelCls}>Phone<RequiredMark /></label>
+                <input
+                  type="tel"
+                  className={inputCls}
+                  value={phone}
+                  onChange={(e) => {
+                    setPhone(e.target.value);
+                    clearError("phone");
+                  }}
+                  placeholder="+44 7700 900000"
+                  maxLength={20}
+                  aria-required={true}
+                  aria-invalid={Boolean(errors.phone)}
+                  aria-describedby={errors.phone ? "phone-error" : undefined}
+                />
+                <FieldError id="phone-error" message={errors.phone} />
               </div>
               <div>
                 <label className={labelCls}>Gender</label>
@@ -247,7 +401,18 @@ export function UserForm({
               </div>
               <div>
                 <label className={labelCls}>Date of birth</label>
-                <input type="date" className={inputCls} value={dateOfBirth} onChange={(e) => setDateOfBirth(e.target.value)} />
+                <input
+                  type="date"
+                  className={inputCls}
+                  value={dateOfBirth}
+                  onChange={(e) => {
+                    setDateOfBirth(e.target.value);
+                    clearError("dateOfBirth");
+                  }}
+                  aria-invalid={Boolean(errors.dateOfBirth)}
+                  aria-describedby={errors.dateOfBirth ? "dateOfBirth-error" : undefined}
+                />
+                <FieldError id="dateOfBirth-error" message={errors.dateOfBirth} />
               </div>
             </div>
           </FormSection>
@@ -262,27 +427,70 @@ export function UserForm({
             )}
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
-                <label className={labelCls}>Job title</label>
-                <input className={inputCls} value={jobTitle} onChange={(e) => setJobTitle(e.target.value)} placeholder="Field Engineer" />
+                <label className={labelCls}>Job title<RequiredMark /></label>
+                <JobTitleCombobox
+                  value={jobTitle}
+                  onChange={(name) => {
+                    setJobTitle(name);
+                    clearError("jobTitle");
+                  }}
+                  invalid={Boolean(errors.jobTitle)}
+                  required
+                  describedBy={errors.jobTitle ? "jobTitle-error" : undefined}
+                />
+                <FieldError id="jobTitle-error" message={errors.jobTitle} />
               </div>
               <div>
-                <label className={labelCls}>Department</label>
-                <DepartmentCombobox value={department} onChange={setDepartment} />
+                <label className={labelCls}>Department<RequiredMark /></label>
+                <DepartmentCombobox
+                  value={department}
+                  onChange={(name) => {
+                    setDepartment(name);
+                    clearError("department");
+                  }}
+                  invalid={Boolean(errors.department)}
+                  required
+                  describedBy={errors.department ? "department-error" : undefined}
+                />
+                <FieldError id="department-error" message={errors.department} />
               </div>
               <div>
-                <label className={labelCls}>Date of joining</label>
-                <input type="date" className={inputCls} value={dateOfJoining} onChange={(e) => setDateOfJoining(e.target.value)} />
+                <label className={labelCls}>Date of joining<RequiredMark /></label>
+                <input
+                  type="date"
+                  className={inputCls}
+                  value={dateOfJoining}
+                  onChange={(e) => {
+                    setDateOfJoining(e.target.value);
+                    clearError("dateOfJoining");
+                  }}
+                  aria-required={true}
+                  aria-invalid={Boolean(errors.dateOfJoining)}
+                  aria-describedby={errors.dateOfJoining ? "dateOfJoining-error" : undefined}
+                />
+                <FieldError id="dateOfJoining-error" message={errors.dateOfJoining} />
               </div>
               <div>
-                <label className={labelCls}>Role</label>
-                <select className={inputCls} value={roleId} onChange={(e) => setRoleId(e.target.value)}>
-                  <option value="">No role</option>
+                <label className={labelCls}>Role<RequiredMark /></label>
+                <select
+                  className={inputCls}
+                  value={roleId}
+                  onChange={(e) => {
+                    setRoleId(e.target.value);
+                    clearError("roleId");
+                  }}
+                  aria-required={true}
+                  aria-invalid={Boolean(errors.roleId)}
+                  aria-describedby={errors.roleId ? "roleId-error" : undefined}
+                >
+                  <option value="">Select a role…</option>
                   {roles.map((r) => (
                     <option key={r.id} value={r.id}>
                       {r.name}
                     </option>
                   ))}
                 </select>
+                <FieldError id="roleId-error" message={errors.roleId} />
               </div>
               <div>
                 <label className={labelCls}>Status</label>
@@ -311,7 +519,19 @@ export function UserForm({
               </div>
               <div>
                 <label className={labelCls}>Postcode</label>
-                <input className={inputCls} value={postcode} onChange={(e) => setPostcode(e.target.value)} placeholder="EC1A 1BB" />
+                <input
+                  className={inputCls}
+                  value={postcode}
+                  onChange={(e) => {
+                    setPostcode(e.target.value);
+                    clearError("postcode");
+                  }}
+                  placeholder="EC1A 1BB"
+                  maxLength={10}
+                  aria-invalid={Boolean(errors.postcode)}
+                  aria-describedby={errors.postcode ? "postcode-error" : undefined}
+                />
+                <FieldError id="postcode-error" message={errors.postcode} />
               </div>
             </div>
           </FormSection>

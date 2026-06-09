@@ -154,3 +154,13 @@ export function FormError({ message }: { message: string }) {
     </div>
   );
 }
+
+// A small red asterisk marking a required field. Decorative (aria-hidden) — the
+// matching input carries aria-required so assistive tech announces it.
+export function RequiredMark() {
+  return (
+    <span aria-hidden="true" className="ml-0.5 text-[var(--neg)]">
+      *
+    </span>
+  );
+}
