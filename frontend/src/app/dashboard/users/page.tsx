@@ -1,6 +1,6 @@
 import { Suspense } from "react";
 
-import { UsersRolesPanel } from "@/components/dashboard/users/UsersRolesPanel";
+import { UsersRolesPanel } from "@/components/dashboard/users-roles/UsersRolesPanel";
 import { PermissionGate } from "@/components/auth/PermissionGate";
 
 export default function UsersPage() {

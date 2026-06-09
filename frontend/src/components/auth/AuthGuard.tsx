@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
-import { homeFor } from "@/types/auth";
+import { homeFor } from "@/lib/auth";
 
 // Gate a protected area. While the session is being verified — or once it's found
 // invalid / not allowed here (until the redirect lands) — we render a neutral

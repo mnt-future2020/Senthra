@@ -5,7 +5,7 @@ import { Loader2, LogOut, Monitor, MonitorSmartphone, Smartphone } from "lucide-
 
 import * as authService from "@/services/auth.service";
 import type { DeviceSession } from "@/types/auth";
-import { Skeleton } from "@/components/ui/skeleton";
+import { Skeleton } from "@/components/ui/Skeleton";
 import { AccountCard } from "./AccountCard";
 
 // Best-effort, dependency-free user-agent label (e.g. "Chrome on Windows").

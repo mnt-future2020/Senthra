@@ -6,7 +6,7 @@ import * as settingsRepo from "#modules/settings/settings.repository.js";
 import { decryptSecret } from "../../utils/crypto.js";
 import { buildEmailHeaderRow, renderBodyToHtml, safeBrandColor } from "../../utils/email-html.js";
 import { renderEmail, type TemplateVars } from "../../utils/template-render.js";
-import { findDefaultTemplate } from "./email-templates.defaults.js";
+import { findDefaultTemplate } from "./emailTemplate.defaults.js";
 
 // Send an email using the SMTP settings configured in the dashboard (Settings ->
 // Email). Throws if SMTP isn't configured, so callers can decide how to handle it.

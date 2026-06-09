@@ -2,7 +2,7 @@
 
 import { Loader2 } from "lucide-react";
 
-import { primaryBtn } from "./styles";
+import { primaryBtn } from "@/components/ui/styles";
 
 // Shared submit row for the Settings forms: an "Unsaved changes" cue while there
 // are pending edits, and a Save button that's disabled when there's nothing to

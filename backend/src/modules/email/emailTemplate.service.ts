@@ -8,7 +8,7 @@ import { slugify } from "../../utils/slugify.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { resolveBrandVars, sendAndLog } from "./email.service.js";
-import { findDefaultTemplate, requiredVariablesFor } from "./email-templates.defaults.js";
+import { findDefaultTemplate, requiredVariablesFor } from "./emailTemplate.defaults.js";
 
 export interface PublicEmailTemplate {
   id: string;

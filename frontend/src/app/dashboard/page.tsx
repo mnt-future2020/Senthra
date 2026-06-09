@@ -4,7 +4,7 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 
 import { useAuth } from "@/hooks/useAuth";
-import { firstDashboardPath } from "@/types/auth";
+import { firstDashboardPath } from "@/lib/auth";
 import { NoAccessHome } from "@/components/dashboard/shell/NoAccessHome";
 
 // The dashboard landing. It has no screen of its own — it forwards each principal

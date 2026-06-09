@@ -33,9 +33,9 @@ src/
 │   ├── user/               # user.{controller,service,repository,validation,routes}.ts
 │   ├── role/               # role.{controller,service,repository,validation,routes}.ts
 │   ├── settings/           # settings.{controller,service,repository,validation,routes}.ts
-│   ├── email/              # email.service + emailLog.repository + email-templates.defaults
+│   ├── email/              # email.service + emailLog.repository + emailTemplate.defaults
 │   │                       #   + emailTemplate.{controller,service,repository,validation,routes}.ts
-│   └── audit/              # audit.service.ts + auditLog.repository.ts
+│   └── audit/              # audit.service.ts + audit.repository.ts
 ├── config/                 # validated environment (env.ts) — the only place process.env is read
 ├── routes/                 # route aggregator (index.ts mounts each module's *.routes.ts) + health check
 ├── middleware/             # auth, validation runner, error handler, rate limiters

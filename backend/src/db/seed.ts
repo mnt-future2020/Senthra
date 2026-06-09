@@ -4,7 +4,7 @@ import * as emailTemplateRepo from "#modules/email/emailTemplate.repository.js";
 import * as roleRepo from "#modules/role/role.repository.js";
 import * as settingsRepo from "#modules/settings/settings.repository.js";
 import { LEGACY_PERMISSION_EXPANSION } from "#modules/role/permissions.js";
-import { DEFAULT_EMAIL_TEMPLATES } from "#modules/email/email-templates.defaults.js";
+import { DEFAULT_EMAIL_TEMPLATES } from "#modules/email/emailTemplate.defaults.js";
 import { renderBodyToHtml } from "../utils/email-html.js";
 import { hashPassword } from "../utils/password.js";
 

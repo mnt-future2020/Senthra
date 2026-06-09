@@ -1,4 +1,4 @@
-import { Skeleton } from "@/components/ui/skeleton";
+import { Skeleton } from "@/components/ui/Skeleton";
 
 // Loading placeholder for the whole dashboard frame, shown by AuthGuard while the
 // session is being verified. It mirrors the real shell — sidebar (expanded, the

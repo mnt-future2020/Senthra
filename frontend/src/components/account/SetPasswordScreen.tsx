@@ -7,11 +7,11 @@ import { Loader2 } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { useBranding } from "@/hooks/useBranding";
 import { BrandMark } from "@/components/branding/BrandMark";
-import { PasswordInput } from "@/components/dashboard/settings/ui/PasswordInput";
-import { Notice } from "@/components/dashboard/settings/ui/Notice";
+import { PasswordInput } from "@/components/ui/PasswordInput";
+import { Notice } from "@/components/ui/Notice";
 import * as authService from "@/services/auth.service";
-import { homeFor } from "@/types/auth";
-import type { Msg } from "@/components/dashboard/settings/types";
+import { homeFor } from "@/lib/auth";
+import type { Msg } from "@/components/ui/types";
 
 // First-login forced password set. There's no current password — the active
 // session authorises the change. On success the principal is refreshed and the

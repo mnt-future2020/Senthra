@@ -4,8 +4,8 @@ import * as React from "react";
 import { useParams } from "next/navigation";
 
 import { PermissionGate } from "@/components/auth/PermissionGate";
-import { UserDetail } from "@/components/dashboard/users/UserDetail";
-import { FormError, FormPageSkeleton } from "@/components/dashboard/users/FormScaffold";
+import { UserDetail } from "@/components/dashboard/users-roles/users/UserDetail";
+import { FormError, FormPageSkeleton } from "@/components/ui/FormScaffold";
 import * as userService from "@/services/user.service";
 import type { User } from "@/types/user";
 

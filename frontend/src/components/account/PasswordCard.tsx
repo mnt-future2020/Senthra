@@ -5,11 +5,11 @@ import { Check, KeyRound, Loader2, X } from "lucide-react";
 
 import * as authService from "@/services/auth.service";
 import { AccountCard } from "./AccountCard";
-import { Field } from "@/components/dashboard/settings/ui/Field";
-import { Notice } from "@/components/dashboard/settings/ui/Notice";
-import { PasswordInput } from "@/components/dashboard/settings/ui/PasswordInput";
-import { primaryBtn } from "@/components/dashboard/settings/ui/styles";
-import type { Msg } from "@/components/dashboard/settings/types";
+import { Field } from "@/components/ui/Field";
+import { Notice } from "@/components/ui/Notice";
+import { PasswordInput } from "@/components/ui/PasswordInput";
+import { primaryBtn } from "@/components/ui/styles";
+import type { Msg } from "@/components/ui/types";
 
 // 0..4 strength from length + character variety. Indicative only — the server
 // enforces the real minimum (8 chars).

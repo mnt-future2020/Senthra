@@ -4,12 +4,8 @@ import * as React from "react";
 
 import * as authService from "@/services/auth.service";
 import { clearAllClientCaches } from "@/lib/clientCache";
-import {
-  principalCan,
-  type AdminPrincipal,
-  type Principal,
-  type UserPrincipal,
-} from "@/types/auth";
+import { principalCan } from "@/lib/auth";
+import type { AdminPrincipal, Principal, UserPrincipal } from "@/types/auth";
 
 export interface AuthState {
   // The authenticated principal (admin or staff user), or null.
