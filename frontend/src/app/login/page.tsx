@@ -7,7 +7,7 @@ import { Eye, EyeOff, Loader2 } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
 import * as authService from "@/services/auth.service";
-import { homeFor } from "@/types/auth";
+import { homeFor } from "@/lib/auth";
 import { AuthLayout } from "@/components/auth/AuthLayout";
 
 // Minimal typing for the Google Identity Services global.

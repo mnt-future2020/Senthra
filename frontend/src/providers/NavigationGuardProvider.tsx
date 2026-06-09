@@ -2,7 +2,7 @@
 
 import * as React from "react";
 
-import { ConfirmDialog } from "@/components/dashboard/users/ConfirmDialog";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 
 // App-level guard against losing unsaved form edits. Any form reports its dirty
 // state via useReportDirty(); navigation away (switching Settings sections, the

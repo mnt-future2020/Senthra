@@ -4,8 +4,8 @@ import * as React from "react";
 import { useParams } from "next/navigation";
 
 import { PermissionGate } from "@/components/auth/PermissionGate";
-import { UserForm } from "@/components/dashboard/users/UserForm";
-import { FormError, FormPageSkeleton } from "@/components/dashboard/users/FormScaffold";
+import { UserForm } from "@/components/dashboard/users-roles/users/UserForm";
+import { FormError, FormPageSkeleton } from "@/components/ui/FormScaffold";
 import * as roleService from "@/services/role.service";
 import * as userService from "@/services/user.service";
 import type { Role } from "@/types/role";

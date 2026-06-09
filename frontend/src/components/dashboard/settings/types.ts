@@ -6,8 +6,6 @@ export type Section =
   | "email"
   | "email-templates";
 
-export type Msg = { type: "success" | "error"; text: string } | null;
-
 // Props the dashboard passes down so the Appearance section can edit personal
 // display preferences. The brand/accent color lives in Branding (it's global and
 // used in emails), so it isn't here.

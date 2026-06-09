@@ -3,8 +3,8 @@
 import * as React from "react";
 
 import { PermissionGate } from "@/components/auth/PermissionGate";
-import { UserForm } from "@/components/dashboard/users/UserForm";
-import { FormPageSkeleton } from "@/components/dashboard/users/FormScaffold";
+import { UserForm } from "@/components/dashboard/users-roles/users/UserForm";
+import { FormPageSkeleton } from "@/components/ui/FormScaffold";
 import * as roleService from "@/services/role.service";
 import type { Role } from "@/types/role";
 
