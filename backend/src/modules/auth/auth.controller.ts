@@ -48,16 +48,17 @@ export const changeCredentials = asyncHandler(async (req, res) => {
   res.json({ principal });
 });
 
-// POST /auth/password  (protected, staff user) — change own password. Powers the
-// first-login forced change and voluntary changes; re-issues the session.
+// POST /auth/password  (protected, staff user OR customer) — change own password.
+// Powers the first-login forced change and voluntary changes; re-issues the
+// session. Dispatches on the principal type so a customer's password lives in the
+// Customer collection (and a staff user's in User).
 export const changePassword = asyncHandler(async (req, res) => {
   const { currentPassword, newPassword } = req.body as ChangePasswordInput;
-  const { tokens, principal } = await authService.changeUserPassword(
-    req.userId!,
-    currentPassword,
-    newPassword,
-    req.sessionId ?? "",
-  );
+  const sid = req.sessionId ?? "";
+  const { tokens, principal } =
+    req.principal?.type === "customer"
+      ? await authService.changeCustomerPassword(req.customerId!, currentPassword, newPassword, sid)
+      : await authService.changeUserPassword(req.userId!, currentPassword, newPassword, sid);
   setAuthCookies(res, tokens.accessToken, tokens.refreshToken, true);
   res.json({ principal });
 });

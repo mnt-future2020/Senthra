@@ -162,6 +162,93 @@ model User {
   @@index([status])
 }
 
+// A customer company (e.g. "BT"). Created by an admin/PM from the dashboard; the
+// record IS the login identity (one read-only login per customer — company email +
+// temp password, mirroring the staff User auth fields). A Customer PM signs in and
+// gets READ-ONLY, single-customer-scoped visibility of their own stock (Flow 9).
+// Customer codes are Counter-allocated (e.g. CUST-001), same pattern as employeeId.
+model Customer {
+  id            String  @id @default(auto()) @map("_id") @db.ObjectId
+  customerCode  String  @unique // human reference, auto-generated (e.g. CUST-001)
+  name          String // company name, e.g. "BT"
+  // Lowercased `name`, kept in sync by the repository on every write. NOT a hard
+  // unique index (a soft-deleted row would otherwise permanently block re-using a
+  // company name); case-insensitive name uniqueness is checked among ACTIVE
+  // customers in the service. `email` is the hard unique login identity.
+  nameLower     String
+  contactPerson String?
+  email         String  @unique // login identity (company email)
+  phone         String?
+  status        String  @default("active") // active | inactive
+
+  // Auth — set at creation, never sent to the browser. One login per customer.
+  passwordHash      String
+  mustResetPassword Boolean @default(true)
+  // First-login "set your password" + forgot-password flow: SHA-256 hash of the
+  // emailed token + its expiry (never the raw token). Mirrors User.
+  resetTokenHash      String?
+  resetTokenExpiresAt DateTime?
+
+  deletedAt DateTime? // soft delete — excluded from listings
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  projects  CustomerProject[]
+  catalogue CustomerCatalogueItem[]
+  sites     CustomerSite[]
+
+  @@index([status])
+}
+
+// A customer's project (e.g. "BT Core Migration"). 1-to-many. Later feeds the
+// "Select Project" dropdown when creating jobs. Case-insensitive unique per customer.
+model CustomerProject {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  customerId String   @db.ObjectId
+  customer   Customer @relation(fields: [customerId], references: [id])
+  name       String
+  nameLower  String // lowercased name; uniqueness scoped per-customer via @@unique
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([customerId, nameLower])
+  @@index([customerId])
+}
+
+// An item in a customer's stock catalogue. Per-customer SKUs (no fixed format).
+// `attributes` holds dynamic per-category custom fields (e.g. Fibre: Singlemode).
+// SKU is case-insensitive unique per customer. NO pricing/cost fields ever live
+// here — customers must never see monetary data.
+model CustomerCatalogueItem {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  customerId String   @db.ObjectId
+  customer   Customer @relation(fields: [customerId], references: [id])
+  name       String
+  sku        String
+  skuLower   String // lowercased sku; uniqueness scoped per-customer via @@unique
+  category   String // e.g. "Optical" | "Core"
+  attributes Json? // dynamic per-category custom fields
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([customerId, skuLower])
+  @@index([customerId])
+}
+
+// A customer site / delivery location (optional). name + UK postcode.
+model CustomerSite {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  customerId String   @db.ObjectId
+  customer   Customer @relation(fields: [customerId], references: [id])
+  name       String
+  postcode   String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([customerId])
+}
+
 // A dynamic, admin-editable email template. Every email the app sends is
 // rendered from one of these (no hardcoded email content). `isSystem` templates
 // ship a built-in default that can be restored but not deleted.
@@ -224,8 +311,8 @@ model AuditLog {
 model Session {
   id            String   @id @default(auto()) @map("_id") @db.ObjectId
   sid           String   @unique // embedded in the access + refresh tokens
-  principalId   String // the admin or user id (no FK — points at either collection)
-  principalType String // "admin" | "user"
+  principalId   String // the admin, user, or customer id (no FK — points at any collection)
+  principalType String // "admin" | "user" | "customer"
   userAgent     String?
   ip            String?
   createdAt     DateTime @default(now())

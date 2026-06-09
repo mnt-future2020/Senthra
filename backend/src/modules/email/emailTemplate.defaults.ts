@@ -52,6 +52,37 @@ Please keep this password safe. Sign-in access is being set up — once it's ena
 — {{brandName}}`,
   },
   {
+    key: "customer.created",
+    name: "Customer Account Created",
+    category: "account",
+    subject: "Your {{brandName}} customer portal access",
+    variables: [
+      "customerName",
+      "contactPerson",
+      "email",
+      "temporaryPassword",
+      "brandName",
+      "loginUrl",
+      "supportEmail",
+      "currentYear",
+    ],
+    // Without the credentials the recipient can't access the portal at all.
+    requiredVariables: ["email", "temporaryPassword"],
+    body: `Hello {{contactPerson}} 👋
+
+A read-only customer portal account has been created for {{customerName}} on {{brandName}}, where you can view your stock.
+
+Use the temporary password below to sign in:
+Email: {{email}}
+Temporary password: {{temporaryPassword}}
+
+Sign in here: {{loginUrl}}
+
+You'll be asked to choose your own password on first login. Please keep these details safe.
+
+— {{brandName}}`,
+  },
+  {
     key: "auth.password_reset",
     name: "Password Reset",
     category: "security",

@@ -2,11 +2,12 @@ import type { Request, RequestHandler } from "express";
 
 import * as adminRepo from "#modules/auth/admin.repository.js";
 import * as userRepo from "#modules/user/user.repository.js";
+import * as customerRepo from "#modules/customer/customer.repository.js";
 import * as sessionService from "#modules/auth/session.service.js";
 import { roleGrants } from "#modules/role/permissions.js";
 import { ACCESS_COOKIE } from "../utils/cookies.js";
 import { verifyAccessToken } from "../utils/jwt.js";
-import { adminPrincipal, userPrincipal } from "../types/principal.js";
+import { adminPrincipal, customerPrincipal, userPrincipal } from "../types/principal.js";
 
 // Access token from the httpOnly cookie first, then an Authorization: Bearer header.
 function readAccessToken(req: Request): string | undefined {
@@ -63,6 +64,26 @@ export const requireAuth: RequestHandler = async (req, res, next) => {
       return;
     }
 
+    if (payload.actor === "customer") {
+      // findById excludes soft-deleted customers.
+      const customer = await customerRepo.findById(payload.sub);
+      if (!customer) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+      if (customer.status !== "active") {
+        res.status(401).json({
+          error: "Your account is not active. Contact your administrator.",
+        });
+        return;
+      }
+      req.principal = customerPrincipal(customer);
+      req.customerId = customer.id;
+      req.customerEmail = customer.email;
+      next();
+      return;
+    }
+
     const admin = await adminRepo.findById(payload.sub);
     if (!admin) {
       res.status(401).json({ error: "Unauthorized" });
@@ -88,8 +109,28 @@ export const requireAdmin: RequestHandler = (req, res, next) => {
   next();
 };
 
+// Restrict a route to a customer principal (the read-only portal surface). Staff
+// and the admin get 403 — the customer portal is exclusively for customers. A
+// customer who hasn't completed the forced first-login password set is walled off
+// the portal data until they do (mirrors the staff requirePermission wall), so a
+// temp-password session can't read anything but the password-set endpoint.
+export const requireCustomer: RequestHandler = (req, res, next) => {
+  const principal = req.principal;
+  if (principal?.type !== "customer") {
+    res.status(403).json({ error: "Customer access required." });
+    return;
+  }
+  if (principal.mustResetPassword) {
+    res.status(403).json({ error: "Set your password before continuing." });
+    return;
+  }
+  next();
+};
+
 // Restrict a route to principals holding a specific permission. The super-admin
 // account always passes; a staff user passes if their role grants it (or "*").
+// A customer principal carries only its fixed read-only set, so it fails any
+// staff/admin permission here — defence in depth on top of the route separation.
 export function requirePermission(permission: string): RequestHandler {
   return (req, res, next) => {
     const principal = req.principal;

@@ -7,11 +7,13 @@ import { env } from "../../config/env.js";
 import * as adminRepo from "./admin.repository.js";
 import * as sessionService from "./session.service.js";
 import * as userRepo from "#modules/user/user.repository.js";
+import * as customerRepo from "#modules/customer/customer.repository.js";
 import * as settingsRepo from "#modules/settings/settings.repository.js";
 import * as auditService from "#modules/audit/audit.service.js";
 import { sendTemplatedEmail } from "#modules/email/email.service.js";
 import {
   adminPrincipal,
+  customerPrincipal,
   userPrincipal,
   type Principal,
 } from "../../types/principal.js";
@@ -112,6 +114,18 @@ export async function login(
     return { principal, ...(await startAndIssue(user.id, "user", meta)) };
   }
 
+  // Finally, an external customer (read-only portal). Email namespaces are kept
+  // disjoint at creation, so a customer is only reached when no admin/user matched.
+  const customer = await customerRepo.findByEmail(normalized);
+  if (customer && (await verifyPassword(password, customer.passwordHash))) {
+    if (customer.status !== "active") {
+      throw forbidden("Your account is not active. Contact your administrator.");
+    }
+    const principal = customerPrincipal(customer);
+    recordAuth("auth.login", principal, meta);
+    return { principal, ...(await startAndIssue(customer.id, "customer", meta)) };
+  }
+
   throw unauthorized("Invalid email or password.");
 }
 
@@ -144,11 +158,15 @@ export async function changeCredentials(
     if (normalized !== admin.email) {
       const existing = await adminRepo.findByEmail(normalized);
       if (existing) throw conflict("That email is already in use.");
-      // Keep the admin/staff email namespaces disjoint. A staff user — even a
-      // soft-deleted one, which can be revived under the same email — holding this
-      // address would be shadowed by login's admin-first match, so block it.
+      // Keep the admin/staff/customer email namespaces disjoint. A staff user or
+      // customer — even a soft-deleted one, which can be revived under the same
+      // email — holding this address would be shadowed by login's admin-first
+      // match, so block it.
       if (await userRepo.findByEmailIncludingDeleted(normalized)) {
         throw conflict("That email belongs to a staff user. Use a different one.");
+      }
+      if (await customerRepo.findByEmailIncludingDeleted(normalized)) {
+        throw conflict("That email belongs to a customer. Use a different one.");
       }
       data.email = normalized;
       data.googleEmail = normalized;
@@ -207,6 +225,40 @@ export async function changeUserPassword(
   return { tokens: issueTokens(userId, "user", currentSid), principal: userPrincipal(updated) };
 }
 
+// Customer: change own password — the first-login forced change and voluntary
+// changes. Mirrors changeUserPassword exactly, on the Customer collection: clears
+// mustResetPassword, signs out other devices, and re-issues tokens for this device.
+export async function changeCustomerPassword(
+  customerId: string,
+  currentPassword: string | undefined,
+  newPassword: string,
+  currentSid: string,
+): Promise<{ tokens: SessionTokens; principal: Principal }> {
+  if (!currentSid) throw unauthorized("Session expired. Please log in again.");
+  const customer = await customerRepo.findById(customerId);
+  if (!customer) throw notFound("Account not found.");
+  // The first-login forced change is authorised by the session itself (the temp
+  // password was just proven at login). A voluntary change re-verifies the current
+  // password and rejects a no-op reuse.
+  if (!customer.mustResetPassword) {
+    if (!currentPassword || !(await verifyPassword(currentPassword, customer.passwordHash))) {
+      throw unauthorized("Current password is incorrect.");
+    }
+    if (await verifyPassword(newPassword, customer.passwordHash)) {
+      throw badRequest("Your new password must be different from the current one.");
+    }
+  }
+  const updated = await customerRepo.update(customerId, {
+    passwordHash: await hashPassword(newPassword),
+    mustResetPassword: false,
+  });
+  await sessionService.endOthers(customerId, "customer", currentSid);
+  return {
+    tokens: issueTokens(customerId, "customer", currentSid),
+    principal: customerPrincipal(updated),
+  };
+}
+
 // Rotate tokens using a refresh token (admin or user). The session must still be
 // live (it isn't after logout, a password change, or eviction by the device cap).
 // Throws on any failure; the caller clears the auth cookies when this rejects.
@@ -227,6 +279,16 @@ export async function refreshSession(refreshToken: string): Promise<AuthResult> 
     if (!user || user.status !== "active") throw unauthorized("Unauthorized.");
     await sessionService.touch(payload.sid);
     return { principal: userPrincipal(user), ...issueTokens(user.id, "user", payload.sid) };
+  }
+
+  if (payload.actor === "customer") {
+    const customer = await customerRepo.findById(payload.sub);
+    if (!customer || customer.status !== "active") throw unauthorized("Unauthorized.");
+    await sessionService.touch(payload.sid);
+    return {
+      principal: customerPrincipal(customer),
+      ...issueTokens(customer.id, "customer", payload.sid),
+    };
   }
 
   const admin = await adminRepo.findById(payload.sub);
@@ -291,6 +353,14 @@ export async function forgotPassword(email: string): Promise<void> {
     void issueResetEmail(user.email, user.firstName, (d) => userRepo.update(user.id, d)).catch(
       onError,
     );
+    return;
+  }
+  const customer = await customerRepo.findByEmail(normalized);
+  if (customer && customer.status === "active") {
+    const firstName = customer.contactPerson?.trim().split(/\s+/)[0] || customer.name;
+    void issueResetEmail(customer.email, firstName, (d) => customerRepo.update(customer.id, d)).catch(
+      onError,
+    );
   }
 }
 
@@ -327,6 +397,22 @@ export async function resetPassword(token: string, newPassword: string): Promise
       resetTokenExpiresAt: null,
     });
     await sessionService.endAll(user.id, "user");
+    return;
+  }
+
+  const customer = await customerRepo.findByResetTokenHash(tokenHash);
+  if (
+    customer &&
+    customer.resetTokenExpiresAt &&
+    customer.resetTokenExpiresAt.getTime() >= Date.now()
+  ) {
+    await customerRepo.update(customer.id, {
+      passwordHash: await hashPassword(newPassword),
+      mustResetPassword: false,
+      resetTokenHash: null,
+      resetTokenExpiresAt: null,
+    });
+    await sessionService.endAll(customer.id, "customer");
     return;
   }
 

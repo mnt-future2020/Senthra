@@ -6,7 +6,7 @@ import * as auditLogRepo from "./audit.repository.js";
 // account is later renamed or removed.
 export interface AuditActor {
   id?: string | null;
-  type?: "admin" | "user" | "system";
+  type?: "admin" | "user" | "customer" | "system";
   email?: string | null;
   // The actor's effective permissions ("*" = all). Not persisted on the audit
   // row — carried so authorization guards can enforce a no-escalation rule (a

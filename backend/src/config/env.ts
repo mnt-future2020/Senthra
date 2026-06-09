@@ -34,6 +34,15 @@ const envSchema = z.object({
   // Initial admin seeded on first startup (optional — seed is skipped if unset).
   ADMIN_EMAIL: z.email().optional(),
   ADMIN_PASSWORD: z.string().min(1).optional(),
+
+  // Feature flag: live customer stock dashboard (Flow 9). OFF until the
+  // Stock/Inventory/Movement modules exist — while off, the customer portal shows
+  // an honest "no stock data yet" state. Flip to "true" (with the inventory
+  // read-model wired into customer.stock.service) to light up live data.
+  FEATURE_CUSTOMER_STOCK: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((v) => v === "true"),
 });
 
 const parsed = envSchema.safeParse(process.env);

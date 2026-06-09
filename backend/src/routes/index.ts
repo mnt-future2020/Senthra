@@ -1,6 +1,7 @@
 import { Router } from "express";
 
 import authRoutes from "#modules/auth/auth.routes.js";
+import { adminRouter as customerRoutes, portalRouter as customerPortalRoutes } from "#modules/customer/customer.routes.js";
 import departmentRoutes from "#modules/department/department.routes.js";
 import emailTemplateRoutes from "#modules/email/emailTemplate.routes.js";
 import jobTitleRoutes from "#modules/jobTitle/jobTitle.routes.js";
@@ -23,5 +24,8 @@ router.use("/roles", roleRoutes);
 router.use("/departments", departmentRoutes);
 router.use("/job-titles", jobTitleRoutes);
 router.use("/email-templates", emailTemplateRoutes);
+// Customer master-data (admin/PM) + the read-only customer portal API.
+router.use("/customers", customerRoutes);
+router.use("/customer", customerPortalRoutes);
 
 export default router;
