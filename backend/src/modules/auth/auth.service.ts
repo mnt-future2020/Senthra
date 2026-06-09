@@ -270,7 +270,8 @@ export async function refreshSession(refreshToken: string): Promise<AuthResult> 
     throw unauthorized("Invalid or expired refresh token.");
   }
 
-  if (!(await sessionService.isActive(payload.sid))) {
+  const session = await sessionService.findActive(payload.sid);
+  if (!session || !sessionService.sessionMatchesPrincipal(session, payload.actor, payload.sub)) {
     throw unauthorized("Session expired. Please log in again.");
   }
 

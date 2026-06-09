@@ -153,7 +153,13 @@ export interface PagedCustomers {
 
 export async function listCustomers(params: ListCustomersParams = {}): Promise<PagedCustomers> {
   const pageSize = Math.min(Math.max(Math.trunc(params.pageSize ?? 20), 1), 100);
-  const filters = { search: params.search, status: params.status };
+  // Constrain the status filter to the known values; an unknown/typo value is
+  // ignored (no filter) rather than silently matching zero rows.
+  const status =
+    params.status && (STATUSES as readonly string[]).includes(params.status)
+      ? params.status
+      : undefined;
+  const filters = { search: params.search, status };
   const total = await customerRepo.count(filters);
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const page = Math.min(Math.max(Math.trunc(params.page ?? 1), 1), totalPages);
@@ -171,17 +177,21 @@ export async function getCustomer(idOrCode: string): Promise<PublicCustomer> {
   return toPublic(c);
 }
 
-// Reject an email that belongs to the admin or an active staff user — login
+// Reject an email that belongs to the admin or an ACTIVE staff user — login
 // resolves admin → user → customer, so a shared address would shadow the customer.
+// Uses findByEmailIncludingDeleted + a `!deletedAt` check (mirroring the reverse
+// guards in user.service / auth.service) so the disjointness rule is expressed the
+// same way on every path. A soft-deleted staff user doesn't block (it can't log in;
+// reviving it later is itself blocked by the active-customer guard there).
 async function assertEmailFree(email: string): Promise<void> {
   const [adminWithEmail, userWithEmail] = await Promise.all([
     adminRepo.findByEmail(email),
-    userRepo.findByEmailWithRole(email),
+    userRepo.findByEmailIncludingDeleted(email),
   ]);
   if (adminWithEmail) {
     throw conflict("That email belongs to the administrator account. Use a different one.");
   }
-  if (userWithEmail) {
+  if (userWithEmail && !userWithEmail.deletedAt) {
     throw conflict("That email belongs to a staff user. Use a different one.");
   }
 }
@@ -492,10 +502,14 @@ function normalizeCatalogueInput(input: CatalogueItemInput): customerRepo.Catalo
   if (!name) throw badRequest("Item name is required.");
   if (!sku) throw badRequest("SKU is required.");
   if (!category) throw badRequest("Category is required.");
-  const attributes =
-    input.attributes && Object.keys(input.attributes).length > 0
-      ? (input.attributes as Prisma.InputJsonValue)
-      : null;
+  // undefined → field omitted (preserve on update); null / {} → explicit clear;
+  // a non-empty object → replace.
+  let attributes: Prisma.InputJsonValue | null | undefined;
+  if (input.attributes === undefined) attributes = undefined;
+  else if (input.attributes === null) attributes = null;
+  else attributes = Object.keys(input.attributes).length > 0
+    ? (input.attributes as Prisma.InputJsonValue)
+    : null;
   return { name, sku, category, attributes };
 }
 

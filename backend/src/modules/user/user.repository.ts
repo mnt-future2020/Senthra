@@ -66,6 +66,10 @@ export function count(filters: UserListFilters = {}): Promise<number> {
 }
 
 export function findById(id: string): Promise<UserWithRole | null> {
+  // Guard a nullish id: Prisma silently drops an `undefined` filter key, so
+  // `findFirst({ where: { id: undefined, deletedAt: null } })` would otherwise
+  // match the FIRST non-deleted user instead of returning null.
+  if (!id) return Promise.resolve(null);
   return prisma.user.findFirst({
     where: { id, deletedAt: null },
     include: { role: true },

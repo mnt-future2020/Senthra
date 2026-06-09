@@ -6,7 +6,7 @@ import {
   type CustomerSite,
 } from "@prisma/client";
 
-import { prisma } from "../../lib/prisma.js";
+import { prisma, withTransaction } from "../../lib/prisma.js";
 
 // Data-access layer for the Customer aggregate (Customer + projects + catalogue +
 // sites). The ONLY place Prisma is touched for customers. Soft-deleted customers
@@ -84,6 +84,9 @@ export function count(filters: CustomerListFilters = {}): Promise<number> {
 // --- single-customer lookups (all exclude soft-deleted) ---------------------
 
 export function findById(id: string): Promise<Customer | null> {
+  // Guard a nullish id (Prisma drops an `undefined` filter key, which would
+  // otherwise match the first non-deleted customer instead of returning null).
+  if (!id) return Promise.resolve(null);
   return prisma.customer.findFirst({ where: { id, deletedAt: null } });
 }
 
@@ -238,11 +241,22 @@ export async function createWithCode(
 // Revive a soft-deleted customer (re-add under the same email). Keeps the existing
 // customerCode — it's already unique and a stable reference — and overwrites the
 // profile + auth with the new details.
+//
+// CRITICAL: the prior occupant's nested data (projects / catalogue / sites) is
+// scrubbed in the SAME transaction. The Customer row is reused (so the email +
+// code stay reserved), so without this the revived customer — a different company
+// reusing the email — would inherit the previous company's catalogue/projects/
+// sites (a cross-tenant data leak via GET /customer/catalogue + the admin detail).
 export function revive(
   id: string,
   data: Omit<Prisma.CustomerUpdateInput, "customerCode">,
 ): Promise<Customer> {
-  return prisma.customer.update({ where: { id }, data });
+  return withTransaction(async (tx) => {
+    await tx.customerProject.deleteMany({ where: { customerId: id } });
+    await tx.customerCatalogueItem.deleteMany({ where: { customerId: id } });
+    await tx.customerSite.deleteMany({ where: { customerId: id } });
+    return tx.customer.update({ where: { id }, data });
+  });
 }
 
 // --- nested: projects -------------------------------------------------------
@@ -292,6 +306,8 @@ export interface CatalogueItemData {
   name: string;
   sku: string;
   category: string;
+  // undefined = leave attributes unchanged (omitted from a PUT); null = clear them;
+  // an object = replace them.
   attributes?: Prisma.InputJsonValue | null;
 }
 
@@ -315,16 +331,16 @@ export function updateCatalogueItem(
   id: string,
   data: CatalogueItemData,
 ): Promise<CustomerCatalogueItem> {
-  return prisma.customerCatalogueItem.update({
-    where: { id },
-    data: {
-      name: data.name,
-      sku: data.sku,
-      skuLower: data.sku.toLowerCase(),
-      category: data.category,
-      attributes: data.attributes ?? null,
-    },
-  });
+  const update: Prisma.CustomerCatalogueItemUpdateInput = {
+    name: data.name,
+    sku: data.sku,
+    skuLower: data.sku.toLowerCase(),
+    category: data.category,
+  };
+  // Only touch attributes when the caller actually sent the field — an omitted
+  // `attributes` (undefined) preserves the stored value rather than wiping it.
+  if (data.attributes !== undefined) update.attributes = data.attributes ?? null;
+  return prisma.customerCatalogueItem.update({ where: { id }, data: update });
 }
 
 export function deleteCatalogueItem(id: string): Promise<CustomerCatalogueItem> {

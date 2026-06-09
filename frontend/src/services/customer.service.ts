@@ -94,19 +94,30 @@ export function getCustomer(idOrCode: string): Promise<Customer> {
   return api<{ customer: Customer }>(`/customers/${idOrCode}`).then((r) => r.customer);
 }
 
+// Any mutation invalidates the cached list pages, so a remount (e.g. returning to
+// the list after a delete) doesn't seed from a stale snapshot that still shows the
+// old/removed row before the background refetch lands.
 export function createCustomer(payload: CreateCustomerPayload): Promise<CreateCustomerResult> {
-  return api<CreateCustomerResult>("/customers", { method: "POST", body: payload });
+  return api<CreateCustomerResult>("/customers", { method: "POST", body: payload }).then((r) => {
+    listCache.clear();
+    return r;
+  });
 }
 
 export function updateCustomer(id: string, payload: UpdateCustomerPayload): Promise<CustomerSummary> {
   return api<{ customer: CustomerSummary }>(`/customers/${id}`, {
     method: "PUT",
     body: payload,
-  }).then((r) => r.customer);
+  }).then((r) => {
+    listCache.clear();
+    return r.customer;
+  });
 }
 
 export function deleteCustomer(id: string): Promise<void> {
-  return api(`/customers/${id}`, { method: "DELETE" }).then(() => undefined);
+  return api(`/customers/${id}`, { method: "DELETE" }).then(() => {
+    listCache.clear();
+  });
 }
 
 export function resendInvite(id: string): Promise<{ temporaryPassword: string }> {

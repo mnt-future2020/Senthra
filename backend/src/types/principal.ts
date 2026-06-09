@@ -49,9 +49,13 @@ export interface CustomerPrincipal {
 
 export type Principal = AdminPrincipal | UserPrincipal | CustomerPrincipal;
 
-// The fixed read-only permission set every customer principal carries. Drives the
-// frontend's principalCan() gating; the backend enforces read-only structurally
-// (customers reach only requireCustomer GET routes, never a write route).
+// The fixed read-only permission set every customer principal carries. NOTE: no
+// runtime gate currently consults this — the customer portal is gated structurally
+// by actor type (requireCustomer on the backend, AuthGuard requireType="customer"
+// on the frontend), and customers reach only GET routes, never a write route. The
+// set exists so principalCan() never throws on a customer and as the seam for any
+// future permission-based gating. "stock.view" is intentionally not in
+// PERMISSION_GROUPS (that catalog is the delegatable STAFF permissions).
 export const CUSTOMER_PERMISSIONS = ["stock.view"];
 
 export function adminPrincipal(admin: Admin): AdminPrincipal {

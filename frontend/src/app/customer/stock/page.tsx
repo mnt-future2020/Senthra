@@ -24,22 +24,28 @@ export default function CustomerStockPage() {
 
   React.useEffect(() => {
     let active = true;
-    Promise.all([customerService.getOwnStock(), customerService.getOwnCatalogue()])
-      .then(([s, c]) => {
-        if (!active) return;
-        setStock(s);
-        setCatalogue(c);
-      })
-      .catch((err) => {
-        if (active)
-          setMsg({
-            type: "error",
-            text: err instanceof Error ? err.message : "Could not load your stock.",
-          });
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
+    // Settle the two reads independently so a blip on one endpoint doesn't blank
+    // the other. The catalogue is the load-bearing call today (stock is gated off
+    // behind a feature flag), so only a catalogue failure surfaces a page error;
+    // a stock failure just leaves the "coming soon" state.
+    (async () => {
+      const [stockRes, catRes] = await Promise.allSettled([
+        customerService.getOwnStock(),
+        customerService.getOwnCatalogue(),
+      ]);
+      if (!active) return;
+      if (stockRes.status === "fulfilled") setStock(stockRes.value);
+      if (catRes.status === "fulfilled") {
+        setCatalogue(catRes.value);
+        setMsg(null);
+      } else {
+        setMsg({
+          type: "error",
+          text: catRes.reason instanceof Error ? catRes.reason.message : "Could not load your stock.",
+        });
+      }
+      setLoading(false);
+    })();
     return () => {
       active = false;
     };

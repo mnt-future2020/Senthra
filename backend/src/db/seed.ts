@@ -88,6 +88,29 @@ export async function seedDatabase(): Promise<void> {
     console.log(`Migrated ${migratedRoles} role(s) to granular permissions.`);
   }
 
+  // Backfill new module grants onto the built-in roles for ALREADY-SEEDED DBs (the
+  // SEED_ROLES block above only runs on a fresh DB). Additive + idempotent: grants
+  // the new customers.* keys to system_admin only if missing, and never touches a
+  // role holding "*". Also retires the vestigial empty customer_pm role (customers
+  // are now a separate principal type, not a role) when it's safe to remove.
+  const existingRoles = await roleRepo.findMany();
+  const systemAdmin = existingRoles.find((r) => r.key === "system_admin");
+  if (systemAdmin && !systemAdmin.permissions.includes("*")) {
+    const wanted = ["customers.view", "customers.create", "customers.edit", "customers.delete"];
+    const missing = wanted.filter((p) => !systemAdmin.permissions.includes(p));
+    if (missing.length) {
+      await roleRepo.update(systemAdmin.id, {
+        permissions: { set: [...systemAdmin.permissions, ...missing] },
+      });
+      console.log(`Granted ${missing.length} customers.* permission(s) to system_admin.`);
+    }
+  }
+  const customerPmRole = existingRoles.find((r) => r.key === "customer_pm");
+  if (customerPmRole && !customerPmRole.isSystem && customerPmRole.permissions.length === 0) {
+    await roleRepo.remove(customerPmRole.id);
+    console.log("Removed retired customer_pm role.");
+  }
+
   const templatesBefore = await emailTemplateRepo.count();
   for (const t of DEFAULT_EMAIL_TEMPLATES) {
     // Create-only: never overwrite an admin's edited subject/body on restart
