@@ -5,8 +5,10 @@
 // `app.listen()`. The listen()/seed flow stays in `server.ts` for local dev
 // (`pnpm dev`) and traditional hosts (`pnpm start`).
 //
-// The compiled app is imported from `dist/` — `vercel-build` (`prisma generate
-// && tsc`) produces it before this function is bundled.
+// This is intentionally plain JavaScript: it imports the already-compiled app
+// from `dist/` (produced by `vercel-build` = `prisma generate && tsc`). Keeping
+// it as .js means Vercel does NOT type-check it against the strict tsconfig,
+// which avoids needing declaration files for the compiled output.
 import { app } from "../dist/app.js";
 
 export default app;
