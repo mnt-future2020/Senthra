@@ -12,6 +12,9 @@ Senthra/
 Each app has its own `package.json`, lockfile, and `.gitignore`; they are developed
 and deployed independently.
 
+> 📊 For a visual overview of the whole system — the Customer / Engineer / Admin
+> role flows and the stock & job Flows 1–6 — see [Diagrams.md](./Diagrams.md).
+
 ## Backend — layered architecture
 
 A request flows top-down through clearly separated layers, each with one job:
