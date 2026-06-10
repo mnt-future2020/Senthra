@@ -42,6 +42,7 @@ export interface CustomerPrincipal {
   email: string;
   name: string; // company name
   customerCode: string;
+  logoUrl: string | null;
   mustResetPassword: boolean;
   // Effective permissions — a fixed read-only set; never derived from a Role.
   permissions: string[];
@@ -70,6 +71,7 @@ export function customerPrincipal(customer: Customer): CustomerPrincipal {
     email: customer.email,
     name: customer.name,
     customerCode: customer.customerCode,
+    logoUrl: customer.logoUrl,
     mustResetPassword: customer.mustResetPassword,
     permissions: CUSTOMER_PERMISSIONS,
   };

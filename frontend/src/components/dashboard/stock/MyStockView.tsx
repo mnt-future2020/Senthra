@@ -5,10 +5,11 @@ import { Boxes, Info, Loader2, ShieldCheck } from "lucide-react";
 
 import * as customerService from "@/services/customer.service";
 import { Notice } from "@/components/ui/Notice";
+import { UOM_KEY } from "@/components/dashboard/customers/CatalogueItemModal";
 import type { CatalogueItem, CustomerStock } from "@/types/customer";
 import type { Msg } from "@/components/ui/types";
 
-// The customer's read-only stock view (Flow 9).
+// The customer's read-only stock view (Flow 9), rendered inside the dashboard shell.
 //
 // Live stock levels + movements come from the inventory module, which doesn't
 // exist yet — so the backend returns `stock.available: false` and we show an
@@ -16,7 +17,7 @@ import type { Msg } from "@/components/ui/types";
 // items their stock is tracked against). When the inventory feature flag flips on,
 // `available` becomes true and the live items/movements tables render instead.
 // NO pricing/cost is ever shown.
-export default function CustomerStockPage() {
+export function MyStockView() {
   const [stock, setStock] = React.useState<CustomerStock | null>(null);
   const [catalogue, setCatalogue] = React.useState<CatalogueItem[]>([]);
   const [loading, setLoading] = React.useState(true);
@@ -24,10 +25,9 @@ export default function CustomerStockPage() {
 
   React.useEffect(() => {
     let active = true;
-    // Settle the two reads independently so a blip on one endpoint doesn't blank
-    // the other. The catalogue is the load-bearing call today (stock is gated off
-    // behind a feature flag), so only a catalogue failure surfaces a page error;
-    // a stock failure just leaves the "coming soon" state.
+    // Settle the two reads independently so a blip on one doesn't blank the other.
+    // The catalogue is load-bearing today (stock is flag-gated off), so only a
+    // catalogue failure surfaces a page error.
     (async () => {
       const [stockRes, catRes] = await Promise.allSettled([
         customerService.getOwnStock(),
@@ -102,24 +102,29 @@ function CatalogueTable({ items }: { items: CatalogueItem[] }) {
             <th className="px-4 py-3">SKU</th>
             <th className="px-4 py-3">Item</th>
             <th className="px-4 py-3">Category</th>
+            <th className="px-4 py-3">Unit</th>
             <th className="px-4 py-3">Details</th>
           </tr>
         </thead>
         <tbody>
-          {items.map((item) => (
-            <tr key={item.id} className="border-b border-[var(--border)] last:border-0">
-              <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{item.sku}</td>
-              <td className="px-4 py-3 font-semibold text-[var(--ink)]">{item.name}</td>
-              <td className="px-4 py-3 text-[var(--muted)]">{item.category}</td>
-              <td className="px-4 py-3 text-xs text-[var(--muted)]">
-                {item.attributes && Object.keys(item.attributes).length > 0
-                  ? Object.entries(item.attributes)
-                      .map(([k, v]) => `${k}: ${v}`)
-                      .join(" · ")
-                  : "—"}
-              </td>
-            </tr>
-          ))}
+          {items.map((item) => {
+            const attrs = item.attributes ?? {};
+            // The unit of measure lives under the reserved `uom` key — surface it in
+            // its own column (like the admin view), and never show the raw key.
+            const uom = attrs[UOM_KEY] ?? null;
+            const custom = Object.entries(attrs).filter(([k, v]) => k !== UOM_KEY && String(v).trim());
+            return (
+              <tr key={item.id} className="border-b border-[var(--border)] last:border-0">
+                <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{item.sku}</td>
+                <td className="px-4 py-3 font-semibold text-[var(--ink)]">{item.name}</td>
+                <td className="px-4 py-3 text-[var(--muted)]">{item.category}</td>
+                <td className="px-4 py-3 text-[var(--muted)]">{uom ?? "—"}</td>
+                <td className="px-4 py-3 text-xs text-[var(--muted)]">
+                  {custom.length > 0 ? custom.map(([k, v]) => `${k}: ${v}`).join(" · ") : "—"}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>

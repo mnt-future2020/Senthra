@@ -1,24 +1,12 @@
 import { z } from "zod";
 
-const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
-// UK phone only (client is UK telecom field-services): national "0" + 9–10 digits
-// (e.g. 07700 900000, 020 1234 5678) or international "+44" with an optional "(0)" +
-// 9–10 digits, after stripping spaces/hyphens/parens. Mirrors the front-end so both
-// layers agree (defence in depth).
-const UK_PHONE_RE = /^(?:\+440?|0)\d{9,10}$/;
-const isValidPhone = (v: string): boolean => UK_PHONE_RE.test(v.replace(/[\s()-]/g, ""));
+import { emailField, isValidPhone, optionalPhoneField } from "../../utils/validation.js";
+
 const statusEnum = z.enum(["active", "inactive", "suspended"]);
 const genderEnum = z.enum(["male", "female", "other", "unspecified"]);
 const profileImage = z
   .string()
   .startsWith("data:image/", "Profile image must be a data URI (data:image/...)");
-
-const emailField = (required = "Email is required.") =>
-  z
-    .string({ error: required })
-    .trim()
-    .min(1, required)
-    .refine((v) => EMAIL_RE.test(v), "Enter a valid email address.");
 
 // A date as an ISO / "YYYY-MM-DD" string. An empty string is allowed and the
 // service treats it as "clear"; any non-empty value must be a parseable date.
@@ -34,12 +22,7 @@ const optionalGender = genderEnum.or(z.literal("")).optional();
 // Profile fields shared by create + update (all optional). The service converts
 // empty strings to null (clear) and parses the date strings.
 const sharedProfileFields = {
-  phone: z
-    .string()
-    .trim()
-    .max(40)
-    .refine((v) => v === "" || isValidPhone(v), "Enter a valid phone number.")
-    .optional(),
+  phone: optionalPhoneField,
   status: statusEnum.optional(),
   notes: z.string().trim().max(1000).optional(),
   profileImage: profileImage.optional(),

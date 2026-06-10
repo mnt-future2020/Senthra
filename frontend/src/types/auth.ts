@@ -38,6 +38,7 @@ export interface CustomerPrincipal {
   email: string;
   name: string; // company name
   customerCode: string;
+  logoUrl: string | null;
   mustResetPassword: boolean;
   permissions: string[];
 }

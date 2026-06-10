@@ -12,11 +12,10 @@ import { homeFor } from "@/lib/auth";
 // placeholder, NOT the app chrome, so a visitor never sees content they shouldn't.
 // Redirects to /login when unauthenticated.
 //
-//  - No flags: requires an authenticated admin or staff user — the shared dashboard
-//    shell. A customer is NOT allowed here (they have their own /customer portal)
-//    and is bounced to their home, so the admin chrome never renders for them.
+//  - No flags: requires any authenticated principal (admin, staff user, or
+//    customer) — everyone shares the dashboard shell; the sidebar nav and per-page
+//    guards filter what each one can see.
 //  - requireType: also require an exact account type; a mismatch is sent to its home.
-//    (The /customer portal passes requireType="customer".)
 //  - fallback: what to show while gating. Defaults to a centered spinner; the
 //    dashboard passes a shell-shaped skeleton so the verified shell mounts with no
 //    layout shift (no bare spinner → skeleton hop).
@@ -32,13 +31,7 @@ export function AuthGuard({
   const { principal, loading } = useAuth();
   const router = useRouter();
 
-  // Allowed iff: signed in AND (matches requireType, when set) AND (when no
-  // requireType — the shared dashboard — the principal is not a customer).
-  const typeOk = principal
-    ? requireType
-      ? principal.type === requireType
-      : principal.type !== "customer"
-    : false;
+  const typeOk = principal ? (!requireType || principal.type === requireType) : false;
 
   React.useEffect(() => {
     if (loading) return;

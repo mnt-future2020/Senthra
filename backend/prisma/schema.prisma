@@ -176,10 +176,28 @@ model Customer {
   // company name); case-insensitive name uniqueness is checked among ACTIVE
   // customers in the service. `email` is the hard unique login identity.
   nameLower     String
-  contactPerson String?
-  email         String  @unique // login identity (company email)
-  phone         String?
-  status        String  @default("active") // active | inactive
+
+  // Company details.
+  registrationNumber String? // company / registration number
+  industry           String? // sector, e.g. "Telecoms"
+  website            String?
+  logoUrl            String? // Cloudinary URL (company logo)
+  notes              String? // internal notes (never shown to the customer)
+  status             String  @default("active") // active | inactive
+
+  // Primary contact (the portal login belongs to this person).
+  contactPerson   String?
+  contactJobTitle String?
+  email           String  @unique // login identity (company email)
+  phone           String?
+  altPhone        String? // secondary phone
+
+  // Address (UK).
+  addressLine1 String?
+  addressLine2 String?
+  city         String?
+  county       String?
+  postcode     String?
 
   // Auth — set at creation, never sent to the browser. One login per customer.
   passwordHash      String

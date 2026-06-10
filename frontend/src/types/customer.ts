@@ -26,15 +26,31 @@ export interface CustomerSite {
   createdAt: string;
 }
 
-// Grid row + the shape embedded in the detail view.
+// Grid row + the shape embedded in the detail view. Mirrors the backend
+// PublicCustomerSummary.
 export interface CustomerSummary {
   id: string;
   customerCode: string;
   name: string;
+  // Company
+  registrationNumber: string | null;
+  industry: string | null;
+  website: string | null;
+  logoUrl: string | null;
+  notes: string | null;
+  status: string;
+  // Primary contact
   contactPerson: string | null;
+  contactJobTitle: string | null;
   email: string;
   phone: string | null;
-  status: string;
+  altPhone: string | null;
+  // Address (UK)
+  addressLine1: string | null;
+  addressLine2: string | null;
+  city: string | null;
+  county: string | null;
+  postcode: string | null;
   mustResetPassword: boolean;
   createdAt: string;
   updatedAt: string;
@@ -51,7 +67,10 @@ export interface CustomerSelfProfile {
   id: string;
   customerCode: string;
   name: string;
+  logoUrl: string | null;
+  website: string | null;
   contactPerson: string | null;
+  contactJobTitle: string | null;
   email: string;
   phone: string | null;
 }

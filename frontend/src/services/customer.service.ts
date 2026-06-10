@@ -34,15 +34,36 @@ export interface PagedCustomers {
   totalPages: number;
 }
 
-export interface CreateCustomerPayload {
-  name: string;
-  email: string;
+// Optional company / contact / address fields shared by create + update. `logo`
+// is a data URI uploaded to Cloudinary by the backend.
+export interface CustomerFieldsPayload {
+  registrationNumber?: string;
+  industry?: string;
+  website?: string;
+  notes?: string;
   contactPerson?: string;
+  contactJobTitle?: string;
   phone?: string;
+  altPhone?: string;
+  addressLine1?: string;
+  addressLine2?: string;
+  city?: string;
+  county?: string;
+  postcode?: string;
   status?: CustomerStatus;
+  logo?: string;
 }
 
-export type UpdateCustomerPayload = Partial<CreateCustomerPayload>;
+export interface CreateCustomerPayload extends CustomerFieldsPayload {
+  name: string;
+  email: string;
+}
+
+export interface UpdateCustomerPayload extends CustomerFieldsPayload {
+  name?: string;
+  email?: string;
+  removeLogo?: boolean;
+}
 
 export interface CreateCustomerResult {
   customer: CustomerSummary;
@@ -97,8 +118,13 @@ export function getCustomer(idOrCode: string): Promise<Customer> {
 // Any mutation invalidates the cached list pages, so a remount (e.g. returning to
 // the list after a delete) doesn't seed from a stale snapshot that still shows the
 // old/removed row before the background refetch lands.
+// A longer timeout covers the Cloudinary logo upload (when a logo is included).
 export function createCustomer(payload: CreateCustomerPayload): Promise<CreateCustomerResult> {
-  return api<CreateCustomerResult>("/customers", { method: "POST", body: payload }).then((r) => {
+  return api<CreateCustomerResult>("/customers", {
+    method: "POST",
+    body: payload,
+    timeout: 60_000,
+  }).then((r) => {
     listCache.clear();
     return r;
   });
@@ -108,6 +134,7 @@ export function updateCustomer(id: string, payload: UpdateCustomerPayload): Prom
   return api<{ customer: CustomerSummary }>(`/customers/${id}`, {
     method: "PUT",
     body: payload,
+    timeout: 60_000,
   }).then((r) => {
     listCache.clear();
     return r.customer;

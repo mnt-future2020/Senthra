@@ -1,7 +1,7 @@
 import * as customerService from "./customer.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
-import { param } from "../../utils/request.js";
+import { param, queryInt } from "../../utils/request.js";
 import { unauthorized } from "../../utils/http-error.js";
 import type {
   CatalogueItemInput,
@@ -10,11 +10,6 @@ import type {
   SiteInput,
   UpdateCustomerInput,
 } from "./customer.validation.js";
-
-const toNum = (v: unknown): number | undefined => {
-  const n = typeof v === "string" ? parseInt(v, 10) : NaN;
-  return Number.isFinite(n) ? n : undefined;
-};
 
 // ============================================================================
 // Admin / PM surface (guarded by customers.* permissions)
@@ -27,8 +22,8 @@ export const listCustomers = asyncHandler(async (req, res) => {
     search: typeof search === "string" ? search : undefined,
     status: typeof status === "string" ? status : undefined,
     sort: typeof sort === "string" ? sort : undefined,
-    page: toNum(page),
-    pageSize: toNum(pageSize),
+    page: queryInt(page),
+    pageSize: queryInt(pageSize),
   });
   res.json(result);
 });

@@ -2,6 +2,7 @@ import { env } from "../config/env.js";
 import * as adminRepo from "#modules/auth/admin.repository.js";
 import * as emailTemplateRepo from "#modules/email/emailTemplate.repository.js";
 import * as roleRepo from "#modules/role/role.repository.js";
+import * as userRepo from "#modules/user/user.repository.js";
 import * as settingsRepo from "#modules/settings/settings.repository.js";
 import { LEGACY_PERMISSION_EXPANSION } from "#modules/role/permissions.js";
 import { DEFAULT_EMAIL_TEMPLATES } from "#modules/email/emailTemplate.defaults.js";
@@ -107,6 +108,11 @@ export async function seedDatabase(): Promise<void> {
   }
   const customerPmRole = existingRoles.find((r) => r.key === "customer_pm");
   if (customerPmRole && !customerPmRole.isSystem && customerPmRole.permissions.length === 0) {
+    // MongoDB has no FK cascade, so a role must be detached from EVERY holder
+    // (incl. soft-deleted) before deletion or we leave a dangling roleId that makes
+    // `include: { role: true }` resolve to null. customer_pm was an empty-permission
+    // role, so detaching it doesn't change any user's effective access.
+    await userRepo.clearRole(customerPmRole.id);
     await roleRepo.remove(customerPmRole.id);
     console.log("Removed retired customer_pm role.");
   }

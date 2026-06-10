@@ -1,17 +1,12 @@
 import * as userService from "./user.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
-import { param } from "../../utils/request.js";
+import { param, queryInt } from "../../utils/request.js";
 import type {
   CreateUserInput,
   UpdateUserInput,
   UpdateUserStatusInput,
 } from "./user.validation.js";
-
-const toNum = (v: unknown): number | undefined => {
-  const n = typeof v === "string" ? parseInt(v, 10) : NaN;
-  return Number.isFinite(n) ? n : undefined;
-};
 
 // GET /users  (protected) — paginated. Query: ?search=&status=&roleId=&page=&pageSize=
 // Returns { users, total, page, pageSize, totalPages }.
@@ -22,8 +17,8 @@ export const listUsers = asyncHandler(async (req, res) => {
     status: typeof status === "string" ? status : undefined,
     roleId: typeof roleId === "string" ? roleId : undefined,
     sort: typeof sort === "string" ? sort : undefined,
-    page: toNum(page),
-    pageSize: toNum(pageSize),
+    page: queryInt(page),
+    pageSize: queryInt(pageSize),
   });
   res.json(result);
 });

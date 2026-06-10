@@ -1,3 +1,5 @@
+import crypto from "node:crypto";
+
 import type {
   Customer,
   CustomerCatalogueItem,
@@ -8,15 +10,28 @@ import type {
 
 import * as customerRepo from "./customer.repository.js";
 import type { CustomerWithChildren } from "./customer.repository.js";
-import * as adminRepo from "#modules/auth/admin.repository.js";
-import * as userRepo from "#modules/user/user.repository.js";
+import { assertEmailNamespaceFree } from "#modules/auth/email-namespace.js";
 import { getCustomerStock, type CustomerStock } from "./customer.stock.service.js";
+import { uploadToCloudinary } from "../../lib/cloudinary.js";
+import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import { generateTempPassword } from "../../utils/generate-password.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import { hashPassword } from "../../utils/password.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { sendTemplatedEmail } from "#modules/email/email.service.js";
+
+// Upload a company logo to Cloudinary (random public id, "senthra/customers"
+// folder) and return its secure URL. Mirrors the staff avatar upload.
+async function uploadLogo(image: string): Promise<string> {
+  const creds = await getCloudinaryCreds();
+  if (!creds) {
+    throw badRequest(
+      "Cloudinary isn't configured. Add your credentials in Settings → Integrations to upload a logo.",
+    );
+  }
+  return uploadToCloudinary(image, crypto.randomUUID(), creds, "senthra/customers");
+}
 
 const STATUSES = ["active", "inactive"] as const;
 export type CustomerStatus = (typeof STATUSES)[number];
@@ -64,10 +79,25 @@ export interface PublicCustomerSummary {
   id: string;
   customerCode: string;
   name: string;
+  // Company
+  registrationNumber: string | null;
+  industry: string | null;
+  website: string | null;
+  logoUrl: string | null;
+  notes: string | null;
+  status: string;
+  // Primary contact
   contactPerson: string | null;
+  contactJobTitle: string | null;
   email: string;
   phone: string | null;
-  status: string;
+  altPhone: string | null;
+  // Address (UK)
+  addressLine1: string | null;
+  addressLine2: string | null;
+  city: string | null;
+  county: string | null;
+  postcode: string | null;
   mustResetPassword: boolean;
   createdAt: string;
   updatedAt: string;
@@ -80,12 +110,15 @@ export interface PublicCustomer extends PublicCustomerSummary {
 }
 
 // What a logged-in customer sees about THEMSELVES (their own profile). Never
-// exposes another customer or any auth/internal field.
+// exposes another customer, internal notes, or any auth field.
 export interface CustomerSelfProfile {
   id: string;
   customerCode: string;
   name: string;
+  logoUrl: string | null;
+  website: string | null;
   contactPerson: string | null;
+  contactJobTitle: string | null;
   email: string;
   phone: string | null;
 }
@@ -95,10 +128,22 @@ function toSummary(c: Customer): PublicCustomerSummary {
     id: c.id,
     customerCode: c.customerCode,
     name: c.name,
+    registrationNumber: c.registrationNumber,
+    industry: c.industry,
+    website: c.website,
+    logoUrl: c.logoUrl,
+    notes: c.notes,
+    status: c.status,
     contactPerson: c.contactPerson,
+    contactJobTitle: c.contactJobTitle,
     email: c.email,
     phone: c.phone,
-    status: c.status,
+    altPhone: c.altPhone,
+    addressLine1: c.addressLine1,
+    addressLine2: c.addressLine2,
+    city: c.city,
+    county: c.county,
+    postcode: c.postcode,
     mustResetPassword: c.mustResetPassword,
     createdAt: c.createdAt.toISOString(),
     updatedAt: c.updatedAt.toISOString(),
@@ -177,33 +222,53 @@ export async function getCustomer(idOrCode: string): Promise<PublicCustomer> {
   return toPublic(c);
 }
 
-// Reject an email that belongs to the admin or an ACTIVE staff user — login
-// resolves admin → user → customer, so a shared address would shadow the customer.
-// Uses findByEmailIncludingDeleted + a `!deletedAt` check (mirroring the reverse
-// guards in user.service / auth.service) so the disjointness rule is expressed the
-// same way on every path. A soft-deleted staff user doesn't block (it can't log in;
-// reviving it later is itself blocked by the active-customer guard there).
-async function assertEmailFree(email: string): Promise<void> {
-  const [adminWithEmail, userWithEmail] = await Promise.all([
-    adminRepo.findByEmail(email),
-    userRepo.findByEmailIncludingDeleted(email),
-  ]);
-  if (adminWithEmail) {
-    throw conflict("That email belongs to the administrator account. Use a different one.");
-  }
-  if (userWithEmail && !userWithEmail.deletedAt) {
-    throw conflict("That email belongs to a staff user. Use a different one.");
-  }
-}
-
 // --- admin: create / update / delete customer --------------------------------
 
-export interface CreateCustomerInput {
+// Optional company / contact / address fields shared by create + update. The
+// service trims each to null. `logo` is a data URI uploaded to Cloudinary.
+export interface CustomerFieldsInput {
+  registrationNumber?: string;
+  industry?: string;
+  website?: string;
+  notes?: string;
+  contactPerson?: string;
+  contactJobTitle?: string;
+  phone?: string;
+  altPhone?: string;
+  addressLine1?: string;
+  addressLine2?: string;
+  city?: string;
+  county?: string;
+  postcode?: string;
+  status?: string;
+  logo?: string;
+}
+
+export interface CreateCustomerInput extends CustomerFieldsInput {
   name: string;
   email: string;
-  contactPerson?: string;
-  phone?: string;
-  status?: string;
+}
+
+// The optional company/contact/address columns (everything except name/email/auth),
+// trimmed to null. Shared by create + revive so the two stay in lockstep.
+function customerColumns(input: CustomerFieldsInput, logoUrl: string | null) {
+  return {
+    registrationNumber: trimToNull(input.registrationNumber),
+    industry: trimToNull(input.industry),
+    website: trimToNull(input.website),
+    notes: trimToNull(input.notes),
+    logoUrl,
+    contactPerson: trimToNull(input.contactPerson),
+    contactJobTitle: trimToNull(input.contactJobTitle),
+    phone: trimToNull(input.phone),
+    altPhone: trimToNull(input.altPhone),
+    addressLine1: trimToNull(input.addressLine1),
+    addressLine2: trimToNull(input.addressLine2),
+    city: trimToNull(input.city),
+    county: trimToNull(input.county),
+    postcode: trimToNull(input.postcode),
+    status: normalizeStatus(input.status),
+  };
 }
 
 // The temporary password is returned ONCE so the admin can relay it; it is never
@@ -222,7 +287,9 @@ export async function createCustomer(
   if (!name) throw badRequest("Customer name is required.");
   if (!email) throw badRequest("Email is required.");
 
-  await assertEmailFree(email);
+  // Reject an email claimed by the admin or an active staff user (keeps the login
+  // namespaces disjoint); the customer's own collection is checked below, with revive.
+  await assertEmailNamespaceFree(email, { skip: { customer: true } });
 
   // A SOFT-DELETED customer with this email is revived (re-adding a removed customer
   // reuses the record + a new password); an ACTIVE one is a real conflict.
@@ -239,26 +306,38 @@ export async function createCustomer(
   }
 
   const temporaryPassword = generateTempPassword();
-  const passwordHash = await hashPassword(temporaryPassword);
+  // bcrypt (CPU) and the optional logo upload (network) are independent — run them
+  // together rather than serially.
+  const [passwordHash, logoUrl] = await Promise.all([
+    hashPassword(temporaryPassword),
+    input.logo ? uploadLogo(input.logo) : Promise.resolve(null),
+  ]);
 
   const fields = {
     name,
     nameLower,
     email,
-    contactPerson: trimToNull(input.contactPerson),
-    phone: trimToNull(input.phone),
-    status: normalizeStatus(input.status),
+    ...customerColumns(input, logoUrl),
     passwordHash,
     mustResetPassword: true,
     resetTokenHash: null,
     resetTokenExpiresAt: null,
   };
 
+  // The service pre-checks the email, but two concurrent creates for the same NEW
+  // email both pass that check and race to the unique index — map that P2002 to a
+  // friendly 409 instead of a raw 500. (A customerCode clash is retried inside
+  // createWithCode.)
   let created: Customer;
-  if (existing) {
-    created = await customerRepo.revive(existing.id, { ...fields, deletedAt: null });
-  } else {
-    created = await customerRepo.createWithCode(fields);
+  try {
+    created = existing
+      ? await customerRepo.revive(existing.id, { ...fields, deletedAt: null })
+      : await customerRepo.createWithCode(fields);
+  } catch (e) {
+    if (customerRepo.isUniqueConflictError(e)) {
+      throw conflict("A customer with that email already exists.");
+    }
+    throw e;
   }
 
   audit.record({
@@ -287,12 +366,10 @@ export async function createCustomer(
   return { customer: toSummary(created), temporaryPassword };
 }
 
-export interface UpdateCustomerInput {
+export interface UpdateCustomerInput extends CustomerFieldsInput {
   name?: string;
   email?: string;
-  contactPerson?: string;
-  phone?: string;
-  status?: string;
+  removeLogo?: boolean;
 }
 
 export async function updateCustomer(
@@ -319,16 +396,33 @@ export async function updateCustomer(
   if (typeof input.email === "string" && input.email.trim()) {
     const email = input.email.trim().toLowerCase();
     if (email !== customer.email) {
-      await assertEmailFree(email);
+      await assertEmailNamespaceFree(email, { skip: { customer: true } });
       const clash = await customerRepo.findByEmailIncludingDeleted(email);
       if (clash && clash.id !== id) throw conflict("A customer with that email already exists.");
       data.email = email;
     }
   }
 
+  // Each optional field is written only when the client actually sent it (so a
+  // partial update never clears untouched columns); an empty string maps to null.
   if (typeof input.contactPerson === "string") data.contactPerson = trimToNull(input.contactPerson);
+  if (typeof input.contactJobTitle === "string") data.contactJobTitle = trimToNull(input.contactJobTitle);
   if (typeof input.phone === "string") data.phone = trimToNull(input.phone);
+  if (typeof input.altPhone === "string") data.altPhone = trimToNull(input.altPhone);
+  if (typeof input.registrationNumber === "string") data.registrationNumber = trimToNull(input.registrationNumber);
+  if (typeof input.industry === "string") data.industry = trimToNull(input.industry);
+  if (typeof input.website === "string") data.website = trimToNull(input.website);
+  if (typeof input.notes === "string") data.notes = trimToNull(input.notes);
+  if (typeof input.addressLine1 === "string") data.addressLine1 = trimToNull(input.addressLine1);
+  if (typeof input.addressLine2 === "string") data.addressLine2 = trimToNull(input.addressLine2);
+  if (typeof input.city === "string") data.city = trimToNull(input.city);
+  if (typeof input.county === "string") data.county = trimToNull(input.county);
+  if (typeof input.postcode === "string") data.postcode = trimToNull(input.postcode);
   if (typeof input.status === "string") data.status = normalizeStatus(input.status);
+
+  // Logo: a new upload replaces the current one; removeLogo clears it.
+  if (input.logo) data.logoUrl = await uploadLogo(input.logo);
+  else if (input.removeLogo) data.logoUrl = null;
 
   if (Object.keys(data).length === 0) throw badRequest("Nothing to update.");
 
@@ -636,7 +730,10 @@ export async function getOwnProfile(customerId: string): Promise<CustomerSelfPro
     id: c.id,
     customerCode: c.customerCode,
     name: c.name,
+    logoUrl: c.logoUrl,
+    website: c.website,
     contactPerson: c.contactPerson,
+    contactJobTitle: c.contactJobTitle,
     email: c.email,
     phone: c.phone,
   };

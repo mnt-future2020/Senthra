@@ -13,33 +13,16 @@ import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles
 import { Avatar } from "@/components/ui/Avatar";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
-import { TempPasswordModal } from "./TempPasswordModal";
+import { TempPasswordModal } from "@/components/ui/TempPasswordModal";
+import { EMAIL_RE, UK_POSTCODE_RE, isPhone } from "@/lib/validation";
+import { MAX_IMAGE_BYTES, readFileAsDataUrl } from "@/lib/image";
 import { DepartmentCombobox } from "@/components/dashboard/users-roles/departments/DepartmentCombobox";
 import { JobTitleCombobox } from "@/components/dashboard/users-roles/job-titles/JobTitleCombobox";
 
 const USERS_LIST = "/dashboard/users";
-const MAX_IMAGE_BYTES = 2 * 1024 * 1024; // 2 MB
-
-function readFileAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(new Error("Could not read the file."));
-    reader.readAsDataURL(file);
-  });
-}
 
 // An ISO timestamp → the "YYYY-MM-DD" a <input type="date"> expects (or "").
 const toDateInput = (iso: string | null | undefined): string => (iso ? iso.slice(0, 10) : "");
-
-// --- Client-side validation (UK-aware). Gives instant, field-level feedback before
-// the request; the backend stays the source of truth (defence in depth). ---
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-// Standard UK postcode shape, e.g. "EC1A 1BB", "M1 1AE", "GU16 7HF".
-const UK_POSTCODE_RE = /^[A-Za-z]{1,2}\d[A-Za-z\d]?\s*\d[A-Za-z]{2}$/;
-// UK phone only: national "0" + 9–10 digits (e.g. 07700 900000) or international
-// "+44" with an optional "(0)" + 9–10 digits, after stripping spaces/hyphens/parens.
-const UK_PHONE_RE = /^(?:\+440?|0)\d{9,10}$/;
 
 function validateUserForm(v: {
   firstName: string;
@@ -70,7 +53,7 @@ function validateUserForm(v: {
   // Phone: required + UK format (national 07… / 020… or international +44…).
   const phone = v.phone.trim();
   if (!phone) errs.phone = "Phone number is required.";
-  else if (!UK_PHONE_RE.test(phone.replace(/[\s()-]/g, ""))) {
+  else if (!isPhone(phone)) {
     errs.phone = "Enter a valid UK phone number (e.g. 07700 900000 or +44 7700 900000).";
   }
 
@@ -633,9 +616,9 @@ export function UserForm({
 
       <TempPasswordModal
         open={tempPw !== null}
+        title="User created"
         email={tempPw?.email ?? ""}
         password={tempPw?.password ?? ""}
-        isResend={false}
         onClose={() => router.push(USERS_LIST)}
       />
     </div>

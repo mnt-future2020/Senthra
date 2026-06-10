@@ -6,19 +6,24 @@ import { Check, Copy } from "lucide-react";
 import { ghostBtn, labelCls, primaryBtn } from "@/components/ui/styles";
 import { Modal } from "@/components/ui/Modal";
 
-// Shown once after creating a user or re-sending an invite — reveals the one-time
-// temporary password (never shown again) with a copy button.
+// Shown once after creating a staff user / customer or re-sending an invite —
+// reveals the one-time temporary password (never shown again) with a copy button.
+// `portal` switches the body copy between a staff account and the customer portal.
 export function TempPasswordModal({
   open,
+  title,
   email,
   password,
-  isResend,
+  portal = false,
+  resent = false,
   onClose,
 }: {
   open: boolean;
+  title: string;
   email: string;
   password: string;
-  isResend: boolean;
+  portal?: boolean;
+  resent?: boolean;
   onClose: () => void;
 }) {
   const [copied, setCopied] = React.useState(false);
@@ -37,7 +42,7 @@ export function TempPasswordModal({
       open={open}
       onClose={onClose}
       size="md"
-      title={isResend ? "Invite re-sent" : "User created"}
+      title={title}
       subtitle={email}
       footer={
         <button onClick={onClose} className={primaryBtn}>
@@ -47,7 +52,8 @@ export function TempPasswordModal({
     >
       <div className="space-y-4">
         <p className="text-sm leading-relaxed text-[var(--muted)]">
-          An account email has been sent to{" "}
+          {resent ? "A new" : portal ? "A" : "An"}{" "}
+          {portal ? "portal access email" : "account email"} has been sent to{" "}
           <strong className="text-[var(--ink)]">{email}</strong>. You can share the
           temporary password securely if needed — it won&apos;t be shown again.
         </p>

@@ -3,7 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Building2, Settings, UserCog, UserRound, X, ChevronDown, LogOut } from "lucide-react";
+import { Building2, Package, Settings, UserCog, UserRound, X, ChevronDown, LogOut } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
 import { useBranding } from "@/hooks/useBranding";
@@ -51,22 +51,40 @@ export function Sidebar({
     router.replace("/login");
   };
 
-  // Only the nav the principal is allowed to see.
-  const nav = NAV.filter((item) => item.perms.some((p) => can(p)));
+  const isCustomer = principal?.type === "customer";
 
-  // Profile chip — works for both the super-admin and a staff user.
+  // A customer sees only their own read-only "My Stock" section; staff see the
+  // permission-filtered admin nav.
+  const nav: NavItem[] = isCustomer
+    ? [{ href: "/dashboard/stock", label: "My Stock", icon: Package, perms: [] }]
+    : NAV.filter((item) => item.perms.some((p) => can(p)));
+
+  // Profile chip — super-admin, staff user, or customer.
   const isUser = principal?.type === "user";
   const initials =
     principal?.type === "user"
       ? `${principal.firstName[0] ?? ""}${principal.lastName[0] ?? ""}`.toUpperCase() || "U"
-      : "SA";
+      : principal?.type === "customer"
+        ? (principal.name.trim()[0] ?? "C").toUpperCase()
+        : "SA";
   const displayName =
     principal?.type === "user"
       ? `${principal.firstName} ${principal.lastName}`.trim() || principal.email
-      : principal?.name || principal?.email || "Super Admin";
+      : principal?.type === "customer"
+        ? principal.name
+        : principal?.name || principal?.email || "Super Admin";
   const roleLabel =
-    principal?.type === "user" ? principal.role?.name ?? "Staff" : "Super Admin";
-  const avatarUrl = principal?.type === "user" ? principal.profileImageUrl : null;
+    principal?.type === "user"
+      ? principal.role?.name ?? "Staff"
+      : principal?.type === "customer"
+        ? "Customer"
+        : "Super Admin";
+  const avatarUrl =
+    principal?.type === "user"
+      ? principal.profileImageUrl
+      : principal?.type === "customer"
+        ? principal.logoUrl
+        : null;
 
   const renderNav = (items: NavItem[]) =>
     items.map((item) => {
@@ -131,7 +149,7 @@ export function Sidebar({
               {brandName}
             </h2>
             <span className="text-[10px] uppercase font-bold tracking-widest text-[var(--faint)] mt-0.5 block">
-              Admin Suite
+              {isCustomer ? "Customer Portal" : "Admin Suite"}
             </span>
           </div>
           <button
@@ -205,7 +223,7 @@ export function Sidebar({
                   {principal?.email}
                 </p>
               </div>
-              {isUser && (
+              {(isUser || isCustomer) && (
                 <button
                   onClick={(e) => {
                     e.stopPropagation();

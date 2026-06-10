@@ -6,6 +6,7 @@ import type { Prisma } from "@prisma/client";
 import { env } from "../../config/env.js";
 import * as adminRepo from "./admin.repository.js";
 import * as sessionService from "./session.service.js";
+import { assertEmailNamespaceFree } from "./email-namespace.js";
 import * as userRepo from "#modules/user/user.repository.js";
 import * as customerRepo from "#modules/customer/customer.repository.js";
 import * as settingsRepo from "#modules/settings/settings.repository.js";
@@ -159,15 +160,9 @@ export async function changeCredentials(
       const existing = await adminRepo.findByEmail(normalized);
       if (existing) throw conflict("That email is already in use.");
       // Keep the admin/staff/customer email namespaces disjoint. A staff user or
-      // customer — even a soft-deleted one, which can be revived under the same
-      // email — holding this address would be shadowed by login's admin-first
-      // match, so block it.
-      if (await userRepo.findByEmailIncludingDeleted(normalized)) {
-        throw conflict("That email belongs to a staff user. Use a different one.");
-      }
-      if (await customerRepo.findByEmailIncludingDeleted(normalized)) {
-        throw conflict("That email belongs to a customer. Use a different one.");
-      }
+      // customer — even a SOFT-DELETED one, which can be revived under the same email
+      // — would be shadowed by login's admin-first match, so block those too.
+      await assertEmailNamespaceFree(normalized, { skip: { admin: true }, blockSoftDeleted: true });
       data.email = normalized;
       data.googleEmail = normalized;
     }
@@ -192,11 +187,22 @@ export async function changeCredentials(
   return { principal: adminPrincipal(updated), tokens };
 }
 
-// Staff user: change own password — the first-login forced change and voluntary
-// changes. Clears mustResetPassword, signs out other devices, and re-issues tokens
-// for the current device.
-export async function changeUserPassword(
-  userId: string,
+// Shared body for a principal changing their OWN password (staff + customer). The
+// first-login forced change is authorised by the session itself (the temp password
+// was just proven at login); a voluntary change re-verifies the current password and
+// rejects a no-op reuse. Then clears mustResetPassword, signs out OTHER devices, and
+// re-issues tokens for the current device so it stays logged in.
+async function changeOwnPassword<
+  TAccount extends { id: string; passwordHash: string; mustResetPassword: boolean },
+  TUpdated,
+>(
+  actor: "user" | "customer",
+  fetchAccount: () => Promise<TAccount | null>,
+  applyUpdate: (
+    id: string,
+    data: { passwordHash: string; mustResetPassword: false },
+  ) => Promise<TUpdated>,
+  toPrincipal: (account: TUpdated) => Principal,
   currentPassword: string | undefined,
   newPassword: string,
   currentSid: string,
@@ -204,59 +210,58 @@ export async function changeUserPassword(
   // requireAuth always populates a live sid; bail rather than let an empty one
   // fall through to endOthers (which would wipe every session) + an unusable token.
   if (!currentSid) throw unauthorized("Session expired. Please log in again.");
-  const user = await userRepo.findById(userId);
-  if (!user) throw notFound("Account not found.");
-  // The first-login forced change is authorised by the session itself (the temp
-  // password was just proven at login). A voluntary change re-verifies the
-  // current password and rejects a no-op reuse.
-  if (!user.mustResetPassword) {
-    if (!currentPassword || !(await verifyPassword(currentPassword, user.passwordHash))) {
+  const account = await fetchAccount();
+  if (!account) throw notFound("Account not found.");
+  if (!account.mustResetPassword) {
+    if (!currentPassword || !(await verifyPassword(currentPassword, account.passwordHash))) {
       throw unauthorized("Current password is incorrect.");
     }
-    if (await verifyPassword(newPassword, user.passwordHash)) {
+    if (await verifyPassword(newPassword, account.passwordHash)) {
       throw badRequest("Your new password must be different from the current one.");
     }
   }
-  const updated = await userRepo.update(userId, {
+  const updated = await applyUpdate(account.id, {
     passwordHash: await hashPassword(newPassword),
     mustResetPassword: false,
   });
-  await sessionService.endOthers(userId, "user", currentSid);
-  return { tokens: issueTokens(userId, "user", currentSid), principal: userPrincipal(updated) };
+  await sessionService.endOthers(account.id, actor, currentSid);
+  return { tokens: issueTokens(account.id, actor, currentSid), principal: toPrincipal(updated) };
 }
 
-// Customer: change own password — the first-login forced change and voluntary
-// changes. Mirrors changeUserPassword exactly, on the Customer collection: clears
-// mustResetPassword, signs out other devices, and re-issues tokens for this device.
-export async function changeCustomerPassword(
+// Staff user: change own password (first-login forced change + voluntary changes).
+export function changeUserPassword(
+  userId: string,
+  currentPassword: string | undefined,
+  newPassword: string,
+  currentSid: string,
+): Promise<{ tokens: SessionTokens; principal: Principal }> {
+  return changeOwnPassword(
+    "user",
+    () => userRepo.findById(userId),
+    (id, data) => userRepo.update(id, data),
+    userPrincipal,
+    currentPassword,
+    newPassword,
+    currentSid,
+  );
+}
+
+// Customer: change own password — the same flow, on the Customer collection.
+export function changeCustomerPassword(
   customerId: string,
   currentPassword: string | undefined,
   newPassword: string,
   currentSid: string,
 ): Promise<{ tokens: SessionTokens; principal: Principal }> {
-  if (!currentSid) throw unauthorized("Session expired. Please log in again.");
-  const customer = await customerRepo.findById(customerId);
-  if (!customer) throw notFound("Account not found.");
-  // The first-login forced change is authorised by the session itself (the temp
-  // password was just proven at login). A voluntary change re-verifies the current
-  // password and rejects a no-op reuse.
-  if (!customer.mustResetPassword) {
-    if (!currentPassword || !(await verifyPassword(currentPassword, customer.passwordHash))) {
-      throw unauthorized("Current password is incorrect.");
-    }
-    if (await verifyPassword(newPassword, customer.passwordHash)) {
-      throw badRequest("Your new password must be different from the current one.");
-    }
-  }
-  const updated = await customerRepo.update(customerId, {
-    passwordHash: await hashPassword(newPassword),
-    mustResetPassword: false,
-  });
-  await sessionService.endOthers(customerId, "customer", currentSid);
-  return {
-    tokens: issueTokens(customerId, "customer", currentSid),
-    principal: customerPrincipal(updated),
-  };
+  return changeOwnPassword(
+    "customer",
+    () => customerRepo.findById(customerId),
+    (id, data) => customerRepo.update(id, data),
+    customerPrincipal,
+    currentPassword,
+    newPassword,
+    currentSid,
+  );
 }
 
 // Rotate tokens using a refresh token (admin or user). The session must still be
@@ -433,9 +438,10 @@ export async function getGoogleConfig(): Promise<{
 }
 
 // Verify the Google ID token and start a session for the matching account: the
-// super-admin (via its configured Google email) or an active staff user whose
-// account email is the verified Google email. Mirrors the password login's order,
-// so Google sign-in works for everyone RBAC already knows — not just the admin.
+// super-admin (via its configured Google email), an active staff user, or an active
+// customer (read-only portal) whose account/login email is the verified Google email.
+// Mirrors the password login's order (admin → user → customer), so Google sign-in
+// works for everyone the system already knows — not just the admin.
 export async function googleLogin(credential: string, meta?: AuthMeta): Promise<AuthResult> {
   const settings = await settingsRepo.findFirst();
   if (!settings?.googleEnabled || !settings.googleClientId) {
@@ -486,7 +492,25 @@ export async function googleLogin(credential: string, meta?: AuthMeta): Promise<
     return { principal, ...(await startAndIssue(account.id, "user", meta)) };
   }
 
-  // 3) The verified email belongs to neither the admin nor any staff user.
+  // 3) A customer (read-only portal) whose login email is the verified Google email.
+  // Same treatment as the staff-user branch: the verified Google identity proves
+  // ownership, so a first-ever Google sign-in also clears the one-time temp-password
+  // wall. `findByEmail` excludes soft-deleted customers, so a removed customer can't
+  // sign in. RBAC is unchanged — a customer holds only their fixed read-only permissions.
+  const customer = await customerRepo.findByEmail(googleEmail);
+  if (customer) {
+    if (customer.status !== "active") {
+      throw forbidden("Your account is not active. Contact an administrator.");
+    }
+    const account = customer.mustResetPassword
+      ? await customerRepo.update(customer.id, { mustResetPassword: false })
+      : customer;
+    const principal = customerPrincipal(account);
+    recordAuth("auth.login", principal, meta);
+    return { principal, ...(await startAndIssue(account.id, "customer", meta)) };
+  }
+
+  // 4) The verified email belongs to no admin, staff user, or customer.
   throw forbidden("This Google account is not authorized.");
 }
 
