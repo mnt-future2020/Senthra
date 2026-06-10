@@ -27,7 +27,7 @@ import { Avatar } from "@/components/ui/Avatar";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Pagination } from "@/components/ui/Pagination";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { TempPasswordModal } from "./TempPasswordModal";
+import { TempPasswordModal } from "@/components/ui/TempPasswordModal";
 
 const PAGE_SIZE = 20;
 
@@ -554,9 +554,10 @@ export function UsersView() {
 
       <TempPasswordModal
         open={tempPw.open}
+        title={tempPw.isResend ? "Invite re-sent" : "User created"}
+        resent={tempPw.isResend}
         email={tempPw.email}
         password={tempPw.password}
-        isResend={tempPw.isResend}
         onClose={() => setTempPw((s) => ({ ...s, open: false }))}
       />
     </div>

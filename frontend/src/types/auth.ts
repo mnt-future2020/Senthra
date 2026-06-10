@@ -28,7 +28,22 @@ export interface UserPrincipal {
   permissions: string[];
 }
 
-export type Principal = AdminPrincipal | UserPrincipal;
+// An external customer (Customer PM). Read-only, scoped to a single customer
+// account. Logs in via the shared /login and lands on the separate /customer
+// portal. Permissions are a fixed read-only set from the backend (never a role).
+export interface CustomerPrincipal {
+  type: "customer";
+  id: string;
+  customerId: string;
+  email: string;
+  name: string; // company name
+  customerCode: string;
+  logoUrl: string | null;
+  mustResetPassword: boolean;
+  permissions: string[];
+}
+
+export type Principal = AdminPrincipal | UserPrincipal | CustomerPrincipal;
 
 // Back-compat alias for admin-facing components that read `useAuth().admin`.
 export type Admin = AdminPrincipal;

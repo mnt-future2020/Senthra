@@ -5,14 +5,20 @@ import * as React from "react";
 import * as authService from "@/services/auth.service";
 import { clearAllClientCaches } from "@/lib/clientCache";
 import { principalCan } from "@/lib/auth";
-import type { AdminPrincipal, Principal, UserPrincipal } from "@/types/auth";
+import type {
+  AdminPrincipal,
+  CustomerPrincipal,
+  Principal,
+  UserPrincipal,
+} from "@/types/auth";
 
 export interface AuthState {
-  // The authenticated principal (admin or staff user), or null.
+  // The authenticated principal (admin, staff user, or customer), or null.
   principal: Principal | null;
   // Convenience accessors, each non-null only for the matching principal type.
   admin: AdminPrincipal | null;
   user: UserPrincipal | null;
+  customer: CustomerPrincipal | null;
   // Permission check (admin holds everything; user checks their role permissions).
   can: (permission: string) => boolean;
   loading: boolean;
@@ -86,11 +92,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const admin = principal?.type === "admin" ? principal : null;
   const user = principal?.type === "user" ? principal : null;
+  const customer = principal?.type === "customer" ? principal : null;
   const can = (permission: string) => principalCan(principal, permission);
 
   return (
     <AuthContext.Provider
-      value={{ principal, admin, user, can, loading, login, loginWithGoogle, logout, refresh }}
+      value={{ principal, admin, user, customer, can, loading, login, loginWithGoogle, logout, refresh }}
     >
       {children}
     </AuthContext.Provider>

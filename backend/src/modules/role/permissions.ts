@@ -77,6 +77,17 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     ],
   },
   {
+    key: "customers",
+    label: "Customers",
+    description: "Customer companies, their projects, stock catalogue and sites.",
+    permissions: [
+      { key: "customers.view", action: "View", description: "View customers and their details." },
+      { key: "customers.create", action: "Create", description: "Add new customers (provisions their read-only login)." },
+      { key: "customers.edit", action: "Edit", description: "Edit customers — profile, projects, catalogue, sites; resend login invite." },
+      { key: "customers.delete", action: "Delete", description: "Remove customers." },
+    ],
+  },
+  {
     key: "audit",
     label: "Audit log",
     description: "The system audit trail.",

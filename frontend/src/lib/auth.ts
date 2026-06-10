@@ -18,28 +18,36 @@ export function principalCan(principal: Principal | null, permission: string): b
 export const DASHBOARD_SECTIONS: { path: string; anyOf: string[] }[] = [
   { path: "/dashboard/settings", anyOf: ["settings.view", "email_templates.view"] },
   { path: "/dashboard/users", anyOf: ["users.view", "roles.view"] },
+  { path: "/dashboard/customers", anyOf: ["customers.view"] },
 ];
 
+// The read-only customer's landing inside the shared dashboard shell.
+export const CUSTOMER_HOME = "/dashboard/stock";
+
 // The first dashboard section this principal can open, or null if they have none.
+// A customer is an external read-only principal: they don't hold staff permissions,
+// so they always land on their own "My Stock" section rather than a staff section.
 export function firstDashboardPath(principal: Principal | null): string | null {
   if (!principal) return null;
+  if (principal.type === "customer") return CUSTOMER_HOME;
   for (const section of DASHBOARD_SECTIONS) {
     if (section.anyOf.some((p) => principalCan(principal, p))) return section.path;
   }
   return null;
 }
 
-// Does this principal have access to at least one dashboard section?
+// Does this principal have access to at least one dashboard section? (A customer
+// always has their My Stock section.)
 export function canAccessDashboard(principal: Principal | null): boolean {
   return firstDashboardPath(principal) !== null;
 }
 
 // Where to send a principal after authentication. Everyone enters the unified
-// dashboard shell: the shell intercepts a first-login user with the set-password
-// screen, and the dashboard landing routes on to their first section (or the
-// no-access home). The principal is kept in the signature so this stays the single
-// place that decides post-auth routing, even though it's the same shell for all.
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export function homeFor(_principal: Principal): string {
+// dashboard shell: the shell intercepts a first-login principal with the
+// set-password screen, then the landing routes to their first section. A staff user
+// lands on their first permitted section (or the no-access home); a customer lands
+// on their read-only My Stock. The single place that decides post-auth routing.
+export function homeFor(principal: Principal): string {
+  if (principal.type === "customer") return CUSTOMER_HOME;
   return "/dashboard";
 }

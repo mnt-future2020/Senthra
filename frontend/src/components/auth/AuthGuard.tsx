@@ -12,8 +12,9 @@ import { homeFor } from "@/lib/auth";
 // placeholder, NOT the app chrome, so a visitor never sees content they shouldn't.
 // Redirects to /login when unauthenticated.
 //
-//  - No flags: requires an authenticated principal (admin or staff). The dashboard
-//    shell is shared by everyone; per-section access is enforced inside it.
+//  - No flags: requires any authenticated principal (admin, staff user, or
+//    customer) — everyone shares the dashboard shell; the sidebar nav and per-page
+//    guards filter what each one can see.
 //  - requireType: also require an exact account type; a mismatch is sent to its home.
 //  - fallback: what to show while gating. Defaults to a centered spinner; the
 //    dashboard passes a shell-shaped skeleton so the verified shell mounts with no
@@ -24,11 +25,13 @@ export function AuthGuard({
   fallback,
 }: {
   children: React.ReactNode;
-  requireType?: "admin" | "user";
+  requireType?: "admin" | "user" | "customer";
   fallback?: React.ReactNode;
 }) {
   const { principal, loading } = useAuth();
   const router = useRouter();
+
+  const typeOk = principal ? (!requireType || principal.type === requireType) : false;
 
   React.useEffect(() => {
     if (loading) return;
@@ -36,12 +39,12 @@ export function AuthGuard({
       router.replace("/login");
       return;
     }
-    if (requireType && principal.type !== requireType) {
+    if (!typeOk) {
       router.replace(homeFor(principal));
     }
-  }, [loading, principal, requireType, router]);
+  }, [loading, principal, typeOk, router]);
 
-  const allowed = principal && (!requireType || principal.type === requireType);
+  const allowed = principal && typeOk;
 
   if (loading || !allowed) {
     if (fallback) return <>{fallback}</>;

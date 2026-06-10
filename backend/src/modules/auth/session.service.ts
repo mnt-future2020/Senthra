@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 
+import type { Session } from "@prisma/client";
+
 import * as sessionRepo from "./session.repository.js";
 import type { Actor } from "../../utils/jwt.js";
 
@@ -65,14 +67,31 @@ export async function startSession(
 
 // Is this session still live (exists + not expired)? Lazily prunes an expired row.
 export async function isActive(sid: string): Promise<boolean> {
-  if (!sid) return false;
+  return (await findActive(sid)) !== null;
+}
+
+// Like isActive but returns the session row, so callers can cross-check that the
+// access/refresh token's actor + sub match the session's principal — defence in
+// depth for the multi-actor (admin/user/customer) model, on top of the JWT binding
+// sub+actor+sid. Lazily prunes an expired row.
+export async function findActive(sid: string): Promise<Session | null> {
+  if (!sid) return null;
   const session = await sessionRepo.findBySid(sid);
-  if (!session) return false;
+  if (!session) return null;
   if (session.expiresAt.getTime() < Date.now()) {
     await sessionRepo.deleteBySid(sid);
-    return false;
+    return null;
   }
-  return true;
+  return session;
+}
+
+// True when a live session belongs to exactly this principal (actor + id).
+export function sessionMatchesPrincipal(
+  session: Session,
+  actor: Actor,
+  principalId: string,
+): boolean {
+  return session.principalType === actor && session.principalId === principalId;
 }
 
 export async function touch(sid: string): Promise<void> {

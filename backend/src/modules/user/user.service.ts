@@ -4,7 +4,7 @@ import type { Prisma } from "@prisma/client";
 
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
 import * as roleRepo from "#modules/role/role.repository.js";
-import * as adminRepo from "#modules/auth/admin.repository.js";
+import { assertEmailNamespaceFree } from "#modules/auth/email-namespace.js";
 import { ALL_PERMISSIONS } from "#modules/role/permissions.js";
 import * as userRepo from "./user.repository.js";
 import type { UserWithRole } from "./user.repository.js";
@@ -221,17 +221,12 @@ export async function createUser(
   if (!firstName || !lastName) throw badRequest("First and last name are required.");
   if (!email) throw badRequest("Email is required.");
 
-  // Both email checks are independent DB reads — run them together. The super-admin
-  // owns its email (login matches the admin first and would shadow a staff user); an
-  // ACTIVE user with this email is a real conflict, while a SOFT-DELETED one is
-  // revived below (re-adding a removed user reuses the record + a new password).
-  const [adminWithEmail, existing] = await Promise.all([
-    adminRepo.findByEmail(email),
-    userRepo.findByEmailIncludingDeleted(email),
-  ]);
-  if (adminWithEmail) {
-    throw conflict("That email belongs to the administrator account. Use a different one.");
-  }
+  // Reject an email claimed by the admin or a customer (keeps the login namespaces
+  // disjoint). The user's OWN collection is handled separately: an ACTIVE user with
+  // this email is a real conflict, while a SOFT-DELETED one is revived below
+  // (re-adding a removed user reuses the record + a new password).
+  await assertEmailNamespaceFree(email, { skip: { staff: true } });
+  const existing = await userRepo.findByEmailIncludingDeleted(email);
   if (existing && !existing.deletedAt) {
     throw conflict("A user with that email already exists.");
   }
@@ -350,9 +345,7 @@ export async function updateUser(
   if (typeof input.email === "string" && input.email.trim()) {
     const email = input.email.trim().toLowerCase();
     if (email !== user.email) {
-      if (await adminRepo.findByEmail(email)) {
-        throw conflict("That email belongs to the administrator account.");
-      }
+      await assertEmailNamespaceFree(email, { skip: { staff: true } });
       const clash = await userRepo.findByEmailIncludingDeleted(email);
       if (clash && clash.id !== id) throw conflict("A user with that email already exists.");
       data.email = email;

@@ -5,14 +5,15 @@ import { useRouter } from "next/navigation";
 
 import { useAuth } from "@/hooks/useAuth";
 import { AccountPanel } from "@/components/account/AccountPanel";
+import { CustomerAccountPanel } from "@/components/account/CustomerAccountPanel";
 
-// "My Account" for a staff user, rendered inside the dashboard shell. The
-// super-admin account manages its own email/password under Settings → Account, so
-// an admin who lands here is redirected there. AuthGuard (in the dashboard layout)
-// keeps unauthenticated visitors out; this page is intentionally open to ANY staff
-// user (it's their own account), so it needs no permission gate.
+// "My Account" inside the dashboard shell, for a staff user OR a customer (both
+// manage their own password + devices here). The super-admin manages its own
+// credentials under Settings → Account, so an admin who lands here is redirected
+// there. AuthGuard keeps unauthenticated visitors out; this is each principal's own
+// account, so it needs no permission gate.
 export default function AccountPage() {
-  const { admin } = useAuth();
+  const { admin, customer } = useAuth();
   const router = useRouter();
 
   React.useEffect(() => {
@@ -21,5 +22,5 @@ export default function AccountPage() {
 
   if (admin) return null;
 
-  return <AccountPanel />;
+  return customer ? <CustomerAccountPanel /> : <AccountPanel />;
 }

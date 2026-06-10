@@ -4,7 +4,7 @@ import * as authService from "./auth.service.js";
 import type { AuthMeta } from "./auth.service.js";
 import { asyncHandler } from "../../utils/async-handler.js";
 import { clearAuthCookies, REFRESH_COOKIE, setAuthCookies } from "../../utils/cookies.js";
-import { unauthorized } from "../../utils/http-error.js";
+import { forbidden, unauthorized } from "../../utils/http-error.js";
 import type {
   ChangeCredentialsInput,
   ChangePasswordInput,
@@ -48,18 +48,29 @@ export const changeCredentials = asyncHandler(async (req, res) => {
   res.json({ principal });
 });
 
-// POST /auth/password  (protected, staff user) — change own password. Powers the
-// first-login forced change and voluntary changes; re-issues the session.
+// POST /auth/password  (protected, staff user OR customer) — change own password.
+// Powers the first-login forced change and voluntary changes; re-issues the
+// session. Dispatches EXPLICITLY on the principal type so a customer's password
+// lives in the Customer collection and a staff user's in User. The super-admin
+// changes its credentials via PATCH /auth/credentials, never here — an admin token
+// is rejected rather than falling through to the user path (which would carry an
+// undefined id into the user lookup).
 export const changePassword = asyncHandler(async (req, res) => {
   const { currentPassword, newPassword } = req.body as ChangePasswordInput;
-  const { tokens, principal } = await authService.changeUserPassword(
-    req.userId!,
-    currentPassword,
-    newPassword,
-    req.sessionId ?? "",
-  );
-  setAuthCookies(res, tokens.accessToken, tokens.refreshToken, true);
-  res.json({ principal });
+  const sid = req.sessionId ?? "";
+  const type = req.principal?.type;
+
+  let result;
+  if (type === "customer") {
+    result = await authService.changeCustomerPassword(req.customerId!, currentPassword, newPassword, sid);
+  } else if (type === "user") {
+    result = await authService.changeUserPassword(req.userId!, currentPassword, newPassword, sid);
+  } else {
+    throw forbidden("Use account settings to change the administrator password.");
+  }
+
+  setAuthCookies(res, result.tokens.accessToken, result.tokens.refreshToken, true);
+  res.json({ principal: result.principal });
 });
 
 // POST /auth/refresh — rotate tokens using the refresh cookie (admin or user).

@@ -9,7 +9,9 @@ import { useAuth } from "@/hooks/useAuth";
 const TITLES: Record<string, string> = {
   settings: "Settings",
   users: "Users & Roles",
+  customers: "Customers",
   account: "My Account",
+  stock: "My Stock",
 };
 
 export function Topbar({ onToggleSidebar }: { onToggleSidebar: () => void }) {

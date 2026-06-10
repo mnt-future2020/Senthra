@@ -36,6 +36,17 @@ export const resetPasswordLimiter = rateLimit({
   message: json("Too many attempts. Please try again later."),
 });
 
+// Authenticated "change my own password" (POST /auth/password). A voluntary
+// change re-verifies the current password with bcrypt, so an unbounded endpoint is
+// an online-guess / CPU-exhaustion surface — cap it even though a session is required.
+export const passwordChangeLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 15,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: json("Too many attempts. Please try again later."),
+});
+
 // Throttle the test-email endpoint so it can't be used to spam.
 export const testEmailLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,

@@ -5,6 +5,7 @@ import { requireAdmin, requireAuth } from "../../middleware/auth.middleware.js";
 import {
   forgotPasswordLimiter,
   loginLimiter,
+  passwordChangeLimiter,
   refreshLimiter,
   resetPasswordLimiter,
 } from "../../middleware/rateLimit.middleware.js";
@@ -45,10 +46,12 @@ router.patch(
   validateBody(changeCredentialsSchema),
   authController.changeCredentials,
 );
-// Staff user: change own password (first-login forced change + voluntary).
+// Staff user or customer: change own password (first-login forced change +
+// voluntary). Rate-limited — a voluntary change re-verifies via bcrypt.
 router.post(
   "/password",
   requireAuth,
+  passwordChangeLimiter,
   validateBody(changePasswordSchema),
   authController.changePassword,
 );

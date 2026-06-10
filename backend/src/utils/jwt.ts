@@ -2,9 +2,10 @@ import jwt, { type JwtPayload, type SignOptions } from "jsonwebtoken";
 
 import { env } from "../config/env.js";
 
-// Which kind of account a session belongs to: the super-admin or a staff user.
-// Both use the same token machinery; only the principal differs.
-export type Actor = "admin" | "user";
+// Which kind of account a session belongs to: the super-admin, a staff user, or
+// an external read-only customer. All use the same token machinery; only the
+// principal differs.
+export type Actor = "admin" | "user" | "customer";
 
 export interface AccessTokenPayload extends JwtPayload {
   sub: string;
@@ -25,7 +26,9 @@ const refreshExpiry = env.REFRESH_TOKEN_EXPIRY as SignOptions["expiresIn"];
 
 // Tokens minted before the `actor` claim existed are treated as admin sessions.
 function readActor(payload: JwtPayload): Actor {
-  return payload.actor === "user" ? "user" : "admin";
+  if (payload.actor === "user") return "user";
+  if (payload.actor === "customer") return "customer";
+  return "admin";
 }
 
 function readSid(payload: JwtPayload): string {
