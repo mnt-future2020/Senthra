@@ -16,7 +16,12 @@ function baseOptions(): CookieOptions {
   const opts: CookieOptions = {
     httpOnly: true,
     secure: isProduction,
-    sameSite: "lax",
+    // In production the SPA and API are served from different sites (separate
+    // *.vercel.app hosts), so the browser only stores/sends the auth cookies on
+    // those cross-site requests when SameSite=None. None REQUIRES Secure, which
+    // we already enable in production (HTTPS). Locally we keep Lax over plain
+    // HTTP, where None+Secure would be dropped.
+    sameSite: isProduction ? "none" : "lax",
   };
   if (env.COOKIE_DOMAIN) opts.domain = env.COOKIE_DOMAIN;
   return opts;
