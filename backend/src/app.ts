@@ -19,6 +19,12 @@ const helmetMiddleware = helmet as unknown as (
 
 export const app = express();
 
+// Behind Vercel's (and most hosts') reverse proxy: trust the first hop so
+// `req.ip` and express-rate-limit read the real client IP from X-Forwarded-For
+// instead of the proxy's loopback address. Without this, rate limiting keys
+// every client to one proxy IP and session device IPs log as 127.0.0.1/::1.
+app.set("trust proxy", 1);
+
 // Security headers (HSTS, nosniff, frameguard, referrer-policy, hides
 // x-powered-by, etc.). CORP is relaxed to cross-origin because the API is
 // consumed by the separate-origin SPA — actual access is still governed by the
