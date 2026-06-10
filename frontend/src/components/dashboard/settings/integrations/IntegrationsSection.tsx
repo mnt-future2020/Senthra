@@ -76,7 +76,7 @@ export function IntegrationsSection() {
             </span>
             <span className="mt-0.5 block text-xs text-[var(--muted)]">
               {googleEnabled
-                ? "Admins can sign in with the configured Google account."
+                ? "Anyone with a matching account can sign in with their Google account."
                 : "Turn on to allow signing in with Google."}
             </span>
           </div>
