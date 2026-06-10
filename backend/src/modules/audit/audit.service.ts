@@ -173,10 +173,15 @@ export async function listFacets(): Promise<AuditFacets> {
   return { actions, actorTypes, targetTypes };
 }
 
-// RFC-4180 cell escaping: wrap in quotes and double any embedded quote whenever
+// CSV cell escaping with spreadsheet formula-injection defense. The audit log
+// stores user-controlled values (customer names, emails, SKUs, target labels), so
+// a cell beginning with =, +, -, @, tab, or CR could be executed as a formula by
+// Excel/Sheets on open. Neutralize that by prefixing such a value with a single
+// quote, THEN apply RFC-4180 quoting (wrap + double any embedded quote) whenever
 // the value contains a quote, comma, or newline. No dependency needed.
 function csvEscape(value: string): string {
-  return /["\n,]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+  const safe = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  return /["\n,\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
 export interface AuditCsvResult {
