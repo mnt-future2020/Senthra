@@ -1,5 +1,6 @@
 import { Router } from "express";
 
+import auditRoutes from "#modules/audit/audit.routes.js";
 import authRoutes from "#modules/auth/auth.routes.js";
 import { adminRouter as customerRoutes, portalRouter as customerPortalRoutes } from "#modules/customer/customer.routes.js";
 import departmentRoutes from "#modules/department/department.routes.js";
@@ -18,6 +19,7 @@ router.get("/", (_req, res) => {
 
 // Feature routes
 router.use("/auth", authRoutes);
+router.use("/audit", auditRoutes);
 router.use("/settings", settingsRoutes);
 router.use("/users", userRoutes);
 router.use("/roles", roleRoutes);

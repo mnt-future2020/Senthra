@@ -3,7 +3,7 @@
 import * as React from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Building2, Package, Settings, UserCog, UserRound, X, ChevronDown, LogOut } from "lucide-react";
+import { Building2, Package, ScrollText, Settings, UserCog, UserRound, X, ChevronDown, LogOut } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
 import { useBranding } from "@/hooks/useBranding";
@@ -27,6 +27,12 @@ const NAV: NavItem[] = [
     label: "Settings",
     icon: Settings,
     perms: ["settings.view", "email_templates.view"],
+  },
+  {
+    href: "/dashboard/audit",
+    label: "Audit Log",
+    icon: ScrollText,
+    perms: ["audit.view"],
   },
 ];
 

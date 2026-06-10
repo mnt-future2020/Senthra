@@ -66,3 +66,13 @@ export const writeLimiter = rateLimit({
   legacyHeaders: false,
   message: json("Too many changes in a short time. Please slow down."),
 });
+
+// CSV export does heavier work than a normal read (scans up to the export cap),
+// so throttle it even though a session is required.
+export const exportLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: json("Too many exports. Please wait a few minutes."),
+});
