@@ -104,7 +104,7 @@ export function SessionsCard({ style }: { style?: React.CSSProperties }) {
     <AccountCard
       icon={MonitorSmartphone}
       title="Devices"
-      desc="Where you're signed in. You can use up to 2 devices — a new sign-in signs out the oldest."
+      desc="Where you're signed in. Up to 2 devices — a new sign-in drops the oldest."
       style={style}
       action={
         sessions && sessions.length > 0 ? (

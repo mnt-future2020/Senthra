@@ -34,10 +34,10 @@ export function AppearanceSection({
     <SettingsCard
       icon={Palette}
       title="Appearance"
-      desc="Customize the look of your dashboard. Changes apply instantly."
+      desc="Theme, density and corners — applied instantly."
     >
       <div className="space-y-6">
-        <Field label="Theme" hint="Switch between a light and dark dashboard.">
+        <Field label="Theme" hint="Light or dark dashboard.">
           <div className="grid grid-cols-2 gap-3">
             <button onClick={() => setTheme("light")} className={segBtn(theme === "light")}>
               Light
@@ -50,7 +50,7 @@ export function AppearanceSection({
 
         <Field
           label="Density"
-          hint="Compact tightens spacing to fit more on screen; Regular is roomier."
+          hint="Compact fits more; Regular is roomier."
         >
           <div className="grid grid-cols-2 gap-3">
             <button onClick={() => setDensity("compact")} className={segBtn(density === "compact")}>
@@ -76,7 +76,7 @@ export function AppearanceSection({
             className="w-full accent-[var(--accent)]"
           />
           <p className={hintCls}>
-            How rounded cards, buttons and inputs appear across the dashboard.
+            Roundness of cards, buttons and inputs.
           </p>
         </div>
 

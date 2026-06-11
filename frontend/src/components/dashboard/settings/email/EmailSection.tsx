@@ -152,7 +152,7 @@ export function EmailSection() {
     <SettingsCard
       icon={Send}
       title="Email (SMTP)"
-      desc="Configure the SMTP server used to send emails — notifications, alerts and reports. The password is stored securely and never shown again."
+      desc="The SMTP server used to send app emails. Your password is stored securely."
     >
       <form onSubmit={save} className="space-y-4">
         {!canManage && <ReadOnlyNotice />}
@@ -165,8 +165,8 @@ export function EmailSection() {
             </span>
             <span className="mt-0.5 block text-xs text-[var(--muted)]">
               {enabled
-                ? "Emails will be sent through this SMTP server."
-                : "Turn on once your SMTP details are configured."}
+                ? "Emails send through this SMTP server."
+                : "Turn on once SMTP is configured."}
             </span>
           </div>
           <Toggle
@@ -179,7 +179,7 @@ export function EmailSection() {
         {/* Provider preset */}
         <Field
           label="Provider preset"
-          hint="Pick a known provider to auto-fill host, port and encryption."
+          hint="Auto-fills host, port and encryption."
         >
           <select
             value={provider}
@@ -199,7 +199,7 @@ export function EmailSection() {
           <div className="sm:col-span-2">
             <Field
               label="SMTP host"
-              hint="Your mail server's address, e.g. smtp.gmail.com."
+              hint="Your mail server, e.g. smtp.gmail.com."
             >
               <input
                 type="text"
@@ -227,7 +227,7 @@ export function EmailSection() {
         {/* Encryption */}
         <Field
           label="Encryption"
-          hint="Match this to the port — 587 uses STARTTLS, 465 uses SSL/TLS."
+          hint="Match the port — 587 STARTTLS, 465 SSL/TLS."
         >
           <div className="flex gap-3">
             <button
@@ -250,7 +250,7 @@ export function EmailSection() {
         {/* Auth */}
         <Field
           label="Username"
-          hint="Usually the full email address of the sending account."
+          hint="Usually the full sending email address."
         >
           <input
             type="text"
@@ -263,7 +263,7 @@ export function EmailSection() {
         </Field>
         <Field
           label={<>Password {passwordSet && "(saved — leave blank to keep)"}</>}
-          hint="For Gmail or Outlook, use an app password — not your login password."
+          hint="Use an app password for Gmail/Outlook, not your login."
         >
           <PasswordInput
             value={password}
@@ -277,7 +277,7 @@ export function EmailSection() {
         <div className="grid gap-4 sm:grid-cols-2">
           <Field
             label="From name"
-            hint="The sender name recipients see, e.g. your company."
+            hint="The sender name recipients see."
           >
             <input
               type="text"
@@ -289,7 +289,7 @@ export function EmailSection() {
           </Field>
           <Field
             label="From email"
-            hint="The address emails are sent from. Some providers require it to match the username."
+            hint="The address emails come from."
           >
             <input
               type="email"
@@ -314,7 +314,7 @@ export function EmailSection() {
         <div className="border-t border-[var(--border-2)] pt-4">
           <Field
             label="Send a test email"
-            hint="Uses the values above (or your saved settings). A blank password falls back to the saved one."
+            hint="Sends using the settings above."
           >
             <div className="flex flex-col gap-3 sm:flex-row">
               <input

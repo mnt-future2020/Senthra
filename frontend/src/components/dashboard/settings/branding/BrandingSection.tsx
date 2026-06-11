@@ -302,14 +302,14 @@ export function BrandingSection() {
     <SettingsCard
       icon={Paintbrush}
       title="Branding"
-      desc="Make the app your own — brand name, logo, favicon, footer and login text. Logo & favicon are uploaded to Cloudinary and applied everywhere."
+      desc="Brand name, logo, colours and login text — applied across the app."
     >
       <form onSubmit={saveText} className="space-y-5">
         {!canManage && <ReadOnlyNotice />}
         <fieldset disabled={!canManage} className="min-w-0 space-y-5">
         <Field
           label="Brand name"
-          hint="Appears in the sidebar, the browser tab and the login screen."
+          hint="Shown in the sidebar, browser tab and login."
         >
           <input
             type="text"
@@ -322,7 +322,7 @@ export function BrandingSection() {
 
         <Field
           label="Brand color"
-          hint="The accent colour used in your emails — the header bar and links."
+          hint="Accent colour for your emails."
         >
           <div className="flex items-center gap-3">
             <input
@@ -354,7 +354,7 @@ export function BrandingSection() {
 
         <Field
           label="Employee ID prefix"
-          hint="The code on new staff IDs. 2–5 letters. Changing it only affects staff created from now on — existing IDs never change."
+          hint="2–5 letters for new staff IDs. Existing IDs don't change."
         >
           <div className="flex flex-wrap items-center gap-3">
             <input
@@ -382,7 +382,7 @@ export function BrandingSection() {
         <div className="grid gap-5 sm:grid-cols-2">
           <ImageUploader
             title="Logo"
-            hint="PNG/SVG with transparency. Recommended 512×512px (or wider for a wordmark), max 2 MB. Shown in the sidebar & login."
+            hint="PNG or SVG, up to 2 MB. Shown in the sidebar & login."
             url={logoUrl}
             uploading={uploading === "logo"}
             onPick={(f) => handleUpload("logo", f)}
@@ -390,7 +390,7 @@ export function BrandingSection() {
           />
           <ImageUploader
             title="Favicon"
-            hint="Square PNG/ICO — recommended 512×512px (min 32×32), max 2 MB. The browser-tab icon."
+            hint="Square PNG or ICO, up to 2 MB. The browser-tab icon."
             url={faviconUrl}
             uploading={uploading === "favicon"}
             onPick={(f) => handleUpload("favicon", f)}
@@ -400,7 +400,7 @@ export function BrandingSection() {
 
         <Field
           label="Footer text"
-          hint="Shown at the bottom of every page. Leave blank to hide it."
+          hint="On every page. Leave blank to hide."
         >
           <input
             type="text"
@@ -413,7 +413,7 @@ export function BrandingSection() {
 
         <Field
           label="Login headline"
-          hint="The large heading visitors see on the login screen."
+          hint="The large heading on the login screen."
         >
           <input
             type="text"
@@ -426,7 +426,7 @@ export function BrandingSection() {
 
         <Field
           label="Login subtext"
-          hint="The smaller supporting line under the login headline."
+          hint="The line under the login headline."
         >
           <textarea
             value={loginSubtext}

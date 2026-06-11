@@ -56,13 +56,13 @@ export function AccountSection() {
           Super Admin
         </span>
       }
-      desc="This is the Super Admin account — the primary login for the system. Update the email you sign in with; your current password confirms the change."
+      desc="The primary Super Admin login. Change your sign-in email below."
     >
       <form onSubmit={save} className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-2">
           <Field
             label="Email address"
-            hint="The address you sign in with. Security notifications are sent here."
+            hint="You sign in and get security alerts here."
           >
             <input
               type="email"
@@ -73,7 +73,7 @@ export function AccountSection() {
           </Field>
           <Field
             label="Current password"
-            hint="Confirms it's really you before the email is changed."
+            hint="Confirms the change is really you."
           >
             <PasswordInput
               value={currentPassword}

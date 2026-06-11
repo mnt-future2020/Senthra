@@ -64,7 +64,7 @@ export function IntegrationsSection() {
     <SettingsCard
       icon={Plug}
       title="Google Sign-In"
-      desc="Configure Google OAuth so you can sign in with Google. Credentials come from the Google Cloud Console; the secret is stored securely and never shown again."
+      desc="Let users sign in with Google. Credentials come from the Google Cloud Console."
     >
       <form onSubmit={save} className="space-y-4">
         {!canManage && <ReadOnlyNotice />}
@@ -76,8 +76,8 @@ export function IntegrationsSection() {
             </span>
             <span className="mt-0.5 block text-xs text-[var(--muted)]">
               {googleEnabled
-                ? "Anyone with a matching account can sign in with their Google account."
-                : "Turn on to allow signing in with Google."}
+                ? "Users with a matching account can sign in with Google."
+                : "Turn on to allow Google sign-in."}
             </span>
           </div>
           <Toggle
@@ -89,7 +89,7 @@ export function IntegrationsSection() {
         <div className="grid gap-4 sm:grid-cols-2">
           <Field
             label="Client ID"
-            hint="From Google Cloud Console → APIs & Services → Credentials."
+            hint="Cloud Console → APIs & Services → Credentials."
           >
             <input
               type="text"
@@ -103,7 +103,7 @@ export function IntegrationsSection() {
             label={
               <>Client secret {secretSet && "(saved — leave blank to keep)"}</>
             }
-            hint="Generated with the Client ID. Stored encrypted, never shown again."
+            hint="Stored encrypted, never shown again."
           >
             <PasswordInput
               value={clientSecret}

@@ -54,13 +54,13 @@ export function SecuritySection() {
     <SettingsCard
       icon={Lock}
       title="Password"
-      desc="Choose a strong password you don't use elsewhere. Minimum 8 characters."
+      desc="Set a strong password you don't reuse — at least 8 characters."
     >
       <form onSubmit={save} className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-3">
           <Field
             label="Current password"
-            hint="Verify it's you before setting a new one."
+            hint="Confirms it's you."
           >
             <PasswordInput
               value={currentPassword}
@@ -71,7 +71,7 @@ export function SecuritySection() {
           </Field>
           <Field
             label="New password"
-            hint="At least 8 characters. Mix letters, numbers & symbols."
+            hint="8+ characters with letters, numbers & symbols."
           >
             <PasswordInput
               value={newPassword}
@@ -82,7 +82,7 @@ export function SecuritySection() {
           </Field>
           <Field
             label="Confirm new password"
-            hint="Re-type the new password to rule out typos."
+            hint="Re-type to confirm."
           >
             <PasswordInput
               value={confirm}
