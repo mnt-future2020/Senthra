@@ -82,14 +82,14 @@ export function CloudinarySection() {
           {configured ? "Connected" : "Not set up"}
         </span>
       }
-      desc="Powers logo & favicon uploads in the Branding tab. Find these in your Cloudinary dashboard. The API secret is encrypted and never shown again. A CLOUDINARY_* backend env config is used as a fallback."
+      desc="Stores logo & favicon uploads. Credentials are in your Cloudinary dashboard."
     >
       <form onSubmit={save} className="space-y-4">
         {!canManage && <ReadOnlyNotice />}
         <fieldset disabled={!canManage} className="min-w-0 space-y-4">
         <Field
           label="Cloud name"
-          hint="Found in your Cloudinary dashboard under Product Environment."
+          hint="From your Cloudinary dashboard."
         >
           <input
             type="text"
@@ -104,7 +104,7 @@ export function CloudinarySection() {
         <div className="grid gap-4 sm:grid-cols-2">
           <Field
             label="API key"
-            hint="The public API key from your Cloudinary account settings."
+            hint="Your public Cloudinary API key."
           >
             <input
               type="text"
@@ -119,7 +119,7 @@ export function CloudinarySection() {
             label={
               <>API secret {secretSet && "(saved — leave blank to keep)"}</>
             }
-            hint="Encrypted on the server and never shown again after saving."
+            hint="Stored encrypted, never shown again."
           >
             <PasswordInput
               value={apiSecret}

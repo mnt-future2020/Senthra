@@ -18,7 +18,7 @@ export function SettingsCard({
 }) {
   return (
     <section
-      className="border border-[var(--border)] bg-[var(--surface)] p-6 shadow-xs md:p-7"
+      className="border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:p-6 md:p-7"
       style={{ borderRadius: "var(--radius)" }}
     >
       <div className="grid gap-6 lg:grid-cols-[260px_minmax(0,1fr)] lg:gap-10">

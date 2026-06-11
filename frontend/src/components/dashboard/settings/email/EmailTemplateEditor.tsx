@@ -195,7 +195,7 @@ export function EmailTemplateEditor({
 
   return (
     <section
-      className="border border-[var(--border)] bg-[var(--surface)] p-6 shadow-xs md:p-7"
+      className="border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:p-6 md:p-7"
       style={{ borderRadius: "var(--radius)" }}
     >
       {/* Header */}
@@ -241,7 +241,7 @@ export function EmailTemplateEditor({
               disabled={!canManage}
             />
           </Field>
-          <Field label="Subject" hint="The email subject line. Variables are allowed.">
+          <Field label="Subject" hint="The subject line. Variables allowed.">
             <input
               ref={subjectRef}
               className={inputCls}
@@ -307,10 +307,9 @@ export function EmailTemplateEditor({
                 placeholder="Type the email message in plain text… a blank line starts a new paragraph."
               />
               <p className="mt-1.5 text-[11px] leading-relaxed text-[var(--faint)]">
-                Just type your message — we wrap it in the branded design automatically. A blank
-                line starts a new paragraph, and links become clickable. Use the chips above to
-                insert details like a name or password. Check the <strong className="text-[var(--muted)]">Preview</strong> to
-                see exactly how it&apos;ll look.
+                Type plain text — we add the branded design. Blank lines split paragraphs; use the
+                chips above to insert details. Check{" "}
+                <strong className="text-[var(--muted)]">Preview</strong> to see the result.
               </p>
             </>
           )}
@@ -346,7 +345,7 @@ export function EmailTemplateEditor({
                 className="h-[440px] w-full rounded-xl border border-[var(--border)] bg-white"
               />
               <p className="text-[11px] text-[var(--faint)]">
-                This is exactly how recipients will see it. Sample values fill each variable.
+                Exactly how recipients see it, with sample values.
               </p>
             </div>
           )}

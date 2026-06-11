@@ -105,7 +105,7 @@ export function EmailTemplatesSection() {
     <SettingsCard
       icon={Mail}
       title="Email Templates"
-      desc="Customise every email the app sends — content, subject and styling. Variables like {{firstName}} are filled in automatically. Disable a template to stop that email (account & security emails always send)."
+      desc="Edit the emails the app sends. Toggle one off to stop it (security emails always send)."
     >
       {loading && templates.length === 0 ? (
         <TemplatesSkeleton />
