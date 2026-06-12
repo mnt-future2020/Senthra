@@ -115,16 +115,16 @@ export async function login(
     return { principal, ...(await startAndIssue(user.id, "user", meta)) };
   }
 
-  // Finally, an external customer (read-only portal). Email namespaces are kept
-  // disjoint at creation, so a customer is only reached when no admin/user matched.
-  const customer = await customerRepo.findByEmail(normalized);
-  if (customer && (await verifyPassword(password, customer.passwordHash))) {
-    if (customer.status !== "active") {
+  // Finally, an external customer portal user (read-only). Email namespaces are kept
+  // disjoint at creation, so a customer user is only reached when no admin/user matched.
+  const cu = await customerRepo.findLoginByEmail(normalized);
+  if (cu?.passwordHash && (await verifyPassword(password, cu.passwordHash))) {
+    if (cu.status !== "active" || cu.customer.deletedAt || cu.customer.status !== "active") {
       throw forbidden("Your account is not active. Contact your administrator.");
     }
-    const principal = customerPrincipal(customer);
+    const principal = customerPrincipal(cu, cu.customer);
     recordAuth("auth.login", principal, meta);
-    return { principal, ...(await startAndIssue(customer.id, "customer", meta)) };
+    return { principal, ...(await startAndIssue(cu.id, "customer", meta)) };
   }
 
   throw unauthorized("Invalid email or password.");
@@ -193,7 +193,7 @@ export async function changeCredentials(
 // rejects a no-op reuse. Then clears mustResetPassword, signs out OTHER devices, and
 // re-issues tokens for the current device so it stays logged in.
 async function changeOwnPassword<
-  TAccount extends { id: string; passwordHash: string; mustResetPassword: boolean },
+  TAccount extends { id: string; passwordHash: string | null; mustResetPassword: boolean | null },
   TUpdated,
 >(
   actor: "user" | "customer",
@@ -212,8 +212,15 @@ async function changeOwnPassword<
   if (!currentSid) throw unauthorized("Session expired. Please log in again.");
   const account = await fetchAccount();
   if (!account) throw notFound("Account not found.");
-  if (!account.mustResetPassword) {
-    if (!currentPassword || !(await verifyPassword(currentPassword, account.passwordHash))) {
+  // A null mustResetPassword (the optional CustomerUser column) is treated as
+  // "must reset" — the conservative default.
+  const mustReset = account.mustResetPassword ?? true;
+  if (!mustReset) {
+    if (
+      !currentPassword ||
+      !account.passwordHash ||
+      !(await verifyPassword(currentPassword, account.passwordHash))
+    ) {
       throw unauthorized("Current password is incorrect.");
     }
     if (await verifyPassword(newPassword, account.passwordHash)) {
@@ -246,25 +253,26 @@ export function changeUserPassword(
   );
 }
 
-// Customer: change own password — the same flow, on the Customer collection.
+// Customer portal user: change own password — the same flow, on the CustomerUser
+// login account (`customerUserId` is the signed-in principal id).
 export function changeCustomerPassword(
-  customerId: string,
+  customerUserId: string,
   currentPassword: string | undefined,
   newPassword: string,
   currentSid: string,
 ): Promise<{ tokens: SessionTokens; principal: Principal }> {
   return changeOwnPassword(
     "customer",
-    () => customerRepo.findById(customerId),
-    (id, data) => customerRepo.update(id, data),
-    customerPrincipal,
+    () => customerRepo.findLoginById(customerUserId),
+    (id, data) => customerRepo.updateLoginUser(id, data),
+    (acct) => customerPrincipal(acct, acct.customer),
     currentPassword,
     newPassword,
     currentSid,
   );
 }
 
-// Rotate tokens using a refresh token (admin or user). The session must still be
+// Rotate tokens using a refresh token (admin, staff user, or customer). The session must still be
 // live (it isn't after logout, a password change, or eviction by the device cap).
 // Throws on any failure; the caller clears the auth cookies when this rejects.
 export async function refreshSession(refreshToken: string): Promise<AuthResult> {
@@ -288,12 +296,19 @@ export async function refreshSession(refreshToken: string): Promise<AuthResult> 
   }
 
   if (payload.actor === "customer") {
-    const customer = await customerRepo.findById(payload.sub);
-    if (!customer || customer.status !== "active") throw unauthorized("Unauthorized.");
+    const cu = await customerRepo.findLoginById(payload.sub);
+    if (
+      !cu ||
+      cu.status !== "active" ||
+      cu.customer.deletedAt ||
+      cu.customer.status !== "active"
+    ) {
+      throw unauthorized("Unauthorized.");
+    }
     await sessionService.touch(payload.sid);
     return {
-      principal: customerPrincipal(customer),
-      ...issueTokens(customer.id, "customer", payload.sid),
+      principal: customerPrincipal(cu, cu.customer),
+      ...issueTokens(cu.id, "customer", payload.sid),
     };
   }
 
@@ -313,7 +328,7 @@ export async function logout(principal: Principal, sid: string): Promise<void> {
 // goes in the link; only its hash is stored. Valid for 1 hour. Rendered from the
 // editable "auth.password_reset" template; forced so a disabled template never
 // blocks a security-critical reset email. `persist` writes the hash+expiry to the
-// owning collection (admin or user), keeping the two flows a single code path.
+// owning collection (admin, staff user, or customer), keeping the flows a single code path.
 async function issueResetEmail(
   email: string,
   firstName: string,
@@ -333,10 +348,11 @@ async function issueResetEmail(
   );
 }
 
-// Email a reset link to a super-admin or an active staff user. No-op (silent)
-// when the email isn't registered. Responds immediately and identically whether
-// or not the email exists: the token write + SMTP send run fire-and-forget, so
-// neither the message nor the response timing reveals registered accounts.
+// Email a reset link to a super-admin, an active staff user, or an active invited
+// customer-portal user. No-op (silent) when the email isn't registered. Responds
+// immediately and identically whether or not the email exists: the token write +
+// SMTP send run fire-and-forget, so neither the message nor the response timing
+// reveals registered accounts.
 export async function forgotPassword(email: string): Promise<void> {
   const normalized = email.trim().toLowerCase();
 
@@ -361,16 +377,26 @@ export async function forgotPassword(email: string): Promise<void> {
     );
     return;
   }
-  const customer = await customerRepo.findByEmail(normalized);
-  if (customer && customer.status === "active") {
-    const firstName = customer.contactPerson?.trim().split(/\s+/)[0] || customer.name;
-    void issueResetEmail(customer.email, firstName, (d) => customerRepo.update(customer.id, d)).catch(
+  const cu = await customerRepo.findLoginByEmail(normalized);
+  // `cu.passwordHash` gates this to INVITED users only — an uninvited contact row
+  // (passwordHash null) can't use the reset flow to self-provision a login, the same
+  // guard `login` applies. Without it, requesting a reset would let an uninvited
+  // contact set a password and bypass the admin invite flow.
+  if (
+    cu &&
+    cu.passwordHash &&
+    cu.status === "active" &&
+    !cu.customer.deletedAt &&
+    cu.customer.status === "active"
+  ) {
+    const firstName = cu.fullName.trim().split(/\s+/)[0] || cu.fullName;
+    void issueResetEmail(cu.email, firstName, (d) => customerRepo.updateLoginUser(cu.id, d)).catch(
       onError,
     );
   }
 }
 
-// Set a new password using the emailed token (admin or user). Single-use: clears
+// Set a new password using the emailed token (admin, staff user, or customer). Single-use: clears
 // the token and signs out every device (they re-log-in with the new password).
 export async function resetPassword(token: string, newPassword: string): Promise<void> {
   const tokenHash = hashResetToken(token);
@@ -406,19 +432,15 @@ export async function resetPassword(token: string, newPassword: string): Promise
     return;
   }
 
-  const customer = await customerRepo.findByResetTokenHash(tokenHash);
-  if (
-    customer &&
-    customer.resetTokenExpiresAt &&
-    customer.resetTokenExpiresAt.getTime() >= Date.now()
-  ) {
-    await customerRepo.update(customer.id, {
+  const cu = await customerRepo.findLoginByResetTokenHash(tokenHash);
+  if (cu && cu.resetTokenExpiresAt && cu.resetTokenExpiresAt.getTime() >= Date.now()) {
+    await customerRepo.updateLoginUser(cu.id, {
       passwordHash: await hashPassword(newPassword),
       mustResetPassword: false,
       resetTokenHash: null,
       resetTokenExpiresAt: null,
     });
-    await sessionService.endAll(customer.id, "customer");
+    await sessionService.endAll(cu.id, "customer");
     return;
   }
 
@@ -497,15 +519,15 @@ export async function googleLogin(credential: string, meta?: AuthMeta): Promise<
   // ownership, so a first-ever Google sign-in also clears the one-time temp-password
   // wall. `findByEmail` excludes soft-deleted customers, so a removed customer can't
   // sign in. RBAC is unchanged — a customer holds only their fixed read-only permissions.
-  const customer = await customerRepo.findByEmail(googleEmail);
-  if (customer) {
-    if (customer.status !== "active") {
+  const cu = await customerRepo.findLoginByEmail(googleEmail);
+  if (cu) {
+    if (cu.status !== "active" || cu.customer.deletedAt || cu.customer.status !== "active") {
       throw forbidden("Your account is not active. Contact an administrator.");
     }
-    const account = customer.mustResetPassword
-      ? await customerRepo.update(customer.id, { mustResetPassword: false })
-      : customer;
-    const principal = customerPrincipal(account);
+    const account = cu.mustResetPassword
+      ? await customerRepo.updateLoginUser(cu.id, { mustResetPassword: false })
+      : cu;
+    const principal = customerPrincipal(account, account.customer);
     recordAuth("auth.login", principal, meta);
     return { principal, ...(await startAndIssue(account.id, "customer", meta)) };
   }

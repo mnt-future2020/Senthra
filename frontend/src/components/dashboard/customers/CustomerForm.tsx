@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { AlertCircle, Building2, Loader2, Trash2, Upload } from "lucide-react";
+import { AlertCircle, Building2, KeyRound, Loader2, Trash2, Upload } from "lucide-react";
 
 import * as customerService from "@/services/customer.service";
 import { useDashboard } from "@/hooks/useDashboard";
@@ -18,6 +18,22 @@ import { MAX_IMAGE_BYTES, readFileAsDataUrl } from "@/lib/image";
 import type { UserStatus } from "@/types/user";
 
 const CUSTOMERS_LIST = "/dashboard/customers";
+
+// Suggestions for the (free-text) industry + country pickers — rendered as a
+// <datalist>, so a user gets select-like options but can still type anything.
+const INDUSTRY_OPTIONS = [
+  "Telecoms",
+  "Construction",
+  "Utilities",
+  "Rail",
+  "Civil Engineering",
+  "Data Centres",
+  "Energy",
+  "Public Sector",
+  "Logistics",
+  "Manufacturing",
+];
+const COUNTRY_OPTIONS = ["United Kingdom", "Ireland", "France", "Germany", "Netherlands", "Spain"];
 
 function validate(v: {
   name: string;
@@ -68,6 +84,7 @@ export function CustomerForm({ mode, customer }: { mode: "create" | "edit"; cust
 
   const [name, setName] = React.useState(customer?.name ?? "");
   const [email, setEmail] = React.useState(customer?.email ?? "");
+  const [legalName, setLegalName] = React.useState(customer?.legalName ?? "");
   const [registrationNumber, setRegistrationNumber] = React.useState(customer?.registrationNumber ?? "");
   const [industry, setIndustry] = React.useState(customer?.industry ?? "");
   const [website, setWebsite] = React.useState(customer?.website ?? "");
@@ -83,6 +100,7 @@ export function CustomerForm({ mode, customer }: { mode: "create" | "edit"; cust
   const [city, setCity] = React.useState(customer?.city ?? "");
   const [county, setCounty] = React.useState(customer?.county ?? "");
   const [postcode, setPostcode] = React.useState(customer?.postcode ?? "");
+  const [country, setCountry] = React.useState(customer?.country ?? (customer ? "" : "United Kingdom"));
   const [notes, setNotes] = React.useState(customer?.notes ?? "");
   const [imageData, setImageData] = React.useState<string | null>(null);
   const [previewUrl, setPreviewUrl] = React.useState<string | null>(customer?.logoUrl ?? null);
@@ -99,6 +117,7 @@ export function CustomerForm({ mode, customer }: { mode: "create" | "edit"; cust
     !saved &&
     (name !== (o?.name ?? "") ||
       email !== (o?.email ?? "") ||
+      legalName !== (o?.legalName ?? "") ||
       registrationNumber !== (o?.registrationNumber ?? "") ||
       industry !== (o?.industry ?? "") ||
       website !== (o?.website ?? "") ||
@@ -112,6 +131,7 @@ export function CustomerForm({ mode, customer }: { mode: "create" | "edit"; cust
       city !== (o?.city ?? "") ||
       county !== (o?.county ?? "") ||
       postcode !== (o?.postcode ?? "") ||
+      country !== (o?.country ?? (o ? "" : "United Kingdom")) ||
       notes !== (o?.notes ?? "") ||
       imageData !== null ||
       removeLogo);
@@ -172,6 +192,7 @@ export function CustomerForm({ mode, customer }: { mode: "create" | "edit"; cust
     setSaving(true);
     try {
       const fields = {
+        legalName: legalName.trim() || undefined,
         registrationNumber: registrationNumber.trim() || undefined,
         industry: industry.trim() || undefined,
         website: website.trim() || undefined,
@@ -185,6 +206,7 @@ export function CustomerForm({ mode, customer }: { mode: "create" | "edit"; cust
         city: city.trim() || undefined,
         county: county.trim() || undefined,
         postcode: postcode.trim() || undefined,
+        country: country.trim() || undefined,
         notes: notes.trim() || undefined,
       };
 
@@ -204,22 +226,21 @@ export function CustomerForm({ mode, customer }: { mode: "create" | "edit"; cust
       } else if (customer) {
         const payload: customerService.UpdateCustomerPayload = {
           name: name.trim(),
-          email: email.trim(),
-          // Editable fields are sent as their current value ("" clears) rather than
-          // omitted, so clearing a field persists.
+          // The portal login (contact person, login email, phone) lives on the login
+          // user — managed in the Portal login tab, never edited here. Company fields
+          // are sent as their current value ("" clears) so clearing persists.
+          legalName: legalName.trim(),
           registrationNumber: registrationNumber.trim(),
           industry: industry.trim(),
           website: website.trim(),
           status,
-          contactPerson: contactPerson.trim(),
-          contactJobTitle: contactJobTitle.trim(),
-          phone: phone.trim(),
           altPhone: altPhone.trim(),
           addressLine1: addressLine1.trim(),
           addressLine2: addressLine2.trim(),
           city: city.trim(),
           county: county.trim(),
           postcode: postcode.trim(),
+          country: country.trim(),
           notes: notes.trim(),
         };
         if (imageData) payload.logo = imageData;
@@ -286,6 +307,16 @@ export function CustomerForm({ mode, customer }: { mode: "create" | "edit"; cust
                 />
                 <FieldError id="name-error" message={errors.name} />
               </div>
+              <div className="sm:col-span-2">
+                <label className={labelCls}>Legal / registered company name</label>
+                <input
+                  className={inputCls}
+                  value={legalName}
+                  onChange={(e) => setLegalName(e.target.value)}
+                  placeholder="e.g. British Telecommunications plc"
+                  maxLength={160}
+                />
+              </div>
               {mode === "edit" && customer?.customerCode && (
                 <div>
                   <label className={labelCls}>Customer code</label>
@@ -299,7 +330,19 @@ export function CustomerForm({ mode, customer }: { mode: "create" | "edit"; cust
               </div>
               <div>
                 <label className={labelCls}>Industry / sector</label>
-                <input className={inputCls} value={industry} onChange={(e) => setIndustry(e.target.value)} placeholder="e.g. Telecoms" maxLength={80} />
+                <input
+                  className={inputCls}
+                  value={industry}
+                  onChange={(e) => setIndustry(e.target.value)}
+                  placeholder="e.g. Telecoms"
+                  list="industry-options"
+                  maxLength={80}
+                />
+                <datalist id="industry-options">
+                  {INDUSTRY_OPTIONS.map((opt) => (
+                    <option key={opt} value={opt} />
+                  ))}
+                </datalist>
               </div>
               <div>
                 <label className={labelCls}>Website</label>
@@ -324,55 +367,6 @@ export function CustomerForm({ mode, customer }: { mode: "create" | "edit"; cust
                   <option value="inactive">Inactive</option>
                 </select>
               </div>
-            </div>
-          </FormSection>
-
-          <FormSection title="Primary contact" description="The portal login belongs to this person.">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <label className={labelCls}>Contact person</label>
-                <input className={inputCls} value={contactPerson} onChange={(e) => setContactPerson(e.target.value)} placeholder="John Smith" maxLength={120} />
-              </div>
-              <div>
-                <label className={labelCls}>Contact job title</label>
-                <input className={inputCls} value={contactJobTitle} onChange={(e) => setContactJobTitle(e.target.value)} placeholder="Project Manager" maxLength={80} />
-              </div>
-              <div>
-                <label className={labelCls}>Login email<RequiredMark /></label>
-                <input
-                  type="email"
-                  className={inputCls}
-                  value={email}
-                  onChange={(e) => {
-                    setEmail(e.target.value);
-                    clearError("email");
-                  }}
-                  placeholder="pm@customer.com"
-                  autoComplete="off"
-                  maxLength={120}
-                  aria-required={true}
-                  aria-invalid={Boolean(errors.email)}
-                  aria-describedby={errors.email ? "email-error" : undefined}
-                />
-                <FieldError id="email-error" message={errors.email} />
-              </div>
-              <div>
-                <label className={labelCls}>Phone</label>
-                <input
-                  type="tel"
-                  className={inputCls}
-                  value={phone}
-                  onChange={(e) => {
-                    setPhone(e.target.value);
-                    clearError("phone");
-                  }}
-                  placeholder="020 1234 5678"
-                  maxLength={20}
-                  aria-invalid={Boolean(errors.phone)}
-                  aria-describedby={errors.phone ? "phone-error" : undefined}
-                />
-                <FieldError id="phone-error" message={errors.phone} />
-              </div>
               <div>
                 <label className={labelCls}>Secondary phone</label>
                 <input
@@ -383,7 +377,7 @@ export function CustomerForm({ mode, customer }: { mode: "create" | "edit"; cust
                     setAltPhone(e.target.value);
                     clearError("altPhone");
                   }}
-                  placeholder="Optional"
+                  placeholder="Optional company number"
                   maxLength={20}
                   aria-invalid={Boolean(errors.altPhone)}
                   aria-describedby={errors.altPhone ? "altPhone-error" : undefined}
@@ -392,6 +386,74 @@ export function CustomerForm({ mode, customer }: { mode: "create" | "edit"; cust
               </div>
             </div>
           </FormSection>
+
+          {/* The single portal login IS this person. On create we collect them (they
+              get the temp password); on edit it's managed in the Portal login tab, so
+              there's one source of truth and the two can never drift apart. */}
+          {mode === "create" ? (
+            <FormSection
+              title="Portal login"
+              description="This person becomes the customer's single portal login — they receive the temporary password."
+            >
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className={labelCls}>Contact person</label>
+                  <input className={inputCls} value={contactPerson} onChange={(e) => setContactPerson(e.target.value)} placeholder="John Smith" maxLength={120} />
+                </div>
+                <div>
+                  <label className={labelCls}>Job title</label>
+                  <input className={inputCls} value={contactJobTitle} onChange={(e) => setContactJobTitle(e.target.value)} placeholder="Project Manager" maxLength={80} />
+                </div>
+                <div>
+                  <label className={labelCls}>Login email<RequiredMark /></label>
+                  <input
+                    type="email"
+                    className={inputCls}
+                    value={email}
+                    onChange={(e) => {
+                      setEmail(e.target.value);
+                      clearError("email");
+                    }}
+                    placeholder="pm@customer.com"
+                    autoComplete="off"
+                    maxLength={120}
+                    aria-required={true}
+                    aria-invalid={Boolean(errors.email)}
+                    aria-describedby={errors.email ? "email-error" : undefined}
+                  />
+                  <FieldError id="email-error" message={errors.email} />
+                </div>
+                <div>
+                  <label className={labelCls}>Phone</label>
+                  <input
+                    type="tel"
+                    className={inputCls}
+                    value={phone}
+                    onChange={(e) => {
+                      setPhone(e.target.value);
+                      clearError("phone");
+                    }}
+                    placeholder="020 1234 5678"
+                    maxLength={20}
+                    aria-invalid={Boolean(errors.phone)}
+                    aria-describedby={errors.phone ? "phone-error" : undefined}
+                  />
+                  <FieldError id="phone-error" message={errors.phone} />
+                </div>
+              </div>
+            </FormSection>
+          ) : (
+            <FormSection title="Portal login" description="The customer's sign-in.">
+              <div className="flex items-start gap-2.5 rounded-xl bg-[var(--surface-2)] px-3.5 py-3 text-xs text-[var(--muted)]">
+                <KeyRound className="mt-0.5 h-4 w-4 shrink-0 text-[var(--faint)]" />
+                <span>
+                  The portal login — contact person, login email and phone — is managed in the
+                  customer&apos;s <strong className="text-[var(--ink)]">Portal login</strong> tab, so
+                  it stays the single source of truth.
+                </span>
+              </div>
+            </FormSection>
+          )}
 
           <FormSection title="Address" description="Optional — UK format.">
             <div className="grid gap-4 sm:grid-cols-2">
@@ -426,6 +488,22 @@ export function CustomerForm({ mode, customer }: { mode: "create" | "edit"; cust
                   aria-describedby={errors.postcode ? "postcode-error" : undefined}
                 />
                 <FieldError id="postcode-error" message={errors.postcode} />
+              </div>
+              <div>
+                <label className={labelCls}>Country</label>
+                <input
+                  className={inputCls}
+                  value={country}
+                  onChange={(e) => setCountry(e.target.value)}
+                  placeholder="United Kingdom"
+                  list="country-options"
+                  maxLength={80}
+                />
+                <datalist id="country-options">
+                  {COUNTRY_OPTIONS.map((opt) => (
+                    <option key={opt} value={opt} />
+                  ))}
+                </datalist>
               </div>
             </div>
           </FormSection>

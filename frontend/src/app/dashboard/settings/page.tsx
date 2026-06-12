@@ -9,7 +9,7 @@ import { PermissionGate } from "@/components/auth/PermissionGate";
 export default function SettingsPage() {
   const d = useDashboard();
   return (
-    <PermissionGate anyOf={["settings.view", "email_templates.view"]}>
+    <PermissionGate anyOf={["settings.view", "email_templates.view", "categories.view"]}>
       {/* Suspense satisfies useSearchParams (the ?section= the panel reads). */}
       <Suspense>
         <SettingsPanel

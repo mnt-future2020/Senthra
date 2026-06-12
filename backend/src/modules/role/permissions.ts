@@ -88,6 +88,17 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     ],
   },
   {
+    key: "categories",
+    label: "Categories",
+    description: "The global stock-category master list used to tag catalogue items.",
+    permissions: [
+      { key: "categories.view", action: "View", description: "View stock categories." },
+      { key: "categories.create", action: "Create", description: "Add new stock categories." },
+      { key: "categories.edit", action: "Edit", description: "Edit stock categories." },
+      { key: "categories.delete", action: "Delete", description: "Delete stock categories." },
+    ],
+  },
+  {
     key: "audit",
     label: "Audit log",
     description: "The system audit trail.",

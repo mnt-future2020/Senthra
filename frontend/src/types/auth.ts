@@ -33,10 +33,11 @@ export interface UserPrincipal {
 // portal. Permissions are a fixed read-only set from the backend (never a role).
 export interface CustomerPrincipal {
   type: "customer";
-  id: string;
-  customerId: string;
-  email: string;
+  id: string; // the signed-in CustomerUser id
+  customerId: string; // the company they belong to
+  email: string; // the user's login email
   name: string; // company name
+  userName: string; // the signed-in person's name
   customerCode: string;
   logoUrl: string | null;
   mustResetPassword: boolean;

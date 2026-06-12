@@ -22,10 +22,12 @@ export async function assertEmailNamespaceFree(
   } = {},
 ): Promise<void> {
   const skip = opts.skip ?? {};
-  const [admin, staff, customer] = await Promise.all([
+  const [admin, staff, customerUser] = await Promise.all([
     skip.admin ? null : adminRepo.findByEmail(email),
     skip.staff ? null : userRepo.findByEmailIncludingDeleted(email),
-    skip.customer ? null : customerRepo.findByEmailIncludingDeleted(email),
+    // The customer login namespace is now CustomerUser emails. "Soft-deleted" means
+    // the owning company is soft-deleted (its users can be re-provisioned on revive).
+    skip.customer ? null : customerRepo.findLoginByEmail(email),
   ]);
   if (admin) {
     throw conflict("That email belongs to the administrator account. Use a different one.");
@@ -33,7 +35,7 @@ export async function assertEmailNamespaceFree(
   if (staff && (opts.blockSoftDeleted || !staff.deletedAt)) {
     throw conflict("That email belongs to a staff user. Use a different one.");
   }
-  if (customer && (opts.blockSoftDeleted || !customer.deletedAt)) {
+  if (customerUser && (opts.blockSoftDeleted || !customerUser.customer.deletedAt)) {
     throw conflict("That email belongs to a customer. Use a different one.");
   }
 }

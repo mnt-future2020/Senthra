@@ -3,7 +3,22 @@
 import * as React from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Building2, Package, ScrollText, Settings, UserCog, UserRound, X, ChevronDown, LogOut } from "lucide-react";
+import {
+  Building2,
+  Package,
+  ScrollText,
+  Settings,
+  UserCog,
+  UserRound,
+  X,
+  ChevronDown,
+  LogOut,
+  LayoutDashboard,
+  FolderKanban,
+  MapPin,
+  ClipboardList,
+  BarChart3,
+} from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
 import { useBranding } from "@/hooks/useBranding";
@@ -26,7 +41,7 @@ const NAV: NavItem[] = [
     href: "/dashboard/settings",
     label: "Settings",
     icon: Settings,
-    perms: ["settings.view", "email_templates.view"],
+    perms: ["settings.view", "email_templates.view", "categories.view"],
   },
   {
     href: "/dashboard/audit",
@@ -34,6 +49,19 @@ const NAV: NavItem[] = [
     icon: ScrollText,
     perms: ["audit.view"],
   },
+];
+
+// The customer portal nav — a separate, read-only surface (no staff permissions).
+// Everything is view-only except Stock Requests (the one place a customer writes).
+// Settings reuses the shared account page (profile + password).
+const CUSTOMER_NAV: NavItem[] = [
+  { href: "/dashboard/portal", label: "Dashboard", icon: LayoutDashboard, perms: [] },
+  { href: "/dashboard/portal/projects", label: "Projects", icon: FolderKanban, perms: [] },
+  { href: "/dashboard/portal/sites", label: "Sites", icon: MapPin, perms: [] },
+  { href: "/dashboard/stock", label: "My Stock", icon: Package, perms: [] },
+  { href: "/dashboard/portal/requests", label: "Stock Requests", icon: ClipboardList, perms: [] },
+  { href: "/dashboard/portal/reports", label: "Reports", icon: BarChart3, perms: [] },
+  { href: "/dashboard/account", label: "Settings", icon: Settings, perms: [] },
 ];
 
 export function Sidebar({
@@ -59,10 +87,10 @@ export function Sidebar({
 
   const isCustomer = principal?.type === "customer";
 
-  // A customer sees only their own read-only "My Stock" section; staff see the
-  // permission-filtered admin nav.
+  // A customer sees their own read-only portal nav; staff see the permission-filtered
+  // admin nav.
   const nav: NavItem[] = isCustomer
-    ? [{ href: "/dashboard/stock", label: "My Stock", icon: Package, perms: [] }]
+    ? CUSTOMER_NAV
     : NAV.filter((item) => item.perms.some((p) => can(p)));
 
   // Profile chip — super-admin, staff user, or customer.

@@ -21,12 +21,13 @@ export const DASHBOARD_SECTIONS: { path: string; anyOf: string[] }[] = [
   { path: "/dashboard/customers", anyOf: ["customers.view"] },
 ];
 
-// The read-only customer's landing inside the shared dashboard shell.
-export const CUSTOMER_HOME = "/dashboard/stock";
+// The customer portal's landing inside the shared dashboard shell — the portal
+// Dashboard (overview), from which the rest of their read-only sections branch.
+export const CUSTOMER_HOME = "/dashboard/portal";
 
 // The first dashboard section this principal can open, or null if they have none.
 // A customer is an external read-only principal: they don't hold staff permissions,
-// so they always land on their own "My Stock" section rather than a staff section.
+// so they always land on their own portal Dashboard rather than a staff section.
 export function firstDashboardPath(principal: Principal | null): string | null {
   if (!principal) return null;
   if (principal.type === "customer") return CUSTOMER_HOME;

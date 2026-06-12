@@ -1,5 +1,6 @@
 import { env } from "../config/env.js";
 import * as adminRepo from "#modules/auth/admin.repository.js";
+import * as categoryRepo from "#modules/category/category.repository.js";
 import * as emailTemplateRepo from "#modules/email/emailTemplate.repository.js";
 import * as roleRepo from "#modules/role/role.repository.js";
 import * as userRepo from "#modules/user/user.repository.js";
@@ -8,6 +9,7 @@ import { LEGACY_PERMISSION_EXPANSION } from "#modules/role/permissions.js";
 import { DEFAULT_EMAIL_TEMPLATES } from "#modules/email/emailTemplate.defaults.js";
 import { renderBodyToHtml } from "../utils/email-html.js";
 import { hashPassword } from "../utils/password.js";
+import { slugify } from "../utils/slugify.js";
 
 // The Senthra domain roles (business-flow doc, FLOW 14). Only super_admin is
 // seeded as a system role (locked — undeletable + unrenamable, and its "*" is
@@ -61,6 +63,18 @@ export async function seedDatabase(): Promise<void> {
       });
     }
     console.log(`Seeded ${SEED_ROLES.length} roles.`);
+  }
+
+  // Seed a starter global stock-category list ONLY on a fresh DB. These are ordinary
+  // admin-managed categories (no system flag) — once seeded, renames/deletes stick and
+  // nothing here touches them again. Catalogue items reference a category by id.
+  if ((await categoryRepo.findMany()).length === 0) {
+    const SEED_CATEGORIES = ["Optical", "Fiber", "Core", "Router", "Switch", "Cable", "Connector"];
+    for (let i = 0; i < SEED_CATEGORIES.length; i++) {
+      const name = SEED_CATEGORIES[i];
+      await categoryRepo.create({ key: slugify(name), name, status: "active", sortOrder: i });
+    }
+    console.log(`Seeded ${SEED_CATEGORIES.length} categories.`);
   }
 
   // Migrate any role still holding a pre-granular "coarse" permission (e.g.

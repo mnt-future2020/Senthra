@@ -3,13 +3,14 @@
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
-  Briefcase,
   Building2,
+  Calendar,
   Check,
+  ClipboardList,
+  Copy,
   FileText,
   FolderKanban,
   Globe,
-  Hash,
   KeyRound,
   Loader2,
   Mail,
@@ -21,7 +22,6 @@ import {
   Search,
   Trash2,
   User as UserIcon,
-  X,
 } from "lucide-react";
 
 import * as customerService from "@/services/customer.service";
@@ -31,27 +31,65 @@ import { FormPageHeader, FormSection } from "@/components/ui/FormScaffold";
 import { Avatar } from "@/components/ui/Avatar";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
-import { inputCls, primaryBtn } from "@/components/ui/styles";
+import { primaryBtn } from "@/components/ui/styles";
 import { TempPasswordModal } from "@/components/ui/TempPasswordModal";
-import { CatalogueItemModal, UOM_KEY } from "./CatalogueItemModal";
+import { CatalogueItemModal } from "./CatalogueItemModal";
+import { getCachedCategories, listCategories } from "@/services/category.service";
+import { ProjectModal } from "./ProjectModal";
+import { SiteModal } from "./SiteModal";
+import { CustomerUserModal } from "./CustomerUserModal";
 import type {
   CatalogueItem,
   Customer,
   CustomerProject,
   CustomerSite,
+  CustomerUser,
+  StockRequest,
 } from "@/types/customer";
 import type { UserStatus } from "@/types/user";
-import { UK_POSTCODE_RE } from "@/lib/validation";
 
 // The detail page is organised into tabs (URL-driven ?tab=) like the Users & Roles
 // panel: the company header stays pinned and each section becomes a tab.
-type TabId = "overview" | "projects" | "catalogue" | "sites";
+type TabId = "overview" | "projects" | "catalogue" | "sites" | "users";
 const TABS: { id: TabId; label: string; icon: React.ElementType }[] = [
   { id: "overview", label: "Overview", icon: Building2 },
   { id: "projects", label: "Projects", icon: FolderKanban },
   { id: "catalogue", label: "Stock catalogue", icon: Package },
   { id: "sites", label: "Sites", icon: MapPin },
+  { id: "users", label: "Portal login", icon: KeyRound },
 ];
+
+// "10 Jun 2026" — en-GB, matching the rest of the dashboard.
+function fmtDate(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+}
+
+const STATUS_STYLE: Record<string, string> = {
+  active: "bg-[var(--pos)]/12 text-[var(--pos)]",
+  inactive: "bg-[var(--faint)]/20 text-[var(--muted)]",
+  planned: "bg-[var(--accent-10)] text-[var(--accent)]",
+  on_hold: "bg-amber-500/15 text-amber-600",
+  completed: "bg-[var(--faint)]/20 text-[var(--muted)]",
+};
+const STATUS_LABEL: Record<string, string> = {
+  active: "Active",
+  inactive: "Inactive",
+  planned: "Planned",
+  on_hold: "On hold",
+  completed: "Completed",
+};
+function StatusChip({ value }: { value: string }) {
+  return (
+    <span
+      className={`inline-flex rounded-full px-2 py-0.5 text-[11px] font-bold ${STATUS_STYLE[value] ?? STATUS_STYLE.inactive}`}
+    >
+      {STATUS_LABEL[value] ?? value}
+    </span>
+  );
+}
 
 export function CustomerDetail({ initial }: { initial: Customer }) {
   const router = useRouter();
@@ -73,13 +111,16 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
   const resend = async () => {
     setResending(true);
     try {
-      const { temporaryPassword } = await customerService.resendInvite(customer.id);
+      const { temporaryPassword, email } = await customerService.resendInvite(customer.id);
       setConfirmResend(false);
-      setResendCreds({ email: customer.email, password: temporaryPassword });
-      // Resend regenerates a temp password and re-arms first-login on the backend;
-      // mirror it locally so the "awaiting first login" badge reflects reality
-      // without needing a refetch.
-      setCustomer((c) => ({ ...c, mustResetPassword: true }));
+      setResendCreds({ email, password: temporaryPassword });
+      // Re-arm the primary user's first-login locally so the Users tab badge is accurate.
+      setCustomer((c) => ({
+        ...c,
+        users: c.users.map((u) =>
+          u.email.toLowerCase() === email.toLowerCase() ? { ...u, mustResetPassword: true } : u,
+        ),
+      }));
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Could not resend invite.", "alert");
     } finally {
@@ -163,11 +204,6 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
               {customer.name}
             </h1>
             <StatusBadge status={customer.status as UserStatus} />
-            {customer.mustResetPassword && (
-              <span className="text-[11px] font-semibold text-[var(--faint)]">
-                · awaiting first login
-              </span>
-            )}
           </div>
           <p className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-[var(--muted)]">
             <span className="font-mono">{customer.customerCode}</span>
@@ -215,6 +251,9 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
       {activeTab === "sites" && (
         <SitesSection customer={customer} canEdit={canEdit} onChange={setCustomer} pushToast={pushToast} />
       )}
+      {activeTab === "users" && (
+        <PortalLoginSection customer={customer} canEdit={canEdit} onChange={setCustomer} pushToast={pushToast} />
+      )}
 
       <ConfirmDialog
         open={confirmResend}
@@ -222,9 +261,9 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
         message={
           <>
             This generates a new temporary password for{" "}
-            <strong className="text-[var(--ink)]">{customer.name}</strong>, emails it, and
-            <strong> invalidates their current password</strong> — they&apos;ll have to set a new
-            one on next sign-in.
+            <strong className="text-[var(--ink)]">{customer.name}</strong>&apos;s primary portal
+            user, emails it, and <strong>invalidates their current password</strong> — they&apos;ll
+            set a new one on next sign-in. (Manage individual users in the Users tab.)
           </>
         }
         confirmLabel="Re-send invite"
@@ -264,71 +303,249 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
   );
 }
 
-// Overview tab — the company / contact / address / notes details (read-only).
+// Overview tab — company / contact / address / notes / audit, grouped into cards
+// with click-to-email, tap-to-call, and copy affordances.
 function OverviewTab({ customer }: { customer: Customer }) {
   const addressLines = [
     customer.addressLine1,
     customer.addressLine2,
     [customer.city, customer.county].filter(Boolean).join(", ") || null,
     customer.postcode,
+    customer.country,
   ].filter(Boolean) as string[];
 
+  const websiteHref = customer.website
+    ? customer.website.startsWith("http")
+      ? customer.website
+      : `https://${customer.website}`
+    : null;
+
+  // The single portal-login user is the source of truth for the contact + login.
+  const login = customer.users[0] ?? null;
+
   return (
-    <FormSection title="Details">
-      <div className="grid gap-x-8 gap-y-4 sm:grid-cols-2">
-        <Detail icon={<Hash className="h-4 w-4" />} label="Company / registration no." value={customer.registrationNumber} />
-        <Detail icon={<Building2 className="h-4 w-4" />} label="Industry" value={customer.industry} />
-        <Detail icon={<UserIcon className="h-4 w-4" />} label="Contact person" value={customer.contactPerson} />
-        <Detail icon={<Briefcase className="h-4 w-4" />} label="Contact job title" value={customer.contactJobTitle} />
-        <Detail icon={<Mail className="h-4 w-4" />} label="Login email" value={customer.email} />
-        <Detail icon={<Phone className="h-4 w-4" />} label="Phone" value={customer.phone} />
-        <Detail icon={<Phone className="h-4 w-4" />} label="Secondary phone" value={customer.altPhone} />
-        <div>
-          <p className="mb-1 flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-[var(--muted)]">
-            <MapPin className="h-3.5 w-3.5 text-[var(--faint)]" /> Address
-          </p>
-          {addressLines.length ? (
-            <p className="text-sm leading-relaxed text-[var(--ink)]">
-              {addressLines.map((line, i) => (
-                <span key={i} className="block">
-                  {line}
-                </span>
-              ))}
-            </p>
+    <div className="grid gap-5 lg:grid-cols-2 lg:items-start">
+      <InfoCard title="Company" icon={Building2}>
+        <Field label="Customer code">
+          <span className="truncate font-mono">{customer.customerCode}</span>
+          <CopyButton value={customer.customerCode} label="customer code" />
+        </Field>
+        <Field label="Status">
+          <StatusBadge status={customer.status as UserStatus} />
+        </Field>
+        <Field label="Legal / registered name">
+          <TextValue value={customer.legalName} />
+        </Field>
+        <Field label="Company / registration no.">
+          <TextValue value={customer.registrationNumber} copyLabel="registration number" />
+        </Field>
+        <Field label="Industry">
+          <TextValue value={customer.industry} />
+        </Field>
+        <Field label="Website">
+          {websiteHref ? (
+            <>
+              <a
+                href={websiteHref}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="truncate text-[var(--accent)] hover:underline"
+              >
+                {customer.website}
+              </a>
+              <CopyButton value={customer.website ?? ""} label="website" />
+            </>
           ) : (
-            <p className="text-sm text-[var(--faint)]">—</p>
+            <Dash />
           )}
-        </div>
-      </div>
+        </Field>
+        <Field label="Secondary phone">
+          <PhoneValue phone={customer.altPhone} />
+        </Field>
+      </InfoCard>
+
+      {/* Primary contact = the single portal-login user (source of truth). Falls
+          back to the company's stored contact only if a login somehow isn't set. */}
+      <InfoCard title="Primary contact" icon={UserIcon}>
+        {login ? (
+          <>
+            <Field label="Contact person">
+              <TextValue value={login.fullName} />
+            </Field>
+            <Field label="Job title">
+              <TextValue value={login.designation} />
+            </Field>
+            <Field label="Login email">
+              <EmailValue email={login.email} />
+            </Field>
+            <Field label="Phone">
+              <PhoneValue phone={login.phone} />
+            </Field>
+            <div className="sm:col-span-2">
+              <p className="text-[11px] text-[var(--faint)]">
+                This is the customer&apos;s portal login — manage it in the{" "}
+                <span className="font-semibold text-[var(--muted)]">Portal login</span> tab.
+              </p>
+            </div>
+          </>
+        ) : (
+          <>
+            <Field label="Contact person">
+              <TextValue value={customer.contactPerson} />
+            </Field>
+            <Field label="Job title">
+              <TextValue value={customer.contactJobTitle} />
+            </Field>
+            <Field label="Email">
+              <EmailValue email={customer.email} />
+            </Field>
+            <Field label="Phone">
+              <PhoneValue phone={customer.phone} />
+            </Field>
+          </>
+        )}
+      </InfoCard>
+
+      <InfoCard
+        title="Address"
+        icon={MapPin}
+        singleColumn
+        className={customer.notes ? undefined : "lg:col-span-2"}
+      >
+        {addressLines.length ? (
+          <address className="text-sm not-italic leading-relaxed text-[var(--ink)]">
+            {addressLines.map((line, i) => (
+              <span key={i} className="block">
+                {line}
+              </span>
+            ))}
+          </address>
+        ) : (
+          <Dash />
+        )}
+      </InfoCard>
+
       {customer.notes && (
-        <div className="mt-5 border-t border-[var(--border)] pt-4">
-          <p className="mb-1 flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-[var(--muted)]">
-            <FileText className="h-3.5 w-3.5 text-[var(--faint)]" /> Internal notes
+        <InfoCard title="Internal notes" icon={FileText} singleColumn>
+          <p className="whitespace-pre-wrap text-sm leading-relaxed text-[var(--ink)]">
+            {customer.notes}
           </p>
-          <p className="whitespace-pre-wrap text-sm text-[var(--ink)]">{customer.notes}</p>
-        </div>
+        </InfoCard>
       )}
-    </FormSection>
+
+      <InfoCard title="Record" icon={Calendar} className="lg:col-span-2">
+        <Field label="Added">
+          <span>{fmtDate(customer.createdAt)}</span>
+          {customer.createdBy && <span className="truncate text-[var(--muted)]"> · {customer.createdBy}</span>}
+        </Field>
+        <Field label="Last updated">
+          <span>{fmtDate(customer.updatedAt)}</span>
+          {customer.updatedBy && <span className="truncate text-[var(--muted)]"> · {customer.updatedBy}</span>}
+        </Field>
+      </InfoCard>
+    </div>
   );
 }
 
-function Detail({
-  icon,
-  label,
-  value,
+// --- Overview building blocks ----------------------------------------------
+
+function InfoCard({
+  title,
+  icon: Icon,
+  children,
+  className,
+  singleColumn,
 }: {
-  icon: React.ReactNode;
-  label: string;
-  value: string | null;
+  title: string;
+  icon: React.ElementType;
+  children: React.ReactNode;
+  className?: string;
+  singleColumn?: boolean;
 }) {
   return (
-    <div>
-      <p className="mb-1 flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-[var(--muted)]">
-        <span className="text-[var(--faint)]">{icon}</span>
-        {label}
-      </p>
-      <p className="text-sm text-[var(--ink)]">{value || <span className="text-[var(--faint)]">—</span>}</p>
+    <section
+      className={`rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs ${className ?? ""}`}
+    >
+      <h3 className="mb-4 flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider text-[var(--muted)]">
+        <Icon className="h-3.5 w-3.5 text-[var(--faint)]" />
+        {title}
+      </h3>
+      <div className={singleColumn ? "" : "grid gap-x-6 gap-y-4 sm:grid-cols-2"}>{children}</div>
+    </section>
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="group min-w-0">
+      <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-[var(--faint)]">{label}</p>
+      <div className="flex items-center gap-1.5 text-sm text-[var(--ink)]">{children}</div>
     </div>
+  );
+}
+
+function Dash() {
+  return <span className="text-[var(--faint)]">—</span>;
+}
+
+function TextValue({ value, copyLabel }: { value: string | null; copyLabel?: string }) {
+  if (!value) return <Dash />;
+  return (
+    <>
+      <span className="truncate">{value}</span>
+      {copyLabel && <CopyButton value={value} label={copyLabel} />}
+    </>
+  );
+}
+
+function EmailValue({ email }: { email: string | null }) {
+  if (!email) return <Dash />;
+  return (
+    <>
+      <a href={`mailto:${email}`} className="truncate text-[var(--accent)] hover:underline">
+        {email}
+      </a>
+      <CopyButton value={email} label="email" />
+    </>
+  );
+}
+
+function PhoneValue({ phone }: { phone: string | null }) {
+  if (!phone) return <Dash />;
+  const tel = phone.replace(/[^\d+]/g, "");
+  return (
+    <>
+      <a href={`tel:${tel}`} className="truncate hover:text-[var(--accent)]">
+        {phone}
+      </a>
+      <CopyButton value={phone} label="phone" />
+    </>
+  );
+}
+
+// Copy-to-clipboard with a brief check-mark confirmation. Always visible (touch-
+// friendly) but faint until hovered.
+function CopyButton({ value, label }: { value: string; label: string }) {
+  const [copied, setCopied] = React.useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard API unavailable (e.g. insecure context) — silently ignore.
+    }
+  };
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      aria-label={copied ? "Copied" : `Copy ${label}`}
+      title={copied ? "Copied" : `Copy ${label}`}
+      className="shrink-0 rounded-md p-1 text-[var(--faint)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--ink)]"
+    >
+      {copied ? <Check className="h-3.5 w-3.5 text-[var(--pos)]" /> : <Copy className="h-3.5 w-3.5" />}
+    </button>
   );
 }
 
@@ -342,44 +559,21 @@ type SectionProps = {
 
 // --- Projects ---------------------------------------------------------------
 function ProjectsSection({ customer, canEdit, onChange, pushToast }: SectionProps) {
-  const [name, setName] = React.useState("");
-  const [busy, setBusy] = React.useState(false);
-  const [editingId, setEditingId] = React.useState<string | null>(null);
-  const [draft, setDraft] = React.useState("");
-  const [savingEdit, setSavingEdit] = React.useState(false);
+  const [open, setOpen] = React.useState(false);
+  const [editing, setEditing] = React.useState<CustomerProject | null>(null);
 
-  const add = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!name.trim()) return;
-    setBusy(true);
-    try {
-      const project = await customerService.addProject(customer.id, name.trim());
-      onChange((p) => ({ ...p, projects: [...p.projects, project] }));
-      setName("");
-    } catch (err) {
-      pushToast(err instanceof Error ? err.message : "Could not add project.", "alert");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const saveEdit = async (project: CustomerProject) => {
-    const v = draft.trim();
-    if (!v) return;
-    if (v === project.name) {
-      setEditingId(null);
-      return;
-    }
-    setSavingEdit(true);
-    try {
-      const updated = await customerService.updateProject(customer.id, project.id, v);
-      onChange((p) => ({ ...p, projects: p.projects.map((x) => (x.id === project.id ? updated : x)) }));
-      setEditingId(null);
-    } catch (err) {
-      pushToast(err instanceof Error ? err.message : "Could not rename project.", "alert");
-    } finally {
-      setSavingEdit(false);
-    }
+  const onSaved = (project: CustomerProject) => {
+    onChange((p) => {
+      const exists = p.projects.some((x) => x.id === project.id);
+      return {
+        ...p,
+        projects: exists
+          ? p.projects.map((x) => (x.id === project.id ? project : x))
+          : [...p.projects, project],
+      };
+    });
+    setOpen(false);
+    setEditing(null);
   };
 
   const remove = async (project: CustomerProject) => {
@@ -393,63 +587,61 @@ function ProjectsSection({ customer, canEdit, onChange, pushToast }: SectionProp
 
   return (
     <FormSection title="Projects" description="The customer's projects (used when creating jobs).">
+      <SectionToolbar
+        canEdit={canEdit}
+        addLabel="Add project"
+        onAdd={() => {
+          setEditing(null);
+          setOpen(true);
+        }}
+      />
+
       {customer.projects.length === 0 ? (
-        <p className="text-sm text-[var(--muted)]">No projects yet.</p>
+        <Empty>No projects yet.</Empty>
       ) : (
-        <ul className="space-y-1.5">
+        <TableShell head={["Code", "Project", "Dates", "Status", canEdit ? "" : null]}>
           {customer.projects.map((project) => (
-            <li
-              key={project.id}
-              className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-sm"
-            >
-              {editingId === project.id ? (
-                <>
-                  <input
-                    autoFocus
-                    value={draft}
-                    onChange={(e) => setDraft(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        void saveEdit(project);
-                      }
-                      if (e.key === "Escape") setEditingId(null);
+            <tr key={project.id} className="border-b border-[var(--border)] align-top last:border-0">
+              <td className="px-3 py-2 font-mono text-xs text-[var(--muted)]">{project.code ?? "—"}</td>
+              <td className="px-3 py-2">
+                <div className="font-semibold text-[var(--ink)]">{project.name}</div>
+                {project.type && <div className="text-[11px] text-[var(--muted)]">{project.type}</div>}
+              </td>
+              <td className="px-3 py-2 text-[var(--muted)]">
+                {project.startDate || project.endDate
+                  ? `${fmtDate(project.startDate)} → ${fmtDate(project.endDate)}`
+                  : "—"}
+              </td>
+              <td className="px-3 py-2"><StatusChip value={project.status} /></td>
+              {canEdit && (
+                <td className="px-3 py-2">
+                  <RowActions
+                    editLabel="Edit project"
+                    onEdit={() => {
+                      setEditing(project);
+                      setOpen(true);
                     }}
-                    maxLength={120}
-                    className="flex-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+                    removeLabel={project.name}
+                    onConfirmRemove={() => remove(project)}
                   />
-                  <SaveCancel busy={savingEdit} onSave={() => void saveEdit(project)} onCancel={() => setEditingId(null)} />
-                </>
-              ) : (
-                <>
-                  <span className="flex-1 font-semibold text-[var(--ink)]">{project.name}</span>
-                  {canEdit && (
-                    <RowActions
-                      onEdit={() => {
-                        setEditingId(project.id);
-                        setDraft(project.name);
-                      }}
-                      onConfirmRemove={() => remove(project)}
-                      removeLabel={project.name}
-                    />
-                  )}
-                </>
+                </td>
               )}
-            </li>
+            </tr>
           ))}
-        </ul>
+        </TableShell>
       )}
-      {canEdit && (
-        <form onSubmit={add} className="mt-3 flex gap-2">
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Add a project…"
-            maxLength={120}
-            className={inputCls}
-          />
-          <AddButton busy={busy} />
-        </form>
+
+      {open && (
+        <ProjectModal
+          key={editing?.id ?? "new"}
+          customerId={customer.id}
+          project={editing}
+          onClose={() => {
+            setOpen(false);
+            setEditing(null);
+          }}
+          onSaved={onSaved}
+        />
       )}
     </FormSection>
   );
@@ -461,13 +653,30 @@ function CatalogueSection({ customer, canEdit, onChange, pushToast }: SectionPro
   const [open, setOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<CatalogueItem | null>(null);
 
+  // The global active category list feeds the catalogue-item picker. Seed from the
+  // SWR cache for an instant render, then refresh.
+  const [categories, setCategories] = React.useState<{ id: string; name: string }[]>(() =>
+    (getCachedCategories() ?? [])
+      .filter((c) => c.status === "active")
+      .map((c) => ({ id: c.id, name: c.name })),
+  );
+  React.useEffect(() => {
+    listCategories()
+      .then((cats) =>
+        setCategories(
+          cats.filter((c) => c.status === "active").map((c) => ({ id: c.id, name: c.name })),
+        ),
+      )
+      .catch(() => {});
+  }, []);
+
   const q = query.trim().toLowerCase();
   const items = q
     ? customer.catalogue.filter(
         (i) =>
           i.name.toLowerCase().includes(q) ||
           i.sku.toLowerCase().includes(q) ||
-          i.category.toLowerCase().includes(q),
+          (i.category?.name ?? "").toLowerCase().includes(q),
       )
     : customer.catalogue;
 
@@ -494,11 +703,138 @@ function CatalogueSection({ customer, canEdit, onChange, pushToast }: SectionPro
     }
   };
 
+  // --- pending stock requests (customer-submitted; internal users review here) ---
+  const [reviewingId, setReviewingId] = React.useState<string | null>(null);
+  const [rejectingId, setRejectingId] = React.useState<string | null>(null);
+  const [rejectNote, setRejectNote] = React.useState("");
+
+  // Approving is a STATUS MOVE ONLY — it never creates a catalogue item or inventory
+  // record (that's a later, deliberate internal step). We just drop the request from
+  // the pending queue.
+  const approve = async (req: StockRequest) => {
+    setReviewingId(req.id);
+    try {
+      await customerService.approveStockRequest(customer.id, req.id);
+      onChange((p) => ({
+        ...p,
+        stockRequests: p.stockRequests.filter((x) => x.id !== req.id),
+      }));
+      pushToast(`Approved the request for "${req.name}".`, "success");
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : "Could not approve the request.", "alert");
+    } finally {
+      setReviewingId(null);
+    }
+  };
+
+  const reject = async (req: StockRequest) => {
+    setReviewingId(req.id);
+    try {
+      await customerService.rejectStockRequest(customer.id, req.id, rejectNote.trim() || undefined);
+      onChange((p) => ({ ...p, stockRequests: p.stockRequests.filter((x) => x.id !== req.id) }));
+      setRejectingId(null);
+      setRejectNote("");
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : "Could not reject the request.", "alert");
+    } finally {
+      setReviewingId(null);
+    }
+  };
+
   return (
     <FormSection
       title="Stock catalogue"
       description="The items this customer's stock is tracked against (per-customer SKUs)."
     >
+      {canEdit && customer.stockRequests.length > 0 && (
+        <div className="mb-4 overflow-hidden rounded-xl border border-amber-500/30 bg-amber-500/5">
+          <div className="flex items-center gap-2 border-b border-amber-500/20 px-3 py-2 text-[11px] font-bold uppercase tracking-wider text-amber-600">
+            <ClipboardList className="h-3.5 w-3.5" />
+            {customer.stockRequests.length} pending request
+            {customer.stockRequests.length === 1 ? "" : "s"} from this customer
+          </div>
+          <div className="divide-y divide-[var(--border)]">
+            {customer.stockRequests.map((req) => (
+              <div key={req.id} className="px-3 py-2.5">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-semibold text-[var(--ink)]">{req.name}</span>
+                      <span className="rounded-md bg-amber-500/15 px-1.5 py-0.5 font-mono text-[11px] font-bold text-amber-700">
+                        ×{req.quantity ?? "?"}
+                      </span>
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-[var(--faint)]">
+                      requested by {req.requestedByName ?? "a portal user"}
+                    </div>
+                    {req.reason && (
+                      <p className="mt-1 text-xs text-[var(--muted)]">
+                        <span className="font-semibold text-[var(--faint)]">Reason:</span>{" "}
+                        {req.reason}
+                      </p>
+                    )}
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => approve(req)}
+                      disabled={reviewingId === req.id}
+                      className="flex items-center gap-1 rounded-lg bg-[var(--pos)] px-2.5 py-1.5 text-[11px] font-bold text-white transition-all hover:opacity-90 disabled:opacity-60"
+                    >
+                      {reviewingId === req.id ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Check className="h-3.5 w-3.5" />
+                      )}
+                      Approve
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRejectingId(rejectingId === req.id ? null : req.id);
+                        setRejectNote("");
+                      }}
+                      disabled={reviewingId === req.id}
+                      className="rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-[11px] font-bold text-[var(--neg)] transition-all hover:bg-[var(--neg)]/10 disabled:opacity-60"
+                    >
+                      Reject
+                    </button>
+                  </div>
+                </div>
+                {rejectingId === req.id && (
+                  <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                    <input
+                      value={rejectNote}
+                      onChange={(e) => setRejectNote(e.target.value)}
+                      placeholder="Reason (optional) — shown to the customer"
+                      maxLength={500}
+                      className="flex-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-xs text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+                    />
+                    <div className="flex gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => reject(req)}
+                        disabled={reviewingId === req.id}
+                        className="rounded-lg bg-[var(--neg)] px-3 py-1.5 text-[11px] font-bold text-white disabled:opacity-60"
+                      >
+                        Confirm reject
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setRejectingId(null)}
+                        className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-[11px] font-bold text-[var(--ink)]"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {(customer.catalogue.length > 0 || canEdit) && (
         <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
           {customer.catalogue.length > 0 && (
@@ -512,6 +848,9 @@ function CatalogueSection({ customer, canEdit, onChange, pushToast }: SectionPro
               />
             </div>
           )}
+          <span className="text-xs text-[var(--muted)] sm:ml-1">
+            {customer.catalogue.length} item{customer.catalogue.length === 1 ? "" : "s"}
+          </span>
           {canEdit && (
             <button
               type="button"
@@ -528,74 +867,42 @@ function CatalogueSection({ customer, canEdit, onChange, pushToast }: SectionPro
       )}
 
       {customer.catalogue.length === 0 ? (
-        <p className="text-sm text-[var(--muted)]">No catalogue items yet.</p>
+        <Empty>No catalogue items yet.</Empty>
       ) : items.length === 0 ? (
-        <p className="text-sm text-[var(--muted)]">No items match your search.</p>
+        <Empty>No items match your search.</Empty>
       ) : (
-        <div className="overflow-x-auto rounded-xl border border-[var(--border)]">
-          <table className="w-full text-left text-sm">
-            <thead>
-              <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                <th className="px-3 py-2">SKU</th>
-                <th className="px-3 py-2">Item</th>
-                <th className="px-3 py-2">Category</th>
-                <th className="px-3 py-2">Unit</th>
-                <th className="px-3 py-2">Details</th>
-                {canEdit && <th className="px-3 py-2" />}
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((item) => {
-                const attrs: Record<string, string> = item.attributes ?? {};
-                const uom = attrs[UOM_KEY] ?? null;
-                const custom = Object.entries(attrs).filter(([k]) => k !== UOM_KEY);
-                return (
-                  <tr key={item.id} className="border-b border-[var(--border)] align-top last:border-0">
-                    <td className="px-3 py-2 font-mono text-xs text-[var(--muted)]">{item.sku}</td>
-                    <td className="px-3 py-2 font-semibold text-[var(--ink)]">{item.name}</td>
-                    <td className="px-3 py-2 text-[var(--muted)]">{item.category}</td>
-                    <td className="px-3 py-2 text-[var(--muted)]">{uom ?? "—"}</td>
-                    <td className="px-3 py-2">
-                      {custom.length === 0 ? (
-                        <span className="text-[var(--faint)]">—</span>
-                      ) : (
-                        <div className="flex flex-wrap gap-1">
-                          {custom.map(([k, v]) => (
-                            <span
-                              key={k}
-                              className="inline-flex items-center gap-1 rounded-md bg-[var(--surface-2)] px-1.5 py-0.5 text-[11px] text-[var(--muted)]"
-                            >
-                              <span className="font-semibold text-[var(--ink)]">{k}</span>
-                              {String(v) && <span>{String(v)}</span>}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                    </td>
-                    {canEdit && (
-                      <td className="px-3 py-2">
-                        <div className="flex items-center justify-end gap-1">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setEditing(item);
-                              setOpen(true);
-                            }}
-                            aria-label="Edit item"
-                            className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--faint)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--ink)]"
-                          >
-                            <Pencil className="h-3.5 w-3.5" />
-                          </button>
-                          <DeleteConfirmButton label={item.sku} onConfirm={() => remove(item)} />
-                        </div>
-                      </td>
-                    )}
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+        <TableShell head={["SKU", "Item", "Category", "UoM", "Threshold", "Status", canEdit ? "" : null]}>
+          {items.map((item) => (
+            <tr key={item.id} className="border-b border-[var(--border)] align-top last:border-0">
+              <td className="px-3 py-2 font-mono text-xs text-[var(--muted)]">{item.sku}</td>
+              <td className="px-3 py-2">
+                <div className="font-semibold text-[var(--ink)]">{item.name}</div>
+                <div className="mt-0.5 flex flex-wrap gap-1">
+                  {item.serialized && <Flag>Serial</Flag>}
+                  {item.barcodeRequired && <Flag>Barcode</Flag>}
+                  {item.highValue && <Flag tone="warn">High value</Flag>}
+                </div>
+              </td>
+              <td className="px-3 py-2 text-[var(--muted)]">{item.category?.name ?? "—"}</td>
+              <td className="px-3 py-2 text-[var(--muted)]">{item.uom ?? "—"}</td>
+              <td className="px-3 py-2 text-[var(--muted)]">{item.thresholdQty ?? "—"}</td>
+              <td className="px-3 py-2"><StatusChip value={item.status} /></td>
+              {canEdit && (
+                <td className="px-3 py-2">
+                  <RowActions
+                    editLabel="Edit item"
+                    onEdit={() => {
+                      setEditing(item);
+                      setOpen(true);
+                    }}
+                    removeLabel={item.sku}
+                    onConfirmRemove={() => remove(item)}
+                  />
+                </td>
+              )}
+            </tr>
+          ))}
+        </TableShell>
       )}
 
       {open && (
@@ -603,6 +910,7 @@ function CatalogueSection({ customer, canEdit, onChange, pushToast }: SectionPro
           key={editing?.id ?? "new"}
           customerId={customer.id}
           item={editing}
+          categories={categories}
           onClose={() => {
             setOpen(false);
             setEditing(null);
@@ -616,61 +924,19 @@ function CatalogueSection({ customer, canEdit, onChange, pushToast }: SectionPro
 
 // --- Sites ------------------------------------------------------------------
 function SitesSection({ customer, canEdit, onChange, pushToast }: SectionProps) {
-  const [name, setName] = React.useState("");
-  const [postcode, setPostcode] = React.useState("");
-  const [busy, setBusy] = React.useState(false);
-  const [pcError, setPcError] = React.useState<string | null>(null);
-  const [editingId, setEditingId] = React.useState<string | null>(null);
-  const [draftName, setDraftName] = React.useState("");
-  const [draftPc, setDraftPc] = React.useState("");
-  const [editPcError, setEditPcError] = React.useState<string | null>(null);
-  const [savingEdit, setSavingEdit] = React.useState(false);
+  const [open, setOpen] = React.useState(false);
+  const [editing, setEditing] = React.useState<CustomerSite | null>(null);
 
-  const validPc = (v: string) => !v.trim() || UK_POSTCODE_RE.test(v.trim());
-
-  const add = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!name.trim()) return;
-    if (!validPc(postcode)) {
-      setPcError("Enter a valid UK postcode (e.g. EC1A 1BB).");
-      return;
-    }
-    setBusy(true);
-    try {
-      const site = await customerService.addSite(customer.id, {
-        name: name.trim(),
-        postcode: postcode.trim() || undefined,
-      });
-      onChange((p) => ({ ...p, sites: [...p.sites, site] }));
-      setName("");
-      setPostcode("");
-      setPcError(null);
-    } catch (err) {
-      pushToast(err instanceof Error ? err.message : "Could not add site.", "alert");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const saveEdit = async (site: CustomerSite) => {
-    if (!draftName.trim()) return;
-    if (!validPc(draftPc)) {
-      setEditPcError("Enter a valid UK postcode.");
-      return;
-    }
-    setSavingEdit(true);
-    try {
-      const updated = await customerService.updateSite(customer.id, site.id, {
-        name: draftName.trim(),
-        postcode: draftPc.trim() || undefined,
-      });
-      onChange((p) => ({ ...p, sites: p.sites.map((x) => (x.id === site.id ? updated : x)) }));
-      setEditingId(null);
-    } catch (err) {
-      pushToast(err instanceof Error ? err.message : "Could not update site.", "alert");
-    } finally {
-      setSavingEdit(false);
-    }
+  const onSaved = (site: CustomerSite) => {
+    onChange((p) => {
+      const exists = p.sites.some((x) => x.id === site.id);
+      return {
+        ...p,
+        sites: exists ? p.sites.map((x) => (x.id === site.id ? site : x)) : [...p.sites, site],
+      };
+    });
+    setOpen(false);
+    setEditing(null);
   };
 
   const remove = async (site: CustomerSite) => {
@@ -683,112 +949,297 @@ function SitesSection({ customer, canEdit, onChange, pushToast }: SectionProps) 
   };
 
   return (
-    <FormSection title="Sites" description="Optional delivery/installation locations.">
+    <FormSection title="Sites" description="Delivery / installation locations.">
+      <SectionToolbar
+        canEdit={canEdit}
+        addLabel="Add site"
+        onAdd={() => {
+          setEditing(null);
+          setOpen(true);
+        }}
+      />
+
       {customer.sites.length === 0 ? (
-        <p className="text-sm text-[var(--muted)]">No sites yet.</p>
+        <Empty>No sites yet.</Empty>
       ) : (
-        <ul className="space-y-1.5">
+        <TableShell head={["Code", "Site", "Postcode", "Contact", "Status", canEdit ? "" : null]}>
           {customer.sites.map((site) => (
-            <li
-              key={site.id}
-              className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-sm"
-            >
-              {editingId === site.id ? (
-                <div className="flex flex-col gap-1.5">
-                  <div className="flex items-center gap-2">
-                    <input
-                      autoFocus
-                      value={draftName}
-                      onChange={(e) => setDraftName(e.target.value)}
-                      placeholder="Site name"
-                      maxLength={120}
-                      className="flex-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
-                    />
-                    <input
-                      value={draftPc}
-                      onChange={(e) => {
-                        setDraftPc(e.target.value);
-                        setEditPcError(null);
-                      }}
-                      placeholder="Postcode"
-                      maxLength={12}
-                      className="w-32 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
-                    />
-                    <SaveCancel busy={savingEdit} onSave={() => void saveEdit(site)} onCancel={() => setEditingId(null)} />
+            <tr key={site.id} className="border-b border-[var(--border)] align-top last:border-0">
+              <td className="px-3 py-2 font-mono text-xs text-[var(--muted)]">{site.code ?? "—"}</td>
+              <td className="px-3 py-2">
+                <div className="font-semibold text-[var(--ink)]">{site.name}</div>
+                {site.addressLine && (
+                  <div className="text-[11px] text-[var(--muted)]">{site.addressLine}</div>
+                )}
+              </td>
+              <td className="px-3 py-2 text-[var(--muted)]">{site.postcode ?? "—"}</td>
+              <td className="px-3 py-2 text-[var(--muted)]">
+                {site.contactPerson || site.contactNumber ? (
+                  <div>
+                    {site.contactPerson && <div className="text-[var(--ink)]">{site.contactPerson}</div>}
+                    {site.contactNumber && <div className="text-[11px]">{site.contactNumber}</div>}
                   </div>
-                  {editPcError && <p className="text-[11px] font-semibold text-[var(--neg)]">{editPcError}</p>}
-                </div>
-              ) : (
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-[var(--ink)]">
-                    <span className="font-semibold">{site.name}</span>
-                    {site.postcode && <span className="ml-2 text-[var(--muted)]">{site.postcode}</span>}
-                  </span>
-                  {canEdit && (
-                    <RowActions
-                      onEdit={() => {
-                        setEditingId(site.id);
-                        setDraftName(site.name);
-                        setDraftPc(site.postcode ?? "");
-                        setEditPcError(null);
-                      }}
-                      onConfirmRemove={() => remove(site)}
-                      removeLabel={site.name}
-                    />
-                  )}
-                </div>
+                ) : (
+                  "—"
+                )}
+              </td>
+              <td className="px-3 py-2"><StatusChip value={site.status} /></td>
+              {canEdit && (
+                <td className="px-3 py-2">
+                  <RowActions
+                    editLabel="Edit site"
+                    onEdit={() => {
+                      setEditing(site);
+                      setOpen(true);
+                    }}
+                    removeLabel={site.name}
+                    onConfirmRemove={() => remove(site)}
+                  />
+                </td>
               )}
-            </li>
+            </tr>
           ))}
-        </ul>
+        </TableShell>
       )}
-      {canEdit && (
-        <form onSubmit={add} className="mt-3">
-          <div className="grid gap-2 sm:grid-cols-[1fr_180px_auto]">
-            <input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Site name"
-              maxLength={120}
-              className={inputCls}
-            />
-            <input
-              value={postcode}
-              onChange={(e) => {
-                setPostcode(e.target.value);
-                setPcError(null);
-              }}
-              placeholder="Postcode (optional)"
-              maxLength={12}
-              aria-invalid={Boolean(pcError)}
-              className={inputCls}
-            />
-            <AddButton busy={busy} />
-          </div>
-          {pcError && <p className="mt-1 text-[11px] font-semibold text-[var(--neg)]">{pcError}</p>}
-        </form>
+
+      {open && (
+        <SiteModal
+          key={editing?.id ?? "new"}
+          customerId={customer.id}
+          site={editing}
+          onClose={() => {
+            setOpen(false);
+            setEditing(null);
+          }}
+          onSaved={onSaved}
+        />
       )}
     </FormSection>
   );
 }
 
-// --- shared small bits ------------------------------------------------------
-function RowActions({
-  onEdit,
-  onConfirmRemove,
-  removeLabel,
+// --- Portal login (the customer's single sign-in) ---------------------------
+function PortalLoginSection({ customer, canEdit, onChange, pushToast }: SectionProps) {
+  // One login per company — the user auto-created with the company.
+  const login = customer.users[0] ?? null;
+  const [open, setOpen] = React.useState(false);
+  // One-time temp-password reveal after creating / re-inviting the login.
+  const [creds, setCreds] = React.useState<{ email: string; password: string; resent: boolean } | null>(
+    null,
+  );
+  const [resending, setResending] = React.useState(false);
+
+  const onSaved = (user: CustomerUser, temporaryPassword?: string) => {
+    onChange((p) => {
+      const exists = p.users.some((x) => x.id === user.id);
+      return {
+        ...p,
+        users: exists ? p.users.map((x) => (x.id === user.id ? user : x)) : [...p.users, user],
+      };
+    });
+    setOpen(false);
+    if (temporaryPassword) setCreds({ email: user.email, password: temporaryPassword, resent: false });
+  };
+
+  const resend = async () => {
+    if (!login) return;
+    setResending(true);
+    try {
+      const { temporaryPassword, email } = await customerService.resendCustomerUserInvite(
+        customer.id,
+        login.id,
+      );
+      setCreds({ email, password: temporaryPassword, resent: true });
+      onChange((p) => ({
+        ...p,
+        users: p.users.map((x) => (x.id === login.id ? { ...x, mustResetPassword: true } : x)),
+      }));
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : "Could not resend invite.", "alert");
+    } finally {
+      setResending(false);
+    }
+  };
+
+  return (
+    <FormSection
+      title="Portal login"
+      description="The customer's single sign-in. Edit it, resend the invite, or deactivate access."
+    >
+      {login ? (
+        <div className="flex flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-semibold text-[var(--ink)]">{login.fullName}</span>
+              <StatusChip value={login.status} />
+              {login.mustResetPassword && (
+                <span className="text-[10px] font-semibold text-[var(--faint)]">
+                  awaiting first login
+                </span>
+              )}
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-[var(--muted)]">
+              <span className="inline-flex items-center gap-1">
+                <Mail className="h-3.5 w-3.5 text-[var(--faint)]" />
+                {login.email}
+              </span>
+              {login.phone && (
+                <span className="inline-flex items-center gap-1">
+                  <Phone className="h-3.5 w-3.5 text-[var(--faint)]" />
+                  {login.phone}
+                </span>
+              )}
+            </div>
+            <div className="mt-0.5 text-[11px] text-[var(--faint)]">
+              Last login: {login.lastLoginAt ? fmtDate(login.lastLoginAt) : "Never"}
+            </div>
+          </div>
+          {canEdit && (
+            <div className="flex shrink-0 items-center gap-2">
+              <button
+                type="button"
+                onClick={resend}
+                disabled={resending}
+                className="flex items-center gap-1.5 rounded-xl border border-[var(--border)] px-3 py-2 text-xs font-bold text-[var(--ink)] transition-all hover:bg-[var(--surface)] disabled:opacity-60"
+              >
+                {resending ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <KeyRound className="h-3.5 w-3.5" />
+                )}
+                Resend invite
+              </button>
+              <button
+                type="button"
+                onClick={() => setOpen(true)}
+                className="flex items-center gap-1.5 rounded-xl border border-[var(--border)] px-3 py-2 text-xs font-bold text-[var(--ink)] transition-all hover:bg-[var(--surface)]"
+              >
+                <Pencil className="h-3.5 w-3.5" />
+                Edit
+              </button>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="flex flex-col items-start gap-3">
+          <Empty>No portal login yet.</Empty>
+          {canEdit && (
+            <button type="button" onClick={() => setOpen(true)} className={primaryBtn}>
+              <Plus className="h-4 w-4" /> Set up login
+            </button>
+          )}
+        </div>
+      )}
+
+      {open && (
+        <CustomerUserModal
+          key={login?.id ?? "new"}
+          customerId={customer.id}
+          user={login}
+          onClose={() => setOpen(false)}
+          onSaved={onSaved}
+        />
+      )}
+
+      {creds && (
+        <TempPasswordModal
+          open
+          title={creds.resent ? "Invite re-sent" : "Login created"}
+          portal
+          resent={creds.resent}
+          email={creds.email}
+          password={creds.password}
+          onClose={() => setCreds(null)}
+        />
+      )}
+    </FormSection>
+  );
+}
+
+// --- shared section UI ------------------------------------------------------
+
+function SectionToolbar({
+  canEdit,
+  addLabel,
+  onAdd,
 }: {
-  onEdit: () => void;
-  onConfirmRemove: () => Promise<void>;
-  removeLabel: string;
+  canEdit: boolean;
+  addLabel: string;
+  onAdd: () => void;
+}) {
+  if (!canEdit) return null;
+  return (
+    <div className="mb-3 flex justify-end">
+      <button type="button" onClick={onAdd} className={primaryBtn}>
+        <Plus className="h-4 w-4" /> {addLabel}
+      </button>
+    </div>
+  );
+}
+
+function TableShell({
+  head,
+  children,
+}: {
+  head: (string | null)[];
+  children: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center gap-1">
+    <div className="overflow-x-auto rounded-xl border border-[var(--border)]">
+      <table className="w-full text-left text-sm">
+        <thead>
+          <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
+            {head.map((h, i) =>
+              h === null ? null : (
+                <th key={i} className="px-3 py-2">
+                  {h}
+                </th>
+              ),
+            )}
+          </tr>
+        </thead>
+        <tbody>{children}</tbody>
+      </table>
+    </div>
+  );
+}
+
+function Empty({ children }: { children: React.ReactNode }) {
+  return <p className="text-sm text-[var(--muted)]">{children}</p>;
+}
+
+function Flag({ children, tone }: { children: React.ReactNode; tone?: "warn" }) {
+  return (
+    <span
+      className={`inline-flex rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
+        tone === "warn"
+          ? "bg-amber-500/15 text-amber-600"
+          : "bg-[var(--surface-2)] text-[var(--muted)]"
+      }`}
+    >
+      {children}
+    </span>
+  );
+}
+
+function RowActions({
+  editLabel,
+  onEdit,
+  removeLabel,
+  onConfirmRemove,
+}: {
+  editLabel: string;
+  onEdit: () => void;
+  removeLabel: string;
+  onConfirmRemove: () => Promise<void>;
+}) {
+  return (
+    <div className="flex items-center justify-end gap-1">
       <button
         type="button"
         onClick={onEdit}
-        aria-label="Edit"
-        className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--faint)] transition-colors hover:bg-[var(--surface)] hover:text-[var(--ink)]"
+        aria-label={editLabel}
+        className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--faint)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--ink)]"
       >
         <Pencil className="h-3.5 w-3.5" />
       </button>
@@ -798,9 +1249,7 @@ function RowActions({
 }
 
 // A trash button that confirms before deleting and disables itself while the
-// request is in flight (so a double-click can't fire two DELETEs). Used for the
-// nested project / catalogue / site rows, matching the confirm the top-level
-// customer delete already has.
+// request is in flight (so a double-click can't fire two DELETEs).
 function DeleteConfirmButton({
   label,
   onConfirm,
@@ -821,7 +1270,14 @@ function DeleteConfirmButton({
   };
   return (
     <>
-      <RemoveButton onClick={() => setOpen(true)} />
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        aria-label="Remove"
+        className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--faint)] transition-colors hover:bg-[var(--neg)]/10 hover:text-[var(--neg)]"
+      >
+        <Trash2 className="h-3.5 w-3.5" />
+      </button>
       <ConfirmDialog
         open={open}
         title="Remove?"
@@ -839,60 +1295,5 @@ function DeleteConfirmButton({
         }}
       />
     </>
-  );
-}
-
-function SaveCancel({
-  busy,
-  onSave,
-  onCancel,
-}: {
-  busy: boolean;
-  onSave: () => void;
-  onCancel: () => void;
-}) {
-  return (
-    <div className="flex items-center gap-1">
-      <button
-        type="button"
-        onClick={onSave}
-        disabled={busy}
-        aria-label="Save"
-        className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--pos)] transition-colors hover:bg-[var(--pos)]/10 disabled:opacity-50"
-      >
-        {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-4 w-4" />}
-      </button>
-      <button
-        type="button"
-        onClick={onCancel}
-        disabled={busy}
-        aria-label="Cancel"
-        className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--faint)] transition-colors hover:bg-[var(--surface)] hover:text-[var(--ink)] disabled:opacity-50"
-      >
-        <X className="h-4 w-4" />
-      </button>
-    </div>
-  );
-}
-
-function AddButton({ busy }: { busy: boolean }) {
-  return (
-    <button type="submit" disabled={busy} className={primaryBtn}>
-      {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-4 w-4" />}
-      Add
-    </button>
-  );
-}
-
-function RemoveButton({ onClick }: { onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-label="Remove"
-      className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--faint)] transition-colors hover:bg-[var(--neg)]/10 hover:text-[var(--neg)]"
-    >
-      <Trash2 className="h-3.5 w-3.5" />
-    </button>
   );
 }
