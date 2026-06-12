@@ -11,8 +11,11 @@ import { validateBody } from "../../middleware/validate.middleware.js";
 import {
   catalogueItemSchema,
   createCustomerSchema,
+  customerUserSchema,
   projectSchema,
   siteSchema,
+  stockRequestSchema,
+  stockReviewSchema,
   updateCustomerSchema,
 } from "./customer.validation.js";
 
@@ -118,17 +121,71 @@ adminRouter.delete(
   customerController.deleteSite,
 );
 
+adminRouter.post(
+  "/:id/users",
+  requirePermission("customers.edit"),
+  writeLimiter,
+  validateBody(customerUserSchema),
+  customerController.addCustomerUser,
+);
+adminRouter.put(
+  "/:id/users/:userId",
+  requirePermission("customers.edit"),
+  writeLimiter,
+  validateBody(customerUserSchema),
+  customerController.updateCustomerUser,
+);
+adminRouter.post(
+  "/:id/users/:userId/resend-invite",
+  requirePermission("customers.edit"),
+  writeLimiter,
+  customerController.resendCustomerUserInvite,
+);
+
+// Stock requests — the review queue for customer-submitted stock asks. Viewing
+// needs customers.view; approving / rejecting needs customers.edit. Approval is a
+// status move only — it never writes the catalogue or inventory.
+adminRouter.get(
+  "/:id/stock-requests",
+  requirePermission("customers.view"),
+  customerController.listStockRequests,
+);
+adminRouter.post(
+  "/:id/stock-requests/:reqId/approve",
+  requirePermission("customers.edit"),
+  writeLimiter,
+  validateBody(stockReviewSchema),
+  customerController.approveStockRequest,
+);
+adminRouter.post(
+  "/:id/stock-requests/:reqId/reject",
+  requirePermission("customers.edit"),
+  writeLimiter,
+  validateBody(stockReviewSchema),
+  customerController.rejectStockRequest,
+);
+
 // ----------------------------------------------------------------------------
-// Customer-facing portal surface — mounted at /customer. READ-ONLY: only GETs,
-// guarded by requireCustomer, and every read is scoped to the authenticated
-// customer's own id (from req.principal). There are deliberately no write routes.
+// Customer-facing portal surface — mounted at /customer. Reads are scoped to the
+// authenticated customer (from req.principal). The single write is submitting a
+// stock REQUEST, which only QUEUES a review — it never writes the catalogue directly.
 // ----------------------------------------------------------------------------
 const portalRouter = Router();
 portalRouter.use(requireAuth, requireCustomer);
 
 portalRouter.get("/me", customerController.getOwnProfile);
+portalRouter.get("/overview", customerController.getOwnOverview);
+portalRouter.get("/projects", customerController.getOwnProjects);
+portalRouter.get("/sites", customerController.getOwnSites);
 portalRouter.get("/catalogue", customerController.getOwnCatalogue);
 portalRouter.get("/stock", customerController.getOwnStock);
+portalRouter.get("/stock-requests", customerController.getOwnStockRequests);
+portalRouter.post(
+  "/stock-requests",
+  writeLimiter,
+  validateBody(stockRequestSchema),
+  customerController.submitStockRequest,
+);
 
 export { adminRouter, portalRouter };
 export default adminRouter;

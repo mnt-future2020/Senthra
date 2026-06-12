@@ -5,14 +5,19 @@ import type {
   CustomerCatalogueItem,
   CustomerProject,
   CustomerSite,
+  CustomerStockRequest,
+  CustomerUser,
   Prisma,
 } from "@prisma/client";
 
 import * as customerRepo from "./customer.repository.js";
 import type { CustomerWithChildren } from "./customer.repository.js";
 import { assertEmailNamespaceFree } from "#modules/auth/email-namespace.js";
+import * as sessionService from "#modules/auth/session.service.js";
+import * as categoryService from "#modules/category/category.service.js";
 import { getCustomerStock, type CustomerStock } from "./customer.stock.service.js";
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
+import { geocodePostcode } from "../../lib/geocode.js";
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import { generateTempPassword } from "../../utils/generate-password.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
@@ -47,6 +52,19 @@ function trimToNull(v?: string | null): string | null {
   return t.length ? t : null;
 }
 
+// An ISO date string → Date, or null for empty/invalid. (Validation already rejects
+// unparseable dates; this is the defensive last mile before the DB.)
+function parseDate(v?: string | null): Date | null {
+  if (!v || !v.trim()) return null;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+// A nullable number passed straight through (validation has already range-checked).
+function numOrNull(v?: number | null): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
 // A 24-char hex string is a Mongo ObjectId; anything else is treated as the human
 // customer reference (e.g. "CUST-0001"). The two never overlap (codes contain "-").
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
@@ -55,7 +73,13 @@ const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 
 export interface PublicCustomerProject {
   id: string;
+  code: string | null;
   name: string;
+  type: string | null;
+  startDate: string | null;
+  endDate: string | null;
+  status: string;
+  description: string | null;
   createdAt: string;
 }
 
@@ -63,15 +87,60 @@ export interface PublicCatalogueItem {
   id: string;
   name: string;
   sku: string;
-  category: string;
+  categoryId: string;
+  category: { id: string; name: string } | null;
+  description: string | null;
+  uom: string | null;
+  serialized: boolean;
+  barcodeRequired: boolean;
+  highValue: boolean;
+  thresholdQty: number | null;
+  status: string;
   attributes: unknown;
   createdAt: string;
 }
 
 export interface PublicCustomerSite {
   id: string;
+  code: string | null;
   name: string;
+  addressLine: string | null;
   postcode: string | null;
+  contactPerson: string | null;
+  contactNumber: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  status: string;
+  createdAt: string;
+}
+
+export interface PublicCustomerUser {
+  id: string;
+  fullName: string;
+  email: string;
+  phone: string | null;
+  designation: string | null;
+  status: string;
+  // True until the user completes their first-login password set (the invite wall).
+  mustResetPassword: boolean;
+  lastLoginAt: string | null;
+  createdAt: string;
+}
+
+// A customer-submitted stock / replenishment request — shown to both the admin
+// (review queue) and the portal user (their request history). It's an order ask,
+// NOT a catalogue write: approving it only moves the status (no item is created).
+export interface PublicStockRequest {
+  id: string;
+  name: string;
+  quantity: number | null;
+  reason: string | null;
+  notes: string | null;
+  status: string; // pending | approved | rejected | completed
+  requestedByName: string | null;
+  reviewedBy: string | null;
+  adminResponse: string | null;
+  reviewedAt: string | null;
   createdAt: string;
 }
 
@@ -80,6 +149,7 @@ export interface PublicCustomerSummary {
   customerCode: string;
   name: string;
   // Company
+  legalName: string | null;
   registrationNumber: string | null;
   industry: string | null;
   website: string | null;
@@ -98,7 +168,10 @@ export interface PublicCustomerSummary {
   city: string | null;
   county: string | null;
   postcode: string | null;
-  mustResetPassword: boolean;
+  country: string | null;
+  // Audit
+  createdBy: string | null;
+  updatedBy: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -107,6 +180,8 @@ export interface PublicCustomer extends PublicCustomerSummary {
   projects: PublicCustomerProject[];
   catalogue: PublicCatalogueItem[];
   sites: PublicCustomerSite[];
+  users: PublicCustomerUser[];
+  stockRequests: PublicStockRequest[]; // PENDING only (the admin review queue)
 }
 
 // What a logged-in customer sees about THEMSELVES (their own profile). Never
@@ -128,6 +203,7 @@ function toSummary(c: Customer): PublicCustomerSummary {
     id: c.id,
     customerCode: c.customerCode,
     name: c.name,
+    legalName: c.legalName,
     registrationNumber: c.registrationNumber,
     industry: c.industry,
     website: c.website,
@@ -144,29 +220,93 @@ function toSummary(c: Customer): PublicCustomerSummary {
     city: c.city,
     county: c.county,
     postcode: c.postcode,
-    mustResetPassword: c.mustResetPassword,
+    country: c.country,
+    createdBy: c.createdBy,
+    updatedBy: c.updatedBy,
     createdAt: c.createdAt.toISOString(),
     updatedAt: c.updatedAt.toISOString(),
   };
 }
 
 function toProject(p: CustomerProject): PublicCustomerProject {
-  return { id: p.id, name: p.name, createdAt: p.createdAt.toISOString() };
+  return {
+    id: p.id,
+    code: p.code,
+    name: p.name,
+    type: p.type,
+    startDate: p.startDate ? p.startDate.toISOString() : null,
+    endDate: p.endDate ? p.endDate.toISOString() : null,
+    status: p.status ?? "active",
+    description: p.description,
+    createdAt: p.createdAt.toISOString(),
+  };
 }
 
-function toCatalogueItem(i: CustomerCatalogueItem): PublicCatalogueItem {
+function toCatalogueItem(
+  i: CustomerCatalogueItem & { category?: { id: string; name: string } | null },
+): PublicCatalogueItem {
   return {
     id: i.id,
     name: i.name,
     sku: i.sku,
-    category: i.category,
+    categoryId: i.categoryId,
+    category: i.category ? { id: i.category.id, name: i.category.name } : null,
+    description: i.description,
+    uom: i.uom,
+    serialized: i.serialized ?? false,
+    barcodeRequired: i.barcodeRequired ?? false,
+    highValue: i.highValue ?? false,
+    thresholdQty: i.thresholdQty,
+    status: i.status ?? "active",
     attributes: i.attributes ?? null,
     createdAt: i.createdAt.toISOString(),
   };
 }
 
 function toSite(s: CustomerSite): PublicCustomerSite {
-  return { id: s.id, name: s.name, postcode: s.postcode, createdAt: s.createdAt.toISOString() };
+  return {
+    id: s.id,
+    code: s.code,
+    name: s.name,
+    addressLine: s.addressLine,
+    postcode: s.postcode,
+    contactPerson: s.contactPerson,
+    contactNumber: s.contactNumber,
+    latitude: s.latitude,
+    longitude: s.longitude,
+    status: s.status ?? "active",
+    createdAt: s.createdAt.toISOString(),
+  };
+}
+
+function toCustomerUser(u: CustomerUser): PublicCustomerUser {
+  return {
+    id: u.id,
+    fullName: u.fullName,
+    email: u.email,
+    phone: u.phone,
+    designation: u.designation,
+    status: u.status,
+    mustResetPassword: u.mustResetPassword ?? true,
+    lastLoginAt: u.lastLoginAt ? u.lastLoginAt.toISOString() : null,
+    createdAt: u.createdAt.toISOString(),
+  };
+}
+
+function toStockRequest(r: CustomerStockRequest): PublicStockRequest {
+  return {
+    id: r.id,
+    name: r.name,
+    quantity: r.quantity,
+    reason: r.reason,
+    notes: r.notes,
+    status: r.status,
+    requestedByName: r.requestedByName,
+    reviewedBy: r.reviewedBy,
+    adminResponse: r.adminResponse,
+    reviewedAt: r.reviewedAt ? r.reviewedAt.toISOString() : null,
+    createdAt: r.createdAt.toISOString(),
+  };
 }
 
 function toPublic(c: CustomerWithChildren): PublicCustomer {
@@ -175,6 +315,8 @@ function toPublic(c: CustomerWithChildren): PublicCustomer {
     projects: c.projects.map(toProject),
     catalogue: c.catalogue.map(toCatalogueItem),
     sites: c.sites.map(toSite),
+    users: c.users.map(toCustomerUser),
+    stockRequests: c.stockRequests.map(toStockRequest),
   };
 }
 
@@ -227,6 +369,7 @@ export async function getCustomer(idOrCode: string): Promise<PublicCustomer> {
 // Optional company / contact / address fields shared by create + update. The
 // service trims each to null. `logo` is a data URI uploaded to Cloudinary.
 export interface CustomerFieldsInput {
+  legalName?: string;
   registrationNumber?: string;
   industry?: string;
   website?: string;
@@ -240,6 +383,7 @@ export interface CustomerFieldsInput {
   city?: string;
   county?: string;
   postcode?: string;
+  country?: string;
   status?: string;
   logo?: string;
 }
@@ -253,6 +397,7 @@ export interface CreateCustomerInput extends CustomerFieldsInput {
 // trimmed to null. Shared by create + revive so the two stay in lockstep.
 function customerColumns(input: CustomerFieldsInput, logoUrl: string | null) {
   return {
+    legalName: trimToNull(input.legalName),
     registrationNumber: trimToNull(input.registrationNumber),
     industry: trimToNull(input.industry),
     website: trimToNull(input.website),
@@ -267,6 +412,7 @@ function customerColumns(input: CustomerFieldsInput, logoUrl: string | null) {
     city: trimToNull(input.city),
     county: trimToNull(input.county),
     postcode: trimToNull(input.postcode),
+    country: trimToNull(input.country),
     status: normalizeStatus(input.status),
   };
 }
@@ -278,6 +424,76 @@ export interface CreateCustomerResult {
   temporaryPassword: string;
 }
 
+// --- portal login provisioning (CustomerUser is the login identity) ----------
+
+// Create a login user with a fresh temp password + email the invite. Returns the
+// plaintext temp password ONCE (for the admin to relay); it's only ever stored hashed.
+async function provisionLoginUser(
+  customerId: string,
+  data: {
+    fullName: string;
+    email: string;
+    phone?: string | null;
+    designation?: string | null;
+    status?: string;
+  },
+  company: Customer,
+): Promise<{ user: CustomerUser; temporaryPassword: string }> {
+  const temporaryPassword = generateTempPassword();
+  const passwordHash = await hashPassword(temporaryPassword);
+  const user = await customerRepo.createCustomerUser(customerId, {
+    fullName: data.fullName.trim(),
+    email: data.email.trim(),
+    phone: data.phone ?? null,
+    designation: data.designation ?? null,
+    status: normalizeStatus(data.status),
+    passwordHash,
+    mustResetPassword: true,
+  });
+  sendInvite(company, user, temporaryPassword);
+  return { user, temporaryPassword };
+}
+
+// Regenerate a user's temp password (re-arming first-login) and return it. The
+// caller emails it + ends the user's other sessions.
+async function reissueLogin(userId: string): Promise<string> {
+  const temporaryPassword = generateTempPassword();
+  await customerRepo.updateLoginUser(userId, {
+    passwordHash: await hashPassword(temporaryPassword),
+    mustResetPassword: true,
+    resetTokenHash: null,
+    resetTokenExpiresAt: null,
+  });
+  return temporaryPassword;
+}
+
+// Fire-and-forget the invite email (reuses the customer.created template). Forced
+// so a disabled template never blocks a login invite.
+function sendInvite(company: Customer, user: CustomerUser, temporaryPassword: string): void {
+  void sendTemplatedEmail(
+    "customer.created",
+    user.email,
+    {
+      customerName: company.name,
+      contactPerson: user.fullName,
+      email: user.email,
+      temporaryPassword,
+    },
+    { force: true },
+  ).catch((e) =>
+    console.error("customer invite email failed:", e instanceof Error ? e.message : e),
+  );
+}
+
+// The company's primary login user — the one whose email matches the company
+// contact email (the auto-created first user), else the earliest user.
+async function findPrimaryUser(company: Customer): Promise<CustomerUser | null> {
+  const byEmail = await customerRepo.findLoginByEmail(company.email.toLowerCase());
+  if (byEmail && byEmail.customerId === company.id) return byEmail;
+  const users = await customerRepo.findUsersByCustomer(company.id);
+  return users[0] ?? null;
+}
+
 export async function createCustomer(
   input: CreateCustomerInput,
   actor?: AuditActor,
@@ -287,9 +503,10 @@ export async function createCustomer(
   if (!name) throw badRequest("Customer name is required.");
   if (!email) throw badRequest("Email is required.");
 
-  // Reject an email claimed by the admin or an active staff user (keeps the login
-  // namespaces disjoint); the customer's own collection is checked below, with revive.
-  await assertEmailNamespaceFree(email, { skip: { customer: true } });
+  // The email becomes the FIRST portal user's login, so it must be free across the
+  // admin / staff / customer-user namespaces. A soft-deleted company's user is allowed
+  // (revive re-provisions it); the company-email revive case is handled just below.
+  await assertEmailNamespaceFree(email);
 
   // A SOFT-DELETED customer with this email is revived (re-adding a removed customer
   // reuses the record + a new password); an ACTIVE one is a real conflict.
@@ -305,23 +522,15 @@ export async function createCustomer(
     throw conflict(`A customer named "${name}" already exists.`);
   }
 
-  const temporaryPassword = generateTempPassword();
-  // bcrypt (CPU) and the optional logo upload (network) are independent — run them
-  // together rather than serially.
-  const [passwordHash, logoUrl] = await Promise.all([
-    hashPassword(temporaryPassword),
-    input.logo ? uploadLogo(input.logo) : Promise.resolve(null),
-  ]);
-
+  const logoUrl = input.logo ? await uploadLogo(input.logo) : null;
+  const actorLabel = actor?.email ?? null;
   const fields = {
     name,
     nameLower,
     email,
     ...customerColumns(input, logoUrl),
-    passwordHash,
-    mustResetPassword: true,
-    resetTokenHash: null,
-    resetTokenExpiresAt: null,
+    createdBy: actorLabel,
+    updatedBy: actorLabel,
   };
 
   // The service pre-checks the email, but two concurrent creates for the same NEW
@@ -349,21 +558,34 @@ export async function createCustomer(
     metadata: { customerCode: created.customerCode, revived: Boolean(existing) },
   });
 
-  void sendTemplatedEmail(
-    "customer.created",
-    created.email,
-    {
-      customerName: created.name,
-      contactPerson: created.contactPerson ?? created.name,
-      email: created.email,
-      temporaryPassword,
-    },
-    { force: true },
-  ).catch((e) =>
-    console.error("customer.created email failed:", e instanceof Error ? e.message : e),
-  );
+  // Provision the FIRST portal login user from the primary contact — this is the
+  // login identity (the company itself has no password). If it fails (e.g. a racing
+  // create grabbed the email), roll the company back so we never leave one without a
+  // login, and surface a friendly conflict.
+  let provisioned: { user: CustomerUser; temporaryPassword: string };
+  try {
+    provisioned = await provisionLoginUser(
+      created.id,
+      {
+        fullName: trimToNull(input.contactPerson) ?? created.name,
+        email: created.email,
+        phone: trimToNull(input.phone),
+        designation: trimToNull(input.contactJobTitle),
+        status: "active",
+      },
+      created,
+    );
+  } catch (e) {
+    await customerRepo.softDelete(created.id).catch(() => {});
+    if (customerRepo.isUniqueConflictError(e)) {
+      throw conflict("A customer with that email already exists.");
+    }
+    throw e;
+  }
 
-  return { customer: toSummary(created), temporaryPassword };
+  auditNested(actor, "customer.user.created", created, provisioned.user.fullName);
+
+  return { customer: toSummary(created), temporaryPassword: provisioned.temporaryPassword };
 }
 
 export interface UpdateCustomerInput extends CustomerFieldsInput {
@@ -405,6 +627,7 @@ export async function updateCustomer(
 
   // Each optional field is written only when the client actually sent it (so a
   // partial update never clears untouched columns); an empty string maps to null.
+  if (typeof input.legalName === "string") data.legalName = trimToNull(input.legalName);
   if (typeof input.contactPerson === "string") data.contactPerson = trimToNull(input.contactPerson);
   if (typeof input.contactJobTitle === "string") data.contactJobTitle = trimToNull(input.contactJobTitle);
   if (typeof input.phone === "string") data.phone = trimToNull(input.phone);
@@ -418,6 +641,7 @@ export async function updateCustomer(
   if (typeof input.city === "string") data.city = trimToNull(input.city);
   if (typeof input.county === "string") data.county = trimToNull(input.county);
   if (typeof input.postcode === "string") data.postcode = trimToNull(input.postcode);
+  if (typeof input.country === "string") data.country = trimToNull(input.country);
   if (typeof input.status === "string") data.status = normalizeStatus(input.status);
 
   // Logo: a new upload replaces the current one; removeLogo clears it.
@@ -425,6 +649,9 @@ export async function updateCustomer(
   else if (input.removeLogo) data.logoUrl = null;
 
   if (Object.keys(data).length === 0) throw badRequest("Nothing to update.");
+
+  // Stamp who last changed it (only once we know there IS a change).
+  data.updatedBy = actor?.email ?? null;
 
   const updated = await customerRepo.update(id, data);
   audit.record({
@@ -440,7 +667,10 @@ export async function updateCustomer(
 export async function deleteCustomer(id: string, actor?: AuditActor): Promise<void> {
   const customer = await customerRepo.findById(id);
   if (!customer) throw notFound("Customer not found.");
+  // End every portal user's sessions so a removed company can't keep browsing.
+  const users = await customerRepo.findUsersByCustomer(id);
   await customerRepo.softDelete(id);
+  await Promise.all(users.map((u) => sessionService.endAll(u.id, "customer")));
   audit.record({
     actor,
     action: "customer.deleted",
@@ -450,45 +680,29 @@ export async function deleteCustomer(id: string, actor?: AuditActor): Promise<vo
   });
 }
 
-// Regenerate the temporary password and re-send the login email — used when the
-// invite is lost or the temp password needs resetting.
+// Re-send the login invite for the company's PRIMARY portal user — a fresh temp
+// password, re-arming first-login and ending their sessions. Used by the customer
+// detail header's "Resend invite".
 export async function resendInvite(
   id: string,
   actor?: AuditActor,
-): Promise<{ temporaryPassword: string }> {
+): Promise<{ temporaryPassword: string; email: string }> {
   const customer = await customerRepo.findById(id);
   if (!customer) throw notFound("Customer not found.");
+  const user = await findPrimaryUser(customer);
+  if (!user) throw badRequest("This customer has no portal user to invite. Add one first.");
 
-  const temporaryPassword = generateTempPassword();
-  await customerRepo.update(id, {
-    passwordHash: await hashPassword(temporaryPassword),
-    mustResetPassword: true,
-    resetTokenHash: null,
-    resetTokenExpiresAt: null,
-  });
+  const temporaryPassword = await reissueLogin(user.id);
+  await sessionService.endAll(user.id, "customer");
   audit.record({
     actor,
     action: "customer.invite_resent",
     targetType: "customer",
     targetId: id,
-    targetLabel: customer.email,
+    targetLabel: user.email,
   });
-
-  void sendTemplatedEmail(
-    "customer.created",
-    customer.email,
-    {
-      customerName: customer.name,
-      contactPerson: customer.contactPerson ?? customer.name,
-      email: customer.email,
-      temporaryPassword,
-    },
-    { force: true },
-  ).catch((e) =>
-    console.error("customer invite resend email failed:", e instanceof Error ? e.message : e),
-  );
-
-  return { temporaryPassword };
+  sendInvite(customer, user, temporaryPassword);
+  return { temporaryPassword, email: user.email };
 }
 
 // --- admin: nested projects / catalogue / sites ------------------------------
@@ -518,55 +732,80 @@ function auditNested(
   });
 }
 
+export interface ProjectInput {
+  name: string;
+  type?: string;
+  startDate?: string;
+  endDate?: string;
+  status?: string;
+  description?: string;
+}
+
+const PROJECT_STATUSES = ["active", "planned", "on_hold", "completed"] as const;
+function normalizeProjectStatus(status?: string): string {
+  return status && (PROJECT_STATUSES as readonly string[]).includes(status) ? status : "active";
+}
+
+function toProjectData(input: ProjectInput): customerRepo.ProjectData {
+  const name = input.name.trim();
+  if (!name) throw badRequest("Project name is required.");
+  return {
+    name,
+    type: trimToNull(input.type),
+    startDate: parseDate(input.startDate),
+    endDate: parseDate(input.endDate),
+    status: normalizeProjectStatus(input.status),
+    description: trimToNull(input.description),
+  };
+}
+
 export async function addProject(
   customerId: string,
-  name: string,
+  input: ProjectInput,
   actor?: AuditActor,
 ): Promise<PublicCustomerProject> {
   const customer = await requireCustomer(customerId);
-  const trimmed = name.trim();
-  if (!trimmed) throw badRequest("Project name is required.");
-  if (await customerRepo.findProjectByName(customerId, trimmed.toLowerCase())) {
-    throw conflict(`A project named "${trimmed}" already exists for this customer.`);
+  const data = toProjectData(input);
+  if (await customerRepo.findProjectByName(customerId, data.name.toLowerCase())) {
+    throw conflict(`A project named "${data.name}" already exists for this customer.`);
   }
   let created: CustomerProject;
   try {
-    created = await customerRepo.createProject(customerId, trimmed);
+    created = await customerRepo.createProject(customerId, data);
   } catch (e) {
     if (customerRepo.isUniqueConflictError(e)) {
-      throw conflict(`A project named "${trimmed}" already exists for this customer.`);
+      throw conflict(`A project named "${data.name}" already exists for this customer.`);
     }
     throw e;
   }
-  auditNested(actor, "customer.project.created", customer, trimmed);
+  auditNested(actor, "customer.project.created", customer, data.name);
   return toProject(created);
 }
 
 export async function updateProject(
   customerId: string,
   projectId: string,
-  name: string,
+  input: ProjectInput,
   actor?: AuditActor,
 ): Promise<PublicCustomerProject> {
   const customer = await requireCustomer(customerId);
   const existing = await customerRepo.findProjectById(projectId);
   if (!existing || existing.customerId !== customerId) throw notFound("Project not found.");
-  const trimmed = name.trim();
-  if (!trimmed) throw badRequest("Project name is required.");
-  const clash = await customerRepo.findProjectByName(customerId, trimmed.toLowerCase());
+  const data = toProjectData(input);
+  const clash = await customerRepo.findProjectByName(customerId, data.name.toLowerCase());
   if (clash && clash.id !== projectId) {
-    throw conflict(`A project named "${trimmed}" already exists for this customer.`);
+    throw conflict(`A project named "${data.name}" already exists for this customer.`);
   }
   let updated: CustomerProject;
   try {
-    updated = await customerRepo.updateProject(projectId, trimmed);
+    updated = await customerRepo.updateProject(projectId, data);
   } catch (e) {
     if (customerRepo.isUniqueConflictError(e)) {
-      throw conflict(`A project named "${trimmed}" already exists for this customer.`);
+      throw conflict(`A project named "${data.name}" already exists for this customer.`);
     }
     throw e;
   }
-  auditNested(actor, "customer.project.updated", customer, trimmed);
+  auditNested(actor, "customer.project.updated", customer, data.name);
   return toProject(updated);
 }
 
@@ -585,17 +824,24 @@ export async function removeProject(
 export interface CatalogueItemInput {
   name: string;
   sku: string;
-  category: string;
+  categoryId: string;
+  description?: string;
+  uom?: string;
+  serialized?: boolean;
+  barcodeRequired?: boolean;
+  highValue?: boolean;
+  thresholdQty?: number;
+  status?: string;
   attributes?: Record<string, unknown> | null;
 }
 
 function normalizeCatalogueInput(input: CatalogueItemInput): customerRepo.CatalogueItemData {
   const name = input.name.trim();
   const sku = input.sku.trim();
-  const category = input.category.trim();
+  const categoryId = input.categoryId.trim();
   if (!name) throw badRequest("Item name is required.");
   if (!sku) throw badRequest("SKU is required.");
-  if (!category) throw badRequest("Category is required.");
+  if (!categoryId) throw badRequest("Select a category.");
   // undefined → field omitted (preserve on update); null / {} → explicit clear;
   // a non-empty object → replace.
   let attributes: Prisma.InputJsonValue | null | undefined;
@@ -604,7 +850,19 @@ function normalizeCatalogueInput(input: CatalogueItemInput): customerRepo.Catalo
   else attributes = Object.keys(input.attributes).length > 0
     ? (input.attributes as Prisma.InputJsonValue)
     : null;
-  return { name, sku, category, attributes };
+  return {
+    name,
+    sku,
+    categoryId,
+    description: trimToNull(input.description),
+    uom: trimToNull(input.uom),
+    serialized: Boolean(input.serialized),
+    barcodeRequired: Boolean(input.barcodeRequired),
+    highValue: Boolean(input.highValue),
+    thresholdQty: numOrNull(input.thresholdQty),
+    status: normalizeStatus(input.status),
+    attributes,
+  };
 }
 
 export async function addCatalogueItem(
@@ -614,6 +872,7 @@ export async function addCatalogueItem(
 ): Promise<PublicCatalogueItem> {
   const customer = await requireCustomer(customerId);
   const data = normalizeCatalogueInput(input);
+  await categoryService.requireActiveCategory(data.categoryId);
   if (await customerRepo.findCatalogueItemBySku(customerId, data.sku.toLowerCase())) {
     throw conflict(`An item with SKU "${data.sku}" already exists for this customer.`);
   }
@@ -640,6 +899,7 @@ export async function updateCatalogueItem(
   const existing = await customerRepo.findCatalogueItemById(itemId);
   if (!existing || existing.customerId !== customerId) throw notFound("Catalogue item not found.");
   const data = normalizeCatalogueInput(input);
+  await categoryService.requireActiveCategory(data.categoryId);
   const clash = await customerRepo.findCatalogueItemBySku(customerId, data.sku.toLowerCase());
   if (clash && clash.id !== itemId) {
     throw conflict(`An item with SKU "${data.sku}" already exists for this customer.`);
@@ -671,7 +931,32 @@ export async function removeCatalogueItem(
 
 export interface SiteInput {
   name: string;
+  addressLine?: string;
   postcode?: string;
+  contactPerson?: string;
+  contactNumber?: string;
+  status?: string;
+}
+
+function toSiteData(input: SiteInput): customerRepo.SiteData {
+  const name = input.name.trim();
+  if (!name) throw badRequest("Site name is required.");
+  return {
+    name,
+    addressLine: trimToNull(input.addressLine),
+    postcode: trimToNull(input.postcode),
+    contactPerson: trimToNull(input.contactPerson),
+    contactNumber: trimToNull(input.contactNumber),
+    status: normalizeStatus(input.status),
+  };
+}
+
+// Coordinates are derived from the postcode on the server (postcodes.io), never
+// typed by the user. Best-effort: an unknown postcode / lookup failure leaves them
+// null, and a cleared postcode clears the coordinates too.
+async function geocodeSiteData(data: customerRepo.SiteData): Promise<customerRepo.SiteData> {
+  const coords = await geocodePostcode(data.postcode);
+  return { ...data, latitude: coords?.latitude ?? null, longitude: coords?.longitude ?? null };
 }
 
 export async function addSite(
@@ -680,13 +965,9 @@ export async function addSite(
   actor?: AuditActor,
 ): Promise<PublicCustomerSite> {
   const customer = await requireCustomer(customerId);
-  const name = input.name.trim();
-  if (!name) throw badRequest("Site name is required.");
-  const created = await customerRepo.createSite(customerId, {
-    name,
-    postcode: trimToNull(input.postcode),
-  });
-  auditNested(actor, "customer.site.created", customer, name);
+  const data = await geocodeSiteData(toSiteData(input));
+  const created = await customerRepo.createSite(customerId, data);
+  auditNested(actor, "customer.site.created", customer, data.name);
   return toSite(created);
 }
 
@@ -699,13 +980,9 @@ export async function updateSite(
   const customer = await requireCustomer(customerId);
   const existing = await customerRepo.findSiteById(siteId);
   if (!existing || existing.customerId !== customerId) throw notFound("Site not found.");
-  const name = input.name.trim();
-  if (!name) throw badRequest("Site name is required.");
-  const updated = await customerRepo.updateSite(siteId, {
-    name,
-    postcode: trimToNull(input.postcode),
-  });
-  auditNested(actor, "customer.site.updated", customer, name);
+  const data = await geocodeSiteData(toSiteData(input));
+  const updated = await customerRepo.updateSite(siteId, data);
+  auditNested(actor, "customer.site.updated", customer, data.name);
   return toSite(updated);
 }
 
@@ -719,6 +996,238 @@ export async function removeSite(
   if (!existing || existing.customerId !== customerId) throw notFound("Site not found.");
   await customerRepo.deleteSite(siteId);
   auditNested(actor, "customer.site.deleted", customer, existing.name);
+}
+
+// --- admin: nested customer users -------------------------------------------
+
+export interface CustomerUserInput {
+  fullName: string;
+  email: string;
+  phone?: string;
+  designation?: string;
+  status?: string;
+}
+
+// Every customer user is also a login account — creating one provisions a login
+// (temp password + invite email) and returns the temp password ONCE.
+export interface AddCustomerUserResult {
+  user: PublicCustomerUser;
+  temporaryPassword: string;
+}
+
+export async function addCustomerUser(
+  customerId: string,
+  input: CustomerUserInput,
+  actor?: AuditActor,
+): Promise<AddCustomerUserResult> {
+  const customer = await requireCustomer(customerId);
+  // One portal login per company (current scope). The first user is auto-created at
+  // company creation, so adding another is blocked — edit / deactivate that one instead.
+  if ((await customerRepo.findUsersByCustomer(customerId)).length >= 1) {
+    throw conflict(
+      "This customer already has a portal login. Edit or deactivate the existing user instead.",
+    );
+  }
+  const fullName = input.fullName.trim();
+  const email = input.email.trim();
+  if (!fullName) throw badRequest("Full name is required.");
+  if (!email) throw badRequest("Email is required.");
+  // The email is a login, so it must be free across the admin / staff / customer-user
+  // namespaces (emailLower is globally unique).
+  await assertEmailNamespaceFree(email.toLowerCase());
+
+  let provisioned: { user: CustomerUser; temporaryPassword: string };
+  try {
+    provisioned = await provisionLoginUser(
+      customerId,
+      {
+        fullName,
+        email,
+        phone: trimToNull(input.phone),
+        designation: trimToNull(input.designation),
+        status: normalizeStatus(input.status),
+      },
+      customer,
+    );
+  } catch (e) {
+    if (customerRepo.isUniqueConflictError(e)) {
+      throw conflict(`A user with email "${email}" already exists.`);
+    }
+    throw e;
+  }
+  auditNested(actor, "customer.user.created", customer, fullName);
+  return { user: toCustomerUser(provisioned.user), temporaryPassword: provisioned.temporaryPassword };
+}
+
+export async function updateCustomerUser(
+  customerId: string,
+  userId: string,
+  input: CustomerUserInput,
+  actor?: AuditActor,
+): Promise<PublicCustomerUser> {
+  const customer = await requireCustomer(customerId);
+  const existing = await customerRepo.findCustomerUserById(userId);
+  if (!existing || existing.customerId !== customerId) throw notFound("User not found.");
+  const fullName = input.fullName.trim();
+  const email = input.email.trim();
+  if (!fullName) throw badRequest("Full name is required.");
+  if (!email) throw badRequest("Email is required.");
+  // Changing the login email must keep it globally unique + out of the admin/staff
+  // namespaces.
+  if (email.toLowerCase() !== existing.emailLower) {
+    await assertEmailNamespaceFree(email.toLowerCase());
+  }
+  const status = normalizeStatus(input.status);
+  let updated: CustomerUser;
+  try {
+    updated = await customerRepo.updateCustomerUser(userId, {
+      fullName,
+      email,
+      phone: trimToNull(input.phone),
+      designation: trimToNull(input.designation),
+      status,
+    });
+  } catch (e) {
+    if (customerRepo.isUniqueConflictError(e)) {
+      throw conflict(`A user with email "${email}" already exists.`);
+    }
+    throw e;
+  }
+  // Deactivating a user revokes their portal access immediately.
+  if (status === "inactive") await sessionService.endAll(userId, "customer");
+  auditNested(actor, "customer.user.updated", customer, fullName);
+  return toCustomerUser(updated);
+}
+
+// Re-issue a single user's login invite (fresh temp password + email), re-arming
+// first-login and ending their existing sessions.
+export async function resendCustomerUserInvite(
+  customerId: string,
+  userId: string,
+  actor?: AuditActor,
+): Promise<{ temporaryPassword: string; email: string }> {
+  const customer = await requireCustomer(customerId);
+  const existing = await customerRepo.findCustomerUserById(userId);
+  if (!existing || existing.customerId !== customerId) throw notFound("User not found.");
+  const temporaryPassword = await reissueLogin(userId);
+  await sessionService.endAll(userId, "customer");
+  auditNested(actor, "customer.user.invite_resent", customer, existing.fullName);
+  sendInvite(customer, existing, temporaryPassword);
+  return { temporaryPassword, email: existing.email };
+}
+
+// --- customer stock requests (portal submit → internal review) --------------
+
+export interface StockRequestInput {
+  name: string;
+  quantity: number;
+  reason: string;
+  notes?: string;
+}
+
+function toStockRequestData(input: StockRequestInput): customerRepo.StockRequestData {
+  const name = input.name.trim();
+  const reason = input.reason.trim();
+  if (!name) throw badRequest("Item name is required.");
+  if (!Number.isFinite(input.quantity) || input.quantity < 1) {
+    throw badRequest("Quantity must be at least 1.");
+  }
+  if (!reason) throw badRequest("A business reason is required.");
+  return {
+    name,
+    quantity: Math.trunc(input.quantity),
+    reason,
+    notes: trimToNull(input.notes),
+  };
+}
+
+// PORTAL: a customer user submits a stock / replenishment request. Scoped to the
+// authenticated customer; the requesting user is recorded. This is the ONE place a
+// portal user can write into the customer module — and even then it only queues a
+// request for admin review, never the catalogue or inventory itself.
+export async function submitStockRequest(
+  customerId: string,
+  requestedBy: { userId: string; name: string; email: string },
+  input: StockRequestInput,
+): Promise<PublicStockRequest> {
+  const customer = await requireCustomer(customerId);
+  const data = toStockRequestData(input);
+  const created = await customerRepo.createStockRequest(
+    customerId,
+    requestedBy.userId,
+    requestedBy.name,
+    data,
+  );
+  audit.record({
+    actor: { id: requestedBy.userId, type: "customer", email: requestedBy.email },
+    action: "customer.stock_request.submitted",
+    targetType: "customer",
+    targetId: customer.id,
+    targetLabel: `${customer.name} — ${data.name} ×${data.quantity}`,
+  });
+  return toStockRequest(created);
+}
+
+// PORTAL: the authenticated customer's own requests (all statuses).
+export async function getOwnStockRequests(customerId: string): Promise<PublicStockRequest[]> {
+  const requests = await customerRepo.findStockRequestsByCustomer(customerId);
+  return requests.map(toStockRequest);
+}
+
+// ADMIN: a customer's stock requests (optionally filtered by status).
+export async function listStockRequests(
+  customerId: string,
+  status?: string,
+): Promise<PublicStockRequest[]> {
+  await requireCustomer(customerId);
+  const requests = await customerRepo.findStockRequestsByCustomer(customerId, status);
+  return requests.map(toStockRequest);
+}
+
+// ADMIN: approve a pending request. This is a STATUS MOVE ONLY — it records the
+// reviewer + an optional admin response note for the customer, and deliberately
+// never creates a catalogue item or inventory record. Turning an approved request
+// into real stock is a separate internal step (the inventory module, later). The
+// rule: a customer request must never directly write catalogue / inventory data.
+export async function approveStockRequest(
+  customerId: string,
+  requestId: string,
+  note: string | undefined,
+  actor?: AuditActor,
+): Promise<{ request: PublicStockRequest }> {
+  const customer = await requireCustomer(customerId);
+  const request = await customerRepo.findStockRequestById(requestId);
+  if (!request || request.customerId !== customerId) throw notFound("Request not found.");
+  if (request.status !== "pending") throw badRequest("This request has already been reviewed.");
+  const reviewed = await customerRepo.reviewStockRequest(requestId, {
+    status: "approved",
+    reviewedBy: actor?.email ?? null,
+    adminResponse: trimToNull(note),
+    reviewedAt: new Date(),
+  });
+  auditNested(actor, "customer.stock_request.approved", customer, request.name);
+  return { request: toStockRequest(reviewed) };
+}
+
+// ADMIN: reject a pending request, with an optional reason.
+export async function rejectStockRequest(
+  customerId: string,
+  requestId: string,
+  note: string | undefined,
+  actor?: AuditActor,
+): Promise<PublicStockRequest> {
+  const customer = await requireCustomer(customerId);
+  const request = await customerRepo.findStockRequestById(requestId);
+  if (!request || request.customerId !== customerId) throw notFound("Request not found.");
+  if (request.status !== "pending") throw badRequest("This request has already been reviewed.");
+  const reviewed = await customerRepo.reviewStockRequest(requestId, {
+    status: "rejected",
+    reviewedBy: actor?.email ?? null,
+    adminResponse: trimToNull(note),
+    reviewedAt: new Date(),
+  });
+  auditNested(actor, "customer.stock_request.rejected", customer, request.name);
+  return toStockRequest(reviewed);
 }
 
 // --- customer-facing reads (scoped strictly by the authenticated customerId) --
@@ -747,4 +1256,64 @@ export async function getOwnCatalogue(customerId: string): Promise<PublicCatalog
 
 export function getOwnStock(customerId: string): Promise<CustomerStock> {
   return getCustomerStock(customerId);
+}
+
+// PORTAL: the customer's own projects (read-only).
+export async function getOwnProjects(customerId: string): Promise<PublicCustomerProject[]> {
+  const c = await customerRepo.findByIdWithChildren(customerId);
+  if (!c) throw notFound("Customer not found.");
+  return c.projects.map(toProject);
+}
+
+// PORTAL: the customer's own sites (read-only).
+export async function getOwnSites(customerId: string): Promise<PublicCustomerSite[]> {
+  const c = await customerRepo.findByIdWithChildren(customerId);
+  if (!c) throw notFound("Customer not found.");
+  return c.sites.map(toSite);
+}
+
+// PORTAL dashboard summary: company header + live counts + a few recent requests.
+// Everything here is derivable today; richer cards (stock movements, allocations)
+// arrive with the inventory module and are surfaced as "coming soon" on the client.
+export interface CustomerOverview {
+  customer: {
+    id: string;
+    customerCode: string;
+    name: string;
+    logoUrl: string | null;
+    status: string;
+  };
+  counts: {
+    activeProjects: number;
+    totalProjects: number;
+    totalSites: number;
+    stockItems: number;
+    pendingRequests: number;
+  };
+  recentRequests: PublicStockRequest[];
+}
+
+export async function getOwnOverview(customerId: string): Promise<CustomerOverview> {
+  const c = await customerRepo.findByIdWithChildren(customerId);
+  if (!c) throw notFound("Customer not found.");
+  // All requests (any status), newest first — for the "recent activity" card and an
+  // accurate pending count (the included children are pre-filtered to pending only).
+  const allRequests = await customerRepo.findStockRequestsByCustomer(customerId);
+  return {
+    customer: {
+      id: c.id,
+      customerCode: c.customerCode,
+      name: c.name,
+      logoUrl: c.logoUrl,
+      status: c.status,
+    },
+    counts: {
+      activeProjects: c.projects.filter((p) => p.status === "active").length,
+      totalProjects: c.projects.length,
+      totalSites: c.sites.length,
+      stockItems: c.catalogue.length,
+      pendingRequests: allRequests.filter((r) => r.status === "pending").length,
+    },
+    recentRequests: allRequests.slice(0, 5).map(toStockRequest),
+  };
 }

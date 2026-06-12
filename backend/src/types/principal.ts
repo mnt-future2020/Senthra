@@ -1,4 +1,4 @@
-import type { Admin, Customer } from "@prisma/client";
+import type { Admin, Customer, CustomerUser } from "@prisma/client";
 
 import type { UserWithRole } from "#modules/user/user.repository.js";
 
@@ -28,19 +28,19 @@ export interface UserPrincipal {
   permissions: string[];
 }
 
-// An external customer (Customer PM). Read-only, scoped to a single customer
-// account: `customerId` (== id) is the ONLY tenant a customer can ever address,
-// and every customer-facing repository query filters by it. Permissions are a
-// fixed read-only set baked in here — customers are NOT governed by the Role
-// system, so a role misconfiguration can never widen their access.
+// An external customer portal user (e.g. a Customer PM). Read-only, scoped to a
+// single company: `id` is the signed-in CustomerUser, and `customerId` is the ONLY
+// tenant they can ever address — every customer-facing repository query filters by
+// it. Permissions are a fixed read-only set baked in here — customers are NOT
+// governed by the Role system, so a role misconfiguration can never widen access.
 export interface CustomerPrincipal {
   type: "customer";
-  id: string;
-  // The customer this login belongs to (identical to `id` — one login per
-  // customer — but named explicitly so isolation reads read clearly).
+  id: string; // the signed-in CustomerUser id (session subject)
+  // The company this user belongs to — the one tenant they can address.
   customerId: string;
-  email: string;
-  name: string; // company name
+  email: string; // the user's login email
+  name: string; // company name (shown across the portal)
+  userName: string; // the signed-in person's name
   customerCode: string;
   logoUrl: string | null;
   mustResetPassword: boolean;
@@ -63,16 +63,17 @@ export function adminPrincipal(admin: Admin): AdminPrincipal {
   return { type: "admin", id: admin.id, email: admin.email, name: admin.name };
 }
 
-export function customerPrincipal(customer: Customer): CustomerPrincipal {
+export function customerPrincipal(user: CustomerUser, customer: Customer): CustomerPrincipal {
   return {
     type: "customer",
-    id: customer.id,
+    id: user.id,
     customerId: customer.id,
-    email: customer.email,
+    email: user.email,
     name: customer.name,
+    userName: user.fullName,
     customerCode: customer.customerCode,
     logoUrl: customer.logoUrl,
-    mustResetPassword: customer.mustResetPassword,
+    mustResetPassword: user.mustResetPassword ?? true,
     permissions: CUSTOMER_PERMISSIONS,
   };
 }

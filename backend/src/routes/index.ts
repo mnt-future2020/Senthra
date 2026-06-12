@@ -2,6 +2,7 @@ import { Router } from "express";
 
 import auditRoutes from "#modules/audit/audit.routes.js";
 import authRoutes from "#modules/auth/auth.routes.js";
+import categoryRoutes from "#modules/category/category.routes.js";
 import { adminRouter as customerRoutes, portalRouter as customerPortalRoutes } from "#modules/customer/customer.routes.js";
 import departmentRoutes from "#modules/department/department.routes.js";
 import emailTemplateRoutes from "#modules/email/emailTemplate.routes.js";
@@ -23,6 +24,7 @@ router.use("/audit", auditRoutes);
 router.use("/settings", settingsRoutes);
 router.use("/users", userRoutes);
 router.use("/roles", roleRoutes);
+router.use("/categories", categoryRoutes);
 router.use("/departments", departmentRoutes);
 router.use("/job-titles", jobTitleRoutes);
 router.use("/email-templates", emailTemplateRoutes);

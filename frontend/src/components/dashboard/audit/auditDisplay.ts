@@ -10,6 +10,11 @@ const VERB_TONE: Record<string, ActionTone> = {
   deleted: "delete",
   login: "auth",
   logout: "auth",
+  // Customer stock-request lifecycle — coloured to match the portal status pills:
+  // amber while awaiting review, green when approved, red when rejected.
+  submitted: "update",
+  approved: "create",
+  rejected: "delete",
 };
 
 export function actionTone(action: string): ActionTone {

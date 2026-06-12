@@ -3,12 +3,17 @@ import { registerClientCache } from "@/lib/clientCache";
 import type {
   CatalogueItem,
   Customer,
+  CustomerOverview,
   CustomerProject,
   CustomerSelfProfile,
   CustomerSite,
   CustomerStatus,
   CustomerStock,
   CustomerSummary,
+  CustomerUser,
+  ProjectStatus,
+  StockRequest,
+  StockRequestStatus,
 } from "@/types/customer";
 
 // Typed wrappers around the backend /customers (admin) + /customer (portal)
@@ -37,6 +42,7 @@ export interface PagedCustomers {
 // Optional company / contact / address fields shared by create + update. `logo`
 // is a data URI uploaded to Cloudinary by the backend.
 export interface CustomerFieldsPayload {
+  legalName?: string;
   registrationNumber?: string;
   industry?: string;
   website?: string;
@@ -50,6 +56,7 @@ export interface CustomerFieldsPayload {
   city?: string;
   county?: string;
   postcode?: string;
+  country?: string;
   status?: CustomerStatus;
   logo?: string;
 }
@@ -70,16 +77,44 @@ export interface CreateCustomerResult {
   temporaryPassword: string;
 }
 
+export interface ProjectPayload {
+  name: string;
+  type?: string;
+  startDate?: string; // ISO date (yyyy-mm-dd) or ""
+  endDate?: string;
+  status?: ProjectStatus;
+  description?: string;
+}
+
 export interface CatalogueItemPayload {
   name: string;
   sku: string;
-  category: string;
+  categoryId: string;
+  description?: string;
+  uom?: string;
+  serialized?: boolean;
+  barcodeRequired?: boolean;
+  highValue?: boolean;
+  thresholdQty?: number;
+  status?: CustomerStatus;
   attributes?: Record<string, string>;
 }
 
 export interface SitePayload {
   name: string;
+  addressLine?: string;
   postcode?: string;
+  contactPerson?: string;
+  contactNumber?: string;
+  status?: CustomerStatus;
+}
+
+export interface CustomerUserPayload {
+  fullName: string;
+  email: string;
+  phone?: string;
+  designation?: string;
+  status?: CustomerStatus;
 }
 
 function qs(params: CustomerListParams): string {
@@ -147,26 +182,29 @@ export function deleteCustomer(id: string): Promise<void> {
   });
 }
 
-export function resendInvite(id: string): Promise<{ temporaryPassword: string }> {
-  return api<{ temporaryPassword: string }>(`/customers/${id}/resend-invite`, { method: "POST" });
+// Resends the company's PRIMARY portal user a fresh temp password.
+export function resendInvite(id: string): Promise<{ temporaryPassword: string; email: string }> {
+  return api<{ temporaryPassword: string; email: string }>(`/customers/${id}/resend-invite`, {
+    method: "POST",
+  });
 }
 
 // --- nested: projects ---
-export function addProject(customerId: string, name: string): Promise<CustomerProject> {
+export function addProject(customerId: string, payload: ProjectPayload): Promise<CustomerProject> {
   return api<{ project: CustomerProject }>(`/customers/${customerId}/projects`, {
     method: "POST",
-    body: { name },
+    body: payload,
   }).then((r) => r.project);
 }
 
 export function updateProject(
   customerId: string,
   projectId: string,
-  name: string,
+  payload: ProjectPayload,
 ): Promise<CustomerProject> {
   return api<{ project: CustomerProject }>(`/customers/${customerId}/projects/${projectId}`, {
     method: "PUT",
-    body: { name },
+    body: payload,
   }).then((r) => r.project);
 }
 
@@ -229,12 +267,107 @@ export function deleteSite(customerId: string, siteId: string): Promise<void> {
   );
 }
 
+// --- nested: customer users ---
+// Every customer user is a login account — creating one returns its one-time
+// temporary password (shown once), alongside the new user.
+export interface CustomerUserInviteResult {
+  user: CustomerUser;
+  temporaryPassword: string;
+}
+
+export function addCustomerUser(
+  customerId: string,
+  payload: CustomerUserPayload,
+): Promise<CustomerUserInviteResult> {
+  return api<CustomerUserInviteResult>(`/customers/${customerId}/users`, {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export function updateCustomerUser(
+  customerId: string,
+  userId: string,
+  payload: CustomerUserPayload,
+): Promise<CustomerUser> {
+  return api<{ user: CustomerUser }>(`/customers/${customerId}/users/${userId}`, {
+    method: "PUT",
+    body: payload,
+  }).then((r) => r.user);
+}
+
+// Re-issue a single user's login invite (fresh temp password + email).
+export function resendCustomerUserInvite(
+  customerId: string,
+  userId: string,
+): Promise<{ temporaryPassword: string; email: string }> {
+  return api<{ temporaryPassword: string; email: string }>(
+    `/customers/${customerId}/users/${userId}/resend-invite`,
+    { method: "POST" },
+  );
+}
+
+// --- nested: stock requests (admin review queue) ---
+export interface StockRequestPayload {
+  name: string;
+  quantity: number;
+  reason: string;
+  notes?: string;
+}
+
+export function listStockRequests(
+  customerId: string,
+  status?: StockRequestStatus,
+): Promise<StockRequest[]> {
+  const q = status ? `?status=${status}` : "";
+  return api<{ requests: StockRequest[] }>(`/customers/${customerId}/stock-requests${q}`).then(
+    (r) => r.requests,
+  );
+}
+
+// Approve → status move only (records the reviewer + optional response note). It
+// never creates a catalogue item or inventory record.
+export function approveStockRequest(
+  customerId: string,
+  requestId: string,
+  note?: string,
+): Promise<StockRequest> {
+  return api<{ request: StockRequest }>(
+    `/customers/${customerId}/stock-requests/${requestId}/approve`,
+    { method: "POST", body: { note } },
+  ).then((r) => r.request);
+}
+
+export function rejectStockRequest(
+  customerId: string,
+  requestId: string,
+  note?: string,
+): Promise<StockRequest> {
+  return api<{ request: StockRequest }>(
+    `/customers/${customerId}/stock-requests/${requestId}/reject`,
+    { method: "POST", body: { note } },
+  ).then((r) => r.request);
+}
+
 // ============================================================================
-// Customer-facing portal surface — /customer (read-only, own data only)
+// Customer-facing portal surface — /customer (own data only; the one write is a
+// stock REQUEST, which only queues a review).
 // ============================================================================
 
 export function getOwnProfile(): Promise<CustomerSelfProfile> {
   return api<{ profile: CustomerSelfProfile }>("/customer/me").then((r) => r.profile);
+}
+
+export function getOwnOverview(): Promise<CustomerOverview> {
+  return api<{ overview: CustomerOverview }>("/customer/overview").then((r) => r.overview);
+}
+
+export function getOwnProjects(): Promise<CustomerProject[]> {
+  return api<{ projects: CustomerProject[] }>("/customer/projects").then((r) => r.projects);
+}
+
+export function getOwnSites(): Promise<CustomerSite[]> {
+  return api<{ sites: CustomerSite[] }>("/customer/sites").then((r) => r.sites);
 }
 
 export function getOwnCatalogue(): Promise<CatalogueItem[]> {
@@ -243,4 +376,15 @@ export function getOwnCatalogue(): Promise<CatalogueItem[]> {
 
 export function getOwnStock(): Promise<CustomerStock> {
   return api<{ stock: CustomerStock }>("/customer/stock").then((r) => r.stock);
+}
+
+export function getOwnStockRequests(): Promise<StockRequest[]> {
+  return api<{ requests: StockRequest[] }>("/customer/stock-requests").then((r) => r.requests);
+}
+
+export function submitStockRequest(payload: StockRequestPayload): Promise<StockRequest> {
+  return api<{ request: StockRequest }>("/customer/stock-requests", {
+    method: "POST",
+    body: payload,
+  }).then((r) => r.request);
 }

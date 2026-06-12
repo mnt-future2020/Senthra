@@ -31,7 +31,7 @@ export const login = asyncHandler(async (req, res) => {
   res.json({ token: accessToken, principal });
 });
 
-// GET /auth/me  (protected) — the resolved principal (admin or user).
+// GET /auth/me  (protected) — the resolved principal (admin, staff user, or customer).
 export const me = asyncHandler(async (req, res) => {
   res.json({ principal: req.principal });
 });
@@ -62,7 +62,9 @@ export const changePassword = asyncHandler(async (req, res) => {
 
   let result;
   if (type === "customer") {
-    result = await authService.changeCustomerPassword(req.customerId!, currentPassword, newPassword, sid);
+    // req.principal.id is the signed-in CustomerUser (the login identity), not the
+    // company — that's whose password we change.
+    result = await authService.changeCustomerPassword(req.principal!.id, currentPassword, newPassword, sid);
   } else if (type === "user") {
     result = await authService.changeUserPassword(req.userId!, currentPassword, newPassword, sid);
   } else {
@@ -73,7 +75,7 @@ export const changePassword = asyncHandler(async (req, res) => {
   res.json({ principal: result.principal });
 });
 
-// POST /auth/refresh — rotate tokens using the refresh cookie (admin or user).
+// POST /auth/refresh — rotate tokens using the refresh cookie (admin, staff user, or customer).
 export const refresh = asyncHandler(async (req, res) => {
   const token = (req.cookies?.[REFRESH_COOKIE] as string | undefined) ?? req.body?.refreshToken;
   if (!token) throw unauthorized("No refresh token.");

@@ -17,9 +17,9 @@ function readAccessToken(req: Request): string | undefined {
   return header.startsWith("Bearer ") ? header.slice(7) : undefined;
 }
 
-// Protects routes. Resolves the access token to either the super-admin or a staff
-// user (per the token's `actor` claim), enforces server-side revocation, and
-// attaches req.principal for downstream handlers.
+// Protects routes. Resolves the access token to the super-admin, a staff user, or a
+// customer-portal user (per the token's `actor` claim), enforces server-side
+// revocation, and attaches req.principal for downstream handlers.
 export const requireAuth: RequestHandler = async (req, res, next) => {
   const token = readAccessToken(req);
   if (!token) {
@@ -68,21 +68,22 @@ export const requireAuth: RequestHandler = async (req, res, next) => {
     }
 
     if (payload.actor === "customer") {
-      // findById excludes soft-deleted customers.
-      const customer = await customerRepo.findById(payload.sub);
-      if (!customer) {
+      // payload.sub is the CustomerUser id (the login identity); load it joined to
+      // its company so we can verify both are active + the company isn't removed.
+      const cu = await customerRepo.findLoginById(payload.sub);
+      if (!cu || cu.customer.deletedAt) {
         res.status(401).json({ error: "Unauthorized" });
         return;
       }
-      if (customer.status !== "active") {
+      if (cu.status !== "active" || cu.customer.status !== "active") {
         res.status(401).json({
           error: "Your account is not active. Contact your administrator.",
         });
         return;
       }
-      req.principal = customerPrincipal(customer);
-      req.customerId = customer.id;
-      req.customerEmail = customer.email;
+      req.principal = customerPrincipal(cu, cu.customer);
+      req.customerId = cu.customer.id;
+      req.customerEmail = cu.email;
       next();
       return;
     }

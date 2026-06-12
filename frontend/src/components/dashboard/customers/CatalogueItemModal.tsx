@@ -9,44 +9,67 @@ import { RequiredMark } from "@/components/ui/FormScaffold";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import type { CatalogueItem } from "@/types/customer";
 
-// Units of measure for catalogue items (UK telecom field-services stock). Stored
-// under the reserved `uom` key inside the item's flexible `attributes` JSON, so no
-// schema change is needed and every other attribute is a free-form custom field.
-export const UOM_KEY = "uom";
+// Units of measure for catalogue items (UK telecom field-services stock). Kept in
+// lockstep with the backend UOM_OPTIONS (customer.validation.ts).
 const UOM_OPTIONS = ["Each", "Metre", "Roll", "Pack", "Box", "Set", "Pair", "Reel"] as const;
 
 type CustomField = { id: number; key: string; value: string };
 
-// Add / edit a per-customer catalogue item: name, SKU, category, unit of measure,
-// plus any number of per-category custom fields (e.g. Length: 50m, Connector: LC).
+// Add / edit a per-customer catalogue item — the product master: name, SKU,
+// category, unit of measure, the serial/barcode/high-value flags, a low-stock
+// threshold, status, plus any number of per-category custom attributes.
 export function CatalogueItemModal({
   customerId,
   item,
   onClose,
   onSaved,
+  categories,
 }: {
   customerId: string;
   item: CatalogueItem | null; // null = create
   onClose: () => void;
   onSaved: (item: CatalogueItem) => void;
+  categories: { id: string; name: string }[]; // active global categories for the picker
 }) {
   const isEdit = Boolean(item);
   const [name, setName] = React.useState(item?.name ?? "");
   const [sku, setSku] = React.useState(item?.sku ?? "");
-  const [category, setCategory] = React.useState(item?.category ?? "");
-  const [uom, setUom] = React.useState(() => item?.attributes?.[UOM_KEY] ?? "");
+  const [categoryId, setCategoryId] = React.useState(item?.categoryId ?? "");
+  const [description, setDescription] = React.useState(item?.description ?? "");
+  const [uom, setUom] = React.useState(item?.uom ?? "");
+  const [serialized, setSerialized] = React.useState(item?.serialized ?? false);
+  const [barcodeRequired, setBarcodeRequired] = React.useState(item?.barcodeRequired ?? false);
+  const [highValue, setHighValue] = React.useState(item?.highValue ?? false);
+  const [thresholdQty, setThresholdQty] = React.useState(
+    item?.thresholdQty != null ? String(item.thresholdQty) : "",
+  );
+  const [status, setStatus] = React.useState<"active" | "inactive">(item?.status ?? "active");
   // Each row carries a stable id so React keys survive insert/remove — an
   // array-index key would reattach focus/IME/selection state to the wrong row when
-  // a middle field is deleted. Initial rows seed from their position; new rows take
-  // (max existing id + 1), which stays unique among current siblings without a ref.
+  // a middle field is deleted.
   const [fields, setFields] = React.useState<CustomField[]>(() =>
-    Object.entries(item?.attributes ?? {})
-      .filter(([k]) => k !== UOM_KEY)
-      .map(([key, value], i) => ({ id: i, key, value: String(value) })),
+    Object.entries(item?.attributes ?? {}).map(([key, value], i) => ({
+      id: i,
+      key,
+      value: String(value),
+    })),
   );
   const [busy, setBusy] = React.useState(false);
   const [errors, setErrors] = React.useState<{ name?: string; sku?: string; category?: string }>({});
   const [error, setError] = React.useState<string | null>(null);
+
+  // The picker is fed the ACTIVE categories. When editing an item whose category was
+  // since deactivated, its id is absent from that list — so surface the item's own
+  // current category as an extra option. Without this the native <select> would render
+  // blank (no matching option) and block the save with "Select a category", making an
+  // unrelated edit (e.g. fixing the threshold) impossible without re-categorising.
+  const categoryOptions = React.useMemo(() => {
+    const current = item?.category;
+    if (current && !categories.some((c) => c.id === current.id)) {
+      return [...categories, { id: current.id, name: `${current.name} (inactive)` }];
+    }
+    return categories;
+  }, [categories, item]);
 
   const setFieldAt = (i: number, patch: Partial<CustomField>) =>
     setFields((prev) => prev.map((f, idx) => (idx === i ? { ...f, ...patch } : f)));
@@ -62,27 +85,41 @@ export function CatalogueItemModal({
     const errs: typeof errors = {};
     if (!name.trim()) errs.name = "Item name is required.";
     if (!sku.trim()) errs.sku = "SKU is required.";
-    if (!category.trim()) errs.category = "Category is required.";
+    if (!categoryId) errs.category = "Select a category.";
     setErrors(errs);
     if (Object.keys(errs).length) return;
 
-    // Build the attributes map: any row with a (trimmed) key is kept, so attributes
-    // loaded from the server round-trip faithfully — editing an unrelated field
-    // never silently drops a stored attribute. Only fully-blank rows are discarded,
-    // the reserved `uom` key can't be overridden by a custom row, and the unit of
-    // measure is appended. Duplicate keys collapse (last wins).
+    // Any row with a (trimmed) key is kept, so attributes round-trip faithfully;
+    // duplicate keys collapse (last wins) and fully-blank rows are discarded.
     const attributes: Record<string, string> = {};
     for (const f of fields) {
       const key = f.key.trim();
-      const value = f.value.trim();
-      if (key && key.toLowerCase() !== UOM_KEY) attributes[key] = value;
+      if (key) attributes[key] = f.value.trim();
     }
-    if (uom) attributes[UOM_KEY] = uom;
+
+    const qty = thresholdQty.trim();
+    const thresholdNum = qty === "" ? undefined : Number(qty);
+    if (thresholdNum !== undefined && (!Number.isInteger(thresholdNum) || thresholdNum < 0)) {
+      setError("Threshold quantity must be a whole number (0 or more).");
+      return;
+    }
 
     setBusy(true);
     setError(null);
     try {
-      const payload = { name: name.trim(), sku: sku.trim(), category: category.trim(), attributes };
+      const payload = {
+        name: name.trim(),
+        sku: sku.trim(),
+        categoryId,
+        description: description.trim() || undefined,
+        uom: uom || undefined,
+        serialized,
+        barcodeRequired,
+        highValue,
+        thresholdQty: thresholdNum,
+        status,
+        attributes,
+      };
       const saved =
         isEdit && item
           ? await customerService.updateCatalogueItem(customerId, item.id, payload)
@@ -98,14 +135,19 @@ export function CatalogueItemModal({
     <Modal
       open
       title={isEdit ? "Edit catalogue item" : "Add catalogue item"}
-      subtitle="A per-customer stock item. No pricing is ever stored or shown to customers."
+      subtitle="A per-customer stock item (the product master). The catalogue is never priced."
       onClose={busy ? () => {} : onClose}
       footer={
         <>
           <button type="button" onClick={onClose} disabled={busy} className={ghostBtn}>
             Cancel
           </button>
-          <button type="submit" form="catalogue-item-form" disabled={busy} className={primaryBtn}>
+          <button
+            type="submit"
+            form="catalogue-item-form"
+            disabled={busy || (!isEdit && categories.length === 0)}
+            className={primaryBtn}
+          >
             {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
             {isEdit ? "Save changes" : "Add item"}
           </button>
@@ -119,7 +161,10 @@ export function CatalogueItemModal({
             <input
               className={inputCls}
               value={name}
-              onChange={(e) => { setName(e.target.value); setErrors((p) => ({ ...p, name: undefined })); }}
+              onChange={(e) => {
+                setName(e.target.value);
+                setErrors((p) => ({ ...p, name: undefined }));
+              }}
               placeholder="e.g. SFP-LX optical module"
               maxLength={160}
               autoFocus
@@ -132,7 +177,10 @@ export function CatalogueItemModal({
             <input
               className={inputCls}
               value={sku}
-              onChange={(e) => { setSku(e.target.value); setErrors((p) => ({ ...p, sku: undefined })); }}
+              onChange={(e) => {
+                setSku(e.target.value);
+                setErrors((p) => ({ ...p, sku: undefined }));
+              }}
               placeholder="e.g. NTTP06CFE6"
               maxLength={80}
               aria-invalid={Boolean(errors.sku)}
@@ -141,17 +189,39 @@ export function CatalogueItemModal({
           </div>
           <div>
             <label className={labelCls}>Category<RequiredMark /></label>
-            <input
+            <select
               className={inputCls}
-              value={category}
-              onChange={(e) => { setCategory(e.target.value); setErrors((p) => ({ ...p, category: undefined })); }}
-              placeholder="e.g. Optical"
-              maxLength={80}
+              value={categoryId}
+              onChange={(e) => {
+                setCategoryId(e.target.value);
+                setErrors((p) => ({ ...p, category: undefined }));
+              }}
               aria-invalid={Boolean(errors.category)}
-            />
+            >
+              <option value="">— Select a category</option>
+              {categoryOptions.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+            {!isEdit && categories.length === 0 && (
+              <p className="mt-1 text-[11px] text-[var(--muted)]">
+                No categories yet. Create one in Settings → Categories first.
+              </p>
+            )}
             <FieldErr msg={errors.category} />
           </div>
           <div className="sm:col-span-2">
+            <label className={labelCls}>Description</label>
+            <textarea
+              className={inputCls}
+              rows={2}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="Optional — what this item is."
+              maxLength={2000}
+            />
+          </div>
+          <div>
             <label className={labelCls}>Unit of measure</label>
             <select className={inputCls} value={uom} onChange={(e) => setUom(e.target.value)}>
               <option value="">— Not set</option>
@@ -160,6 +230,35 @@ export function CatalogueItemModal({
               ))}
             </select>
           </div>
+          <div>
+            <label className={labelCls}>Low-stock threshold</label>
+            <input
+              type="number"
+              min={0}
+              step={1}
+              className={inputCls}
+              value={thresholdQty}
+              onChange={(e) => setThresholdQty(e.target.value)}
+              placeholder="e.g. 10"
+            />
+          </div>
+          <div>
+            <label className={labelCls}>Status</label>
+            <select
+              className={inputCls}
+              value={status}
+              onChange={(e) => setStatus(e.target.value as "active" | "inactive")}
+            >
+              <option value="active">Active</option>
+              <option value="inactive">Inactive</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-x-5 gap-y-2 rounded-xl border border-[var(--border-2)] px-3.5 py-3">
+          <Toggle label="Serialized item" checked={serialized} onChange={setSerialized} />
+          <Toggle label="Barcode required" checked={barcodeRequired} onChange={setBarcodeRequired} />
+          <Toggle label="High-value item" checked={highValue} onChange={setHighValue} />
         </div>
 
         <div className="border-t border-[var(--border-2)] pt-4">
@@ -213,6 +312,28 @@ export function CatalogueItemModal({
         {error && <p className="text-sm font-semibold text-[var(--neg)]">{error}</p>}
       </form>
     </Modal>
+  );
+}
+
+function Toggle({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <label className="flex cursor-pointer items-center gap-2 text-sm font-semibold text-[var(--ink)]">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className="h-4 w-4 rounded border-[var(--border)] accent-[var(--accent)]"
+      />
+      {label}
+    </label>
   );
 }
 
