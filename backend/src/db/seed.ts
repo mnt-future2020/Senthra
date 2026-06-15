@@ -3,6 +3,7 @@ import * as adminRepo from "#modules/auth/admin.repository.js";
 import * as categoryRepo from "#modules/category/category.repository.js";
 import * as emailTemplateRepo from "#modules/email/emailTemplate.repository.js";
 import * as roleRepo from "#modules/role/role.repository.js";
+import * as supplierTypeRepo from "#modules/supplier-type/supplier-type.repository.js";
 import * as userRepo from "#modules/user/user.repository.js";
 import * as warehouseTypeRepo from "#modules/warehouse-type/warehouse-type.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
@@ -31,7 +32,7 @@ const SEED_ROLES: {
   permissions: string[];
 }[] = [
   { key: "super_admin", name: "Super Admin", description: "Full system owner. Manages users, roles and all settings.", sortOrder: 0, permissions: ["*"] },
-  { key: "system_admin", name: "System Admin", description: "IT / HR administrator who creates and manages user accounts and customers.", sortOrder: 1, permissions: ["users.view", "users.create", "users.edit", "users.delete", "roles.view", "customers.view", "customers.create", "customers.edit", "customers.delete", "warehouse.view", "warehouse.create", "warehouse.edit", "warehouse.delete", "warehouse_types.view", "warehouse_types.create", "warehouse_types.edit", "warehouse_types.delete", "categories.view", "categories.create", "categories.edit", "categories.delete"] },
+  { key: "system_admin", name: "System Admin", description: "IT / HR administrator who creates and manages user accounts and customers.", sortOrder: 1, permissions: ["users.view", "users.create", "users.edit", "users.delete", "roles.view", "customers.view", "customers.create", "customers.edit", "customers.delete", "warehouse.view", "warehouse.create", "warehouse.edit", "warehouse.delete", "warehouse_types.view", "warehouse_types.create", "warehouse_types.edit", "warehouse_types.delete", "categories.view", "categories.create", "categories.edit", "categories.delete", "suppliers.view", "suppliers.create", "suppliers.edit", "suppliers.delete", "supplier_types.view", "supplier_types.create", "supplier_types.edit", "supplier_types.delete"] },
   { key: "project_manager", name: "Project Manager", description: "Creates job packs, authorises dispatch and tracks projects.", sortOrder: 2, permissions: [] },
   { key: "project_coordinator", name: "Project Coordinator", description: "Supports project managers with day-to-day coordination.", sortOrder: 3, permissions: [] },
   { key: "warehouse_manager", name: "Warehouse Manager", description: "Receives goods, scans stock in/out and manages a warehouse.", sortOrder: 4, permissions: ["warehouse.view", "warehouse.edit", "warehouse_types.view"] },
@@ -95,6 +96,25 @@ export async function seedDatabase(): Promise<void> {
       await warehouseTypeRepo.create({ key: slugify(name), name, status: "active", sortOrder: i });
     }
     console.log(`Seeded ${SEED_WAREHOUSE_TYPES.length} warehouse types.`);
+  }
+
+  // Seed the starter Supplier Type master ONLY on a fresh DB. Ordinary admin-managed
+  // types (no system flag) — once seeded, renames/deletes stick and nothing here touches
+  // them again. Suppliers reference a type by id.
+  if ((await supplierTypeRepo.findMany()).length === 0) {
+    const SEED_SUPPLIER_TYPES = [
+      "Manufacturer",
+      "Distributor",
+      "Vendor",
+      "Service Partner",
+      "Logistics Partner",
+      "Repair Partner",
+    ];
+    for (let i = 0; i < SEED_SUPPLIER_TYPES.length; i++) {
+      const name = SEED_SUPPLIER_TYPES[i];
+      await supplierTypeRepo.create({ key: slugify(name), name, status: "active", sortOrder: i });
+    }
+    console.log(`Seeded ${SEED_SUPPLIER_TYPES.length} supplier types.`);
   }
 
   // One-time migration: backfill Warehouse.typeId from the legacy `type` string, then
@@ -165,6 +185,8 @@ export async function seedDatabase(): Promise<void> {
       "warehouse.view", "warehouse.create", "warehouse.edit", "warehouse.delete",
       "warehouse_types.view", "warehouse_types.create", "warehouse_types.edit", "warehouse_types.delete",
       "categories.view", "categories.create", "categories.edit", "categories.delete",
+      "suppliers.view", "suppliers.create", "suppliers.edit", "suppliers.delete",
+      "supplier_types.view", "supplier_types.create", "supplier_types.edit", "supplier_types.delete",
     ];
     const missing = wanted.filter((p) => !systemAdmin.permissions.includes(p));
     if (missing.length) {

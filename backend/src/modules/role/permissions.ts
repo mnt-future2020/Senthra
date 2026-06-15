@@ -34,6 +34,7 @@ export const PERMISSION_CATEGORIES: string[] = [
   "Access & Security",
   "Customers",
   "Inventory",
+  "Suppliers",
   "System",
 ];
 
@@ -203,6 +204,30 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       { key: "warehouse_types.create", action: "Create", description: "Add new warehouse types." },
       { key: "warehouse_types.edit", action: "Edit", description: "Edit warehouse types." },
       { key: "warehouse_types.delete", action: "Delete", description: "Delete warehouse types." },
+    ],
+  },
+  {
+    key: "suppliers",
+    label: "Suppliers",
+    description: "Supplier master data — the organisations inventory is procured from.",
+    category: "Suppliers",
+    permissions: [
+      { key: "suppliers.view", action: "View", description: "View suppliers and their details." },
+      { key: "suppliers.create", action: "Create", description: "Add new suppliers." },
+      { key: "suppliers.edit", action: "Edit", description: "Edit suppliers; assign an owner; activate / deactivate." },
+      { key: "suppliers.delete", action: "Delete", description: "Remove suppliers (only when no dependencies exist)." },
+    ],
+  },
+  {
+    key: "supplier_types",
+    label: "Supplier Types",
+    description: "The classification master list used to categorise suppliers.",
+    category: "Suppliers",
+    permissions: [
+      { key: "supplier_types.view", action: "View", description: "View supplier types." },
+      { key: "supplier_types.create", action: "Create", description: "Add new supplier types." },
+      { key: "supplier_types.edit", action: "Edit", description: "Edit supplier types." },
+      { key: "supplier_types.delete", action: "Delete", description: "Delete supplier types." },
     ],
   },
   {
