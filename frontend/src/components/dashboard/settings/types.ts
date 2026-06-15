@@ -7,7 +7,9 @@ export type Section =
   | "email-templates"
   | "categories"
   | "warehouse-types"
-  | "supplier-types";
+  | "supplier-types"
+  | "irm-types"
+  | "irm-categories";
 
 // Props the dashboard passes down so the Appearance section can edit personal
 // display preferences. The brand/accent color lives in Branding (it's global and

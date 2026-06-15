@@ -207,6 +207,42 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     ],
   },
   {
+    key: "irm",
+    label: "IRM Catalogue",
+    description: "Company-owned internal stock/material items — the master data future procurement & inventory modules reference.",
+    category: "Inventory",
+    permissions: [
+      { key: "irm.view", action: "View", description: "View IRM catalogue items and their details." },
+      { key: "irm.create", action: "Create", description: "Add new IRM items." },
+      { key: "irm.edit", action: "Edit", description: "Edit IRM items; assign suppliers/owner; activate / deactivate." },
+      { key: "irm.delete", action: "Delete", description: "Remove IRM items (only when no dependencies exist)." },
+    ],
+  },
+  {
+    key: "irm_types",
+    label: "IRM Types",
+    description: "The item-type master list used to classify IRM items (Consumable, Asset, Tool…).",
+    category: "Inventory",
+    permissions: [
+      { key: "irm_types.view", action: "View", description: "View IRM types." },
+      { key: "irm_types.create", action: "Create", description: "Add new IRM types." },
+      { key: "irm_types.edit", action: "Edit", description: "Edit IRM types." },
+      { key: "irm_types.delete", action: "Delete", description: "Delete IRM types." },
+    ],
+  },
+  {
+    key: "irm_categories",
+    label: "IRM Categories",
+    description: "The company-domain category master used to classify IRM items (separate from customer categories).",
+    category: "Inventory",
+    permissions: [
+      { key: "irm_categories.view", action: "View", description: "View IRM categories." },
+      { key: "irm_categories.create", action: "Create", description: "Add new IRM categories." },
+      { key: "irm_categories.edit", action: "Edit", description: "Edit IRM categories." },
+      { key: "irm_categories.delete", action: "Delete", description: "Delete IRM categories." },
+    ],
+  },
+  {
     key: "suppliers",
     label: "Suppliers",
     description: "Supplier master data — the organisations inventory is procured from.",

@@ -16,6 +16,8 @@ export default function SettingsPage() {
         "categories.view",
         "warehouse_types.view",
         "supplier_types.view",
+        "irm_types.view",
+        "irm_categories.view",
       ]}
     >
       {/* Suspense satisfies useSearchParams (the ?section= the panel reads). */}
