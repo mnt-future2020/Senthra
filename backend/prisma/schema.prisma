@@ -182,6 +182,85 @@ model Warehouse {
   @@index([typeId])
 }
 
+// Supplier Type master-data (e.g. "Manufacturer", "Distributor"). The classification a
+// supplier belongs to — managed under Settings exactly like the Warehouse Type / stock
+// Category masters. A supplier references one type by id (typeId). Mirrors the Category
+// model: slug `key`, case-insensitive `nameLower` guard, status + sortOrder.
+model SupplierType {
+  id          String     @id @default(auto()) @map("_id") @db.ObjectId
+  key         String     @unique // auto slug from name: "Service Provider" -> "service_provider"
+  name        String // display name exactly as typed
+  nameLower   String     @unique // case-insensitive uniqueness (enforced at the DB)
+  description String?
+  status      String     @default("active") // active | inactive
+  sortOrder   Int        @default(0)
+  suppliers   Supplier[] // back-relation
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+}
+
+// A supplier — the organisation inventory is procured from (e.g. "Corning Ltd"). This is
+// MASTER-DATA ONLY: no procurement, purchase-order, goods-in or pricing logic lives here;
+// those modules reference `supplierId` later. Codes are Counter-allocated (SUP-0001), same
+// mechanism as warehouseCode / customerCode / employeeId. No geolocation (suppliers aren't
+// geocoded). Soft-deleted rows (deletedAt set) are excluded from normal reads.
+model Supplier {
+  id          String  @id @default(auto()) @map("_id") @db.ObjectId
+  code        String  @unique // auto-allocated, e.g. SUP-0001
+  name        String
+  legalName   String? // legal / registered business name (distinct from trading name)
+  description String?
+
+  // Classification → the SupplierType master (single source of truth).
+  typeId       String?       @db.ObjectId
+  supplierType SupplierType? @relation(fields: [typeId], references: [id])
+
+  status String @default("active") // active | inactive
+
+  // Primary contact (all optional).
+  contactPerson   String?
+  contactJobTitle String?
+  contactEmail    String?
+  contactPhone    String?
+
+  // Business information (all optional).
+  companyRegistrationNumber String?
+  vatNumber                 String?
+  website                   String?
+
+  // Address (UK).
+  addressLine1 String?
+  addressLine2 String?
+  city         String?
+  county       String?
+  postcode     String?
+  country      String? // defaults to "United Kingdom" in the UI
+
+  // Payment.
+  paymentTerms       String? // Prepaid | 7 Days | … | 90 Days | Custom
+  customPaymentTerms String? // free-text, used only when paymentTerms = "Custom"
+  currency           String? @default("GBP") // GBP | EUR
+
+  // Operational.
+  leadTimeDays Int? // typical lead time in days (0–365)
+  notes        String?
+
+  // Internal owner — an active staff user responsible for the relationship. Optional.
+  ownerUserId String? @db.ObjectId
+  owner       User?   @relation(fields: [ownerUserId], references: [id])
+
+  deletedAt DateTime? // soft delete — excluded from listings; history stays intact
+
+  createdBy String? // staff email that created the supplier
+  updatedBy String? // staff email that last updated it
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([ownerUserId])
+  @@index([typeId])
+}
+
 // Employee master-data: a department a staff member belongs to (e.g. "Operations").
 // Managed (create/rename/delete) from Users & Roles; the user form picks from this
 // list or creates one inline. User.department stores the chosen NAME (denormalized),
@@ -259,6 +338,8 @@ model User {
 
   // Warehouses this user is the primary manager of (back-relation; no DB column).
   managedWarehouses Warehouse[]
+  // Suppliers this user is the internal owner of (back-relation; no DB column).
+  ownedSuppliers    Supplier[]
 
   @@index([roleId])
   @@index([status])

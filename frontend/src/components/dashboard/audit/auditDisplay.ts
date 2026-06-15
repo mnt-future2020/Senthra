@@ -22,6 +22,9 @@ const VERB_TONE: Record<string, ActionTone> = {
   manager_assigned: "create",
   manager_removed: "delete",
   default_changed: "update",
+  // Supplier owner lifecycle — assign reads as positive, remove as negative.
+  owner_assigned: "create",
+  owner_removed: "delete",
 };
 
 export function actionTone(action: string): ActionTone {
