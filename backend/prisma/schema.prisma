@@ -103,6 +103,85 @@ model Category {
   updatedAt   DateTime @updatedAt
 }
 
+// Warehouse Type master-data (e.g. "Main Depot", "Engineer Van"). The operational
+// classification a warehouse belongs to — managed under Settings exactly like the
+// stock Category master. A warehouse references one type by id (typeId). Mirrors the
+// Category model: slug `key`, case-insensitive `nameLower` guard, status + sortOrder.
+model WarehouseType {
+  id          String      @id @default(auto()) @map("_id") @db.ObjectId
+  key         String      @unique // auto slug from name: "Main Depot" -> "main_depot"
+  name        String // display name exactly as typed
+  nameLower   String      @unique // case-insensitive uniqueness (enforced at the DB)
+  description String?
+  status      String      @default("active") // active | inactive
+  sortOrder   Int         @default(0)
+  warehouses  Warehouse[] // back-relation
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+}
+
+// A physical stock location (e.g. "Leeds Depot") — the master record every future
+// inventory movement (Goods In/Out, Stock Transfer, Engineer Dispatch, Rental) is
+// scoped against. This is MASTER-DATA ONLY: stock is never stored on the warehouse;
+// balances derive from an inventory ledger that references `warehouseId`, added in a
+// later phase. Codes are Counter-allocated (WH-0001), same mechanism as employeeId /
+// customerCode. Geolocation is derived server-side from the postcode (never typed).
+model Warehouse {
+  id          String  @id @default(auto()) @map("_id") @db.ObjectId
+  code        String  @unique // auto-allocated, e.g. WH-0001
+  name        String
+  description String?
+
+  // Operational classification → the WarehouseType master (single source of truth).
+  typeId        String?        @db.ObjectId
+  warehouseType WarehouseType? @relation(fields: [typeId], references: [id])
+
+  // The default destination for future Goods In. At most one warehouse is the default
+  // at a time — the service unsets the previous default when a new one is chosen.
+  isDefault Boolean @default(false)
+
+  // Address (UK).
+  addressLine1 String?
+  addressLine2 String?
+  city         String?
+  county       String?
+  postcode     String?
+  country      String? // defaults to "United Kingdom" in the UI
+
+  // Geolocation — derived from the postcode (postcodes.io) on the server. Hidden,
+  // read-only system fields; never hand-entered.
+  latitude  Float?
+  longitude Float?
+
+  // Contact.
+  contactPerson String?
+  contactEmail  String?
+  contactPhone  String?
+
+  // Operational metadata — display-only for now (no scheduling / inventory logic).
+  operatingHours String? // free-text, e.g. "Mon–Fri 08:00–18:00"
+  timezone       String? @default("Europe/London")
+  notes          String?
+
+  // Primary manager — an active staff user. Optional: assignable after creation
+  // (Create → Assign Manager → Activate).
+  managerUserId String? @db.ObjectId
+  manager       User?   @relation(fields: [managerUserId], references: [id])
+
+  status String @default("active") // active | inactive
+
+  deletedAt DateTime? // soft delete — excluded from listings; history stays intact
+
+  createdBy String? // staff email that created the warehouse
+  updatedBy String? // staff email that last updated it
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([managerUserId])
+  @@index([typeId])
+}
+
 // Employee master-data: a department a staff member belongs to (e.g. "Operations").
 // Managed (create/rename/delete) from Users & Roles; the user form picks from this
 // list or creates one inline. User.department stores the chosen NAME (denormalized),
@@ -177,6 +256,9 @@ model User {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  // Warehouses this user is the primary manager of (back-relation; no DB column).
+  managedWarehouses Warehouse[]
 
   @@index([roleId])
   @@index([status])

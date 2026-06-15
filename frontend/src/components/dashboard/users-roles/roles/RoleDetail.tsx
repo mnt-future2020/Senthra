@@ -8,6 +8,7 @@ import * as roleService from "@/services/role.service";
 import { useAuth } from "@/hooks/useAuth";
 import type { PermissionGroup, Role } from "@/types/role";
 import { FormAsideCard, FormPageHeader, FormSection } from "@/components/ui/FormScaffold";
+import { PermissionMatrix } from "./PermissionMatrix";
 
 const ROLES_LIST = "/dashboard/users?tab=roles";
 
@@ -32,13 +33,19 @@ export function RoleDetail({ role }: { role: Role }) {
   const isFullAccess = role.key === "super_admin" || role.permissions.includes("*");
 
   const [groups, setGroups] = React.useState<PermissionGroup[]>([]);
+  const [categories, setCategories] = React.useState<string[]>([]);
   const [catalogLoading, setCatalogLoading] = React.useState(true);
 
   React.useEffect(() => {
     let active = true;
     roleService
-      .listPermissionGroups()
-      .then((g) => active && setGroups(g))
+      .listPermissionCatalog()
+      .then(({ groups: g, categories: c }) => {
+        if (active) {
+          setGroups(g);
+          setCategories(c);
+        }
+      })
       .catch(() => {})
       .finally(() => active && setCatalogLoading(false));
     return () => {
@@ -104,37 +111,11 @@ export function RoleDetail({ role }: { role: Role }) {
             ) : groups.length === 0 ? (
               <p className="px-1 text-xs text-[var(--faint)]">No permissions available.</p>
             ) : (
-              <div className="divide-y divide-[var(--border-2)] overflow-hidden rounded-xl border border-[var(--border)]">
-                {groups.map((group) => (
-                  <div
-                    key={group.key}
-                    className="flex flex-col gap-2.5 p-4 sm:flex-row sm:items-start sm:justify-between"
-                  >
-                    <div className="min-w-0 sm:pr-4">
-                      <p className="text-sm font-bold text-[var(--ink)]">{group.label}</p>
-                      <p className="text-[11px] text-[var(--muted)]">{group.description}</p>
-                    </div>
-                    <div className="flex flex-wrap gap-1.5 sm:justify-end">
-                      {group.permissions.map((p) => {
-                        const granted = role.permissions.includes(p.key);
-                        return (
-                          <span
-                            key={p.key}
-                            title={p.description}
-                            className={`rounded-lg border px-2.5 py-1.5 text-[11px] font-bold ${
-                              granted
-                                ? "border-[var(--accent)] bg-[var(--accent-10)] text-[var(--accent)]"
-                                : "border-[var(--border)] text-[var(--faint)] opacity-60"
-                            }`}
-                          >
-                            {p.action}
-                          </span>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))}
-              </div>
+              <PermissionMatrix
+                groups={groups}
+                categories={categories}
+                granted={role.permissions}
+              />
             )}
           </FormSection>
         </div>

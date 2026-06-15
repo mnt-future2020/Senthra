@@ -59,6 +59,19 @@ const TABS: { id: TabId; label: string; icon: React.ElementType }[] = [
   { id: "users", label: "Portal login", icon: KeyRound },
 ];
 
+// Each tab beyond Overview is gated by its sub-entity's view permission, so an admin
+// without (say) customer_sites.view never sees the Sites tab. The aggregate detail GET
+// stays gated by customers.view — this is purely tab visibility, no separate read API.
+// Overview is the company record itself, so it's always shown (reaching this page
+// already required customers.view). Keys mirror the backend PERMISSION_GROUPS.
+const TAB_PERMISSION: Record<TabId, string | null> = {
+  overview: null,
+  projects: "customer_projects.view",
+  catalogue: "customer_stock.view",
+  sites: "customer_sites.view",
+  users: "customer_portal.view",
+};
+
 // "10 Jun 2026" — en-GB, matching the rest of the dashboard.
 function fmtDate(iso: string | null): string {
   if (!iso) return "—";
@@ -105,8 +118,37 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
     null,
   );
 
-  const canEdit = can("customers.edit");
+  // Company-record capabilities (the customers.* group governs the company only).
+  const canEditCompany = can("customers.edit");
   const canDelete = can("customers.delete");
+  const canResendPrimary = can("customer_portal.resend_invite");
+
+  // Per-sub-entity capabilities — each customer detail section is gated by its own
+  // granular group, matching the backend route permissions.
+  const projectCaps = {
+    create: can("customer_projects.create"),
+    edit: can("customer_projects.edit"),
+    delete: can("customer_projects.delete"),
+  };
+  const stockCaps = {
+    create: can("customer_stock.create"),
+    edit: can("customer_stock.edit"),
+    delete: can("customer_stock.delete"),
+  };
+  const siteCaps = {
+    create: can("customer_sites.create"),
+    edit: can("customer_sites.edit"),
+    delete: can("customer_sites.delete"),
+  };
+  const stockReqCaps = {
+    approve: can("stock_requests.approve"),
+    reject: can("stock_requests.reject"),
+  };
+  const portalCaps = {
+    manage: can("customer_portal.manage"),
+    resendInvite: can("customer_portal.resend_invite"),
+    resetPassword: can("customer_portal.reset_password"),
+  };
 
   const resend = async () => {
     setResending(true);
@@ -148,7 +190,12 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
 
   const searchParams = useSearchParams();
   const requestedTab = searchParams.get("tab");
-  const activeTab: TabId = TABS.find((t) => t.id === requestedTab)?.id ?? "overview";
+  // Only show tabs the user can view; an unauthorised ?tab= falls back to Overview.
+  const visibleTabs = TABS.filter((t) => {
+    const perm = TAB_PERMISSION[t.id];
+    return !perm || can(perm);
+  });
+  const activeTab: TabId = visibleTabs.find((t) => t.id === requestedTab)?.id ?? "overview";
   const selectTab = (t: TabId) =>
     router.replace(`/dashboard/customers/${customer.customerCode}?tab=${t}`, { scroll: false });
 
@@ -160,7 +207,7 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
         onBack={() => router.push("/dashboard/customers")}
         actions={
           <>
-            {canEdit && (
+            {canResendPrimary && (
               <button
                 onClick={() => setConfirmResend(true)}
                 disabled={resending}
@@ -174,7 +221,7 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
                 Resend invite
               </button>
             )}
-            {canEdit && (
+            {canEditCompany && (
               <button
                 onClick={() => router.push(`/dashboard/customers/${customer.customerCode}/edit`)}
                 className={primaryBtn}
@@ -225,7 +272,7 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
 
       {/* Tabs — URL-driven (?tab=), like the Users & Roles panel. */}
       <div className="flex gap-1 overflow-x-auto rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-1">
-        {TABS.map((t) => (
+        {visibleTabs.map((t) => (
           <button
             key={t.id}
             onClick={() => selectTab(t.id)}
@@ -243,16 +290,22 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
 
       {activeTab === "overview" && <OverviewTab customer={customer} />}
       {activeTab === "projects" && (
-        <ProjectsSection customer={customer} canEdit={canEdit} onChange={setCustomer} pushToast={pushToast} />
+        <ProjectsSection customer={customer} caps={projectCaps} onChange={setCustomer} pushToast={pushToast} />
       )}
       {activeTab === "catalogue" && (
-        <CatalogueSection customer={customer} canEdit={canEdit} onChange={setCustomer} pushToast={pushToast} />
+        <CatalogueSection
+          customer={customer}
+          caps={stockCaps}
+          stockReq={stockReqCaps}
+          onChange={setCustomer}
+          pushToast={pushToast}
+        />
       )}
       {activeTab === "sites" && (
-        <SitesSection customer={customer} canEdit={canEdit} onChange={setCustomer} pushToast={pushToast} />
+        <SitesSection customer={customer} caps={siteCaps} onChange={setCustomer} pushToast={pushToast} />
       )}
       {activeTab === "users" && (
-        <PortalLoginSection customer={customer} canEdit={canEdit} onChange={setCustomer} pushToast={pushToast} />
+        <PortalLoginSection customer={customer} caps={portalCaps} onChange={setCustomer} pushToast={pushToast} />
       )}
 
       <ConfirmDialog
@@ -550,15 +603,19 @@ function CopyButton({ value, label }: { value: string; label: string }) {
 }
 
 type PushToast = (msg: string, type?: "success" | "alert") => void;
+// Granular write capabilities for a customer sub-entity section (create / edit /
+// delete), matching the backend's per-group route permissions.
+type SectionCaps = { create: boolean; edit: boolean; delete: boolean };
 type SectionProps = {
   customer: Customer;
-  canEdit: boolean;
+  caps: SectionCaps;
   onChange: React.Dispatch<React.SetStateAction<Customer>>;
   pushToast: PushToast;
 };
 
 // --- Projects ---------------------------------------------------------------
-function ProjectsSection({ customer, canEdit, onChange, pushToast }: SectionProps) {
+function ProjectsSection({ customer, caps, onChange, pushToast }: SectionProps) {
+  const canWrite = caps.edit || caps.delete;
   const [open, setOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<CustomerProject | null>(null);
 
@@ -588,7 +645,7 @@ function ProjectsSection({ customer, canEdit, onChange, pushToast }: SectionProp
   return (
     <FormSection title="Projects" description="The customer's projects (used when creating jobs).">
       <SectionToolbar
-        canEdit={canEdit}
+        canEdit={caps.create}
         addLabel="Add project"
         onAdd={() => {
           setEditing(null);
@@ -599,7 +656,7 @@ function ProjectsSection({ customer, canEdit, onChange, pushToast }: SectionProp
       {customer.projects.length === 0 ? (
         <Empty>No projects yet.</Empty>
       ) : (
-        <TableShell head={["Code", "Project", "Dates", "Status", canEdit ? "" : null]}>
+        <TableShell head={["Code", "Project", "Dates", "Status", canWrite ? "" : null]}>
           {customer.projects.map((project) => (
             <tr key={project.id} className="border-b border-[var(--border)] align-top last:border-0">
               <td className="px-3 py-2 font-mono text-xs text-[var(--muted)]">{project.code ?? "—"}</td>
@@ -613,9 +670,11 @@ function ProjectsSection({ customer, canEdit, onChange, pushToast }: SectionProp
                   : "—"}
               </td>
               <td className="px-3 py-2"><StatusChip value={project.status} /></td>
-              {canEdit && (
+              {canWrite && (
                 <td className="px-3 py-2">
                   <RowActions
+                    canEdit={caps.edit}
+                    canDelete={caps.delete}
                     editLabel="Edit project"
                     onEdit={() => {
                       setEditing(project);
@@ -648,7 +707,15 @@ function ProjectsSection({ customer, canEdit, onChange, pushToast }: SectionProp
 }
 
 // --- Catalogue --------------------------------------------------------------
-function CatalogueSection({ customer, canEdit, onChange, pushToast }: SectionProps) {
+function CatalogueSection({
+  customer,
+  caps,
+  stockReq,
+  onChange,
+  pushToast,
+}: SectionProps & { stockReq: { approve: boolean; reject: boolean } }) {
+  const canWrite = caps.edit || caps.delete;
+  const canReview = stockReq.approve || stockReq.reject;
   const [query, setQuery] = React.useState("");
   const [open, setOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<CatalogueItem | null>(null);
@@ -746,7 +813,7 @@ function CatalogueSection({ customer, canEdit, onChange, pushToast }: SectionPro
       title="Stock catalogue"
       description="The items this customer's stock is tracked against (per-customer SKUs)."
     >
-      {canEdit && customer.stockRequests.length > 0 && (
+      {canReview && customer.stockRequests.length > 0 && (
         <div className="mb-4 overflow-hidden rounded-xl border border-amber-500/30 bg-amber-500/5">
           <div className="flex items-center gap-2 border-b border-amber-500/20 px-3 py-2 text-[11px] font-bold uppercase tracking-wider text-amber-600">
             <ClipboardList className="h-3.5 w-3.5" />
@@ -775,30 +842,34 @@ function CatalogueSection({ customer, canEdit, onChange, pushToast }: SectionPro
                     )}
                   </div>
                   <div className="flex shrink-0 items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => approve(req)}
-                      disabled={reviewingId === req.id}
-                      className="flex items-center gap-1 rounded-lg bg-[var(--pos)] px-2.5 py-1.5 text-[11px] font-bold text-white transition-all hover:opacity-90 disabled:opacity-60"
-                    >
-                      {reviewingId === req.id ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Check className="h-3.5 w-3.5" />
-                      )}
-                      Approve
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setRejectingId(rejectingId === req.id ? null : req.id);
-                        setRejectNote("");
-                      }}
-                      disabled={reviewingId === req.id}
-                      className="rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-[11px] font-bold text-[var(--neg)] transition-all hover:bg-[var(--neg)]/10 disabled:opacity-60"
-                    >
-                      Reject
-                    </button>
+                    {stockReq.approve && (
+                      <button
+                        type="button"
+                        onClick={() => approve(req)}
+                        disabled={reviewingId === req.id}
+                        className="flex items-center gap-1 rounded-lg bg-[var(--pos)] px-2.5 py-1.5 text-[11px] font-bold text-white transition-all hover:opacity-90 disabled:opacity-60"
+                      >
+                        {reviewingId === req.id ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Check className="h-3.5 w-3.5" />
+                        )}
+                        Approve
+                      </button>
+                    )}
+                    {stockReq.reject && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setRejectingId(rejectingId === req.id ? null : req.id);
+                          setRejectNote("");
+                        }}
+                        disabled={reviewingId === req.id}
+                        className="rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-[11px] font-bold text-[var(--neg)] transition-all hover:bg-[var(--neg)]/10 disabled:opacity-60"
+                      >
+                        Reject
+                      </button>
+                    )}
                   </div>
                 </div>
                 {rejectingId === req.id && (
@@ -835,7 +906,7 @@ function CatalogueSection({ customer, canEdit, onChange, pushToast }: SectionPro
         </div>
       )}
 
-      {(customer.catalogue.length > 0 || canEdit) && (
+      {(customer.catalogue.length > 0 || caps.create) && (
         <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
           {customer.catalogue.length > 0 && (
             <div className="relative w-full sm:max-w-xs">
@@ -851,7 +922,7 @@ function CatalogueSection({ customer, canEdit, onChange, pushToast }: SectionPro
           <span className="text-xs text-[var(--muted)] sm:ml-1">
             {customer.catalogue.length} item{customer.catalogue.length === 1 ? "" : "s"}
           </span>
-          {canEdit && (
+          {caps.create && (
             <button
               type="button"
               onClick={() => {
@@ -871,7 +942,7 @@ function CatalogueSection({ customer, canEdit, onChange, pushToast }: SectionPro
       ) : items.length === 0 ? (
         <Empty>No items match your search.</Empty>
       ) : (
-        <TableShell head={["SKU", "Item", "Category", "UoM", "Threshold", "Status", canEdit ? "" : null]}>
+        <TableShell head={["SKU", "Item", "Category", "UoM", "Threshold", "Status", canWrite ? "" : null]}>
           {items.map((item) => (
             <tr key={item.id} className="border-b border-[var(--border)] align-top last:border-0">
               <td className="px-3 py-2 font-mono text-xs text-[var(--muted)]">{item.sku}</td>
@@ -887,9 +958,11 @@ function CatalogueSection({ customer, canEdit, onChange, pushToast }: SectionPro
               <td className="px-3 py-2 text-[var(--muted)]">{item.uom ?? "—"}</td>
               <td className="px-3 py-2 text-[var(--muted)]">{item.thresholdQty ?? "—"}</td>
               <td className="px-3 py-2"><StatusChip value={item.status} /></td>
-              {canEdit && (
+              {canWrite && (
                 <td className="px-3 py-2">
                   <RowActions
+                    canEdit={caps.edit}
+                    canDelete={caps.delete}
                     editLabel="Edit item"
                     onEdit={() => {
                       setEditing(item);
@@ -923,7 +996,8 @@ function CatalogueSection({ customer, canEdit, onChange, pushToast }: SectionPro
 }
 
 // --- Sites ------------------------------------------------------------------
-function SitesSection({ customer, canEdit, onChange, pushToast }: SectionProps) {
+function SitesSection({ customer, caps, onChange, pushToast }: SectionProps) {
+  const canWrite = caps.edit || caps.delete;
   const [open, setOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<CustomerSite | null>(null);
 
@@ -951,7 +1025,7 @@ function SitesSection({ customer, canEdit, onChange, pushToast }: SectionProps) 
   return (
     <FormSection title="Sites" description="Delivery / installation locations.">
       <SectionToolbar
-        canEdit={canEdit}
+        canEdit={caps.create}
         addLabel="Add site"
         onAdd={() => {
           setEditing(null);
@@ -962,7 +1036,7 @@ function SitesSection({ customer, canEdit, onChange, pushToast }: SectionProps) 
       {customer.sites.length === 0 ? (
         <Empty>No sites yet.</Empty>
       ) : (
-        <TableShell head={["Code", "Site", "Postcode", "Contact", "Status", canEdit ? "" : null]}>
+        <TableShell head={["Code", "Site", "Postcode", "Contact", "Status", canWrite ? "" : null]}>
           {customer.sites.map((site) => (
             <tr key={site.id} className="border-b border-[var(--border)] align-top last:border-0">
               <td className="px-3 py-2 font-mono text-xs text-[var(--muted)]">{site.code ?? "—"}</td>
@@ -984,9 +1058,11 @@ function SitesSection({ customer, canEdit, onChange, pushToast }: SectionProps) 
                 )}
               </td>
               <td className="px-3 py-2"><StatusChip value={site.status} /></td>
-              {canEdit && (
+              {canWrite && (
                 <td className="px-3 py-2">
                   <RowActions
+                    canEdit={caps.edit}
+                    canDelete={caps.delete}
                     editLabel="Edit site"
                     onEdit={() => {
                       setEditing(site);
@@ -1019,7 +1095,14 @@ function SitesSection({ customer, canEdit, onChange, pushToast }: SectionProps) 
 }
 
 // --- Portal login (the customer's single sign-in) ---------------------------
-function PortalLoginSection({ customer, canEdit, onChange, pushToast }: SectionProps) {
+function PortalLoginSection({
+  customer,
+  caps,
+  onChange,
+  pushToast,
+}: Omit<SectionProps, "caps"> & {
+  caps: { manage: boolean; resendInvite: boolean; resetPassword: boolean };
+}) {
   // One login per company — the user auto-created with the company.
   const login = customer.users[0] ?? null;
   const [open, setOpen] = React.useState(false);
@@ -1028,6 +1111,7 @@ function PortalLoginSection({ customer, canEdit, onChange, pushToast }: SectionP
     null,
   );
   const [resending, setResending] = React.useState(false);
+  const [sendingReset, setSendingReset] = React.useState(false);
 
   const onSaved = (user: CustomerUser, temporaryPassword?: string) => {
     onChange((p) => {
@@ -1061,10 +1145,27 @@ function PortalLoginSection({ customer, canEdit, onChange, pushToast }: SectionP
     }
   };
 
+  // Admin-initiated reset: emails the customer a secure link to set their OWN
+  // password. The admin never sees or sets it (no temp-password reveal here).
+  const sendResetLink = async () => {
+    if (!login) return;
+    setSendingReset(true);
+    try {
+      const { email } = await customerService.sendCustomerUserResetLink(customer.id, login.id);
+      pushToast(`Password reset link sent to ${email}.`, "success");
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : "Could not send reset link.", "alert");
+    } finally {
+      setSendingReset(false);
+    }
+  };
+
+  const hasLoginActions = caps.resendInvite || caps.resetPassword || caps.manage;
+
   return (
     <FormSection
       title="Portal login"
-      description="The customer's single sign-in. Edit it, resend the invite, or deactivate access."
+      description="The customer's single sign-in. Edit it, resend the invite, send a self-serve password reset, or deactivate access."
     >
       {login ? (
         <div className="flex flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-4 sm:flex-row sm:items-center sm:justify-between">
@@ -1094,36 +1195,56 @@ function PortalLoginSection({ customer, canEdit, onChange, pushToast }: SectionP
               Last login: {login.lastLoginAt ? fmtDate(login.lastLoginAt) : "Never"}
             </div>
           </div>
-          {canEdit && (
-            <div className="flex shrink-0 items-center gap-2">
-              <button
-                type="button"
-                onClick={resend}
-                disabled={resending}
-                className="flex items-center gap-1.5 rounded-xl border border-[var(--border)] px-3 py-2 text-xs font-bold text-[var(--ink)] transition-all hover:bg-[var(--surface)] disabled:opacity-60"
-              >
-                {resending ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <KeyRound className="h-3.5 w-3.5" />
-                )}
-                Resend invite
-              </button>
-              <button
-                type="button"
-                onClick={() => setOpen(true)}
-                className="flex items-center gap-1.5 rounded-xl border border-[var(--border)] px-3 py-2 text-xs font-bold text-[var(--ink)] transition-all hover:bg-[var(--surface)]"
-              >
-                <Pencil className="h-3.5 w-3.5" />
-                Edit
-              </button>
+          {hasLoginActions && (
+            <div className="flex shrink-0 flex-wrap items-center gap-2">
+              {caps.resendInvite && (
+                <button
+                  type="button"
+                  onClick={resend}
+                  disabled={resending}
+                  className="flex items-center gap-1.5 rounded-xl border border-[var(--border)] px-3 py-2 text-xs font-bold text-[var(--ink)] transition-all hover:bg-[var(--surface)] disabled:opacity-60"
+                >
+                  {resending ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <KeyRound className="h-3.5 w-3.5" />
+                  )}
+                  Resend invite
+                </button>
+              )}
+              {caps.resetPassword && (
+                <button
+                  type="button"
+                  onClick={sendResetLink}
+                  disabled={sendingReset}
+                  className="flex items-center gap-1.5 rounded-xl border border-[var(--border)] px-3 py-2 text-xs font-bold text-[var(--ink)] transition-all hover:bg-[var(--surface)] disabled:opacity-60"
+                  title="Email the customer a secure link to set their own password"
+                >
+                  {sendingReset ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Mail className="h-3.5 w-3.5" />
+                  )}
+                  Send reset link
+                </button>
+              )}
+              {caps.manage && (
+                <button
+                  type="button"
+                  onClick={() => setOpen(true)}
+                  className="flex items-center gap-1.5 rounded-xl border border-[var(--border)] px-3 py-2 text-xs font-bold text-[var(--ink)] transition-all hover:bg-[var(--surface)]"
+                >
+                  <Pencil className="h-3.5 w-3.5" />
+                  Edit
+                </button>
+              )}
             </div>
           )}
         </div>
       ) : (
         <div className="flex flex-col items-start gap-3">
           <Empty>No portal login yet.</Empty>
-          {canEdit && (
+          {caps.manage && (
             <button type="button" onClick={() => setOpen(true)} className={primaryBtn}>
               <Plus className="h-4 w-4" /> Set up login
             </button>
@@ -1227,23 +1348,29 @@ function RowActions({
   onEdit,
   removeLabel,
   onConfirmRemove,
+  canEdit = true,
+  canDelete = true,
 }: {
   editLabel: string;
   onEdit: () => void;
   removeLabel: string;
   onConfirmRemove: () => Promise<void>;
+  canEdit?: boolean;
+  canDelete?: boolean;
 }) {
   return (
     <div className="flex items-center justify-end gap-1">
-      <button
-        type="button"
-        onClick={onEdit}
-        aria-label={editLabel}
-        className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--faint)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--ink)]"
-      >
-        <Pencil className="h-3.5 w-3.5" />
-      </button>
-      <DeleteConfirmButton label={removeLabel} onConfirm={onConfirmRemove} />
+      {canEdit && (
+        <button
+          type="button"
+          onClick={onEdit}
+          aria-label={editLabel}
+          className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--faint)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--ink)]"
+        >
+          <Pencil className="h-3.5 w-3.5" />
+        </button>
+      )}
+      {canDelete && <DeleteConfirmButton label={removeLabel} onConfirm={onConfirmRemove} />}
     </div>
   );
 }

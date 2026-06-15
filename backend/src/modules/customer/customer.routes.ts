@@ -48,118 +48,128 @@ adminRouter.delete(
   writeLimiter,
   customerController.deleteCustomer,
 );
+// Re-issuing the company's primary portal invite is a portal-login action.
 adminRouter.post(
   "/:id/resend-invite",
-  requirePermission("customers.edit"),
+  requirePermission("customer_portal.resend_invite"),
   writeLimiter,
   customerController.resendInvite,
 );
 
-// Nested master-data — managed inline from the customer detail page, so editing a
-// customer (customers.edit) covers adding/renaming/removing projects, catalogue
-// items and sites.
+// Nested sub-entities — managed inline from the customer detail page, each gated by
+// its own granular group (the parent customers.view is implied for reads via the
+// aggregate detail GET). Writes carry the matching create / edit / delete permission.
 adminRouter.post(
   "/:id/projects",
-  requirePermission("customers.edit"),
+  requirePermission("customer_projects.create"),
   writeLimiter,
   validateBody(projectSchema),
   customerController.addProject,
 );
 adminRouter.put(
   "/:id/projects/:projectId",
-  requirePermission("customers.edit"),
+  requirePermission("customer_projects.edit"),
   writeLimiter,
   validateBody(projectSchema),
   customerController.updateProject,
 );
 adminRouter.delete(
   "/:id/projects/:projectId",
-  requirePermission("customers.edit"),
+  requirePermission("customer_projects.delete"),
   writeLimiter,
   customerController.deleteProject,
 );
 
 adminRouter.post(
   "/:id/catalogue",
-  requirePermission("customers.edit"),
+  requirePermission("customer_stock.create"),
   writeLimiter,
   validateBody(catalogueItemSchema),
   customerController.addCatalogueItem,
 );
 adminRouter.put(
   "/:id/catalogue/:itemId",
-  requirePermission("customers.edit"),
+  requirePermission("customer_stock.edit"),
   writeLimiter,
   validateBody(catalogueItemSchema),
   customerController.updateCatalogueItem,
 );
 adminRouter.delete(
   "/:id/catalogue/:itemId",
-  requirePermission("customers.edit"),
+  requirePermission("customer_stock.delete"),
   writeLimiter,
   customerController.deleteCatalogueItem,
 );
 
 adminRouter.post(
   "/:id/sites",
-  requirePermission("customers.edit"),
+  requirePermission("customer_sites.create"),
   writeLimiter,
   validateBody(siteSchema),
   customerController.addSite,
 );
 adminRouter.put(
   "/:id/sites/:siteId",
-  requirePermission("customers.edit"),
+  requirePermission("customer_sites.edit"),
   writeLimiter,
   validateBody(siteSchema),
   customerController.updateSite,
 );
 adminRouter.delete(
   "/:id/sites/:siteId",
-  requirePermission("customers.edit"),
+  requirePermission("customer_sites.delete"),
   writeLimiter,
   customerController.deleteSite,
 );
 
+// Portal-login accounts: create / edit / deactivate is `manage`; the two re-credential
+// actions have their own keys (resend invite vs. email a self-serve reset link).
 adminRouter.post(
   "/:id/users",
-  requirePermission("customers.edit"),
+  requirePermission("customer_portal.manage"),
   writeLimiter,
   validateBody(customerUserSchema),
   customerController.addCustomerUser,
 );
 adminRouter.put(
   "/:id/users/:userId",
-  requirePermission("customers.edit"),
+  requirePermission("customer_portal.manage"),
   writeLimiter,
   validateBody(customerUserSchema),
   customerController.updateCustomerUser,
 );
 adminRouter.post(
   "/:id/users/:userId/resend-invite",
-  requirePermission("customers.edit"),
+  requirePermission("customer_portal.resend_invite"),
   writeLimiter,
   customerController.resendCustomerUserInvite,
 );
+adminRouter.post(
+  "/:id/users/:userId/send-reset-link",
+  requirePermission("customer_portal.reset_password"),
+  writeLimiter,
+  customerController.sendCustomerUserResetLink,
+);
 
-// Stock requests — the review queue for customer-submitted stock asks. Viewing
-// needs customers.view; approving / rejecting needs customers.edit. Approval is a
-// status move only — it never writes the catalogue or inventory.
+// Stock requests — the review queue for customer-submitted stock asks. Viewing needs
+// stock_requests.view; approving / rejecting need the matching key. Approval is a
+// status move only — it never writes the catalogue or inventory. (Completion is a
+// future status, introduced with the Goods Out workflow.)
 adminRouter.get(
   "/:id/stock-requests",
-  requirePermission("customers.view"),
+  requirePermission("stock_requests.view"),
   customerController.listStockRequests,
 );
 adminRouter.post(
   "/:id/stock-requests/:reqId/approve",
-  requirePermission("customers.edit"),
+  requirePermission("stock_requests.approve"),
   writeLimiter,
   validateBody(stockReviewSchema),
   customerController.approveStockRequest,
 );
 adminRouter.post(
   "/:id/stock-requests/:reqId/reject",
-  requirePermission("customers.edit"),
+  requirePermission("stock_requests.reject"),
   writeLimiter,
   validateBody(stockReviewSchema),
   customerController.rejectStockRequest,

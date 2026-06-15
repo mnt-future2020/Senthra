@@ -13,6 +13,7 @@ import type {
 import * as customerRepo from "./customer.repository.js";
 import type { CustomerWithChildren } from "./customer.repository.js";
 import { assertEmailNamespaceFree } from "#modules/auth/email-namespace.js";
+import { issueResetEmail } from "#modules/auth/auth.service.js";
 import * as sessionService from "#modules/auth/session.service.js";
 import * as categoryService from "#modules/category/category.service.js";
 import { getCustomerStock, type CustomerStock } from "./customer.stock.service.js";
@@ -309,14 +310,19 @@ function toStockRequest(r: CustomerStockRequest): PublicStockRequest {
   };
 }
 
-function toPublic(c: CustomerWithChildren): PublicCustomer {
+function toPublic(
+  c: CustomerWithChildren,
+  opts: { includeStockRequests?: boolean } = {},
+): PublicCustomer {
   return {
     ...toSummary(c),
     projects: c.projects.map(toProject),
     catalogue: c.catalogue.map(toCatalogueItem),
     sites: c.sites.map(toSite),
     users: c.users.map(toCustomerUser),
-    stockRequests: c.stockRequests.map(toStockRequest),
+    // The pending stock-request queue is its own capability (stock_requests.view) —
+    // never expose it to a caller who only holds customers.view.
+    stockRequests: opts.includeStockRequests ? c.stockRequests.map(toStockRequest) : [],
   };
 }
 
@@ -356,12 +362,15 @@ export async function listCustomers(params: ListCustomersParams = {}): Promise<P
 
 // Resolve a customer by either its database id OR its customerCode (so pages can
 // route by the friendly reference). Includes children for the detail view.
-export async function getCustomer(idOrCode: string): Promise<PublicCustomer> {
+export async function getCustomer(
+  idOrCode: string,
+  opts: { includeStockRequests?: boolean } = {},
+): Promise<PublicCustomer> {
   const c = OBJECT_ID_RE.test(idOrCode)
     ? await customerRepo.findByIdWithChildren(idOrCode)
     : await customerRepo.findByCustomerCodeWithChildren(idOrCode);
   if (!c) throw notFound("Customer not found.");
-  return toPublic(c);
+  return toPublic(c, opts);
 }
 
 // --- admin: create / update / delete customer --------------------------------
@@ -1114,6 +1123,32 @@ export async function resendCustomerUserInvite(
   auditNested(actor, "customer.user.invite_resent", customer, existing.fullName);
   sendInvite(customer, existing, temporaryPassword);
   return { temporaryPassword, email: existing.email };
+}
+
+// Admin-INITIATED password reset for a customer's portal login. The admin never sees
+// or sets the password: this issues a secure single-use reset token (1-hour expiry,
+// only its hash stored) and emails the customer a link to the public /reset-password
+// page, where they choose their own password (handled by auth.resetPassword, which
+// also clears the forced-first-login flag + ends every session). Blocked for inactive
+// users / companies — a disabled login shouldn't be re-armed. Returns only the email
+// (there is no password to relay).
+export async function sendUserResetLink(
+  customerId: string,
+  userId: string,
+  actor?: AuditActor,
+): Promise<{ email: string }> {
+  const customer = await requireCustomer(customerId);
+  const existing = await customerRepo.findCustomerUserById(userId);
+  if (!existing || existing.customerId !== customerId) throw notFound("User not found.");
+  if (existing.status !== "active" || customer.status !== "active" || customer.deletedAt) {
+    throw badRequest("This login is inactive. Reactivate it before sending a reset link.");
+  }
+  const firstName = existing.fullName.trim().split(/\s+/)[0] || existing.fullName;
+  await issueResetEmail(existing.email, firstName, (d) =>
+    customerRepo.updateLoginUser(userId, d),
+  );
+  auditNested(actor, "customer.user.reset_link_sent", customer, existing.fullName);
+  return { email: existing.email };
 }
 
 // --- customer stock requests (portal submit → internal review) --------------

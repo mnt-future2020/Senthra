@@ -10,12 +10,39 @@ import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardP
 import type { PermissionGroup, Role } from "@/types/role";
 import { inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
+import { PermissionMatrix } from "./PermissionMatrix";
 
 const ROLES_LIST = "/dashboard/users?tab=roles";
 
 // The "view" action's key for a group (e.g. "users.view"), if it has one.
 const viewKeyOf = (group: PermissionGroup): string | undefined =>
   group.permissions.find((p) => p.action === "View")?.key;
+
+// The customer sub-entity groups — mirrors the backend CUSTOMER_CHILD_GROUPS. Holding
+// any permission in one of these implies customers.view (you can't manage a customer's
+// projects, catalogue, sites, portal login or stock requests without seeing the customer).
+const CUSTOMER_CHILD_GROUPS = new Set([
+  "customer_projects",
+  "customer_stock",
+  "customer_sites",
+  "customer_portal",
+  "stock_requests",
+]);
+
+// Coerce a permission set to its implied closure, mirroring the backend's
+// applyImpliedPermissions so the matrix always shows exactly what will be saved: any
+// non-view action implies its group's "View", and any customer sub-entity grant implies
+// customers.view. Keeps the Customers → View checkbox in sync without a page reload.
+const applyImplied = (perms: string[], groups: PermissionGroup[]): string[] => {
+  const set = new Set(perms);
+  for (const group of groups) {
+    const viewKey = viewKeyOf(group);
+    if (!viewKey) continue;
+    if (group.permissions.some((p) => p.key !== viewKey && set.has(p.key))) set.add(viewKey);
+  }
+  if ([...set].some((k) => CUSTOMER_CHILD_GROUPS.has(k.split(".")[0]))) set.add("customers.view");
+  return [...set];
+};
 
 // Full-page Add/Edit role form: full-width two-column layout with a roomy
 // permission matrix (scales as new modules add groups) and a live summary aside.
@@ -31,6 +58,7 @@ export function RoleForm({ mode, role }: { mode: "create" | "edit"; role?: Role 
   const [description, setDescription] = React.useState(role?.description ?? "");
   const [permissions, setPermissions] = React.useState<string[]>(role?.permissions ?? []);
   const [groups, setGroups] = React.useState<PermissionGroup[]>([]);
+  const [categories, setCategories] = React.useState<string[]>([]);
   const [catalogLoading, setCatalogLoading] = React.useState(true);
   const [saving, setSaving] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
@@ -40,9 +68,12 @@ export function RoleForm({ mode, role }: { mode: "create" | "edit"; role?: Role 
   React.useEffect(() => {
     let active = true;
     roleService
-      .listPermissionGroups()
-      .then((g) => {
-        if (active) setGroups(g);
+      .listPermissionCatalog()
+      .then(({ groups: g, categories: c }) => {
+        if (active) {
+          setGroups(g);
+          setCategories(c);
+        }
       })
       .catch(() => {
         // leave empty — the form still works without the catalog
@@ -55,24 +86,9 @@ export function RoleForm({ mode, role }: { mode: "create" | "edit"; role?: Role 
     };
   }, []);
 
-  // Toggle one permission, keeping each module coherent: enabling any action also
-  // enables its "View"; disabling "View" clears every action in that module.
-  const togglePerm = (group: PermissionGroup, key: string) => {
-    const viewKey = viewKeyOf(group);
-    setPermissions((prev) => {
-      const has = prev.includes(key);
-      if (!has) {
-        const next = [...prev, key];
-        if (viewKey && key !== viewKey && !next.includes(viewKey)) next.push(viewKey);
-        return next;
-      }
-      if (viewKey && key === viewKey) {
-        const groupKeys = new Set(group.permissions.map((p) => p.key));
-        return prev.filter((p) => !groupKeys.has(p));
-      }
-      return prev.filter((p) => p !== key);
-    });
-  };
+  // Apply any matrix change (single toggle, row all/none, category bulk) and coerce the
+  // result to its implied closure so the matrix mirrors exactly what the server stores.
+  const onPermissionsChange = (next: string[]) => setPermissions(applyImplied(next, groups));
 
   const permsChanged =
     [...permissions].sort().join(",") !== [...(role?.permissions ?? [])].sort().join(",");
@@ -222,40 +238,12 @@ export function RoleForm({ mode, role }: { mode: "create" | "edit"; role?: Role 
             ) : groups.length === 0 ? (
               <p className="px-1 text-xs text-[var(--faint)]">No permissions available.</p>
             ) : (
-              <div className="divide-y divide-[var(--border-2)] overflow-hidden rounded-xl border border-[var(--border)]">
-                {groups.map((group) => (
-                  <div
-                    key={group.key}
-                    className="flex flex-col gap-2.5 p-4 sm:flex-row sm:items-start sm:justify-between"
-                  >
-                    <div className="min-w-0 sm:pr-4">
-                      <p className="text-sm font-bold text-[var(--ink)]">{group.label}</p>
-                      <p className="text-[11px] text-[var(--muted)]">{group.description}</p>
-                    </div>
-                    <div className="flex flex-wrap gap-1.5 sm:justify-end">
-                      {group.permissions.map((p) => {
-                        const checked = permissions.includes(p.key);
-                        return (
-                          <button
-                            type="button"
-                            key={p.key}
-                            onClick={() => togglePerm(group, p.key)}
-                            title={p.description}
-                            aria-pressed={checked}
-                            className={`rounded-lg border px-2.5 py-1.5 text-[11px] font-bold transition-all ${
-                              checked
-                                ? "border-[var(--accent)] bg-[var(--accent-10)] text-[var(--accent)]"
-                                : "border-[var(--border)] text-[var(--muted)] hover:border-[var(--border-2)] hover:text-[var(--ink)]"
-                            }`}
-                          >
-                            {p.action}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ))}
-              </div>
+              <PermissionMatrix
+                groups={groups}
+                categories={categories}
+                granted={permissions}
+                onChange={onPermissionsChange}
+              />
             )}
           </FormSection>
 

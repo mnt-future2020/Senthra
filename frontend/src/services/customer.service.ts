@@ -307,6 +307,18 @@ export function resendCustomerUserInvite(
   );
 }
 
+// Admin-initiated password reset: the backend emails the customer a secure link to
+// set their OWN new password. Returns only the email (no password is exposed).
+export function sendCustomerUserResetLink(
+  customerId: string,
+  userId: string,
+): Promise<{ email: string }> {
+  return api<{ email: string }>(
+    `/customers/${customerId}/users/${userId}/send-reset-link`,
+    { method: "POST" },
+  );
+}
+
 // --- nested: stock requests (admin review queue) ---
 export interface StockRequestPayload {
   name: string;

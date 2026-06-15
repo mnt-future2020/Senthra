@@ -1,6 +1,7 @@
 import type { Admin, Customer, CustomerUser } from "@prisma/client";
 
 import type { UserWithRole } from "#modules/user/user.repository.js";
+import { roleGrants } from "#modules/role/permissions.js";
 
 // The authenticated principal — the super-admin account (Admin model), a staff
 // user (User model), or an external read-only customer (Customer model). Resolved
@@ -93,4 +94,15 @@ export function userPrincipal(user: UserWithRole): UserPrincipal {
       : null,
     permissions: user.role?.permissions ?? [],
   };
+}
+
+// Boolean form of the requirePermission gate, with no HTTP side-effects: does this
+// principal hold `permission`? The super-admin always does; a staff or customer
+// principal passes if its effective set grants it (or "*"). Use to conditionally
+// shape a response a route's coarse permission already allows — e.g. omit a customer's
+// stock requests from the detail view for a caller who lacks stock_requests.view.
+export function principalGrants(principal: Principal | undefined, permission: string): boolean {
+  if (!principal) return false;
+  if (principal.type === "admin") return true;
+  return roleGrants(principal.permissions, permission);
 }

@@ -3,6 +3,7 @@ import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
 import { param, queryInt } from "../../utils/request.js";
 import { unauthorized } from "../../utils/http-error.js";
+import { principalGrants } from "../../types/principal.js";
 import type {
   CatalogueItemInput,
   CreateCustomerInput,
@@ -32,8 +33,12 @@ export const listCustomers = asyncHandler(async (req, res) => {
 });
 
 // GET /customers/:id  — detail (by id or customerCode), with projects/catalogue/sites.
+// The pending stock-request queue is only embedded for callers who hold
+// stock_requests.view — customers.view alone never exposes it (it has its own route).
 export const getCustomer = asyncHandler(async (req, res) => {
-  const customer = await customerService.getCustomer(param(req, "id"));
+  const customer = await customerService.getCustomer(param(req, "id"), {
+    includeStockRequests: principalGrants(req.principal, "stock_requests.view"),
+  });
   res.json({ customer });
 });
 
@@ -161,6 +166,18 @@ export const updateCustomerUser = asyncHandler(async (req, res) => {
 // POST /customers/:id/users/:userId/resend-invite — fresh temp password + email.
 export const resendCustomerUserInvite = asyncHandler(async (req, res) => {
   const result = await customerService.resendCustomerUserInvite(
+    param(req, "id"),
+    param(req, "userId"),
+    actorFrom(req),
+  );
+  res.json(result);
+});
+
+// POST /customers/:id/users/:userId/send-reset-link — email the customer a secure
+// link to set their OWN new password. The admin never sees or sets it. Returns the
+// email only (no password to relay).
+export const sendCustomerUserResetLink = asyncHandler(async (req, res) => {
+  const result = await customerService.sendUserResetLink(
     param(req, "id"),
     param(req, "userId"),
     actorFrom(req),

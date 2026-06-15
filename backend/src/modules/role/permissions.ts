@@ -23,8 +23,19 @@ export interface PermissionGroup {
   key: string; // module key, e.g. "users"
   label: string; // display name, e.g. "Users"
   description: string;
+  category: string; // display category, e.g. "Customers" — groups sections in the role-editor matrix
+  parent?: string; // module key of the parent group, for visual nesting (e.g. customer sub-entities under "customers")
   permissions: PermissionAction[];
 }
+
+// Ordered list of the matrix categories. Drives section order in the role editor;
+// any group whose `category` isn't in this list is bucketed under "General" at the end.
+export const PERMISSION_CATEGORIES: string[] = [
+  "Access & Security",
+  "Customers",
+  "Inventory",
+  "System",
+];
 
 // Flat catalog entry (derived) — kept for validation + the legacy list shape.
 export interface PermissionDef {
@@ -40,6 +51,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     key: "users",
     label: "Users",
     description: "Staff user accounts.",
+    category: "Access & Security",
     permissions: [
       { key: "users.view", action: "View", description: "View staff users and their details." },
       { key: "users.create", action: "Create", description: "Add new staff users." },
@@ -51,6 +63,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     key: "roles",
     label: "Roles & permissions",
     description: "Roles and the permissions each one grants.",
+    category: "Access & Security",
     permissions: [
       { key: "roles.view", action: "View", description: "View roles and their permissions." },
       { key: "roles.create", action: "Create", description: "Create new roles." },
@@ -62,6 +75,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     key: "settings",
     label: "Settings",
     description: "Branding, email (SMTP) and integrations.",
+    category: "System",
     permissions: [
       { key: "settings.view", action: "View", description: "View application settings." },
       { key: "settings.manage", action: "Manage", description: "Edit branding, email (SMTP) and integrations." },
@@ -71,6 +85,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     key: "email_templates",
     label: "Email templates",
     description: "The templates used for the emails the system sends.",
+    category: "System",
     permissions: [
       { key: "email_templates.view", action: "View", description: "View email templates." },
       { key: "email_templates.manage", action: "Manage", description: "Edit, enable/disable and restore email templates." },
@@ -79,18 +94,86 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
   {
     key: "customers",
     label: "Customers",
-    description: "Customer companies, their projects, stock catalogue and sites.",
+    description:
+      "The customer company record itself. Its projects, stock catalogue, sites, portal login and stock requests are governed by the separate groups below.",
+    category: "Customers",
     permissions: [
-      { key: "customers.view", action: "View", description: "View customers and their details." },
-      { key: "customers.create", action: "Create", description: "Add new customers (provisions their read-only login)." },
-      { key: "customers.edit", action: "Edit", description: "Edit customers — profile, projects, catalogue, sites; resend login invite." },
-      { key: "customers.delete", action: "Delete", description: "Remove customers." },
+      { key: "customers.view", action: "View", description: "View customers and their company details." },
+      { key: "customers.create", action: "Create", description: "Add new customer companies (also provisions their read-only portal login)." },
+      { key: "customers.edit", action: "Edit", description: "Edit a customer company's own profile — name, contact, status." },
+      { key: "customers.delete", action: "Delete", description: "Remove customer companies." },
+    ],
+  },
+  {
+    key: "customer_projects",
+    label: "Customer Projects",
+    description: "The projects listed on a customer, managed from the customer's detail page.",
+    category: "Customers",
+    parent: "customers",
+    permissions: [
+      { key: "customer_projects.view", action: "View", description: "View a customer's projects." },
+      { key: "customer_projects.create", action: "Create", description: "Add projects to a customer." },
+      { key: "customer_projects.edit", action: "Edit", description: "Edit a customer's projects." },
+      { key: "customer_projects.delete", action: "Delete", description: "Remove a customer's projects." },
+    ],
+  },
+  {
+    key: "customer_stock",
+    label: "Customer Stock Catalogue",
+    description: "The catalogue of stock items defined on each customer.",
+    category: "Customers",
+    parent: "customers",
+    permissions: [
+      { key: "customer_stock.view", action: "View", description: "View a customer's stock catalogue." },
+      { key: "customer_stock.create", action: "Create", description: "Add catalogue items to a customer." },
+      { key: "customer_stock.edit", action: "Edit", description: "Edit a customer's catalogue items." },
+      { key: "customer_stock.delete", action: "Delete", description: "Remove a customer's catalogue items." },
+    ],
+  },
+  {
+    key: "customer_sites",
+    label: "Customer Sites",
+    description: "The delivery / installation sites listed on each customer.",
+    category: "Customers",
+    parent: "customers",
+    permissions: [
+      { key: "customer_sites.view", action: "View", description: "View a customer's sites." },
+      { key: "customer_sites.create", action: "Create", description: "Add sites to a customer." },
+      { key: "customer_sites.edit", action: "Edit", description: "Edit a customer's sites." },
+      { key: "customer_sites.delete", action: "Delete", description: "Remove a customer's sites." },
+    ],
+  },
+  {
+    key: "customer_portal",
+    label: "Customer Portal Login",
+    description: "The customer's read-only portal sign-in account.",
+    category: "Customers",
+    parent: "customers",
+    permissions: [
+      { key: "customer_portal.view", action: "View", description: "See a customer's portal login and whether it's active." },
+      { key: "customer_portal.manage", action: "Manage", description: "Create, edit and deactivate a customer's portal login." },
+      { key: "customer_portal.resend_invite", action: "Resend invite", description: "Re-send the portal invite with a fresh temporary password." },
+      { key: "customer_portal.reset_password", action: "Reset password", description: "Email the customer a secure link to choose their own new password." },
+    ],
+  },
+  {
+    key: "stock_requests",
+    label: "Customer Stock Requests",
+    description: "The review queue for stock additions a customer requests from their portal.",
+    category: "Customers",
+    parent: "customers",
+    permissions: [
+      { key: "stock_requests.view", action: "View", description: "View customer stock requests." },
+      { key: "stock_requests.approve", action: "Approve", description: "Approve a customer's stock request." },
+      { key: "stock_requests.reject", action: "Reject", description: "Reject a customer's stock request." },
+      { key: "stock_requests.complete", action: "Complete", description: "Mark an approved request fulfilled (enabled once the Goods Out workflow ships)." },
     ],
   },
   {
     key: "categories",
     label: "Categories",
     description: "The global stock-category master list used to tag catalogue items.",
+    category: "Inventory",
     permissions: [
       { key: "categories.view", action: "View", description: "View stock categories." },
       { key: "categories.create", action: "Create", description: "Add new stock categories." },
@@ -99,9 +182,34 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     ],
   },
   {
+    key: "warehouse",
+    label: "Warehouses",
+    description: "Physical stock-location master data that future inventory modules build on.",
+    category: "Inventory",
+    permissions: [
+      { key: "warehouse.view", action: "View", description: "View warehouses and their details." },
+      { key: "warehouse.create", action: "Create", description: "Add new warehouses." },
+      { key: "warehouse.edit", action: "Edit", description: "Edit warehouses; assign a manager; activate / deactivate." },
+      { key: "warehouse.delete", action: "Delete", description: "Remove warehouses (only when no stock or open movements exist)." },
+    ],
+  },
+  {
+    key: "warehouse_types",
+    label: "Warehouse Types",
+    description: "The operational classification master list used to categorise warehouses.",
+    category: "Inventory",
+    permissions: [
+      { key: "warehouse_types.view", action: "View", description: "View warehouse types." },
+      { key: "warehouse_types.create", action: "Create", description: "Add new warehouse types." },
+      { key: "warehouse_types.edit", action: "Edit", description: "Edit warehouse types." },
+      { key: "warehouse_types.delete", action: "Delete", description: "Delete warehouse types." },
+    ],
+  },
+  {
     key: "audit",
     label: "Audit log",
     description: "The system audit trail.",
+    category: "System",
     permissions: [
       { key: "audit.view", action: "View", description: "View the audit log." },
     ],
@@ -149,11 +257,25 @@ export function roleGrants(permissions: string[], permission: string): boolean {
   return permissions.includes(ALL_PERMISSIONS) || permissions.includes(permission);
 }
 
+// The customer sub-entity groups. Each is a slice of a single customer record, so
+// holding ANY permission in one of them implies being able to see the parent
+// customer (`customers.view`) — you can't manage a customer's projects, catalogue,
+// sites, portal login or stock requests without first seeing the customer.
+export const CUSTOMER_CHILD_GROUPS = new Set([
+  "customer_projects",
+  "customer_stock",
+  "customer_sites",
+  "customer_portal",
+  "stock_requests",
+]);
+
 // Enforce the "manage implies view" invariant: if a permission set grants any action
 // in a module (create / edit / delete / manage), it also gets that module's `view`
 // permission — you can't act on what you can't see. Keeps roles coherent on the
 // server no matter how they were submitted (so an edit-without-view role can't be
-// created via the API). "*" already implies everything, so it's returned untouched.
+// created via the API). It also adds the cross-group implication above: any customer
+// sub-entity grant pulls in `customers.view`. "*" already implies everything, so it's
+// returned untouched.
 export function applyImpliedPermissions(permissions: string[]): string[] {
   if (permissions.includes(ALL_PERMISSIONS)) return [...permissions];
   const set = new Set(permissions);
@@ -163,6 +285,11 @@ export function applyImpliedPermissions(permissions: string[]): string[] {
     const hasNonView = group.permissions.some((p) => p.key !== viewKey && set.has(p.key));
     if (hasNonView) set.add(viewKey);
   }
+  // Cross-group: any customer sub-entity permission implies seeing the customer.
+  const needsCustomerView = [...set].some((key) =>
+    CUSTOMER_CHILD_GROUPS.has(key.split(".")[0]),
+  );
+  if (needsCustomerView) set.add("customers.view");
   return [...set];
 }
 
@@ -186,3 +313,45 @@ export const LEGACY_PERMISSION_EXPANSION: Record<string, string[]> = {
   "settings.manage": ["settings.view", "settings.manage"],
   "email_templates.manage": ["email_templates.view", "email_templates.manage"],
 };
+
+// Additive backward-compat for the customer RBAC split. The customer module used to
+// gate its projects, catalogue, sites, portal login and stock requests entirely under
+// the coarse `customers.view` / `customers.edit` keys; those entities now have their
+// own granular groups. To preserve every role's EXACT effective access, a role that
+// held a coarse key gains the matching child keys (it never loses `customers.*` — that
+// key now governs the company record only). Unlike LEGACY_PERMISSION_EXPANSION this is
+// purely additive (the source key is kept). Applied once at startup over every role in
+// db/seed.ts; idempotent. NOTE: stock_requests.complete is granted here for forward
+// consistency even though its route ships later — a `customers.edit` holder would have
+// had that capability under the old coarse model.
+export const CUSTOMER_COMPAT_BACKFILL: Record<string, string[]> = {
+  "customers.view": [
+    "customer_projects.view",
+    "customer_stock.view",
+    "customer_sites.view",
+    "customer_portal.view",
+    "stock_requests.view",
+  ],
+  "customers.edit": [
+    "customer_projects.view", "customer_projects.create", "customer_projects.edit", "customer_projects.delete",
+    "customer_stock.view", "customer_stock.create", "customer_stock.edit", "customer_stock.delete",
+    "customer_sites.view", "customer_sites.create", "customer_sites.edit", "customer_sites.delete",
+    "customer_portal.view", "customer_portal.manage", "customer_portal.resend_invite", "customer_portal.reset_password",
+    "stock_requests.view", "stock_requests.approve", "stock_requests.reject", "stock_requests.complete",
+  ],
+};
+
+// Compute the additive customer-compat keys a role's permission set is missing.
+// "*" roles (super-admin) grant everything already, so they need nothing. Idempotent:
+// returns only keys not already held, so re-running the migration is a no-op.
+export function customerCompatAdditions(permissions: string[]): string[] {
+  if (permissions.includes(ALL_PERMISSIONS)) return [];
+  const have = new Set(permissions);
+  const additions = new Set<string>();
+  for (const held of permissions) {
+    for (const key of CUSTOMER_COMPAT_BACKFILL[held] ?? []) {
+      if (!have.has(key)) additions.add(key);
+    }
+  }
+  return [...additions];
+}

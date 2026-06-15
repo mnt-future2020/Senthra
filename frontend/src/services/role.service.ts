@@ -29,9 +29,16 @@ export function getRole(id: string): Promise<Role> {
   return api<{ role: Role }>(`/roles/${id}`).then((r) => r.role);
 }
 
-// The grouped permission catalog for the role-editor matrix.
-export function listPermissionGroups(): Promise<PermissionGroup[]> {
-  return api<{ groups: PermissionGroup[] }>("/roles/permissions").then((r) => r.groups);
+// The grouped permission catalog + ordered category list for the role-editor matrix.
+export interface PermissionCatalog {
+  groups: PermissionGroup[];
+  categories: string[];
+}
+export function listPermissionCatalog(): Promise<PermissionCatalog> {
+  return api<PermissionCatalog>("/roles/permissions").then((r) => ({
+    groups: r.groups ?? [],
+    categories: r.categories ?? [],
+  }));
 }
 
 export function createRole(payload: RolePayload): Promise<Role> {

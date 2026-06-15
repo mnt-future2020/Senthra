@@ -10,6 +10,8 @@ import jobTitleRoutes from "#modules/jobTitle/jobTitle.routes.js";
 import roleRoutes from "#modules/role/role.routes.js";
 import settingsRoutes from "#modules/settings/settings.routes.js";
 import userRoutes from "#modules/user/user.routes.js";
+import warehouseRoutes from "#modules/warehouse/warehouse.routes.js";
+import warehouseTypeRoutes from "#modules/warehouse-type/warehouse-type.routes.js";
 
 const router = Router();
 
@@ -25,6 +27,8 @@ router.use("/settings", settingsRoutes);
 router.use("/users", userRoutes);
 router.use("/roles", roleRoutes);
 router.use("/categories", categoryRoutes);
+router.use("/warehouses", warehouseRoutes);
+router.use("/warehouse-types", warehouseTypeRoutes);
 router.use("/departments", departmentRoutes);
 router.use("/job-titles", jobTitleRoutes);
 router.use("/email-templates", emailTemplateRoutes);
