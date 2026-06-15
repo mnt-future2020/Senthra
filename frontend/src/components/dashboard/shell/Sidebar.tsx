@@ -20,6 +20,7 @@ import {
   BarChart3,
   Warehouse,
   Truck,
+  PackageSearch,
 } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
@@ -41,11 +42,12 @@ const NAV: NavItem[] = [
   { href: "/dashboard/customers", label: "Customers", icon: Building2, perms: ["customers.view"] },
   { href: "/dashboard/warehouses", label: "Warehouses", icon: Warehouse, perms: ["warehouse.view"] },
   { href: "/dashboard/suppliers", label: "Suppliers", icon: Truck, perms: ["suppliers.view"] },
+  { href: "/dashboard/irm", label: "IRM Catalogue", icon: PackageSearch, perms: ["irm.view"] },
   {
     href: "/dashboard/settings",
     label: "Settings",
     icon: Settings,
-    perms: ["settings.view", "email_templates.view", "categories.view", "warehouse_types.view", "supplier_types.view"],
+    perms: ["settings.view", "email_templates.view", "categories.view", "warehouse_types.view", "supplier_types.view", "irm_types.view", "irm_categories.view"],
   },
   {
     href: "/dashboard/audit",

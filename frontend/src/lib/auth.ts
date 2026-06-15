@@ -21,6 +21,7 @@ export const DASHBOARD_SECTIONS: { path: string; anyOf: string[] }[] = [
   { path: "/dashboard/customers", anyOf: ["customers.view"] },
   { path: "/dashboard/warehouses", anyOf: ["warehouse.view"] },
   { path: "/dashboard/suppliers", anyOf: ["suppliers.view"] },
+  { path: "/dashboard/irm", anyOf: ["irm.view"] },
 ];
 
 // The customer portal's landing inside the shared dashboard shell — the portal

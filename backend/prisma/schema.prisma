@@ -249,6 +249,9 @@ model Supplier {
   ownerUserId String? @db.ObjectId
   owner       User?   @relation(fields: [ownerUserId], references: [id])
 
+  // IRM items this supplier can supply (junction back-relation; no DB column).
+  irmLinks IrmItemSupplier[]
+
   deletedAt DateTime? // soft delete — excluded from listings; history stays intact
 
   createdBy String? // staff email that created the supplier
@@ -259,6 +262,136 @@ model Supplier {
   @@index([status])
   @@index([ownerUserId])
   @@index([typeId])
+}
+
+// ── IRM (company-owned internal stock) Catalogue — MASTER DATA ONLY ───────────────────
+// Completely separate from the customer catalogue (CustomerCatalogueItem). Defines items
+// that future procurement/inventory modules (Purchase Orders, Goods In, Warehouse
+// Inventory, Stock Transfer, Goods Out, Rental) reference. No stock movement, no balances,
+// no physical locations stored here. Codes are Counter-allocated (IRM-0001). Cost is stored
+// in integer pence (never a float). IRM and customer assets never mix.
+
+// IRM Type master (e.g. "Consumable", "Asset") — managed under Settings, mirrors the
+// Supplier Type / Warehouse Type / Category masters.
+model IrmType {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  key         String    @unique
+  name        String
+  nameLower   String    @unique
+  description String?
+  status      String    @default("active") // active | inactive
+  sortOrder   Int       @default(0)
+  items       IrmItem[] // back-relation
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+// IRM Category master — the COMPANY-domain classification taxonomy. DELIBERATELY separate
+// from the customer-domain `Category` master to avoid reporting / ownership coupling.
+model IrmCategory {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  key         String    @unique
+  name        String
+  nameLower   String    @unique
+  description String?
+  status      String    @default("active") // active | inactive
+  sortOrder   Int       @default(0)
+  items       IrmItem[] // back-relation
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+// A company-owned internal stock item (e.g. "CAT6 Cable"). MASTER DATA ONLY.
+model IrmItem {
+  id           String  @id @default(auto()) @map("_id") @db.ObjectId
+  code         String  @unique // auto-allocated, e.g. IRM-0001
+  name         String
+  description  String?
+  brand        String?
+  manufacturer String?
+  mpn          String? // manufacturer part number
+
+  // Classification (company domain).
+  typeId        String?      @db.ObjectId
+  irmType       IrmType?     @relation(fields: [typeId], references: [id])
+  irmCategoryId String?      @db.ObjectId
+  irmCategory   IrmCategory? @relation(fields: [irmCategoryId], references: [id])
+
+  status String @default("active") // active | inactive
+
+  // Identification. `sku` is GLOBALLY unique FOREVER (never reused, even after soft-delete).
+  // Enforced at the DB by a PARTIAL unique index on `skuLower` (created in the seed step via
+  // irmRepo.ensureSkuUniqueIndex) PLUS an app-level pre-check. Do NOT add `@unique` here:
+  // Prisma would create a non-sparse index that rejects a second null SKU (prisma#23870),
+  // and most items have no SKU. The partial index only covers string skuLower values.
+  sku      String?
+  skuLower String?
+  barcode  String?
+  qrCode   String?
+
+  // Suppliers — at least one, exactly one primary (junction; enforced in the service).
+  suppliers IrmItemSupplier[]
+
+  // Unit of measure.
+  baseUnit        String? // e.g. "Each", "Metre"
+  packSize        Int?
+  conversionRatio Float?
+
+  // Stock policies (planning thresholds — ADVISORY; never live stock).
+  minimumStock    Int?
+  reorderLevel    Int?
+  reorderQuantity Int?
+  maximumStock    Int?
+  safetyStock     Int?
+  criticalLevel   Int?
+
+  // Cost (internal only — never exposed to customers). Pence to avoid float drift.
+  standardCostPence Int?
+  currency          String? @default("GBP") // GBP | EUR
+  vatRatePercent    Float?  @default(20) // UK standard rate default
+
+  // Tracking flags.
+  trackInventory     Boolean @default(true)
+  trackSerialNumbers Boolean @default(false)
+  trackBatchNumbers  Boolean @default(false)
+  allowNegativeStock Boolean @default(false)
+
+  // Operations.
+  ownerUserId String? @db.ObjectId
+  owner       User?   @relation(fields: [ownerUserId], references: [id])
+  notes       String?
+
+  deletedAt DateTime? // soft delete — excluded from listings; history stays intact
+
+  createdBy String? // staff email that created the item
+  updatedBy String? // staff email that last updated it
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([typeId])
+  @@index([irmCategoryId])
+  @@index([ownerUserId])
+}
+
+// Junction: which suppliers can provide an IRM item, with ranking + per-supplier detail.
+// Replaces a scalar array so future Purchase Orders can do preferred-supplier / ranking /
+// price-comparison / lead-time work. Exactly one row per item has isPrimary = true.
+model IrmItemSupplier {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  irmItemId    String   @db.ObjectId
+  irmItem      IrmItem  @relation(fields: [irmItemId], references: [id])
+  supplierId   String   @db.ObjectId
+  supplier     Supplier @relation(fields: [supplierId], references: [id])
+  isPrimary    Boolean  @default(false)
+  priority     Int      @default(0)
+  supplierSku  String?
+  leadTimeDays Int?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([irmItemId, supplierId])
+  @@index([supplierId])
 }
 
 // Employee master-data: a department a staff member belongs to (e.g. "Operations").
@@ -340,6 +473,8 @@ model User {
   managedWarehouses Warehouse[]
   // Suppliers this user is the internal owner of (back-relation; no DB column).
   ownedSuppliers    Supplier[]
+  // IRM items this user is the internal owner of (back-relation; no DB column).
+  ownedIrmItems     IrmItem[]
 
   @@index([roleId])
   @@index([status])
