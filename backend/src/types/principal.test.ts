@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Customer, CustomerUser } from "@prisma/client";
 
-import { CUSTOMER_PERMISSIONS, customerPrincipal } from "./principal.js";
+import { CUSTOMER_PERMISSIONS, customerPrincipal, principalGrants, type Principal } from "./principal.js";
 
 // The portal login identity = a CustomerUser scoped to a company. This builder is
 // the seam every customer request flows through, so its shape is load-bearing.
@@ -61,5 +61,52 @@ describe("customerPrincipal (the portal login identity)", () => {
     expect(
       customerPrincipal(makeUser({ mustResetPassword: false }), makeCompany()).mustResetPassword,
     ).toBe(false);
+  });
+});
+
+// The boolean form of the requirePermission gate — lets a handler hide a sub-resource
+// the route's coarse permission allows but the caller can't independently view.
+const adminPrincipal: Principal = { type: "admin", id: "a", email: "admin@x.com", name: null };
+
+function staffPrincipal(permissions: string[]): Principal {
+  return {
+    type: "user",
+    id: "u",
+    email: "user@x.com",
+    firstName: "U",
+    lastName: "Ser",
+    profileImageUrl: null,
+    status: "active",
+    mustResetPassword: false,
+    role: null,
+    permissions,
+  };
+}
+
+describe("principalGrants", () => {
+  it("the super-admin holds every permission", () => {
+    expect(principalGrants(adminPrincipal, "stock_requests.view")).toBe(true);
+  });
+
+  it("a staff user holds a permission their role grants", () => {
+    expect(principalGrants(staffPrincipal(["stock_requests.view"]), "stock_requests.view")).toBe(true);
+  });
+
+  it("a staff user is denied a permission their role lacks", () => {
+    expect(principalGrants(staffPrincipal(["customers.view"]), "stock_requests.view")).toBe(false);
+  });
+
+  it("a wildcard staff role grants anything", () => {
+    expect(principalGrants(staffPrincipal(["*"]), "stock_requests.view")).toBe(true);
+  });
+
+  it("a customer principal never holds a staff permission", () => {
+    expect(principalGrants(customerPrincipal(makeUser(), makeCompany()), "stock_requests.view")).toBe(
+      false,
+    );
+  });
+
+  it("no principal grants nothing", () => {
+    expect(principalGrants(undefined, "stock_requests.view")).toBe(false);
   });
 });

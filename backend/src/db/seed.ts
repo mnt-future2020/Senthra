@@ -4,8 +4,10 @@ import * as categoryRepo from "#modules/category/category.repository.js";
 import * as emailTemplateRepo from "#modules/email/emailTemplate.repository.js";
 import * as roleRepo from "#modules/role/role.repository.js";
 import * as userRepo from "#modules/user/user.repository.js";
+import * as warehouseTypeRepo from "#modules/warehouse-type/warehouse-type.repository.js";
+import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as settingsRepo from "#modules/settings/settings.repository.js";
-import { LEGACY_PERMISSION_EXPANSION } from "#modules/role/permissions.js";
+import { LEGACY_PERMISSION_EXPANSION, customerCompatAdditions } from "#modules/role/permissions.js";
 import { DEFAULT_EMAIL_TEMPLATES } from "#modules/email/emailTemplate.defaults.js";
 import { renderBodyToHtml } from "../utils/email-html.js";
 import { hashPassword } from "../utils/password.js";
@@ -17,9 +19,9 @@ import { slugify } from "../utils/slugify.js";
 // roles the admin fully controls — rename or delete them from the UI. Seeded only
 // on a fresh DB (see below), so admin edits are never overwritten on restart.
 // Default permissions: super_admin holds everything ("*"), system_admin gets the
-// granular Users + Customers permissions + roles.view (IT/HR onboarding + customer
-// master-data setup); the rest start empty and gain permissions as feature modules
-// ship. NOTE: external customers are NOT a role — they're a separate read-only
+// granular Users + Customers + Warehouses + Categories permissions + roles.view
+// (IT/HR onboarding + customer & stock master-data setup); the rest start empty and
+// gain permissions as feature modules ship. NOTE: external customers are NOT a role — they're a separate read-only
 // `customer` principal type (see types/principal.ts), so there is no customer role.
 const SEED_ROLES: {
   key: string;
@@ -29,10 +31,10 @@ const SEED_ROLES: {
   permissions: string[];
 }[] = [
   { key: "super_admin", name: "Super Admin", description: "Full system owner. Manages users, roles and all settings.", sortOrder: 0, permissions: ["*"] },
-  { key: "system_admin", name: "System Admin", description: "IT / HR administrator who creates and manages user accounts and customers.", sortOrder: 1, permissions: ["users.view", "users.create", "users.edit", "users.delete", "roles.view", "customers.view", "customers.create", "customers.edit", "customers.delete"] },
+  { key: "system_admin", name: "System Admin", description: "IT / HR administrator who creates and manages user accounts and customers.", sortOrder: 1, permissions: ["users.view", "users.create", "users.edit", "users.delete", "roles.view", "customers.view", "customers.create", "customers.edit", "customers.delete", "warehouse.view", "warehouse.create", "warehouse.edit", "warehouse.delete", "warehouse_types.view", "warehouse_types.create", "warehouse_types.edit", "warehouse_types.delete", "categories.view", "categories.create", "categories.edit", "categories.delete"] },
   { key: "project_manager", name: "Project Manager", description: "Creates job packs, authorises dispatch and tracks projects.", sortOrder: 2, permissions: [] },
   { key: "project_coordinator", name: "Project Coordinator", description: "Supports project managers with day-to-day coordination.", sortOrder: 3, permissions: [] },
-  { key: "warehouse_manager", name: "Warehouse Manager", description: "Receives goods, scans stock in/out and manages a warehouse.", sortOrder: 4, permissions: [] },
+  { key: "warehouse_manager", name: "Warehouse Manager", description: "Receives goods, scans stock in/out and manages a warehouse.", sortOrder: 4, permissions: ["warehouse.view", "warehouse.edit", "warehouse_types.view"] },
   { key: "field_engineer", name: "Field Engineer", description: "Collects stock, installs on site and updates job status.", sortOrder: 5, permissions: [] },
   { key: "finance_director", name: "Finance Director", description: "Views spend, purchase orders and finance reports.", sortOrder: 6, permissions: [] },
   { key: "hr_manager", name: "HR Manager", description: "Manages people-related records and onboarding.", sortOrder: 7, permissions: [] },
@@ -77,6 +79,30 @@ export async function seedDatabase(): Promise<void> {
     console.log(`Seeded ${SEED_CATEGORIES.length} categories.`);
   }
 
+  // Seed the starter Warehouse Type master ONLY on a fresh DB. Names map 1:1 from the
+  // old hardcoded `Warehouse.type` enum so the backfill below can translate cleanly.
+  if ((await warehouseTypeRepo.findMany()).length === 0) {
+    const SEED_WAREHOUSE_TYPES = [
+      "Main Depot",
+      "Regional Hub",
+      "Transit Point",
+      "Engineer Van",
+      "Returns Centre",
+      "Virtual",
+    ];
+    for (let i = 0; i < SEED_WAREHOUSE_TYPES.length; i++) {
+      const name = SEED_WAREHOUSE_TYPES[i];
+      await warehouseTypeRepo.create({ key: slugify(name), name, status: "active", sortOrder: i });
+    }
+    console.log(`Seeded ${SEED_WAREHOUSE_TYPES.length} warehouse types.`);
+  }
+
+  // One-time migration: backfill Warehouse.typeId from the legacy `type` string, then
+  // ensure EVERY warehouse has a typeId (so it can become the single source of truth).
+  // Idempotent — only touches rows where typeId is still null. The legacy-string read
+  // is removed in pass 2 once this has run (the fallback safety net stays).
+  await backfillWarehouseTypeIds();
+
   // Migrate any role still holding a pre-granular "coarse" permission (e.g.
   // "users.manage") to the new per-action keys. Idempotent: "*" (super-admin) is
   // left alone and a role is only rewritten when its expanded set actually differs,
@@ -103,21 +129,62 @@ export async function seedDatabase(): Promise<void> {
     console.log(`Migrated ${migratedRoles} role(s) to granular permissions.`);
   }
 
+  // Customer RBAC split backward-compat. The customer module's projects, catalogue,
+  // sites, portal login and stock requests used to be gated by the coarse
+  // customers.view / customers.edit keys; they now have their own granular groups.
+  // Backfill the matching child keys onto EVERY role (built-in AND admin-created) that
+  // held a coarse key, so no role loses any effective access when the routes re-gate.
+  // Purely additive + idempotent ("*" roles are skipped, already grant everything), so
+  // this is a no-op on every boot after the one-time upgrade.
+  let customerSplitRoles = 0;
+  for (const role of await roleRepo.findMany()) {
+    const additions = customerCompatAdditions(role.permissions);
+    if (additions.length) {
+      await roleRepo.update(role.id, {
+        permissions: { set: [...role.permissions, ...additions] },
+      });
+      customerSplitRoles++;
+    }
+  }
+  if (customerSplitRoles > 0) {
+    console.log(`Backfilled granular customer permissions onto ${customerSplitRoles} role(s).`);
+  }
+
   // Backfill new module grants onto the built-in roles for ALREADY-SEEDED DBs (the
-  // SEED_ROLES block above only runs on a fresh DB). Additive + idempotent: grants
-  // the new customers.* keys to system_admin only if missing, and never touches a
-  // role holding "*". Also retires the vestigial empty customer_pm role (customers
-  // are now a separate principal type, not a role) when it's safe to remove.
+  // SEED_ROLES block above only runs on a fresh DB). Additive + idempotent: grants the
+  // new customers / warehouse / category keys to system_admin only if missing, and
+  // never touches a role holding "*". Also retires the vestigial empty customer_pm role
+  // (customers are now a separate principal type, not a role) when it's safe to remove.
   const existingRoles = await roleRepo.findMany();
   const systemAdmin = existingRoles.find((r) => r.key === "system_admin");
   if (systemAdmin && !systemAdmin.permissions.includes("*")) {
-    const wanted = ["customers.view", "customers.create", "customers.edit", "customers.delete"];
+    // Every built-in grant system_admin should hold (customers, warehouses + types, and
+    // the global stock-category master). One read, one update — only missing keys added.
+    const wanted = [
+      "customers.view", "customers.create", "customers.edit", "customers.delete",
+      "warehouse.view", "warehouse.create", "warehouse.edit", "warehouse.delete",
+      "warehouse_types.view", "warehouse_types.create", "warehouse_types.edit", "warehouse_types.delete",
+      "categories.view", "categories.create", "categories.edit", "categories.delete",
+    ];
     const missing = wanted.filter((p) => !systemAdmin.permissions.includes(p));
     if (missing.length) {
       await roleRepo.update(systemAdmin.id, {
         permissions: { set: [...systemAdmin.permissions, ...missing] },
       });
-      console.log(`Granted ${missing.length} customers.* permission(s) to system_admin.`);
+      console.log(`Granted ${missing.length} built-in permission(s) to system_admin.`);
+    }
+  }
+  // Warehouse Manager gets read + edit on warehouses, and read on warehouse types
+  // (already-seeded DBs).
+  const whManager = existingRoles.find((r) => r.key === "warehouse_manager");
+  if (whManager && !whManager.permissions.includes("*")) {
+    const wanted = ["warehouse.view", "warehouse.edit", "warehouse_types.view"];
+    const missing = wanted.filter((p) => !whManager.permissions.includes(p));
+    if (missing.length) {
+      await roleRepo.update(whManager.id, {
+        permissions: { set: [...whManager.permissions, ...missing] },
+      });
+      console.log(`Granted ${missing.length} warehouse permission(s) to warehouse_manager.`);
     }
   }
   const customerPmRole = existingRoles.find((r) => r.key === "customer_pm");
@@ -174,4 +241,22 @@ export async function seedDatabase(): Promise<void> {
     await adminRepo.create({ email, passwordHash, googleEmail: email });
     console.log(`Seeded admin account: ${email}`);
   }
+}
+
+// Safety net: every warehouse must have a `typeId` (the single source of truth now
+// that the legacy `type` string is gone). The one-time legacy→typeId mapping already
+// ran; this just assigns the default type ("Main Depot") to any row still missing one.
+// Idempotent — only touches rows whose typeId is null.
+async function backfillWarehouseTypeIds(): Promise<void> {
+  const types = await warehouseTypeRepo.findMany();
+  if (types.length === 0) return;
+  const fallbackId = types.find((t) => t.name === "Main Depot")?.id ?? types[0].id;
+
+  const orphans = await warehouseRepo.findIdsMissingType();
+  let backfilled = 0;
+  for (const w of orphans) {
+    await warehouseRepo.update(w.id, { typeId: fallbackId });
+    backfilled++;
+  }
+  if (backfilled > 0) console.log(`Assigned default type to ${backfilled} warehouse(s).`);
 }

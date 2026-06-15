@@ -329,7 +329,9 @@ export async function logout(principal: Principal, sid: string): Promise<void> {
 // editable "auth.password_reset" template; forced so a disabled template never
 // blocks a security-critical reset email. `persist` writes the hash+expiry to the
 // owning collection (admin, staff user, or customer), keeping the flows a single code path.
-async function issueResetEmail(
+// Exported so an admin-initiated customer-user reset (customer.service) reuses the
+// exact same token mechanics + email, completed via the public /reset-password page.
+export async function issueResetEmail(
   email: string,
   firstName: string,
   persist: (data: { resetTokenHash: string; resetTokenExpiresAt: Date }) => Promise<unknown>,

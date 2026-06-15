@@ -18,6 +18,7 @@ import {
   MapPin,
   ClipboardList,
   BarChart3,
+  Warehouse,
 } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
@@ -37,11 +38,12 @@ type NavItem = {
 const NAV: NavItem[] = [
   { href: "/dashboard/users", label: "Users & Roles", icon: UserCog, perms: ["users.view", "roles.view"] },
   { href: "/dashboard/customers", label: "Customers", icon: Building2, perms: ["customers.view"] },
+  { href: "/dashboard/warehouses", label: "Warehouses", icon: Warehouse, perms: ["warehouse.view"] },
   {
     href: "/dashboard/settings",
     label: "Settings",
     icon: Settings,
-    perms: ["settings.view", "email_templates.view", "categories.view"],
+    perms: ["settings.view", "email_templates.view", "categories.view", "warehouse_types.view"],
   },
   {
     href: "/dashboard/audit",

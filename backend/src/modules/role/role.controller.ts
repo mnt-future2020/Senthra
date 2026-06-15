@@ -9,9 +9,10 @@ export const listRoles = asyncHandler(async (_req, res) => {
   res.json({ roles: await roleService.listRoles() });
 });
 
-// GET /roles/permissions — the grouped permission catalog for the role-editor matrix.
+// GET /roles/permissions — the grouped permission catalog (+ ordered categories) for
+// the role-editor matrix.
 export const listPermissions = asyncHandler(async (_req, res) => {
-  res.json({ groups: roleService.listPermissionGroups() });
+  res.json(roleService.listPermissionCatalog());
 });
 
 // GET /roles/:id  (protected) — one role, for the edit page.

@@ -15,6 +15,13 @@ const VERB_TONE: Record<string, ActionTone> = {
   submitted: "update",
   approved: "create",
   rejected: "delete",
+  // Warehouse lifecycle — activate / assign read as positive, deactivate / remove as
+  // negative, default change as an update.
+  activated: "create",
+  deactivated: "delete",
+  manager_assigned: "create",
+  manager_removed: "delete",
+  default_changed: "update",
 };
 
 export function actionTone(action: string): ActionTone {

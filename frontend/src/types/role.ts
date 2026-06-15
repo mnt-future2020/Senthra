@@ -25,5 +25,7 @@ export interface PermissionGroup {
   key: string;
   label: string;
   description: string;
+  category: string; // section the group sits under in the matrix, e.g. "Customers"
+  parent?: string; // module key of the parent group, for visual nesting (e.g. customer sub-entities)
   permissions: PermissionAction[];
 }

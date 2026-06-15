@@ -8,6 +8,7 @@ import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import {
   ALL_PERMISSIONS,
+  PERMISSION_CATEGORIES,
   PERMISSION_GROUPS,
   applyImpliedPermissions,
   escalationViolations,
@@ -47,9 +48,13 @@ export async function listRoles(): Promise<PublicRole[]> {
   return roles.map((role) => toPublicRole(role, counts[role.id] ?? 0));
 }
 
-// The grouped permission catalog, for the role-editor matrix.
-export function listPermissionGroups(): PermissionGroup[] {
-  return PERMISSION_GROUPS;
+// The grouped permission catalog + the ordered category list, for the role-editor
+// matrix. Categories drive the order of the collapsible sections in the UI.
+export function listPermissionCatalog(): {
+  groups: PermissionGroup[];
+  categories: string[];
+} {
+  return { groups: PERMISSION_GROUPS, categories: PERMISSION_CATEGORIES };
 }
 
 // Resolve a role by either its database id (24-hex) or its stable key (e.g.

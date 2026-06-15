@@ -2,10 +2,11 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ShieldCheck, Palette, Plug, Mail, MailCheck, Paintbrush, Tag } from "lucide-react";
+import { ShieldCheck, Palette, Plug, Mail, MailCheck, Paintbrush, Tag, Boxes } from "lucide-react";
 
 import { AccountSection } from "./account/AccountSection";
 import { CategoriesView } from "./categories/CategoriesView";
+import { WarehouseTypesView } from "./warehouse-types/WarehouseTypesView";
 import { SecuritySection } from "./account/SecuritySection";
 import { BrandingSection } from "./branding/BrandingSection";
 import { AppearanceSection } from "./appearance/AppearanceSection";
@@ -25,7 +26,12 @@ const NAV: {
   label: string;
   icon: React.ElementType;
   desc: string;
-  requires: "admin" | "settings.view" | "email_templates.view" | "categories.view";
+  requires:
+    | "admin"
+    | "settings.view"
+    | "email_templates.view"
+    | "categories.view"
+    | "warehouse_types.view";
 }[] = [
   { id: "account", label: "Account & Security", icon: ShieldCheck, desc: "Email & password", requires: "admin" },
   { id: "branding", label: "Branding", icon: Paintbrush, desc: "Logo, name & theme text", requires: "settings.view" },
@@ -34,6 +40,7 @@ const NAV: {
   { id: "email", label: "Email", icon: Mail, desc: "SMTP & delivery", requires: "settings.view" },
   { id: "email-templates", label: "Email Templates", icon: MailCheck, desc: "Customize sent emails", requires: "email_templates.view" },
   { id: "categories", label: "Categories", icon: Tag, desc: "Stock category list", requires: "categories.view" },
+  { id: "warehouse-types", label: "Warehouse Types", icon: Boxes, desc: "Warehouse classifications", requires: "warehouse_types.view" },
 ];
 
 export function SettingsPanel(appearance: AppearanceProps) {
@@ -118,6 +125,7 @@ export function SettingsPanel(appearance: AppearanceProps) {
           {activeSection === "email" && <EmailSection />}
           {activeSection === "email-templates" && <EmailTemplatesSection />}
           {activeSection === "categories" && <CategoriesView />}
+          {activeSection === "warehouse-types" && <WarehouseTypesView />}
         </div>
       </div>
     </div>
