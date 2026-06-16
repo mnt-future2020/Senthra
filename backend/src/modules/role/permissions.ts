@@ -35,6 +35,7 @@ export const PERMISSION_CATEGORIES: string[] = [
   "Customers",
   "Inventory",
   "Suppliers",
+  "Procurement",
   "System",
 ];
 
@@ -240,6 +241,23 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       { key: "irm_categories.create", action: "Create", description: "Add new IRM categories." },
       { key: "irm_categories.edit", action: "Edit", description: "Edit IRM categories." },
       { key: "irm_categories.delete", action: "Delete", description: "Delete IRM categories." },
+    ],
+  },
+  {
+    key: "purchase_orders",
+    label: "Purchase Orders",
+    description: "The procurement workflow — raise, approve, send and track orders to suppliers.",
+    category: "Procurement",
+    permissions: [
+      { key: "purchase_orders.view", action: "View", description: "View purchase orders and their details." },
+      { key: "purchase_orders.create", action: "Create", description: "Create draft purchase orders." },
+      { key: "purchase_orders.edit", action: "Edit", description: "Edit draft purchase orders + manage attachments." },
+      { key: "purchase_orders.delete", action: "Delete", description: "Delete draft purchase orders." },
+      { key: "purchase_orders.submit", action: "Submit", description: "Submit a draft for approval." },
+      { key: "purchase_orders.approve", action: "Approve", description: "Approve or reject a submitted purchase order." },
+      { key: "purchase_orders.send", action: "Send", description: "Issue an approved purchase order to the supplier." },
+      { key: "purchase_orders.cancel", action: "Cancel", description: "Cancel a purchase order before it is received." },
+      { key: "purchase_orders.close", action: "Close", description: "Close a received purchase order." },
     ],
   },
   {

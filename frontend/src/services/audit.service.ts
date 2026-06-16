@@ -13,6 +13,7 @@ export interface AuditListParams {
   action?: string;
   actorType?: string;
   targetType?: string;
+  targetId?: string;
   from?: string;
   to?: string;
   page?: number;
@@ -25,6 +26,7 @@ function qs(params: AuditListParams): string {
   if (params.action) sp.set("action", params.action);
   if (params.actorType) sp.set("actorType", params.actorType);
   if (params.targetType) sp.set("targetType", params.targetType);
+  if (params.targetId) sp.set("targetId", params.targetId);
   if (params.from) sp.set("from", params.from);
   if (params.to) sp.set("to", params.to);
   if (params.page) sp.set("page", String(params.page));

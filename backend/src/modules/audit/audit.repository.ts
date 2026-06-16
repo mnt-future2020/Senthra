@@ -10,6 +10,7 @@ export interface AuditListFilters {
   action?: string;
   actorType?: string;
   targetType?: string;
+  targetId?: string;
   from?: Date;
   to?: Date;
 }
@@ -19,6 +20,7 @@ function buildWhere(filters: AuditListFilters): Prisma.AuditLogWhereInput {
   if (filters.action) where.action = filters.action;
   if (filters.actorType) where.actorType = filters.actorType;
   if (filters.targetType) where.targetType = filters.targetType;
+  if (filters.targetId) where.targetId = filters.targetId;
   if (filters.from || filters.to) {
     where.createdAt = {};
     if (filters.from) where.createdAt.gte = filters.from;

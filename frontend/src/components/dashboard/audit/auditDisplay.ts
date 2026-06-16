@@ -25,6 +25,15 @@ const VERB_TONE: Record<string, ActionTone> = {
   // Supplier owner lifecycle — assign reads as positive, remove as negative.
   owner_assigned: "create",
   owner_removed: "delete",
+  // Purchase order lifecycle — issue reads as an update, receipt as positive,
+  // cancel as negative, close as a neutral terminal; attachments add/remove.
+  sent: "update",
+  closed: "neutral",
+  cancelled: "delete",
+  partially_received: "create",
+  fully_received: "create",
+  attachment_added: "create",
+  attachment_removed: "delete",
 };
 
 export function actionTone(action: string): ActionTone {

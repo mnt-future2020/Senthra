@@ -6,6 +6,7 @@ import * as irmTypeService from "#modules/irm-type/irm-type.service.js";
 import * as irmCategoryService from "#modules/irm-category/irm-category.service.js";
 import * as supplierService from "#modules/supplier/supplier.service.js";
 import * as userRepo from "#modules/user/user.repository.js";
+import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
@@ -462,7 +463,8 @@ export async function updateIrmItem(id: string, input: UpdateIrmItemInput, actor
 // Future dependency-checkers (PO / Goods In / Inventory / Transfer / Goods Out / Rental).
 type DependencyChecker = { label: string; count: (itemId: string) => Promise<number> };
 const DELETE_DEPENDENCY_CHECKERS: DependencyChecker[] = [
-  // FUTURE: purchase orders, goods in, warehouse inventory, stock transfer, goods out, rental.
+  { label: "purchase orders", count: (id) => poRepo.countByIrmItem(id) },
+  // FUTURE: goods in, warehouse inventory, stock transfer, goods out, rental.
 ];
 
 async function assertIrmItemDeletable(itemId: string): Promise<void> {
