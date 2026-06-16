@@ -488,3 +488,47 @@ export function recomputeReceiptStatus(items: { quantity: number; receivedQuanti
   if (anyReceived) return "partially_received";
   return "sent";
 }
+
+// ADDITIVE Goods In seam — called INSIDE the GRN completion transaction. Bumps each PO line's
+// receivedQuantity by the physically-received delta, recomputes the received status from ALL
+// lines, and advances the PO (sent → partially_received / fully_received) emitting the reserved
+// audit verb. Forward-only: receivedQuantity only grows, so recompute never downgrades. No
+// existing PO behaviour/field changes — this is the writer the seams above were built for.
+export async function applyGoodsReceipt(
+  tx: Prisma.TransactionClient,
+  purchaseOrderId: string,
+  deltas: { purchaseOrderItemId: string; receivedDelta: number }[],
+  actor?: AuditActor,
+): Promise<void> {
+  // Terminal-state guard: `closed` and `cancelled` are immutable — a receipt must NEVER reopen or
+  // mutate such a PO (the bug this closes: completing a stale draft GRN silently un-closed the PO,
+  // left a stale closedAt, and still wrote inventory). Loaded + checked BEFORE any write, so
+  // throwing rolls back the whole GRN completion transaction — PO, inventory and GRN all unchanged.
+  const header = await poRepo.headerForReceiptTx(tx, purchaseOrderId);
+  if (!header) throw conflict("The purchase order for this receipt no longer exists.");
+  if (header.status === "closed" || header.status === "cancelled") {
+    throw conflict(`This purchase order is ${header.status} and can no longer receive stock.`);
+  }
+
+  // Concurrency backstop: re-validate each delta against the LIVE remaining inside the tx, so
+  // two receipts can't over-receive the same PO line. (Throwing here rolls back the whole GRN
+  // completion transaction — inventory included.)
+  const before = await poRepo.lineReceiptTotalsTx(tx, purchaseOrderId);
+  const liveById = new Map(before.map((l) => [l.id, l]));
+  for (const d of deltas) {
+    const l = liveById.get(d.purchaseOrderItemId);
+    if (!l) throw conflict("A received line no longer exists on the purchase order.");
+    if (d.receivedDelta > l.quantity - l.receivedQuantity) {
+      throw conflict("Can't receive more than the quantity remaining on the purchase order.");
+    }
+  }
+  for (const d of deltas) {
+    if (d.receivedDelta > 0) await poRepo.incrementLineReceivedTx(tx, d.purchaseOrderItemId, d.receivedDelta);
+  }
+  const lines = await poRepo.lineReceiptTotalsTx(tx, purchaseOrderId);
+  const next = recomputeReceiptStatus(lines);
+  if (next !== header.status && (next === "partially_received" || next === "fully_received")) {
+    await poRepo.setStatusTx(tx, purchaseOrderId, next);
+    recordStatus(actor, purchaseOrderId, header.code, `purchase_order.${next}`);
+  }
+}

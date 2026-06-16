@@ -7,6 +7,11 @@ vi.mock("./purchase-order.repository.js", () => ({
   softDelete: vi.fn(),
   createWithCode: vi.fn(),
   replaceItemsAndTotals: vi.fn(),
+  // Goods In seam (tx-aware writers).
+  headerForReceiptTx: vi.fn(),
+  lineReceiptTotalsTx: vi.fn(),
+  incrementLineReceivedTx: vi.fn(),
+  setStatusTx: vi.fn(),
 }));
 vi.mock("#modules/supplier/supplier.service.js", () => ({ requireActiveSupplier: vi.fn() }));
 vi.mock("#modules/warehouse/warehouse.service.js", () => ({ requireActiveWarehouse: vi.fn() }));
@@ -21,6 +26,7 @@ import * as warehouseService from "#modules/warehouse/warehouse.service.js";
 import * as irmService from "#modules/irm/irm.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import {
+  applyGoodsReceipt,
   approvePurchaseOrder,
   cancelPurchaseOrder,
   closePurchaseOrder,
@@ -204,5 +210,57 @@ describe("draft-only editability + delete", () => {
     await expect(deletePurchaseOrder(PO_ID)).resolves.toBeUndefined();
     expect(mockSoftDelete).toHaveBeenCalledWith(PO_ID);
     expect(auditActions()).toContain("purchase_order.deleted");
+  });
+});
+
+// The Goods In → PO seam. `closed` and `cancelled` are terminal & immutable: a receipt must never
+// reopen or mutate such a PO (the bug this guards: completing a stale draft GRN silently un-closed
+// the PO and wrote inventory). All writes must be skipped and the tx rolled back. fully_received →
+// closed is covered by the closePurchaseOrder state-machine tests above.
+describe("applyGoodsReceipt — terminal-state guard (Goods In seam)", () => {
+  const LINE_ID = "e".repeat(24);
+  const tx = {} as unknown as Parameters<typeof applyGoodsReceipt>[0];
+  const mockHeader = poRepo.headerForReceiptTx as ReturnType<typeof vi.fn>;
+  const mockLineTotals = poRepo.lineReceiptTotalsTx as ReturnType<typeof vi.fn>;
+  const mockIncrement = poRepo.incrementLineReceivedTx as ReturnType<typeof vi.fn>;
+  const mockSetStatus = poRepo.setStatusTx as ReturnType<typeof vi.fn>;
+
+  it("rejects receiving against a CLOSED purchase order — no PO/inventory writes", async () => {
+    mockHeader.mockResolvedValue({ id: PO_ID, code: "PO-0001", status: "closed" });
+    await expect(applyGoodsReceipt(tx, PO_ID, [{ purchaseOrderItemId: LINE_ID, receivedDelta: 5 }])).rejects.toThrow(
+      /closed|can no longer receive/i,
+    );
+    expect(mockIncrement).not.toHaveBeenCalled();
+    expect(mockSetStatus).not.toHaveBeenCalled();
+  });
+
+  it("rejects receiving against a CANCELLED purchase order — no PO/inventory writes", async () => {
+    mockHeader.mockResolvedValue({ id: PO_ID, code: "PO-0001", status: "cancelled" });
+    await expect(applyGoodsReceipt(tx, PO_ID, [{ purchaseOrderItemId: LINE_ID, receivedDelta: 5 }])).rejects.toThrow(
+      /cancelled|can no longer receive/i,
+    );
+    expect(mockIncrement).not.toHaveBeenCalled();
+    expect(mockSetStatus).not.toHaveBeenCalled();
+  });
+
+  it("sent → partially_received: applies a partial delivery", async () => {
+    mockHeader.mockResolvedValue({ id: PO_ID, code: "PO-0001", status: "sent" });
+    mockLineTotals
+      .mockResolvedValueOnce([{ id: LINE_ID, quantity: 10, receivedQuantity: 0 }]) // before
+      .mockResolvedValueOnce([{ id: LINE_ID, quantity: 10, receivedQuantity: 5 }]); // after
+    await applyGoodsReceipt(tx, PO_ID, [{ purchaseOrderItemId: LINE_ID, receivedDelta: 5 }]);
+    expect(mockIncrement).toHaveBeenCalledWith(tx, LINE_ID, 5);
+    expect(mockSetStatus).toHaveBeenCalledWith(tx, PO_ID, "partially_received");
+    expect(auditActions()).toContain("purchase_order.partially_received");
+  });
+
+  it("partially_received → fully_received: applies the remainder", async () => {
+    mockHeader.mockResolvedValue({ id: PO_ID, code: "PO-0001", status: "partially_received" });
+    mockLineTotals
+      .mockResolvedValueOnce([{ id: LINE_ID, quantity: 10, receivedQuantity: 5 }]) // before
+      .mockResolvedValueOnce([{ id: LINE_ID, quantity: 10, receivedQuantity: 10 }]); // after
+    await applyGoodsReceipt(tx, PO_ID, [{ purchaseOrderItemId: LINE_ID, receivedDelta: 5 }]);
+    expect(mockSetStatus).toHaveBeenCalledWith(tx, PO_ID, "fully_received");
+    expect(auditActions()).toContain("purchase_order.fully_received");
   });
 });

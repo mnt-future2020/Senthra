@@ -30,6 +30,8 @@ const VERB_TONE: Record<string, ActionTone> = {
   sent: "update",
   closed: "neutral",
   cancelled: "delete",
+  // Goods In lifecycle — completing a receipt posts stock (positive).
+  completed: "create",
   partially_received: "create",
   fully_received: "create",
   attachment_added: "create",

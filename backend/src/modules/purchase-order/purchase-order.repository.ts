@@ -160,6 +160,21 @@ export function countByIrmItem(irmItemId: string): Promise<number> {
   return prisma.purchaseOrderItem.count({ where: { irmItemId, purchaseOrder: { is: { deletedAt: null } } } });
 }
 
+// --- Goods In seam (tx-aware writers; called only from the GRN completion transaction) -------
+// Goods In owns the receipt amounts; the PO just records them. Additive — no existing behaviour.
+export function incrementLineReceivedTx(tx: Prisma.TransactionClient, purchaseOrderItemId: string, delta: number) {
+  return tx.purchaseOrderItem.update({ where: { id: purchaseOrderItemId }, data: { receivedQuantity: { increment: delta } } });
+}
+export function lineReceiptTotalsTx(tx: Prisma.TransactionClient, purchaseOrderId: string) {
+  return tx.purchaseOrderItem.findMany({ where: { purchaseOrderId }, select: { id: true, quantity: true, receivedQuantity: true } });
+}
+export function headerForReceiptTx(tx: Prisma.TransactionClient, purchaseOrderId: string) {
+  return tx.purchaseOrder.findUnique({ where: { id: purchaseOrderId }, select: { id: true, code: true, status: true } });
+}
+export function setStatusTx(tx: Prisma.TransactionClient, purchaseOrderId: string, status: string) {
+  return tx.purchaseOrder.update({ where: { id: purchaseOrderId }, data: { status } });
+}
+
 // --- attachments ----------------------------------------------------------------------------
 export function addAttachment(data: Prisma.PurchaseOrderAttachmentUncheckedCreateInput): Promise<PurchaseOrderAttachment> {
   return prisma.purchaseOrderAttachment.create({ data });
