@@ -172,6 +172,10 @@ model Warehouse {
 
   // Purchase orders delivering to this warehouse (back-relation; no DB column).
   purchaseOrders PurchaseOrder[]
+  // Goods In + inventory at this warehouse (back-relations; no DB column).
+  goodsReceipts         GoodsReceipt[]
+  inventoryBalances     InventoryBalance[]
+  inventoryTransactions InventoryTransaction[]
 
   deletedAt DateTime? // soft delete — excluded from listings; history stays intact
 
@@ -368,6 +372,10 @@ model IrmItem {
 
   // Purchase-order lines referencing this item (back-relation; no DB column).
   purchaseOrderLines PurchaseOrderItem[]
+  // Goods In lines + inventory for this item (back-relations; no DB column).
+  goodsReceiptItems     GoodsReceiptItem[]
+  inventoryBalances     InventoryBalance[]
+  inventoryTransactions InventoryTransaction[]
 
   deletedAt DateTime? // soft delete — excluded from listings; history stays intact
 
@@ -464,8 +472,9 @@ model PurchaseOrder {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  items       PurchaseOrderItem[]
-  attachments PurchaseOrderAttachment[]
+  items         PurchaseOrderItem[]
+  attachments   PurchaseOrderAttachment[]
+  goodsReceipts GoodsReceipt[] // Goods In receipts against this PO (back-relation; no DB column)
 
   @@index([status])
   @@index([supplierId])
@@ -494,6 +503,9 @@ model PurchaseOrderItem {
   notes            String?
   sortOrder        Int     @default(0)
 
+  // Goods In lines receiving against this PO line (back-relation; no DB column).
+  goodsReceiptItems GoodsReceiptItem[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -517,6 +529,199 @@ model PurchaseOrderAttachment {
   createdAt       DateTime @default(now())
 
   @@index([purchaseOrderId])
+}
+
+// ── GOODS IN (GRN — Goods Receipt Note) ───────────────────────────────────────────────
+// Receives physical goods against a SENT / partially-received Purchase Order, captures
+// serials / batches / damage, increases warehouse inventory, and advances the PO received
+// status. The FIRST module to mutate inventory. Codes Counter-allocated (GRN-0001).
+// Forward-only status draft → completed → cancelled; inventory is written ONCE, atomically,
+// at Completed. Soft-deleted rows (deletedAt set) are excluded from normal reads.
+model GoodsReceipt {
+  id   String @id @default(auto()) @map("_id") @db.ObjectId
+  code String @unique // auto-allocated, e.g. GRN-0001
+
+  // Source purchase order — the only way goods enter. poCode + supplier snapshotted.
+  purchaseOrderId String        @db.ObjectId
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id])
+  poCode          String? // snapshot at create
+
+  // Supplier — denormalised id + name snapshot (resolved live via the PO; no direct FK,
+  // so supplier deletion stays guarded by the PO that references it).
+  supplierId   String? @db.ObjectId
+  supplierName String?
+
+  // Destination warehouse — taken from the PO, immutable (user can't change it).
+  warehouseId String    @db.ObjectId
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
+
+  status String @default("draft") // draft | completed | cancelled
+
+  receivedDate        DateTime
+  referenceNumber     String?
+  carrier             String?
+  deliveryNoteNumber  String?
+  vehicleRegistration String?
+  description         String?
+
+  // Quality summary (manual flag; per-line damagedQuantity carries the granular detail).
+  qualityStatus String  @default("passed") // passed | partial | failed
+  qualityNotes  String?
+
+  internalNotes String?
+
+  createdBy    String?
+  completedBy  String?
+  completedAt  DateTime?
+  cancelledBy  String?
+  cancelledAt  DateTime?
+  cancelReason String?
+  updatedBy    String?
+
+  deletedAt DateTime? // soft delete — DRAFT only; GRN numbers are never freed
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items       GoodsReceiptItem[]
+  attachments GoodsReceiptAttachment[]
+
+  @@index([status])
+  @@index([purchaseOrderId])
+  @@index([warehouseId])
+  @@index([supplierId])
+}
+
+// A received line. Receives against ONE PO line; snapshots item name/sku/unit + the ordered
+// and previously-received quantities at draft time. acceptedQuantity (= received − damaged)
+// is the GOOD stock that enters inventory; damaged units are recorded but never added.
+model GoodsReceiptItem {
+  id             String       @id @default(auto()) @map("_id") @db.ObjectId
+  goodsReceiptId String       @db.ObjectId
+  goodsReceipt   GoodsReceipt @relation(fields: [goodsReceiptId], references: [id])
+
+  purchaseOrderItemId String            @db.ObjectId
+  purchaseOrderItem   PurchaseOrderItem @relation(fields: [purchaseOrderItemId], references: [id])
+  irmItemId           String            @db.ObjectId
+  irmItem             IrmItem           @relation(fields: [irmItemId], references: [id])
+
+  // Snapshots (denormalised for self-contained, historically-accurate lines).
+  itemName String
+  sku      String?
+  baseUnit String?
+
+  orderedQuantity    Int // snapshot of the PO line quantity at draft
+  previouslyReceived Int @default(0) // snapshot of the PO line receivedQuantity at draft
+  receivedQuantity   Int // physically received in THIS GRN (incl damaged)
+  damagedQuantity    Int @default(0)
+  acceptedQuantity   Int // computed = received − damaged (good stock → inventory)
+  notes              String?
+  sortOrder          Int     @default(0)
+
+  serials GoodsReceiptSerial[]
+  batches GoodsReceiptBatch[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([goodsReceiptId, purchaseOrderItemId])
+  @@index([goodsReceiptId])
+  @@index([irmItemId])
+}
+
+// One serial per accepted unit (only when the IRM item tracks serial numbers).
+model GoodsReceiptSerial {
+  id                 String           @id @default(auto()) @map("_id") @db.ObjectId
+  goodsReceiptItemId String           @db.ObjectId
+  goodsReceiptItem   GoodsReceiptItem @relation(fields: [goodsReceiptItemId], references: [id])
+  irmItemId          String           @db.ObjectId // denormalised for per-item uniqueness checks
+  serialNumber       String
+  serialLower        String
+  createdAt          DateTime @default(now())
+
+  @@index([goodsReceiptItemId])
+  // DB-level backstop: a serial = one physical unit, unique per IRM item across all receipts.
+  // The app-level check (findSerialConflicts) gives friendly errors; this prevents a concurrent
+  // race from inserting the same serial twice. A P2002 here is mapped to a 409 in the repository.
+  @@unique([irmItemId, serialLower])
+}
+
+// A batch / lot received (only when the IRM item tracks batch numbers). Σ quantity == accepted.
+model GoodsReceiptBatch {
+  id                 String           @id @default(auto()) @map("_id") @db.ObjectId
+  goodsReceiptItemId String           @db.ObjectId
+  goodsReceiptItem   GoodsReceiptItem @relation(fields: [goodsReceiptItemId], references: [id])
+  batchNumber        String
+  expiryDate         DateTime?
+  quantity           Int
+  createdAt          DateTime @default(now())
+
+  @@index([goodsReceiptItemId])
+}
+
+// A file attached to a goods receipt (delivery note / invoice / packing slip / photo).
+// Mirrors PurchaseOrderAttachment (Cloudinary; pdf/docx/png/jpg).
+model GoodsReceiptAttachment {
+  id             String       @id @default(auto()) @map("_id") @db.ObjectId
+  goodsReceiptId String       @db.ObjectId
+  goodsReceipt   GoodsReceipt @relation(fields: [goodsReceiptId], references: [id])
+  label          String?
+  fileName       String
+  fileType       String // pdf | docx | png | jpg
+  fileSizeBytes  Int
+  url            String
+  uploadedBy     String?
+  createdAt      DateTime @default(now())
+
+  @@index([goodsReceiptId])
+}
+
+// ── INVENTORY PRIMITIVES ───────────────────────────────────────────────────────────────
+// Introduced by Goods In (the first module to mutate stock); the future Warehouse Inventory
+// module OWNS and extends them. Goods In only WRITES inbound rows.
+
+// Current on-hand per IRM item × warehouse. A maintained running total, reconstructable from
+// the InventoryTransaction ledger. NO soft-delete (balances are maintained, not deleted).
+model InventoryBalance {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  irmItemId   String    @db.ObjectId
+  irmItem     IrmItem   @relation(fields: [irmItemId], references: [id])
+  warehouseId String    @db.ObjectId
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
+
+  quantityOnHand   Int @default(0)
+  quantityReserved Int @default(0) // FUTURE (Goods Out / allocation); 0 now
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([irmItemId, warehouseId])
+  @@index([warehouseId])
+}
+
+// Immutable, append-only stock ledger — every inventory change is exactly one row. type /
+// sourceType describe the movement; balanceAfter snapshots on-hand post-apply. NEVER updated
+// or deleted.
+model InventoryTransaction {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  irmItemId   String    @db.ObjectId
+  irmItem     IrmItem   @relation(fields: [irmItemId], references: [id])
+  warehouseId String    @db.ObjectId
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
+
+  quantityDelta Int // + inbound (Goods In) / − outbound (future)
+  type          String // goods_in (future: transfer_in/out, goods_out, adjustment, return)
+  sourceType    String // goods_receipt
+  sourceId      String  @db.ObjectId
+  sourceCode    String? // snapshot, e.g. GRN-0001
+  balanceAfter  Int // on-hand snapshot after applying this row
+  notes         String?
+  createdBy     String?
+  createdAt     DateTime @default(now())
+
+  @@index([irmItemId, warehouseId])
+  @@index([sourceType, sourceId])
+  @@index([createdAt])
 }
 
 // Employee master-data: a department a staff member belongs to (e.g. "Operations").

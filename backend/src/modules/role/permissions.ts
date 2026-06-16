@@ -261,6 +261,20 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     ],
   },
   {
+    key: "goods_in",
+    label: "Goods In",
+    description: "Receiving goods against purchase orders (GRN) — records receipts, serials/batches and increases stock.",
+    category: "Inventory",
+    permissions: [
+      { key: "goods_in.view", action: "View", description: "View goods receipts and their details." },
+      { key: "goods_in.create", action: "Create", description: "Create draft goods receipts." },
+      { key: "goods_in.edit", action: "Edit", description: "Edit draft goods receipts + manage attachments." },
+      { key: "goods_in.delete", action: "Delete", description: "Delete draft goods receipts." },
+      { key: "goods_in.complete", action: "Complete", description: "Complete a receipt — posts stock and updates the purchase order." },
+      { key: "goods_in.cancel", action: "Cancel", description: "Cancel a draft goods receipt." },
+    ],
+  },
+  {
     key: "suppliers",
     label: "Suppliers",
     description: "Supplier master data — the organisations inventory is procured from.",
