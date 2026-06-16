@@ -32,3 +32,26 @@ export async function uploadToCloudinary(
   });
   return result.secure_url;
 }
+
+// Upload an arbitrary file (data URI) — used for purchase-order attachments. `resource_type`
+// "auto" handles raw documents (PDF/DOCX) AND images (PNG/JPG). Each attachment is a distinct
+// asset (unique publicId, no overwrite); returns its secure URL.
+export async function uploadFileToCloudinary(
+  source: string,
+  publicId: string,
+  creds: CloudinaryCreds,
+  folder = "senthra/purchase-orders",
+): Promise<string> {
+  cloudinary.config({
+    cloud_name: creds.cloudName,
+    api_key: creds.apiKey,
+    api_secret: creds.apiSecret,
+    secure: true,
+  });
+  const result = await cloudinary.uploader.upload(source, {
+    folder,
+    public_id: publicId,
+    resource_type: "auto",
+  });
+  return result.secure_url;
+}

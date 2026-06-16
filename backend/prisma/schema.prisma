@@ -170,6 +170,9 @@ model Warehouse {
 
   status String @default("active") // active | inactive
 
+  // Purchase orders delivering to this warehouse (back-relation; no DB column).
+  purchaseOrders PurchaseOrder[]
+
   deletedAt DateTime? // soft delete — excluded from listings; history stays intact
 
   createdBy String? // staff email that created the warehouse
@@ -251,6 +254,8 @@ model Supplier {
 
   // IRM items this supplier can supply (junction back-relation; no DB column).
   irmLinks IrmItemSupplier[]
+  // Purchase orders raised against this supplier (back-relation; no DB column).
+  purchaseOrders PurchaseOrder[]
 
   deletedAt DateTime? // soft delete — excluded from listings; history stays intact
 
@@ -361,6 +366,9 @@ model IrmItem {
   owner       User?   @relation(fields: [ownerUserId], references: [id])
   notes       String?
 
+  // Purchase-order lines referencing this item (back-relation; no DB column).
+  purchaseOrderLines PurchaseOrderItem[]
+
   deletedAt DateTime? // soft delete — excluded from listings; history stays intact
 
   createdBy String? // staff email that created the item
@@ -392,6 +400,123 @@ model IrmItemSupplier {
 
   @@unique([irmItemId, supplierId])
   @@index([supplierId])
+}
+
+// ── Purchase Orders — PROCUREMENT WORKFLOW ONLY ──────────────────────────────────────
+// Raise an order against a Supplier for IRM Catalogue items, route it through approval,
+// issue it to the supplier, track status until it is READY FOR GOODS IN. No stock movement,
+// no balances, no receiving here — `receivedQuantity` stays 0 and the received statuses are
+// driven LATER by Goods In via a guarded seam. Codes are Counter-allocated (PO-0001). Money
+// is integer GBP pence. Status is a forward-only machine enforced in the service. EDITABLE
+// ONLY IN `draft`: once submitted, the header, supplier, warehouse, quantities and prices
+// are locked; only Reject → Draft reopens editing.
+model PurchaseOrder {
+  id   String @id @default(auto()) @map("_id") @db.ObjectId
+  code String @unique // auto-allocated, e.g. PO-0001
+
+  // Supplier (read-only section, resolved live; name snapshotted for list/history).
+  supplierId   String   @db.ObjectId
+  supplier     Supplier @relation(fields: [supplierId], references: [id])
+  supplierName String? // snapshot at create
+
+  // Delivery destination warehouse (defaults to the company default warehouse in the UI).
+  warehouseId String    @db.ObjectId
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
+
+  status   String @default("draft") // draft|pending_approval|approved|sent|partially_received|fully_received|closed|cancelled
+  priority String @default("normal") // low | normal | high | urgent
+
+  referenceNumber      String?
+  description          String?
+  orderDate            DateTime  @default(now())
+  expectedDeliveryDate DateTime?
+
+  currency String @default("GBP") // GBP only for now
+
+  // Financial roll-ups — SYSTEM-CALCULATED from the lines (integer pence). Never user-set.
+  subtotalPence   Int @default(0)
+  vatPence        Int @default(0)
+  grandTotalPence Int @default(0)
+
+  // Delivery.
+  deliveryAddress      String? // optional override; defaults to the warehouse address in the UI
+  deliveryInstructions String?
+
+  // Notes.
+  internalNotes String? // never leaves the company
+  supplierNotes String? // appears on the issued PO
+
+  // Approval workflow — actor email snapshots + timestamps.
+  createdBy       String?
+  submittedBy     String?
+  submittedAt     DateTime?
+  approvedBy      String?
+  approvedAt      DateTime?
+  sentAt          DateTime?
+  closedAt        DateTime?
+  cancelledAt     DateTime?
+  cancelReason    String?
+  rejectionReason String?
+  updatedBy       String?
+
+  deletedAt DateTime? // soft delete — DRAFT only; PO numbers are never freed
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items       PurchaseOrderItem[]
+  attachments PurchaseOrderAttachment[]
+
+  @@index([status])
+  @@index([supplierId])
+  @@index([warehouseId])
+}
+
+// A line on a purchase order. Snapshots the IRM item's name/sku/unit at add-time so a later
+// IRM rename never rewrites an issued order. `receivedQuantity` is the GOODS IN seam (0 here).
+model PurchaseOrderItem {
+  id              String        @id @default(auto()) @map("_id") @db.ObjectId
+  purchaseOrderId String        @db.ObjectId
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id])
+  irmItemId       String        @db.ObjectId
+  irmItem         IrmItem       @relation(fields: [irmItemId], references: [id])
+
+  // Snapshots (denormalised for self-contained, historically-accurate lines).
+  itemName String
+  sku      String?
+  baseUnit String?
+
+  quantity         Int
+  unitPricePence   Int
+  vatRate          Float   @default(0)
+  lineTotalPence   Int     @default(0) // system-calculated: quantity * unitPricePence (ex-VAT)
+  receivedQuantity Int     @default(0) // FUTURE Goods In writes this; 0 in this module
+  notes            String?
+  sortOrder        Int     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([purchaseOrderId, irmItemId])
+  @@index([purchaseOrderId])
+  @@index([irmItemId])
+}
+
+// A file attached to a purchase order (supplier quote/invoice/supporting doc). Uploaded to
+// Cloudinary (raw for PDF/DOCX, image for PNG/JPG).
+model PurchaseOrderAttachment {
+  id              String        @id @default(auto()) @map("_id") @db.ObjectId
+  purchaseOrderId String        @db.ObjectId
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id])
+  label           String?
+  fileName        String
+  fileType        String // pdf | docx | png | jpg
+  fileSizeBytes   Int
+  url             String
+  uploadedBy      String?
+  createdAt       DateTime @default(now())
+
+  @@index([purchaseOrderId])
 }
 
 // Employee master-data: a department a staff member belongs to (e.g. "Operations").

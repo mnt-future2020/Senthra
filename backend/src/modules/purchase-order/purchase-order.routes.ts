@@ -1,0 +1,73 @@
+import { Router } from "express";
+
+import * as poController from "./purchase-order.controller.js";
+import { requireAuth, requirePermission } from "../../middleware/auth.middleware.js";
+import { writeLimiter } from "../../middleware/rateLimit.middleware.js";
+import { validateBody } from "../../middleware/validate.middleware.js";
+import {
+  createPurchaseOrderSchema,
+  poAttachmentSchema,
+  poCancelSchema,
+  poRejectSchema,
+  updatePurchaseOrderSchema,
+} from "./purchase-order.validation.js";
+
+const router = Router();
+
+router.use(requireAuth);
+
+router.get("/", requirePermission("purchase_orders.view"), poController.listPurchaseOrders);
+router.get("/:id", requirePermission("purchase_orders.view"), poController.getPurchaseOrder);
+
+router.post(
+  "/",
+  requirePermission("purchase_orders.create"),
+  writeLimiter,
+  validateBody(createPurchaseOrderSchema),
+  poController.createPurchaseOrder,
+);
+router.patch(
+  "/:id",
+  requirePermission("purchase_orders.edit"),
+  writeLimiter,
+  validateBody(updatePurchaseOrderSchema),
+  poController.updatePurchaseOrder,
+);
+router.delete("/:id", requirePermission("purchase_orders.delete"), writeLimiter, poController.deletePurchaseOrder);
+
+// --- workflow transitions (state machine enforced in the service) -----------
+router.post("/:id/submit", requirePermission("purchase_orders.submit"), writeLimiter, poController.submitPurchaseOrder);
+router.post("/:id/approve", requirePermission("purchase_orders.approve"), writeLimiter, poController.approvePurchaseOrder);
+router.post(
+  "/:id/reject",
+  requirePermission("purchase_orders.approve"),
+  writeLimiter,
+  validateBody(poRejectSchema),
+  poController.rejectPurchaseOrder,
+);
+router.post("/:id/send", requirePermission("purchase_orders.send"), writeLimiter, poController.sendPurchaseOrder);
+router.post(
+  "/:id/cancel",
+  requirePermission("purchase_orders.cancel"),
+  writeLimiter,
+  validateBody(poCancelSchema),
+  poController.cancelPurchaseOrder,
+);
+router.post("/:id/close", requirePermission("purchase_orders.close"), writeLimiter, poController.closePurchaseOrder);
+
+// --- attachments ------------------------------------------------------------
+router.post(
+  "/:id/attachments",
+  requirePermission("purchase_orders.edit"),
+  writeLimiter,
+  validateBody(poAttachmentSchema),
+  poController.addAttachment,
+);
+router.delete(
+  "/:id/attachments/:attachmentId",
+  requirePermission("purchase_orders.edit"),
+  writeLimiter,
+  poController.removeAttachment,
+);
+
+export default router;

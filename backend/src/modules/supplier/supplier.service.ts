@@ -4,6 +4,7 @@ import * as supplierRepo from "./supplier.repository.js";
 import type { SupplierWithRelations } from "./supplier.repository.js";
 import * as supplierTypeService from "#modules/supplier-type/supplier-type.service.js";
 import * as userRepo from "#modules/user/user.repository.js";
+import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
@@ -345,7 +346,7 @@ export async function updateSupplier(
 type DependencyChecker = { label: string; count: (supplierId: string) => Promise<number> };
 const DELETE_DEPENDENCY_CHECKERS: DependencyChecker[] = [
   // FUTURE: { label: "catalogue items", count: (id) => irmRepo.countBySupplier(id) },
-  // FUTURE: { label: "purchase orders", count: (id) => poRepo.countBySupplier(id) },
+  { label: "purchase orders", count: (id) => poRepo.countBySupplier(id) },
   // FUTURE: { label: "goods in", count: (id) => goodsInRepo.countBySupplier(id) },
   // FUTURE: { label: "inventory", count: (id) => inventoryRepo.countBySupplier(id) },
 ];

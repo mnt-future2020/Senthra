@@ -72,6 +72,7 @@ export interface ListAuditParams {
   action?: string;
   actorType?: string;
   targetType?: string;
+  targetId?: string;
   from?: string;
   to?: string;
   page?: number;
@@ -115,6 +116,7 @@ function normalizeFilters(params: ListAuditParams): AuditListFilters {
     action: params.action?.trim() || undefined,
     actorType,
     targetType: params.targetType?.trim() || undefined,
+    targetId: params.targetId?.trim() || undefined,
     from: parseDate(params.from, "start"),
     to: parseDate(params.to, "end"),
   };
