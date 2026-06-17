@@ -9,6 +9,7 @@ import * as userRepo from "#modules/user/user.repository.js";
 import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import * as grnRepo from "#modules/goods-in/goods-in.repository.js";
 import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
+import * as goodsOutRepo from "#modules/goods-out/goods-out.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
@@ -468,7 +469,8 @@ const DELETE_DEPENDENCY_CHECKERS: DependencyChecker[] = [
   { label: "purchase orders", count: (id) => poRepo.countByIrmItem(id) },
   { label: "goods receipts", count: (id) => grnRepo.countByIrmItem(id) },
   { label: "inventory", count: (id) => inventoryRepo.countBalancesWithStockByIrmItem(id) },
-  // FUTURE: stock transfer (open), goods out, rental.
+  { label: "engineer stock", count: (id) => goodsOutRepo.countEngineerStockWithStockByIrmItem(id) },
+  // FUTURE: stock transfer (open), rental.
 ];
 
 async function assertIrmItemDeletable(itemId: string): Promise<void> {

@@ -36,6 +36,7 @@ export const PERMISSION_CATEGORIES: string[] = [
   "Inventory",
   "Suppliers",
   "Procurement",
+  "Goods Out",
   "System",
 ];
 
@@ -286,6 +287,20 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       { key: "inventory.export", action: "Export", description: "Export the inventory list to CSV." },
       { key: "inventory.adjust", action: "Adjust", description: "Adjust stock levels (reserved for the future Stock Adjustment module)." },
       { key: "inventory.stock_take", action: "Stock take", description: "Run a stock take (reserved for the future Stock Take module)." },
+    ],
+  },
+  {
+    key: "goods_out",
+    label: "Goods Out",
+    description: "Dispatching IRM stock from a warehouse to an engineer — decreases warehouse stock and adds it to the engineer's holding.",
+    category: "Goods Out",
+    permissions: [
+      { key: "goods_out.view", action: "View", description: "View dispatches and their details." },
+      { key: "goods_out.create", action: "Create", description: "Create draft dispatches." },
+      { key: "goods_out.edit", action: "Edit", description: "Edit draft dispatches." },
+      { key: "goods_out.delete", action: "Delete", description: "Delete draft dispatches." },
+      { key: "goods_out.dispatch", action: "Dispatch", description: "Dispatch a draft — posts stock from the warehouse to the engineer's holding." },
+      { key: "goods_out.cancel", action: "Cancel", description: "Cancel a draft dispatch." },
     ],
   },
   {

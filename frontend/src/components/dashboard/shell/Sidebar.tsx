@@ -23,6 +23,7 @@ import {
   PackageSearch,
   PackageCheck,
   Boxes,
+  PackageMinus,
 } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
@@ -48,6 +49,7 @@ const NAV: NavItem[] = [
   { href: "/dashboard/purchase-orders", label: "Purchase Orders", icon: ClipboardList, perms: ["purchase_orders.view"] },
   { href: "/dashboard/goods-in", label: "Goods In", icon: PackageCheck, perms: ["goods_in.view"] },
   { href: "/dashboard/inventory", label: "Inventory", icon: Boxes, perms: ["inventory.view"] },
+  { href: "/dashboard/goods-out", label: "Goods Out", icon: PackageMinus, perms: ["goods_out.view"] },
   {
     href: "/dashboard/settings",
     label: "Settings",
