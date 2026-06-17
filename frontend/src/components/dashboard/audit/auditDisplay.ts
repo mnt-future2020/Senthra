@@ -39,6 +39,8 @@ const VERB_TONE: Record<string, ActionTone> = {
   // Warehouse Inventory — a stock transfer is a movement (update); a CSV export is a neutral read.
   transfer: "update",
   viewed: "neutral",
+  // Goods Out — dispatching stock to an engineer is a movement (update).
+  dispatched: "update",
 };
 
 export function actionTone(action: string): ActionTone {

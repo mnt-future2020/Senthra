@@ -179,6 +179,8 @@ model Warehouse {
   // Stock transfers leaving / arriving at this warehouse (back-relations; no DB column).
   stockTransfersFrom StockTransfer[] @relation("StockTransferFrom")
   stockTransfersTo   StockTransfer[] @relation("StockTransferTo")
+  // Goods Out dispatches from this warehouse (back-relation; no DB column).
+  goodsOuts          GoodsOut[]
 
   deletedAt DateTime? // soft delete — excluded from listings; history stays intact
 
@@ -381,6 +383,10 @@ model IrmItem {
   inventoryTransactions InventoryTransaction[]
   // Stock transfers of this item between warehouses (back-relation; no DB column).
   stockTransfers StockTransfer[]
+  // Goods Out lines + engineer-held stock for this item (back-relations; no DB column).
+  goodsOutItems            GoodsOutItem[]
+  engineerStockBalances    EngineerStockBalance[]
+  engineerStockTransactions EngineerStockTransaction[]
 
   deletedAt DateTime? // soft delete — excluded from listings; history stays intact
 
@@ -774,6 +780,128 @@ model StockTransfer {
   @@index([movementDate])
 }
 
+// A warehouse → engineer stock dispatch (GDN-0001). Twin of GoodsReceipt: Draft (editable/deletable)
+// → Dispatched (terminal; inventory written ONCE) | Cancelled (terminal). On Dispatch ONE transaction
+// decrements the warehouse InventoryBalance (via applyOutbound + a goods_out InventoryTransaction) and
+// increments the engineer's EngineerStockBalance (+ an EngineerStockTransaction). Warehouse / engineer /
+// item names are snapshotted so history reads correctly after renames. jobId/projectId/
+// customerStockRequestId are optional FUTURE Job-Pack sockets (no relations). `deletedAt` is written
+// EXPLICITLY on create (Prisma+Mongo `{deletedAt:null}` reads don't match an absent field). Serial- and
+// batch-tracked IRM items are blocked in v1.
+model GoodsOut {
+  id   String @id @default(auto()) @map("_id") @db.ObjectId
+  code String @unique // auto-allocated, e.g. GDN-0001
+
+  warehouseId   String    @db.ObjectId
+  warehouse     Warehouse @relation(fields: [warehouseId], references: [id])
+  warehouseName String // snapshot
+  warehouseCode String? // snapshot
+
+  engineerId         String  @db.ObjectId
+  engineer           User    @relation("GoodsOutEngineer", fields: [engineerId], references: [id])
+  engineerName       String // snapshot
+  engineerEmail      String? // snapshot
+  engineerEmployeeId String? // snapshot, e.g. SNT-0007
+
+  status             String    @default("draft") // draft | dispatched | cancelled
+  dispatchDate       DateTime
+  dispatchReason     String // job_work | customer_request | installation | maintenance | replacement | warehouse_replenishment | emergency_dispatch | other
+  expectedReturnDate DateTime? // store-only seam for the future Returns module (FLOW 5)
+
+  // Who authorised the dispatch — snapshot only (no relation; NOT a hard approval gate).
+  authorizedById   String? @db.ObjectId
+  authorizedByName String?
+
+  // FUTURE Job Pack sockets — optional, no relations yet.
+  jobId                  String? @db.ObjectId
+  projectId              String? @db.ObjectId
+  customerStockRequestId String? @db.ObjectId
+
+  referenceNumber String?
+  description     String?
+  internalNotes   String?
+
+  items GoodsOutItem[]
+
+  createdBy    String?
+  dispatchedBy String?
+  dispatchedAt DateTime?
+  cancelledBy  String?
+  cancelledAt  DateTime?
+  cancelReason String?
+  updatedBy    String?
+  deletedAt    DateTime? // soft delete — draft-only delete; history stays intact
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([warehouseId])
+  @@index([engineerId])
+  @@index([dispatchDate])
+}
+
+model GoodsOutItem {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  goodsOutId String   @db.ObjectId
+  goodsOut   GoodsOut @relation(fields: [goodsOutId], references: [id])
+
+  irmItemId String  @db.ObjectId
+  irmItem   IrmItem @relation(fields: [irmItemId], references: [id])
+  itemName  String // snapshot
+  sku       String? // snapshot
+  baseUnit  String? // snapshot
+
+  quantity Int
+  notes    String?
+
+  createdAt DateTime @default(now())
+
+  @@index([goodsOutId])
+}
+
+// Engineer-held stock primitive — the engineer-side twin of InventoryBalance. The on-hand quantity an
+// engineer currently holds for an IRM item. Goods Out increments it; future Usage/Returns/Transfer
+// adjust it. The Engineer Van Inventory module later reads this as its surface.
+model EngineerStockBalance {
+  id         String  @id @default(auto()) @map("_id") @db.ObjectId
+  irmItemId  String  @db.ObjectId
+  irmItem    IrmItem @relation(fields: [irmItemId], references: [id])
+  engineerId String  @db.ObjectId
+  engineer   User    @relation("EngineerStockOwner", fields: [engineerId], references: [id])
+
+  quantityOnHand Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([irmItemId, engineerId])
+  @@index([engineerId])
+}
+
+// Immutable, append-only engineer-stock ledger — the engineer-side twin of InventoryTransaction.
+model EngineerStockTransaction {
+  id         String  @id @default(auto()) @map("_id") @db.ObjectId
+  irmItemId  String  @db.ObjectId
+  irmItem    IrmItem @relation(fields: [irmItemId], references: [id])
+  engineerId String  @db.ObjectId
+  engineer   User    @relation("EngineerStockTxnOwner", fields: [engineerId], references: [id])
+
+  quantityDelta Int // + dispatch in (future: − usage/return, +/− transfer)
+  type          String // goods_out (future: usage, return, transfer_in, transfer_out)
+  sourceType    String // goods_out
+  sourceId      String   @db.ObjectId
+  sourceCode    String? // snapshot, e.g. GDN-0001
+  balanceAfter  Int // engineer on-hand snapshot after applying this row
+  notes         String?
+  createdBy     String?
+  createdAt     DateTime @default(now())
+
+  @@index([irmItemId, engineerId])
+  @@index([sourceType, sourceId])
+  @@index([createdAt])
+}
+
 // Employee master-data: a department a staff member belongs to (e.g. "Operations").
 // Managed (create/rename/delete) from Users & Roles; the user form picks from this
 // list or creates one inline. User.department stores the chosen NAME (denormalized),
@@ -855,6 +983,10 @@ model User {
   ownedSuppliers    Supplier[]
   // IRM items this user is the internal owner of (back-relation; no DB column).
   ownedIrmItems     IrmItem[]
+  // Goods Out dispatches received + engineer-held stock (back-relations; no DB column).
+  goodsOutsReceived         GoodsOut[]                 @relation("GoodsOutEngineer")
+  engineerStockBalances     EngineerStockBalance[]     @relation("EngineerStockOwner")
+  engineerStockTransactions EngineerStockTransaction[] @relation("EngineerStockTxnOwner")
 
   @@index([roleId])
   @@index([status])
