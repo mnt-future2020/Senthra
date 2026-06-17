@@ -22,6 +22,7 @@ import {
   Truck,
   PackageSearch,
   PackageCheck,
+  Boxes,
 } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
@@ -46,6 +47,7 @@ const NAV: NavItem[] = [
   { href: "/dashboard/irm", label: "IRM Catalogue", icon: PackageSearch, perms: ["irm.view"] },
   { href: "/dashboard/purchase-orders", label: "Purchase Orders", icon: ClipboardList, perms: ["purchase_orders.view"] },
   { href: "/dashboard/goods-in", label: "Goods In", icon: PackageCheck, perms: ["goods_in.view"] },
+  { href: "/dashboard/inventory", label: "Inventory", icon: Boxes, perms: ["inventory.view"] },
   {
     href: "/dashboard/settings",
     label: "Settings",

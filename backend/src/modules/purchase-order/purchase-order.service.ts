@@ -532,3 +532,10 @@ export async function applyGoodsReceipt(
     recordStatus(actor, purchaseOrderId, header.code, `purchase_order.${next}`);
   }
 }
+
+// READ seam for Warehouse Inventory: total still-to-arrive quantity for an item at a warehouse,
+// summed across open POs (sent / partially_received). Pure read; no PO behaviour change.
+export async function incomingForItemWarehouse(irmItemId: string, warehouseId: string): Promise<number> {
+  const lines = await poRepo.incomingLinesForItemWarehouse(irmItemId, warehouseId);
+  return lines.reduce((sum, l) => sum + Math.max(0, l.quantity - l.receivedQuantity), 0);
+}

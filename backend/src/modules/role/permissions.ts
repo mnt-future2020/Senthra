@@ -275,6 +275,20 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     ],
   },
   {
+    key: "inventory",
+    label: "Warehouse Inventory",
+    description: "Live stock levels, movement + purchase history, and warehouse-to-warehouse transfers.",
+    category: "Inventory",
+    permissions: [
+      { key: "inventory.view", action: "View", description: "View live inventory, balances and movement/purchase history." },
+      { key: "inventory.move", action: "Move", description: "Transfer stock between warehouses." },
+      { key: "inventory.history", action: "History", description: "View the stock-transfer movement history." },
+      { key: "inventory.export", action: "Export", description: "Export the inventory list to CSV." },
+      { key: "inventory.adjust", action: "Adjust", description: "Adjust stock levels (reserved for the future Stock Adjustment module)." },
+      { key: "inventory.stock_take", action: "Stock take", description: "Run a stock take (reserved for the future Stock Take module)." },
+    ],
+  },
+  {
     key: "suppliers",
     label: "Suppliers",
     description: "Supplier master data — the organisations inventory is procured from.",
