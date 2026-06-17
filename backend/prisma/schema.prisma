@@ -176,6 +176,9 @@ model Warehouse {
   goodsReceipts         GoodsReceipt[]
   inventoryBalances     InventoryBalance[]
   inventoryTransactions InventoryTransaction[]
+  // Stock transfers leaving / arriving at this warehouse (back-relations; no DB column).
+  stockTransfersFrom StockTransfer[] @relation("StockTransferFrom")
+  stockTransfersTo   StockTransfer[] @relation("StockTransferTo")
 
   deletedAt DateTime? // soft delete — excluded from listings; history stays intact
 
@@ -376,6 +379,8 @@ model IrmItem {
   goodsReceiptItems     GoodsReceiptItem[]
   inventoryBalances     InventoryBalance[]
   inventoryTransactions InventoryTransaction[]
+  // Stock transfers of this item between warehouses (back-relation; no DB column).
+  stockTransfers StockTransfer[]
 
   deletedAt DateTime? // soft delete — excluded from listings; history stays intact
 
@@ -722,6 +727,51 @@ model InventoryTransaction {
   @@index([irmItemId, warehouseId])
   @@index([sourceType, sourceId])
   @@index([createdAt])
+}
+
+// A completed warehouse → warehouse stock movement (TRF-0001). The Warehouse Inventory module's
+// only write: applied atomically (decrement source + increment destination + two immutable
+// InventoryTransaction ledger rows) in one transaction. Item/warehouse names + codes are snapshotted
+// so the record reads correctly even if the masters are later renamed. Soft-delete only (no delete
+// endpoint). `deletedAt` is written EXPLICITLY on create (Prisma+Mongo `{deletedAt:null}` reads don't
+// match an absent field).
+model StockTransfer {
+  id      String  @id @default(auto()) @map("_id") @db.ObjectId
+  code    String  @unique // auto-allocated, e.g. TRF-0001
+  irmItemId String  @db.ObjectId
+  irmItem   IrmItem @relation(fields: [irmItemId], references: [id])
+  itemName  String // snapshot
+  sku       String? // snapshot
+
+  fromWarehouseId   String    @db.ObjectId
+  fromWarehouse     Warehouse @relation("StockTransferFrom", fields: [fromWarehouseId], references: [id])
+  fromWarehouseName String // snapshot
+  fromWarehouseCode String? // snapshot
+
+  toWarehouseId   String    @db.ObjectId
+  toWarehouse     Warehouse @relation("StockTransferTo", fields: [toWarehouseId], references: [id])
+  toWarehouseName String // snapshot
+  toWarehouseCode String? // snapshot
+
+  quantity     Int
+  movementDate DateTime
+  status       String  @default("completed") // completed (only state today)
+
+  referenceNumber String?
+  description     String?
+  internalNotes   String?
+
+  createdBy String? // staff email that performed the transfer
+  deletedAt DateTime? // soft delete — no delete endpoint; history stays intact
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([irmItemId])
+  @@index([fromWarehouseId])
+  @@index([toWarehouseId])
+  @@index([movementDate])
 }
 
 // Employee master-data: a department a staff member belongs to (e.g. "Operations").

@@ -175,6 +175,15 @@ export function setStatusTx(tx: Prisma.TransactionClient, purchaseOrderId: strin
   return tx.purchaseOrder.update({ where: { id: purchaseOrderId }, data: { status } });
 }
 
+// Warehouse Inventory READ seam: outstanding (ordered − received) lines on open POs (sent /
+// partially_received) delivering an item to a warehouse — feeds the inventory detail "Incoming".
+export function incomingLinesForItemWarehouse(irmItemId: string, warehouseId: string) {
+  return prisma.purchaseOrderItem.findMany({
+    where: { irmItemId, purchaseOrder: { is: { warehouseId, status: { in: ["sent", "partially_received"] }, deletedAt: null } } },
+    select: { quantity: true, receivedQuantity: true },
+  });
+}
+
 // --- attachments ----------------------------------------------------------------------------
 export function addAttachment(data: Prisma.PurchaseOrderAttachmentUncheckedCreateInput): Promise<PurchaseOrderAttachment> {
   return prisma.purchaseOrderAttachment.create({ data });

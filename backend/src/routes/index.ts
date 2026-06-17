@@ -7,6 +7,7 @@ import { adminRouter as customerRoutes, portalRouter as customerPortalRoutes } f
 import departmentRoutes from "#modules/department/department.routes.js";
 import emailTemplateRoutes from "#modules/email/emailTemplate.routes.js";
 import goodsInRoutes from "#modules/goods-in/goods-in.routes.js";
+import inventoryRoutes from "#modules/inventory/inventory.routes.js";
 import irmRoutes from "#modules/irm/irm.routes.js";
 import irmCategoryRoutes from "#modules/irm-category/irm-category.routes.js";
 import irmTypeRoutes from "#modules/irm-type/irm-type.routes.js";
@@ -43,6 +44,7 @@ router.use("/irm-types", irmTypeRoutes);
 router.use("/irm-categories", irmCategoryRoutes);
 router.use("/purchase-orders", purchaseOrderRoutes);
 router.use("/goods-in", goodsInRoutes);
+router.use("/inventory", inventoryRoutes);
 router.use("/departments", departmentRoutes);
 router.use("/job-titles", jobTitleRoutes);
 router.use("/email-templates", emailTemplateRoutes);

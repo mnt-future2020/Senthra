@@ -224,6 +224,17 @@ export function countByIrmItem(irmItemId: string): Promise<number> {
   return prisma.goodsReceiptItem.count({ where: { irmItemId, goodsReceipt: { is: { deletedAt: null } } } });
 }
 
+// Warehouse Inventory READ seam: completed-receipt history for an item at a warehouse — feeds the
+// inventory detail "Purchase History" tab (PO / supplier / received qty / date). Pure read.
+export function receivedHistoryForItemWarehouse(irmItemId: string, warehouseId: string) {
+  return prisma.goodsReceiptItem.findMany({
+    where: { irmItemId, goodsReceipt: { is: { warehouseId, status: "completed", deletedAt: null } } },
+    select: { receivedQuantity: true, goodsReceipt: { select: { code: true, poCode: true, supplierName: true, receivedDate: true } } },
+    orderBy: { createdAt: "desc" },
+    take: 200,
+  });
+}
+
 // --- serial uniqueness (app-level, per item, across non-deleted GRNs) ------------------------
 export function findSerialConflicts(irmItemId: string, serialLowers: string[], excludeGoodsReceiptId?: string): Promise<{ serialLower: string }[]> {
   if (serialLowers.length === 0) return Promise.resolve([]);

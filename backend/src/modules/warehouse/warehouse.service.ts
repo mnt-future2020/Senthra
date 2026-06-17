@@ -6,6 +6,7 @@ import * as warehouseTypeService from "#modules/warehouse-type/warehouse-type.se
 import * as userRepo from "#modules/user/user.repository.js";
 import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import * as grnRepo from "#modules/goods-in/goods-in.repository.js";
+import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
@@ -346,7 +347,7 @@ type DependencyChecker = { label: string; count: (warehouseId: string) => Promis
 const DELETE_DEPENDENCY_CHECKERS: DependencyChecker[] = [
   { label: "purchase orders", count: (id) => poRepo.countByWarehouse(id) },
   { label: "goods receipts", count: (id) => grnRepo.countByWarehouse(id) },
-  // FUTURE: { label: "inventory", count: (id) => inventoryRepo.countByWarehouse(id) },
+  { label: "inventory", count: (id) => inventoryRepo.countBalancesWithStockByWarehouse(id) },
   // FUTURE: { label: "jobs", count: (id) => jobRepo.countByWarehouse(id) },
   // FUTURE: { label: "transfers", count: (id) => transferRepo.countOpenByWarehouse(id) },
   // FUTURE: { label: "allocations", count: (id) => allocationRepo.countByWarehouse(id) },
