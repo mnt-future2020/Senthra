@@ -133,7 +133,7 @@ export function RoleForm({ mode, role }: { mode: "create" | "edit"; role?: Role 
       else await roleService.createRole(payload);
       setSaved(true);
       pushToast(mode === "edit" ? "Role saved." : "Role created.", "success");
-      router.push(ROLES_LIST);
+      router.replace(ROLES_LIST);
     } catch (err) {
       showError(err instanceof Error ? err.message : "Save failed.");
       setSaving(false);

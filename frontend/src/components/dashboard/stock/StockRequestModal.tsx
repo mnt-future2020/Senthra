@@ -5,6 +5,7 @@ import { Loader2 } from "lucide-react";
 
 import * as customerService from "@/services/customer.service";
 import { Modal } from "@/components/ui/Modal";
+import { NumberInput } from "@/components/ui/NumberInput";
 import { RequiredMark } from "@/components/ui/FormScaffold";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import type { StockRequest } from "@/types/customer";
@@ -100,8 +101,7 @@ export function StockRequestModal({
             <label className={labelCls}>
               Quantity<RequiredMark />
             </label>
-            <input
-              type="number"
+            <NumberInput
               min={1}
               step={1}
               className={inputCls}

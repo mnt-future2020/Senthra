@@ -33,7 +33,9 @@ router.get(
 
 router.post(
   "/",
-  requirePermission("warehouse_types.create"),
+  // Inline-create is allowed for warehouse creators/editors too (no Settings round-trip),
+  // mirroring how the type list is already readable by them. Rename/delete stay restricted.
+  requireAnyPermission("warehouse_types.create", "warehouse.create", "warehouse.edit"),
   writeLimiter,
   validateBody(createWarehouseTypeSchema),
   warehouseTypeController.createWarehouseType,

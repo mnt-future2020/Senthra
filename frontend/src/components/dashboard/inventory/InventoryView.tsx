@@ -109,13 +109,13 @@ export function InventoryView() {
   };
 
   return (
-    <div className="space-y-5">
-      <div className="border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs" style={{ borderRadius: "var(--radius)" }}>
+    <div className="flex h-full flex-col gap-5">
+      <div className="shrink-0 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs" style={{ borderRadius: "var(--radius)" }}>
         <h2 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">Warehouse Inventory</h2>
         <p className="mt-0.5 text-xs text-[var(--muted)]">Live on-hand stock per item and warehouse. Move stock between warehouses or open a record for its full movement history.</p>
       </div>
 
-      <div className="flex flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:items-center">
+      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:items-center">
         <div className="relative w-full lg:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="Search item or SKU…" className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]" />
@@ -146,7 +146,7 @@ export function InventoryView() {
         </div>
       </div>
 
-      <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
         {showSkeleton ? (
           <TableSkeleton />
         ) : error ? (
@@ -159,7 +159,7 @@ export function InventoryView() {
           </div>
         ) : (
           <>
-            <div className="overflow-x-auto">
+            <div className="min-h-0 flex-1 overflow-auto">
               <table className="w-full min-w-[1040px] text-left text-sm">
                 <thead>
                   <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
@@ -190,7 +190,7 @@ export function InventoryView() {
               </table>
             </div>
             {data && (
-              <div className="flex flex-wrap justify-end gap-x-8 gap-y-1 border-t border-[var(--border)] p-4 text-sm">
+              <div className="flex shrink-0 flex-wrap justify-end gap-x-8 gap-y-1 border-t border-[var(--border)] p-4 text-sm">
                 <span className="text-[var(--muted)]">Total stock value (this view) <strong className="text-[var(--ink)]">{formatMoney(data.totalValue)}</strong></span>
               </div>
             )}
@@ -198,7 +198,11 @@ export function InventoryView() {
         )}
       </div>
 
-      {data && data.total > 0 && <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="records" onPage={setPage} />}
+      {data && data.total > 0 && (
+        <div className="shrink-0">
+          <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="records" onPage={setPage} />
+        </div>
+      )}
     </div>
   );
 }

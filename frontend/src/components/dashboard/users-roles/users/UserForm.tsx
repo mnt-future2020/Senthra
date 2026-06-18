@@ -14,6 +14,7 @@ import { Avatar } from "@/components/ui/Avatar";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { TempPasswordModal } from "@/components/ui/TempPasswordModal";
+import { PostcodeField } from "@/components/ui/PostcodeField";
 import { EMAIL_RE, UK_POSTCODE_RE, isPhone } from "@/lib/validation";
 import { MAX_IMAGE_BYTES, readFileAsDataUrl } from "@/lib/image";
 import { DepartmentCombobox } from "@/components/dashboard/users-roles/departments/DepartmentCombobox";
@@ -256,7 +257,7 @@ export function UserForm({
         await userService.updateUser(user.id, payload);
         setSaved(true);
         pushToast("User updated.", "success");
-        router.push(USERS_LIST);
+        router.replace(USERS_LIST);
       }
     } catch (err) {
       showError(err instanceof Error ? err.message : "Save failed.");
@@ -500,22 +501,17 @@ export function UserForm({
                 <label className={labelCls}>City / town</label>
                 <input className={inputCls} value={city} onChange={(e) => setCity(e.target.value)} placeholder="London" />
               </div>
-              <div>
-                <label className={labelCls}>Postcode</label>
-                <input
-                  className={inputCls}
-                  value={postcode}
-                  onChange={(e) => {
-                    setPostcode(e.target.value);
-                    clearError("postcode");
-                  }}
-                  placeholder="EC1A 1BB"
-                  maxLength={10}
-                  aria-invalid={Boolean(errors.postcode)}
-                  aria-describedby={errors.postcode ? "postcode-error" : undefined}
-                />
-                <FieldError id="postcode-error" message={errors.postcode} />
-              </div>
+              <PostcodeField
+                value={postcode}
+                onChange={(v) => {
+                  setPostcode(v);
+                  clearError("postcode");
+                }}
+                setCity={setCity}
+                error={errors.postcode}
+                errorId="postcode-error"
+                required={false}
+              />
             </div>
           </FormSection>
 
@@ -619,7 +615,7 @@ export function UserForm({
         title="User created"
         email={tempPw?.email ?? ""}
         password={tempPw?.password ?? ""}
-        onClose={() => router.push(USERS_LIST)}
+        onClose={() => router.replace(USERS_LIST)}
       />
     </div>
   );

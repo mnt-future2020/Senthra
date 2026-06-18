@@ -2,14 +2,10 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ShieldCheck, Palette, Plug, Mail, MailCheck, Paintbrush, Tag, Boxes, Factory, Layers, Tags } from "lucide-react";
+import { ShieldCheck, Palette, Plug, Mail, MailCheck, Paintbrush, Tag } from "lucide-react";
 
 import { AccountSection } from "./account/AccountSection";
 import { CategoriesView } from "./categories/CategoriesView";
-import { WarehouseTypesView } from "./warehouse-types/WarehouseTypesView";
-import { SupplierTypesView } from "./supplier-types/SupplierTypesView";
-import { IrmTypesView } from "./irm-types/IrmTypesView";
-import { IrmCategoriesView } from "./irm-categories/IrmCategoriesView";
 import { SecuritySection } from "./account/SecuritySection";
 import { BrandingSection } from "./branding/BrandingSection";
 import { AppearanceSection } from "./appearance/AppearanceSection";
@@ -33,11 +29,7 @@ const NAV: {
     | "admin"
     | "settings.view"
     | "email_templates.view"
-    | "categories.view"
-    | "warehouse_types.view"
-    | "supplier_types.view"
-    | "irm_types.view"
-    | "irm_categories.view";
+    | "categories.view";
 }[] = [
   { id: "account", label: "Account & Security", icon: ShieldCheck, desc: "Email & password", requires: "admin" },
   { id: "branding", label: "Branding", icon: Paintbrush, desc: "Logo, name & theme text", requires: "settings.view" },
@@ -46,10 +38,6 @@ const NAV: {
   { id: "email", label: "Email", icon: Mail, desc: "SMTP & delivery", requires: "settings.view" },
   { id: "email-templates", label: "Email Templates", icon: MailCheck, desc: "Customize sent emails", requires: "email_templates.view" },
   { id: "categories", label: "Categories", icon: Tag, desc: "Stock category list", requires: "categories.view" },
-  { id: "warehouse-types", label: "Warehouse Types", icon: Boxes, desc: "Warehouse classifications", requires: "warehouse_types.view" },
-  { id: "supplier-types", label: "Supplier Types", icon: Factory, desc: "Supplier classifications", requires: "supplier_types.view" },
-  { id: "irm-types", label: "IRM Types", icon: Layers, desc: "IRM item types", requires: "irm_types.view" },
-  { id: "irm-categories", label: "IRM Categories", icon: Tags, desc: "IRM categories", requires: "irm_categories.view" },
 ];
 
 export function SettingsPanel(appearance: AppearanceProps) {
@@ -134,10 +122,6 @@ export function SettingsPanel(appearance: AppearanceProps) {
           {activeSection === "email" && <EmailSection />}
           {activeSection === "email-templates" && <EmailTemplatesSection />}
           {activeSection === "categories" && <CategoriesView />}
-          {activeSection === "warehouse-types" && <WarehouseTypesView />}
-          {activeSection === "supplier-types" && <SupplierTypesView />}
-          {activeSection === "irm-types" && <IrmTypesView />}
-          {activeSection === "irm-categories" && <IrmCategoriesView />}
         </div>
       </div>
     </div>

@@ -31,7 +31,9 @@ router.get(
 
 router.post(
   "/",
-  requirePermission("irm_categories.create"),
+  // Inline-create is allowed for IRM item creators/editors too (no Settings round-trip),
+  // mirroring how the category list is already readable by them. Rename/delete stay restricted.
+  requireAnyPermission("irm_categories.create", "irm.create", "irm.edit"),
   writeLimiter,
   validateBody(createIrmCategorySchema),
   irmCategoryController.createIrmCategory,

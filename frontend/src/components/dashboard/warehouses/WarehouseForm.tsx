@@ -5,12 +5,16 @@ import { useRouter } from "next/navigation";
 import { Loader2, MapPin } from "lucide-react";
 
 import * as warehouseService from "@/services/warehouse.service";
-import { listWarehouseTypes } from "@/services/warehouse-type.service";
+import { listWarehouseTypes, createWarehouseType } from "@/services/warehouse-type.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import type { Warehouse, WarehouseManager } from "@/types/warehouse";
 import type { WarehouseType } from "@/types/warehouse-type";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
+import { firstActiveId } from "@/lib/utils";
+import { useAuth } from "@/hooks/useAuth";
+import { PostcodeField } from "@/components/ui/PostcodeField";
+import { CreatableSelect } from "@/components/ui/CreatableSelect";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { EMAIL_RE, UK_POSTCODE_RE, isPhone } from "@/lib/validation";
@@ -39,6 +43,7 @@ export function WarehouseForm({ mode, warehouse }: { mode: "create" | "edit"; wa
   const router = useRouter();
   const guard = useNavigationGuard();
   const { pushToast } = useDashboard();
+  const { can } = useAuth();
 
   const o = warehouse;
   const [name, setName] = React.useState(o?.name ?? "");
@@ -83,7 +88,7 @@ export function WarehouseForm({ mode, warehouse }: { mode: "create" | "edit"; wa
         setTypes(t);
         // On create, preselect the first ACTIVE type so the required field starts valid.
         if (mode === "create") {
-          setTypeId((cur) => cur || t.find((x) => x.status === "active")?.id || "");
+          setTypeId((cur) => cur || firstActiveId(t));
         }
       },
       () => {},
@@ -114,10 +119,13 @@ export function WarehouseForm({ mode, warehouse }: { mode: "create" | "edit"; wa
     return managers;
   }, [managers, o]);
 
+  // On create the Type is auto-preselected to the first active option, so the baseline
+  // must hold that same default — otherwise the preselect alone would read as a user edit.
+  const baselineTypeId = mode === "create" ? firstActiveId(types) : (o?.typeId ?? "");
   const isDirty =
     !saved &&
     (name !== (o?.name ?? "") ||
-      typeId !== (o?.typeId ?? "") ||
+      typeId !== baselineTypeId ||
       description !== (o?.description ?? "") ||
       isDefault !== (o?.isDefault ?? false) ||
       addressLine1 !== (o?.addressLine1 ?? "") ||
@@ -216,7 +224,7 @@ export function WarehouseForm({ mode, warehouse }: { mode: "create" | "edit"; wa
         setSaved(true);
         pushToast(`Warehouse ${created.code} created.`, "success");
         notifyGeocode(created);
-        router.push(`/dashboard/warehouses/${created.code}`);
+        router.replace(`/dashboard/warehouses/${created.code}`);
       } else if (o) {
         // Update sends fields as their current value ("" clears).
         const updated = await warehouseService.updateWarehouse(o.id, {
@@ -242,7 +250,7 @@ export function WarehouseForm({ mode, warehouse }: { mode: "create" | "edit"; wa
         setSaved(true);
         pushToast("Warehouse updated.", "success");
         notifyGeocode(updated);
-        router.push(`/dashboard/warehouses/${o.code}`);
+        router.replace(`/dashboard/warehouses/${o.code}`);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Could not save the warehouse.";
@@ -299,22 +307,26 @@ export function WarehouseForm({ mode, warehouse }: { mode: "create" | "edit"; wa
                 <label className={labelCls}>
                   Type<RequiredMark />
                 </label>
-                <select
-                  className={inputCls}
+                <CreatableSelect
                   value={typeId}
-                  onChange={(e) => {
-                    setTypeId(e.target.value);
+                  onChange={(id) => {
+                    setTypeId(id);
                     clearError("typeId");
                   }}
-                  aria-invalid={Boolean(errors.typeId)}
-                >
-                  <option value="">— Select a type —</option>
-                  {typeOptions.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.name}
-                    </option>
-                  ))}
-                </select>
+                  options={typeOptions}
+                  onCreate={async (name) => {
+                    const t = await createWarehouseType({ name });
+                    setTypes((prev) => [...prev, t]);
+                    return { id: t.id, name: t.name };
+                  }}
+                  canCreate={can("warehouse_types.create") || can("warehouse.create") || can("warehouse.edit")}
+                  canManage={can("warehouse_types.edit") || can("warehouse_types.delete")}
+                  manageHref="/dashboard/warehouses?tab=types"
+                  noun="type"
+                  required
+                  invalid={Boolean(errors.typeId)}
+                  describedBy={errors.typeId ? "err-typeId" : undefined}
+                />
                 <FieldError id="err-typeId" message={errors.typeId} />
               </div>
               <div>
@@ -399,23 +411,21 @@ export function WarehouseForm({ mode, warehouse }: { mode: "create" | "edit"; wa
                 <label className={labelCls}>County</label>
                 <input className={inputCls} value={county} onChange={(e) => setCounty(e.target.value)} maxLength={80} />
               </div>
-              <div>
-                <label className={labelCls}>
-                  Postcode<RequiredMark />
-                </label>
-                <input
-                  className={inputCls}
-                  value={postcode}
-                  onChange={(e) => {
-                    setPostcode(e.target.value);
-                    clearError("postcode");
-                  }}
-                  placeholder="e.g. LS1 4DY"
-                  maxLength={12}
-                  aria-invalid={Boolean(errors.postcode)}
-                />
-                <FieldError id="err-postcode" message={errors.postcode} />
-              </div>
+              <PostcodeField
+                value={postcode}
+                onChange={(v) => {
+                  setPostcode(v);
+                  clearError("postcode");
+                }}
+                setCity={setCity}
+                setCounty={setCounty}
+                setCountry={setCountry}
+                onResolved={() => {
+                  clearError("city");
+                  clearError("country");
+                }}
+                error={errors.postcode}
+              />
               <div>
                 <label className={labelCls}>
                   Country<RequiredMark />

@@ -13,6 +13,7 @@ import { Avatar } from "@/components/ui/Avatar";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { TempPasswordModal } from "@/components/ui/TempPasswordModal";
+import { PostcodeField } from "@/components/ui/PostcodeField";
 import { EMAIL_RE, UK_POSTCODE_RE, WEBSITE_RE, isPhone } from "@/lib/validation";
 import { MAX_IMAGE_BYTES, readFileAsDataUrl } from "@/lib/image";
 import type { UserStatus } from "@/types/user";
@@ -248,7 +249,7 @@ export function CustomerForm({ mode, customer }: { mode: "create" | "edit"; cust
         await customerService.updateCustomer(customer.id, payload);
         setSaved(true);
         pushToast("Customer updated.", "success");
-        router.push(`${CUSTOMERS_LIST}/${customer.customerCode}`);
+        router.replace(`${CUSTOMERS_LIST}/${customer.customerCode}`);
       }
     } catch (err) {
       showError(err instanceof Error ? err.message : "Save failed.");
@@ -473,22 +474,19 @@ export function CustomerForm({ mode, customer }: { mode: "create" | "edit"; cust
                 <label className={labelCls}>County</label>
                 <input className={inputCls} value={county} onChange={(e) => setCounty(e.target.value)} placeholder="Optional" maxLength={80} />
               </div>
-              <div>
-                <label className={labelCls}>Postcode</label>
-                <input
-                  className={inputCls}
-                  value={postcode}
-                  onChange={(e) => {
-                    setPostcode(e.target.value);
-                    clearError("postcode");
-                  }}
-                  placeholder="EC1A 1BB"
-                  maxLength={12}
-                  aria-invalid={Boolean(errors.postcode)}
-                  aria-describedby={errors.postcode ? "postcode-error" : undefined}
-                />
-                <FieldError id="postcode-error" message={errors.postcode} />
-              </div>
+              <PostcodeField
+                value={postcode}
+                onChange={(v) => {
+                  setPostcode(v);
+                  clearError("postcode");
+                }}
+                setCity={setCity}
+                setCounty={setCounty}
+                setCountry={setCountry}
+                error={errors.postcode}
+                errorId="postcode-error"
+                required={false}
+              />
               <div>
                 <label className={labelCls}>Country</label>
                 <input
@@ -611,7 +609,7 @@ export function CustomerForm({ mode, customer }: { mode: "create" | "edit"; cust
           portal
           email={tempPw.email}
           password={tempPw.password}
-          onClose={() => router.push(`${CUSTOMERS_LIST}/${tempPw.code}`)}
+          onClose={() => router.replace(`${CUSTOMERS_LIST}/${tempPw.code}`)}
         />
       )}
     </div>

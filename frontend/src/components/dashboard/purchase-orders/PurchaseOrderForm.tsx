@@ -11,6 +11,7 @@ import { listIrmItems } from "@/services/irm.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
+import { NumberInput } from "@/components/ui/NumberInput";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { formatMoney } from "./poStatus";
 import type { PoPriority, PurchaseOrder } from "@/types/purchase-order";
@@ -50,6 +51,9 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
   const [description, setDescription] = React.useState(o?.description ?? "");
   const [deliveryAddress, setDeliveryAddress] = React.useState(o?.deliveryAddress ?? "");
   const [deliveryInstructions, setDeliveryInstructions] = React.useState(o?.deliveryInstructions ?? "");
+  // Off-site delivery is the exception: hide the address override by default and only
+  // reveal it when the user opts in. Pre-open on edit if the order already carries one.
+  const [overrideAddress, setOverrideAddress] = React.useState(Boolean(o?.deliveryAddress));
   const [internalNotes, setInternalNotes] = React.useState(o?.internalNotes ?? "");
   const [supplierNotes, setSupplierNotes] = React.useState(o?.supplierNotes ?? "");
   const [lineRows, setLineRows] = React.useState<LineRow[]>(() =>
@@ -91,6 +95,23 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
   useReportDirty("po-form", dirty && !saved);
 
   const supplierPanel = suppliers.find((s) => s.id === supplierId) ?? o?.supplier ?? null;
+
+  // Selected warehouse + its composed address, shown read-only so the user can see
+  // where goods will be delivered. Blank delivery address = this address is used
+  // (resolved server-side); the override below is only for off-site deliveries.
+  const selectedWarehouse = warehouses.find((w) => w.id === warehouseId) ?? null;
+  const warehouseAddressLines = selectedWarehouse
+    ? [
+        selectedWarehouse.addressLine1,
+        selectedWarehouse.addressLine2,
+        selectedWarehouse.city,
+        selectedWarehouse.county,
+        selectedWarehouse.postcode,
+        selectedWarehouse.country,
+      ]
+        .map((l) => l?.trim())
+        .filter((l): l is string => Boolean(l))
+    : [];
 
   const itemOptions = React.useMemo(() => {
     // keep any already-selected (possibly now-inactive) line items visible on edit
@@ -187,12 +208,12 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
         const created = await poService.createPurchaseOrder(buildPayload());
         setSaved(true);
         pushToast(`Purchase order ${created.code} created.`, "success");
-        router.push(`/dashboard/purchase-orders/${created.code}`);
+        router.replace(`/dashboard/purchase-orders/${created.code}`);
       } else if (o) {
         await poService.updatePurchaseOrder(o.id, buildPayload());
         setSaved(true);
         pushToast("Purchase order updated.", "success");
-        router.push(`/dashboard/purchase-orders/${o.code}`);
+        router.replace(`/dashboard/purchase-orders/${o.code}`);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Could not save the purchase order.";
@@ -291,6 +312,10 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
               {lineRows.map((row, idx) => {
                 const qty = Number(row.quantity) || 0;
                 const price = Number(row.unitPrice) || 0;
+                // Surface the selected supplier's own code for this item (read-only). Lookup is
+                // local — the item list already carries each item's supplier links + codes.
+                const pickedItem = row.irmItemId ? itemOptions.map.get(row.irmItemId) : undefined;
+                const supplierLink = pickedItem && supplierId ? pickedItem.suppliers.find((s) => s.supplierId === supplierId) : undefined;
                 return (
                   <div key={row._key} className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/30 p-3">
                     <div className="grid gap-3 sm:grid-cols-12">
@@ -300,18 +325,25 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
                           <option value="">— Select an item —</option>
                           {itemOptions.list.map((i) => (<option key={i.id} value={i.id}>{i.name} ({i.code})</option>))}
                         </select>
+                        {pickedItem && supplierId && (
+                          supplierLink?.supplierSku ? (
+                            <p className="mt-1.5 text-[11px] text-[var(--muted)]">Supplier item code: <span className="font-mono text-[var(--ink)]">{supplierLink.supplierSku}</span></p>
+                          ) : !supplierLink ? (
+                            <p className="mt-1.5 text-[11px] text-[var(--warn)]">Not listed for the selected supplier.</p>
+                          ) : null
+                        )}
                       </div>
                       <div className="sm:col-span-2">
                         <label className={labelCls}>Quantity</label>
-                        <input className={inputCls} type="number" min={1} value={row.quantity} onChange={(e) => updateLine(idx, { quantity: e.target.value })} placeholder="e.g. 100" />
+                        <NumberInput className={inputCls} min={1} value={row.quantity} onChange={(e) => updateLine(idx, { quantity: e.target.value })} placeholder="e.g. 100" />
                       </div>
                       <div className="sm:col-span-2">
                         <label className={labelCls}>Unit price (£)</label>
-                        <input className={inputCls} type="number" min={0} step="0.01" value={row.unitPrice} onChange={(e) => updateLine(idx, { unitPrice: e.target.value })} placeholder="e.g. 12.50" />
+                        <NumberInput className={inputCls} min={0} step="0.01" value={row.unitPrice} onChange={(e) => updateLine(idx, { unitPrice: e.target.value })} placeholder="e.g. 12.50" />
                       </div>
                       <div className="sm:col-span-1">
                         <label className={labelCls}>VAT %</label>
-                        <input className={inputCls} type="number" min={0} max={100} step="0.01" value={row.vatRate} onChange={(e) => updateLine(idx, { vatRate: e.target.value })} placeholder="20" />
+                        <NumberInput className={inputCls} min={0} max={100} step="0.01" value={row.vatRate} onChange={(e) => updateLine(idx, { vatRate: e.target.value })} placeholder="20" />
                       </div>
                       <div className="flex items-end justify-between sm:col-span-2">
                         <div className="text-xs">
@@ -335,11 +367,45 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
 
           <FormSection title="Delivery" description="Where the supplier should deliver this order.">
             <div className="grid gap-4">
-              <div>
-                <label className={labelCls}>Delivery address</label>
-                <textarea className={inputCls} rows={2} value={deliveryAddress} onChange={(e) => { setDeliveryAddress(e.target.value); touch(); }} maxLength={300} placeholder="Leave blank to use the warehouse address." />
-                <p className="mt-1.5 text-[11px] text-[var(--faint)]">Override only when goods are delivered elsewhere.</p>
-              </div>
+              {selectedWarehouse && (
+                <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/40 px-3.5 py-3">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-[var(--faint)]">
+                    {deliveryAddress.trim() ? "Selected warehouse address" : "Delivering to"}
+                  </p>
+                  <p className="mt-1 text-sm font-semibold text-[var(--ink)]">
+                    {selectedWarehouse.name} ({selectedWarehouse.code})
+                  </p>
+                  {warehouseAddressLines.length > 0 ? (
+                    <p className="mt-0.5 text-[13px] leading-relaxed text-[var(--muted)]">{warehouseAddressLines.join(", ")}</p>
+                  ) : (
+                    <p className="mt-1 text-[13px] text-[var(--faint)]">No address on file for this warehouse — add one on the warehouse record, or enter a delivery address below.</p>
+                  )}
+                </div>
+              )}
+              <label className="flex items-start gap-2.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/40 px-3.5 py-3">
+                <input
+                  type="checkbox"
+                  checked={overrideAddress}
+                  onChange={(e) => {
+                    const on = e.target.checked;
+                    setOverrideAddress(on);
+                    if (!on && deliveryAddress) setDeliveryAddress("");
+                    touch();
+                  }}
+                  className="mt-0.5 h-4 w-4 accent-[var(--accent)]"
+                />
+                <span className="text-xs text-[var(--ink)]">
+                  <span className="font-bold">Deliver to a different address</span>
+                  <span className="block text-[11px] text-[var(--faint)]">Tick only when goods go somewhere other than this warehouse.</span>
+                </span>
+              </label>
+              {overrideAddress && (
+                <div>
+                  <label className={labelCls}>Delivery address</label>
+                  <textarea className={inputCls} rows={2} value={deliveryAddress} onChange={(e) => { setDeliveryAddress(e.target.value); touch(); }} maxLength={300} placeholder="Enter the full delivery address." autoFocus />
+                  <p className="mt-1.5 text-[11px] text-[var(--faint)]">This replaces the warehouse address for this order only.</p>
+                </div>
+              )}
               <div>
                 <label className={labelCls}>Delivery instructions</label>
                 <input className={inputCls} value={deliveryInstructions} onChange={(e) => { setDeliveryInstructions(e.target.value); touch(); }} maxLength={500} placeholder="Access hours, contact person, loading bay instructions (optional)." />

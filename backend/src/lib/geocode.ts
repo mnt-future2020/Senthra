@@ -14,11 +14,22 @@ export interface Coordinates {
   longitude: number;
 }
 
-// Look up a UK postcode's centroid. Returns null when the postcode is empty,
-// unknown, or the service is unreachable.
-export async function geocodePostcode(
+// Administrative detail + centroid for a UK postcode, from postcodes.io. NOTE: this
+// free API returns the area only — there is NO street-level address (house number /
+// street), so City/County can be prefilled but Address line 1 stays manual.
+export interface PostcodeDetails {
+  city: string | null; // admin_district — the town/city (local authority)
+  county: string | null; // admin_county — often null for metropolitan areas
+  latitude: number | null;
+  longitude: number | null;
+}
+
+// Look up a UK postcode. Returns null when empty, unknown, or the service is
+// unreachable (best-effort — never throws). Shared by the coordinate-only caller
+// (geocodePostcode) and the address-autofill endpoint.
+export async function lookupPostcode(
   postcode: string | null | undefined,
-): Promise<Coordinates | null> {
+): Promise<PostcodeDetails | null> {
   const trimmed = postcode?.trim();
   if (!trimmed) return null;
 
@@ -28,16 +39,36 @@ export async function geocodePostcode(
     const res = await fetch(`${POSTCODES_IO}/${encodeURIComponent(trimmed)}`, {
       signal: controller.signal,
     });
-    if (!res.ok) return null; // 404 (unknown postcode) and friends → no coordinates
+    if (!res.ok) return null; // 404 (unknown postcode) and friends → no result
     const body = (await res.json()) as {
-      result?: { latitude?: number | null; longitude?: number | null };
+      result?: {
+        latitude?: number | null;
+        longitude?: number | null;
+        admin_district?: string | null;
+        admin_county?: string | null;
+      };
     };
-    const { latitude, longitude } = body.result ?? {};
-    if (typeof latitude !== "number" || typeof longitude !== "number") return null;
-    return { latitude, longitude };
+    const r = body.result;
+    if (!r) return null;
+    return {
+      city: r.admin_district?.trim() || null,
+      county: r.admin_county?.trim() || null,
+      latitude: typeof r.latitude === "number" ? r.latitude : null,
+      longitude: typeof r.longitude === "number" ? r.longitude : null,
+    };
   } catch {
     return null; // network error / timeout / abort — best-effort, never throws
   } finally {
     clearTimeout(timer);
   }
+}
+
+// Look up a UK postcode's centroid. Returns null when the postcode is empty,
+// unknown, or the service is unreachable.
+export async function geocodePostcode(
+  postcode: string | null | undefined,
+): Promise<Coordinates | null> {
+  const d = await lookupPostcode(postcode);
+  if (!d || typeof d.latitude !== "number" || typeof d.longitude !== "number") return null;
+  return { latitude: d.latitude, longitude: d.longitude };
 }

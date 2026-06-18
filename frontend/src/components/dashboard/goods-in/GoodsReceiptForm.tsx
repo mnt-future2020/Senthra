@@ -10,6 +10,7 @@ import { listIrmItems } from "@/services/irm.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import { inputCls, ghostBtn, labelCls, primaryBtn } from "@/components/ui/styles";
+import { NumberInput } from "@/components/ui/NumberInput";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import type { GoodsReceipt } from "@/types/goods-in";
 import type { PurchaseOrder } from "@/types/purchase-order";
@@ -235,12 +236,12 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
         const created = await grnService.createGoodsReceipt(buildPayload());
         setSaved(true);
         pushToast(`Goods receipt ${created.code} created.`, "success");
-        router.push(`/dashboard/goods-in/${created.code}`);
+        router.replace(`/dashboard/goods-in/${created.code}`);
       } else if (o) {
         await grnService.updateGoodsReceipt(o.id, buildPayload());
         setSaved(true);
         pushToast("Goods receipt updated.", "success");
-        router.push(`/dashboard/goods-in/${o.code}`);
+        router.replace(`/dashboard/goods-in/${o.code}`);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Could not save the goods receipt.";
@@ -361,11 +362,11 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
                       <div className="grid gap-3 sm:grid-cols-4">
                         <div>
                           <label className={labelCls}>Receive qty</label>
-                          <input className={inputCls} type="number" min={0} max={remaining} value={l.receive} onChange={(e) => updateLine(idx, { receive: e.target.value })} placeholder="e.g. 100" />
+                          <NumberInput className={inputCls} min={0} max={remaining} value={l.receive} onChange={(e) => updateLine(idx, { receive: e.target.value })} placeholder="e.g. 100" />
                         </div>
                         <div>
                           <label className={labelCls}>Damaged</label>
-                          <input className={inputCls} type="number" min={0} value={l.damaged} onChange={(e) => updateLine(idx, { damaged: e.target.value })} placeholder="e.g. 2" />
+                          <NumberInput className={inputCls} min={0} value={l.damaged} onChange={(e) => updateLine(idx, { damaged: e.target.value })} placeholder="e.g. 2" />
                         </div>
                         <div>
                           <label className={labelCls}>Accepted</label>
@@ -393,7 +394,7 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
                               <div key={b._key} className="grid gap-2 sm:grid-cols-12">
                                 <input className={`${inputCls} sm:col-span-5`} value={b.batchNumber} onChange={(e) => updateBatch(idx, bi, { batchNumber: e.target.value })} maxLength={120} placeholder="Batch / lot number" />
                                 <input className={`${inputCls} sm:col-span-4`} type="date" value={b.expiryDate} onChange={(e) => updateBatch(idx, bi, { expiryDate: e.target.value })} />
-                                <input className={`${inputCls} sm:col-span-2`} type="number" min={1} value={b.quantity} onChange={(e) => updateBatch(idx, bi, { quantity: e.target.value })} placeholder="Qty" />
+                                <NumberInput className={`${inputCls} sm:col-span-2`} min={1} value={b.quantity} onChange={(e) => updateBatch(idx, bi, { quantity: e.target.value })} placeholder="Qty" />
                                 <button type="button" onClick={() => removeBatch(idx, bi)} className="flex items-center justify-center rounded-lg p-2 text-[var(--muted)] hover:bg-[var(--surface-2)] hover:text-[var(--neg)] sm:col-span-1" aria-label="Remove batch"><Trash2 className="h-4 w-4" /></button>
                               </div>
                             ))}
