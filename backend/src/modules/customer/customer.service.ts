@@ -1420,7 +1420,7 @@ export interface PublicStockEntry {
   warehouseId: string;
   warehouseName: string;
   warehouseCode: string;
-  assignmentId: string;
+  assignmentId: string | null;
   itemName: string;
   sku: string | null;
   categoryId: string | null;
@@ -1569,6 +1569,8 @@ export interface DirectStockEntryInput {
   serialized?: boolean;
   serialNumber?: string;
   highValue?: boolean;
+  thresholdQty?: number;
+  attributes?: Record<string, string>;
 }
 
 export async function createDirectStockEntry(
@@ -1597,12 +1599,12 @@ export async function createDirectStockEntry(
     receivedAt: new Date(),
   });
 
-  await audit.log({
+  audit.record({
     action: "customer_stock_entry.created",
-    actor: actor ?? null,
+    actor,
     targetType: "customer_stock_entry",
     targetId: entry.id,
-    details: { itemName: input.itemName, quantity: input.quantity, warehouseId: input.warehouseId, direct: true },
+    metadata: { itemName: input.itemName, quantity: input.quantity, warehouseId: input.warehouseId, direct: true },
   });
 
   return toStockEntry(entry as StockEntryRow);

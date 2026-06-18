@@ -33,7 +33,9 @@ router.get(
 
 router.post(
   "/",
-  requirePermission("supplier_types.create"),
+  // Inline-create is allowed for supplier creators/editors too (no Settings round-trip),
+  // mirroring how the type list is already readable by them. Rename/delete stay restricted.
+  requireAnyPermission("supplier_types.create", "suppliers.create", "suppliers.edit"),
   writeLimiter,
   validateBody(createSupplierTypeSchema),
   supplierTypeController.createSupplierType,

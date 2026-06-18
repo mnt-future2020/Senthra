@@ -5,8 +5,8 @@ import { useRouter } from "next/navigation";
 import { Loader2, Plus, Trash2 } from "lucide-react";
 
 import * as irmService from "@/services/irm.service";
-import { listIrmTypes } from "@/services/irm-type.service";
-import { listIrmCategories } from "@/services/irm-category.service";
+import { listIrmTypes, createIrmType } from "@/services/irm-type.service";
+import { listIrmCategories, createIrmCategory } from "@/services/irm-category.service";
 import { listSuppliers } from "@/services/supplier.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
@@ -15,6 +15,10 @@ import type { IrmType } from "@/types/irm-type";
 import type { IrmCategory } from "@/types/irm-category";
 import type { Supplier } from "@/types/supplier";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
+import { firstActiveId } from "@/lib/utils";
+import { useAuth } from "@/hooks/useAuth";
+import { NumberInput } from "@/components/ui/NumberInput";
+import { CreatableSelect } from "@/components/ui/CreatableSelect";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import type { UserStatus } from "@/types/user";
@@ -41,6 +45,7 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
   const router = useRouter();
   const guard = useNavigationGuard();
   const { pushToast } = useDashboard();
+  const { can } = useAuth();
 
   const o = item;
   const [name, setName] = React.useState(o?.name ?? "");
@@ -99,7 +104,7 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
       (t) => {
         if (!active) return;
         setTypes(t);
-        if (mode === "create") setTypeId((cur) => cur || t.find((x) => x.status === "active")?.id || "");
+        if (mode === "create") setTypeId((cur) => cur || firstActiveId(t));
       },
       () => {},
     );
@@ -107,7 +112,7 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
       (c) => {
         if (!active) return;
         setCategories(c);
-        if (mode === "create") setIrmCategoryId((cur) => cur || c.find((x) => x.status === "active")?.id || "");
+        if (mode === "create") setIrmCategoryId((cur) => cur || firstActiveId(c));
       },
       () => {},
     );
@@ -169,8 +174,10 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
     () =>
       JSON.stringify({
         name: o?.name ?? "",
-        typeId: o?.typeId ?? "",
-        irmCategoryId: o?.irmCategoryId ?? "",
+        // On create, Type/Category are auto-preselected to the first active option — the
+        // baseline must mirror that default so the preselect alone isn't read as an edit.
+        typeId: mode === "create" ? firstActiveId(types) : (o?.typeId ?? ""),
+        irmCategoryId: mode === "create" ? firstActiveId(categories) : (o?.irmCategoryId ?? ""),
         description: o?.description ?? "",
         brand: o?.brand ?? "",
         manufacturer: o?.manufacturer ?? "",
@@ -207,7 +214,7 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
               }))
             : [{ supplierId: "", isPrimary: true, priority: "1", supplierSku: "", leadTimeDays: "" }],
       }),
-    [o],
+    [o, mode, types, categories],
   );
   const isDirty = !saved && liveKey !== initialKey;
   useReportDirty("irm-form", isDirty);
@@ -326,12 +333,12 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
         const created = await irmService.createIrmItem(basePayload());
         setSaved(true);
         pushToast(`Item ${created.code} created.`, "success");
-        router.push(`/dashboard/irm/${created.code}`);
+        router.replace(`/dashboard/irm/${created.code}`);
       } else if (o) {
         await irmService.updateIrmItem(o.id, basePayload());
         setSaved(true);
         pushToast("Item updated.", "success");
-        router.push(`/dashboard/irm/${o.code}`);
+        router.replace(`/dashboard/irm/${o.code}`);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Could not save the item.";
@@ -378,27 +385,49 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
                 <label className={labelCls}>
                   Type<RequiredMark />
                 </label>
-                <select className={inputCls} value={typeId} onChange={(e) => { setTypeId(e.target.value); clearError("typeId"); }} aria-invalid={Boolean(errors.typeId)}>
-                  <option value="">— Select a type —</option>
-                  {typeOptions.map((t) => (
-                    <option key={t.id} value={t.id}>{t.name}</option>
-                  ))}
-                </select>
+                <CreatableSelect
+                  value={typeId}
+                  onChange={(id) => { setTypeId(id); clearError("typeId"); }}
+                  options={typeOptions}
+                  onCreate={async (name) => {
+                    const t = await createIrmType({ name });
+                    setTypes((prev) => [...prev, t]);
+                    return { id: t.id, name: t.name };
+                  }}
+                  canCreate={can("irm_types.create") || can("irm.create") || can("irm.edit")}
+                  canManage={can("irm_types.edit") || can("irm_types.delete")}
+                  manageHref="/dashboard/irm?tab=types"
+                  noun="type"
+                  required
+                  invalid={Boolean(errors.typeId)}
+                  describedBy={errors.typeId ? "err-typeId" : undefined}
+                />
                 <FieldError id="err-typeId" message={errors.typeId} />
-                <p className="mt-1.5 text-[11px] text-[var(--faint)]">What kind of item this is. Manage the list in Settings → IRM Types.</p>
+                <p className="mt-1.5 text-[11px] text-[var(--faint)]">What kind of item this is.</p>
               </div>
               <div>
                 <label className={labelCls}>
                   Category<RequiredMark />
                 </label>
-                <select className={inputCls} value={irmCategoryId} onChange={(e) => { setIrmCategoryId(e.target.value); clearError("irmCategoryId"); }} aria-invalid={Boolean(errors.irmCategoryId)}>
-                  <option value="">— Select a category —</option>
-                  {categoryOptions.map((c) => (
-                    <option key={c.id} value={c.id}>{c.name}</option>
-                  ))}
-                </select>
+                <CreatableSelect
+                  value={irmCategoryId}
+                  onChange={(id) => { setIrmCategoryId(id); clearError("irmCategoryId"); }}
+                  options={categoryOptions}
+                  onCreate={async (name) => {
+                    const c = await createIrmCategory({ name });
+                    setCategories((prev) => [...prev, c]);
+                    return { id: c.id, name: c.name };
+                  }}
+                  canCreate={can("irm_categories.create") || can("irm.create") || can("irm.edit")}
+                  canManage={can("irm_categories.edit") || can("irm_categories.delete")}
+                  manageHref="/dashboard/irm?tab=categories"
+                  noun="category"
+                  required
+                  invalid={Boolean(errors.irmCategoryId)}
+                  describedBy={errors.irmCategoryId ? "err-irmCategoryId" : undefined}
+                />
                 <FieldError id="err-irmCategoryId" message={errors.irmCategoryId} />
-                <p className="mt-1.5 text-[11px] text-[var(--faint)]">The material / domain category. Manage in Settings → IRM Categories.</p>
+                <p className="mt-1.5 text-[11px] text-[var(--faint)]">The material / domain category.</p>
               </div>
               <div>
                 <label className={labelCls}>Brand</label>
@@ -461,15 +490,15 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
                     </div>
                     <div className="sm:col-span-2">
                       <label className={labelCls}>Priority</label>
-                      <input className={inputCls} type="number" min={0} value={row.priority} onChange={(e) => updateRow(idx, { priority: e.target.value })} placeholder="1" />
+                      <NumberInput className={inputCls} min={0} value={row.priority} onChange={(e) => updateRow(idx, { priority: e.target.value })} placeholder="1" />
                     </div>
                     <div className="sm:col-span-2">
-                      <label className={labelCls}>Supplier SKU</label>
+                      <label className={labelCls}>Supplier item code</label>
                       <input className={inputCls} value={row.supplierSku} onChange={(e) => updateRow(idx, { supplierSku: e.target.value })} maxLength={80} placeholder="Supplier's code" />
                     </div>
                     <div className="sm:col-span-2">
                       <label className={labelCls}>Lead time</label>
-                      <input className={inputCls} type="number" min={0} max={365} value={row.leadTimeDays} onChange={(e) => updateRow(idx, { leadTimeDays: e.target.value })} placeholder="days" />
+                      <NumberInput className={inputCls} min={0} max={365} value={row.leadTimeDays} onChange={(e) => updateRow(idx, { leadTimeDays: e.target.value })} placeholder="days" />
                     </div>
                     <div className="flex items-end justify-between sm:col-span-1">
                       <button
@@ -513,11 +542,11 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
               </div>
               <div>
                 <label className={labelCls}>Pack size</label>
-                <input className={inputCls} type="number" min={1} value={packSize} onChange={(e) => setPackSize(e.target.value)} placeholder="e.g. 1" />
+                <NumberInput className={inputCls} min={1} value={packSize} onChange={(e) => setPackSize(e.target.value)} placeholder="e.g. 1" />
               </div>
               <div>
                 <label className={labelCls}>Conversion ratio</label>
-                <input className={inputCls} type="number" min={0} step="any" value={conversionRatio} onChange={(e) => setConversionRatio(e.target.value)} placeholder="e.g. 305" />
+                <NumberInput className={inputCls} min={0} step="any" value={conversionRatio} onChange={(e) => setConversionRatio(e.target.value)} placeholder="e.g. 305" />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Base units in one pack — e.g. a 305 m box = 305.</p>
               </div>
             </div>
@@ -527,29 +556,29 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
             <div className="grid gap-4 sm:grid-cols-3">
               <div>
                 <label className={labelCls}>Minimum stock</label>
-                <input className={inputCls} type="number" min={0} value={minimumStock} onChange={(e) => { setMinimumStock(e.target.value); clearError("maximumStock"); }} placeholder="e.g. 50" />
+                <NumberInput className={inputCls} min={0} value={minimumStock} onChange={(e) => { setMinimumStock(e.target.value); clearError("maximumStock"); }} placeholder="e.g. 50" />
               </div>
               <div>
                 <label className={labelCls}>Reorder level</label>
-                <input className={inputCls} type="number" min={0} value={reorderLevel} onChange={(e) => setReorderLevel(e.target.value)} placeholder="e.g. 100" />
+                <NumberInput className={inputCls} min={0} value={reorderLevel} onChange={(e) => setReorderLevel(e.target.value)} placeholder="e.g. 100" />
               </div>
               <div>
                 <label className={labelCls}>Reorder quantity</label>
-                <input className={inputCls} type="number" min={0} value={reorderQuantity} onChange={(e) => setReorderQuantity(e.target.value)} placeholder="e.g. 200" />
+                <NumberInput className={inputCls} min={0} value={reorderQuantity} onChange={(e) => setReorderQuantity(e.target.value)} placeholder="e.g. 200" />
               </div>
               <div>
                 <label className={labelCls}>Maximum stock</label>
-                <input className={inputCls} type="number" min={0} value={maximumStock} onChange={(e) => { setMaximumStock(e.target.value); clearError("maximumStock"); }} placeholder="e.g. 500" aria-invalid={Boolean(errors.maximumStock)} />
+                <NumberInput className={inputCls} min={0} value={maximumStock} onChange={(e) => { setMaximumStock(e.target.value); clearError("maximumStock"); }} placeholder="e.g. 500" aria-invalid={Boolean(errors.maximumStock)} />
                 <FieldError id="err-maximumStock" message={errors.maximumStock} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Must be greater than or equal to minimum stock.</p>
               </div>
               <div>
                 <label className={labelCls}>Safety stock</label>
-                <input className={inputCls} type="number" min={0} value={safetyStock} onChange={(e) => setSafetyStock(e.target.value)} placeholder="e.g. 25" />
+                <NumberInput className={inputCls} min={0} value={safetyStock} onChange={(e) => setSafetyStock(e.target.value)} placeholder="e.g. 25" />
               </div>
               <div>
                 <label className={labelCls}>Critical level</label>
-                <input className={inputCls} type="number" min={0} value={criticalLevel} onChange={(e) => setCriticalLevel(e.target.value)} placeholder="e.g. 10" />
+                <NumberInput className={inputCls} min={0} value={criticalLevel} onChange={(e) => setCriticalLevel(e.target.value)} placeholder="e.g. 10" />
               </div>
             </div>
           </FormSection>
@@ -558,7 +587,7 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
             <div className="grid gap-4 sm:grid-cols-3">
               <div>
                 <label className={labelCls}>Standard cost ({currency === "EUR" ? "€" : "£"})</label>
-                <input className={inputCls} type="number" min={0} step="0.01" value={standardCost} onChange={(e) => { setStandardCost(e.target.value); clearError("standardCost"); }} placeholder="e.g. 42.50" aria-invalid={Boolean(errors.standardCost)} />
+                <NumberInput className={inputCls} min={0} step="0.01" value={standardCost} onChange={(e) => { setStandardCost(e.target.value); clearError("standardCost"); }} placeholder="e.g. 42.50" aria-invalid={Boolean(errors.standardCost)} />
                 <FieldError id="err-standardCost" message={errors.standardCost} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Unit cost excluding VAT. Never shown to customers.</p>
               </div>
@@ -573,7 +602,7 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
               </div>
               <div>
                 <label className={labelCls}>VAT rate (%)</label>
-                <input className={inputCls} type="number" min={0} max={100} step="0.01" value={vatRatePercent} onChange={(e) => { setVatRatePercent(e.target.value); clearError("vatRatePercent"); }} placeholder="e.g. 20" aria-invalid={Boolean(errors.vatRatePercent)} />
+                <NumberInput className={inputCls} min={0} max={100} step="0.01" value={vatRatePercent} onChange={(e) => { setVatRatePercent(e.target.value); clearError("vatRatePercent"); }} placeholder="e.g. 20" aria-invalid={Boolean(errors.vatRatePercent)} />
                 <FieldError id="err-vatRatePercent" message={errors.vatRatePercent} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">UK standard rate is 20%. Use 5% or 0% where applicable.</p>
               </div>

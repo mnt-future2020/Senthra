@@ -12,6 +12,7 @@ import { useDashboard } from "@/hooks/useDashboard";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import { inputCls, ghostBtn, labelCls, primaryBtn } from "@/components/ui/styles";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
+import { NumberInput } from "@/components/ui/NumberInput";
 import { DISPATCH_REASONS, DISPATCH_REASON_LABELS } from "./goodsOutStatus";
 import type { GoodsOut } from "@/types/goods-out";
 
@@ -168,12 +169,12 @@ export function GoodsOutForm({ mode, order }: { mode: "create" | "edit"; order?:
         const created = await goodsOutService.createGoodsOut(buildPayload());
         setSaved(true);
         pushToast(`Dispatch ${created.code} created.`, "success");
-        router.push(`/dashboard/goods-out/${created.code}`);
+        router.replace(`/dashboard/goods-out/${created.code}`);
       } else if (o) {
         await goodsOutService.updateGoodsOut(o.id, buildPayload());
         setSaved(true);
         pushToast("Dispatch updated.", "success");
-        router.push(`/dashboard/goods-out/${o.code}`);
+        router.replace(`/dashboard/goods-out/${o.code}`);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Could not save the dispatch.";
@@ -278,7 +279,7 @@ export function GoodsOutForm({ mode, order }: { mode: "create" | "edit"; order?:
                     </div>
                     <div className="sm:col-span-2">
                       <label className={labelCls}>Quantity</label>
-                      <input className={inputCls} type="number" min={1} step={1} max={l.available ?? undefined} value={l.quantity} onChange={(e) => { setLine(l._key, { quantity: e.target.value }); touch(); clearError("items"); }} placeholder="0" />
+                      <NumberInput className={inputCls} min={1} step={1} max={l.available ?? undefined} value={l.quantity} onChange={(e) => { setLine(l._key, { quantity: e.target.value }); touch(); clearError("items"); }} placeholder="0" />
                     </div>
                     <div className="sm:col-span-3">
                       <label className={labelCls}>Line note</label>

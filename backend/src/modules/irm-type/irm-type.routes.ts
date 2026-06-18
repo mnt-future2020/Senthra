@@ -29,7 +29,9 @@ router.get(
 
 router.post(
   "/",
-  requirePermission("irm_types.create"),
+  // Inline-create is allowed for IRM item creators/editors too (no Settings round-trip),
+  // mirroring how the type list is already readable by them. Rename/delete stay restricted.
+  requireAnyPermission("irm_types.create", "irm.create", "irm.edit"),
   writeLimiter,
   validateBody(createIrmTypeSchema),
   irmTypeController.createIrmType,

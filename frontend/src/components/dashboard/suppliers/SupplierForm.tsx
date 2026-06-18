@@ -5,12 +5,17 @@ import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
 
 import * as supplierService from "@/services/supplier.service";
-import { listSupplierTypes } from "@/services/supplier-type.service";
+import { listSupplierTypes, createSupplierType } from "@/services/supplier-type.service";
 import { useDashboard } from "@/hooks/useDashboard";
+import { useAuth } from "@/hooks/useAuth";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import type { Supplier, SupplierOwner } from "@/types/supplier";
 import type { SupplierType } from "@/types/supplier-type";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
+import { firstActiveId } from "@/lib/utils";
+import { NumberInput } from "@/components/ui/NumberInput";
+import { PostcodeField } from "@/components/ui/PostcodeField";
+import { CreatableSelect } from "@/components/ui/CreatableSelect";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { EMAIL_RE, UK_POSTCODE_RE, isPhone } from "@/lib/validation";
@@ -53,6 +58,7 @@ export function SupplierForm({ mode, supplier }: { mode: "create" | "edit"; supp
   const router = useRouter();
   const guard = useNavigationGuard();
   const { pushToast } = useDashboard();
+  const { can } = useAuth();
 
   const o = supplier;
   const [name, setName] = React.useState(o?.name ?? "");
@@ -107,7 +113,7 @@ export function SupplierForm({ mode, supplier }: { mode: "create" | "edit"; supp
         setTypes(t);
         // On create, preselect the first ACTIVE type so the required field starts valid.
         if (mode === "create") {
-          setTypeId((cur) => cur || t.find((x) => x.status === "active")?.id || "");
+          setTypeId((cur) => cur || firstActiveId(t));
         }
       },
       () => {},
@@ -138,11 +144,14 @@ export function SupplierForm({ mode, supplier }: { mode: "create" | "edit"; supp
     return owners;
   }, [owners, o]);
 
+  // On create the Type is auto-preselected to the first active option, so the baseline
+  // must hold that same default — otherwise the preselect alone would read as a user edit.
+  const baselineTypeId = mode === "create" ? firstActiveId(types) : (o?.typeId ?? "");
   const isDirty =
     !saved &&
     (name !== (o?.name ?? "") ||
       legalName !== (o?.legalName ?? "") ||
-      typeId !== (o?.typeId ?? "") ||
+      typeId !== baselineTypeId ||
       description !== (o?.description ?? "") ||
       status !== (o?.status ?? "active") ||
       companyRegistrationNumber !== (o?.companyRegistrationNumber ?? "") ||
@@ -252,7 +261,7 @@ export function SupplierForm({ mode, supplier }: { mode: "create" | "edit"; supp
         });
         setSaved(true);
         pushToast(`Supplier ${created.code} created.`, "success");
-        router.push(`/dashboard/suppliers/${created.code}`);
+        router.replace(`/dashboard/suppliers/${created.code}`);
       } else if (o) {
         // Update sends fields as their current value ("" clears).
         await supplierService.updateSupplier(o.id, {
@@ -285,7 +294,7 @@ export function SupplierForm({ mode, supplier }: { mode: "create" | "edit"; supp
         });
         setSaved(true);
         pushToast("Supplier updated.", "success");
-        router.push(`/dashboard/suppliers/${o.code}`);
+        router.replace(`/dashboard/suppliers/${o.code}`);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Could not save the supplier.";
@@ -352,22 +361,26 @@ export function SupplierForm({ mode, supplier }: { mode: "create" | "edit"; supp
                 <label className={labelCls}>
                   Type<RequiredMark />
                 </label>
-                <select
-                  className={inputCls}
+                <CreatableSelect
                   value={typeId}
-                  onChange={(e) => {
-                    setTypeId(e.target.value);
+                  onChange={(id) => {
+                    setTypeId(id);
                     clearError("typeId");
                   }}
-                  aria-invalid={Boolean(errors.typeId)}
-                >
-                  <option value="">— Select a type —</option>
-                  {typeOptions.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.name}
-                    </option>
-                  ))}
-                </select>
+                  options={typeOptions}
+                  onCreate={async (name) => {
+                    const t = await createSupplierType({ name });
+                    setTypes((prev) => [...prev, t]);
+                    return { id: t.id, name: t.name };
+                  }}
+                  canCreate={can("supplier_types.create") || can("suppliers.create") || can("suppliers.edit")}
+                  canManage={can("supplier_types.edit") || can("supplier_types.delete")}
+                  manageHref="/dashboard/suppliers?tab=types"
+                  noun="type"
+                  required
+                  invalid={Boolean(errors.typeId)}
+                  describedBy={errors.typeId ? "err-typeId" : undefined}
+                />
                 <FieldError id="err-typeId" message={errors.typeId} />
               </div>
               <div>
@@ -470,23 +483,21 @@ export function SupplierForm({ mode, supplier }: { mode: "create" | "edit"; supp
                 <label className={labelCls}>County</label>
                 <input className={inputCls} value={county} onChange={(e) => setCounty(e.target.value)} maxLength={80} />
               </div>
-              <div>
-                <label className={labelCls}>
-                  Postcode<RequiredMark />
-                </label>
-                <input
-                  className={inputCls}
-                  value={postcode}
-                  onChange={(e) => {
-                    setPostcode(e.target.value);
-                    clearError("postcode");
-                  }}
-                  placeholder="e.g. LS1 4DY"
-                  maxLength={12}
-                  aria-invalid={Boolean(errors.postcode)}
-                />
-                <FieldError id="err-postcode" message={errors.postcode} />
-              </div>
+              <PostcodeField
+                value={postcode}
+                onChange={(v) => {
+                  setPostcode(v);
+                  clearError("postcode");
+                }}
+                setCity={setCity}
+                setCounty={setCounty}
+                setCountry={setCountry}
+                onResolved={() => {
+                  clearError("city");
+                  clearError("country");
+                }}
+                error={errors.postcode}
+              />
               <div>
                 <label className={labelCls}>
                   Country<RequiredMark />
@@ -611,9 +622,8 @@ export function SupplierForm({ mode, supplier }: { mode: "create" | "edit"; supp
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className={labelCls}>Lead time (days)</label>
-                <input
+                <NumberInput
                   className={inputCls}
-                  type="number"
                   min={0}
                   max={365}
                   value={leadTimeDays}
