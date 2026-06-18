@@ -17,7 +17,7 @@ import {
   FolderKanban,
   MapPin,
   ClipboardList,
-  // BarChart3, // Hidden for client demo — used by the portal "Reports" nav item below.
+  BarChart3,
   Warehouse,
   Truck,
   PackageSearch,
@@ -73,8 +73,7 @@ const CUSTOMER_NAV: NavItem[] = [
   { href: "/dashboard/portal/sites", label: "Sites", icon: MapPin, perms: [] },
   { href: "/dashboard/stock", label: "My Stock", icon: Package, perms: [] },
   { href: "/dashboard/portal/requests", label: "Stock Requests", icon: ClipboardList, perms: [] },
-  // Hidden for client demo (re-enable after launch — the Reports page shows "coming soon").
-  // { href: "/dashboard/portal/reports", label: "Reports", icon: BarChart3, perms: [] },
+  { href: "/dashboard/portal/reports", label: "Reports", icon: BarChart3, perms: [] },
   { href: "/dashboard/account", label: "Settings", icon: Settings, perms: [] },
 ];
 
