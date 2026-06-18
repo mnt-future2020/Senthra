@@ -12,6 +12,10 @@ vi.mock("./purchase-order.repository.js", () => ({
   lineReceiptTotalsTx: vi.fn(),
   incrementLineReceivedTx: vi.fn(),
   setStatusTx: vi.fn(),
+  // Attachments.
+  addAttachment: vi.fn(),
+  findAttachment: vi.fn(),
+  removeAttachment: vi.fn(),
 }));
 vi.mock("#modules/supplier/supplier.service.js", () => ({ requireActiveSupplier: vi.fn() }));
 vi.mock("#modules/warehouse/warehouse.service.js", () => ({ requireActiveWarehouse: vi.fn() }));
@@ -25,7 +29,10 @@ import * as supplierService from "#modules/supplier/supplier.service.js";
 import * as warehouseService from "#modules/warehouse/warehouse.service.js";
 import * as irmService from "#modules/irm/irm.service.js";
 import * as audit from "#modules/audit/audit.service.js";
+import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
+import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
 import {
+  addAttachment,
   applyGoodsReceipt,
   approvePurchaseOrder,
   cancelPurchaseOrder,
@@ -33,6 +40,7 @@ import {
   createPurchaseOrder,
   deletePurchaseOrder,
   rejectPurchaseOrder,
+  removeAttachment,
   sendPurchaseOrder,
   submitPurchaseOrder,
   updatePurchaseOrder,
@@ -262,5 +270,36 @@ describe("applyGoodsReceipt — terminal-state guard (Goods In seam)", () => {
     await applyGoodsReceipt(tx, PO_ID, [{ purchaseOrderItemId: LINE_ID, receivedDelta: 5 }]);
     expect(mockSetStatus).toHaveBeenCalledWith(tx, PO_ID, "fully_received");
     expect(auditActions()).toContain("purchase_order.fully_received");
+  });
+});
+
+describe("attachments — terminal-state guard", () => {
+  const mockAddAtt = poRepo.addAttachment as ReturnType<typeof vi.fn>;
+  const mockFindAtt = poRepo.findAttachment as ReturnType<typeof vi.fn>;
+  const mockRemoveAtt = poRepo.removeAttachment as ReturnType<typeof vi.fn>;
+  const mockCreds = getCloudinaryCreds as ReturnType<typeof vi.fn>;
+  const mockUpload = uploadFileToCloudinary as ReturnType<typeof vi.fn>;
+  const att = { label: "Quote", fileName: "q.pdf", fileType: "pdf", fileSizeBytes: 1000, data: "data:application/pdf;base64,AAAA" } as Parameters<typeof addAttachment>[1];
+
+  it("adds an attachment on a SENT (non-terminal) PO", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "sent" }));
+    mockCreds.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
+    mockUpload.mockResolvedValue("https://cdn/q.pdf");
+    await addAttachment(PO_ID, att, { type: "admin", email: "x@x.com" });
+    expect(mockAddAtt).toHaveBeenCalledTimes(1);
+    expect(auditActions()).toContain("purchase_order.attachment_added");
+  });
+
+  it("blocks adding an attachment on a CLOSED PO", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "closed" }));
+    await expect(addAttachment(PO_ID, att)).rejects.toThrow(/closed or cancelled/i);
+    expect(mockAddAtt).not.toHaveBeenCalled();
+  });
+
+  it("blocks removing an attachment on a CANCELLED PO", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "cancelled" }));
+    await expect(removeAttachment(PO_ID, "att1")).rejects.toThrow(/closed or cancelled/i);
+    expect(mockFindAtt).not.toHaveBeenCalled();
+    expect(mockRemoveAtt).not.toHaveBeenCalled();
   });
 });

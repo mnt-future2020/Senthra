@@ -165,6 +165,11 @@ export function countByWarehouse(warehouseId: string): Promise<number> {
 export function countEngineerStockWithStockByIrmItem(irmItemId: string): Promise<number> {
   return prisma.engineerStockBalance.count({ where: { irmItemId, quantityOnHand: { gt: 0 } } });
 }
+// How many distinct items an engineer still HOLDS (quantityOnHand > 0). Used to block
+// deactivating an engineer who hasn't returned their stock (User status guard).
+export function countEngineerHeldStock(engineerId: string): Promise<number> {
+  return prisma.engineerStockBalance.count({ where: { engineerId, quantityOnHand: { gt: 0 } } });
+}
 
 // --- code allocation (atomic Counter, prefix "GDN") -----------------------------------------
 const GDN_CODE_PREFIX = "GDN";

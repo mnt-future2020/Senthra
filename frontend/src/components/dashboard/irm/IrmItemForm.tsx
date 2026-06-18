@@ -69,7 +69,6 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
   const [trackInventory, setTrackInventory] = React.useState(o?.trackInventory ?? true);
   const [trackSerialNumbers, setTrackSerialNumbers] = React.useState(o?.trackSerialNumbers ?? false);
   const [trackBatchNumbers, setTrackBatchNumbers] = React.useState(o?.trackBatchNumbers ?? false);
-  const [allowNegativeStock, setAllowNegativeStock] = React.useState(o?.allowNegativeStock ?? false);
   const [ownerUserId, setOwnerUserId] = React.useState(o?.ownerUserId ?? "");
   const [notes, setNotes] = React.useState(o?.notes ?? "");
 
@@ -162,7 +161,7 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
     name, typeId, irmCategoryId, description, brand, manufacturer, mpn, status, sku, barcode, qrCode,
     baseUnit, packSize, conversionRatio, minimumStock, reorderLevel, reorderQuantity, maximumStock, safetyStock,
     criticalLevel, standardCost, currency, vatRatePercent, trackInventory, trackSerialNumbers, trackBatchNumbers,
-    allowNegativeStock, ownerUserId, notes, supplierRows,
+    ownerUserId, notes, supplierRows,
   });
   // Initial snapshot derived from the item prop (same shape/order as liveKey), so a
   // change to any field flips dirty. Computed from `o`, not a render-time ref read.
@@ -195,7 +194,6 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
         trackInventory: o?.trackInventory ?? true,
         trackSerialNumbers: o?.trackSerialNumbers ?? false,
         trackBatchNumbers: o?.trackBatchNumbers ?? false,
-        allowNegativeStock: o?.allowNegativeStock ?? false,
         ownerUserId: o?.ownerUserId ?? "",
         notes: o?.notes ?? "",
         supplierRows:
@@ -308,7 +306,6 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
     trackInventory,
     trackSerialNumbers,
     trackBatchNumbers,
-    allowNegativeStock,
     ownerUserId,
     notes: notes.trim(),
   });
@@ -589,7 +586,6 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
                 { label: "Track inventory", checked: trackInventory, set: setTrackInventory, hint: "Keep stock balances for this item once inventory is live." },
                 { label: "Track serial numbers", checked: trackSerialNumbers, set: setTrackSerialNumbers, hint: "Each unit is tracked by a unique serial number." },
                 { label: "Track batch numbers", checked: trackBatchNumbers, set: setTrackBatchNumbers, hint: "Units are grouped and tracked by batch / lot." },
-                { label: "Allow negative stock", checked: allowNegativeStock, set: setAllowNegativeStock, hint: "Permit issuing this item below zero on-hand." },
               ].map((f) => (
                 <label key={f.label} className="flex items-start gap-2.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/40 px-3.5 py-3">
                   <input type="checkbox" checked={f.checked} onChange={(e) => f.set(e.target.checked)} className="mt-0.5 h-4 w-4 accent-[var(--accent)]" />

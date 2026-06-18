@@ -5,6 +5,8 @@ import type { SupplierWithRelations } from "./supplier.repository.js";
 import * as supplierTypeService from "#modules/supplier-type/supplier-type.service.js";
 import * as userRepo from "#modules/user/user.repository.js";
 import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
+import * as irmRepo from "#modules/irm/irm.repository.js";
+import * as grnRepo from "#modules/goods-in/goods-in.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
@@ -345,10 +347,12 @@ export async function updateSupplier(
 // supplier. Each procurement-era module registers one here; all are no-ops today.
 type DependencyChecker = { label: string; count: (supplierId: string) => Promise<number> };
 const DELETE_DEPENDENCY_CHECKERS: DependencyChecker[] = [
-  // FUTURE: { label: "catalogue items", count: (id) => irmRepo.countBySupplier(id) },
+  { label: "catalogue items", count: (id) => irmRepo.countBySupplier(id) },
   { label: "purchase orders", count: (id) => poRepo.countBySupplier(id) },
-  // FUTURE: { label: "goods in", count: (id) => goodsInRepo.countBySupplier(id) },
-  // FUTURE: { label: "inventory", count: (id) => inventoryRepo.countBySupplier(id) },
+  { label: "goods in", count: (id) => grnRepo.countBySupplier(id) },
+  // Inventory is intentionally NOT checked here: InventoryBalance has no supplierId
+  // (stock is tracked per item × warehouse, not per supplier), so an inventory-by-supplier
+  // guard would be both impossible to express and redundant with the goods-in check above.
 ];
 
 // Blocks deletion when ANY dependency still references the supplier. No-op today (the

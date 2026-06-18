@@ -441,8 +441,17 @@ export async function deletePurchaseOrder(id: string, actor?: AuditActor): Promi
 }
 
 // ── Attachments ──────────────────────────────────────────────────────────────────────────────
+// A PO is immutable once it reaches a terminal state — attachments can't be changed on a
+// closed or cancelled order (consistent with the draft-only edit lock on the header/lines).
+function assertAttachmentsEditable(status: string): void {
+  if (status === "closed" || status === "cancelled") {
+    throw conflict("Attachments can't be changed on a closed or cancelled purchase order.");
+  }
+}
+
 export async function addAttachment(poId: string, input: PoAttachmentInput, actor?: AuditActor): Promise<PublicPurchaseOrder> {
   const po = await loadOrThrow(poId);
+  assertAttachmentsEditable(po.status);
   const creds = await getCloudinaryCreds();
   if (!creds) throw badRequest("File uploads aren't configured. Add Cloudinary credentials in Settings first.");
   const url = await uploadFileToCloudinary(input.data, randomUUID(), creds);
@@ -461,6 +470,7 @@ export async function addAttachment(poId: string, input: PoAttachmentInput, acto
 
 export async function removeAttachment(poId: string, attachmentId: string, actor?: AuditActor): Promise<PublicPurchaseOrder> {
   const po = await loadOrThrow(poId);
+  assertAttachmentsEditable(po.status);
   const att = await poRepo.findAttachment(attachmentId);
   if (!att || att.purchaseOrderId !== poId) throw notFound("Attachment not found.");
   await poRepo.removeAttachment(attachmentId);

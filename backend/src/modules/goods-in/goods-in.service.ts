@@ -483,6 +483,9 @@ export async function deleteGoodsReceipt(id: string, actor?: AuditActor): Promis
 // ── Attachments ──────────────────────────────────────────────────────────────────────────────
 export async function addAttachment(grnId: string, input: GRNAttachmentInput, actor?: AuditActor): Promise<PublicGoodsReceipt> {
   const grn = await loadOrThrow(grnId);
+  // Attachments are editable on a DRAFT receipt only — a completed or cancelled GRN is
+  // immutable (mirrors the edit/delete guards).
+  if (grn.status !== "draft") throw conflict("Only draft goods receipts can have attachments changed.");
   const creds = await getCloudinaryCreds();
   if (!creds) throw badRequest("File uploads aren't configured. Add Cloudinary credentials in Settings first.");
   const url = await uploadFileToCloudinary(input.data, randomUUID(), creds, "senthra/goods-in");
@@ -501,6 +504,7 @@ export async function addAttachment(grnId: string, input: GRNAttachmentInput, ac
 
 export async function removeAttachment(grnId: string, attachmentId: string, actor?: AuditActor): Promise<PublicGoodsReceipt> {
   const grn = await loadOrThrow(grnId);
+  if (grn.status !== "draft") throw conflict("Only draft goods receipts can have attachments changed.");
   const att = await grnRepo.findAttachment(attachmentId);
   if (!att || att.goodsReceiptId !== grnId) throw notFound("Attachment not found.");
   await grnRepo.removeAttachment(attachmentId);

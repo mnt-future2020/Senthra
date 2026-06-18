@@ -80,6 +80,13 @@ model Role {
   description String?
   isSystem    Boolean  @default(false) // seeded role → cannot be deleted
   permissions String[] @default([]) // RESERVED for future RBAC (empty for now)
+  // Field-operations capability: members of this role may HOLD field stock (the
+  // Goods Out dispatch recipient + future Van Inventory / Engineer Usage / Returns).
+  // NULLABLE on purpose: this field was ADDED to an existing collection, and Prisma+MongoDB
+  // throws reading a doc that LACKS a non-optional field (same reason CustomerStockRequest
+  // keeps its new fields nullable). Absent/null is treated as "can't hold stock" everywhere,
+  // and @default(false) stamps new rows; the seed grants it to field-operations roles.
+  canHoldStock Boolean? @default(false)
   sortOrder   Int      @default(0)
   users       User[]
   createdAt   DateTime @default(now())

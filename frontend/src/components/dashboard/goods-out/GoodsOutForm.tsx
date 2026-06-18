@@ -87,6 +87,16 @@ export function GoodsOutForm({ mode, order }: { mode: "create" | "edit"; order?:
     );
   }, []);
 
+  // On opening an EXISTING draft, load each line's availability immediately (once) so the hint
+  // and the client-side over-quantity guard are correct without the user re-picking anything.
+  // Lines open seeded with `available: null`; without this they'd show "no stock" until touched.
+  const didLoadInitialAvail = React.useRef(false);
+  React.useEffect(() => {
+    if (didLoadInitialAvail.current || !o || !warehouseId) return;
+    didLoadInitialAvail.current = true;
+    lines.forEach((l) => { if (l.irmItemId) loadAvailability(l._key, l.irmItemId, warehouseId); });
+  }, [o, warehouseId, lines, loadAvailability]);
+
   // When the warehouse changes, re-check availability for every line that has an item.
   const onPickWarehouse = (whId: string) => {
     setWarehouseId(whId);
