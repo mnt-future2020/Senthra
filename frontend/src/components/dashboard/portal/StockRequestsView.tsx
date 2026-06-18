@@ -98,7 +98,10 @@ export function StockRequestsView() {
           {requests.map((r) => (
             <tr key={r.id} className="border-b border-[var(--border)] align-top last:border-0">
               <td className="px-4 py-3">
-                <div className="font-semibold text-[var(--ink)]">{r.name}</div>
+                <div className="font-semibold text-[var(--ink)]">{r.editedName ?? r.name}</div>
+                {r.editedName && r.editedName !== r.name && (
+                  <div className="mt-0.5 text-[11px] text-[var(--faint)] line-through">{r.name}</div>
+                )}
                 {r.reason && (
                   <div className="mt-0.5 max-w-md text-[11px] text-[var(--muted)]">{r.reason}</div>
                 )}

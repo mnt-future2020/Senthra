@@ -38,9 +38,9 @@ export function remove(id: string): Promise<Category> {
   return prisma.category.delete({ where: { id } });
 }
 
-// How many catalogue items reference this category — the in-use guard for delete.
+// How many stock entries reference this category — the in-use guard for delete.
 export function countItems(categoryId: string): Promise<number> {
-  return prisma.customerCatalogueItem.count({ where: { categoryId } });
+  return prisma.customerStockEntry.count({ where: { categoryId } });
 }
 
 // True when a write failed because a unique index rejected a duplicate (P2002) —
@@ -53,7 +53,7 @@ export function isNameConflict(e: unknown): boolean {
 
 // Grouped item counts for all categories at once (avoids per-category N+1 in the list).
 export async function countItemsByCategoryMap(): Promise<Record<string, number>> {
-  const groups = await prisma.customerCatalogueItem.groupBy({
+  const groups = await prisma.customerStockEntry.groupBy({
     by: ["categoryId"],
     _count: { _all: true },
   });

@@ -105,9 +105,9 @@ model Category {
   description String?
   status      String   @default("active") // active | inactive
   sortOrder   Int      @default(0)
-  items       CustomerCatalogueItem[]
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  customerStockEntries CustomerStockEntry[] @relation("CustomerStockEntryCategory")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 }
 
 // Warehouse Type master-data (e.g. "Main Depot", "Engineer Van"). The operational
@@ -188,6 +188,10 @@ model Warehouse {
   stockTransfersTo   StockTransfer[] @relation("StockTransferTo")
   // Goods Out dispatches from this warehouse (back-relation; no DB column).
   goodsOuts          GoodsOut[]
+  // Customer stock assignments destined for this warehouse (back-relation; no DB column).
+  customerStockAssignments CustomerStockWarehouseAssignment[]
+  // Received customer stock physically at this warehouse (back-relation; no DB column).
+  customerStockEntries     CustomerStockEntry[]
 
   deletedAt DateTime? // soft delete — excluded from listings; history stays intact
 
@@ -286,7 +290,7 @@ model Supplier {
 }
 
 // ── IRM (company-owned internal stock) Catalogue — MASTER DATA ONLY ───────────────────
-// Completely separate from the customer catalogue (CustomerCatalogueItem). Defines items
+// Completely separate from customer stock entries. Defines items
 // that future procurement/inventory modules (Purchase Orders, Goods In, Warehouse
 // Inventory, Stock Transfer, Goods Out, Rental) reference. No stock movement, no balances,
 // no physical locations stored here. Codes are Counter-allocated (IRM-0001). Cost is stored
@@ -1051,10 +1055,10 @@ model Customer {
   updatedAt DateTime @updatedAt
 
   projects      CustomerProject[]
-  catalogue     CustomerCatalogueItem[]
   sites         CustomerSite[]
   users         CustomerUser[]
   stockRequests CustomerStockRequest[]
+  stockEntries  CustomerStockEntry[]
 
   @@index([status])
 }
@@ -1080,35 +1084,6 @@ model CustomerProject {
 
   @@unique([customerId, nameLower])
   @@index([customerId])
-}
-
-// An item in a customer's stock catalogue. Per-customer SKUs (no fixed format).
-// `attributes` holds dynamic per-category custom fields (e.g. Fibre: Singlemode).
-// SKU is case-insensitive unique per customer. NO pricing/cost fields ever live
-// here — customers must never see monetary data.
-model CustomerCatalogueItem {
-  id              String   @id @default(auto()) @map("_id") @db.ObjectId
-  customerId      String   @db.ObjectId
-  customer        Customer @relation(fields: [customerId], references: [id])
-  name            String
-  sku             String
-  skuLower        String   // lowercased sku; uniqueness scoped per-customer via @@unique
-  categoryId      String   @db.ObjectId
-  category        Category @relation(fields: [categoryId], references: [id])
-  description     String?
-  uom             String?  // unit of measure, e.g. "Each" | "Metre"
-  serialized      Boolean  @default(false) // tracked by serial number
-  barcodeRequired Boolean  @default(false)
-  highValue       Boolean  @default(false)
-  thresholdQty    Int?     // low-stock reorder threshold (genuinely optional)
-  status          String   @default("active") // active | inactive
-  attributes      Json?    // dynamic per-category custom fields
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-
-  @@unique([customerId, skuLower])
-  @@index([customerId])
-  @@index([categoryId])
 }
 
 // A customer site / delivery location (optional). name + UK postcode.
@@ -1162,32 +1137,109 @@ model CustomerUser {
   @@index([customerId])
 }
 
-// A customer-submitted STOCK REQUEST — an order / replenishment ask, NOT a catalogue
-// write. A portal user asks for an item + quantity with a business reason; an internal
-// user with customers.edit reviews it (pending → approved / rejected, and later
-// completed once fulfilled). A request NEVER creates a catalogue or inventory record
-// directly — fulfilment is a separate, deliberate admin/inventory step.
+// A customer-submitted STOCK REQUEST — an inbound stock notification. A portal user
+// (or PM on their behalf) declares "these items are coming" with a quantity + reason;
+// an internal user reviews, edits the item name to match the catalogue, assigns
+// warehouse(s), and the warehouse manager receives the physical goods.
+// Status machine: pending → approved → assigned → partially_received → completed
+//                                   → rejected
 model CustomerStockRequest {
   id          String   @id @default(auto()) @map("_id") @db.ObjectId
   customerId  String   @db.ObjectId
   customer    Customer @relation(fields: [customerId], references: [id])
-  name        String   // requested item name
+  name        String   // requested item name (free text from customer)
   // quantity + reason are MANDATORY in validation (zod), but DB-nullable on purpose:
   // Prisma+MongoDB throws reading a doc that LACKS a required field, so new required
   // fields stay nullable at the DB and the API enforces them.
   quantity    Int?
   reason      String?  // business justification (app-required)
   notes       String?
-  status            String    @default("pending") // pending | approved | rejected | completed
+  status            String    @default("pending") // pending | approved | assigned | partially_received | completed | rejected
   requestedByUserId String?   @db.ObjectId
   requestedByName   String?
   reviewedBy        String?   // staff email that approved / rejected
   adminResponse     String?   // admin response notes (shown to the customer)
   reviewedAt        DateTime?
+
+  // PM edits: corrected item name + optional link to catalogue item.
+  editedName        String?   // PM-corrected name (e.g. "spf" → "SFP-LX")
+  catalogueItemId   String?   @db.ObjectId // optional link (legacy, being phased out)
+
+  // Warehouse assignments (back-relation; no DB column).
+  warehouseAssignments CustomerStockWarehouseAssignment[]
+
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
   @@index([customerId, status])
+}
+
+// A warehouse allocation for a customer stock request. One request can be split across
+// multiple warehouses (e.g. 10 SFP-LX → 6 Leeds + 4 London). The warehouse manager
+// receives stock against each assignment independently. Partial delivery is supported.
+model CustomerStockWarehouseAssignment {
+  id                     String               @id @default(auto()) @map("_id") @db.ObjectId
+  customerStockRequestId String               @db.ObjectId
+  stockRequest           CustomerStockRequest @relation(fields: [customerStockRequestId], references: [id])
+  warehouseId            String               @db.ObjectId
+  warehouse              Warehouse            @relation(fields: [warehouseId], references: [id])
+
+  quantity               Int     // how many assigned to this warehouse
+  receivedQuantity       Int     @default(0) // how many actually received so far
+  status                 String  @default("pending") // pending | partially_received | received
+
+  receivedBy             String? // staff email that received the stock
+  receivedAt             DateTime?
+  notes                  String?
+
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  @@unique([customerStockRequestId, warehouseId])
+  @@index([customerStockRequestId])
+  @@index([warehouseId, status])
+}
+
+// A physical stock entry created when customer stock is received at a warehouse.
+// Starts as "draft" (basic info from the assignment) — the warehouse manager then
+// fills in the product details (like catalogue fields) and optionally generates a
+// barcode. Separate from IRM inventory (customer-owned stock, no pricing).
+model CustomerStockEntry {
+  id            String    @id @default(auto()) @map("_id") @db.ObjectId
+  customerId    String    @db.ObjectId
+  customer      Customer  @relation(fields: [customerId], references: [id])
+  warehouseId   String    @db.ObjectId
+  warehouse     Warehouse @relation(fields: [warehouseId], references: [id])
+  assignmentId  String?   @db.ObjectId // links back to CustomerStockWarehouseAssignment (null for direct adds)
+
+  // Product details — mandatory fields filled by warehouse manager after receipt.
+  itemName      String    // pre-filled from editedName / request name
+  sku           String?   // manual or auto-generated
+  categoryId    String?   @db.ObjectId
+  category      Category? @relation("CustomerStockEntryCategory", fields: [categoryId], references: [id])
+  description   String?
+  uom           String?   // unit of measure (Each / Metre / Box etc.)
+  quantity      Int       // received quantity
+  serialized    Boolean   @default(false)
+  serialNumber  String?   // if serialized
+  highValue     Boolean   @default(false)
+  thresholdQty  Int?      // low-stock reorder threshold
+  attributes    Json?     // dynamic per-category custom fields
+
+  // Barcode — generated on demand, stored for print / scan.
+  barcode         String?  // the barcode value string (e.g. "CSE-00001")
+  barcodeDataUri  String?  // base64 data URI of the rendered barcode image
+
+  status        String    @default("draft") // draft | active
+  receivedBy    String?   // staff email that received the stock
+  receivedAt    DateTime? // when physically received
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([customerId])
+  @@index([warehouseId, status])
+  @@index([assignmentId])
 }
 
 // A dynamic, admin-editable email template. Every email the app sends is

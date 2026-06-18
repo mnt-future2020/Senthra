@@ -98,7 +98,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     key: "customers",
     label: "Customers",
     description:
-      "The customer company record itself. Its projects, stock catalogue, sites, portal login and stock requests are governed by the separate groups below.",
+      "The customer company record itself. Its projects, stock entries, sites, portal login and stock requests are governed by the separate groups below.",
     category: "Customers",
     permissions: [
       { key: "customers.view", action: "View", description: "View customers and their company details." },
@@ -122,15 +122,15 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
   },
   {
     key: "customer_stock",
-    label: "Customer Stock Catalogue",
-    description: "The catalogue of stock items defined on each customer.",
+    label: "Customer Stock Entries",
+    description: "The stock entries (received items) for each customer across warehouses.",
     category: "Customers",
     parent: "customers",
     permissions: [
-      { key: "customer_stock.view", action: "View", description: "View a customer's stock catalogue." },
-      { key: "customer_stock.create", action: "Create", description: "Add catalogue items to a customer." },
-      { key: "customer_stock.edit", action: "Edit", description: "Edit a customer's catalogue items." },
-      { key: "customer_stock.delete", action: "Delete", description: "Remove a customer's catalogue items." },
+      { key: "customer_stock.view", action: "View", description: "View a customer's stock entries." },
+      { key: "customer_stock.create", action: "Create", description: "Add stock entries for a customer." },
+      { key: "customer_stock.edit", action: "Edit", description: "Edit a customer's stock entries." },
+      { key: "customer_stock.delete", action: "Delete", description: "Remove a customer's stock entries." },
     ],
   },
   {
@@ -175,7 +175,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
   {
     key: "categories",
     label: "Categories",
-    description: "The global stock-category master list used to tag catalogue items.",
+    description: "The global stock-category master list used to tag stock entries and IRM items.",
     category: "Inventory",
     permissions: [
       { key: "categories.view", action: "View", description: "View stock categories." },
@@ -381,7 +381,7 @@ export function roleGrants(permissions: string[], permission: string): boolean {
 
 // The customer sub-entity groups. Each is a slice of a single customer record, so
 // holding ANY permission in one of them implies being able to see the parent
-// customer (`customers.view`) — you can't manage a customer's projects, catalogue,
+// customer (`customers.view`) — you can't manage a customer's projects, stock,
 // sites, portal login or stock requests without first seeing the customer.
 export const CUSTOMER_CHILD_GROUPS = new Set([
   "customer_projects",
@@ -437,7 +437,7 @@ export const LEGACY_PERMISSION_EXPANSION: Record<string, string[]> = {
 };
 
 // Additive backward-compat for the customer RBAC split. The customer module used to
-// gate its projects, catalogue, sites, portal login and stock requests entirely under
+// gate its projects, stock, sites, portal login and stock requests entirely under
 // the coarse `customers.view` / `customers.edit` keys; those entities now have their
 // own granular groups. To preserve every role's EXACT effective access, a role that
 // held a coarse key gains the matching child keys (it never loses `customers.*` — that

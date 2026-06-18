@@ -16,24 +16,6 @@ export interface CustomerProject {
   createdAt: string;
 }
 
-export interface CatalogueItem {
-  id: string;
-  name: string;
-  sku: string;
-  categoryId: string;
-  category: { id: string; name: string } | null;
-  description: string | null;
-  uom: string | null; // unit of measure, e.g. "Each" | "Metre"
-  serialized: boolean;
-  barcodeRequired: boolean;
-  highValue: boolean;
-  thresholdQty: number | null; // low-stock reorder threshold
-  status: CustomerStatus;
-  // Dynamic per-category custom fields (e.g. { Fibre: "Singlemode" }).
-  attributes: Record<string, string> | null;
-  createdAt: string;
-}
-
 export interface CustomerSite {
   id: string;
   code: string | null; // auto-allocated per customer, e.g. STE-0001
@@ -63,22 +45,88 @@ export interface CustomerUser {
   createdAt: string;
 }
 
-export type StockRequestStatus = "pending" | "approved" | "rejected" | "completed";
+export type StockRequestStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "assigned"
+  | "partially_received"
+  | "completed";
 
-// A customer-submitted stock / replenishment request — an order ask, NOT a
-// catalogue write. Portal users queue one of these; an internal user reviews and
-// approves/rejects it. Approval is a status move only (no catalogue/inventory write).
+export type WarehouseAssignmentStatus = "pending" | "partially_received" | "received";
+
+export interface WarehouseAssignment {
+  id: string;
+  warehouseId: string;
+  warehouseName: string;
+  warehouseCode: string | null;
+  quantity: number;
+  receivedQuantity: number;
+  status: WarehouseAssignmentStatus;
+  receivedBy: string | null;
+  receivedAt: string | null;
+  notes: string | null;
+}
+
 export interface StockRequest {
   id: string;
   name: string;
+  editedName: string | null;
+  catalogueItemId: string | null;
   quantity: number | null;
-  reason: string | null; // business justification
+  reason: string | null;
   notes: string | null;
   status: StockRequestStatus;
   requestedByName: string | null;
   reviewedBy: string | null;
-  adminResponse: string | null; // admin response note shown to the customer
+  adminResponse: string | null;
   reviewedAt: string | null;
+  warehouseAssignments: WarehouseAssignment[];
+  createdAt: string;
+}
+
+export interface PendingStockItem {
+  assignmentId: string;
+  requestId: string;
+  customerName: string;
+  customerCode: string;
+  itemName: string;
+  quantity: number;
+  receivedQuantity: number;
+  status: string;
+  warehouseName: string;
+  warehouseCode: string | null;
+  createdAt: string;
+}
+
+export type StockEntryStatus = "draft" | "active";
+
+export interface CustomerStockEntry {
+  id: string;
+  customerId: string;
+  customerName: string;
+  customerCode: string;
+  warehouseId: string;
+  warehouseName: string;
+  warehouseCode: string;
+  assignmentId: string | null;
+  itemName: string;
+  sku: string | null;
+  categoryId: string | null;
+  categoryName: string | null;
+  description: string | null;
+  uom: string | null;
+  quantity: number;
+  serialized: boolean;
+  serialNumber: string | null;
+  highValue: boolean;
+  thresholdQty: number | null;
+  attributes: Record<string, string> | null;
+  barcode: string | null;
+  barcodeDataUri: string | null;
+  status: StockEntryStatus;
+  receivedBy: string | null;
+  receivedAt: string | null;
   createdAt: string;
 }
 
@@ -118,7 +166,6 @@ export interface CustomerSummary {
 
 export interface Customer extends CustomerSummary {
   projects: CustomerProject[];
-  catalogue: CatalogueItem[];
   sites: CustomerSite[];
   users: CustomerUser[];
   stockRequests: StockRequest[]; // PENDING only (the admin review queue)
@@ -150,7 +197,6 @@ export interface CustomerOverview {
     activeProjects: number;
     totalProjects: number;
     totalSites: number;
-    stockItems: number;
     pendingRequests: number;
   };
   recentRequests: StockRequest[];

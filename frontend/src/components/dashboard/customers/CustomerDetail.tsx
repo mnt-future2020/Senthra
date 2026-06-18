@@ -1,13 +1,15 @@
-"use client";
+﻿"use client";
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
+  Boxes,
   Building2,
   Calendar,
   Check,
   ClipboardList,
   Copy,
+  Eye,
   FileText,
   FolderKanban,
   Globe,
@@ -33,20 +35,23 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { primaryBtn } from "@/components/ui/styles";
 import { TempPasswordModal } from "@/components/ui/TempPasswordModal";
-import { CatalogueItemModal } from "./CatalogueItemModal";
-import { getCachedCategories, listCategories } from "@/services/category.service";
 import { ProjectModal } from "./ProjectModal";
 import { SiteModal } from "./SiteModal";
 import { CustomerUserModal } from "./CustomerUserModal";
 import type {
-  CatalogueItem,
   Customer,
   CustomerProject,
   CustomerSite,
+  CustomerStockEntry,
   CustomerUser,
   StockRequest,
+  WarehouseAssignment,
 } from "@/types/customer";
 import type { UserStatus } from "@/types/user";
+import { EditApproveModal } from "./EditApproveModal";
+import { AssignWarehouseModal } from "./AssignWarehouseModal";
+import { ReceiveStockModal } from "./ReceiveStockModal";
+import { AddStockEntryModal } from "./AddStockEntryModal";
 
 // The detail page is organised into tabs (URL-driven ?tab=) like the Users & Roles
 // panel: the company header stays pinned and each section becomes a tab.
@@ -54,14 +59,14 @@ type TabId = "overview" | "projects" | "catalogue" | "sites" | "users";
 const TABS: { id: TabId; label: string; icon: React.ElementType }[] = [
   { id: "overview", label: "Overview", icon: Building2 },
   { id: "projects", label: "Projects", icon: FolderKanban },
-  { id: "catalogue", label: "Stock catalogue", icon: Package },
+  { id: "catalogue", label: "Stock entries", icon: Boxes },
   { id: "sites", label: "Sites", icon: MapPin },
   { id: "users", label: "Portal login", icon: KeyRound },
 ];
 
 // Each tab beyond Overview is gated by its sub-entity's view permission, so an admin
 // without (say) customer_sites.view never sees the Sites tab. The aggregate detail GET
-// stays gated by customers.view — this is purely tab visibility, no separate read API.
+// stays gated by customers.view â€” this is purely tab visibility, no separate read API.
 // Overview is the company record itself, so it's always shown (reaching this page
 // already required customers.view). Keys mirror the backend PERMISSION_GROUPS.
 const TAB_PERMISSION: Record<TabId, string | null> = {
@@ -72,11 +77,11 @@ const TAB_PERMISSION: Record<TabId, string | null> = {
   users: "customer_portal.view",
 };
 
-// "10 Jun 2026" — en-GB, matching the rest of the dashboard.
+// "10 Jun 2026" â€” en-GB, matching the rest of the dashboard.
 function fmtDate(iso: string | null): string {
-  if (!iso) return "—";
+  if (!iso) return "â€”";
   const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
+  if (Number.isNaN(d.getTime())) return "â€”";
   return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
 }
 
@@ -123,7 +128,7 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
   const canDelete = can("customers.delete");
   const canResendPrimary = can("customer_portal.resend_invite");
 
-  // Per-sub-entity capabilities — each customer detail section is gated by its own
+  // Per-sub-entity capabilities â€” each customer detail section is gated by its own
   // granular group, matching the backend route permissions.
   const projectCaps = {
     create: can("customer_projects.create"),
@@ -270,7 +275,7 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
         </div>
       </div>
 
-      {/* Tabs — URL-driven (?tab=), like the Users & Roles panel. */}
+      {/* Tabs â€” URL-driven (?tab=), like the Users & Roles panel. */}
       <div className="flex gap-1 overflow-x-auto rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-1">
         {visibleTabs.map((t) => (
           <button
@@ -293,12 +298,13 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
         <ProjectsSection customer={customer} caps={projectCaps} onChange={setCustomer} pushToast={pushToast} />
       )}
       {activeTab === "catalogue" && (
-        <CatalogueSection
+        <StockEntriesTab
           customer={customer}
-          caps={stockCaps}
           stockReq={stockReqCaps}
+          stockCaps={stockCaps}
           onChange={setCustomer}
           pushToast={pushToast}
+          router={router}
         />
       )}
       {activeTab === "sites" && (
@@ -315,7 +321,7 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
           <>
             This generates a new temporary password for{" "}
             <strong className="text-[var(--ink)]">{customer.name}</strong>&apos;s primary portal
-            user, emails it, and <strong>invalidates their current password</strong> — they&apos;ll
+            user, emails it, and <strong>invalidates their current password</strong> â€” they&apos;ll
             set a new one on next sign-in. (Manage individual users in the Users tab.)
           </>
         }
@@ -356,7 +362,7 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
   );
 }
 
-// Overview tab — company / contact / address / notes / audit, grouped into cards
+// Overview tab â€” company / contact / address / notes / audit, grouped into cards
 // with click-to-email, tap-to-call, and copy affordances.
 function OverviewTab({ customer }: { customer: Customer }) {
   const addressLines = [
@@ -436,7 +442,7 @@ function OverviewTab({ customer }: { customer: Customer }) {
             </Field>
             <div className="sm:col-span-2">
               <p className="text-[11px] text-[var(--faint)]">
-                This is the customer&apos;s portal login — manage it in the{" "}
+                This is the customer&apos;s portal login â€” manage it in the{" "}
                 <span className="font-semibold text-[var(--muted)]">Portal login</span> tab.
               </p>
             </div>
@@ -489,11 +495,11 @@ function OverviewTab({ customer }: { customer: Customer }) {
       <InfoCard title="Record" icon={Calendar} className="lg:col-span-2">
         <Field label="Added">
           <span>{fmtDate(customer.createdAt)}</span>
-          {customer.createdBy && <span className="truncate text-[var(--muted)]"> · {customer.createdBy}</span>}
+          {customer.createdBy && <span className="truncate text-[var(--muted)]"> Â· {customer.createdBy}</span>}
         </Field>
         <Field label="Last updated">
           <span>{fmtDate(customer.updatedAt)}</span>
-          {customer.updatedBy && <span className="truncate text-[var(--muted)]"> · {customer.updatedBy}</span>}
+          {customer.updatedBy && <span className="truncate text-[var(--muted)]"> Â· {customer.updatedBy}</span>}
         </Field>
       </InfoCard>
     </div>
@@ -538,7 +544,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 function Dash() {
-  return <span className="text-[var(--faint)]">—</span>;
+  return <span className="text-[var(--faint)]">â€”</span>;
 }
 
 function TextValue({ value, copyLabel }: { value: string | null; copyLabel?: string }) {
@@ -586,7 +592,7 @@ function CopyButton({ value, label }: { value: string; label: string }) {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
     } catch {
-      // Clipboard API unavailable (e.g. insecure context) — silently ignore.
+      // Clipboard API unavailable (e.g. insecure context) â€” silently ignore.
     }
   };
   return (
@@ -659,15 +665,15 @@ function ProjectsSection({ customer, caps, onChange, pushToast }: SectionProps) 
         <TableShell head={["Code", "Project", "Dates", "Status", canWrite ? "" : null]}>
           {customer.projects.map((project) => (
             <tr key={project.id} className="border-b border-[var(--border)] align-top last:border-0">
-              <td className="px-3 py-2 font-mono text-xs text-[var(--muted)]">{project.code ?? "—"}</td>
+              <td className="px-3 py-2 font-mono text-xs text-[var(--muted)]">{project.code ?? "â€”"}</td>
               <td className="px-3 py-2">
                 <div className="font-semibold text-[var(--ink)]">{project.name}</div>
                 {project.type && <div className="text-[11px] text-[var(--muted)]">{project.type}</div>}
               </td>
               <td className="px-3 py-2 text-[var(--muted)]">
                 {project.startDate || project.endDate
-                  ? `${fmtDate(project.startDate)} → ${fmtDate(project.endDate)}`
-                  : "—"}
+                  ? `${fmtDate(project.startDate)} â†’ ${fmtDate(project.endDate)}`
+                  : "â€”"}
               </td>
               <td className="px-3 py-2"><StatusChip value={project.status} /></td>
               {canWrite && (
@@ -706,87 +712,58 @@ function ProjectsSection({ customer, caps, onChange, pushToast }: SectionProps) 
   );
 }
 
-// --- Catalogue --------------------------------------------------------------
-function CatalogueSection({
+// --- Stock entries tab (unified: stock requests + received entries) ----------
+function StockEntriesTab({
   customer,
-  caps,
   stockReq,
+  stockCaps,
   onChange,
   pushToast,
-}: SectionProps & { stockReq: { approve: boolean; reject: boolean } }) {
-  const canWrite = caps.edit || caps.delete;
+  router,
+}: {
+  customer: Customer;
+  stockReq: { approve: boolean; reject: boolean };
+  stockCaps: SectionCaps;
+  onChange: React.Dispatch<React.SetStateAction<Customer>>;
+  pushToast: PushToast;
+  router: ReturnType<typeof useRouter>;
+}) {
   const canReview = stockReq.approve || stockReq.reject;
-  const [query, setQuery] = React.useState("");
-  const [open, setOpen] = React.useState(false);
-  const [editing, setEditing] = React.useState<CatalogueItem | null>(null);
 
-  // The global active category list feeds the catalogue-item picker. Seed from the
-  // SWR cache for an instant render, then refresh.
-  const [categories, setCategories] = React.useState<{ id: string; name: string }[]>(() =>
-    (getCachedCategories() ?? [])
-      .filter((c) => c.status === "active")
-      .map((c) => ({ id: c.id, name: c.name })),
-  );
-  React.useEffect(() => {
-    listCategories()
-      .then((cats) =>
-        setCategories(
-          cats.filter((c) => c.status === "active").map((c) => ({ id: c.id, name: c.name })),
-        ),
-      )
-      .catch(() => {});
-  }, []);
+  // --- add stock entry modal ---
+  const [showAdd, setShowAdd] = React.useState(false);
 
-  const q = query.trim().toLowerCase();
-  const items = q
-    ? customer.catalogue.filter(
-        (i) =>
-          i.name.toLowerCase().includes(q) ||
-          i.sku.toLowerCase().includes(q) ||
-          (i.category?.name ?? "").toLowerCase().includes(q),
-      )
-    : customer.catalogue;
+  // --- stock entries list ---
+  const [entries, setEntries] = React.useState<CustomerStockEntry[] | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+  const [filter, setFilter] = React.useState<"" | "draft" | "active">("");
 
-  const onSaved = (item: CatalogueItem) => {
-    onChange((p) => {
-      const exists = p.catalogue.some((x) => x.id === item.id);
-      return {
-        ...p,
-        catalogue: exists
-          ? p.catalogue.map((x) => (x.id === item.id ? item : x))
-          : [...p.catalogue, item],
-      };
-    });
-    setOpen(false);
-    setEditing(null);
-  };
+  const load = React.useCallback(() => {
+    customerService
+      .listCustomerStockEntries(customer.id, filter || undefined)
+      .then(setEntries)
+      .catch((e) => setError(e instanceof Error ? e.message : "Could not load stock entries."));
+  }, [customer.id, filter]);
 
-  const remove = async (item: CatalogueItem) => {
-    try {
-      await customerService.deleteCatalogueItem(customer.id, item.id);
-      onChange((p) => ({ ...p, catalogue: p.catalogue.filter((x) => x.id !== item.id) }));
-    } catch (err) {
-      pushToast(err instanceof Error ? err.message : "Could not remove item.", "alert");
-    }
-  };
+  React.useEffect(() => { load(); }, [load]);
 
-  // --- pending stock requests (customer-submitted; internal users review here) ---
+  // --- stock request review flow ---
   const [reviewingId, setReviewingId] = React.useState<string | null>(null);
   const [rejectingId, setRejectingId] = React.useState<string | null>(null);
   const [rejectNote, setRejectNote] = React.useState("");
+  const [editApproveReq, setEditApproveReq] = React.useState<StockRequest | null>(null);
+  const [assignReq, setAssignReq] = React.useState<StockRequest | null>(null);
+  const [receiveTarget, setReceiveTarget] = React.useState<{ assignment: WarehouseAssignment; request: StockRequest } | null>(null);
 
-  // Approving is a STATUS MOVE ONLY — it never creates a catalogue item or inventory
-  // record (that's a later, deliberate internal step). We just drop the request from
-  // the pending queue.
   const approve = async (req: StockRequest) => {
     setReviewingId(req.id);
     try {
-      await customerService.approveStockRequest(customer.id, req.id);
+      const updated = await customerService.approveStockRequest(customer.id, req.id);
       onChange((p) => ({
         ...p,
-        stockRequests: p.stockRequests.filter((x) => x.id !== req.id),
+        stockRequests: p.stockRequests.map((x) => (x.id === updated.id ? updated : x)),
       }));
-      pushToast(`Approved the request for "${req.name}".`, "success");
+      pushToast(`Approved "${req.name}".`, "success");
     } catch (err) {
       pushToast(err instanceof Error ? err.message : "Could not approve the request.", "alert");
     } finally {
@@ -808,17 +785,56 @@ function CatalogueSection({
     }
   };
 
+  const onEditApproved = (updated: StockRequest) => {
+    onChange((p) => ({
+      ...p,
+      stockRequests: p.stockRequests.map((x) => (x.id === updated.id ? updated : x)),
+    }));
+    setEditApproveReq(null);
+    pushToast(`Approved "${updated.editedName ?? updated.name}".`, "success");
+  };
+
+  const onAssigned = (updated: StockRequest) => {
+    onChange((p) => ({
+      ...p,
+      stockRequests: p.stockRequests.map((x) => (x.id === updated.id ? updated : x)),
+    }));
+    setAssignReq(null);
+    pushToast(`Assigned to ${updated.warehouseAssignments.length} warehouse(s).`, "success");
+  };
+
+  const onReceived = (updatedAssignment: WarehouseAssignment, stockEntryId: string) => {
+    if (!receiveTarget) return;
+    const reqId = receiveTarget.request.id;
+    onChange((p) => ({
+      ...p,
+      stockRequests: p.stockRequests.map((r) => {
+        if (r.id !== reqId) return r;
+        const newAssignments = r.warehouseAssignments.map((a) =>
+          a.id === updatedAssignment.id ? updatedAssignment : a,
+        );
+        const allReceived = newAssignments.every((a) => a.status === "received");
+        const someReceived = newAssignments.some((a) => a.status === "received" || a.status === "partially_received");
+        return {
+          ...r,
+          warehouseAssignments: newAssignments,
+          status: allReceived ? "completed" as const : someReceived ? "partially_received" as const : r.status,
+        };
+      }),
+    }));
+    setReceiveTarget(null);
+    pushToast(`Received ${updatedAssignment.receivedQuantity} at ${updatedAssignment.warehouseName}.`, "success");
+    router.push(`/dashboard/stock-entries/${stockEntryId}`);
+  };
+
   return (
-    <FormSection
-      title="Stock catalogue"
-      description="The items this customer's stock is tracked against (per-customer SKUs)."
-    >
+    <div className="space-y-6">
+      {/* Stock requests (pending review) */}
       {canReview && customer.stockRequests.length > 0 && (
-        <div className="mb-4 overflow-hidden rounded-xl border border-amber-500/30 bg-amber-500/5">
-          <div className="flex items-center gap-2 border-b border-amber-500/20 px-3 py-2 text-[11px] font-bold uppercase tracking-wider text-amber-600">
+        <div className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)]">
+          <div className="flex items-center gap-2 border-b border-[var(--border)] px-3 py-2 text-[11px] font-bold uppercase tracking-wider text-[var(--muted)]">
             <ClipboardList className="h-3.5 w-3.5" />
-            {customer.stockRequests.length} pending request
-            {customer.stockRequests.length === 1 ? "" : "s"} from this customer
+            Stock requests ({customer.stockRequests.length})
           </div>
           <div className="divide-y divide-[var(--border)]">
             {customer.stockRequests.map((req) => (
@@ -826,38 +842,52 @@ function CatalogueSection({
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-semibold text-[var(--ink)]">{req.name}</span>
-                      <span className="rounded-md bg-amber-500/15 px-1.5 py-0.5 font-mono text-[11px] font-bold text-amber-700">
-                        ×{req.quantity ?? "?"}
+                      <span className="font-semibold text-[var(--ink)]">
+                        {req.editedName ?? req.name}
                       </span>
+                      {req.editedName && req.editedName !== req.name && (
+                        <span className="text-[11px] text-[var(--faint)] line-through">{req.name}</span>
+                      )}
+                      <span className="rounded-md bg-[var(--surface-2)] px-1.5 py-0.5 font-mono text-[11px] font-bold text-[var(--muted)]">
+                        x{req.quantity ?? "?"}
+                      </span>
+                      <RequestStatusBadge status={req.status} />
                     </div>
                     <div className="mt-0.5 text-[11px] text-[var(--faint)]">
                       requested by {req.requestedByName ?? "a portal user"}
                     </div>
                     {req.reason && (
                       <p className="mt-1 text-xs text-[var(--muted)]">
-                        <span className="font-semibold text-[var(--faint)]">Reason:</span>{" "}
-                        {req.reason}
+                        <span className="font-semibold text-[var(--faint)]">Reason:</span> {req.reason}
                       </p>
                     )}
                   </div>
-                  <div className="flex shrink-0 items-center gap-1.5">
-                    {stockReq.approve && (
-                      <button
-                        type="button"
-                        onClick={() => approve(req)}
-                        disabled={reviewingId === req.id}
-                        className="flex items-center gap-1 rounded-lg bg-[var(--pos)] px-2.5 py-1.5 text-[11px] font-bold text-white transition-all hover:opacity-90 disabled:opacity-60"
-                      >
-                        {reviewingId === req.id ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Check className="h-3.5 w-3.5" />
-                        )}
-                        Approve
-                      </button>
+                  <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+                    {req.status === "pending" && stockReq.approve && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => setEditApproveReq(req)}
+                          className="flex items-center gap-1 rounded-lg bg-[var(--accent)] px-2.5 py-1.5 text-[11px] font-bold text-white transition-all hover:opacity-90"
+                        >
+                          <Pencil className="h-3 w-3" /> Edit & approve
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => approve(req)}
+                          disabled={reviewingId === req.id}
+                          className="flex items-center gap-1 rounded-lg bg-[var(--pos)] px-2.5 py-1.5 text-[11px] font-bold text-white transition-all hover:opacity-90 disabled:opacity-60"
+                        >
+                          {reviewingId === req.id ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Check className="h-3.5 w-3.5" />
+                          )}
+                          Approve as-is
+                        </button>
+                      </>
                     )}
-                    {stockReq.reject && (
+                    {req.status === "pending" && stockReq.reject && (
                       <button
                         type="button"
                         onClick={() => {
@@ -870,6 +900,15 @@ function CatalogueSection({
                         Reject
                       </button>
                     )}
+                    {req.status === "approved" && stockReq.approve && (
+                      <button
+                        type="button"
+                        onClick={() => setAssignReq(req)}
+                        className="flex items-center gap-1 rounded-lg bg-blue-600 px-2.5 py-1.5 text-[11px] font-bold text-white transition-all hover:opacity-90"
+                      >
+                        Assign warehouses
+                      </button>
+                    )}
                   </div>
                 </div>
                 {rejectingId === req.id && (
@@ -877,7 +916,7 @@ function CatalogueSection({
                     <input
                       value={rejectNote}
                       onChange={(e) => setRejectNote(e.target.value)}
-                      placeholder="Reason (optional) — shown to the customer"
+                      placeholder="Reason (optional) â€” shown to the customer"
                       maxLength={500}
                       className="flex-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-xs text-[var(--ink)] outline-none focus:border-[var(--accent)]"
                     />
@@ -900,98 +939,194 @@ function CatalogueSection({
                     </div>
                   </div>
                 )}
+                {req.warehouseAssignments.length > 0 && (
+                  <div className="mt-2 space-y-1">
+                    {req.warehouseAssignments.map((a) => (
+                      <div
+                        key={a.id}
+                        className="flex items-center justify-between rounded-lg bg-[var(--surface-2)] px-2.5 py-1.5 text-xs"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-[var(--ink)]">{a.warehouseName}</span>
+                          {a.warehouseCode && (
+                            <span className="font-mono text-[var(--faint)]">{a.warehouseCode}</span>
+                          )}
+                          <span className="text-[var(--muted)]">
+                            {a.receivedQuantity}/{a.quantity} received
+                          </span>
+                          <AssignmentStatusBadge status={a.status} />
+                        </div>
+                        {a.status !== "received" && stockReq.approve && (
+                          <button
+                            type="button"
+                            onClick={() => setReceiveTarget({ assignment: a, request: req })}
+                            className="rounded-lg bg-[var(--pos)] px-2 py-1 text-[10px] font-bold text-white hover:opacity-90"
+                          >
+                            Receive
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             ))}
           </div>
         </div>
       )}
 
-      {(customer.catalogue.length > 0 || caps.create) && (
-        <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center">
-          {customer.catalogue.length > 0 && (
-            <div className="relative w-full sm:max-w-xs">
-              <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search SKU, item or category…"
-                className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2 pl-9 pr-3 text-xs text-[var(--ink)] outline-none focus:border-[var(--accent)]"
-              />
-            </div>
-          )}
-          <span className="text-xs text-[var(--muted)] sm:ml-1">
-            {customer.catalogue.length} item{customer.catalogue.length === 1 ? "" : "s"}
-          </span>
-          {caps.create && (
-            <button
-              type="button"
-              onClick={() => {
-                setEditing(null);
-                setOpen(true);
-              }}
-              className={`${primaryBtn} sm:ml-auto`}
-            >
-              <Plus className="h-4 w-4" /> Add item
-            </button>
-          )}
-        </div>
-      )}
-
-      {customer.catalogue.length === 0 ? (
-        <Empty>No catalogue items yet.</Empty>
-      ) : items.length === 0 ? (
-        <Empty>No items match your search.</Empty>
-      ) : (
-        <TableShell head={["SKU", "Item", "Category", "UoM", "Threshold", "Status", canWrite ? "" : null]}>
-          {items.map((item) => (
-            <tr key={item.id} className="border-b border-[var(--border)] align-top last:border-0">
-              <td className="px-3 py-2 font-mono text-xs text-[var(--muted)]">{item.sku}</td>
-              <td className="px-3 py-2">
-                <div className="font-semibold text-[var(--ink)]">{item.name}</div>
-                <div className="mt-0.5 flex flex-wrap gap-1">
-                  {item.serialized && <Flag>Serial</Flag>}
-                  {item.barcodeRequired && <Flag>Barcode</Flag>}
-                  {item.highValue && <Flag tone="warn">High value</Flag>}
-                </div>
-              </td>
-              <td className="px-3 py-2 text-[var(--muted)]">{item.category?.name ?? "—"}</td>
-              <td className="px-3 py-2 text-[var(--muted)]">{item.uom ?? "—"}</td>
-              <td className="px-3 py-2 text-[var(--muted)]">{item.thresholdQty ?? "—"}</td>
-              <td className="px-3 py-2"><StatusChip value={item.status} /></td>
-              {canWrite && (
-                <td className="px-3 py-2">
-                  <RowActions
-                    canEdit={caps.edit}
-                    canDelete={caps.delete}
-                    editLabel="Edit item"
-                    onEdit={() => {
-                      setEditing(item);
-                      setOpen(true);
-                    }}
-                    removeLabel={item.sku}
-                    onConfirmRemove={() => remove(item)}
-                  />
-                </td>
-              )}
-            </tr>
-          ))}
-        </TableShell>
-      )}
-
-      {open && (
-        <CatalogueItemModal
-          key={editing?.id ?? "new"}
+      {editApproveReq && (
+        <EditApproveModal
           customerId={customer.id}
-          item={editing}
-          categories={categories}
-          onClose={() => {
-            setOpen(false);
-            setEditing(null);
-          }}
-          onSaved={onSaved}
+          request={editApproveReq}
+          onClose={() => setEditApproveReq(null)}
+          onSaved={onEditApproved}
         />
       )}
-    </FormSection>
+      {assignReq && (
+        <AssignWarehouseModal
+          customerId={customer.id}
+          request={assignReq}
+          onClose={() => setAssignReq(null)}
+          onSaved={onAssigned}
+        />
+      )}
+      {receiveTarget && (
+        <ReceiveStockModal
+          assignment={receiveTarget.assignment}
+          itemName={receiveTarget.request.editedName ?? receiveTarget.request.name}
+          onClose={() => setReceiveTarget(null)}
+          onSaved={onReceived}
+        />
+      )}
+
+      {/* Stock entries table */}
+      {error ? (
+        <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>
+      ) : entries === null ? (
+        <div className="flex items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--surface)] py-16">
+          <Loader2 className="h-6 w-6 animate-spin text-[var(--muted)]" />
+        </div>
+      ) : (
+        <>
+          <div className="flex flex-wrap items-center gap-2">
+            {(["", "active", "draft"] as const).map((f) => (
+              <button
+                key={f}
+                type="button"
+                onClick={() => setFilter(f)}
+                className={`rounded-full px-3 py-1.5 text-[11px] font-bold transition-all ${
+                  filter === f
+                    ? "bg-[var(--accent)] text-white"
+                    : "border border-[var(--border)] bg-[var(--surface-2)] text-[var(--muted)] hover:text-[var(--ink)]"
+                }`}
+              >
+                {f === "" ? "All" : f === "active" ? "Active" : "Draft"}
+              </button>
+            ))}
+            <span className="ml-1 text-xs text-[var(--muted)]">{entries.length} entr{entries.length === 1 ? "y" : "ies"}</span>
+            {stockCaps.create && (
+              <button
+                type="button"
+                onClick={() => setShowAdd(true)}
+                className={`${primaryBtn} ml-auto`}
+              >
+                <Plus className="h-4 w-4" /> Add item
+              </button>
+            )}
+          </div>
+
+          {entries.length === 0 ? (
+            <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
+              <Boxes className="h-7 w-7 text-[var(--faint)]" />
+              <p className="text-sm font-semibold text-[var(--ink)]">No stock entries</p>
+              <p className="text-xs text-[var(--muted)]">
+                {filter ? `No ${filter} entries found.` : "Received stock for this customer will appear here."}
+              </p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+              <table className="w-full text-left text-sm" style={{ minWidth: 750 }}>
+                <thead>
+                  <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
+                    <th className="px-4 py-3">Item</th>
+                    <th className="px-4 py-3">Warehouse</th>
+                    <th className="px-4 py-3">SKU</th>
+                    <th className="px-4 py-3">Qty</th>
+                    <th className="px-4 py-3">Barcode</th>
+                    <th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3">Received</th>
+                    <th className="px-4 py-3" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {entries.map((e) => (
+                    <tr
+                      key={e.id}
+                      className="cursor-pointer border-b border-[var(--border)] align-top transition-colors last:border-0 hover:bg-[var(--surface-2)]"
+                      onClick={() => router.push(`/dashboard/stock-entries/${e.id}`)}
+                    >
+                      <td className="px-4 py-3 font-semibold text-[var(--ink)]">{e.itemName}</td>
+                      <td className="px-4 py-3">
+                        <div className="text-[var(--ink)]">{e.warehouseName}</div>
+                        <div className="font-mono text-[11px] text-[var(--faint)]">{e.warehouseCode}</div>
+                      </td>
+                      <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.sku ?? "â€”"}</td>
+                      <td className="px-4 py-3 font-bold text-[var(--ink)]">{e.quantity}</td>
+                      <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.barcode ?? "â€”"}</td>
+                      <td className="px-4 py-3">
+                        <span
+                          className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                            e.status === "active"
+                              ? "bg-[var(--pos)]/12 text-[var(--pos)]"
+                              : "bg-amber-500/15 text-amber-600"
+                          }`}
+                        >
+                          {e.status}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-[var(--muted)]">{fmtDate(e.receivedAt ?? e.createdAt)}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            title="View"
+                            onClick={(ev) => { ev.stopPropagation(); router.push(`/dashboard/stock-entries/${e.id}`); }}
+                            className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface-2)] text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)]"
+                          >
+                            <Eye className="h-4 w-4" />
+                          </button>
+                          <button
+                            type="button"
+                            title="Edit"
+                            onClick={(ev) => { ev.stopPropagation(); router.push(`/dashboard/stock-entries/${e.id}`); }}
+                            className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--accent)] text-white transition-all hover:opacity-90"
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+
+      {showAdd && (
+        <AddStockEntryModal
+          customerId={customer.id}
+          onClose={() => setShowAdd(false)}
+          onSaved={() => {
+            setShowAdd(false);
+            load();
+            pushToast("Stock entry added.", "success");
+          }}
+        />
+      )}
+    </div>
   );
 }
 
@@ -1039,14 +1174,14 @@ function SitesSection({ customer, caps, onChange, pushToast }: SectionProps) {
         <TableShell head={["Code", "Site", "Postcode", "Contact", "Status", canWrite ? "" : null]}>
           {customer.sites.map((site) => (
             <tr key={site.id} className="border-b border-[var(--border)] align-top last:border-0">
-              <td className="px-3 py-2 font-mono text-xs text-[var(--muted)]">{site.code ?? "—"}</td>
+              <td className="px-3 py-2 font-mono text-xs text-[var(--muted)]">{site.code ?? "â€”"}</td>
               <td className="px-3 py-2">
                 <div className="font-semibold text-[var(--ink)]">{site.name}</div>
                 {site.addressLine && (
                   <div className="text-[11px] text-[var(--muted)]">{site.addressLine}</div>
                 )}
               </td>
-              <td className="px-3 py-2 text-[var(--muted)]">{site.postcode ?? "—"}</td>
+              <td className="px-3 py-2 text-[var(--muted)]">{site.postcode ?? "â€”"}</td>
               <td className="px-3 py-2 text-[var(--muted)]">
                 {site.contactPerson || site.contactNumber ? (
                   <div>
@@ -1054,7 +1189,7 @@ function SitesSection({ customer, caps, onChange, pushToast }: SectionProps) {
                     {site.contactNumber && <div className="text-[11px]">{site.contactNumber}</div>}
                   </div>
                 ) : (
-                  "—"
+                  "â€”"
                 )}
               </td>
               <td className="px-3 py-2"><StatusChip value={site.status} /></td>
@@ -1103,7 +1238,7 @@ function PortalLoginSection({
 }: Omit<SectionProps, "caps"> & {
   caps: { manage: boolean; resendInvite: boolean; resetPassword: boolean };
 }) {
-  // One login per company — the user auto-created with the company.
+  // One login per company â€” the user auto-created with the company.
   const login = customer.users[0] ?? null;
   const [open, setOpen] = React.useState(false);
   // One-time temp-password reveal after creating / re-inviting the login.
@@ -1372,6 +1507,35 @@ function RowActions({
       )}
       {canDelete && <DeleteConfirmButton label={removeLabel} onConfirm={onConfirmRemove} />}
     </div>
+  );
+}
+
+const REQ_STATUS_COLORS: Record<string, string> = {
+  pending: "bg-amber-500/15 text-amber-600",
+  approved: "bg-[var(--pos)]/12 text-[var(--pos)]",
+  rejected: "bg-[var(--neg)]/12 text-[var(--neg)]",
+  assigned: "bg-blue-500/12 text-blue-600",
+  partially_received: "bg-indigo-500/12 text-indigo-600",
+  completed: "bg-[var(--accent-10)] text-[var(--accent)]",
+};
+function RequestStatusBadge({ status }: { status: string }) {
+  return (
+    <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${REQ_STATUS_COLORS[status] ?? REQ_STATUS_COLORS.pending}`}>
+      {status.replace(/_/g, " ")}
+    </span>
+  );
+}
+
+const ASSIGN_STATUS_COLORS: Record<string, string> = {
+  pending: "bg-amber-500/15 text-amber-600",
+  partially_received: "bg-indigo-500/12 text-indigo-600",
+  received: "bg-[var(--pos)]/12 text-[var(--pos)]",
+};
+function AssignmentStatusBadge({ status }: { status: string }) {
+  return (
+    <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${ASSIGN_STATUS_COLORS[status] ?? ASSIGN_STATUS_COLORS.pending}`}>
+      {status.replace(/_/g, " ")}
+    </span>
   );
 }
 

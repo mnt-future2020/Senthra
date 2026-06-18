@@ -1,7 +1,6 @@
 import {
   Prisma,
   type Customer,
-  type CustomerCatalogueItem,
   type CustomerProject,
   type CustomerSite,
   type CustomerStockRequest,
@@ -10,9 +9,9 @@ import {
 
 import { prisma, withTransaction } from "../../lib/prisma.js";
 
-// Data-access layer for the Customer aggregate (Customer + projects + catalogue +
-// sites + users). The ONLY place Prisma is touched for customers. Soft-deleted
-// customers (deletedAt set) are excluded from normal reads.
+// Data-access layer for the Customer aggregate (Customer + projects + sites +
+// users). The ONLY place Prisma is touched for customers. Soft-deleted customers
+// (deletedAt set) are excluded from normal reads.
 //
 // ISOLATION INVARIANT: every nested read/write is scoped by `customerId`. Callers
 // pass the customerId resolved from the route (admin) or from req.principal
@@ -20,7 +19,6 @@ import { prisma, withTransaction } from "../../lib/prisma.js";
 
 export type CustomerWithChildren = Customer & {
   projects: CustomerProject[];
-  catalogue: CustomerCatalogueItem[];
   sites: CustomerSite[];
   users: CustomerUser[];
   stockRequests: CustomerStockRequest[];
@@ -28,11 +26,14 @@ export type CustomerWithChildren = Customer & {
 
 const childInclude = {
   projects: { orderBy: { name: "asc" } },
-  catalogue: { include: { category: true }, orderBy: { name: "asc" } },
   sites: { orderBy: { name: "asc" } },
   users: { orderBy: { fullName: "asc" } },
   // Only PENDING requests ride along on the admin detail (the review queue).
-  stockRequests: { where: { status: "pending" }, orderBy: { createdAt: "desc" } },
+  stockRequests: {
+    where: { status: "pending" },
+    include: { warehouseAssignments: { include: { warehouse: { select: { id: true, name: true, code: true } } }, orderBy: { createdAt: "asc" } } },
+    orderBy: { createdAt: "desc" },
+  },
 } satisfies Prisma.CustomerInclude;
 
 export interface CustomerListFilters {
@@ -249,18 +250,17 @@ export async function createWithCode(
 // customerCode — it's already unique and a stable reference — and overwrites the
 // profile + auth with the new details.
 //
-// CRITICAL: the prior occupant's nested data (projects / catalogue / sites / users)
-// is scrubbed in the SAME transaction. The Customer row is reused (so the email +
-// code stay reserved), so without this the revived customer — a different company
-// reusing the email — would inherit the previous company's catalogue/projects/
-// sites/users (a cross-tenant data leak via GET /customer/catalogue + the detail).
+// CRITICAL: the prior occupant's nested data (projects / sites / users) is scrubbed
+// in the SAME transaction. The Customer row is reused (so the email + code stay
+// reserved), so without this the revived customer — a different company reusing the
+// email — would inherit the previous company's projects/sites/users (a cross-tenant
+// data leak via the detail endpoint).
 export function revive(
   id: string,
   data: Omit<Prisma.CustomerUpdateInput, "customerCode">,
 ): Promise<Customer> {
   return withTransaction(async (tx) => {
     await tx.customerProject.deleteMany({ where: { customerId: id } });
-    await tx.customerCatalogueItem.deleteMany({ where: { customerId: id } });
     await tx.customerSite.deleteMany({ where: { customerId: id } });
     await tx.customerUser.deleteMany({ where: { customerId: id } });
     return tx.customer.update({ where: { id }, data });
@@ -381,86 +381,6 @@ export function updateProject(id: string, data: ProjectData): Promise<CustomerPr
 
 export function deleteProject(id: string): Promise<CustomerProject> {
   return prisma.customerProject.delete({ where: { id } });
-}
-
-// --- nested: catalogue items ------------------------------------------------
-
-export function findCatalogueItemById(id: string) {
-  return prisma.customerCatalogueItem.findUnique({ where: { id }, include: { category: true } });
-}
-
-export function findCatalogueItemBySku(
-  customerId: string,
-  skuLower: string,
-): Promise<CustomerCatalogueItem | null> {
-  return prisma.customerCatalogueItem.findFirst({ where: { customerId, skuLower } });
-}
-
-export interface CatalogueItemData {
-  name: string;
-  sku: string;
-  categoryId: string;
-  description?: string | null;
-  uom?: string | null;
-  serialized?: boolean;
-  barcodeRequired?: boolean;
-  highValue?: boolean;
-  thresholdQty?: number | null;
-  status?: string | null;
-  // undefined = leave attributes unchanged (omitted from a PUT); null = clear them;
-  // an object = replace them.
-  attributes?: Prisma.InputJsonValue | null;
-}
-
-export function createCatalogueItem(
-  customerId: string,
-  data: CatalogueItemData,
-): Promise<CustomerCatalogueItem> {
-  return prisma.customerCatalogueItem.create({
-    data: {
-      customerId,
-      name: data.name,
-      sku: data.sku,
-      skuLower: data.sku.toLowerCase(),
-      categoryId: data.categoryId,
-      description: data.description ?? null,
-      uom: data.uom ?? null,
-      serialized: data.serialized ?? false,
-      barcodeRequired: data.barcodeRequired ?? false,
-      highValue: data.highValue ?? false,
-      thresholdQty: data.thresholdQty ?? null,
-      status: data.status ?? "active",
-      attributes: data.attributes ?? null,
-    },
-    include: { category: true },
-  });
-}
-
-export function updateCatalogueItem(
-  id: string,
-  data: CatalogueItemData,
-): Promise<CustomerCatalogueItem> {
-  const update: Prisma.CustomerCatalogueItemUncheckedUpdateInput = {
-    name: data.name,
-    sku: data.sku,
-    skuLower: data.sku.toLowerCase(),
-    categoryId: data.categoryId,
-    description: data.description ?? null,
-    uom: data.uom ?? null,
-    serialized: data.serialized ?? false,
-    barcodeRequired: data.barcodeRequired ?? false,
-    highValue: data.highValue ?? false,
-    thresholdQty: data.thresholdQty ?? null,
-    status: data.status ?? "active",
-  };
-  // Only touch attributes when the caller actually sent the field — an omitted
-  // `attributes` (undefined) preserves the stored value rather than wiping it.
-  if (data.attributes !== undefined) update.attributes = data.attributes ?? null;
-  return prisma.customerCatalogueItem.update({ where: { id }, data: update, include: { category: true } });
-}
-
-export function deleteCatalogueItem(id: string): Promise<CustomerCatalogueItem> {
-  return prisma.customerCatalogueItem.delete({ where: { id } });
 }
 
 // --- nested: sites ----------------------------------------------------------
@@ -650,9 +570,15 @@ export function createStockRequest(
 export function findStockRequestsByCustomer(
   customerId: string,
   status?: string,
-): Promise<CustomerStockRequest[]> {
+) {
   return prisma.customerStockRequest.findMany({
     where: { customerId, ...(status ? { status } : {}) },
+    include: {
+      warehouseAssignments: {
+        include: { warehouse: { select: { id: true, name: true, code: true } } },
+        orderBy: { createdAt: "asc" },
+      },
+    },
     orderBy: { createdAt: "desc" },
   });
 }
@@ -663,7 +589,7 @@ export function findStockRequestById(id: string): Promise<CustomerStockRequest |
 
 // The reviewer's verdict on a request: a status move (approved | rejected) plus an
 // optional admin response note shown to the customer. Approval is status-only — it
-// never writes a catalogue item or inventory record (that's a later, deliberate
+// never writes a stock entry or inventory record (that's a later, deliberate
 // internal step).
 export interface StockReviewData {
   status: string;
@@ -684,9 +610,246 @@ export function reviewStockRequest(id: string, data: StockReviewData): Promise<C
   });
 }
 
+// --- customer stock request editing + warehouse assignment ---
+
+export interface StockRequestEditData {
+  editedName: string;
+  catalogueItemId?: string | null;
+  adminResponse?: string | null;
+  status: string;
+  reviewedBy: string | null;
+  reviewedAt: Date;
+}
+
+export function editAndApproveStockRequest(id: string, data: StockRequestEditData): Promise<CustomerStockRequest> {
+  return prisma.customerStockRequest.update({
+    where: { id },
+    data: {
+      editedName: data.editedName,
+      catalogueItemId: data.catalogueItemId ?? null,
+      adminResponse: data.adminResponse ?? null,
+      status: data.status,
+      reviewedBy: data.reviewedBy,
+      reviewedAt: data.reviewedAt,
+    },
+  });
+}
+
+export function updateStockRequestStatus(id: string, status: string): Promise<CustomerStockRequest> {
+  return prisma.customerStockRequest.update({
+    where: { id },
+    data: { status },
+  });
+}
+
+export interface WarehouseAssignmentData {
+  customerStockRequestId: string;
+  warehouseId: string;
+  quantity: number;
+}
+
+export function createWarehouseAssignments(data: WarehouseAssignmentData[]) {
+  return prisma.$transaction(
+    data.map((d) =>
+      prisma.customerStockWarehouseAssignment.create({ data: d }),
+    ),
+  );
+}
+
+export function findAssignmentsByRequest(requestId: string) {
+  return prisma.customerStockWarehouseAssignment.findMany({
+    where: { customerStockRequestId: requestId },
+    include: { warehouse: { select: { id: true, name: true, code: true } } },
+    orderBy: { createdAt: "asc" },
+  });
+}
+
+export function findAssignmentById(id: string) {
+  return prisma.customerStockWarehouseAssignment.findUnique({
+    where: { id },
+    include: {
+      warehouse: { select: { id: true, name: true, code: true } },
+      stockRequest: { select: { id: true, customerId: true, name: true, editedName: true, quantity: true, status: true } },
+    },
+  });
+}
+
+export function findPendingAssignmentsByWarehouse(warehouseId: string) {
+  return prisma.customerStockWarehouseAssignment.findMany({
+    where: { warehouseId, status: { in: ["pending", "partially_received"] } },
+    include: {
+      stockRequest: {
+        select: { id: true, customerId: true, name: true, editedName: true, quantity: true, status: true, customer: { select: { id: true, name: true, customerCode: true } } },
+      },
+      warehouse: { select: { id: true, name: true, code: true } },
+    },
+    orderBy: { createdAt: "asc" },
+  });
+}
+
+export function updateAssignmentReceived(id: string, receivedQuantity: number, totalReceivedSoFar: number, assignedQty: number, receivedBy: string | null, notes: string | null) {
+  const newTotal = totalReceivedSoFar + receivedQuantity;
+  const status = newTotal >= assignedQty ? "received" : "partially_received";
+  return prisma.customerStockWarehouseAssignment.update({
+    where: { id },
+    data: {
+      receivedQuantity: newTotal,
+      status,
+      receivedBy,
+      receivedAt: new Date(),
+      notes,
+    },
+  });
+}
+
+export function findStockRequestWithAssignments(id: string) {
+  return prisma.customerStockRequest.findUnique({
+    where: { id },
+    include: {
+      warehouseAssignments: {
+        include: { warehouse: { select: { id: true, name: true, code: true } } },
+      },
+    },
+  });
+}
+
+// --- customer stock entries (physical stock received at warehouses) -----------
+
+export interface CreateStockEntryData {
+  customerId: string;
+  warehouseId: string;
+  assignmentId: string;
+  itemName: string;
+  quantity: number;
+  receivedBy: string | null;
+  receivedAt: Date;
+}
+
+export function createStockEntry(data: CreateStockEntryData) {
+  return prisma.customerStockEntry.create({ data });
+}
+
+export interface CreateDirectStockEntryData {
+  customerId: string;
+  warehouseId: string;
+  itemName: string;
+  sku?: string | null;
+  categoryId?: string | null;
+  description?: string | null;
+  uom?: string | null;
+  quantity: number;
+  serialized?: boolean;
+  serialNumber?: string | null;
+  highValue?: boolean;
+  thresholdQty?: number | null;
+  attributes?: Record<string, string> | null;
+  status: string;
+  receivedBy: string | null;
+  receivedAt: Date;
+}
+
+export function createDirectStockEntry(data: CreateDirectStockEntryData) {
+  return prisma.customerStockEntry.create({
+    data,
+    include: {
+      customer: { select: { id: true, name: true, customerCode: true } },
+      warehouse: { select: { id: true, name: true, code: true } },
+      category: { select: { id: true, name: true } },
+    },
+  });
+}
+
+export function findStockEntryById(id: string) {
+  return prisma.customerStockEntry.findUnique({
+    where: { id },
+    include: {
+      customer: { select: { id: true, name: true, customerCode: true } },
+      warehouse: { select: { id: true, name: true, code: true } },
+      category: { select: { id: true, name: true } },
+    },
+  });
+}
+
+export function findStockEntriesByCustomer(customerId: string, status?: string) {
+  return prisma.customerStockEntry.findMany({
+    where: { customerId, ...(status ? { status } : {}) },
+    include: {
+      customer: { select: { id: true, name: true, customerCode: true } },
+      warehouse: { select: { id: true, name: true, code: true } },
+      category: { select: { id: true, name: true } },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+}
+
+export function findStockEntriesByWarehouse(warehouseId: string, status?: string) {
+  return prisma.customerStockEntry.findMany({
+    where: { warehouseId, ...(status ? { status } : {}) },
+    include: {
+      customer: { select: { id: true, name: true, customerCode: true } },
+      warehouse: { select: { id: true, name: true, code: true } },
+      category: { select: { id: true, name: true } },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+}
+
+export function findStockEntriesByAssignment(assignmentId: string) {
+  return prisma.customerStockEntry.findMany({
+    where: { assignmentId },
+    include: {
+      customer: { select: { id: true, name: true, customerCode: true } },
+      warehouse: { select: { id: true, name: true, code: true } },
+      category: { select: { id: true, name: true } },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+}
+
+export interface UpdateStockEntryData {
+  itemName: string;
+  sku?: string | null;
+  categoryId?: string | null;
+  description?: string | null;
+  uom?: string | null;
+  serialized?: boolean;
+  serialNumber?: string | null;
+  highValue?: boolean;
+  attributes?: Record<string, string> | null;
+  status: string;
+}
+
+export function updateStockEntry(id: string, data: UpdateStockEntryData) {
+  return prisma.customerStockEntry.update({
+    where: { id },
+    data,
+    include: {
+      customer: { select: { id: true, name: true, customerCode: true } },
+      warehouse: { select: { id: true, name: true, code: true } },
+      category: { select: { id: true, name: true } },
+    },
+  });
+}
+
+export function updateStockEntryBarcode(id: string, barcode: string, barcodeDataUri: string) {
+  return prisma.customerStockEntry.update({
+    where: { id },
+    data: { barcode, barcodeDataUri },
+    include: {
+      customer: { select: { id: true, name: true, customerCode: true } },
+      warehouse: { select: { id: true, name: true, code: true } },
+      category: { select: { id: true, name: true } },
+    },
+  });
+}
+
+export function countStockEntries() {
+  return prisma.customerStockEntry.count();
+}
+
 // True when a nested write hit a per-customer unique index (P2002) — duplicate
-// project name, catalogue SKU, or customer-user email within the same customer.
-// The service turns this into a friendly 409.
+// project name or customer-user email within the same customer. The service
+// turns this into a friendly 409.
 export function isUniqueConflictError(e: unknown): boolean {
   return e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002";
 }

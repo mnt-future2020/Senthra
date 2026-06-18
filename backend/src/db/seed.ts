@@ -100,7 +100,7 @@ export async function seedDatabase(): Promise<void> {
 
   // Seed a starter global stock-category list ONLY on a fresh DB. These are ordinary
   // admin-managed categories (no system flag) — once seeded, renames/deletes stick and
-  // nothing here touches them again. Catalogue items reference a category by id.
+  // nothing here touches them again. Stock entries reference a category by id.
   if ((await categoryRepo.findMany()).length === 0) {
     const SEED_CATEGORIES = ["Optical", "Fiber", "Core", "Router", "Switch", "Cable", "Connector"];
     for (let i = 0; i < SEED_CATEGORIES.length; i++) {
@@ -221,7 +221,7 @@ export async function seedDatabase(): Promise<void> {
     console.log(`Migrated ${migratedRoles} role(s) to granular permissions.`);
   }
 
-  // Customer RBAC split backward-compat. The customer module's projects, catalogue,
+  // Customer RBAC split backward-compat. The customer module's projects, stock,
   // sites, portal login and stock requests used to be gated by the coarse
   // customers.view / customers.edit keys; they now have their own granular groups.
   // Backfill the matching child keys onto EVERY role (built-in AND admin-created) that

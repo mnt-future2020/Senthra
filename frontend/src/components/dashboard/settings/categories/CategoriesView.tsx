@@ -14,7 +14,7 @@ import { Pagination } from "@/components/ui/Pagination";
 
 const PAGE_SIZE = 12;
 
-// Settings → Categories: the global stock-category master list. Catalogue items pick
+// Settings → Categories: the global stock-category master list. Stock entries pick
 // a category from here; an in-use category can't be deleted (the API guards it).
 export function CategoriesView() {
   const { pushToast } = useDashboard();
@@ -181,7 +181,7 @@ export function CategoriesView() {
           <div className="min-w-0">
             <h3 className="text-sm font-extrabold text-[var(--ink)]">Categories</h3>
             <p className="text-xs text-[var(--muted)]">
-              The global stock-category list. Catalogue items pick a category from here.
+              The global stock-category list. Stock entries pick a category from here.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -425,7 +425,7 @@ export function CategoriesView() {
         message={
           <>
             Delete <strong className="text-[var(--ink)]">{confirm.category?.name}</strong>? A category
-            in use by catalogue items can&apos;t be deleted.
+            in use by stock entries can&apos;t be deleted.
           </>
         }
         confirmLabel="Delete"

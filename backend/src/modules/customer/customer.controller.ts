@@ -5,12 +5,15 @@ import { param, queryInt } from "../../utils/request.js";
 import { unauthorized } from "../../utils/http-error.js";
 import { principalGrants } from "../../types/principal.js";
 import type {
-  CatalogueItemInput,
   CreateCustomerInput,
   CustomerUserInput,
   ProjectInput,
   SiteInput,
   StockRequestInput,
+  StockRequestEditInput,
+  StockRequestAssignInput,
+  StockAssignmentReceiveInput,
+  StockEntryUpdateInput,
   StockReviewInput,
   UpdateCustomerInput,
 } from "./customer.validation.js";
@@ -32,7 +35,7 @@ export const listCustomers = asyncHandler(async (req, res) => {
   res.json(result);
 });
 
-// GET /customers/:id  — detail (by id or customerCode), with projects/catalogue/sites.
+// GET /customers/:id  — detail (by id or customerCode), with projects/sites/users.
 // The pending stock-request queue is only embedded for callers who hold
 // stock_requests.view — customers.view alone never exposes it (it has its own route).
 export const getCustomer = asyncHandler(async (req, res) => {
@@ -92,31 +95,6 @@ export const updateProject = asyncHandler(async (req, res) => {
 
 export const deleteProject = asyncHandler(async (req, res) => {
   await customerService.removeProject(param(req, "id"), param(req, "projectId"), actorFrom(req));
-  res.json({ ok: true });
-});
-
-// --- nested: catalogue ---
-export const addCatalogueItem = asyncHandler(async (req, res) => {
-  const item = await customerService.addCatalogueItem(
-    param(req, "id"),
-    req.body as CatalogueItemInput,
-    actorFrom(req),
-  );
-  res.status(201).json({ item });
-});
-
-export const updateCatalogueItem = asyncHandler(async (req, res) => {
-  const item = await customerService.updateCatalogueItem(
-    param(req, "id"),
-    param(req, "itemId"),
-    req.body as CatalogueItemInput,
-    actorFrom(req),
-  );
-  res.json({ item });
-});
-
-export const deleteCatalogueItem = asyncHandler(async (req, res) => {
-  await customerService.removeCatalogueItem(param(req, "id"), param(req, "itemId"), actorFrom(req));
   res.json({ ok: true });
 });
 
@@ -197,7 +175,7 @@ export const listStockRequests = asyncHandler(async (req, res) => {
 });
 
 // POST /customers/:id/stock-requests/:reqId/approve — status move only (never
-// creates a catalogue item or inventory record).
+// creates a stock entry or inventory record).
 export const approveStockRequest = asyncHandler(async (req, res) => {
   const result = await customerService.approveStockRequest(
     param(req, "id"),
@@ -219,6 +197,107 @@ export const rejectStockRequest = asyncHandler(async (req, res) => {
   res.json({ request });
 });
 
+// POST /customers/:id/stock-requests/:reqId/edit-approve — PM edits name + approves.
+export const editAndApproveStockRequest = asyncHandler(async (req, res) => {
+  const result = await customerService.editAndApproveStockRequest(
+    param(req, "id"),
+    param(req, "reqId"),
+    req.body as StockRequestEditInput,
+    actorFrom(req),
+  );
+  res.json(result);
+});
+
+// POST /customers/:id/stock-requests/:reqId/assign — PM assigns warehouses.
+export const assignStockRequestWarehouses = asyncHandler(async (req, res) => {
+  const result = await customerService.assignStockRequestWarehouses(
+    param(req, "id"),
+    param(req, "reqId"),
+    req.body as StockRequestAssignInput,
+    actorFrom(req),
+  );
+  res.json(result);
+});
+
+// GET /customers/:id/stock-requests/:reqId/assignments — view warehouse assignments.
+export const listStockRequestAssignments = asyncHandler(async (req, res) => {
+  const assignments = await customerService.getStockRequestAssignments(
+    param(req, "id"),
+    param(req, "reqId"),
+  );
+  res.json({ assignments });
+});
+
+// POST /stock-assignments/:id/receive — warehouse manager receives stock.
+export const receiveStockAssignment = asyncHandler(async (req, res) => {
+  const result = await customerService.receiveStockAssignment(
+    param(req, "id"),
+    req.body as StockAssignmentReceiveInput,
+    actorFrom(req),
+  );
+  res.json(result);
+});
+
+// GET /warehouses/:id/pending-stock — pending customer stock for a warehouse.
+export const getPendingStockForWarehouse = asyncHandler(async (req, res) => {
+  const items = await customerService.getPendingStockForWarehouse(param(req, "id"));
+  res.json({ items });
+});
+
+// --- customer stock entries (product details after warehouse receive) ---------
+
+// GET /stock-entries/:id — single stock entry detail.
+export const getStockEntry = asyncHandler(async (req, res) => {
+  const entry = await customerService.getStockEntry(param(req, "id"));
+  res.json({ entry });
+});
+
+// PUT /stock-entries/:id — update product details + activate.
+export const updateStockEntry = asyncHandler(async (req, res) => {
+  const entry = await customerService.updateStockEntry(
+    param(req, "id"),
+    req.body as StockEntryUpdateInput,
+    actorFrom(req),
+  );
+  res.json({ entry });
+});
+
+// POST /stock-entries/:id/generate-barcode — generate + save barcode.
+export const generateStockEntryBarcode = asyncHandler(async (req, res) => {
+  const entry = await customerService.generateStockEntryBarcode(param(req, "id"), actorFrom(req));
+  res.json({ entry });
+});
+
+// POST /customers/:id/stock-entries — directly add a stock entry for a customer.
+export const createDirectStockEntry = asyncHandler(async (req, res) => {
+  const entry = await customerService.createDirectStockEntry(
+    param(req, "id"),
+    req.body as customerService.DirectStockEntryInput,
+    actorFrom(req),
+  );
+  res.status(201).json({ entry });
+});
+
+// GET /customers/:id/stock-entries — list stock entries for a customer.
+export const listCustomerStockEntries = asyncHandler(async (req, res) => {
+  const { status } = req.query;
+  const entries = await customerService.listCustomerStockEntries(
+    param(req, "id"),
+    typeof status === "string" ? status : undefined,
+  );
+  res.json({ entries });
+});
+
+// GET /warehouses/:id/stock-entries — list stock entries for a warehouse.
+export const listWarehouseStockEntries = asyncHandler(async (req, res) => {
+  const { status } = req.query;
+  const entries = await customerService.listWarehouseStockEntries(
+    param(req, "id"),
+    typeof status === "string" ? status : undefined,
+  );
+  res.json({ entries });
+});
+
 // ============================================================================
 // Customer-facing portal surface (guarded by requireCustomer)
 //
@@ -238,17 +317,17 @@ export const getOwnProfile = asyncHandler(async (req, res) => {
   res.json({ profile });
 });
 
-// GET /customer/catalogue  — the signed-in customer's stock catalogue.
-export const getOwnCatalogue = asyncHandler(async (req, res) => {
-  const catalogue = await customerService.getOwnCatalogue(customerId(req));
-  res.json({ catalogue });
-});
-
 // GET /customer/stock  — the signed-in customer's stock (Flow 9). Returns
 // { available: false, ... } until the inventory read-model is wired + flagged on.
 export const getOwnStock = asyncHandler(async (req, res) => {
   const stock = await customerService.getOwnStock(customerId(req));
   res.json({ stock });
+});
+
+// GET /customer/stock-entries — the signed-in customer's received stock entries.
+export const getOwnStockEntries = asyncHandler(async (req, res) => {
+  const entries = await customerService.listCustomerStockEntries(customerId(req));
+  res.json({ entries });
 });
 
 // GET /customer/projects — the signed-in customer's projects (read-only).
@@ -270,13 +349,13 @@ export const getOwnOverview = asyncHandler(async (req, res) => {
   res.json({ overview });
 });
 
-// GET /customer/stock-requests — the signed-in customer's own catalogue-add requests.
+// GET /customer/stock-requests — the signed-in customer's own stock requests.
 export const getOwnStockRequests = asyncHandler(async (req, res) => {
   const requests = await customerService.getOwnStockRequests(customerId(req));
   res.json({ requests });
 });
 
-// POST /customer/stock-requests — request to add a catalogue item (queued for an
+// POST /customer/stock-requests — request to add a stock item (queued for an
 // internal user to review). The ONE write a portal user can make into the module.
 export const submitStockRequest = asyncHandler(async (req, res) => {
   const p = req.principal;

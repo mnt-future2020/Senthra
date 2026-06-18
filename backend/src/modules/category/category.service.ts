@@ -156,7 +156,7 @@ export async function deleteCategory(id: string, actor?: AuditActor): Promise<vo
   });
 }
 
-// For other modules (the customer catalogue): assert a category id points to an
+// For other modules (customer stock entries, IRM): assert a category id points to an
 // existing ACTIVE category. Returns the category. Throws badRequest otherwise.
 export async function requireActiveCategory(categoryId: string): Promise<Category> {
   if (!categoryId || !CATEGORY_OBJECT_ID_RE.test(categoryId)) {

@@ -9,12 +9,16 @@ import {
 import { writeLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import {
-  catalogueItemSchema,
   createCustomerSchema,
   customerUserSchema,
+  directStockEntrySchema,
   projectSchema,
   siteSchema,
   stockRequestSchema,
+  stockRequestEditSchema,
+  stockRequestAssignSchema,
+  stockAssignmentReceiveSchema,
+  stockEntryUpdateSchema,
   stockReviewSchema,
   updateCustomerSchema,
 } from "./customer.validation.js";
@@ -81,27 +85,6 @@ adminRouter.delete(
 );
 
 adminRouter.post(
-  "/:id/catalogue",
-  requirePermission("customer_stock.create"),
-  writeLimiter,
-  validateBody(catalogueItemSchema),
-  customerController.addCatalogueItem,
-);
-adminRouter.put(
-  "/:id/catalogue/:itemId",
-  requirePermission("customer_stock.edit"),
-  writeLimiter,
-  validateBody(catalogueItemSchema),
-  customerController.updateCatalogueItem,
-);
-adminRouter.delete(
-  "/:id/catalogue/:itemId",
-  requirePermission("customer_stock.delete"),
-  writeLimiter,
-  customerController.deleteCatalogueItem,
-);
-
-adminRouter.post(
   "/:id/sites",
   requirePermission("customer_sites.create"),
   writeLimiter,
@@ -153,8 +136,8 @@ adminRouter.post(
 
 // Stock requests — the review queue for customer-submitted stock asks. Viewing needs
 // stock_requests.view; approving / rejecting need the matching key. Approval is a
-// status move only — it never writes the catalogue or inventory. (Completion is a
-// future status, introduced with the Goods Out workflow.)
+// status move only — it never writes inventory. (Completion is a future status,
+// introduced with the Goods Out workflow.)
 adminRouter.get(
   "/:id/stock-requests",
   requirePermission("stock_requests.view"),
@@ -175,10 +158,52 @@ adminRouter.post(
   customerController.rejectStockRequest,
 );
 
+// PM edits request item name + approves in one step.
+adminRouter.post(
+  "/:id/stock-requests/:reqId/edit-approve",
+  requirePermission("stock_requests.approve"),
+  writeLimiter,
+  validateBody(stockRequestEditSchema),
+  customerController.editAndApproveStockRequest,
+);
+
+// PM assigns warehouses to an approved request.
+adminRouter.post(
+  "/:id/stock-requests/:reqId/assign",
+  requirePermission("stock_requests.approve"),
+  writeLimiter,
+  validateBody(stockRequestAssignSchema),
+  customerController.assignStockRequestWarehouses,
+);
+
+// View warehouse assignments for a request.
+adminRouter.get(
+  "/:id/stock-requests/:reqId/assignments",
+  requirePermission("stock_requests.view"),
+  customerController.listStockRequestAssignments,
+);
+
+// List stock entries (received stock) for a customer.
+adminRouter.get(
+  "/:id/stock-entries",
+  requirePermission("stock_requests.view"),
+  customerController.listCustomerStockEntries,
+);
+
+// Directly add a stock entry for a customer (existing stock in warehouse).
+adminRouter.post(
+  "/:id/stock-entries",
+  requirePermission("customer_stock.create"),
+  writeLimiter,
+  validateBody(directStockEntrySchema),
+  customerController.createDirectStockEntry,
+);
+
+
 // ----------------------------------------------------------------------------
 // Customer-facing portal surface — mounted at /customer. Reads are scoped to the
 // authenticated customer (from req.principal). The single write is submitting a
-// stock REQUEST, which only QUEUES a review — it never writes the catalogue directly.
+// stock REQUEST, which only QUEUES a review — it never writes stock directly.
 // ----------------------------------------------------------------------------
 const portalRouter = Router();
 portalRouter.use(requireAuth, requireCustomer);
@@ -187,8 +212,8 @@ portalRouter.get("/me", customerController.getOwnProfile);
 portalRouter.get("/overview", customerController.getOwnOverview);
 portalRouter.get("/projects", customerController.getOwnProjects);
 portalRouter.get("/sites", customerController.getOwnSites);
-portalRouter.get("/catalogue", customerController.getOwnCatalogue);
 portalRouter.get("/stock", customerController.getOwnStock);
+portalRouter.get("/stock-entries", customerController.getOwnStockEntries);
 portalRouter.get("/stock-requests", customerController.getOwnStockRequests);
 portalRouter.post(
   "/stock-requests",
@@ -197,5 +222,68 @@ portalRouter.post(
   customerController.submitStockRequest,
 );
 
-export { adminRouter, portalRouter };
+// ----------------------------------------------------------------------------
+// Stock assignment endpoints — mounted at /stock-assignments. Warehouse managers
+// receive stock against an assignment.
+// ----------------------------------------------------------------------------
+const stockAssignmentRouter = Router();
+stockAssignmentRouter.use(requireAuth);
+
+stockAssignmentRouter.post(
+  "/:id/receive",
+  requirePermission("stock_requests.complete"),
+  writeLimiter,
+  validateBody(stockAssignmentReceiveSchema),
+  customerController.receiveStockAssignment,
+);
+
+// ----------------------------------------------------------------------------
+// Warehouse pending customer stock — mounted alongside warehouse routes.
+// GET /warehouses/:id/pending-stock is wired from the route aggregator
+// because it lives on the warehouse path, not the customer path.
+// ----------------------------------------------------------------------------
+const warehousePendingRouter = Router();
+warehousePendingRouter.use(requireAuth);
+
+warehousePendingRouter.get(
+  "/:id/pending-stock",
+  requirePermission("stock_requests.view"),
+  customerController.getPendingStockForWarehouse,
+);
+
+warehousePendingRouter.get(
+  "/:id/stock-entries",
+  requirePermission("stock_requests.view"),
+  customerController.listWarehouseStockEntries,
+);
+
+// ----------------------------------------------------------------------------
+// Customer stock entry endpoints — mounted at /stock-entries. Product detail
+// management after warehouse receive (fill fields, generate barcode).
+// ----------------------------------------------------------------------------
+const stockEntryRouter = Router();
+stockEntryRouter.use(requireAuth);
+
+stockEntryRouter.get(
+  "/:id",
+  requirePermission("stock_requests.view"),
+  customerController.getStockEntry,
+);
+
+stockEntryRouter.put(
+  "/:id",
+  requirePermission("stock_requests.complete"),
+  writeLimiter,
+  validateBody(stockEntryUpdateSchema),
+  customerController.updateStockEntry,
+);
+
+stockEntryRouter.post(
+  "/:id/generate-barcode",
+  requirePermission("stock_requests.complete"),
+  writeLimiter,
+  customerController.generateStockEntryBarcode,
+);
+
+export { adminRouter, portalRouter, stockAssignmentRouter, warehousePendingRouter, stockEntryRouter };
 export default adminRouter;

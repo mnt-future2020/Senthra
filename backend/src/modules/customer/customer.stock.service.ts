@@ -3,7 +3,7 @@ import { env } from "../../config/env.js";
 // Customer stock read-model SEAM (Flow 9).
 //
 // The customer portal's reason to exist is "see my stock". That data — qty-on-hand
-// per catalogue item, dated dispatched/received movements, serialized high-value
+// per stock item, dated dispatched/received movements, serialized high-value
 // tracking — comes from the Stock / IRM Inventory / Goods-In-Out / Warehouse
 // modules, which DO NOT EXIST YET. This service is the single, well-typed boundary
 // between the customer portal and that future inventory read-model.

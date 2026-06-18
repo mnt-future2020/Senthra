@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowLeft, ArrowLeftRight, Loader2, PackageSearch, ScrollText } from "lucide-react";
 
 import * as inventoryService from "@/services/inventory.service";
@@ -15,8 +15,12 @@ const TXN_PAGE_SIZE = 20;
 
 export function InventoryDetail({ initial }: { initial: InventoryDetailType }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { can } = useAuth();
-  const [tab, setTab] = React.useState<Tab>("overview");
+  const TABS: Tab[] = ["overview", "transactions", "purchases"];
+  const requestedTab = searchParams.get("tab");
+  const tab: Tab = TABS.includes(requestedTab as Tab) ? (requestedTab as Tab) : "overview";
+  const setTab = (t: Tab) => router.replace(`/dashboard/inventory/${initial.id}?tab=${t}`, { scroll: false });
   const inv = initial;
 
   return (

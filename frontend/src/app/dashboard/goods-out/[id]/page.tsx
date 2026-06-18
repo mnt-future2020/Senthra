@@ -38,5 +38,6 @@ function Loader({ idOrCode }: { idOrCode: string }) {
 
   if (loading) return <FormPageSkeleton />;
   if (error || !gdn) return <FormError message={error ?? "Dispatch not found."} />;
-  return <GoodsOutDetail initial={gdn} />;
+  // Suspense satisfies useSearchParams (the ?tab= seed) during prerender.
+  return <React.Suspense fallback={<FormPageSkeleton />}><GoodsOutDetail initial={gdn} /></React.Suspense>;
 }

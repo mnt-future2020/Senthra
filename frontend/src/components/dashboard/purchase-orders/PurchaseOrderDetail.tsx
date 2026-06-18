@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { CheckCircle2, Loader2, Paperclip, Pencil, ScrollText, Send, Trash2, Upload, XCircle } from "lucide-react";
 
 import * as poService from "@/services/purchase-order.service";
@@ -20,10 +20,14 @@ type Tab = "overview" | "attachments" | "audit";
 
 export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { can } = useAuth();
   const { pushToast } = useDashboard();
   const [po, setPo] = React.useState<PurchaseOrder>(initial);
-  const [tab, setTab] = React.useState<Tab>("overview");
+  const TABS: Tab[] = ["overview", "attachments", "audit"];
+  const requestedTab = searchParams.get("tab");
+  const tab: Tab = TABS.includes(requestedTab as Tab) ? (requestedTab as Tab) : "overview";
+  const setTab = (t: Tab) => router.replace(`/dashboard/purchase-orders/${po.code}?tab=${t}`, { scroll: false });
   const [busy, setBusy] = React.useState(false);
   const [reasonFor, setReasonFor] = React.useState<"reject" | "cancel" | null>(null);
   const [reason, setReason] = React.useState("");

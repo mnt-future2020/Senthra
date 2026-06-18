@@ -1,16 +1,19 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
-import { Activity, Boxes, Loader2, MapPin, Pencil, Power, ScrollText } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Activity, Boxes, Eye, Loader2, MapPin, Pencil, Power, ScrollText } from "lucide-react";
 
 import * as warehouseService from "@/services/warehouse.service";
+import * as customerService from "@/services/customer.service";
 import * as auditService from "@/services/audit.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { actionLabel, actionTone, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
+import { ReceiveStockModal } from "@/components/dashboard/customers/ReceiveStockModal";
 import type { AuditEntry } from "@/types/audit";
+import type { CustomerStockEntry, PendingStockItem, WarehouseAssignment } from "@/types/customer";
 import type { Warehouse } from "@/types/warehouse";
 import type { UserStatus } from "@/types/user";
 
@@ -21,9 +24,10 @@ function fmtDate(iso: string | null): string {
   return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
 }
 
-type Tab = "overview" | "inventory" | "transactions" | "audit";
-const TABS: { key: Tab; label: string }[] = [
+type Tab = "overview" | "incoming" | "inventory" | "transactions" | "audit";
+const TABS: { key: Tab; label: string; perm?: string }[] = [
   { key: "overview", label: "Overview" },
+  { key: "incoming", label: "Incoming stock", perm: "stock_requests.view" },
   { key: "inventory", label: "Inventory" },
   { key: "transactions", label: "Transactions" },
   { key: "audit", label: "Audit trail" },
@@ -31,12 +35,16 @@ const TABS: { key: Tab; label: string }[] = [
 
 export function WarehouseDetail({ initial }: { initial: Warehouse }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { can } = useAuth();
   const { pushToast } = useDashboard();
   const [w, setW] = React.useState<Warehouse>(initial);
-  const [tab, setTab] = React.useState<Tab>("overview");
   const [busy, setBusy] = React.useState(false);
   const canEdit = can("warehouse.edit");
+
+  const visibleTabs = TABS.filter((t) => !t.perm || can(t.perm));
+  const requestedTab = searchParams.get("tab");
+  const tab: Tab = visibleTabs.find((t) => t.key === requestedTab)?.key ?? "overview";
 
   const toggleStatus = async () => {
     const next = w.status === "active" ? "inactive" : "active";
@@ -99,10 +107,10 @@ export function WarehouseDetail({ initial }: { initial: Warehouse }) {
 
       {/* Tabs */}
       <div className="flex gap-1 overflow-x-auto border-b border-[var(--border)]">
-        {TABS.map((t) => (
+        {visibleTabs.map((t) => (
           <button
             key={t.key}
-            onClick={() => setTab(t.key)}
+            onClick={() => router.replace(`/dashboard/warehouses/${w.code}?tab=${t.key}`, { scroll: false })}
             className={`shrink-0 border-b-2 px-3.5 py-2.5 text-xs font-bold transition-colors ${
               tab === t.key
                 ? "border-[var(--accent)] text-[var(--accent)]"
@@ -115,13 +123,8 @@ export function WarehouseDetail({ initial }: { initial: Warehouse }) {
       </div>
 
       {tab === "overview" && <Overview w={w} />}
-      {tab === "inventory" && (
-        <Placeholder
-          icon={Boxes}
-          title="Inventory"
-          body="Stock currently held at this warehouse will appear here once the inventory module is connected."
-        />
-      )}
+      {tab === "incoming" && <IncomingStock warehouseId={w.id} pushToast={pushToast} router={router} />}
+      {tab === "inventory" && <WarehouseStockEntries warehouseId={w.id} router={router} />}
       {tab === "transactions" && (
         <Placeholder
           icon={Activity}
@@ -251,6 +254,276 @@ function Overview({ w }: { w: Warehouse }) {
           <Field label="Updated by">{w.updatedBy}</Field>
         </div>
       </Card>
+    </div>
+  );
+}
+
+function IncomingStock({
+  warehouseId,
+  pushToast,
+  router,
+}: {
+  warehouseId: string;
+  pushToast: (msg: string, type?: "success" | "alert") => void;
+  router: ReturnType<typeof useRouter>;
+}) {
+  const [items, setItems] = React.useState<PendingStockItem[] | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+  const [receiveTarget, setReceiveTarget] = React.useState<PendingStockItem | null>(null);
+
+  const load = React.useCallback(() => {
+    customerService
+      .getPendingStockForWarehouse(warehouseId)
+      .then(setItems)
+      .catch((e) => setError(e instanceof Error ? e.message : "Could not load incoming stock."));
+  }, [warehouseId]);
+
+  React.useEffect(() => { load(); }, [load]);
+
+  const onReceived = (updated: WarehouseAssignment, stockEntryId: string) => {
+    if (!receiveTarget) return;
+    setItems((prev) =>
+      (prev ?? [])
+        .map((it) => {
+          if (it.assignmentId !== updated.id) return it;
+          return {
+            ...it,
+            receivedQuantity: updated.receivedQuantity,
+            status: updated.status,
+          };
+        })
+        .filter((it) => it.status !== "received"),
+    );
+    setReceiveTarget(null);
+    pushToast(`Received ${updated.receivedQuantity} at ${updated.warehouseName}.`, "success");
+    router.push(`/dashboard/stock-entries/${stockEntryId}`);
+  };
+
+  if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
+  if (items === null) {
+    return (
+      <div className="flex items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--surface)] py-16">
+        <Loader2 className="h-6 w-6 animate-spin text-[var(--muted)]" />
+      </div>
+    );
+  }
+  if (items.length === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
+        <Boxes className="h-7 w-7 text-[var(--faint)]" />
+        <p className="text-sm font-semibold text-[var(--ink)]">No incoming stock</p>
+        <p className="text-xs text-[var(--muted)]">Customer stock assigned to this warehouse will appear here.</p>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+        <table className="w-full text-left text-sm" style={{ minWidth: 700 }}>
+          <thead>
+            <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
+              <th className="px-4 py-3">Customer</th>
+              <th className="px-4 py-3">Item</th>
+              <th className="px-4 py-3">Qty</th>
+              <th className="px-4 py-3">Received</th>
+              <th className="px-4 py-3">Status</th>
+              <th className="px-4 py-3">Requested</th>
+              <th className="px-4 py-3" />
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((it) => {
+              const remaining = it.quantity - it.receivedQuantity;
+              return (
+                <tr key={it.assignmentId} className="border-b border-[var(--border)] align-top last:border-0">
+                  <td className="px-4 py-3">
+                    <div className="font-semibold text-[var(--ink)]">{it.customerName}</div>
+                    <div className="font-mono text-[11px] text-[var(--faint)]">{it.customerCode}</div>
+                  </td>
+                  <td className="px-4 py-3 font-semibold text-[var(--ink)]">{it.itemName}</td>
+                  <td className="px-4 py-3 font-bold text-[var(--ink)]">{it.quantity}</td>
+                  <td className="px-4 py-3 text-[var(--muted)]">
+                    {it.receivedQuantity}/{it.quantity}
+                  </td>
+                  <td className="px-4 py-3">
+                    <span
+                      className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                        it.status === "partially_received"
+                          ? "bg-indigo-500/12 text-indigo-600"
+                          : "bg-amber-500/15 text-amber-600"
+                      }`}
+                    >
+                      {it.status.replace(/_/g, " ")}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-xs text-[var(--muted)]">{fmtDate(it.createdAt)}</td>
+                  <td className="px-4 py-3">
+                    {remaining > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setReceiveTarget(it)}
+                        className="rounded-lg bg-[var(--pos)] px-2.5 py-1.5 text-[11px] font-bold text-white transition-all hover:opacity-90"
+                      >
+                        Receive
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {receiveTarget && (
+        <ReceiveStockModal
+          assignment={{
+            id: receiveTarget.assignmentId,
+            warehouseId: warehouseId,
+            warehouseName: receiveTarget.warehouseName,
+            warehouseCode: receiveTarget.warehouseCode,
+            quantity: receiveTarget.quantity,
+            receivedQuantity: receiveTarget.receivedQuantity,
+            status: receiveTarget.status as "pending" | "partially_received" | "received",
+            receivedBy: null,
+            receivedAt: null,
+            notes: null,
+          }}
+          itemName={receiveTarget.itemName}
+          onClose={() => setReceiveTarget(null)}
+          onSaved={onReceived}
+        />
+      )}
+    </>
+  );
+}
+
+function WarehouseStockEntries({
+  warehouseId,
+  router,
+}: {
+  warehouseId: string;
+  router: ReturnType<typeof useRouter>;
+}) {
+  const [entries, setEntries] = React.useState<CustomerStockEntry[] | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+  const [filter, setFilter] = React.useState<"" | "draft" | "active">("");
+
+  const load = React.useCallback(() => {
+    customerService
+      .listWarehouseStockEntries(warehouseId, filter || undefined)
+      .then(setEntries)
+      .catch((e) => setError(e instanceof Error ? e.message : "Could not load stock entries."));
+  }, [warehouseId, filter]);
+
+  React.useEffect(() => { load(); }, [load]);
+
+  if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
+  if (entries === null) {
+    return (
+      <div className="flex items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--surface)] py-16">
+        <Loader2 className="h-6 w-6 animate-spin text-[var(--muted)]" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      {/* Filter chips */}
+      <div className="flex items-center gap-2">
+        {(["", "active", "draft"] as const).map((f) => (
+          <button
+            key={f}
+            type="button"
+            onClick={() => setFilter(f)}
+            className={`rounded-full px-3 py-1.5 text-[11px] font-bold transition-all ${
+              filter === f
+                ? "bg-[var(--accent)] text-white"
+                : "border border-[var(--border)] bg-[var(--surface-2)] text-[var(--muted)] hover:text-[var(--ink)]"
+            }`}
+          >
+            {f === "" ? "All" : f === "active" ? "Active" : "Draft"}
+          </button>
+        ))}
+      </div>
+
+      {entries.length === 0 ? (
+        <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
+          <Boxes className="h-7 w-7 text-[var(--faint)]" />
+          <p className="text-sm font-semibold text-[var(--ink)]">No stock entries</p>
+          <p className="text-xs text-[var(--muted)]">
+            {filter ? `No ${filter} entries found.` : "Customer stock received at this warehouse will appear here."}
+          </p>
+        </div>
+      ) : (
+        <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+          <table className="w-full text-left text-sm" style={{ minWidth: 750 }}>
+            <thead>
+              <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
+                <th className="px-4 py-3">Item</th>
+                <th className="px-4 py-3">Customer</th>
+                <th className="px-4 py-3">SKU</th>
+                <th className="px-4 py-3">Qty</th>
+                <th className="px-4 py-3">Barcode</th>
+                <th className="px-4 py-3">Status</th>
+                <th className="px-4 py-3">Received</th>
+                <th className="px-4 py-3" />
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map((e) => (
+                <tr
+                  key={e.id}
+                  className="cursor-pointer border-b border-[var(--border)] align-top transition-colors last:border-0 hover:bg-[var(--surface-2)]"
+                  onClick={() => router.push(`/dashboard/stock-entries/${e.id}`)}
+                >
+                  <td className="px-4 py-3 font-semibold text-[var(--ink)]">{e.itemName}</td>
+                  <td className="px-4 py-3">
+                    <div className="text-[var(--ink)]">{e.customerName}</div>
+                    <div className="font-mono text-[11px] text-[var(--faint)]">{e.customerCode}</div>
+                  </td>
+                  <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.sku ?? "—"}</td>
+                  <td className="px-4 py-3 font-bold text-[var(--ink)]">{e.quantity}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.barcode ?? "—"}</td>
+                  <td className="px-4 py-3">
+                    <span
+                      className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                        e.status === "active"
+                          ? "bg-[var(--pos)]/12 text-[var(--pos)]"
+                          : "bg-amber-500/15 text-amber-600"
+                      }`}
+                    >
+                      {e.status}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-xs text-[var(--muted)]">{fmtDate(e.receivedAt ?? e.createdAt)}</td>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        title="View"
+                        onClick={(ev) => { ev.stopPropagation(); router.push(`/dashboard/stock-entries/${e.id}`); }}
+                        className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface-2)] text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)]"
+                      >
+                        <Eye className="h-4 w-4" />
+                      </button>
+                      <button
+                        type="button"
+                        title="Edit"
+                        onClick={(ev) => { ev.stopPropagation(); router.push(`/dashboard/stock-entries/${e.id}`); }}
+                        className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--accent)] text-white transition-all hover:opacity-90"
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,7 +1,6 @@
 import { api } from "@/lib/api";
 import { registerClientCache } from "@/lib/clientCache";
 import type {
-  CatalogueItem,
   Customer,
   CustomerOverview,
   CustomerProject,
@@ -9,11 +8,14 @@ import type {
   CustomerSite,
   CustomerStatus,
   CustomerStock,
+  CustomerStockEntry,
   CustomerSummary,
   CustomerUser,
+  PendingStockItem,
   ProjectStatus,
   StockRequest,
   StockRequestStatus,
+  WarehouseAssignment,
 } from "@/types/customer";
 
 // Typed wrappers around the backend /customers (admin) + /customer (portal)
@@ -84,20 +86,6 @@ export interface ProjectPayload {
   endDate?: string;
   status?: ProjectStatus;
   description?: string;
-}
-
-export interface CatalogueItemPayload {
-  name: string;
-  sku: string;
-  categoryId: string;
-  description?: string;
-  uom?: string;
-  serialized?: boolean;
-  barcodeRequired?: boolean;
-  highValue?: boolean;
-  thresholdQty?: number;
-  status?: CustomerStatus;
-  attributes?: Record<string, string>;
 }
 
 export interface SitePayload {
@@ -210,34 +198,6 @@ export function updateProject(
 
 export function deleteProject(customerId: string, projectId: string): Promise<void> {
   return api(`/customers/${customerId}/projects/${projectId}`, { method: "DELETE" }).then(
-    () => undefined,
-  );
-}
-
-// --- nested: catalogue ---
-export function addCatalogueItem(
-  customerId: string,
-  payload: CatalogueItemPayload,
-): Promise<CatalogueItem> {
-  return api<{ item: CatalogueItem }>(`/customers/${customerId}/catalogue`, {
-    method: "POST",
-    body: payload,
-  }).then((r) => r.item);
-}
-
-export function updateCatalogueItem(
-  customerId: string,
-  itemId: string,
-  payload: CatalogueItemPayload,
-): Promise<CatalogueItem> {
-  return api<{ item: CatalogueItem }>(`/customers/${customerId}/catalogue/${itemId}`, {
-    method: "PUT",
-    body: payload,
-  }).then((r) => r.item);
-}
-
-export function deleteCatalogueItem(customerId: string, itemId: string): Promise<void> {
-  return api(`/customers/${customerId}/catalogue/${itemId}`, { method: "DELETE" }).then(
     () => undefined,
   );
 }
@@ -361,6 +321,157 @@ export function rejectStockRequest(
   ).then((r) => r.request);
 }
 
+// PM edits the free-text item name + approves in one step.
+export interface EditApprovePayload {
+  editedName: string;
+  catalogueItemId?: string;
+  note?: string;
+}
+
+export function editAndApproveStockRequest(
+  customerId: string,
+  requestId: string,
+  payload: EditApprovePayload,
+): Promise<StockRequest> {
+  return api<{ request: StockRequest }>(
+    `/customers/${customerId}/stock-requests/${requestId}/edit-approve`,
+    { method: "POST", body: payload },
+  ).then((r) => r.request);
+}
+
+// PM assigns warehouses to an approved request (total must match quantity).
+export interface AssignWarehousesPayload {
+  assignments: Array<{ warehouseId: string; quantity: number }>;
+}
+
+export function assignStockRequestWarehouses(
+  customerId: string,
+  requestId: string,
+  payload: AssignWarehousesPayload,
+): Promise<StockRequest> {
+  return api<{ request: StockRequest }>(
+    `/customers/${customerId}/stock-requests/${requestId}/assign`,
+    { method: "POST", body: payload },
+  ).then((r) => r.request);
+}
+
+// View warehouse assignments for a specific stock request.
+export function listStockRequestAssignments(
+  customerId: string,
+  requestId: string,
+): Promise<WarehouseAssignment[]> {
+  return api<{ assignments: WarehouseAssignment[] }>(
+    `/customers/${customerId}/stock-requests/${requestId}/assignments`,
+  ).then((r) => r.assignments);
+}
+
+// Warehouse manager receives stock against an assignment.
+export interface ReceiveStockPayload {
+  receivedQuantity: number;
+  notes?: string;
+}
+
+export interface ReceiveStockResult {
+  assignment: WarehouseAssignment;
+  stockEntryId: string;
+}
+
+export function receiveStockAssignment(
+  assignmentId: string,
+  payload: ReceiveStockPayload,
+): Promise<ReceiveStockResult> {
+  return api<ReceiveStockResult>(
+    `/stock-assignments/${assignmentId}/receive`,
+    { method: "POST", body: payload },
+  );
+}
+
+// Pending customer stock items for a warehouse (the incoming queue).
+export function getPendingStockForWarehouse(warehouseId: string): Promise<PendingStockItem[]> {
+  return api<{ items: PendingStockItem[] }>(
+    `/warehouses/${warehouseId}/pending-stock`,
+  ).then((r) => r.items);
+}
+
+// --- customer stock entries (product details after warehouse receive) ---------
+
+export function getStockEntry(entryId: string): Promise<CustomerStockEntry> {
+  return api<{ entry: CustomerStockEntry }>(`/stock-entries/${entryId}`).then((r) => r.entry);
+}
+
+export interface StockEntryUpdatePayload {
+  itemName: string;
+  sku?: string;
+  categoryId?: string;
+  description?: string;
+  uom?: string;
+  serialized?: boolean;
+  serialNumber?: string;
+  highValue?: boolean;
+  attributes?: Record<string, string>;
+}
+
+export function updateStockEntry(
+  entryId: string,
+  payload: StockEntryUpdatePayload,
+): Promise<CustomerStockEntry> {
+  return api<{ entry: CustomerStockEntry }>(`/stock-entries/${entryId}`, {
+    method: "PUT",
+    body: payload,
+  }).then((r) => r.entry);
+}
+
+export function generateStockEntryBarcode(entryId: string): Promise<CustomerStockEntry> {
+  return api<{ entry: CustomerStockEntry }>(`/stock-entries/${entryId}/generate-barcode`, {
+    method: "POST",
+  }).then((r) => r.entry);
+}
+
+export interface DirectStockEntryPayload {
+  warehouseId: string;
+  itemName: string;
+  sku?: string;
+  categoryId?: string;
+  description?: string;
+  uom?: string;
+  quantity: number;
+  serialized?: boolean;
+  serialNumber?: string;
+  highValue?: boolean;
+  thresholdQty?: number;
+  attributes?: Record<string, string>;
+}
+
+export function createDirectStockEntry(
+  customerId: string,
+  payload: DirectStockEntryPayload,
+): Promise<CustomerStockEntry> {
+  return api<{ entry: CustomerStockEntry }>(`/customers/${customerId}/stock-entries`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  }).then((r) => r.entry);
+}
+
+export function listCustomerStockEntries(
+  customerId: string,
+  status?: string,
+): Promise<CustomerStockEntry[]> {
+  const q = status ? `?status=${status}` : "";
+  return api<{ entries: CustomerStockEntry[] }>(
+    `/customers/${customerId}/stock-entries${q}`,
+  ).then((r) => r.entries);
+}
+
+export function listWarehouseStockEntries(
+  warehouseId: string,
+  status?: string,
+): Promise<CustomerStockEntry[]> {
+  const q = status ? `?status=${status}` : "";
+  return api<{ entries: CustomerStockEntry[] }>(
+    `/warehouses/${warehouseId}/stock-entries${q}`,
+  ).then((r) => r.entries);
+}
+
 // ============================================================================
 // Customer-facing portal surface — /customer (own data only; the one write is a
 // stock REQUEST, which only queues a review).
@@ -382,12 +493,12 @@ export function getOwnSites(): Promise<CustomerSite[]> {
   return api<{ sites: CustomerSite[] }>("/customer/sites").then((r) => r.sites);
 }
 
-export function getOwnCatalogue(): Promise<CatalogueItem[]> {
-  return api<{ catalogue: CatalogueItem[] }>("/customer/catalogue").then((r) => r.catalogue);
-}
-
 export function getOwnStock(): Promise<CustomerStock> {
   return api<{ stock: CustomerStock }>("/customer/stock").then((r) => r.stock);
+}
+
+export function getOwnStockEntries(): Promise<CustomerStockEntry[]> {
+  return api<{ entries: CustomerStockEntry[] }>("/customer/stock-entries").then((r) => r.entries);
 }
 
 export function getOwnStockRequests(): Promise<StockRequest[]> {

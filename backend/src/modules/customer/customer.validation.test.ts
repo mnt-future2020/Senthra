@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  catalogueItemSchema,
   createCustomerSchema,
   customerUserSchema,
   projectSchema,
@@ -40,81 +39,6 @@ describe("projectSchema", () => {
     const r = projectSchema.safeParse({ name: "P", status: "" });
     expect(r.success).toBe(true);
     if (r.success) expect(r.data.status).toBeUndefined();
-  });
-});
-
-describe("catalogueItemSchema", () => {
-  const base = { name: "SFP-LX", sku: "NTTP06", categoryId: "0123456789abcdef01234567" };
-
-  it("accepts a full item and coerces thresholdQty to a number", () => {
-    const r = catalogueItemSchema.safeParse({
-      ...base,
-      description: "single-mode",
-      uom: "Each",
-      serialized: true,
-      barcodeRequired: true,
-      highValue: true,
-      thresholdQty: "10",
-      status: "active",
-      attributes: { Fibre: "Singlemode" },
-    });
-    expect(r.success).toBe(true);
-    if (r.success) {
-      expect(r.data.thresholdQty).toBe(10);
-      expect(r.data.serialized).toBe(true);
-      expect(r.data.uom).toBe("Each");
-    }
-  });
-
-  it("requires name, sku and categoryId", () => {
-    expect(catalogueItemSchema.safeParse({ ...base, name: "" }).success).toBe(false);
-    expect(catalogueItemSchema.safeParse({ ...base, sku: "" }).success).toBe(false);
-    expect(catalogueItemSchema.safeParse({ name: "x", sku: "y" }).success).toBe(false);
-  });
-
-  it("requires categoryId to be a 24-hex id, not free text", () => {
-    expect(catalogueItemSchema.safeParse({ ...base, categoryId: "Optical" }).success).toBe(false);
-    expect(catalogueItemSchema.safeParse({ ...base, categoryId: "  " }).success).toBe(false);
-    expect(catalogueItemSchema.safeParse({ ...base, categoryId: "0123456789abcdef01234567" }).success).toBe(true);
-  });
-
-  it("allows the spec's own 'High Value Item' wording (no broad money-word guard)", () => {
-    expect(catalogueItemSchema.safeParse({ ...base, name: "High Value Optical Module" }).success).toBe(
-      true,
-    );
-  });
-
-  it("rejects a currency symbol in any visible field (price-free catalogue)", () => {
-    expect(catalogueItemSchema.safeParse({ ...base, name: "Cable £5" }).success).toBe(false);
-    expect(catalogueItemSchema.safeParse({ ...base, sku: "$KU" }).success).toBe(false);
-    expect(
-      catalogueItemSchema.safeParse({ ...base, attributes: { Cost: "€5" } }).success,
-    ).toBe(false);
-  });
-
-  it("rejects an unknown unit of measure", () => {
-    expect(catalogueItemSchema.safeParse({ ...base, uom: "Furlong" }).success).toBe(false);
-  });
-
-  it("rejects a non-integer / negative threshold", () => {
-    expect(catalogueItemSchema.safeParse({ ...base, thresholdQty: "10.5" }).success).toBe(false);
-    expect(catalogueItemSchema.safeParse({ ...base, thresholdQty: "-1" }).success).toBe(false);
-  });
-
-  it("caps custom fields at 30", () => {
-    const attributes = Object.fromEntries(
-      Array.from({ length: 31 }, (_, i) => [`k${i}`, "v"]),
-    );
-    expect(catalogueItemSchema.safeParse({ ...base, attributes }).success).toBe(false);
-  });
-
-  it("never carries a price field through (catalogue is price-free)", () => {
-    const r = catalogueItemSchema.safeParse(base);
-    expect(r.success).toBe(true);
-    if (r.success) {
-      expect("unitPricePence" in r.data).toBe(false);
-      expect("price" in r.data).toBe(false);
-    }
   });
 });
 

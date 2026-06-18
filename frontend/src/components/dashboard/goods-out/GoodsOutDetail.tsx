@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Loader2, Pencil, ScrollText, Send, XCircle } from "lucide-react";
 
 import * as goodsOutService from "@/services/goods-out.service";
@@ -18,10 +18,14 @@ type Tab = "overview" | "audit";
 
 export function GoodsOutDetail({ initial }: { initial: GoodsOut }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { can } = useAuth();
   const { pushToast } = useDashboard();
   const [gdn, setGdn] = React.useState<GoodsOut>(initial);
-  const [tab, setTab] = React.useState<Tab>("overview");
+  const TABS: Tab[] = ["overview", "audit"];
+  const requestedTab = searchParams.get("tab");
+  const tab: Tab = TABS.includes(requestedTab as Tab) ? (requestedTab as Tab) : "overview";
+  const setTab = (t: Tab) => router.replace(`/dashboard/goods-out/${gdn.code}?tab=${t}`, { scroll: false });
   const [busy, setBusy] = React.useState(false);
   const [confirmDispatch, setConfirmDispatch] = React.useState(false);
   const [cancelOpen, setCancelOpen] = React.useState(false);

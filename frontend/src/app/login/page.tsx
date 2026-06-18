@@ -230,6 +230,49 @@ export default function LoginPage() {
         </button>
       </form>
 
+      {/* Quick dev logins */}
+      {process.env.NODE_ENV === "development" && (
+        <div className="mt-6 space-y-2">
+          <div className="flex items-center gap-3">
+            <div className="h-px flex-1 bg-[var(--border)]" />
+            <span className="text-xs font-semibold uppercase tracking-wider text-[var(--faint)]">
+              Quick login
+            </span>
+            <div className="h-px flex-1 bg-[var(--border)]" />
+          </div>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              disabled={submitting}
+              onClick={() => {
+                setEmail("shahul@mntfuture.com");
+                setPassword("Shahul@9080");
+                setTimeout(() => {
+                  document.querySelector<HTMLFormElement>("form")?.requestSubmit();
+                }, 50);
+              }}
+              className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] py-2.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)]"
+            >
+              🔑 Admin
+            </button>
+            <button
+              type="button"
+              disabled={submitting}
+              onClick={() => {
+                setEmail("kansha@mntfuture.com");
+                setPassword("12345678");
+                setTimeout(() => {
+                  document.querySelector<HTMLFormElement>("form")?.requestSubmit();
+                }, 50);
+              }}
+              className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] py-2.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)]"
+            >
+              👤 Customer
+            </button>
+          </div>
+        </div>
+      )}
+
       {(!googleChecked || googleEnabled) && (
         <>
           <div className="my-6 flex items-center gap-3">

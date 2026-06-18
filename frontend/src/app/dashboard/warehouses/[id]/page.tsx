@@ -46,5 +46,9 @@ function WarehouseLoader({ idOrCode }: { idOrCode: string }) {
 
   if (loading) return <FormPageSkeleton />;
   if (error || !warehouse) return <FormError message={error ?? "Warehouse not found."} />;
-  return <WarehouseDetail initial={warehouse} />;
+  return (
+    <React.Suspense fallback={<FormPageSkeleton />}>
+      <WarehouseDetail initial={warehouse} />
+    </React.Suspense>
+  );
 }

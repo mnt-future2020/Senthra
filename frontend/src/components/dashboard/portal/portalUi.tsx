@@ -93,11 +93,13 @@ export function StatusChip({ value }: { value: string }) {
   );
 }
 
-const REQ_STATUS_STYLE: Record<StockRequestStatus, { cls: string; dot: string }> = {
-  pending: { cls: "border-amber-500/30 bg-amber-500/10 text-amber-600", dot: "bg-amber-500" },
-  approved: { cls: "border-[var(--pos)]/30 bg-[var(--pos)]/10 text-[var(--pos)]", dot: "bg-[var(--pos)]" },
-  rejected: { cls: "border-[var(--neg)]/30 bg-[var(--neg)]/10 text-[var(--neg)]", dot: "bg-[var(--neg)]" },
-  completed: { cls: "border-[var(--accent)]/30 bg-[var(--accent-10)] text-[var(--accent)]", dot: "bg-[var(--accent)]" },
+const REQ_STATUS_STYLE: Record<StockRequestStatus, { cls: string; dot: string; label: string }> = {
+  pending: { cls: "border-amber-500/30 bg-amber-500/10 text-amber-600", dot: "bg-amber-500", label: "Pending" },
+  approved: { cls: "border-[var(--pos)]/30 bg-[var(--pos)]/10 text-[var(--pos)]", dot: "bg-[var(--pos)]", label: "Approved" },
+  rejected: { cls: "border-[var(--neg)]/30 bg-[var(--neg)]/10 text-[var(--neg)]", dot: "bg-[var(--neg)]", label: "Rejected" },
+  assigned: { cls: "border-blue-500/30 bg-blue-500/10 text-blue-600", dot: "bg-blue-500", label: "Assigned" },
+  partially_received: { cls: "border-indigo-500/30 bg-indigo-500/10 text-indigo-600", dot: "bg-indigo-500", label: "Partially received" },
+  completed: { cls: "border-[var(--accent)]/30 bg-[var(--accent-10)] text-[var(--accent)]", dot: "bg-[var(--accent)]", label: "Completed" },
 };
 
 export function RequestStatusChip({ value }: { value: StockRequestStatus }) {
@@ -107,7 +109,7 @@ export function RequestStatusChip({ value }: { value: StockRequestStatus }) {
       className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-wider ${s.cls}`}
     >
       <span className={`h-1.5 w-1.5 rounded-full ${s.dot}`} />
-      {value}
+      {s.label}
     </span>
   );
 }

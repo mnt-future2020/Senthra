@@ -2,7 +2,6 @@ import crypto from "node:crypto";
 
 import type {
   Customer,
-  CustomerCatalogueItem,
   CustomerProject,
   CustomerSite,
   CustomerStockRequest,
@@ -15,7 +14,6 @@ import type { CustomerWithChildren } from "./customer.repository.js";
 import { assertEmailNamespaceFree } from "#modules/auth/email-namespace.js";
 import { issueResetEmail } from "#modules/auth/auth.service.js";
 import * as sessionService from "#modules/auth/session.service.js";
-import * as categoryService from "#modules/category/category.service.js";
 import { getCustomerStock, type CustomerStock } from "./customer.stock.service.js";
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
 import { geocodePostcode } from "../../lib/geocode.js";
@@ -61,11 +59,6 @@ function parseDate(v?: string | null): Date | null {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-// A nullable number passed straight through (validation has already range-checked).
-function numOrNull(v?: number | null): number | null {
-  return typeof v === "number" && Number.isFinite(v) ? v : null;
-}
-
 // A 24-char hex string is a Mongo ObjectId; anything else is treated as the human
 // customer reference (e.g. "CUST-0001"). The two never overlap (codes contain "-").
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
@@ -81,23 +74,6 @@ export interface PublicCustomerProject {
   endDate: string | null;
   status: string;
   description: string | null;
-  createdAt: string;
-}
-
-export interface PublicCatalogueItem {
-  id: string;
-  name: string;
-  sku: string;
-  categoryId: string;
-  category: { id: string; name: string } | null;
-  description: string | null;
-  uom: string | null;
-  serialized: boolean;
-  barcodeRequired: boolean;
-  highValue: boolean;
-  thresholdQty: number | null;
-  status: string;
-  attributes: unknown;
   createdAt: string;
 }
 
@@ -129,19 +105,34 @@ export interface PublicCustomerUser {
 }
 
 // A customer-submitted stock / replenishment request — shown to both the admin
-// (review queue) and the portal user (their request history). It's an order ask,
-// NOT a catalogue write: approving it only moves the status (no item is created).
+// (review queue) and the portal user (their request history).
+export interface PublicWarehouseAssignment {
+  id: string;
+  warehouseId: string;
+  warehouseName: string;
+  warehouseCode: string | null;
+  quantity: number;
+  receivedQuantity: number;
+  status: string;
+  receivedBy: string | null;
+  receivedAt: string | null;
+  notes: string | null;
+}
+
 export interface PublicStockRequest {
   id: string;
   name: string;
+  editedName: string | null;
+  catalogueItemId: string | null;
   quantity: number | null;
   reason: string | null;
   notes: string | null;
-  status: string; // pending | approved | rejected | completed
+  status: string;
   requestedByName: string | null;
   reviewedBy: string | null;
   adminResponse: string | null;
   reviewedAt: string | null;
+  warehouseAssignments: PublicWarehouseAssignment[];
   createdAt: string;
 }
 
@@ -179,7 +170,6 @@ export interface PublicCustomerSummary {
 
 export interface PublicCustomer extends PublicCustomerSummary {
   projects: PublicCustomerProject[];
-  catalogue: PublicCatalogueItem[];
   sites: PublicCustomerSite[];
   users: PublicCustomerUser[];
   stockRequests: PublicStockRequest[]; // PENDING only (the admin review queue)
@@ -243,27 +233,6 @@ function toProject(p: CustomerProject): PublicCustomerProject {
   };
 }
 
-function toCatalogueItem(
-  i: CustomerCatalogueItem & { category?: { id: string; name: string } | null },
-): PublicCatalogueItem {
-  return {
-    id: i.id,
-    name: i.name,
-    sku: i.sku,
-    categoryId: i.categoryId,
-    category: i.category ? { id: i.category.id, name: i.category.name } : null,
-    description: i.description,
-    uom: i.uom,
-    serialized: i.serialized ?? false,
-    barcodeRequired: i.barcodeRequired ?? false,
-    highValue: i.highValue ?? false,
-    thresholdQty: i.thresholdQty,
-    status: i.status ?? "active",
-    attributes: i.attributes ?? null,
-    createdAt: i.createdAt.toISOString(),
-  };
-}
-
 function toSite(s: CustomerSite): PublicCustomerSite {
   return {
     id: s.id,
@@ -294,10 +263,29 @@ function toCustomerUser(u: CustomerUser): PublicCustomerUser {
   };
 }
 
-function toStockRequest(r: CustomerStockRequest): PublicStockRequest {
+function toWarehouseAssignment(a: { id: string; warehouseId: string; warehouse: { id: string; name: string; code: string }; quantity: number; receivedQuantity: number; status: string; receivedBy: string | null; receivedAt: Date | null; notes: string | null }): PublicWarehouseAssignment {
+  return {
+    id: a.id,
+    warehouseId: a.warehouseId,
+    warehouseName: a.warehouse.name,
+    warehouseCode: a.warehouse.code,
+    quantity: a.quantity,
+    receivedQuantity: a.receivedQuantity,
+    status: a.status,
+    receivedBy: a.receivedBy,
+    receivedAt: a.receivedAt ? a.receivedAt.toISOString() : null,
+    notes: a.notes,
+  };
+}
+
+type StockRequestRow = CustomerStockRequest & { warehouseAssignments?: Array<{ id: string; warehouseId: string; warehouse: { id: string; name: string; code: string }; quantity: number; receivedQuantity: number; status: string; receivedBy: string | null; receivedAt: Date | null; notes: string | null }> };
+
+function toStockRequest(r: StockRequestRow): PublicStockRequest {
   return {
     id: r.id,
     name: r.name,
+    editedName: r.editedName ?? null,
+    catalogueItemId: r.catalogueItemId ?? null,
     quantity: r.quantity,
     reason: r.reason,
     notes: r.notes,
@@ -306,6 +294,7 @@ function toStockRequest(r: CustomerStockRequest): PublicStockRequest {
     reviewedBy: r.reviewedBy,
     adminResponse: r.adminResponse,
     reviewedAt: r.reviewedAt ? r.reviewedAt.toISOString() : null,
+    warehouseAssignments: (r.warehouseAssignments ?? []).map(toWarehouseAssignment),
     createdAt: r.createdAt.toISOString(),
   };
 }
@@ -317,7 +306,6 @@ function toPublic(
   return {
     ...toSummary(c),
     projects: c.projects.map(toProject),
-    catalogue: c.catalogue.map(toCatalogueItem),
     sites: c.sites.map(toSite),
     users: c.users.map(toCustomerUser),
     // The pending stock-request queue is its own capability (stock_requests.view) —
@@ -714,7 +702,7 @@ export async function resendInvite(
   return { temporaryPassword, email: user.email };
 }
 
-// --- admin: nested projects / catalogue / sites ------------------------------
+// --- admin: nested projects / sites -------------------------------------------
 //
 // Each write first loads the parent customer (404 if missing) and, on update/delete,
 // verifies the child belongs to that customer — so a mismatched customerId/childId
@@ -828,114 +816,6 @@ export async function removeProject(
   if (!existing || existing.customerId !== customerId) throw notFound("Project not found.");
   await customerRepo.deleteProject(projectId);
   auditNested(actor, "customer.project.deleted", customer, existing.name);
-}
-
-export interface CatalogueItemInput {
-  name: string;
-  sku: string;
-  categoryId: string;
-  description?: string;
-  uom?: string;
-  serialized?: boolean;
-  barcodeRequired?: boolean;
-  highValue?: boolean;
-  thresholdQty?: number;
-  status?: string;
-  attributes?: Record<string, unknown> | null;
-}
-
-function normalizeCatalogueInput(input: CatalogueItemInput): customerRepo.CatalogueItemData {
-  const name = input.name.trim();
-  const sku = input.sku.trim();
-  const categoryId = input.categoryId.trim();
-  if (!name) throw badRequest("Item name is required.");
-  if (!sku) throw badRequest("SKU is required.");
-  if (!categoryId) throw badRequest("Select a category.");
-  // undefined → field omitted (preserve on update); null / {} → explicit clear;
-  // a non-empty object → replace.
-  let attributes: Prisma.InputJsonValue | null | undefined;
-  if (input.attributes === undefined) attributes = undefined;
-  else if (input.attributes === null) attributes = null;
-  else attributes = Object.keys(input.attributes).length > 0
-    ? (input.attributes as Prisma.InputJsonValue)
-    : null;
-  return {
-    name,
-    sku,
-    categoryId,
-    description: trimToNull(input.description),
-    uom: trimToNull(input.uom),
-    serialized: Boolean(input.serialized),
-    barcodeRequired: Boolean(input.barcodeRequired),
-    highValue: Boolean(input.highValue),
-    thresholdQty: numOrNull(input.thresholdQty),
-    status: normalizeStatus(input.status),
-    attributes,
-  };
-}
-
-export async function addCatalogueItem(
-  customerId: string,
-  input: CatalogueItemInput,
-  actor?: AuditActor,
-): Promise<PublicCatalogueItem> {
-  const customer = await requireCustomer(customerId);
-  const data = normalizeCatalogueInput(input);
-  await categoryService.requireActiveCategory(data.categoryId);
-  if (await customerRepo.findCatalogueItemBySku(customerId, data.sku.toLowerCase())) {
-    throw conflict(`An item with SKU "${data.sku}" already exists for this customer.`);
-  }
-  let created: CustomerCatalogueItem;
-  try {
-    created = await customerRepo.createCatalogueItem(customerId, data);
-  } catch (e) {
-    if (customerRepo.isUniqueConflictError(e)) {
-      throw conflict(`An item with SKU "${data.sku}" already exists for this customer.`);
-    }
-    throw e;
-  }
-  auditNested(actor, "customer.catalogue.created", customer, data.sku);
-  return toCatalogueItem(created);
-}
-
-export async function updateCatalogueItem(
-  customerId: string,
-  itemId: string,
-  input: CatalogueItemInput,
-  actor?: AuditActor,
-): Promise<PublicCatalogueItem> {
-  const customer = await requireCustomer(customerId);
-  const existing = await customerRepo.findCatalogueItemById(itemId);
-  if (!existing || existing.customerId !== customerId) throw notFound("Catalogue item not found.");
-  const data = normalizeCatalogueInput(input);
-  await categoryService.requireActiveCategory(data.categoryId);
-  const clash = await customerRepo.findCatalogueItemBySku(customerId, data.sku.toLowerCase());
-  if (clash && clash.id !== itemId) {
-    throw conflict(`An item with SKU "${data.sku}" already exists for this customer.`);
-  }
-  let updated: CustomerCatalogueItem;
-  try {
-    updated = await customerRepo.updateCatalogueItem(itemId, data);
-  } catch (e) {
-    if (customerRepo.isUniqueConflictError(e)) {
-      throw conflict(`An item with SKU "${data.sku}" already exists for this customer.`);
-    }
-    throw e;
-  }
-  auditNested(actor, "customer.catalogue.updated", customer, data.sku);
-  return toCatalogueItem(updated);
-}
-
-export async function removeCatalogueItem(
-  customerId: string,
-  itemId: string,
-  actor?: AuditActor,
-): Promise<void> {
-  const customer = await requireCustomer(customerId);
-  const existing = await customerRepo.findCatalogueItemById(itemId);
-  if (!existing || existing.customerId !== customerId) throw notFound("Catalogue item not found.");
-  await customerRepo.deleteCatalogueItem(itemId);
-  auditNested(actor, "customer.catalogue.deleted", customer, existing.sku);
 }
 
 export interface SiteInput {
@@ -1179,7 +1059,7 @@ function toStockRequestData(input: StockRequestInput): customerRepo.StockRequest
 // PORTAL: a customer user submits a stock / replenishment request. Scoped to the
 // authenticated customer; the requesting user is recorded. This is the ONE place a
 // portal user can write into the customer module — and even then it only queues a
-// request for admin review, never the catalogue or inventory itself.
+// request for admin review, never the stock or inventory itself.
 export async function submitStockRequest(
   customerId: string,
   requestedBy: { userId: string; name: string; email: string },
@@ -1221,9 +1101,8 @@ export async function listStockRequests(
 
 // ADMIN: approve a pending request. This is a STATUS MOVE ONLY — it records the
 // reviewer + an optional admin response note for the customer, and deliberately
-// never creates a catalogue item or inventory record. Turning an approved request
-// into real stock is a separate internal step (the inventory module, later). The
-// rule: a customer request must never directly write catalogue / inventory data.
+// never creates an inventory record. Turning an approved request into real stock
+// is a separate internal step (the inventory module, later).
 export async function approveStockRequest(
   customerId: string,
   requestId: string,
@@ -1265,6 +1144,190 @@ export async function rejectStockRequest(
   return toStockRequest(reviewed);
 }
 
+// --- stock request: PM edit + approve in one step ----------------------------
+
+export interface EditStockRequestInput {
+  editedName: string;
+  catalogueItemId?: string;
+  note?: string;
+}
+
+export async function editAndApproveStockRequest(
+  customerId: string,
+  requestId: string,
+  input: EditStockRequestInput,
+  actor?: AuditActor,
+): Promise<{ request: PublicStockRequest }> {
+  const customer = await requireCustomer(customerId);
+  const request = await customerRepo.findStockRequestById(requestId);
+  if (!request || request.customerId !== customerId) throw notFound("Request not found.");
+  if (request.status !== "pending") throw badRequest("Only pending requests can be edited.");
+  const reviewed = await customerRepo.editAndApproveStockRequest(requestId, {
+    editedName: input.editedName.trim(),
+    catalogueItemId: trimToNull(input.catalogueItemId) ?? null,
+    adminResponse: trimToNull(input.note),
+    status: "approved",
+    reviewedBy: actor?.email ?? null,
+    reviewedAt: new Date(),
+  });
+  auditNested(actor, "customer.stock_request.edited_approved", customer, `${request.name} → ${input.editedName}`);
+  return { request: toStockRequest(reviewed) };
+}
+
+// --- stock request: assign warehouses ----------------------------------------
+
+export interface AssignWarehousesInput {
+  assignments: Array<{ warehouseId: string; quantity: number }>;
+}
+
+export async function assignStockRequestWarehouses(
+  customerId: string,
+  requestId: string,
+  input: AssignWarehousesInput,
+  actor?: AuditActor,
+): Promise<{ request: PublicStockRequest }> {
+  const customer = await requireCustomer(customerId);
+  const request = await customerRepo.findStockRequestById(requestId);
+  if (!request || request.customerId !== customerId) throw notFound("Request not found.");
+  if (request.status !== "approved") throw badRequest("Only approved requests can be assigned to warehouses.");
+
+  const totalAssigned = input.assignments.reduce((s, a) => s + a.quantity, 0);
+  if (request.quantity && totalAssigned !== request.quantity) {
+    throw badRequest(`Total assigned (${totalAssigned}) must equal request quantity (${request.quantity}).`);
+  }
+
+  const warehouseIds = new Set(input.assignments.map((a) => a.warehouseId));
+  if (warehouseIds.size !== input.assignments.length) {
+    throw badRequest("Each warehouse can only appear once.");
+  }
+
+  await customerRepo.createWarehouseAssignments(
+    input.assignments.map((a) => ({
+      customerStockRequestId: requestId,
+      warehouseId: a.warehouseId,
+      quantity: a.quantity,
+    })),
+  );
+  await customerRepo.updateStockRequestStatus(requestId, "assigned");
+
+  const updated = await customerRepo.findStockRequestWithAssignments(requestId);
+  auditNested(actor, "customer.stock_request.assigned", customer, `${request.editedName ?? request.name} → ${input.assignments.length} warehouse(s)`);
+  return { request: toStockRequest(updated as StockRequestRow) };
+}
+
+// --- stock assignment: warehouse manager receives stock ----------------------
+
+export interface ReceiveStockInput {
+  receivedQuantity: number;
+  notes?: string;
+}
+
+export async function receiveStockAssignment(
+  assignmentId: string,
+  input: ReceiveStockInput,
+  actor?: AuditActor,
+): Promise<{ assignment: PublicWarehouseAssignment; stockEntryId: string }> {
+  const assignment = await customerRepo.findAssignmentById(assignmentId);
+  if (!assignment) throw notFound("Assignment not found.");
+  if (assignment.status === "received") throw badRequest("This assignment is already fully received.");
+
+  const remaining = assignment.quantity - assignment.receivedQuantity;
+  if (input.receivedQuantity > remaining) {
+    throw badRequest(`Only ${remaining} remaining to receive. You entered ${input.receivedQuantity}.`);
+  }
+
+  const updated = await customerRepo.updateAssignmentReceived(
+    assignmentId,
+    input.receivedQuantity,
+    assignment.receivedQuantity,
+    assignment.quantity,
+    actor?.email ?? null,
+    trimToNull(input.notes),
+  );
+
+  const allAssignments = await customerRepo.findAssignmentsByRequest(assignment.customerStockRequestId);
+  const allReceived = allAssignments.every((a) => a.status === "received");
+  const someReceived = allAssignments.some((a) => a.status === "received" || a.status === "partially_received");
+
+  if (allReceived) {
+    await customerRepo.updateStockRequestStatus(assignment.customerStockRequestId, "completed");
+  } else if (someReceived) {
+    await customerRepo.updateStockRequestStatus(assignment.customerStockRequestId, "partially_received");
+  }
+
+  const stockEntry = await customerRepo.createStockEntry({
+    customerId: assignment.stockRequest.customerId,
+    warehouseId: assignment.warehouseId,
+    assignmentId,
+    itemName: assignment.stockRequest.editedName ?? assignment.stockRequest.name,
+    quantity: input.receivedQuantity,
+    receivedBy: actor?.email ?? null,
+    receivedAt: new Date(),
+  });
+
+  audit.record({
+    actor,
+    action: "customer.stock_request.received",
+    targetType: "customer_stock_assignment",
+    targetId: assignmentId,
+    targetLabel: `${assignment.stockRequest.editedName ?? assignment.stockRequest.name} ×${input.receivedQuantity} at ${assignment.warehouse.name}`,
+  });
+
+  return {
+    assignment: toWarehouseAssignment({
+      ...updated,
+      warehouse: assignment.warehouse,
+    }),
+    stockEntryId: stockEntry.id,
+  };
+}
+
+// --- stock request: get assignments for a request ----------------------------
+
+export async function getStockRequestAssignments(
+  customerId: string,
+  requestId: string,
+): Promise<PublicWarehouseAssignment[]> {
+  await requireCustomer(customerId);
+  const request = await customerRepo.findStockRequestById(requestId);
+  if (!request || request.customerId !== customerId) throw notFound("Request not found.");
+  const assignments = await customerRepo.findAssignmentsByRequest(requestId);
+  return assignments.map(toWarehouseAssignment);
+}
+
+// --- warehouse pending stock view --------------------------------------------
+
+export interface PendingStockItem {
+  assignmentId: string;
+  requestId: string;
+  customerName: string;
+  customerCode: string;
+  itemName: string;
+  quantity: number;
+  receivedQuantity: number;
+  status: string;
+  warehouseName: string;
+  warehouseCode: string | null;
+  createdAt: string;
+}
+
+export async function getPendingStockForWarehouse(warehouseId: string): Promise<PendingStockItem[]> {
+  const assignments = await customerRepo.findPendingAssignmentsByWarehouse(warehouseId);
+  return assignments.map((a) => ({
+    assignmentId: a.id,
+    requestId: a.stockRequest.id,
+    customerName: a.stockRequest.customer.name,
+    customerCode: a.stockRequest.customer.customerCode,
+    itemName: a.stockRequest.editedName ?? a.stockRequest.name,
+    quantity: a.quantity,
+    receivedQuantity: a.receivedQuantity,
+    status: a.status,
+    warehouseName: a.warehouse.name,
+    warehouseCode: a.warehouse.code,
+    createdAt: a.createdAt.toISOString(),
+  }));
+}
+
 // --- customer-facing reads (scoped strictly by the authenticated customerId) --
 
 export async function getOwnProfile(customerId: string): Promise<CustomerSelfProfile> {
@@ -1281,12 +1344,6 @@ export async function getOwnProfile(customerId: string): Promise<CustomerSelfPro
     email: c.email,
     phone: c.phone,
   };
-}
-
-export async function getOwnCatalogue(customerId: string): Promise<PublicCatalogueItem[]> {
-  const c = await customerRepo.findByIdWithChildren(customerId);
-  if (!c) throw notFound("Customer not found.");
-  return c.catalogue.map(toCatalogueItem);
 }
 
 export function getOwnStock(customerId: string): Promise<CustomerStock> {
@@ -1322,7 +1379,6 @@ export interface CustomerOverview {
     activeProjects: number;
     totalProjects: number;
     totalSites: number;
-    stockItems: number;
     pendingRequests: number;
   };
   recentRequests: PublicStockRequest[];
@@ -1346,9 +1402,224 @@ export async function getOwnOverview(customerId: string): Promise<CustomerOvervi
       activeProjects: c.projects.filter((p) => p.status === "active").length,
       totalProjects: c.projects.length,
       totalSites: c.sites.length,
-      stockItems: c.catalogue.length,
       pendingRequests: allRequests.filter((r) => r.status === "pending").length,
     },
     recentRequests: allRequests.slice(0, 5).map(toStockRequest),
   };
+}
+
+// ============================================================================
+// Customer stock entries — physical stock received at warehouses
+// ============================================================================
+
+export interface PublicStockEntry {
+  id: string;
+  customerId: string;
+  customerName: string;
+  customerCode: string;
+  warehouseId: string;
+  warehouseName: string;
+  warehouseCode: string;
+  assignmentId: string;
+  itemName: string;
+  sku: string | null;
+  categoryId: string | null;
+  categoryName: string | null;
+  description: string | null;
+  uom: string | null;
+  quantity: number;
+  serialized: boolean;
+  serialNumber: string | null;
+  highValue: boolean;
+  thresholdQty: number | null;
+  attributes: Record<string, string> | null;
+  barcode: string | null;
+  barcodeDataUri: string | null;
+  status: string;
+  receivedBy: string | null;
+  receivedAt: string | null;
+  createdAt: string;
+}
+
+type StockEntryRow = NonNullable<Awaited<ReturnType<typeof customerRepo.findStockEntryById>>>;
+
+function toStockEntry(e: StockEntryRow): PublicStockEntry {
+  return {
+    id: e.id,
+    customerId: e.customerId,
+    customerName: e.customer.name,
+    customerCode: e.customer.customerCode,
+    warehouseId: e.warehouseId,
+    warehouseName: e.warehouse.name,
+    warehouseCode: e.warehouse.code,
+    assignmentId: e.assignmentId,
+    itemName: e.itemName,
+    sku: e.sku,
+    categoryId: e.categoryId,
+    categoryName: e.category?.name ?? null,
+    description: e.description,
+    uom: e.uom,
+    quantity: e.quantity,
+    serialized: e.serialized,
+    serialNumber: e.serialNumber,
+    highValue: e.highValue,
+    thresholdQty: e.thresholdQty ?? null,
+    attributes: e.attributes as Record<string, string> | null,
+    barcode: e.barcode,
+    barcodeDataUri: e.barcodeDataUri,
+    status: e.status,
+    receivedBy: e.receivedBy,
+    receivedAt: e.receivedAt ? e.receivedAt.toISOString() : null,
+    createdAt: e.createdAt.toISOString(),
+  };
+}
+
+export async function getStockEntry(entryId: string): Promise<PublicStockEntry> {
+  const entry = await customerRepo.findStockEntryById(entryId);
+  if (!entry) throw notFound("Stock entry not found.");
+  return toStockEntry(entry);
+}
+
+export interface UpdateStockEntryInput {
+  itemName: string;
+  sku?: string;
+  categoryId?: string;
+  description?: string;
+  uom?: string;
+  serialized?: boolean;
+  serialNumber?: string;
+  highValue?: boolean;
+  attributes?: Record<string, string>;
+}
+
+export async function updateStockEntry(
+  entryId: string,
+  input: UpdateStockEntryInput,
+  actor?: AuditActor,
+): Promise<PublicStockEntry> {
+  const entry = await customerRepo.findStockEntryById(entryId);
+  if (!entry) throw notFound("Stock entry not found.");
+
+  const updated = await customerRepo.updateStockEntry(entryId, {
+    itemName: input.itemName.trim(),
+    sku: trimToNull(input.sku),
+    categoryId: trimToNull(input.categoryId),
+    description: trimToNull(input.description),
+    uom: trimToNull(input.uom),
+    serialized: input.serialized ?? false,
+    serialNumber: trimToNull(input.serialNumber),
+    highValue: input.highValue ?? false,
+    attributes: input.attributes ?? null,
+    status: "active",
+  });
+
+  audit.record({
+    actor,
+    action: "customer.stock_entry.updated",
+    targetType: "customer_stock_entry",
+    targetId: entryId,
+    targetLabel: `${updated.itemName} at ${updated.warehouse.name}`,
+  });
+
+  return toStockEntry(updated);
+}
+
+export async function generateStockEntryBarcode(
+  entryId: string,
+  actor?: AuditActor,
+): Promise<PublicStockEntry> {
+  const entry = await customerRepo.findStockEntryById(entryId);
+  if (!entry) throw notFound("Stock entry not found.");
+
+  const count = await customerRepo.countStockEntries();
+  const barcodeValue = `CSE-${String(count).padStart(5, "0")}`;
+
+  const bwipjs = await import("bwip-js");
+  const pngBuffer = await bwipjs.default.toBuffer({
+    bcid: "code128",
+    text: barcodeValue,
+    scale: 3,
+    height: 10,
+    includetext: true,
+    textxalign: "center",
+  });
+  const dataUri = `data:image/png;base64,${pngBuffer.toString("base64")}`;
+
+  const updated = await customerRepo.updateStockEntryBarcode(entryId, barcodeValue, dataUri);
+
+  audit.record({
+    actor,
+    action: "customer.stock_entry.barcode_generated",
+    targetType: "customer_stock_entry",
+    targetId: entryId,
+    targetLabel: `${entry.itemName} → ${barcodeValue}`,
+  });
+
+  return toStockEntry(updated);
+}
+
+export interface DirectStockEntryInput {
+  warehouseId: string;
+  itemName: string;
+  sku?: string;
+  categoryId?: string;
+  description?: string;
+  uom?: string;
+  quantity: number;
+  serialized?: boolean;
+  serialNumber?: string;
+  highValue?: boolean;
+}
+
+export async function createDirectStockEntry(
+  customerId: string,
+  input: DirectStockEntryInput,
+  actor?: AuditActor,
+): Promise<PublicStockEntry> {
+  await requireCustomer(customerId);
+
+  const entry = await customerRepo.createDirectStockEntry({
+    customerId,
+    warehouseId: input.warehouseId,
+    itemName: input.itemName,
+    sku: input.sku || null,
+    categoryId: input.categoryId || null,
+    description: input.description || null,
+    uom: input.uom || null,
+    quantity: input.quantity,
+    serialized: input.serialized ?? false,
+    serialNumber: input.serialNumber || null,
+    highValue: input.highValue ?? false,
+    thresholdQty: input.thresholdQty ?? null,
+    attributes: input.attributes ?? null,
+    status: "active",
+    receivedBy: actor?.email ?? null,
+    receivedAt: new Date(),
+  });
+
+  await audit.log({
+    action: "customer_stock_entry.created",
+    actor: actor ?? null,
+    targetType: "customer_stock_entry",
+    targetId: entry.id,
+    details: { itemName: input.itemName, quantity: input.quantity, warehouseId: input.warehouseId, direct: true },
+  });
+
+  return toStockEntry(entry as StockEntryRow);
+}
+
+export async function listCustomerStockEntries(
+  customerId: string,
+  status?: string,
+): Promise<PublicStockEntry[]> {
+  const entries = await customerRepo.findStockEntriesByCustomer(customerId, status);
+  return entries.map((e) => toStockEntry(e as StockEntryRow));
+}
+
+export async function listWarehouseStockEntries(
+  warehouseId: string,
+  status?: string,
+): Promise<PublicStockEntry[]> {
+  const entries = await customerRepo.findStockEntriesByWarehouse(warehouseId, status);
+  return entries.map((e) => toStockEntry(e as StockEntryRow));
 }

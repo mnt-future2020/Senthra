@@ -9,23 +9,6 @@ const WEBSITE_RE = /^(https?:\/\/)?[\w-]+(\.[\w-]+)+([/?#].*)?$/i;
 // Standard UK postcode shape, e.g. "EC1A 1BB", "M1 1AE".
 const UK_POSTCODE_RE = /^[A-Za-z]{1,2}\d[A-Za-z\d]?\s*\d[A-Za-z]{2}$/;
 
-// A currency SYMBOL never belongs in a customer-visible catalogue field — the
-// catalogue is deliberately price-free. This guard is intentionally narrow (just
-// the symbols): the old broad money-word list was dropped because it false-flagged
-// legitimate telecom text such as the spec's own "High Value Item".
-const CURRENCY_RE = /[£$€]/;
-const NO_CURRENCY_MSG = "Remove the currency symbol — the catalogue isn't priced.";
-
-// Required, trimmed, length-bounded text that also rejects a stray currency symbol —
-// used for each customer-visible catalogue column.
-const catalogueText = (max: number, label: string) =>
-  z
-    .string({ error: `${label} is required.` })
-    .trim()
-    .min(1, `${label} is required.`)
-    .max(max)
-    .refine((v) => !CURRENCY_RE.test(v), NO_CURRENCY_MSG);
-
 // An empty/blank string from an unselected <select> or cleared <input> becomes
 // `undefined`, so it doesn't trip an enum / format / number check downstream.
 const emptyToUndef = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
@@ -45,7 +28,7 @@ const postcodeField = z
   .optional();
 
 // Units of measure (UK telecom field-services stock). Kept in lockstep with the
-// frontend CatalogueItemModal list.
+// frontend stock item modal list.
 export const UOM_OPTIONS = ["Each", "Metre", "Roll", "Pack", "Box", "Set", "Pair", "Reel"] as const;
 const uomField = z.preprocess(emptyToUndef, z.enum(UOM_OPTIONS).optional());
 
@@ -119,41 +102,6 @@ export const projectSchema = z.object({
 });
 export type ProjectInput = z.infer<typeof projectSchema>;
 
-// --- nested: catalogue ------------------------------------------------------
-
-export const catalogueItemSchema = z.object({
-  // Fixed columns are all surfaced verbatim on the customer-facing catalogue, so
-  // each rejects a stray currency symbol.
-  name: catalogueText(160, "Item name"),
-  sku: catalogueText(80, "SKU"),
-  // A reference to a global Category (validated against the active list in the service).
-  categoryId: z
-    .string({ error: "Select a category." })
-    .trim()
-    .regex(/^[a-f0-9]{24}$/i, "Select a category."),
-  description: z.string().trim().max(2000).optional(),
-  uom: uomField,
-  serialized: z.boolean().optional(),
-  barcodeRequired: z.boolean().optional(),
-  highValue: z.boolean().optional(),
-  thresholdQty: z.preprocess(
-    (v) => (v === "" || v === null ? undefined : v),
-    z.coerce.number().int("Use a whole number.").min(0).max(1_000_000).optional(),
-  ),
-  status: statusEnum.optional(),
-  // Dynamic per-category custom fields (e.g. { Fibre: "Singlemode" }). String
-  // keys/values only (bounded), capped in count, currency-symbol-guarded.
-  attributes: z
-    .record(z.string().trim().min(1).max(60), z.string().max(200))
-    .refine((o) => Object.keys(o).length <= 30, "Too many custom fields (max 30).")
-    .refine(
-      (o) => !Object.entries(o).some(([k, v]) => CURRENCY_RE.test(k) || CURRENCY_RE.test(v)),
-      NO_CURRENCY_MSG,
-    )
-    .optional(),
-});
-export type CatalogueItemInput = z.infer<typeof catalogueItemSchema>;
-
 // --- nested: sites ----------------------------------------------------------
 
 export const siteSchema = z.object({
@@ -187,13 +135,12 @@ export const customerUserSchema = z.object({
 });
 export type CustomerUserInput = z.infer<typeof customerUserSchema>;
 
-// --- customer stock requests (portal-submitted catalogue-add requests) -------
+// --- customer stock requests (portal-submitted stock requests) ----------------
 
 // What a portal user submits to REQUEST stock — an order / replenishment ask. Item
 // name + quantity + a business reason are MANDATORY (an approval without a quantity or
 // reason is useless for audit + inventory planning later). Categories are internal
-// master-data and never appear on a customer request. The currency guard isn't
-// needed here — a request isn't customer-visible catalogue content.
+// master-data and never appear on a customer request.
 export const stockRequestSchema = z.object({
   name: z
     .string({ error: "Item name is required." })
@@ -220,3 +167,101 @@ export const stockReviewSchema = z.object({
   note: z.string().trim().max(500).optional(),
 });
 export type StockReviewInput = z.infer<typeof stockReviewSchema>;
+
+// PM edits the request: corrects the item name + optional item link.
+export const stockRequestEditSchema = z.object({
+  editedName: z
+    .string({ error: "Corrected item name is required." })
+    .trim()
+    .min(1, "Corrected item name is required.")
+    .max(160),
+  catalogueItemId: z
+    .string()
+    .trim()
+    .regex(/^[a-f0-9]{24}$/i, "Invalid catalogue item.")
+    .optional(),
+  note: z.string().trim().max(500).optional(),
+});
+export type StockRequestEditInput = z.infer<typeof stockRequestEditSchema>;
+
+// PM assigns a request's quantity across one or more warehouses.
+const warehouseAssignmentItem = z.object({
+  warehouseId: z
+    .string({ error: "Warehouse is required." })
+    .trim()
+    .regex(/^[a-f0-9]{24}$/i, "Invalid warehouse."),
+  quantity: z.coerce
+    .number({ error: "Quantity is required." })
+    .int("Use a whole number.")
+    .min(1, "Quantity must be at least 1.")
+    .max(1_000_000),
+});
+
+export const stockRequestAssignSchema = z.object({
+  assignments: z
+    .array(warehouseAssignmentItem)
+    .min(1, "At least one warehouse assignment is required.")
+    .max(50),
+});
+export type StockRequestAssignInput = z.infer<typeof stockRequestAssignSchema>;
+
+// Warehouse manager receives stock against an assignment.
+export const stockAssignmentReceiveSchema = z.object({
+  receivedQuantity: z.coerce
+    .number({ error: "Received quantity is required." })
+    .int("Use a whole number.")
+    .min(1, "Received quantity must be at least 1.")
+    .max(1_000_000),
+  notes: z.string().trim().max(2000).optional(),
+});
+export type StockAssignmentReceiveInput = z.infer<typeof stockAssignmentReceiveSchema>;
+
+// --- customer stock entries (product details filled after warehouse receive) ---
+
+const objectIdField = z.string().trim().regex(/^[a-f0-9]{24}$/i, "Invalid ID.");
+
+export const stockEntryUpdateSchema = z.object({
+  itemName: z
+    .string({ error: "Item name is required." })
+    .trim()
+    .min(1, "Item name is required.")
+    .max(160),
+  sku: z.string().trim().max(80).optional(),
+  categoryId: objectIdField.optional(),
+  description: z.string().trim().max(2000).optional(),
+  uom: uomField,
+  serialized: z.boolean().optional(),
+  serialNumber: z.string().trim().max(120).optional(),
+  highValue: z.boolean().optional(),
+  attributes: z
+    .record(z.string().trim().min(1).max(60), z.string().max(200))
+    .refine((o) => Object.keys(o).length <= 30, "Too many custom fields (max 30).")
+    .optional(),
+});
+export type StockEntryUpdateInput = z.infer<typeof stockEntryUpdateSchema>;
+
+export const directStockEntrySchema = z.object({
+  warehouseId: objectIdField,
+  itemName: z
+    .string({ error: "Item name is required." })
+    .trim()
+    .min(1, "Item name is required.")
+    .max(160),
+  sku: z.string().trim().max(80).optional(),
+  categoryId: objectIdField.optional(),
+  description: z.string().trim().max(2000).optional(),
+  uom: uomField,
+  quantity: z.number({ error: "Quantity is required." }).int().min(1, "Quantity must be at least 1."),
+  serialized: z.boolean().optional(),
+  serialNumber: z.string().trim().max(120).optional(),
+  highValue: z.boolean().optional(),
+  thresholdQty: z.preprocess(
+    (v) => (v === "" || v === null ? undefined : v),
+    z.coerce.number().int("Use a whole number.").min(0).max(1_000_000).optional(),
+  ),
+  attributes: z
+    .record(z.string().trim().min(1).max(60), z.string().max(200))
+    .refine((o) => Object.keys(o).length <= 30, "Too many custom fields (max 30).")
+    .optional(),
+});
+export type DirectStockEntryInput = z.infer<typeof directStockEntrySchema>;

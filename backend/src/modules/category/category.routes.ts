@@ -14,7 +14,7 @@ const router = Router();
 
 router.use(requireAuth);
 
-// The category list is read by category-managers AND by the catalogue-item form's
+// The category list is read by category-managers AND by the stock-entry form's
 // category picker (which staff reach via customers.edit), so either may read it.
 router.get("/", requireAnyPermission("categories.view", "customers.edit"), categoryController.listCategories);
 router.get("/:id", requireAnyPermission("categories.view", "categories.edit"), categoryController.getCategory);

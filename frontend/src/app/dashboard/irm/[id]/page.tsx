@@ -46,5 +46,9 @@ function IrmLoader({ idOrCode }: { idOrCode: string }) {
 
   if (loading) return <FormPageSkeleton />;
   if (error || !item) return <FormError message={error ?? "Item not found."} />;
-  return <IrmItemDetail initial={item} />;
+  return (
+    <React.Suspense fallback={<FormPageSkeleton />}>
+      <IrmItemDetail initial={item} />
+    </React.Suspense>
+  );
 }

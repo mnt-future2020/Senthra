@@ -38,5 +38,6 @@ function Loader({ idOrCode }: { idOrCode: string }) {
 
   if (loading) return <FormPageSkeleton />;
   if (error || !grn) return <FormError message={error ?? "Goods receipt not found."} />;
-  return <GoodsReceiptDetail initial={grn} />;
+  // Suspense satisfies useSearchParams (the ?tab= seed) during prerender.
+  return <React.Suspense fallback={<FormPageSkeleton />}><GoodsReceiptDetail initial={grn} /></React.Suspense>;
 }

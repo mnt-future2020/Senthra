@@ -46,5 +46,6 @@ function PoLoader({ idOrCode }: { idOrCode: string }) {
 
   if (loading) return <FormPageSkeleton />;
   if (error || !order) return <FormError message={error ?? "Purchase order not found."} />;
-  return <PurchaseOrderDetail initial={order} />;
+  // Suspense satisfies useSearchParams (the ?tab= seed) during prerender.
+  return <React.Suspense fallback={<FormPageSkeleton />}><PurchaseOrderDetail initial={order} /></React.Suspense>;
 }

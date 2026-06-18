@@ -38,5 +38,6 @@ function Loader({ id }: { id: string }) {
 
   if (loading) return <FormPageSkeleton />;
   if (error || !inv) return <FormError message={error ?? "Inventory record not found."} />;
-  return <InventoryDetail initial={inv} />;
+  // Suspense satisfies useSearchParams (the ?tab= seed) during prerender.
+  return <React.Suspense fallback={<FormPageSkeleton />}><InventoryDetail initial={inv} /></React.Suspense>;
 }

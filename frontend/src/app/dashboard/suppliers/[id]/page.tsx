@@ -46,5 +46,9 @@ function SupplierLoader({ idOrCode }: { idOrCode: string }) {
 
   if (loading) return <FormPageSkeleton />;
   if (error || !supplier) return <FormError message={error ?? "Supplier not found."} />;
-  return <SupplierDetail initial={supplier} />;
+  return (
+    <React.Suspense fallback={<FormPageSkeleton />}>
+      <SupplierDetail initial={supplier} />
+    </React.Suspense>
+  );
 }

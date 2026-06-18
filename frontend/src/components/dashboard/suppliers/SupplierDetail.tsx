@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Boxes, ClipboardList, Loader2, PackageCheck, Pencil, Power, ScrollText } from "lucide-react";
 
 import * as supplierService from "@/services/supplier.service";
@@ -39,11 +39,16 @@ const TABS: { key: Tab; label: string }[] = [
 
 export function SupplierDetail({ initial }: { initial: Supplier }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { can } = useAuth();
   const { pushToast } = useDashboard();
   const [s, setS] = React.useState<Supplier>(initial);
-  const [tab, setTab] = React.useState<Tab>("overview");
   const [busy, setBusy] = React.useState(false);
+
+  const requestedTab = searchParams.get("tab");
+  const tab: Tab = TABS.find((t) => t.key === requestedTab)?.key ?? "overview";
+  const selectTab = (key: Tab) =>
+    router.replace(`/dashboard/suppliers/${s.code}?tab=${key}`, { scroll: false });
   const canEdit = can("suppliers.edit");
 
   const toggleStatus = async () => {
@@ -105,7 +110,7 @@ export function SupplierDetail({ initial }: { initial: Supplier }) {
         {TABS.map((t) => (
           <button
             key={t.key}
-            onClick={() => setTab(t.key)}
+            onClick={() => selectTab(t.key)}
             className={`shrink-0 border-b-2 px-3.5 py-2.5 text-xs font-bold transition-colors ${
               tab === t.key
                 ? "border-[var(--accent)] text-[var(--accent)]"
