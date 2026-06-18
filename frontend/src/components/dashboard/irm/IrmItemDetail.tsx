@@ -220,7 +220,6 @@ function Overview({ i, costLabel }: { i: IrmItem; costLabel: string }) {
           <Field label="Track inventory">{i.trackInventory ? "Yes" : "No"}</Field>
           <Field label="Serial numbers">{i.trackSerialNumbers ? "Yes" : "No"}</Field>
           <Field label="Batch numbers">{i.trackBatchNumbers ? "Yes" : "No"}</Field>
-          <Field label="Allow negative stock">{i.allowNegativeStock ? "Yes" : "No"}</Field>
           <div className="col-span-2">
             <Field label="Internal owner">
               {i.owner ? (

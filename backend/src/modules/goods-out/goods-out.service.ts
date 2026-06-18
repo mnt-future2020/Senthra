@@ -169,11 +169,18 @@ function toPublic(g: GoodsOutWithRelations): PublicGoodsOut {
 }
 
 // ── Engineer (dispatch recipient) ───────────────────────────────────────────────────────────────
+// The recipient must be an ACTIVE staff member whose role grants the field-operations
+// stock-holding capability (canHoldStock) — not just any active user. Enforced on both
+// create and (re-validated) dispatch, so admins / warehouse managers / finance etc. can
+// never end up holding van stock.
 async function requireActiveEngineer(engineerId: string) {
   if (!OBJECT_ID_RE.test(engineerId)) throw badRequest("Select an engineer.");
   const u = await userRepo.findById(engineerId);
   if (!u) throw badRequest("Selected engineer no longer exists.");
   if ((u.status ?? "active") !== "active") throw conflict("Selected engineer is inactive and can't receive stock.");
+  if (!u.role?.canHoldStock) {
+    throw conflict("Selected staff member isn't authorised to hold stock. Assign a field-operations role first.");
+  }
   return u;
 }
 
@@ -334,6 +341,14 @@ export async function dispatchGoodsOut(id: string, actor?: AuditActor): Promise<
       throw conflict("This dispatch was just modified elsewhere. Refresh and try again.");
     }
     if (fresh.items.length === 0) throw conflict("This dispatch has no items.");
+
+    // Re-validate the recipient + warehouse INSIDE the transaction, before any inventory
+    // movement. A draft can sit for days; the engineer may have been suspended / lost the
+    // stock-holding capability, or the warehouse deactivated, since it was drafted. Either
+    // makes the whole dispatch abort (full rollback) instead of crediting stock to an
+    // engineer/warehouse that's no longer eligible.
+    await requireActiveEngineer(fresh.engineerId);
+    await warehouseService.requireActiveWarehouse(fresh.warehouseId);
 
     for (const line of fresh.items) {
       // Defensive: serial/batch items are blocked at create; never let one slip through to a movement.

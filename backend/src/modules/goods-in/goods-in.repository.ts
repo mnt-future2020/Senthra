@@ -223,6 +223,9 @@ export function countByWarehouse(warehouseId: string): Promise<number> {
 export function countByIrmItem(irmItemId: string): Promise<number> {
   return prisma.goodsReceiptItem.count({ where: { irmItemId, goodsReceipt: { is: { deletedAt: null } } } });
 }
+export function countBySupplier(supplierId: string): Promise<number> {
+  return prisma.goodsReceipt.count({ where: { supplierId, deletedAt: null } });
+}
 
 // Warehouse Inventory READ seam: completed-receipt history for an item at a warehouse — feeds the
 // inventory detail "Purchase History" tab (PO / supplier / received qty / date). Pure read.

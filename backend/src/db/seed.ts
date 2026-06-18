@@ -27,19 +27,31 @@ import { slugify } from "../utils/slugify.js";
 // (IT/HR onboarding + customer & stock master-data setup); the rest start empty and
 // gain permissions as feature modules ship. NOTE: external customers are NOT a role — they're a separate read-only
 // `customer` principal type (see types/principal.ts), so there is no customer role.
+// Field-operations role keys — members may HOLD field stock (Goods Out dispatch
+// recipient + future Van Inventory / Engineer Usage / Returns). Used both to seed
+// `canHoldStock` on a fresh DB and to backfill it idempotently on every startup.
+const FIELD_OPS_ROLE_KEYS = [
+  "field_engineer",
+  "senior_engineer",
+  "lead_engineer",
+  "technician",
+  "field_supervisor",
+];
+
 const SEED_ROLES: {
   key: string;
   name: string;
   description: string;
   sortOrder: number;
   permissions: string[];
+  canHoldStock?: boolean;
 }[] = [
   { key: "super_admin", name: "Super Admin", description: "Full system owner. Manages users, roles and all settings.", sortOrder: 0, permissions: ["*"] },
   { key: "system_admin", name: "System Admin", description: "IT / HR administrator who creates and manages user accounts and customers.", sortOrder: 1, permissions: ["users.view", "users.create", "users.edit", "users.delete", "roles.view", "customers.view", "customers.create", "customers.edit", "customers.delete", "warehouse.view", "warehouse.create", "warehouse.edit", "warehouse.delete", "warehouse_types.view", "warehouse_types.create", "warehouse_types.edit", "warehouse_types.delete", "categories.view", "categories.create", "categories.edit", "categories.delete", "suppliers.view", "suppliers.create", "suppliers.edit", "suppliers.delete", "supplier_types.view", "supplier_types.create", "supplier_types.edit", "supplier_types.delete", "irm.view", "irm.create", "irm.edit", "irm.delete", "irm_types.view", "irm_types.create", "irm_types.edit", "irm_types.delete", "irm_categories.view", "irm_categories.create", "irm_categories.edit", "irm_categories.delete", "purchase_orders.view", "purchase_orders.create", "purchase_orders.edit", "purchase_orders.delete", "purchase_orders.submit", "purchase_orders.approve", "purchase_orders.send", "purchase_orders.cancel", "purchase_orders.close", "goods_in.view", "goods_in.create", "goods_in.edit", "goods_in.delete", "goods_in.complete", "goods_in.cancel", "inventory.view", "inventory.move", "inventory.history", "inventory.export", "inventory.adjust", "inventory.stock_take", "goods_out.view", "goods_out.create", "goods_out.edit", "goods_out.delete", "goods_out.dispatch", "goods_out.cancel"] },
   { key: "project_manager", name: "Project Manager", description: "Creates job packs, authorises dispatch and tracks projects.", sortOrder: 2, permissions: [] },
   { key: "project_coordinator", name: "Project Coordinator", description: "Supports project managers with day-to-day coordination.", sortOrder: 3, permissions: [] },
   { key: "warehouse_manager", name: "Warehouse Manager", description: "Receives goods, scans stock in/out and manages a warehouse.", sortOrder: 4, permissions: ["warehouse.view", "warehouse.edit", "warehouse_types.view"] },
-  { key: "field_engineer", name: "Field Engineer", description: "Collects stock, installs on site and updates job status.", sortOrder: 5, permissions: [] },
+  { key: "field_engineer", name: "Field Engineer", description: "Collects stock, installs on site and updates job status.", sortOrder: 5, permissions: [], canHoldStock: true },
   { key: "finance_director", name: "Finance Director", description: "Views spend, purchase orders and finance reports.", sortOrder: 6, permissions: [] },
   { key: "hr_manager", name: "HR Manager", description: "Manages people-related records and onboarding.", sortOrder: 7, permissions: [] },
 ];
@@ -66,9 +78,24 @@ export async function seedDatabase(): Promise<void> {
         isSystem: r.key === "super_admin",
         sortOrder: r.sortOrder,
         permissions: r.permissions,
+        canHoldStock: r.canHoldStock ?? false,
       });
     }
     console.log(`Seeded ${SEED_ROLES.length} roles.`);
+  }
+
+  // Backfill the field-operations capability idempotently (covers DBs seeded before
+  // `canHoldStock` existed). Only grants it to the known field-ops role keys, and only
+  // when not already set — never revokes an admin's manual grant.
+  {
+    let granted = 0;
+    for (const role of await roleRepo.findMany()) {
+      if (FIELD_OPS_ROLE_KEYS.includes(role.key) && !role.canHoldStock) {
+        await roleRepo.update(role.id, { canHoldStock: true });
+        granted++;
+      }
+    }
+    if (granted > 0) console.log(`Granted stock-holding capability to ${granted} field-operations role(s).`);
   }
 
   // Seed a starter global stock-category list ONLY on a fresh DB. These are ordinary

@@ -11,13 +11,23 @@ vi.mock("#modules/user/user.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/supplier-type/supplier-type.service.js", () => ({
   requireActiveSupplierType: vi.fn(),
 }));
+vi.mock("#modules/purchase-order/purchase-order.repository.js", () => ({ countBySupplier: vi.fn() }));
+vi.mock("#modules/irm/irm.repository.js", () => ({ countBySupplier: vi.fn() }));
+vi.mock("#modules/goods-in/goods-in.repository.js", () => ({ countBySupplier: vi.fn() }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 
 import * as supplierRepo from "./supplier.repository.js";
 import * as userRepo from "#modules/user/user.repository.js";
 import * as supplierTypeService from "#modules/supplier-type/supplier-type.service.js";
+import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
+import * as irmRepo from "#modules/irm/irm.repository.js";
+import * as grnRepo from "#modules/goods-in/goods-in.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import { deleteSupplier, updateSupplier } from "./supplier.service.js";
+
+const mockPoCount = poRepo.countBySupplier as ReturnType<typeof vi.fn>;
+const mockIrmCount = irmRepo.countBySupplier as ReturnType<typeof vi.fn>;
+const mockGrnCount = grnRepo.countBySupplier as ReturnType<typeof vi.fn>;
 
 const SUP_ID = "f".repeat(24);
 const ACTIVE_OWNER = "a".repeat(24);
@@ -79,6 +89,10 @@ beforeEach(() => {
   mockUpdate.mockImplementation((_id: string, data: Record<string, unknown>) =>
     Promise.resolve(sRow(data)),
   );
+  // No dependencies by default — each delete-guard test overrides the one it exercises.
+  mockPoCount.mockResolvedValue(0);
+  mockIrmCount.mockResolvedValue(0);
+  mockGrnCount.mockResolvedValue(0);
 });
 
 describe("updateSupplier — owner change handling", () => {
@@ -191,6 +205,27 @@ describe("deleteSupplier", () => {
   it("throws not found when the supplier does not exist", async () => {
     mockFindById.mockResolvedValue(null);
     await expect(deleteSupplier(SUP_ID)).rejects.toThrow(/not found/i);
+    expect(mockSoftDelete).not.toHaveBeenCalled();
+  });
+
+  it("blocks delete when the supplier is linked to IRM catalogue items", async () => {
+    mockFindById.mockResolvedValue(sRow());
+    mockIrmCount.mockResolvedValue(2);
+    await expect(deleteSupplier(SUP_ID)).rejects.toThrow(/in use/i);
+    expect(mockSoftDelete).not.toHaveBeenCalled();
+  });
+
+  it("blocks delete when the supplier has purchase orders", async () => {
+    mockFindById.mockResolvedValue(sRow());
+    mockPoCount.mockResolvedValue(1);
+    await expect(deleteSupplier(SUP_ID)).rejects.toThrow(/in use/i);
+    expect(mockSoftDelete).not.toHaveBeenCalled();
+  });
+
+  it("blocks delete when the supplier has goods-in receipts", async () => {
+    mockFindById.mockResolvedValue(sRow());
+    mockGrnCount.mockResolvedValue(3);
+    await expect(deleteSupplier(SUP_ID)).rejects.toThrow(/in use/i);
     expect(mockSoftDelete).not.toHaveBeenCalled();
   });
 });

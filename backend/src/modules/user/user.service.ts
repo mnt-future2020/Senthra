@@ -8,6 +8,7 @@ import { assertEmailNamespaceFree } from "#modules/auth/email-namespace.js";
 import { ALL_PERMISSIONS } from "#modules/role/permissions.js";
 import * as userRepo from "./user.repository.js";
 import type { UserWithRole } from "./user.repository.js";
+import * as goodsOutRepo from "#modules/goods-out/goods-out.repository.js";
 import { generateTempPassword } from "../../utils/generate-password.js";
 import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
 import { hashPassword } from "../../utils/password.js";
@@ -327,6 +328,17 @@ export interface UpdateUserInput extends ProfileFieldsInput {
   removeProfileImage?: boolean;
 }
 
+// A staff member who still HOLDS field stock (EngineerStockBalance > 0) can't be moved to a
+// non-active status — their van stock would be orphaned with no owner to return it. This only
+// BLOCKS; it never auto-transfers, deletes or silently moves stock. Applied to every path that
+// can deactivate / suspend a user.
+async function assertNotHoldingStock(userId: string): Promise<void> {
+  const held = await goodsOutRepo.countEngineerHeldStock(userId);
+  if (held > 0) {
+    throw conflict("This staff member still holds stock. Return or transfer their stock before deactivating.");
+  }
+}
+
 export async function updateUser(
   id: string,
   input: UpdateUserInput,
@@ -353,7 +365,14 @@ export async function updateUser(
   }
   if (typeof input.phone === "string") data.phone = trimToNull(input.phone);
   if (typeof input.notes === "string") data.notes = trimToNull(input.notes);
-  if (typeof input.status === "string") data.status = normalizeStatus(input.status);
+  if (typeof input.status === "string") {
+    const nextStatus = normalizeStatus(input.status);
+    // Block deactivation / suspension while the user still holds field stock.
+    if (nextStatus !== "active" && (user.status ?? "active") === "active") {
+      await assertNotHoldingStock(id);
+    }
+    data.status = nextStatus;
+  }
   // Employment
   if (typeof input.jobTitle === "string") data.jobTitle = trimToNull(input.jobTitle);
   if (typeof input.department === "string") data.department = trimToNull(input.department);
@@ -400,6 +419,10 @@ export async function setUserStatus(
   const user = await userRepo.findById(id);
   if (!user) throw notFound("User not found.");
   const next = normalizeStatus(status);
+  // Block deactivation / suspension while the user still holds field stock.
+  if (next !== "active" && (user.status ?? "active") === "active") {
+    await assertNotHoldingStock(id);
+  }
   const updated = await userRepo.update(id, { status: next });
   audit.record({
     actor,

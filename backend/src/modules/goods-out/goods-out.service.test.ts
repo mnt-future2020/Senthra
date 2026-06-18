@@ -121,7 +121,7 @@ const baseInput = { warehouseId: WH_ID, engineerId: ENG_ID, dispatchDate: "2026-
 beforeEach(() => {
   vi.clearAllMocks();
   mockReqWarehouse.mockResolvedValue({ id: WH_ID, name: "Leeds", code: "WH-0001" });
-  mockUser.mockResolvedValue({ id: ENG_ID, firstName: "Karthik", lastName: "R", email: "karthik@x.com", employeeId: "SNT-0007", status: "active" });
+  mockUser.mockResolvedValue({ id: ENG_ID, firstName: "Karthik", lastName: "R", email: "karthik@x.com", employeeId: "SNT-0007", status: "active", role: { canHoldStock: true } });
   mockReqIrm.mockResolvedValue({ id: IRM_ID, name: "CAT6 Cable", sku: "C6", baseUnit: "Metre", trackInventory: true, trackSerialNumbers: false, trackBatchNumbers: false });
   mockFindBalance.mockResolvedValue({ quantityOnHand: 100, quantityReserved: 0 });
   mockCreate.mockResolvedValue(gdnRow());
@@ -165,8 +165,20 @@ describe("createGoodsOut", () => {
   });
 
   it("rejects an inactive engineer", async () => {
-    mockUser.mockResolvedValue({ id: ENG_ID, firstName: "X", lastName: "Y", email: null, employeeId: null, status: "inactive" });
+    mockUser.mockResolvedValue({ id: ENG_ID, firstName: "X", lastName: "Y", email: null, employeeId: null, status: "inactive", role: { canHoldStock: true } });
     await expect(createGoodsOut(baseInput)).rejects.toThrow(/inactive/i);
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it("rejects a recipient whose role can't hold stock (not field-operations)", async () => {
+    mockUser.mockResolvedValue({ id: ENG_ID, firstName: "Adam", lastName: "Min", email: "admin@x.com", employeeId: null, status: "active", role: { canHoldStock: false } });
+    await expect(createGoodsOut(baseInput)).rejects.toThrow(/isn't authorised to hold stock/i);
+    expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it("rejects a recipient with no role at all", async () => {
+    mockUser.mockResolvedValue({ id: ENG_ID, firstName: "No", lastName: "Role", email: null, employeeId: null, status: "active", role: null });
+    await expect(createGoodsOut(baseInput)).rejects.toThrow(/isn't authorised to hold stock/i);
     expect(mockCreate).not.toHaveBeenCalled();
   });
 });
@@ -208,6 +220,29 @@ describe("dispatchGoodsOut", () => {
     mockFindByIdTx.mockResolvedValue(gdnRow({ updatedAt: new Date("2026-06-16T11:00:00Z") }));
     await expect(dispatchGoodsOut(GDN_ID)).rejects.toThrow(/modified elsewhere/i);
     expect(mockApplyOutbound).not.toHaveBeenCalled();
+    expect(mockDispatchTx).not.toHaveBeenCalled();
+  });
+
+  it("aborts (writes nothing) when the engineer was suspended after the draft was created", async () => {
+    mockUser.mockResolvedValue({ id: ENG_ID, firstName: "Karthik", lastName: "R", email: "karthik@x.com", employeeId: "SNT-0007", status: "suspended", role: { canHoldStock: true } });
+    await expect(dispatchGoodsOut(GDN_ID)).rejects.toThrow(/inactive/i);
+    expect(mockApplyOutbound).not.toHaveBeenCalled();
+    expect(mockUpsertEng).not.toHaveBeenCalled();
+    expect(mockDispatchTx).not.toHaveBeenCalled();
+  });
+
+  it("aborts (writes nothing) when the engineer lost the stock-holding capability after drafting", async () => {
+    mockUser.mockResolvedValue({ id: ENG_ID, firstName: "Karthik", lastName: "R", email: "karthik@x.com", employeeId: "SNT-0007", status: "active", role: { canHoldStock: false } });
+    await expect(dispatchGoodsOut(GDN_ID)).rejects.toThrow(/isn't authorised to hold stock/i);
+    expect(mockApplyOutbound).not.toHaveBeenCalled();
+    expect(mockDispatchTx).not.toHaveBeenCalled();
+  });
+
+  it("aborts (writes nothing) when the warehouse was deactivated after the draft was created", async () => {
+    mockReqWarehouse.mockRejectedValue(new Error("Selected warehouse is inactive and can't be used for stock movements."));
+    await expect(dispatchGoodsOut(GDN_ID)).rejects.toThrow(/inactive/i);
+    expect(mockApplyOutbound).not.toHaveBeenCalled();
+    expect(mockUpsertEng).not.toHaveBeenCalled();
     expect(mockDispatchTx).not.toHaveBeenCalled();
   });
 });

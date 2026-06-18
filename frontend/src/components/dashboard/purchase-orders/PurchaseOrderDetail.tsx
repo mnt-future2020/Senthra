@@ -238,6 +238,7 @@ function Attachments({ po, setPo, canEdit }: { po: PurchaseOrder; setPo: (p: Pur
   const { pushToast } = useDashboard();
   const [uploading, setUploading] = React.useState(false);
   const [confirm, setConfirm] = React.useState<{ open: boolean; id: string | null }>({ open: false, id: null });
+  const [deleting, setDeleting] = React.useState(false);
   const inputRef = React.useRef<HTMLInputElement>(null);
 
   const onFile = (file: File) => {
@@ -270,14 +271,16 @@ function Attachments({ po, setPo, canEdit }: { po: PurchaseOrder; setPo: (p: Pur
   };
 
   const onDelete = async () => {
-    if (!confirm.id) return;
+    if (!confirm.id || deleting) return;
+    setDeleting(true);
     try {
       setPo(await poService.removeAttachment(po.id, confirm.id));
       pushToast("Attachment removed.", "success");
+      setConfirm({ open: false, id: null });
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Delete failed.", "alert");
     } finally {
-      setConfirm({ open: false, id: null });
+      setDeleting(false);
     }
   };
 
@@ -317,7 +320,7 @@ function Attachments({ po, setPo, canEdit }: { po: PurchaseOrder; setPo: (p: Pur
           ))}
         </ul>
       )}
-      <ConfirmDialog open={confirm.open} danger title="Remove attachment" message="Remove this attachment from the order?" confirmLabel="Remove" onConfirm={onDelete} onClose={() => setConfirm({ open: false, id: null })} />
+      <ConfirmDialog open={confirm.open} danger busy={deleting} title="Remove attachment" message="Remove this attachment from the order?" confirmLabel="Remove" onConfirm={onDelete} onClose={() => { if (!deleting) setConfirm({ open: false, id: null }); }} />
     </div>
   );
 }

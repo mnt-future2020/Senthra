@@ -157,6 +157,13 @@ export function softDelete(id: string): Promise<IrmItem> {
   return prisma.irmItem.update({ where: { id }, data: { deletedAt: new Date() } });
 }
 
+// --- delete-guard counter (Supplier can't be deleted while linked to live IRM items) ---------
+// Counts IrmItemSupplier links to NON-deleted IRM items for the given supplier, so deleting a
+// supplier that still supplies catalogue items is blocked.
+export function countBySupplier(supplierId: string): Promise<number> {
+  return prisma.irmItemSupplier.count({ where: { supplierId, irmItem: { is: { deletedAt: null } } } });
+}
+
 // Active staff users for the owner picker (minimal slice, name-sorted).
 export function findOwnerOptions(): Promise<
   { id: string; firstName: string; lastName: string; email: string; jobTitle: string | null; role: { name: string } | null }[]

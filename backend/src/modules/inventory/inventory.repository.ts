@@ -1,6 +1,7 @@
 import { Prisma, type InventoryBalance, type InventoryTransaction, type StockTransfer } from "@prisma/client";
 
 import { prisma, withTransaction } from "../../lib/prisma.js";
+import { conflict } from "../../utils/http-error.js";
 
 // Data-access for the Warehouse Inventory module: the inventory PRIMITIVES (on-hand balance +
 // immutable ledger) plus the StockTransfer movement records. The ONLY place Prisma is touched for
@@ -96,12 +97,22 @@ export function listTransactions(filters: { sourceType?: string; sourceId?: stri
 // --- tx-aware primitive writers (used inside Goods In + the atomic transfer) ------------------
 // Upsert the (item, warehouse) balance, applying `delta` (+ inbound / − outbound). Returns the row
 // AFTER the change so the caller can snapshot `balanceAfter` onto the ledger entry.
-export function upsertBalanceTx(tx: Prisma.TransactionClient, irmItemId: string, warehouseId: string, delta: number): Promise<InventoryBalance> {
-  return tx.inventoryBalance.upsert({
+export async function upsertBalanceTx(tx: Prisma.TransactionClient, irmItemId: string, warehouseId: string, delta: number): Promise<InventoryBalance> {
+  const balance = await tx.inventoryBalance.upsert({
     where: { irmItemId_warehouseId: { irmItemId, warehouseId } },
     create: { irmItemId, warehouseId, quantityOnHand: delta, quantityReserved: 0 },
     update: { quantityOnHand: { increment: delta } },
   });
+  // Hard invariant: on-hand can NEVER go negative. The per-path "available" re-checks
+  // catch stale snapshots, but this is the final, atomic backstop — it runs on the
+  // post-increment value inside the transaction, so any decrement that would breach
+  // zero (incl. a lost concurrent-commit race that the read-then-write checks miss)
+  // throws here and rolls the whole movement back. Centralised so every current and
+  // future decrement path (Goods Out, transfers, adjustments) is covered.
+  if (balance.quantityOnHand < 0) {
+    throw conflict("Insufficient stock: this movement would take on-hand below zero. Refresh and try again.");
+  }
+  return balance;
 }
 // tx-aware: read a balance inside the transaction (the concurrency-safe source re-read for transfers).
 export function findBalancePairTx(tx: Prisma.TransactionClient, irmItemId: string, warehouseId: string): Promise<InventoryBalance | null> {

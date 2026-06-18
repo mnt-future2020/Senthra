@@ -29,7 +29,9 @@ import * as grnRepo from "./goods-in.repository.js";
 import * as poService from "#modules/purchase-order/purchase-order.service.js";
 import * as inventoryService from "#modules/inventory/inventory.service.js";
 import * as audit from "#modules/audit/audit.service.js";
-import { cancelGoodsReceipt, completeGoodsReceipt, createGoodsReceipt, deleteGoodsReceipt, updateGoodsReceipt } from "./goods-in.service.js";
+import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
+import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
+import { addAttachment, cancelGoodsReceipt, completeGoodsReceipt, createGoodsReceipt, deleteGoodsReceipt, removeAttachment, updateGoodsReceipt } from "./goods-in.service.js";
 
 const GRN_ID = "e".repeat(24);
 const PO_ID = "f".repeat(24);
@@ -282,5 +284,36 @@ describe("cancel + draft-only guards", () => {
     await expect(deleteGoodsReceipt(GRN_ID)).resolves.toBeUndefined();
     expect(mockSoftDelete).toHaveBeenCalledWith(GRN_ID);
     expect(auditActions()).toContain("goods_in.deleted");
+  });
+});
+
+describe("attachments — draft-only guard", () => {
+  const mockAddAtt = grnRepo.addAttachment as ReturnType<typeof vi.fn>;
+  const mockFindAtt = grnRepo.findAttachment as ReturnType<typeof vi.fn>;
+  const mockRemoveAtt = grnRepo.removeAttachment as ReturnType<typeof vi.fn>;
+  const mockCreds = getCloudinaryCreds as ReturnType<typeof vi.fn>;
+  const mockUpload = uploadFileToCloudinary as ReturnType<typeof vi.fn>;
+  const att = { label: "Invoice", fileName: "inv.pdf", fileType: "pdf", fileSizeBytes: 1000, data: "data:application/pdf;base64,AAAA" } as Parameters<typeof addAttachment>[1];
+
+  it("adds an attachment on a DRAFT receipt", async () => {
+    mockFindById.mockResolvedValue(grnRow({ status: "draft" }));
+    mockCreds.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
+    mockUpload.mockResolvedValue("https://cdn/inv.pdf");
+    await addAttachment(GRN_ID, att, { type: "admin", email: "x@x.com" });
+    expect(mockAddAtt).toHaveBeenCalledTimes(1);
+    expect(auditActions()).toContain("goods_in.attachment_added");
+  });
+
+  it("blocks adding an attachment on a COMPLETED receipt", async () => {
+    mockFindById.mockResolvedValue(grnRow({ status: "completed" }));
+    await expect(addAttachment(GRN_ID, att)).rejects.toThrow(/only draft/i);
+    expect(mockAddAtt).not.toHaveBeenCalled();
+  });
+
+  it("blocks removing an attachment on a CANCELLED receipt", async () => {
+    mockFindById.mockResolvedValue(grnRow({ status: "cancelled" }));
+    await expect(removeAttachment(GRN_ID, "att1")).rejects.toThrow(/only draft/i);
+    expect(mockFindAtt).not.toHaveBeenCalled();
+    expect(mockRemoveAtt).not.toHaveBeenCalled();
   });
 });
