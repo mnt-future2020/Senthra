@@ -11,6 +11,7 @@ import { useDashboard } from "@/hooks/useDashboard";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import { inputCls, ghostBtn, labelCls, primaryBtn } from "@/components/ui/styles";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
+import { NumberInput } from "@/components/ui/NumberInput";
 import type { Availability } from "@/types/inventory";
 
 const INVENTORY_LIST = "/dashboard/inventory";
@@ -133,7 +134,7 @@ export function TransferForm() {
       });
       setSaved(true); // unmount the dirty guard before navigating away
       pushToast(`Transfer ${transfer.code} completed.`, "success");
-      router.push("/dashboard/inventory/history");
+      router.replace("/dashboard/inventory/history");
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Could not complete the transfer.";
       setError(msg);
@@ -195,7 +196,7 @@ export function TransferForm() {
               </div>
               <div>
                 <label className={labelCls}>Quantity<RequiredMark /></label>
-                <input className={inputCls} type="number" min={1} step={1} max={available ?? undefined} value={quantity} onChange={(e) => { setQuantity(e.target.value); touch(); clearError("quantity"); }} aria-invalid={Boolean(errors.quantity)} placeholder="e.g. 50" />
+                <NumberInput className={inputCls} min={1} step={1} max={available ?? undefined} value={quantity} onChange={(e) => { setQuantity(e.target.value); touch(); clearError("quantity"); }} aria-invalid={Boolean(errors.quantity)} placeholder="e.g. 50" />
                 <FieldError message={errors.quantity} />
               </div>
               <div>

@@ -11,6 +11,7 @@ import { Notice } from "@/components/ui/Notice";
 import { Toggle } from "@/components/dashboard/settings/ui/Toggle";
 import { PasswordInput } from "@/components/ui/PasswordInput";
 import { Field } from "@/components/ui/Field";
+import { NumberInput } from "@/components/ui/NumberInput";
 import { inputCls, primaryBtn } from "@/components/ui/styles";
 import type { Msg } from "@/components/ui/types";
 
@@ -214,8 +215,7 @@ export function EmailSection() {
             </Field>
           </div>
           <Field label="Port" hint="587 for STARTTLS, 465 for SSL/TLS.">
-            <input
-              type="number"
+            <NumberInput
               value={port}
               onChange={(e) => setPort(e.target.value)}
               placeholder="587"

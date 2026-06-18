@@ -287,18 +287,8 @@ export function SuppliersView() {
   };
 
   return (
-    <div className="space-y-5">
-      <div
-        className="border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs"
-        style={{ borderRadius: "var(--radius)" }}
-      >
-        <h2 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">Suppliers</h2>
-        <p className="mt-0.5 text-xs text-[var(--muted)]">
-          The organisations you procure stock from. The master data that purchase orders and goods-in build on.
-        </p>
-      </div>
-
-      <div className="flex flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center">
+    <div className="flex h-full flex-col gap-5">
+      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center">
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input
@@ -347,7 +337,7 @@ export function SuppliersView() {
         )}
       </div>
 
-      <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
         {showSkeleton ? (
           <SuppliersTableSkeleton actions={showActions} />
         ) : error ? (
@@ -368,7 +358,7 @@ export function SuppliersView() {
             )}
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="min-h-0 flex-1 overflow-auto">
             <table className="w-full min-w-[1100px] text-left text-sm">
               <thead>
                 <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
@@ -428,13 +418,15 @@ export function SuppliersView() {
       </div>
 
       {data && data.total > 0 && (
-        <Pagination
-          page={data.page}
-          totalPages={data.totalPages}
-          total={data.total}
-          label="suppliers"
-          onPage={setPage}
-        />
+        <div className="shrink-0">
+          <Pagination
+            page={data.page}
+            totalPages={data.totalPages}
+            total={data.total}
+            label="suppliers"
+            onPage={setPage}
+          />
+        </div>
       )}
 
       <ConfirmDialog

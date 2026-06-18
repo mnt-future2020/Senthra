@@ -1,0 +1,122 @@
+"use client";
+
+import * as React from "react";
+import { Loader2, Search } from "lucide-react";
+
+import * as geoService from "@/services/geo.service";
+import { inputCls, labelCls } from "./styles";
+import { RequiredMark } from "./FormScaffold";
+
+type Setter = React.Dispatch<React.SetStateAction<string>>;
+
+interface PostcodeFieldProps {
+  value: string;
+  // Parent updates its own postcode state (and typically clears its postcode error).
+  onChange: (next: string) => void;
+  setCity: Setter;
+  // Optional — forms without a County / Country field simply omit these.
+  setCounty?: Setter;
+  setCountry?: Setter;
+  // Called after a successful fill so the parent can clear City/Country errors.
+  onResolved?: () => void;
+  error?: string;
+  label?: string;
+  required?: boolean;
+  errorId?: string;
+}
+
+// Postcode input + "Find address" button that fills City/County (and confirms Country)
+// from postcodes.io via the backend. Shared across the warehouse, supplier, customer
+// and user forms so the behaviour and look stay identical. Street (address line 1) is
+// never returned by the lookup, so it stays manual. UK-only.
+export function PostcodeField({
+  value,
+  onChange,
+  setCity,
+  setCounty,
+  setCountry,
+  onResolved,
+  error,
+  label = "Postcode",
+  required = true,
+  errorId = "err-postcode",
+}: PostcodeFieldProps) {
+  const [lookingUp, setLookingUp] = React.useState(false);
+  const [lookupMsg, setLookupMsg] = React.useState<string | null>(null);
+  // What the last lookup auto-filled, so editing the postcode can invalidate it
+  // without ever wiping a value the user typed by hand.
+  const autofilledRef = React.useRef<{ city: string; county: string } | null>(null);
+
+  const handleChange = (next: string) => {
+    onChange(next);
+    setLookupMsg(null);
+    const af = autofilledRef.current;
+    if (af) {
+      setCity((c) => (c === af.city ? "" : c));
+      setCounty?.((c) => (c === af.county ? "" : c));
+      autofilledRef.current = null;
+    }
+  };
+
+  const findAddress = async () => {
+    const code = value.trim();
+    if (!code) {
+      setLookupMsg("Enter a postcode first.");
+      return;
+    }
+    setLookingUp(true);
+    setLookupMsg(null);
+    try {
+      const result = await geoService.lookupPostcode(code);
+      if (!result) {
+        autofilledRef.current = null;
+        setLookupMsg("Couldn't find that postcode — enter the address manually.");
+        return;
+      }
+      const filledCity = result.city ?? "";
+      const filledCounty = result.county ?? "";
+      if (result.city) setCity(result.city);
+      if (result.county && setCounty) setCounty(result.county);
+      setCountry?.("United Kingdom");
+      autofilledRef.current = { city: filledCity, county: filledCounty };
+      onResolved?.();
+      setLookupMsg("Filled from postcode — check and adjust if needed.");
+    } catch {
+      setLookupMsg("Couldn't look up that postcode right now.");
+    } finally {
+      setLookingUp(false);
+    }
+  };
+
+  return (
+    <div>
+      <label className={labelCls}>
+        {label}
+        {required && <RequiredMark />}
+      </label>
+      <div className="flex items-stretch gap-2">
+        <input
+          className={`${inputCls} min-w-0 flex-1`}
+          value={value}
+          onChange={(e) => handleChange(e.target.value)}
+          placeholder="e.g. LS1 4DY"
+          maxLength={12}
+          aria-invalid={Boolean(error)}
+        />
+        <button
+          type="button"
+          onClick={findAddress}
+          disabled={lookingUp || !value.trim()}
+          title="Find address from postcode — fills City & County"
+          aria-label="Find address from postcode"
+          className="flex shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-xl bg-[var(--accent-10)] px-4 text-xs font-bold text-[var(--accent)] shadow-xs transition-all hover:bg-[var(--accent)] hover:text-white disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-[var(--accent-10)] disabled:hover:text-[var(--accent)]"
+        >
+          {lookingUp ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" /> : <Search className="h-3.5 w-3.5 shrink-0" />}
+          Find
+        </button>
+      </div>
+      {error && <p id={errorId} className="mt-1.5 text-[11px] font-semibold text-[var(--neg)]">{error}</p>}
+      {lookupMsg && <p className="mt-1.5 text-[11px] text-[var(--muted)]">{lookupMsg}</p>}
+    </div>
+  );
+}

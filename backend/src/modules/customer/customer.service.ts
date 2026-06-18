@@ -1617,6 +1617,8 @@ export interface DirectStockEntryInput {
   serialized?: boolean;
   serialNumber?: string;
   highValue?: boolean;
+  thresholdQty?: number;
+  attributes?: Record<string, string>;
 }
 
 export async function createDirectStockEntry(
@@ -1649,6 +1651,7 @@ export async function createDirectStockEntry(
     targetType: "customer_stock_entry",
     targetId: entry.id,
     targetLabel: `${input.itemName} (${input.quantity})`,
+    metadata: { itemName: input.itemName, quantity: input.quantity, warehouseId: input.warehouseId, direct: true },
   });
 
   return toStockEntry(entry as StockEntryRow);

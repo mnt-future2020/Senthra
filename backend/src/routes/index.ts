@@ -6,6 +6,7 @@ import categoryRoutes from "#modules/category/category.routes.js";
 import { adminRouter as customerRoutes, portalRouter as customerPortalRoutes, stockAssignmentRouter, warehousePendingRouter, stockEntryRouter } from "#modules/customer/customer.routes.js";
 import departmentRoutes from "#modules/department/department.routes.js";
 import emailTemplateRoutes from "#modules/email/emailTemplate.routes.js";
+import geoRoutes from "#modules/geo/geo.routes.js";
 import goodsInRoutes from "#modules/goods-in/goods-in.routes.js";
 import goodsOutRoutes from "#modules/goods-out/goods-out.routes.js";
 import inventoryRoutes from "#modules/inventory/inventory.routes.js";
@@ -48,6 +49,7 @@ router.use("/goods-in", goodsInRoutes);
 router.use("/goods-out", goodsOutRoutes);
 router.use("/inventory", inventoryRoutes);
 router.use("/departments", departmentRoutes);
+router.use("/geo", geoRoutes);
 router.use("/job-titles", jobTitleRoutes);
 router.use("/email-templates", emailTemplateRoutes);
 // Customer master-data (admin/PM) + the read-only customer portal API.

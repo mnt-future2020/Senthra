@@ -193,7 +193,7 @@ function Overview({ i, costLabel }: { i: IrmItem; costLabel: string }) {
                 {s.isPrimary && (
                   <span className="rounded-full bg-[var(--accent-10)] px-1.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-[var(--accent)]">Primary</span>
                 )}
-                {s.supplierSku && <span className="text-[11px] text-[var(--muted)]">SKU: {s.supplierSku}</span>}
+                {s.supplierSku && <span className="text-[11px] text-[var(--muted)]">Supplier item code: {s.supplierSku}</span>}
                 {s.leadTimeDays != null && <span className="text-[11px] text-[var(--muted)]">{s.leadTimeDays}d lead</span>}
               </li>
             ))}
