@@ -50,16 +50,16 @@ import type {
 import type { UserStatus } from "@/types/user";
 import { EditApproveModal } from "./EditApproveModal";
 import { AssignWarehouseModal } from "./AssignWarehouseModal";
-import { ReceiveStockModal } from "./ReceiveStockModal";
-import { AddStockEntryModal } from "./AddStockEntryModal";
+import { AdminStockSubmissionModal } from "./AdminStockSubmissionModal";
 
 // The detail page is organised into tabs (URL-driven ?tab=) like the Users & Roles
 // panel: the company header stays pinned and each section becomes a tab.
-type TabId = "overview" | "projects" | "catalogue" | "sites" | "users";
+type TabId = "overview" | "projects" | "catalogue" | "submissions" | "sites" | "users";
 const TABS: { id: TabId; label: string; icon: React.ElementType }[] = [
   { id: "overview", label: "Overview", icon: Building2 },
   { id: "projects", label: "Projects", icon: FolderKanban },
-  { id: "catalogue", label: "Stock entries", icon: Boxes },
+  { id: "catalogue", label: "Inventory", icon: Boxes },
+  { id: "submissions", label: "Stock Submissions", icon: ClipboardList },
   { id: "sites", label: "Sites", icon: MapPin },
   { id: "users", label: "Portal login", icon: KeyRound },
 ];
@@ -73,6 +73,7 @@ const TAB_PERMISSION: Record<TabId, string | null> = {
   overview: null,
   projects: "customer_projects.view",
   catalogue: "customer_stock.view",
+  submissions: "stock_requests.view",
   sites: "customer_sites.view",
   users: "customer_portal.view",
 };
@@ -300,11 +301,17 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
       {activeTab === "catalogue" && (
         <StockEntriesTab
           customer={customer}
-          stockReq={stockReqCaps}
           stockCaps={stockCaps}
-          onChange={setCustomer}
           pushToast={pushToast}
           router={router}
+        />
+      )}
+      {activeTab === "submissions" && (
+        <StockSubmissionsTab
+          customer={customer}
+          stockReq={stockReqCaps}
+          onChange={setCustomer}
+          pushToast={pushToast}
         />
       )}
       {activeTab === "sites" && (
@@ -712,27 +719,18 @@ function ProjectsSection({ customer, caps, onChange, pushToast }: SectionProps) 
   );
 }
 
-// --- Stock entries tab (unified: stock requests + received entries) ----------
+// --- Inventory tab (received stock entries) ----------------------------------
 function StockEntriesTab({
   customer,
-  stockReq,
   stockCaps,
-  onChange,
   pushToast,
   router,
 }: {
   customer: Customer;
-  stockReq: { approve: boolean; reject: boolean };
   stockCaps: SectionCaps;
-  onChange: React.Dispatch<React.SetStateAction<Customer>>;
   pushToast: PushToast;
   router: ReturnType<typeof useRouter>;
 }) {
-  const canReview = stockReq.approve || stockReq.reject;
-
-  // --- add stock entry modal ---
-  const [showAdd, setShowAdd] = React.useState(false);
-
   // --- stock entries list ---
   const [entries, setEntries] = React.useState<CustomerStockEntry[] | null>(null);
   const [error, setError] = React.useState<string | null>(null);
@@ -747,13 +745,171 @@ function StockEntriesTab({
 
   React.useEffect(() => { load(); }, [load]);
 
-  // --- stock request review flow ---
+  return (
+    <div className="space-y-6">
+      {/* Stock entries table */}
+      {error ? (
+        <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>
+      ) : entries === null ? (
+        <div className="flex items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--surface)] py-16">
+          <Loader2 className="h-6 w-6 animate-spin text-[var(--muted)]" />
+        </div>
+      ) : (
+        <>
+          <div className="flex flex-wrap items-center gap-2">
+            {(["", "active", "draft"] as const).map((f) => (
+              <button
+                key={f}
+                type="button"
+                onClick={() => setFilter(f)}
+                className={`rounded-full px-3 py-1.5 text-[11px] font-bold transition-all ${
+                  filter === f
+                    ? "bg-[var(--accent)] text-white"
+                    : "border border-[var(--border)] bg-[var(--surface-2)] text-[var(--muted)] hover:text-[var(--ink)]"
+                }`}
+              >
+                {f === "" ? "All" : f === "active" ? "Active" : "Draft"}
+              </button>
+            ))}
+            <span className="ml-1 text-xs text-[var(--muted)]">{entries.length} entr{entries.length === 1 ? "y" : "ies"}</span>
+            {stockCaps.create && (
+              <button
+                type="button"
+                onClick={() => router.push(`/dashboard/customers/${customer.id}/add-stock-entry`)}
+                className={`${primaryBtn} ml-auto`}
+              >
+                <Plus className="h-4 w-4" /> Add item
+              </button>
+            )}
+          </div>
+
+          {entries.length === 0 ? (
+            <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
+              <Boxes className="h-7 w-7 text-[var(--faint)]" />
+              <p className="text-sm font-semibold text-[var(--ink)]">No stock entries</p>
+              <p className="text-xs text-[var(--muted)]">
+                {filter ? `No ${filter} entries found.` : "Received stock for this customer will appear here."}
+              </p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+              <table className="w-full text-left text-sm" style={{ minWidth: 750 }}>
+                <thead>
+                  <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
+                    <th className="px-4 py-3">Item</th>
+                    <th className="px-4 py-3">Warehouse</th>
+                    <th className="px-4 py-3">SKU</th>
+                    <th className="px-4 py-3">Qty</th>
+                    <th className="px-4 py-3">Barcode</th>
+                    <th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3">Received</th>
+                    <th className="px-4 py-3" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {entries.map((e) => (
+                    <tr
+                      key={e.id}
+                      className="cursor-pointer border-b border-[var(--border)] align-top transition-colors last:border-0 hover:bg-[var(--surface-2)]"
+                      onClick={() => router.push(`/dashboard/stock-entries/${e.id}`)}
+                    >
+                      <td className="px-4 py-3 font-semibold text-[var(--ink)]">{e.itemName}</td>
+                      <td className="px-4 py-3">
+                        <div className="text-[var(--ink)]">{e.warehouseName}</div>
+                        <div className="font-mono text-[11px] text-[var(--faint)]">{e.warehouseCode}</div>
+                      </td>
+                      <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.sku ?? "â€”"}</td>
+                      <td className="px-4 py-3 font-bold text-[var(--ink)]">{e.quantity}</td>
+                      <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.barcode ?? "â€”"}</td>
+                      <td className="px-4 py-3">
+                        <span
+                          className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                            e.status === "active"
+                              ? "bg-[var(--pos)]/12 text-[var(--pos)]"
+                              : "bg-amber-500/15 text-amber-600"
+                          }`}
+                        >
+                          {e.status}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-[var(--muted)]">{fmtDate(e.receivedAt ?? e.createdAt)}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            title="View"
+                            onClick={(ev) => { ev.stopPropagation(); router.push(`/dashboard/stock-entries/${e.id}`); }}
+                            className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface-2)] text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)]"
+                          >
+                            <Eye className="h-4 w-4" />
+                          </button>
+                          <button
+                            type="button"
+                            title="Edit"
+                            onClick={(ev) => { ev.stopPropagation(); router.push(`/dashboard/stock-entries/${e.id}`); }}
+                            className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--accent)] text-white transition-all hover:opacity-90"
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </button>
+                          {stockCaps.delete && (
+                            <button
+                              type="button"
+                              title="Delete"
+                              onClick={async (ev) => {
+                                ev.stopPropagation();
+                                if (!confirm(`Delete "${e.itemName}"?`)) return;
+                                try {
+                                  await customerService.deleteStockEntry(e.id);
+                                  pushToast("Stock entry deleted.", "success");
+                                  load();
+                                } catch (err) {
+                                  pushToast(err instanceof Error ? err.message : "Delete failed.", "alert");
+                                }
+                              }}
+                              className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--neg)]/30 bg-[var(--neg)]/10 text-[var(--neg)] transition-all hover:bg-[var(--neg)] hover:text-white"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+
+    </div>
+  );
+}
+
+// --- Stock Submissions tab (customer-submitted stock, pending review/receive) -
+function StockSubmissionsTab({
+  customer,
+  stockReq,
+  onChange,
+  pushToast,
+}: {
+  customer: Customer;
+  stockReq: { approve: boolean; reject: boolean };
+  onChange: React.Dispatch<React.SetStateAction<Customer>>;
+  pushToast: PushToast;
+}) {
   const [reviewingId, setReviewingId] = React.useState<string | null>(null);
   const [rejectingId, setRejectingId] = React.useState<string | null>(null);
   const [rejectNote, setRejectNote] = React.useState("");
   const [editApproveReq, setEditApproveReq] = React.useState<StockRequest | null>(null);
   const [assignReq, setAssignReq] = React.useState<StockRequest | null>(null);
-  const [receiveTarget, setReceiveTarget] = React.useState<{ assignment: WarehouseAssignment; request: StockRequest } | null>(null);
+  const [showCreate, setShowCreate] = React.useState(false);
+
+  const onCreated = (created: StockRequest) => {
+    onChange((p) => ({ ...p, stockRequests: [created, ...p.stockRequests] }));
+    setShowCreate(false);
+    pushToast(`Submission created for "${created.name}".`, "success");
+  };
 
   const approve = async (req: StockRequest) => {
     setReviewingId(req.id);
@@ -803,38 +959,33 @@ function StockEntriesTab({
     pushToast(`Assigned to ${updated.warehouseAssignments.length} warehouse(s).`, "success");
   };
 
-  const onReceived = (updatedAssignment: WarehouseAssignment, stockEntryId: string) => {
-    if (!receiveTarget) return;
-    const reqId = receiveTarget.request.id;
-    onChange((p) => ({
-      ...p,
-      stockRequests: p.stockRequests.map((r) => {
-        if (r.id !== reqId) return r;
-        const newAssignments = r.warehouseAssignments.map((a) =>
-          a.id === updatedAssignment.id ? updatedAssignment : a,
-        );
-        const allReceived = newAssignments.every((a) => a.status === "received");
-        const someReceived = newAssignments.some((a) => a.status === "received" || a.status === "partially_received");
-        return {
-          ...r,
-          warehouseAssignments: newAssignments,
-          status: allReceived ? "completed" as const : someReceived ? "partially_received" as const : r.status,
-        };
-      }),
-    }));
-    setReceiveTarget(null);
-    pushToast(`Received ${updatedAssignment.receivedQuantity} at ${updatedAssignment.warehouseName}.`, "success");
-    router.push(`/dashboard/stock-entries/${stockEntryId}`);
-  };
-
   return (
     <div className="space-y-6">
-      {/* Stock requests (pending review) */}
-      {canReview && customer.stockRequests.length > 0 && (
+      {stockReq.approve && (
+        <div className="flex items-center justify-end">
+          <button
+            type="button"
+            onClick={() => setShowCreate(true)}
+            className={primaryBtn}
+          >
+            <Plus className="h-4 w-4" /> New submission
+          </button>
+        </div>
+      )}
+
+      {customer.stockRequests.length === 0 ? (
+        <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
+          <ClipboardList className="h-7 w-7 text-[var(--faint)]" />
+          <p className="text-sm font-semibold text-[var(--ink)]">No stock submissions</p>
+          <p className="text-xs text-[var(--muted)]">
+            Stock the customer submits from their portal — or that you add on their behalf — appears here for review.
+          </p>
+        </div>
+      ) : (
         <div className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)]">
           <div className="flex items-center gap-2 border-b border-[var(--border)] px-3 py-2 text-[11px] font-bold uppercase tracking-wider text-[var(--muted)]">
             <ClipboardList className="h-3.5 w-3.5" />
-            Stock requests ({customer.stockRequests.length})
+            Stock submissions ({customer.stockRequests.length})
           </div>
           <div className="divide-y divide-[var(--border)]">
             {customer.stockRequests.map((req) => (
@@ -916,7 +1067,7 @@ function StockEntriesTab({
                     <input
                       value={rejectNote}
                       onChange={(e) => setRejectNote(e.target.value)}
-                      placeholder="Reason (optional) â€” shown to the customer"
+                      placeholder="Reason (optional) — shown to the customer"
                       maxLength={500}
                       className="flex-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-xs text-[var(--ink)] outline-none focus:border-[var(--accent)]"
                     />
@@ -956,15 +1107,6 @@ function StockEntriesTab({
                           </span>
                           <AssignmentStatusBadge status={a.status} />
                         </div>
-                        {a.status !== "received" && stockReq.approve && (
-                          <button
-                            type="button"
-                            onClick={() => setReceiveTarget({ assignment: a, request: req })}
-                            className="rounded-lg bg-[var(--pos)] px-2 py-1 text-[10px] font-bold text-white hover:opacity-90"
-                          >
-                            Receive
-                          </button>
-                        )}
                       </div>
                     ))}
                   </div>
@@ -991,139 +1133,12 @@ function StockEntriesTab({
           onSaved={onAssigned}
         />
       )}
-      {receiveTarget && (
-        <ReceiveStockModal
-          assignment={receiveTarget.assignment}
-          itemName={receiveTarget.request.editedName ?? receiveTarget.request.name}
-          onClose={() => setReceiveTarget(null)}
-          onSaved={onReceived}
-        />
-      )}
-
-      {/* Stock entries table */}
-      {error ? (
-        <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>
-      ) : entries === null ? (
-        <div className="flex items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--surface)] py-16">
-          <Loader2 className="h-6 w-6 animate-spin text-[var(--muted)]" />
-        </div>
-      ) : (
-        <>
-          <div className="flex flex-wrap items-center gap-2">
-            {(["", "active", "draft"] as const).map((f) => (
-              <button
-                key={f}
-                type="button"
-                onClick={() => setFilter(f)}
-                className={`rounded-full px-3 py-1.5 text-[11px] font-bold transition-all ${
-                  filter === f
-                    ? "bg-[var(--accent)] text-white"
-                    : "border border-[var(--border)] bg-[var(--surface-2)] text-[var(--muted)] hover:text-[var(--ink)]"
-                }`}
-              >
-                {f === "" ? "All" : f === "active" ? "Active" : "Draft"}
-              </button>
-            ))}
-            <span className="ml-1 text-xs text-[var(--muted)]">{entries.length} entr{entries.length === 1 ? "y" : "ies"}</span>
-            {stockCaps.create && (
-              <button
-                type="button"
-                onClick={() => setShowAdd(true)}
-                className={`${primaryBtn} ml-auto`}
-              >
-                <Plus className="h-4 w-4" /> Add item
-              </button>
-            )}
-          </div>
-
-          {entries.length === 0 ? (
-            <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
-              <Boxes className="h-7 w-7 text-[var(--faint)]" />
-              <p className="text-sm font-semibold text-[var(--ink)]">No stock entries</p>
-              <p className="text-xs text-[var(--muted)]">
-                {filter ? `No ${filter} entries found.` : "Received stock for this customer will appear here."}
-              </p>
-            </div>
-          ) : (
-            <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
-              <table className="w-full text-left text-sm" style={{ minWidth: 750 }}>
-                <thead>
-                  <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                    <th className="px-4 py-3">Item</th>
-                    <th className="px-4 py-3">Warehouse</th>
-                    <th className="px-4 py-3">SKU</th>
-                    <th className="px-4 py-3">Qty</th>
-                    <th className="px-4 py-3">Barcode</th>
-                    <th className="px-4 py-3">Status</th>
-                    <th className="px-4 py-3">Received</th>
-                    <th className="px-4 py-3" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {entries.map((e) => (
-                    <tr
-                      key={e.id}
-                      className="cursor-pointer border-b border-[var(--border)] align-top transition-colors last:border-0 hover:bg-[var(--surface-2)]"
-                      onClick={() => router.push(`/dashboard/stock-entries/${e.id}`)}
-                    >
-                      <td className="px-4 py-3 font-semibold text-[var(--ink)]">{e.itemName}</td>
-                      <td className="px-4 py-3">
-                        <div className="text-[var(--ink)]">{e.warehouseName}</div>
-                        <div className="font-mono text-[11px] text-[var(--faint)]">{e.warehouseCode}</div>
-                      </td>
-                      <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.sku ?? "â€”"}</td>
-                      <td className="px-4 py-3 font-bold text-[var(--ink)]">{e.quantity}</td>
-                      <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.barcode ?? "â€”"}</td>
-                      <td className="px-4 py-3">
-                        <span
-                          className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${
-                            e.status === "active"
-                              ? "bg-[var(--pos)]/12 text-[var(--pos)]"
-                              : "bg-amber-500/15 text-amber-600"
-                          }`}
-                        >
-                          {e.status}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-xs text-[var(--muted)]">{fmtDate(e.receivedAt ?? e.createdAt)}</td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            title="View"
-                            onClick={(ev) => { ev.stopPropagation(); router.push(`/dashboard/stock-entries/${e.id}`); }}
-                            className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface-2)] text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)]"
-                          >
-                            <Eye className="h-4 w-4" />
-                          </button>
-                          <button
-                            type="button"
-                            title="Edit"
-                            onClick={(ev) => { ev.stopPropagation(); router.push(`/dashboard/stock-entries/${e.id}`); }}
-                            className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--accent)] text-white transition-all hover:opacity-90"
-                          >
-                            <Pencil className="h-4 w-4" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </>
-      )}
-
-      {showAdd && (
-        <AddStockEntryModal
+      {showCreate && (
+        <AdminStockSubmissionModal
           customerId={customer.id}
-          onClose={() => setShowAdd(false)}
-          onSaved={() => {
-            setShowAdd(false);
-            load();
-            pushToast("Stock entry added.", "success");
-          }}
+          customerName={customer.name}
+          onClose={() => setShowCreate(false)}
+          onCreated={onCreated}
         />
       )}
     </div>

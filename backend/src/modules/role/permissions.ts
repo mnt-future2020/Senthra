@@ -122,8 +122,8 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
   },
   {
     key: "customer_stock",
-    label: "Customer Stock Entries",
-    description: "The stock entries (received items) for each customer across warehouses.",
+    label: "Customer Inventory",
+    description: "The inventory (received items) for each customer across warehouses.",
     category: "Customers",
     parent: "customers",
     permissions: [
@@ -161,8 +161,8 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
   },
   {
     key: "stock_requests",
-    label: "Customer Stock Requests",
-    description: "The review queue for stock additions a customer requests from their portal.",
+    label: "Customer Stock Submissions",
+    description: "The review queue for stock a customer submits from their portal.",
     category: "Customers",
     parent: "customers",
     permissions: [

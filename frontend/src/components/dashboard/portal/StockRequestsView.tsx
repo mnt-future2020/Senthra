@@ -76,11 +76,11 @@ export function StockRequestsView() {
   return (
     <div className="space-y-6">
       <PortalHeader
-        title="Stock Requests"
-        subtitle="Request stock from your account team and track each request's status."
+        title="Stock Submissions"
+        subtitle="Submit stock to your account team and track each submission's status."
         action={
           <button type="button" onClick={() => setRequestOpen(true)} className={primaryBtn}>
-            <Plus className="h-4 w-4" /> Request stock
+            <Plus className="h-4 w-4" /> Submit stock
           </button>
         }
       />
@@ -90,8 +90,8 @@ export function StockRequestsView() {
       {msg?.type === "error" ? null : requests.length === 0 ? (
         <EmptyState
           icon={ClipboardList}
-          title="No requests yet"
-          hint='Use "Request stock" to ask your account team for an item. They review every request before anything is added.'
+          title="No submissions yet"
+          hint='Use "Submit stock" to send an item to your account team. They review every submission before anything is added.'
         />
       ) : (
         <TableCard headers={HEADERS}>

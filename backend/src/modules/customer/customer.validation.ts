@@ -138,9 +138,8 @@ export type CustomerUserInput = z.infer<typeof customerUserSchema>;
 // --- customer stock requests (portal-submitted stock requests) ----------------
 
 // What a portal user submits to REQUEST stock — an order / replenishment ask. Item
-// name + quantity + a business reason are MANDATORY (an approval without a quantity or
-// reason is useless for audit + inventory planning later). Categories are internal
-// master-data and never appear on a customer request.
+// name + quantity are MANDATORY. Reason and notes are optional free-text. Categories
+// are internal master-data and never appear on a customer request.
 export const stockRequestSchema = z.object({
   name: z
     .string({ error: "Item name is required." })
@@ -152,14 +151,17 @@ export const stockRequestSchema = z.object({
     .int("Use a whole number.")
     .min(1, "Quantity must be at least 1.")
     .max(1_000_000),
-  reason: z
-    .string({ error: "A business reason is required." })
-    .trim()
-    .min(1, "A business reason is required.")
-    .max(1000),
+  reason: z.string().trim().max(1000).optional(),
   notes: z.string().trim().max(2000).optional(),
 });
 export type StockRequestInput = z.infer<typeof stockRequestSchema>;
+
+// ADMIN creates a submission on behalf of a customer (e.g. taken over the phone).
+// Same shape as the portal submission plus an optional "requested by" contact name.
+export const adminStockRequestSchema = stockRequestSchema.extend({
+  requestedByName: z.string().trim().max(160).optional(),
+});
+export type AdminStockRequestInput = z.infer<typeof adminStockRequestSchema>;
 
 // Optional admin response note when approving / rejecting a request (shown to the
 // customer).

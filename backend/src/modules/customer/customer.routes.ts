@@ -9,6 +9,7 @@ import {
 import { writeLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import {
+  adminStockRequestSchema,
   createCustomerSchema,
   customerUserSchema,
   directStockEntrySchema,
@@ -144,6 +145,13 @@ adminRouter.get(
   customerController.listStockRequests,
 );
 adminRouter.post(
+  "/:id/stock-requests",
+  requirePermission("stock_requests.approve"),
+  writeLimiter,
+  validateBody(adminStockRequestSchema),
+  customerController.createStockRequest,
+);
+adminRouter.post(
   "/:id/stock-requests/:reqId/approve",
   requirePermission("stock_requests.approve"),
   writeLimiter,
@@ -276,6 +284,13 @@ stockEntryRouter.put(
   writeLimiter,
   validateBody(stockEntryUpdateSchema),
   customerController.updateStockEntry,
+);
+
+stockEntryRouter.delete(
+  "/:id",
+  requirePermission("customer_stock.delete"),
+  writeLimiter,
+  customerController.deleteStockEntry,
 );
 
 stockEntryRouter.post(

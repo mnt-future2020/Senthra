@@ -168,7 +168,7 @@ export interface Customer extends CustomerSummary {
   projects: CustomerProject[];
   sites: CustomerSite[];
   users: CustomerUser[];
-  stockRequests: StockRequest[]; // PENDING only (the admin review queue)
+  stockRequests: StockRequest[]; // in-flight submissions (pending → partially_received)
 }
 
 // What a logged-in customer sees about themselves (the portal).

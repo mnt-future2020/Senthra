@@ -9,18 +9,23 @@ import { RequiredMark } from "@/components/ui/FormScaffold";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import type { StockRequest } from "@/types/customer";
 
-// Portal: a customer user submits a stock REQUEST — an ask, not a catalogue write.
-// Item name and quantity are mandatory; notes are optional. The request is queued for
-// an internal reviewer to approve or reject. Approval never writes inventory directly.
-export function StockRequestModal({
+// Admin creates a stock submission on behalf of a customer (e.g. taken over the
+// phone). Same queue + review flow as a portal-submitted one; the optional
+// "requested by" captures the customer contact the admin spoke to.
+export function AdminStockSubmissionModal({
+  customerId,
+  customerName,
   onClose,
-  onSubmitted,
+  onCreated,
 }: {
+  customerId: string;
+  customerName: string;
   onClose: () => void;
-  onSubmitted: (request: StockRequest) => void;
+  onCreated: (request: StockRequest) => void;
 }) {
   const [name, setName] = React.useState("");
   const [quantity, setQuantity] = React.useState("");
+  const [requestedByName, setRequestedByName] = React.useState("");
   const [notes, setNotes] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [errors, setErrors] = React.useState<{ name?: string; quantity?: string }>({});
@@ -40,14 +45,15 @@ export function StockRequestModal({
     setBusy(true);
     setError(null);
     try {
-      const request = await customerService.submitStockRequest({
+      const request = await customerService.createStockRequestForCustomer(customerId, {
         name: name.trim(),
         quantity: qty,
+        requestedByName: requestedByName.trim() || undefined,
         notes: notes.trim() || undefined,
       });
-      onSubmitted(request);
+      onCreated(request);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not submit the request.");
+      setError(err instanceof Error ? err.message : "Could not create the submission.");
       setBusy(false);
     }
   };
@@ -55,22 +61,22 @@ export function StockRequestModal({
   return (
     <Modal
       open
-      title="Submit stock"
-      subtitle="Sent to your account team to review. Approval doesn't ship stock on its own."
+      title="New stock submission"
+      subtitle={`Created on behalf of ${customerName}. Queued for the normal review flow.`}
       onClose={busy ? () => {} : onClose}
       footer={
         <>
           <button type="button" onClick={onClose} disabled={busy} className={ghostBtn}>
             Cancel
           </button>
-          <button type="submit" form="stock-request-form" disabled={busy} className={primaryBtn}>
+          <button type="submit" form="admin-submission-form" disabled={busy} className={primaryBtn}>
             {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-            Submit stock
+            Create submission
           </button>
         </>
       }
     >
-      <form id="stock-request-form" onSubmit={submit} className="space-y-4">
+      <form id="admin-submission-form" onSubmit={submit} className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="sm:col-span-2">
             <label className={labelCls}>
@@ -108,6 +114,16 @@ export function StockRequestModal({
               aria-invalid={Boolean(errors.quantity)}
             />
             <FieldErr msg={errors.quantity} />
+          </div>
+          <div>
+            <label className={labelCls}>Requested by</label>
+            <input
+              className={inputCls}
+              value={requestedByName}
+              onChange={(e) => setRequestedByName(e.target.value)}
+              placeholder="Customer contact (optional)"
+              maxLength={160}
+            />
           </div>
           <div className="sm:col-span-2">
             <label className={labelCls}>Notes</label>

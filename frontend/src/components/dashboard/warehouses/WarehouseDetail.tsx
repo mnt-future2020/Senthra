@@ -123,7 +123,7 @@ export function WarehouseDetail({ initial }: { initial: Warehouse }) {
       </div>
 
       {tab === "overview" && <Overview w={w} />}
-      {tab === "incoming" && <IncomingStock warehouseId={w.id} pushToast={pushToast} router={router} />}
+      {tab === "incoming" && <IncomingStock warehouseId={w.id} pushToast={pushToast} />}
       {tab === "inventory" && <WarehouseStockEntries warehouseId={w.id} router={router} />}
       {tab === "transactions" && (
         <Placeholder
@@ -261,11 +261,9 @@ function Overview({ w }: { w: Warehouse }) {
 function IncomingStock({
   warehouseId,
   pushToast,
-  router,
 }: {
   warehouseId: string;
   pushToast: (msg: string, type?: "success" | "alert") => void;
-  router: ReturnType<typeof useRouter>;
 }) {
   const [items, setItems] = React.useState<PendingStockItem[] | null>(null);
   const [error, setError] = React.useState<string | null>(null);
@@ -280,7 +278,7 @@ function IncomingStock({
 
   React.useEffect(() => { load(); }, [load]);
 
-  const onReceived = (updated: WarehouseAssignment, stockEntryId: string) => {
+  const onReceived = (updated: WarehouseAssignment) => {
     if (!receiveTarget) return;
     setItems((prev) =>
       (prev ?? [])
@@ -295,8 +293,13 @@ function IncomingStock({
         .filter((it) => it.status !== "received"),
     );
     setReceiveTarget(null);
-    pushToast(`Received ${updated.receivedQuantity} at ${updated.warehouseName}.`, "success");
-    router.push(`/dashboard/stock-entries/${stockEntryId}`);
+    const done = updated.status === "received";
+    pushToast(
+      done
+        ? `Fully received at ${updated.warehouseName}. View it under Inventory.`
+        : `Received ${updated.receivedQuantity}/${updated.quantity} at ${updated.warehouseName}.`,
+      "success",
+    );
   };
 
   if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;

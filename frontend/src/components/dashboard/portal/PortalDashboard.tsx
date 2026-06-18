@@ -66,7 +66,7 @@ export function PortalDashboard() {
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           icon={ClipboardList}
-          label="Pending stock requests"
+          label="Pending stock submissions"
           value={counts.pendingRequests}
           href="/dashboard/portal/requests"
           accent
@@ -163,7 +163,7 @@ function RecentActivity({ requests }: { requests: CustomerOverview["recentReques
       <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
         {requests.length === 0 ? (
           <p className="px-4 py-10 text-center text-xs text-[var(--muted)]">
-            No stock requests yet.
+            No stock submissions yet.
           </p>
         ) : (
           <ul className="divide-y divide-[var(--border)]">
