@@ -19,6 +19,9 @@ import {
   StatCardSkeleton,
 } from "./portalUi";
 
+// Hidden for client demo — flip to false after launch to show the "coming soon" cards.
+const DEMO_HIDE_COMING_SOON = true;
+
 // Customer portal — Dashboard (the landing). A quick read on the things a customer
 // cares about: how many requests are awaiting review, how much work is in flight
 // (projects/sites), the size of their catalogue, and their most recent requests.
@@ -95,15 +98,17 @@ export function PortalDashboard() {
       <div className="grid gap-4 lg:grid-cols-2">
         <RecentActivity requests={recentRequests} />
 
-        <div className="space-y-2">
-          <h2 className="text-sm font-extrabold text-[var(--ink)]">Recent stock movements</h2>
-          <ComingSoon
-            icon={Activity}
-            title="Stock movements"
-            body="Once live inventory is connected, dispatches and deliveries to your sites will show up here."
-            compact
-          />
-        </div>
+        {!DEMO_HIDE_COMING_SOON && (
+          <div className="space-y-2">
+            <h2 className="text-sm font-extrabold text-[var(--ink)]">Recent stock movements</h2>
+            <ComingSoon
+              icon={Activity}
+              title="Stock movements"
+              body="Once live inventory is connected, dispatches and deliveries to your sites will show up here."
+              compact
+            />
+          </div>
+        )}
       </div>
     </div>
   );

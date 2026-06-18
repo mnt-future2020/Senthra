@@ -24,8 +24,9 @@ function fmtDate(iso: string | null): string {
 type Tab = "overview" | "inventory" | "transactions" | "audit";
 const TABS: { key: Tab; label: string }[] = [
   { key: "overview", label: "Overview" },
-  { key: "inventory", label: "Inventory" },
-  { key: "transactions", label: "Transactions" },
+  // Hidden for client demo (re-enable after launch — these tabs show "coming soon").
+  // { key: "inventory", label: "Inventory" },
+  // { key: "transactions", label: "Transactions" },
   { key: "audit", label: "Audit trail" },
 ];
 

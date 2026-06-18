@@ -17,13 +17,13 @@ import {
   FolderKanban,
   MapPin,
   ClipboardList,
-  BarChart3,
+  // BarChart3, // Hidden for client demo — used by the portal "Reports" nav item below.
   Warehouse,
   Truck,
   PackageSearch,
   PackageCheck,
   Boxes,
-  PackageMinus,
+  // PackageMinus, // Hidden for client demo — used by the "Goods Out" nav item below.
 } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
@@ -49,7 +49,8 @@ const NAV: NavItem[] = [
   { href: "/dashboard/purchase-orders", label: "Purchase Orders", icon: ClipboardList, perms: ["purchase_orders.view"] },
   { href: "/dashboard/goods-in", label: "Goods In", icon: PackageCheck, perms: ["goods_in.view"] },
   { href: "/dashboard/inventory", label: "Inventory", icon: Boxes, perms: ["inventory.view"] },
-  { href: "/dashboard/goods-out", label: "Goods Out", icon: PackageMinus, perms: ["goods_out.view"] },
+  // Hidden for client demo (re-enable after launch — don't show Goods Out yet).
+  // { href: "/dashboard/goods-out", label: "Goods Out", icon: PackageMinus, perms: ["goods_out.view"] },
   {
     href: "/dashboard/settings",
     label: "Settings",
@@ -73,7 +74,8 @@ const CUSTOMER_NAV: NavItem[] = [
   { href: "/dashboard/portal/sites", label: "Sites", icon: MapPin, perms: [] },
   { href: "/dashboard/stock", label: "My Stock", icon: Package, perms: [] },
   { href: "/dashboard/portal/requests", label: "Stock Requests", icon: ClipboardList, perms: [] },
-  { href: "/dashboard/portal/reports", label: "Reports", icon: BarChart3, perms: [] },
+  // Hidden for client demo (re-enable after launch — the Reports page shows "coming soon").
+  // { href: "/dashboard/portal/reports", label: "Reports", icon: BarChart3, perms: [] },
   { href: "/dashboard/account", label: "Settings", icon: Settings, perms: [] },
 ];
 

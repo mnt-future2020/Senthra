@@ -31,9 +31,10 @@ function paymentTermsLabel(s: Supplier): string {
 type Tab = "overview" | "items" | "purchase-orders" | "goods-in" | "audit";
 const TABS: { key: Tab; label: string }[] = [
   { key: "overview", label: "Overview" },
-  { key: "items", label: "Items" },
-  { key: "purchase-orders", label: "Purchase Orders" },
-  { key: "goods-in", label: "Goods In" },
+  // Hidden for client demo (re-enable after launch — these tabs show "coming soon").
+  // { key: "items", label: "Items" },
+  // { key: "purchase-orders", label: "Purchase Orders" },
+  // { key: "goods-in", label: "Goods In" },
   { key: "audit", label: "Audit trail" },
 ];
 
