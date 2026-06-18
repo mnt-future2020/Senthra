@@ -33,9 +33,10 @@ function fmtCost(item: IrmItem): string {
 type Tab = "overview" | "stock" | "purchase-orders" | "movements" | "audit";
 const TABS: { key: Tab; label: string }[] = [
   { key: "overview", label: "Overview" },
-  { key: "stock", label: "Stock Levels" },
-  { key: "purchase-orders", label: "Purchase Orders" },
-  { key: "movements", label: "Movements" },
+  // Hidden for client demo (re-enable after launch — these tabs show "coming soon").
+  // { key: "stock", label: "Stock Levels" },
+  // { key: "purchase-orders", label: "Purchase Orders" },
+  // { key: "movements", label: "Movements" },
   { key: "audit", label: "Audit trail" },
 ];
 
