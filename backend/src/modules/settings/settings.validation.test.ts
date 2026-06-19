@@ -68,3 +68,22 @@ describe("updateSettingsSchema — company profile + regional", () => {
     expect(updateSettingsSchema.safeParse(payload).success).toBe(false);
   });
 });
+
+describe("updateSettingsSchema — stock code prefix", () => {
+  it.each([["CSE"], ["AB"], ["abcde"]])("accepts %s", (v) => {
+    expect(updateSettingsSchema.safeParse({ stockCodePrefix: v }).success).toBe(true);
+  });
+
+  it("accepts an empty string (clears back to the default)", () => {
+    expect(updateSettingsSchema.safeParse({ stockCodePrefix: "" }).success).toBe(true);
+  });
+
+  it.each([
+    ["one letter", "A"],
+    ["six letters", "ABCDEF"],
+    ["contains a digit", "CS1"],
+    ["contains a dash", "C-E"],
+  ])("rejects %s", (_label, v) => {
+    expect(updateSettingsSchema.safeParse({ stockCodePrefix: v }).success).toBe(false);
+  });
+});

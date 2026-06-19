@@ -144,6 +144,7 @@ export function BrandingSection() {
   const [loginHeadline, setLoginHeadline] = React.useState("");
   const [loginSubtext, setLoginSubtext] = React.useState("");
   const [employeeIdPrefix, setEmployeeIdPrefix] = React.useState("");
+  const [stockCodePrefix, setStockCodePrefix] = React.useState("");
 
   // Snapshot of the last-persisted text fields. Logo & favicon save immediately
   // on upload/remove, so they aren't part of this form's unsaved state — only
@@ -155,6 +156,7 @@ export function BrandingSection() {
     loginHeadline: "",
     loginSubtext: "",
     employeeIdPrefix: "",
+    stockCodePrefix: "",
   });
 
   const isDirty =
@@ -163,7 +165,8 @@ export function BrandingSection() {
     footerText !== saved.footerText ||
     loginHeadline !== saved.loginHeadline ||
     loginSubtext !== saved.loginSubtext ||
-    employeeIdPrefix !== saved.employeeIdPrefix;
+    employeeIdPrefix !== saved.employeeIdPrefix ||
+    stockCodePrefix !== saved.stockCodePrefix;
 
   useReportDirty("branding", isDirty);
 
@@ -183,6 +186,7 @@ export function BrandingSection() {
         setLoginHeadline(s.loginHeadline);
         setLoginSubtext(s.loginSubtext);
         setEmployeeIdPrefix(s.employeeIdPrefix);
+        setStockCodePrefix(s.stockCodePrefix);
         setSaved({
           brandName: s.brandName,
           brandColor: s.brandColor,
@@ -190,6 +194,7 @@ export function BrandingSection() {
           loginHeadline: s.loginHeadline,
           loginSubtext: s.loginSubtext,
           employeeIdPrefix: s.employeeIdPrefix,
+          stockCodePrefix: s.stockCodePrefix,
         });
       } catch {
         // ignore — leave fields blank
@@ -262,6 +267,10 @@ export function BrandingSection() {
       setMsg({ type: "error", text: "Employee ID prefix must be 2–5 letters." });
       return;
     }
+    if (stockCodePrefix && !/^[A-Z]{2,5}$/.test(stockCodePrefix)) {
+      setMsg({ type: "error", text: "Stock code prefix must be 2–5 letters." });
+      return;
+    }
     setSaving(true);
     try {
       const settings = await settingsService.updateSettings({
@@ -271,6 +280,7 @@ export function BrandingSection() {
         loginHeadline,
         loginSubtext,
         employeeIdPrefix,
+        stockCodePrefix,
       });
       setBranding(brandingFromSettings(settings));
       setBrandName(settings.brandName);
@@ -279,6 +289,7 @@ export function BrandingSection() {
       setLoginHeadline(settings.loginHeadline);
       setLoginSubtext(settings.loginSubtext);
       setEmployeeIdPrefix(settings.employeeIdPrefix);
+      setStockCodePrefix(settings.stockCodePrefix);
       setSaved({
         brandName: settings.brandName,
         brandColor: settings.brandColor,
@@ -286,6 +297,7 @@ export function BrandingSection() {
         loginHeadline: settings.loginHeadline,
         loginSubtext: settings.loginSubtext,
         employeeIdPrefix: settings.employeeIdPrefix,
+        stockCodePrefix: settings.stockCodePrefix,
       });
       setMsg({ type: "success", text: "Branding saved." });
     } catch (err) {
@@ -374,6 +386,33 @@ export function BrandingSection() {
               Next ID looks like{" "}
               <span className="font-mono font-bold text-[var(--muted)]">
                 {(employeeIdPrefix || "SNT")}-0007
+              </span>
+            </span>
+          </div>
+        </Field>
+
+        <Field
+          label="Stock code prefix"
+          hint="2–5 letters for new stock-entry barcodes. Existing barcodes don't change."
+        >
+          <div className="flex flex-wrap items-center gap-3">
+            <input
+              type="text"
+              value={stockCodePrefix}
+              onChange={(e) =>
+                setStockCodePrefix(
+                  e.target.value.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 5),
+                )
+              }
+              placeholder="CSE"
+              maxLength={5}
+              spellCheck={false}
+              className={`${inputCls} max-w-[140px] font-mono uppercase tracking-widest`}
+            />
+            <span className="text-xs text-[var(--faint)]">
+              Next barcode looks like{" "}
+              <span className="font-mono font-bold text-[var(--muted)]">
+                {(stockCodePrefix || "CSE")}-00007
               </span>
             </span>
           </div>

@@ -22,6 +22,7 @@ export interface UserPrincipal {
   firstName: string;
   lastName: string;
   profileImageUrl: string | null;
+  signatureUrl: string | null;
   status: string;
   mustResetPassword: boolean;
   role: { id: string; key: string; name: string } | null;
@@ -87,6 +88,7 @@ export function userPrincipal(user: UserWithRole): UserPrincipal {
     firstName: user.firstName,
     lastName: user.lastName,
     profileImageUrl: user.profileImageUrl,
+    signatureUrl: user.signatureUrl,
     status: user.status,
     mustResetPassword: user.mustResetPassword,
     role: user.role

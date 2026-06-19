@@ -6,7 +6,8 @@ import { prisma, withTransaction } from "../../lib/prisma.js";
 // POs (deletedAt set) are excluded from normal reads. Header + lines + totals are written
 // atomically (withTransaction) so a PO can never persist with stale totals or half-written lines.
 
-// Supplier slice for the read-only "Supplier Information" section.
+// Supplier slice for the read-only "Supplier Information" section + the PO document's
+// Supplier block (postal address). Additive — the public DTO ignores the address fields.
 const supplierSelect = {
   id: true,
   code: true,
@@ -18,6 +19,12 @@ const supplierSelect = {
   customPaymentTerms: true,
   currency: true,
   leadTimeDays: true,
+  addressLine1: true,
+  addressLine2: true,
+  city: true,
+  county: true,
+  postcode: true,
+  country: true,
 } satisfies Prisma.SupplierSelect;
 
 const warehouseSelect = {

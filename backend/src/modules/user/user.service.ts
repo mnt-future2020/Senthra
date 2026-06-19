@@ -31,6 +31,13 @@ export interface PublicUser {
   status: string;
   profileImageUrl: string | null;
   notes: string | null;
+  // Personal signature (printed on issued documents); signatureUrl is the Cloudinary image.
+  signatureUrl: string | null;
+  signatureName: string | null;
+  signatureMimeType: string | null;
+  signatureFileSize: number | null;
+  signatureUploadedAt: string | null;
+  signatureUpdatedAt: string | null;
   mustResetPassword: boolean;
   role: { id: string; key: string; name: string } | null;
   // Employment
@@ -60,6 +67,12 @@ function publicUser(u: UserWithRole): PublicUser {
     status: u.status,
     profileImageUrl: u.profileImageUrl,
     notes: u.notes,
+    signatureUrl: u.signatureUrl,
+    signatureName: u.signatureName,
+    signatureMimeType: u.signatureMimeType,
+    signatureFileSize: u.signatureFileSize,
+    signatureUploadedAt: isoOrNull(u.signatureUploadedAt),
+    signatureUpdatedAt: isoOrNull(u.signatureUpdatedAt),
     mustResetPassword: u.mustResetPassword,
     role: u.role ? { id: u.role.id, key: u.role.key, name: u.role.name } : null,
     employeeId: u.employeeId,
@@ -129,6 +142,56 @@ async function uploadAvatar(image: string): Promise<string> {
     );
   }
   return uploadToCloudinary(image, crypto.randomUUID(), creds, "senthra/users");
+}
+
+// --- User signature (self-service; printed on issued documents) ------------------------------
+// Upload under a DETERMINISTIC publicId so re-uploading overwrites the old asset (one signature
+// per user, never a gallery). Reuses the same credential resolution as branding/avatar.
+async function uploadSignatureImage(image: string, userId: string): Promise<string> {
+  const creds = await getCloudinaryCreds();
+  if (!creds) {
+    throw badRequest(
+      "Cloudinary isn't configured. Add your credentials in Settings → Integrations to upload a signature.",
+    );
+  }
+  return uploadToCloudinary(image, `signature-${userId}`, creds, "senthra/signatures");
+}
+
+// Derive the mime type + byte size from a base64 image data URI (data:image/png;base64,XXXX),
+// so the stored signature metadata is accurate without trusting the client.
+function parseImageDataUri(dataUri: string): { mimeType: string; sizeBytes: number } {
+  const match = /^data:([^;,]+)(;base64)?,(.*)$/s.exec(dataUri);
+  const mimeType = match?.[1]?.trim() || "image/png";
+  const payload = match?.[3] ?? "";
+  if (match?.[2]) {
+    const pad = payload.endsWith("==") ? 2 : payload.endsWith("=") ? 1 : 0;
+    return { mimeType, sizeBytes: Math.max(0, Math.floor((payload.length * 3) / 4) - pad) };
+  }
+  return { mimeType, sizeBytes: Buffer.byteLength(payload, "utf8") };
+}
+
+// Reusable reader for the Document Platform: resolve a SIGNER (a PO's `sentBy` email) to a
+// printable signature — the person's name + the signature image URL. Returns null when the
+// signer has no (non-deleted) account or no signature on file, so generation degrades gracefully.
+export interface UserSignature {
+  signerName: string;
+  jobTitle: string | null;
+  url: string;
+  mimeType: string | null;
+}
+export async function getSignatureForEmail(
+  email: string | null | undefined,
+): Promise<UserSignature | null> {
+  const e = email?.trim().toLowerCase();
+  if (!e) return null;
+  const u = await userRepo.findByEmailWithRole(e);
+  if (!u || !u.signatureUrl) return null;
+  return {
+    signerName: `${u.firstName} ${u.lastName}`.trim(),
+    jobTitle: u.jobTitle,
+    url: u.signatureUrl,
+    mimeType: u.signatureMimeType,
+  };
 }
 
 export interface ListUsersParams {
@@ -486,4 +549,69 @@ export async function resendInvite(
   );
 
   return { temporaryPassword };
+}
+
+// --- Self-service signature (My Account) ----------------------------------------------------
+// The acting staff user uploads / clears THEIR OWN signature. Gated by requireAuth only (no
+// granular permission), like the self password change. Non-staff actors are rejected.
+export interface UploadSignatureParams {
+  signature: string; // data:image/... URI
+  fileName?: string;
+}
+
+export async function uploadMySignature(
+  input: UploadSignatureParams,
+  actor?: AuditActor,
+): Promise<PublicUser> {
+  if (actor?.type !== "user" || !actor.id) {
+    throw forbidden("Only a staff account can set a signature.");
+  }
+  const user = await userRepo.findById(actor.id);
+  if (!user) throw notFound("User not found.");
+
+  const url = await uploadSignatureImage(input.signature, user.id);
+  const { mimeType, sizeBytes } = parseImageDataUri(input.signature);
+  const now = new Date();
+  const updated = await userRepo.update(user.id, {
+    signatureUrl: url,
+    signatureName: trimToNull(input.fileName),
+    signatureMimeType: mimeType,
+    signatureFileSize: sizeBytes,
+    // First upload stamps "uploaded"; every save refreshes "updated".
+    signatureUploadedAt: user.signatureUploadedAt ?? now,
+    signatureUpdatedAt: now,
+  });
+  audit.record({
+    actor,
+    action: "user.signature_uploaded",
+    targetType: "user",
+    targetId: user.id,
+    targetLabel: updated.email,
+  });
+  return publicUser(updated);
+}
+
+export async function removeMySignature(actor?: AuditActor): Promise<PublicUser> {
+  if (actor?.type !== "user" || !actor.id) {
+    throw forbidden("Only a staff account can set a signature.");
+  }
+  const user = await userRepo.findById(actor.id);
+  if (!user) throw notFound("User not found.");
+
+  const updated = await userRepo.update(user.id, {
+    signatureUrl: null,
+    signatureName: null,
+    signatureMimeType: null,
+    signatureFileSize: null,
+    signatureUploadedAt: null,
+    signatureUpdatedAt: null,
+  });
+  audit.record({
+    actor,
+    action: "user.signature_removed",
+    targetType: "user",
+    targetId: user.id,
+    targetLabel: updated.email,
+  });
+  return publicUser(updated);
 }

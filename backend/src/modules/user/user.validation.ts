@@ -4,9 +4,20 @@ import { emailField, isValidPhone, optionalPhoneField } from "../../utils/valida
 
 const statusEnum = z.enum(["active", "inactive", "suspended"]);
 const genderEnum = z.enum(["male", "female", "other", "unspecified"]);
+// Raster image data URIs only. SVG is excluded on purpose — it can embed script and is
+// rendered raw in the UI, so it must never be accepted server-side (the client already
+// limits the picker, but a direct API call would otherwise bypass that). base64 inflates
+// ~33%, so ~3 MB of chars caps the binary near ~2.2 MB (above the 2 MB the UI allows).
+const MAX_IMAGE_DATA_URI_CHARS = 3 * 1024 * 1024;
 const profileImage = z
   .string()
-  .startsWith("data:image/", "Profile image must be a data URI (data:image/...)");
+  .regex(/^data:image\/(png|jpe?g|gif|webp);base64,/i, "Profile image must be a PNG, JPG, GIF or WEBP.")
+  .max(MAX_IMAGE_DATA_URI_CHARS, "Profile image is too large (max ~2 MB).");
+// A user's signature image as a data URI — PNG/JPG only (matches the signature pad/upload).
+const signatureImage = z
+  .string()
+  .regex(/^data:image\/(png|jpe?g);base64,/i, "Signature must be a PNG or JPG image.")
+  .max(MAX_IMAGE_DATA_URI_CHARS, "Signature is too large (max ~2 MB).");
 
 // A date as an ISO / "YYYY-MM-DD" string. An empty string is allowed and the
 // service treats it as "clear"; any non-empty value must be a parseable date.
@@ -95,3 +106,11 @@ export const updateUserStatusSchema = z.object({
   status: statusEnum,
 });
 export type UpdateUserStatusInput = z.infer<typeof updateUserStatusSchema>;
+
+// Self-service signature upload (My Account). Only the image is required; the
+// original filename is optional metadata stored alongside it.
+export const uploadSignatureSchema = z.object({
+  signature: signatureImage,
+  fileName: z.string().trim().max(200).optional(),
+});
+export type UploadSignatureInput = z.infer<typeof uploadSignatureSchema>;

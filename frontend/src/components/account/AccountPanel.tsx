@@ -1,6 +1,7 @@
 import { ProfileCard } from "./ProfileCard";
 import { PasswordCard } from "./PasswordCard";
 import { SessionsCard } from "./SessionsCard";
+import { SignatureCard } from "./SignatureCard";
 
 // The staff "My Account" surface (at /dashboard/account): a full-width two-column
 // layout matching the rest of the app — the actionable cards (change password,
@@ -18,13 +19,19 @@ export function AccountPanel() {
           className="anim-fade-in"
           style={{ animationDelay: "70ms", animationFillMode: "backwards" }}
         >
+          <SignatureCard />
+        </div>
+        <div
+          className="anim-fade-in"
+          style={{ animationDelay: "140ms", animationFillMode: "backwards" }}
+        >
           <SessionsCard />
         </div>
       </div>
       <aside className="lg:sticky lg:top-6 lg:self-start">
         <div
           className="anim-fade-in"
-          style={{ animationDelay: "140ms", animationFillMode: "backwards" }}
+          style={{ animationDelay: "210ms", animationFillMode: "backwards" }}
         >
           <ProfileCard />
         </div>

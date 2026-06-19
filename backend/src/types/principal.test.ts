@@ -76,6 +76,7 @@ function staffPrincipal(permissions: string[]): Principal {
     firstName: "U",
     lastName: "Ser",
     profileImageUrl: null,
+    signatureUrl: null,
     status: "active",
     mustResetPassword: false,
     role: null,

@@ -5,8 +5,10 @@ import { z } from "zod";
 // (status enums, postcode/website, profile dates) stay in each module's validation.
 
 // Email shape — intentionally lenient; real deliverability is proven by the invite /
-// reset email, not the regex.
-export const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+// reset email, not the regex. Explicitly forbids ` , ; < > ` so a stored address can't
+// smuggle a second recipient (comma/semicolon address-lists) or header brackets into a
+// downstream `to:` field (e.g. the PO-to-supplier email).
+export const EMAIL_RE = /^[^@\s,;<>]+@[^@\s,;<>]+\.[^@\s,;<>]+$/;
 
 // UK phone only (client is a UK telecom field-services business): national "0" +
 // 9–10 digits, or international "+44" with an optional "(0)" + 9–10 digits, after

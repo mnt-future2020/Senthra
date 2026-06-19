@@ -43,6 +43,10 @@ export async function getCloudinaryCreds(): Promise<CloudinaryCreds | null> {
 // display name is renamed.
 export const DEFAULT_EMPLOYEE_ID_PREFIX = "SNT";
 
+// The default customer stock-entry barcode prefix when none is configured.
+// Matches the historical hardcoded value so existing codes stay consistent.
+export const DEFAULT_STOCK_CODE_PREFIX = "CSE";
+
 // Read-time defaults for the company-profile + regional settings. Applied only when the stored
 // value is blank, so they stay fully overridable (never hardcoded into downstream documents).
 export const DEFAULT_COMPANY_COUNTRY = "United Kingdom";
@@ -62,6 +66,20 @@ function normalizeEmployeeIdPrefix(raw?: string | null): string {
 export async function getEmployeeIdPrefix(): Promise<string> {
   const s = await settingsRepo.getOrCreate();
   return normalizeEmployeeIdPrefix(s.employeeIdPrefix);
+}
+
+// Clean a stored/configured stock-code prefix the same way as the employee one:
+// uppercase, letters only, 2–5 chars; falls back to the default when invalid/blank
+// so barcode generation always has a sane prefix.
+function normalizeStockCodePrefix(raw?: string | null): string {
+  const clean = (raw ?? "").trim().toUpperCase().replace(/[^A-Z]/g, "");
+  return clean.length >= 2 ? clean.slice(0, 5) : DEFAULT_STOCK_CODE_PREFIX;
+}
+
+// The effective stock-entry barcode prefix, for the customer module's barcode allocation.
+export async function getStockCodePrefix(): Promise<string> {
+  const s = await settingsRepo.getOrCreate();
+  return normalizeStockCodePrefix(s.stockCodePrefix);
 }
 
 // --- Branding (all public) ---
@@ -180,6 +198,7 @@ export interface PublicSettings extends PublicBranding {
   cloudinaryApiSecretSet: boolean;
   cloudinaryConfigured: boolean;
   employeeIdPrefix: string;
+  stockCodePrefix: string;
   // Company profile (legal identity for documents) + regional formatting. Default-filled on read.
   companyLegalName: string;
   companyRegNumber: string;
@@ -223,6 +242,9 @@ function publicSettings(s: Settings): PublicSettings {
 
     // Staff-ID prefix (effective value, default-filled).
     employeeIdPrefix: normalizeEmployeeIdPrefix(s.employeeIdPrefix),
+
+    // Stock-entry barcode prefix (effective value, default-filled).
+    stockCodePrefix: normalizeStockCodePrefix(s.stockCodePrefix),
 
     // Company profile (text fields empty when unset; country/regional default-filled).
     companyLegalName: s.companyLegalName || "",
@@ -274,6 +296,7 @@ export interface UpdateSettingsParams {
   loginHeadline?: string;
   loginSubtext?: string;
   employeeIdPrefix?: string;
+  stockCodePrefix?: string;
   // Company profile + regional (all optional; empty string clears back to null → default on read).
   companyLegalName?: string;
   companyRegNumber?: string;
@@ -364,6 +387,9 @@ export async function updateSettings(input: UpdateSettingsParams): Promise<Publi
   // bounded it to 2–5 letters.
   if (typeof input.employeeIdPrefix === "string") {
     data.employeeIdPrefix = input.employeeIdPrefix.trim().toUpperCase() || null;
+  }
+  if (typeof input.stockCodePrefix === "string") {
+    data.stockCodePrefix = input.stockCodePrefix.trim().toUpperCase() || null;
   }
 
   // --- Company profile + regional (trim; empty string clears to null → default applies on read) ---

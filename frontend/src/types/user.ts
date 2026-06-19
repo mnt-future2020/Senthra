@@ -16,6 +16,13 @@ export interface User {
   status: UserStatus;
   profileImageUrl: string | null;
   notes: string | null;
+  // Personal signature (printed on documents the user issues, e.g. Purchase Order PDFs).
+  signatureUrl: string | null;
+  signatureName: string | null;
+  signatureMimeType: string | null;
+  signatureFileSize: number | null;
+  signatureUploadedAt: string | null;
+  signatureUpdatedAt: string | null;
   mustResetPassword: boolean;
   role: UserRoleRef | null;
   // Employment

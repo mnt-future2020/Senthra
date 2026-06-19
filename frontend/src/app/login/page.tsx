@@ -31,6 +31,16 @@ declare global {
 const inputCls =
   "w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3.5 py-2.5 text-sm text-[var(--ink)] outline-none transition-all placeholder:text-[var(--faint)] focus:border-[var(--accent)]";
 
+// Dev-only quick-login shortcuts. Credentials come from gitignored .env.local
+// (NEXT_PUBLIC_QUICK_*), NEVER hardcoded in source, and the whole block is compiled out of
+// production builds by the NODE_ENV gate below. A button renders only when both its email
+// and password env vars are set, so a missing/empty var simply hides that shortcut.
+const QUICK_LOGINS: { label: string; email?: string; password?: string }[] = [
+  { label: "🔑 Admin", email: process.env.NEXT_PUBLIC_QUICK_ADMIN_EMAIL, password: process.env.NEXT_PUBLIC_QUICK_ADMIN_PASSWORD },
+  { label: "👤 Customer", email: process.env.NEXT_PUBLIC_QUICK_CUSTOMER_EMAIL, password: process.env.NEXT_PUBLIC_QUICK_CUSTOMER_PASSWORD },
+  { label: "🧑‍🔧 User", email: process.env.NEXT_PUBLIC_QUICK_USER_EMAIL, password: process.env.NEXT_PUBLIC_QUICK_USER_PASSWORD },
+].filter((q) => q.email && q.password);
+
 export default function LoginPage() {
   const { principal, loading, login, loginWithGoogle } = useAuth();
   const router = useRouter();
@@ -54,6 +64,13 @@ export default function LoginPage() {
   React.useEffect(() => {
     if (!loading && principal) router.replace(homeFor(principal));
   }, [loading, principal, router]);
+
+  // Dev quick-login: fill the creds + submit (used only by the dev-gated buttons below).
+  const quickLogin = (em: string, pw: string) => {
+    setEmail(em);
+    setPassword(pw);
+    setTimeout(() => document.querySelector<HTMLFormElement>("form")?.requestSubmit(), 50);
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -230,8 +247,8 @@ export default function LoginPage() {
         </button>
       </form>
 
-      {/* Quick dev logins */}
-      {process.env.NODE_ENV === "development" && (
+      {/* Quick dev logins — dev build only; creds come from gitignored .env.local, never source. */}
+      {process.env.NODE_ENV === "development" && QUICK_LOGINS.length > 0 && (
         <div className="mt-6 space-y-2">
           <div className="flex items-center gap-3">
             <div className="h-px flex-1 bg-[var(--border)]" />
@@ -241,34 +258,17 @@ export default function LoginPage() {
             <div className="h-px flex-1 bg-[var(--border)]" />
           </div>
           <div className="flex gap-2">
-            <button
-              type="button"
-              disabled={submitting}
-              onClick={() => {
-                setEmail("shahul@mntfuture.com");
-                setPassword("Shahul@9080");
-                setTimeout(() => {
-                  document.querySelector<HTMLFormElement>("form")?.requestSubmit();
-                }, 50);
-              }}
-              className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] py-2.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)]"
-            >
-              🔑 Admin
-            </button>
-            <button
-              type="button"
-              disabled={submitting}
-              onClick={() => {
-                setEmail("kansha@mntfuture.com");
-                setPassword("12345678");
-                setTimeout(() => {
-                  document.querySelector<HTMLFormElement>("form")?.requestSubmit();
-                }, 50);
-              }}
-              className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] py-2.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)]"
-            >
-              👤 Customer
-            </button>
+            {QUICK_LOGINS.map((q) => (
+              <button
+                key={q.label}
+                type="button"
+                disabled={submitting}
+                onClick={() => quickLogin(q.email!, q.password!)}
+                className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] py-2.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)]"
+              >
+                {q.label}
+              </button>
+            ))}
           </div>
         </div>
       )}

@@ -1,5 +1,6 @@
-import { api } from "@/lib/api";
+import { api, apiBlob } from "@/lib/api";
 import { registerClientCache } from "@/lib/clientCache";
+import { downloadBlob } from "@/lib/download";
 import type { PoPriority, PurchaseOrder } from "@/types/purchase-order";
 
 // Typed wrappers around the backend /purchase-orders endpoints (CRUD + workflow + attachments).
@@ -86,6 +87,12 @@ export function listPurchaseOrders(params: PoListParams = {}): Promise<PagedPurc
 
 export function getPurchaseOrder(idOrCode: string): Promise<PurchaseOrder> {
   return api<{ purchaseOrder: PurchaseOrder }>(`/purchase-orders/${idOrCode}`).then((r) => r.purchaseOrder);
+}
+
+// Download the generated PO document (PDF) — the same document emailed to the supplier.
+export async function downloadPurchaseOrderPdf(idOrCode: string, filename: string): Promise<void> {
+  const blob = await apiBlob(`/purchase-orders/${idOrCode}/pdf`);
+  downloadBlob(blob, filename);
 }
 
 const mutate = (p: Promise<{ purchaseOrder: PurchaseOrder }>): Promise<PurchaseOrder> =>

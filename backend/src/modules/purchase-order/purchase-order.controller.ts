@@ -1,4 +1,5 @@
 import * as poService from "./purchase-order.service.js";
+import * as documentService from "#modules/document/document.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
 import { param, queryInt } from "../../utils/request.js";
@@ -29,6 +30,15 @@ export const listPurchaseOrders = asyncHandler(async (req, res) => {
 // GET /purchase-orders/:id  (id or code)
 export const getPurchaseOrder = asyncHandler(async (req, res) => {
   res.json({ purchaseOrder: await poService.getPurchaseOrder(param(req, "id")) });
+});
+
+// GET /purchase-orders/:id/pdf  (id or code) — stream the generated PO document for preview/download.
+export const downloadPurchaseOrderPdf = asyncHandler(async (req, res) => {
+  const po = await poService.loadPurchaseOrderEntity(param(req, "id"));
+  const pdf = await documentService.generatePurchaseOrderPdf(po, actorFrom(req).email);
+  res.setHeader("Content-Type", pdf.mimeType);
+  res.setHeader("Content-Disposition", `inline; filename="${pdf.filename}"`);
+  res.send(pdf.buffer);
 });
 
 // POST /purchase-orders

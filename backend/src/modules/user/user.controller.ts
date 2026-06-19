@@ -6,6 +6,7 @@ import type {
   CreateUserInput,
   UpdateUserInput,
   UpdateUserStatusInput,
+  UploadSignatureInput,
 } from "./user.validation.js";
 
 // GET /users  (protected) — paginated. Query: ?search=&status=&roleId=&page=&pageSize=
@@ -62,4 +63,16 @@ export const resendInvite = asyncHandler(async (req, res) => {
 export const deleteUser = asyncHandler(async (req, res) => {
   await userService.deleteUser(param(req, "id"), actorFrom(req));
   res.json({ ok: true });
+});
+
+// POST /users/me/signature  (self-service) — upload the signed-in user's signature.
+export const uploadMySignature = asyncHandler(async (req, res) => {
+  const user = await userService.uploadMySignature(req.body as UploadSignatureInput, actorFrom(req));
+  res.json({ user });
+});
+
+// DELETE /users/me/signature  (self-service) — clear the signed-in user's signature.
+export const removeMySignature = asyncHandler(async (req, res) => {
+  const user = await userService.removeMySignature(actorFrom(req));
+  res.json({ user });
 });

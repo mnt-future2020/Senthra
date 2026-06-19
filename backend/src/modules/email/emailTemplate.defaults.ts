@@ -98,6 +98,51 @@ Reset it here: {{resetPasswordLink}}
 
 This link is valid for 1 hour. If you didn't request this, you can safely ignore this email.`,
   },
+  {
+    key: "po.sent",
+    name: "Purchase Order Sent",
+    category: "notification",
+    subject: "Purchase Order {{poCode}} from {{companyLegalName}}",
+    variables: [
+      "supplierName",
+      "contactPerson",
+      "poCode",
+      "orderDate",
+      "expectedDeliveryDate",
+      "grandTotal",
+      "companyLegalName",
+      "brandName",
+      "currentYear",
+    ],
+    // The PO number ties the email to its attached document; it must stay in the message.
+    requiredVariables: ["poCode"],
+    // Deliberately short — the full order (items, totals, addresses) lives in the attached PDF,
+    // which is the source of truth. Never inline the whole PO in the body.
+    body: `Hello {{supplierName}},
+
+Please find attached Purchase Order {{poCode}}. The order details, items and totals are in the attached PDF.
+
+If you have any questions, just reply to this email.
+
+Regards,
+{{companyLegalName}}`,
+  },
+  {
+    key: "po.cancelled",
+    name: "Purchase Order Cancelled",
+    category: "notification",
+    subject: "Purchase Order {{poCode}} has been cancelled",
+    variables: ["supplierName", "contactPerson", "poCode", "companyLegalName", "brandName", "currentYear"],
+    requiredVariables: ["poCode"],
+    body: `Hello {{supplierName}},
+
+Purchase Order {{poCode}} has been cancelled. Please disregard the original order.
+
+If anything has already been dispatched, contact us before sending it.
+
+Regards,
+{{companyLegalName}}`,
+  },
 ];
 
 export function findDefaultTemplate(key: string): EmailTemplateDefault | undefined {
