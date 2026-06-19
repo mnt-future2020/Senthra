@@ -15,6 +15,7 @@ import { assertEmailNamespaceFree } from "#modules/auth/email-namespace.js";
 import { issueResetEmail } from "#modules/auth/auth.service.js";
 import * as sessionService from "#modules/auth/session.service.js";
 import { getCustomerStock, type CustomerStock } from "./customer.stock.service.js";
+import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
 import { geocodePostcode } from "../../lib/geocode.js";
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
@@ -1221,13 +1222,29 @@ export async function assignStockRequestWarehouses(
     throw badRequest("Each warehouse can only appear once.");
   }
 
-  await customerRepo.createWarehouseAssignments(
-    input.assignments.map((a) => ({
-      customerStockRequestId: requestId,
-      warehouseId: a.warehouseId,
-      quantity: a.quantity,
-    })),
-  );
+  // Verify every target warehouse exists before creating assignments (no FK on Mongo,
+  // so a stale/foreign id would otherwise create orphan assignments).
+  const warehouses = await Promise.all([...warehouseIds].map((id) => warehouseRepo.findById(id)));
+  if (warehouses.some((w) => !w)) {
+    throw badRequest("One or more selected warehouses no longer exist.");
+  }
+
+  try {
+    await customerRepo.createWarehouseAssignments(
+      input.assignments.map((a) => ({
+        customerStockRequestId: requestId,
+        warehouseId: a.warehouseId,
+        quantity: a.quantity,
+      })),
+    );
+  } catch (e) {
+    // Unique index (customerStockRequestId, warehouseId): a concurrent assign already
+    // created these — surface a clean 409 instead of a raw 500.
+    if (customerRepo.isUniqueConflictError(e)) {
+      throw conflict("This request has already been assigned to warehouses.");
+    }
+    throw e;
+  }
   await customerRepo.updateStockRequestStatus(requestId, "assigned");
 
   const updated = await customerRepo.findStockRequestWithAssignments(requestId);
@@ -1264,6 +1281,11 @@ export async function receiveStockAssignment(
     actor?.email ?? null,
     trimToNull(input.notes),
   );
+  // Lost the optimistic race — another receive updated this assignment first. Bail BEFORE
+  // creating a stock entry, so we never double-count or spawn a duplicate entry.
+  if (!updated) {
+    throw conflict("This assignment was just updated by someone else. Please refresh and try again.");
+  }
 
   const allAssignments = await customerRepo.findAssignmentsByRequest(assignment.customerStockRequestId);
   const allReceived = allAssignments.every((a) => a.status === "received");
@@ -1561,8 +1583,8 @@ export async function generateStockEntryBarcode(
   const entry = await customerRepo.findStockEntryById(entryId);
   if (!entry) throw notFound("Stock entry not found.");
 
-  const count = await customerRepo.countStockEntries();
-  const barcodeValue = `CSE-${String(count).padStart(5, "0")}`;
+  const seq = await customerRepo.nextStockEntryBarcodeSeq();
+  const barcodeValue = `CSE-${String(seq).padStart(5, "0")}`;
 
   const bwipjs = await import("bwip-js");
   const pngBuffer = await bwipjs.default.toBuffer({
@@ -1628,6 +1650,11 @@ export async function createDirectStockEntry(
 ): Promise<PublicStockEntry> {
   await requireCustomer(customerId);
 
+  // Guard against a well-formed-but-nonexistent warehouseId creating an orphan entry
+  // (MongoDB has no FK enforcement, so this must be checked explicitly).
+  const warehouse = await warehouseRepo.findById(input.warehouseId);
+  if (!warehouse) throw badRequest("Selected warehouse no longer exists.");
+
   const entry = await customerRepo.createDirectStockEntry({
     customerId,
     warehouseId: input.warehouseId,
@@ -1640,6 +1667,8 @@ export async function createDirectStockEntry(
     serialized: input.serialized ?? false,
     serialNumber: input.serialNumber || null,
     highValue: input.highValue ?? false,
+    thresholdQty: input.thresholdQty ?? null,
+    attributes: input.attributes ?? null,
     status: "active",
     receivedBy: actor?.email ?? null,
     receivedAt: new Date(),
