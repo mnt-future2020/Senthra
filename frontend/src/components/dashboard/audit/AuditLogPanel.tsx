@@ -6,6 +6,7 @@ import { Download, ScrollText, Search } from "lucide-react";
 import * as auditService from "@/services/audit.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { Pagination } from "@/components/ui/Pagination";
+import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
 import type { AuditEntry, AuditFacets, PagedAuditLogs } from "@/types/audit";
 import { AuditEntryDrawer } from "./AuditEntryDrawer";
@@ -185,54 +186,36 @@ export function AuditLogPanel() {
             className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
           />
         </div>
-        <select
+        <Select
+          size="sm"
           value={action}
-          onChange={(e) => {
-            setAction(e.target.value);
+          onChange={(v) => {
+            setAction(v);
             setPage(1);
           }}
-          className={selectCls}
-          title="Action"
-        >
-          <option value="">All actions</option>
-          {facets.actions.map((a) => (
-            <option key={a} value={a}>
-              {actionLabel(a)}
-            </option>
-          ))}
-        </select>
-        <select
+          options={[{ value: "", label: "All actions" }, ...facets.actions.map((a) => ({ value: a, label: actionLabel(a) }))]}
+          ariaLabel="Action filter"
+        />
+        <Select
+          size="sm"
           value={targetType}
-          onChange={(e) => {
-            setTargetType(e.target.value);
+          onChange={(v) => {
+            setTargetType(v);
             setPage(1);
           }}
-          className={selectCls}
-          title="Type"
-        >
-          <option value="">All types</option>
-          {facets.targetTypes.map((t) => (
-            <option key={t} value={t}>
-              {humanizeType(t)}
-            </option>
-          ))}
-        </select>
-        <select
+          options={[{ value: "", label: "All types" }, ...facets.targetTypes.map((t) => ({ value: t, label: humanizeType(t) }))]}
+          ariaLabel="Type filter"
+        />
+        <Select
+          size="sm"
           value={actorType}
-          onChange={(e) => {
-            setActorType(e.target.value);
+          onChange={(v) => {
+            setActorType(v);
             setPage(1);
           }}
-          className={selectCls}
-          title="Actor type"
-        >
-          <option value="">All actors</option>
-          {facets.actorTypes.map((t) => (
-            <option key={t} value={t}>
-              {humanizeType(t)}
-            </option>
-          ))}
-        </select>
+          options={[{ value: "", label: "All actors" }, ...facets.actorTypes.map((t) => ({ value: t, label: humanizeType(t) }))]}
+          ariaLabel="Actor type filter"
+        />
         <label className="flex items-center gap-1.5 text-xs font-bold text-[var(--muted)]">
           From
           <input

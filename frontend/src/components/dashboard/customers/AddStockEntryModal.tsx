@@ -6,6 +6,7 @@ import { Loader2, Plus, Trash2 } from "lucide-react";
 import * as customerService from "@/services/customer.service";
 import * as warehouseService from "@/services/warehouse.service";
 import { Modal } from "@/components/ui/Modal";
+import { Select } from "@/components/ui/Select";
 import { RequiredMark } from "@/components/ui/FormScaffold";
 import { inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import { listCategories, getCachedCategories } from "@/services/category.service";
@@ -150,17 +151,14 @@ export function AddStockEntryModal({
 
         <div>
           <label className={labelCls}>Warehouse<RequiredMark /></label>
-          <select
-            className={inputCls}
+          <Select
             value={warehouseId}
-            onChange={(e) => { setWarehouseId(e.target.value); clearError("warehouseId"); }}
-            aria-invalid={Boolean(errors.warehouseId)}
-          >
-            <option value="">-- Select warehouse --</option>
-            {warehouses.map((w) => (
-              <option key={w.id} value={w.id}>{w.name} ({w.code})</option>
-            ))}
-          </select>
+            onChange={(v) => { setWarehouseId(v); clearError("warehouseId"); }}
+            options={warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))}
+            placeholder="-- Select warehouse --"
+            ariaLabel="Warehouse"
+            invalid={Boolean(errors.warehouseId)}
+          />
           {errors.warehouseId && <p className="mt-1 text-[11px] font-semibold text-[var(--neg)]">{errors.warehouseId}</p>}
         </div>
 
@@ -192,29 +190,23 @@ export function AddStockEntryModal({
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
             <label className={labelCls}>Category</label>
-            <select
-              className={inputCls}
+            <Select
               value={categoryId}
-              onChange={(e) => setCategoryId(e.target.value)}
-            >
-              <option value="">-- Select category --</option>
-              {categories.map((c) => (
-                <option key={c.id} value={c.id}>{c.name}</option>
-              ))}
-            </select>
+              onChange={(v) => setCategoryId(v)}
+              options={categories.map((c) => ({ value: c.id, label: c.name }))}
+              placeholder="-- Select category --"
+              ariaLabel="Category"
+            />
           </div>
           <div>
             <label className={labelCls}>Unit of measure</label>
-            <select
-              className={inputCls}
+            <Select
               value={uom}
-              onChange={(e) => setUom(e.target.value)}
-            >
-              <option value="">-- Select --</option>
-              {UOM_OPTIONS.map((u) => (
-                <option key={u} value={u}>{u}</option>
-              ))}
-            </select>
+              onChange={(v) => setUom(v)}
+              options={UOM_OPTIONS.map((u) => ({ value: u, label: u }))}
+              placeholder="-- Select --"
+              ariaLabel="Unit of measure"
+            />
           </div>
         </div>
 

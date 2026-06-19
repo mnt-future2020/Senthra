@@ -16,6 +16,7 @@ import { firstActiveId } from "@/lib/utils";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { PostcodeField } from "@/components/ui/PostcodeField";
 import { CreatableSelect } from "@/components/ui/CreatableSelect";
+import { Select } from "@/components/ui/Select";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { EMAIL_RE, UK_POSTCODE_RE, isPhone } from "@/lib/validation";
@@ -385,14 +386,15 @@ export function SupplierForm({ mode, supplier }: { mode: "create" | "edit"; supp
               </div>
               <div>
                 <label className={labelCls}>Status</label>
-                <select
-                  className={inputCls}
+                <Select
                   value={status}
-                  onChange={(e) => setStatus(e.target.value as "active" | "inactive")}
-                >
-                  <option value="active">Active</option>
-                  <option value="inactive">Inactive</option>
-                </select>
+                  onChange={(v) => setStatus(v as "active" | "inactive")}
+                  ariaLabel="Status"
+                  options={[
+                    { value: "active", label: "Active" },
+                    { value: "inactive", label: "Inactive" },
+                  ]}
+                />
               </div>
               <div className="sm:col-span-2">
                 <label className={labelCls}>Description</label>
@@ -502,21 +504,16 @@ export function SupplierForm({ mode, supplier }: { mode: "create" | "edit"; supp
                 <label className={labelCls}>
                   Country<RequiredMark />
                 </label>
-                <select
-                  className={inputCls}
+                <Select
                   value={country}
-                  onChange={(e) => {
-                    setCountry(e.target.value);
+                  onChange={(v) => {
+                    setCountry(v);
                     clearError("country");
                   }}
-                  aria-invalid={Boolean(errors.country)}
-                >
-                  {COUNTRY_OPTIONS.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </select>
+                  ariaLabel="Country"
+                  invalid={Boolean(errors.country)}
+                  options={COUNTRY_OPTIONS.map((c) => ({ value: c, label: c }))}
+                />
                 <FieldError id="err-country" message={errors.country} />
               </div>
             </div>
@@ -570,31 +567,25 @@ export function SupplierForm({ mode, supplier }: { mode: "create" | "edit"; supp
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className={labelCls}>Payment terms</label>
-                <select
-                  className={inputCls}
+                <Select
                   value={paymentTerms}
-                  onChange={(e) => {
-                    setPaymentTerms(e.target.value);
+                  onChange={(v) => {
+                    setPaymentTerms(v);
                     clearError("customPaymentTerms");
                   }}
-                >
-                  <option value="">— None —</option>
-                  {PAYMENT_TERMS_OPTIONS.map((t) => (
-                    <option key={t} value={t}>
-                      {t}
-                    </option>
-                  ))}
-                </select>
+                  ariaLabel="Payment terms"
+                  placeholder="— None —"
+                  options={PAYMENT_TERMS_OPTIONS.map((t) => ({ value: t, label: t }))}
+                />
               </div>
               <div>
                 <label className={labelCls}>Currency</label>
-                <select className={inputCls} value={currency} onChange={(e) => setCurrency(e.target.value)}>
-                  {CURRENCY_OPTIONS.map((c) => (
-                    <option key={c} value={c}>
-                      {CURRENCY_LABELS[c] ?? c}
-                    </option>
-                  ))}
-                </select>
+                <Select
+                  value={currency}
+                  onChange={(v) => setCurrency(v)}
+                  ariaLabel="Currency"
+                  options={CURRENCY_OPTIONS.map((c) => ({ value: c, label: CURRENCY_LABELS[c] ?? c }))}
+                />
               </div>
               {paymentTerms === "Custom" && (
                 <div className="sm:col-span-2">
@@ -641,14 +632,16 @@ export function SupplierForm({ mode, supplier }: { mode: "create" | "edit"; supp
               </div>
               <div>
                 <label className={labelCls}>Internal owner</label>
-                <select className={inputCls} value={ownerUserId} onChange={(e) => setOwnerUserId(e.target.value)}>
-                  <option value="">— No owner assigned —</option>
-                  {ownerOptions.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.jobTitle ? `${m.name} — ${m.jobTitle}` : m.name}
-                    </option>
-                  ))}
-                </select>
+                <Select
+                  value={ownerUserId}
+                  onChange={(v) => setOwnerUserId(v)}
+                  ariaLabel="Internal owner"
+                  placeholder="— No owner assigned —"
+                  options={ownerOptions.map((m) => ({
+                    value: m.id,
+                    label: m.jobTitle ? `${m.name} — ${m.jobTitle}` : m.name,
+                  }))}
+                />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">
                   Optional — the staff member responsible for this supplier.
                 </p>

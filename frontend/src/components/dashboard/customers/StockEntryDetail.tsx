@@ -9,6 +9,7 @@ import { listCategories, getCachedCategories } from "@/services/category.service
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { FormSection, FormAsideCard, RequiredMark } from "@/components/ui/FormScaffold";
+import { Select } from "@/components/ui/Select";
 import { inputCls, labelCls, primaryBtn, hintCls } from "@/components/ui/styles";
 import type { CustomerStockEntry, StockEntryStatus } from "@/types/customer";
 
@@ -190,17 +191,14 @@ export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
                 </div>
                 <div>
                   <label className={labelCls}>Category</label>
-                  <select
-                    className={inputCls}
+                  <Select
                     value={categoryId}
-                    onChange={(e) => setCategoryId(e.target.value)}
+                    onChange={(v) => setCategoryId(v)}
+                    options={categories.map((c) => ({ value: c.id, label: c.name }))}
+                    placeholder="— Select category —"
+                    ariaLabel="Category"
                     disabled={!canEdit}
-                  >
-                    <option value="">— Select category —</option>
-                    {categories.map((c) => (
-                      <option key={c.id} value={c.id}>{c.name}</option>
-                    ))}
-                  </select>
+                  />
                 </div>
                 <div className="sm:col-span-2">
                   <label className={labelCls}>Description</label>

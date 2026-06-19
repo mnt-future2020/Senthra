@@ -11,6 +11,7 @@ import type { Role } from "@/types/role";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Pagination } from "@/components/ui/Pagination";
+import { Select } from "@/components/ui/Select";
 
 const PAGE_SIZE = 12;
 
@@ -161,19 +162,20 @@ export function RolesView() {
               className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
             />
           </div>
-          <select
+          <Select
+            size="sm"
             value={sort}
-            onChange={(e) => {
-              setSort(e.target.value as "newest" | "oldest" | "name");
+            onChange={(v) => {
+              setSort(v as "newest" | "oldest" | "name");
               setPage(1);
             }}
-            className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] outline-none focus:border-[var(--accent)]"
-            title="Sort"
-          >
-            <option value="newest">Newest</option>
-            <option value="oldest">Oldest</option>
-            <option value="name">Name (A–Z)</option>
-          </select>
+            ariaLabel="Sort"
+            options={[
+              { value: "newest", label: "Newest" },
+              { value: "oldest", label: "Oldest" },
+              { value: "name", label: "Name (A–Z)" },
+            ]}
+          />
           {canCreate && (
             <button
               onClick={() => router.push("/dashboard/roles/new")}

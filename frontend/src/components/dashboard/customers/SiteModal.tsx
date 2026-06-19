@@ -5,6 +5,7 @@ import { Loader2 } from "lucide-react";
 
 import * as customerService from "@/services/customer.service";
 import { Modal } from "@/components/ui/Modal";
+import { Select } from "@/components/ui/Select";
 import { RequiredMark } from "@/components/ui/FormScaffold";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import { UK_POSTCODE_RE } from "@/lib/validation";
@@ -136,14 +137,15 @@ export function SiteModal({
           </div>
           <div>
             <label className={labelCls}>Status</label>
-            <select
-              className={inputCls}
+            <Select
               value={status}
-              onChange={(e) => setStatus(e.target.value as "active" | "inactive")}
-            >
-              <option value="active">Active</option>
-              <option value="inactive">Inactive</option>
-            </select>
+              onChange={(v) => setStatus(v as "active" | "inactive")}
+              options={[
+                { value: "active", label: "Active" },
+                { value: "inactive", label: "Inactive" },
+              ]}
+              ariaLabel="Status"
+            />
           </div>
           <div>
             <label className={labelCls}>Contact person</label>

@@ -15,6 +15,7 @@ import { firstActiveId } from "@/lib/utils";
 import { useAuth } from "@/hooks/useAuth";
 import { PostcodeField } from "@/components/ui/PostcodeField";
 import { CreatableSelect } from "@/components/ui/CreatableSelect";
+import { Select } from "@/components/ui/Select";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { EMAIL_RE, UK_POSTCODE_RE, isPhone } from "@/lib/validation";
@@ -331,14 +332,15 @@ export function WarehouseForm({ mode, warehouse }: { mode: "create" | "edit"; wa
               </div>
               <div>
                 <label className={labelCls}>Status</label>
-                <select
-                  className={inputCls}
+                <Select
                   value={status}
-                  onChange={(e) => setStatus(e.target.value as "active" | "inactive")}
-                >
-                  <option value="active">Active</option>
-                  <option value="inactive">Inactive</option>
-                </select>
+                  onChange={(v) => setStatus(v as "active" | "inactive")}
+                  ariaLabel="Status"
+                  options={[
+                    { value: "active", label: "Active" },
+                    { value: "inactive", label: "Inactive" },
+                  ]}
+                />
               </div>
               <div className="sm:col-span-2">
                 <label className={labelCls}>Description</label>
@@ -430,21 +432,16 @@ export function WarehouseForm({ mode, warehouse }: { mode: "create" | "edit"; wa
                 <label className={labelCls}>
                   Country<RequiredMark />
                 </label>
-                <select
-                  className={inputCls}
+                <Select
                   value={country}
-                  onChange={(e) => {
-                    setCountry(e.target.value);
+                  onChange={(v) => {
+                    setCountry(v);
                     clearError("country");
                   }}
-                  aria-invalid={Boolean(errors.country)}
-                >
-                  {COUNTRY_OPTIONS.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </select>
+                  ariaLabel="Country"
+                  invalid={Boolean(errors.country)}
+                  options={COUNTRY_OPTIONS.map((c) => ({ value: c, label: c }))}
+                />
                 <FieldError id="err-country" message={errors.country} />
               </div>
             </div>
@@ -507,13 +504,12 @@ export function WarehouseForm({ mode, warehouse }: { mode: "create" | "edit"; wa
               </div>
               <div>
                 <label className={labelCls}>Timezone</label>
-                <select className={inputCls} value={timezone} onChange={(e) => setTimezone(e.target.value)}>
-                  {TIMEZONE_OPTIONS.map((tz) => (
-                    <option key={tz} value={tz}>
-                      {tz}
-                    </option>
-                  ))}
-                </select>
+                <Select
+                  value={timezone}
+                  onChange={(v) => setTimezone(v)}
+                  ariaLabel="Timezone"
+                  options={TIMEZONE_OPTIONS.map((tz) => ({ value: tz, label: tz }))}
+                />
               </div>
               <div className="sm:col-span-2">
                 <label className={labelCls}>Notes</label>
@@ -532,14 +528,16 @@ export function WarehouseForm({ mode, warehouse }: { mode: "create" | "edit"; wa
           <FormSection title="Warehouse Management" description="The staff member who manages this warehouse.">
             <div>
               <label className={labelCls}>Warehouse manager</label>
-              <select className={inputCls} value={managerUserId} onChange={(e) => setManagerUserId(e.target.value)}>
-                <option value="">— No manager assigned —</option>
-                {managerOptions.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.jobTitle ? `${m.name} — ${m.jobTitle}` : m.name}
-                  </option>
-                ))}
-              </select>
+              <Select
+                value={managerUserId}
+                onChange={(v) => setManagerUserId(v)}
+                ariaLabel="Warehouse manager"
+                placeholder="— No manager assigned —"
+                options={managerOptions.map((m) => ({
+                  value: m.id,
+                  label: m.jobTitle ? `${m.name} — ${m.jobTitle}` : m.name,
+                }))}
+              />
               <p className="mt-1.5 text-[11px] text-[var(--faint)]">
                 Optional — you can assign or change this at any time.
               </p>

@@ -12,6 +12,7 @@ import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardP
 import { inputCls, ghostBtn, labelCls, primaryBtn } from "@/components/ui/styles";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { NumberInput } from "@/components/ui/NumberInput";
+import { Select } from "@/components/ui/Select";
 import type { Availability } from "@/types/inventory";
 
 const INVENTORY_LIST = "/dashboard/inventory";
@@ -168,18 +169,12 @@ export function TransferForm() {
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="sm:col-span-2">
                 <label className={labelCls}>Item<RequiredMark /></label>
-                <select className={inputCls} value={irmItemId} onChange={(e) => { setIrmItemId(e.target.value); touch(); clearError("irmItemId"); clearError("quantity"); }} aria-invalid={Boolean(errors.irmItemId)}>
-                  <option value="">— Select an item —</option>
-                  {items.map((i) => (<option key={i.id} value={i.id}>{i.code} — {i.name}{i.sku ? ` (${i.sku})` : ""}</option>))}
-                </select>
+                <Select value={irmItemId} onChange={(v) => { setIrmItemId(v); touch(); clearError("irmItemId"); clearError("quantity"); }} options={items.map((i) => ({ value: i.id, label: `${i.code} — ${i.name}${i.sku ? ` (${i.sku})` : ""}` }))} placeholder="— Select an item —" ariaLabel="Item" invalid={Boolean(errors.irmItemId)} />
                 <FieldError message={errors.irmItemId} />
               </div>
               <div>
                 <label className={labelCls}>Source warehouse<RequiredMark /></label>
-                <select className={inputCls} value={fromWarehouseId} onChange={(e) => { setFromWarehouseId(e.target.value); touch(); clearError("fromWarehouseId"); clearError("quantity"); }} aria-invalid={Boolean(errors.fromWarehouseId)}>
-                  <option value="">— Select source —</option>
-                  {warehouses.map((w) => (<option key={w.id} value={w.id}>{w.name} ({w.code})</option>))}
-                </select>
+                <Select value={fromWarehouseId} onChange={(v) => { setFromWarehouseId(v); touch(); clearError("fromWarehouseId"); clearError("quantity"); }} options={warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))} placeholder="— Select source —" ariaLabel="Source warehouse" invalid={Boolean(errors.fromWarehouseId)} />
                 <FieldError message={errors.fromWarehouseId} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">
                   {!irmItemId || !fromWarehouseId ? "Pick an item and source to see available stock." : availLoading ? "Checking available stock…" : available !== null ? `${available} available to move${selectedItem?.baseUnit ? ` ${selectedItem.baseUnit}` : ""}.` : "No stock of this item at the source."}
@@ -187,10 +182,7 @@ export function TransferForm() {
               </div>
               <div>
                 <label className={labelCls}>Destination warehouse<RequiredMark /></label>
-                <select className={inputCls} value={toWarehouseId} onChange={(e) => { setToWarehouseId(e.target.value); touch(); clearError("toWarehouseId"); }} aria-invalid={Boolean(errors.toWarehouseId)}>
-                  <option value="">— Select destination —</option>
-                  {warehouses.filter((w) => w.id !== fromWarehouseId).map((w) => (<option key={w.id} value={w.id}>{w.name} ({w.code})</option>))}
-                </select>
+                <Select value={toWarehouseId} onChange={(v) => { setToWarehouseId(v); touch(); clearError("toWarehouseId"); }} options={warehouses.filter((w) => w.id !== fromWarehouseId).map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))} placeholder="— Select destination —" ariaLabel="Destination warehouse" invalid={Boolean(errors.toWarehouseId)} />
                 <FieldError message={errors.toWarehouseId} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Must be different from the source warehouse.</p>
               </div>

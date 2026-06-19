@@ -9,6 +9,7 @@ import { useDashboard } from "@/hooks/useDashboard";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import type { Customer } from "@/types/customer";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
+import { Select } from "@/components/ui/Select";
 import { Avatar } from "@/components/ui/Avatar";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
@@ -363,10 +364,15 @@ export function CustomerForm({ mode, customer }: { mode: "create" | "edit"; cust
               </div>
               <div>
                 <label className={labelCls}>Status</label>
-                <select className={inputCls} value={status} onChange={(e) => setStatus(e.target.value as "active" | "inactive")}>
-                  <option value="active">Active</option>
-                  <option value="inactive">Inactive</option>
-                </select>
+                <Select
+                  value={status}
+                  onChange={(v) => setStatus(v as "active" | "inactive")}
+                  options={[
+                    { value: "active", label: "Active" },
+                    { value: "inactive", label: "Inactive" },
+                  ]}
+                  ariaLabel="Status"
+                />
               </div>
               <div>
                 <label className={labelCls}>Secondary phone</label>

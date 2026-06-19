@@ -13,14 +13,12 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { TempPasswordModal } from "@/components/ui/TempPasswordModal";
+import { Select } from "@/components/ui/Select";
 import type { CustomerStatus, CustomerSummary } from "@/types/customer";
 import type { UserStatus } from "@/types/user";
 
 const PAGE_SIZE = 20;
 type Sort = "newest" | "oldest" | "name";
-
-const selectCls =
-  "rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] outline-none focus:border-[var(--accent)]";
 
 function MenuItem({
   icon: Icon,
@@ -330,25 +328,28 @@ export function CustomersView() {
             className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
           />
         </div>
-        <select
+        <Select
+          size="sm"
           value={statusFilter}
-          onChange={(e) => onStatusChange(e.target.value as "all" | CustomerStatus)}
-          className={selectCls}
-        >
-          <option value="all">All statuses</option>
-          <option value="active">Active</option>
-          <option value="inactive">Inactive</option>
-        </select>
-        <select
+          onChange={(v) => onStatusChange(v as "all" | CustomerStatus)}
+          options={[
+            { value: "all", label: "All statuses" },
+            { value: "active", label: "Active" },
+            { value: "inactive", label: "Inactive" },
+          ]}
+          ariaLabel="Status filter"
+        />
+        <Select
+          size="sm"
           value={sort}
-          onChange={(e) => onSortChange(e.target.value as Sort)}
-          className={selectCls}
-          title="Sort"
-        >
-          <option value="newest">Newest first</option>
-          <option value="oldest">Oldest first</option>
-          <option value="name">Name (A–Z)</option>
-        </select>
+          onChange={(v) => onSortChange(v as Sort)}
+          options={[
+            { value: "newest", label: "Newest first" },
+            { value: "oldest", label: "Oldest first" },
+            { value: "name", label: "Name (A–Z)" },
+          ]}
+          ariaLabel="Sort"
+        />
         {can("customers.create") && (
           <button
             onClick={goToNew}
