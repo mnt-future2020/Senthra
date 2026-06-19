@@ -27,6 +27,22 @@ export interface SettingsUpdate {
   loginHeadline?: string;
   loginSubtext?: string;
   employeeIdPrefix?: string;
+  // Company profile + regional (all optional; empty string clears back to the backend default).
+  companyLegalName?: string;
+  companyRegNumber?: string;
+  vatNumber?: string;
+  companyAddressLine1?: string;
+  companyAddressLine2?: string;
+  companyCity?: string;
+  companyCounty?: string;
+  companyPostcode?: string;
+  companyCountry?: string;
+  companyPhone?: string;
+  companyEmail?: string;
+  websiteUrl?: string;
+  timezone?: string;
+  dateFormat?: string;
+  timeFormat?: string;
 }
 
 // Stale-while-revalidate cache (module-level, survives route navigation): switching

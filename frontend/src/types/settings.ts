@@ -31,4 +31,21 @@ export interface Settings extends Branding {
   // Code prefixed to new staff IDs (e.g. "SNT" → SNT-0007). Effective value
   // (default-filled by the backend). Only affects newly-created staff.
   employeeIdPrefix: string;
+  // Company profile (legal identity for official documents) + regional formatting.
+  // Default-filled by the backend (country/timezone/dateFormat/timeFormat).
+  companyLegalName: string;
+  companyRegNumber: string;
+  vatNumber: string;
+  companyAddressLine1: string;
+  companyAddressLine2: string;
+  companyCity: string;
+  companyCounty: string;
+  companyPostcode: string;
+  companyCountry: string;
+  companyPhone: string;
+  companyEmail: string;
+  websiteUrl: string;
+  timezone: string;
+  dateFormat: string;
+  timeFormat: string;
 }

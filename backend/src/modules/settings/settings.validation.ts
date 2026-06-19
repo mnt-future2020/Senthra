@@ -63,6 +63,29 @@ export const updateSettingsSchema = z.object({
     .regex(/^[A-Za-z]{2,5}$/, "Employee ID prefix must be 2–5 letters.")
     .or(z.literal(""))
     .optional(),
+
+  // --- Company profile (legal identity for official documents). All optional;
+  // empty string clears the field back to null (default applied on read). ---
+  companyLegalName: z.string().max(200).optional(),
+  companyRegNumber: z.string().max(40).optional(),
+  vatNumber: z.string().max(40).optional(),
+  companyAddressLine1: z.string().max(200).optional(),
+  companyAddressLine2: z.string().max(200).optional(),
+  companyCity: z.string().max(100).optional(),
+  companyCounty: z.string().max(100).optional(),
+  companyPostcode: z.string().max(16).optional(),
+  companyCountry: z.string().max(80).optional(),
+  companyPhone: z.string().max(40).optional(),
+  // Empty string allowed (clears it); a non-empty value must be a valid email / URL.
+  companyEmail: z.union([z.literal(""), z.string().email("Enter a valid company email address.")]).optional(),
+  websiteUrl: z.union([z.literal(""), z.string().url("Enter a valid website URL (including https://).")]).optional(),
+
+  // --- Regional formatting. Empty clears back to the default applied on read. ---
+  // Controlled set (UK-based app); mirrors the frontend dropdown. Extend BOTH sides
+  // together for future expansion. Empty clears to null → default "Europe/London" on read.
+  timezone: z.enum(["Europe/London", "Europe/Dublin", "UTC", "Europe/Paris", "Europe/Berlin"]).or(z.literal("")).optional(),
+  dateFormat: z.enum(["DD/MM/YYYY", "MM/DD/YYYY", "YYYY-MM-DD"]).or(z.literal("")).optional(),
+  timeFormat: z.enum(["24h", "12h"]).or(z.literal("")).optional(),
 });
 export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;
 
