@@ -18,7 +18,7 @@ import { getCustomerStock, type CustomerStock } from "./customer.stock.service.j
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
 import { geocodePostcode } from "../../lib/geocode.js";
-import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
+import { getCloudinaryCreds, getStockCodePrefix } from "#modules/settings/settings.service.js";
 import { generateTempPassword } from "../../utils/generate-password.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import { hashPassword } from "../../utils/password.js";
@@ -1583,8 +1583,11 @@ export async function generateStockEntryBarcode(
   const entry = await customerRepo.findStockEntryById(entryId);
   if (!entry) throw notFound("Stock entry not found.");
 
-  const seq = await customerRepo.nextStockEntryBarcodeSeq();
-  const barcodeValue = `CSE-${String(seq).padStart(5, "0")}`;
+  const [prefix, seq] = await Promise.all([
+    getStockCodePrefix(),
+    customerRepo.nextStockEntryBarcodeSeq(),
+  ]);
+  const barcodeValue = `${prefix}-${String(seq).padStart(5, "0")}`;
 
   const bwipjs = await import("bwip-js");
   const pngBuffer = await bwipjs.default.toBuffer({

@@ -2,7 +2,7 @@ import { Router } from "express";
 
 import * as poController from "./purchase-order.controller.js";
 import { requireAuth, requirePermission } from "../../middleware/auth.middleware.js";
-import { writeLimiter } from "../../middleware/rateLimit.middleware.js";
+import { writeLimiter, exportLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import {
   createPurchaseOrderSchema,
@@ -18,6 +18,10 @@ router.use(requireAuth);
 
 router.get("/", requirePermission("purchase_orders.view"), poController.listPurchaseOrders);
 router.get("/:id", requirePermission("purchase_orders.view"), poController.getPurchaseOrder);
+// Preview / download the generated PO document (PDF). PDF render is heavy (synchronous
+// pdfkit render + remote logo fetch), so throttle it like the CSV export — otherwise an
+// authenticated client could loop downloads and pin the single-threaded event loop.
+router.get("/:id/pdf", requirePermission("purchase_orders.view"), exportLimiter, poController.downloadPurchaseOrderPdf);
 
 router.post(
   "/",

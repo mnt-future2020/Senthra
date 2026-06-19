@@ -12,6 +12,7 @@ const makeUser = (permissions: string[]): UserPrincipal => ({
   firstName: "U",
   lastName: "Ser",
   profileImageUrl: null,
+  signatureUrl: null,
   status: "active",
   mustResetPassword: false,
   role: null,

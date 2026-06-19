@@ -23,6 +23,12 @@ vi.mock("#modules/irm/irm.service.js", () => ({ requireActiveIrmItem: vi.fn() })
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn() }));
 vi.mock("../../lib/cloudinary.js", () => ({ uploadFileToCloudinary: vi.fn() }));
+// The supplier email is fire-and-forget; mock it so the transition tests stay pure and we can
+// assert it's triggered + that a failure can't roll back the PO.
+vi.mock("./purchase-order.email.js", () => ({
+  notifySupplierPoSent: vi.fn(() => Promise.resolve()),
+  notifySupplierPoCancelled: vi.fn(() => Promise.resolve()),
+}));
 
 import * as poRepo from "./purchase-order.repository.js";
 import * as supplierService from "#modules/supplier/supplier.service.js";
@@ -45,6 +51,7 @@ import {
   submitPurchaseOrder,
   updatePurchaseOrder,
 } from "./purchase-order.service.js";
+import * as poEmail from "./purchase-order.email.js";
 
 const PO_ID = "f".repeat(24);
 const SUP_ID = "a".repeat(24);
@@ -301,5 +308,31 @@ describe("attachments — terminal-state guard", () => {
     await expect(removeAttachment(PO_ID, "att1")).rejects.toThrow(/closed or cancelled/i);
     expect(mockFindAtt).not.toHaveBeenCalled();
     expect(mockRemoveAtt).not.toHaveBeenCalled();
+  });
+});
+
+// The supplier email is fire-and-forget: it's triggered on send/cancel, but a failure must never
+// roll back the workflow transition (the PO stays sent/cancelled).
+describe("supplier email hooks (fire-and-forget)", () => {
+  const mockSent = poEmail.notifySupplierPoSent as ReturnType<typeof vi.fn>;
+  const mockCancelled = poEmail.notifySupplierPoCancelled as ReturnType<typeof vi.fn>;
+
+  it("send triggers the supplier PO-sent notification with the now-sent PO", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    await sendPurchaseOrder(PO_ID, { type: "user", id: "u", email: "buyer@x.co", permissions: [] });
+    expect(mockSent).toHaveBeenCalledTimes(1);
+    expect(mockSent.mock.calls[0][0]).toMatchObject({ status: "sent" });
+  });
+
+  it("a failing supplier email never rolls back the send (still resolves to sent)", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    mockSent.mockRejectedValueOnce(new Error("SMTP down"));
+    expect((await sendPurchaseOrder(PO_ID)).status).toBe("sent");
+  });
+
+  it("cancel triggers the supplier cancellation notification", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "sent", sentAt: new Date() }));
+    await cancelPurchaseOrder(PO_ID, "No longer needed");
+    expect(mockCancelled).toHaveBeenCalledTimes(1);
   });
 });

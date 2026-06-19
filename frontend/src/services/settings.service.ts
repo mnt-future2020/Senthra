@@ -27,6 +27,7 @@ export interface SettingsUpdate {
   loginHeadline?: string;
   loginSubtext?: string;
   employeeIdPrefix?: string;
+  stockCodePrefix?: string;
   // Company profile + regional (all optional; empty string clears back to the backend default).
   companyLegalName?: string;
   companyRegNumber?: string;

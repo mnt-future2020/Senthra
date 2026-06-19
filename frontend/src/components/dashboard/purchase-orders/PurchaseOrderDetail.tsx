@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { CheckCircle2, Loader2, Paperclip, Pencil, ScrollText, Send, Trash2, Upload, XCircle } from "lucide-react";
+import { CheckCircle2, Download, Loader2, Paperclip, Pencil, ScrollText, Send, Trash2, Upload, XCircle } from "lucide-react";
 
 import * as poService from "@/services/purchase-order.service";
 import * as auditService from "@/services/audit.service";
@@ -31,6 +31,19 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   const [busy, setBusy] = React.useState(false);
   const [reasonFor, setReasonFor] = React.useState<"reject" | "cancel" | null>(null);
   const [reason, setReason] = React.useState("");
+  const [downloading, setDownloading] = React.useState(false);
+  const [confirmSend, setConfirmSend] = React.useState(false);
+
+  const downloadPdf = async () => {
+    setDownloading(true);
+    try {
+      await poService.downloadPurchaseOrderPdf(po.id, `${po.code}.pdf`);
+    } catch (e) {
+      pushToast(e instanceof Error ? e.message : "Could not generate the PDF.", "alert");
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   const run = async (fn: () => Promise<PurchaseOrder>, ok: string) => {
     setBusy(true);
@@ -57,9 +70,14 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
     else if (which === "cancel") await run(() => poService.cancelPurchaseOrder(po.id, r || undefined), "Purchase order cancelled.");
   };
 
-  // Workflow buttons available for the current status × permissions.
+  // Workflow buttons available for the current status × permissions. The PDF download is always
+  // available to a viewer (it's the same document emailed to the supplier).
   const s = po.status;
-  const actions: React.ReactNode[] = [];
+  const actions: React.ReactNode[] = [
+    <ActionBtn key="pdf" icon={Download} onClick={downloadPdf} disabled={busy || downloading}>
+      {downloading ? "Preparing…" : "Download PDF"}
+    </ActionBtn>,
+  ];
   if (s === "draft" && can("purchase_orders.edit"))
     actions.push(<ActionBtn key="edit" icon={Pencil} onClick={() => router.push(`/dashboard/purchase-orders/${po.code}/edit`)} disabled={busy}>Edit</ActionBtn>);
   if (s === "draft" && can("purchase_orders.submit"))
@@ -69,7 +87,7 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
     actions.push(<ActionBtn key="reject" icon={XCircle} onClick={() => { setReason(""); setReasonFor("reject"); }} disabled={busy}>Reject</ActionBtn>);
   }
   if (s === "approved" && can("purchase_orders.send"))
-    actions.push(<ActionBtn key="send" icon={Send} primary onClick={() => run(() => poService.sendPurchaseOrder(po.id), "Issued to the supplier.")} disabled={busy}>Send to supplier</ActionBtn>);
+    actions.push(<ActionBtn key="send" icon={Send} primary onClick={() => setConfirmSend(true)} disabled={busy}>Send to supplier</ActionBtn>);
   if ((s === "partially_received" || s === "fully_received") && can("purchase_orders.close"))
     actions.push(<ActionBtn key="close" icon={CheckCircle2} primary onClick={() => run(() => poService.closePurchaseOrder(po.id), "Purchase order closed.")} disabled={busy}>Close</ActionBtn>);
   if (["draft", "pending_approval", "approved", "sent"].includes(s) && can("purchase_orders.cancel"))
@@ -117,6 +135,26 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
           onClose={() => { setReasonFor(null); setReason(""); }}
         />
       )}
+
+      <ConfirmDialog
+        open={confirmSend}
+        title="Send to supplier"
+        message={
+          po.supplier?.contactEmail
+            ? `This issues ${po.code} and emails it to ${po.supplier.contactEmail} with the PO document (PDF) attached.`
+            : `This issues ${po.code}. No supplier email is on file, so it will be marked sent but not emailed.`
+        }
+        confirmLabel="Send"
+        busy={busy}
+        onConfirm={() => {
+          setConfirmSend(false);
+          run(
+            () => poService.sendPurchaseOrder(po.id),
+            po.supplier?.contactEmail ? `Issued — emailing ${po.supplier.contactEmail}.` : "Issued to the supplier.",
+          );
+        }}
+        onClose={() => setConfirmSend(false)}
+      />
     </div>
   );
 }

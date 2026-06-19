@@ -31,6 +31,9 @@ export interface Settings extends Branding {
   // Code prefixed to new staff IDs (e.g. "SNT" → SNT-0007). Effective value
   // (default-filled by the backend). Only affects newly-created staff.
   employeeIdPrefix: string;
+  // Display prefix for customer stock-entry barcodes (e.g. "CSE" → CSE-00006).
+  // Effective value (default-filled by the backend). Only affects new barcodes.
+  stockCodePrefix: string;
   // Company profile (legal identity for official documents) + regional formatting.
   // Default-filled by the backend (country/timezone/dateFormat/timeFormat).
   companyLegalName: string;

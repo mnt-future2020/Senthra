@@ -128,3 +128,17 @@ export function resendInvite(id: string): Promise<{ temporaryPassword: string }>
 export function deleteUser(id: string): Promise<void> {
   return api(`/users/${id}`, { method: "DELETE" }).then(() => undefined);
 }
+
+// --- Self-service signature (My Account) ---
+// Upload the signed-in user's own signature image (data URI). Cloudinary upload → longer timeout.
+export function uploadMySignature(signature: string, fileName?: string): Promise<User> {
+  return api<{ user: User }>("/users/me/signature", {
+    method: "POST",
+    body: { signature, fileName },
+    timeout: 60_000,
+  }).then((r) => r.user);
+}
+
+export function removeMySignature(): Promise<User> {
+  return api<{ user: User }>("/users/me/signature", { method: "DELETE" }).then((r) => r.user);
+}

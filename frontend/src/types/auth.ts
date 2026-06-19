@@ -21,6 +21,7 @@ export interface UserPrincipal {
   firstName: string;
   lastName: string;
   profileImageUrl: string | null;
+  signatureUrl: string | null;
   status: string;
   mustResetPassword: boolean;
   role: UserRoleRef | null;

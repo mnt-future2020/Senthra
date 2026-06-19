@@ -12,11 +12,20 @@ export interface SmtpConfig {
   fromEmail: string;
 }
 
+// A file attached to an email. `content` is the raw bytes (Buffer) or a string; nodemailer
+// streams it as-is. Used for the Purchase Order PDF (and future document attachments).
+export interface MailAttachment {
+  filename: string;
+  content: Buffer | string;
+  contentType?: string;
+}
+
 export interface MailMessage {
   to: string;
   subject: string;
   text: string;
   html: string;
+  attachments?: MailAttachment[];
 }
 
 // Build a nodemailer transport from a plain SMTP config object.

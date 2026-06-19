@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 
 import * as poRepo from "./purchase-order.repository.js";
 import type { PoLineRow, PurchaseOrderWithRelations } from "./purchase-order.repository.js";
+import * as poEmail from "./purchase-order.email.js";
 import * as supplierService from "#modules/supplier/supplier.service.js";
 import * as warehouseService from "#modules/warehouse/warehouse.service.js";
 import * as irmService from "#modules/irm/irm.service.js";
@@ -299,6 +300,14 @@ export async function getPurchaseOrder(idOrCode: string): Promise<PublicPurchase
   return toPublic(po);
 }
 
+// Load the raw PO (with relations) for the Document Platform — the PO PDF (supplier email +
+// staff download) builds from this. Throws 404 when missing/soft-deleted.
+export async function loadPurchaseOrderEntity(idOrCode: string): Promise<PurchaseOrderWithRelations> {
+  const po = OBJECT_ID_RE.test(idOrCode) ? await poRepo.findById(idOrCode) : await poRepo.findByCode(idOrCode);
+  if (!po) throw notFound("Purchase order not found.");
+  return po;
+}
+
 export async function createPurchaseOrder(input: CreatePurchaseOrderInput, actor?: AuditActor): Promise<PublicPurchaseOrder> {
   const supplier = await supplierService.requireActiveSupplier(input.supplierId);
   await warehouseService.requireActiveWarehouse(input.warehouseId);
@@ -412,8 +421,13 @@ export async function rejectPurchaseOrder(id: string, reason: string, actor?: Au
 export async function sendPurchaseOrder(id: string, actor?: AuditActor): Promise<PublicPurchaseOrder> {
   const po = await loadOrThrow(id);
   assertTransition(po.status, "sent");
-  const updated = await poRepo.update(id, { status: "sent", sentAt: new Date() });
+  // sentBy is the issuer — the signer printed on the PO document (deterministic for email + download).
+  const updated = await poRepo.update(id, { status: "sent", sentAt: new Date(), sentBy: actor?.email ?? null });
   recordStatus(actor, id, updated.code, "purchase_order.sent");
+  // Fire-and-forget: email the supplier the issued PO with its PDF. NEVER blocks or rolls back.
+  void poEmail.notifySupplierPoSent(updated, actor).catch((e) =>
+    console.error(`PO ${updated.code} supplier email failed:`, e instanceof Error ? e.message : e),
+  );
   return toPublic(updated);
 }
 
@@ -422,6 +436,10 @@ export async function cancelPurchaseOrder(id: string, reason: string | undefined
   assertTransition(po.status, "cancelled");
   const updated = await poRepo.update(id, { status: "cancelled", cancelledAt: new Date(), cancelReason: trimToNull(reason) });
   recordStatus(actor, id, updated.code, "purchase_order.cancelled");
+  // Fire-and-forget: notify the supplier ONLY if the PO had already been issued to them.
+  void poEmail.notifySupplierPoCancelled(updated).catch((e) =>
+    console.error(`PO ${updated.code} cancellation email failed:`, e instanceof Error ? e.message : e),
+  );
   return toPublic(updated);
 }
 

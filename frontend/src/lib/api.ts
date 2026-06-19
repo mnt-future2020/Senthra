@@ -98,3 +98,29 @@ export async function api<T = unknown>(
     throw err;
   }
 }
+
+/**
+ * Fetch a binary response (e.g. a generated PDF) as a Blob. Sends the auth cookies and shares the
+ * silent-refresh interceptor, like `api()`. Uses a longer default timeout since document generation
+ * (logo/signature fetch + render) can take a little longer than a JSON call.
+ */
+export async function apiBlob(path: string, timeout = 60_000): Promise<Blob> {
+  try {
+    const res = await client.request<Blob>({
+      url: path,
+      method: "GET",
+      responseType: "blob",
+      timeout,
+    });
+    return res.data;
+  } catch (err) {
+    if (axios.isAxiosError(err)) {
+      if (err.code === "ECONNABORTED")
+        throw new Error("The request timed out. Please try again.");
+      if (err.code === "ERR_NETWORK")
+        throw new Error("Could not reach the server. Check your connection.");
+      throw new Error(`Request failed${err.response ? ` (${err.response.status})` : ""}.`);
+    }
+    throw err;
+  }
+}

@@ -65,6 +65,11 @@ model Settings {
   // brandName on purpose: renaming the brand must not silently change permanent
   // employee IDs. Null falls back to the default. Only affects NEW staff.
   employeeIdPrefix   String?
+  // Display prefix for customer stock-entry barcodes (e.g. "CSE" -> CSE-00006).
+  // Only the human-readable prefix is configurable — the underlying sequence
+  // counter is a fixed internal namespace, so changing this never resets or
+  // collides numbering. Null falls back to the default. Only affects NEW barcodes.
+  stockCodePrefix    String?
 
   // --- Company profile (legal identity for official documents — PO PDF letterhead etc.) ---
   // Pure reference data, surfaced via getCompanyProfile(). Distinct from the display brand above
@@ -506,6 +511,7 @@ model PurchaseOrder {
   approvedBy      String?
   approvedAt      DateTime?
   sentAt          DateTime?
+  sentBy          String? // issuer email snapshot — the signer printed on the issued PO document
   closedAt        DateTime?
   cancelledAt     DateTime?
   cancelReason    String?
@@ -981,6 +987,15 @@ model User {
   status          String  @default("active") // active | inactive | suspended
   profileImageUrl String?
   notes           String?
+
+  // Personal signature — printed on documents the user issues (e.g. the Purchase Order PDF).
+  // One per user, uploaded under My Account; reuses the Cloudinary image pipeline. All optional.
+  signatureUrl        String?
+  signatureName       String?
+  signatureMimeType   String?
+  signatureFileSize   Int?
+  signatureUploadedAt DateTime?
+  signatureUpdatedAt  DateTime?
 
   // Employment record.
   employeeId    String?   @unique // human staff reference, auto-generated (e.g. SNT-0007)

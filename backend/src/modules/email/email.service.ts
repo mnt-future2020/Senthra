@@ -1,5 +1,5 @@
 import { env } from "../../config/env.js";
-import { sendMail, type MailMessage } from "../../lib/mailer.js";
+import { sendMail, type MailAttachment, type MailMessage } from "../../lib/mailer.js";
 import * as emailLogRepo from "./emailLog.repository.js";
 import * as emailTemplateRepo from "./emailTemplate.repository.js";
 import * as settingsRepo from "#modules/settings/settings.repository.js";
@@ -79,6 +79,8 @@ interface SendTemplatedOptions {
   // Send even when the template is disabled. Used for transactional account /
   // security emails (account created, password reset) that must always go out.
   force?: boolean;
+  // Files to attach (e.g. the Purchase Order PDF). Passed straight to the transport.
+  attachments?: MailAttachment[];
 }
 
 // Render a stored template and send it. The DB row is the source of truth; the
@@ -126,6 +128,7 @@ export async function sendTemplatedEmail(
       subject: rendered.subject,
       text: rendered.text,
       html: rendered.html,
+      attachments: opts.attachments,
     });
     await logEmail({
       to,
