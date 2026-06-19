@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Barcode, Loader2, Save } from "lucide-react";
+import { ArrowLeft, Barcode, Loader2, Printer, Save } from "lucide-react";
 
 import * as customerService from "@/services/customer.service";
 import { listCategories, getCachedCategories } from "@/services/category.service";
@@ -10,8 +10,11 @@ import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { FormSection, FormAsideCard, RequiredMark } from "@/components/ui/FormScaffold";
 import { Select } from "@/components/ui/Select";
-import { inputCls, labelCls, primaryBtn, hintCls } from "@/components/ui/styles";
+import { inputCls, labelCls, primaryBtn, secondaryBtn, hintCls } from "@/components/ui/styles";
 import type { CustomerStockEntry, StockEntryStatus } from "@/types/customer";
+
+// Standard units of measure — mirrors the IRM item form + backend UOM_OPTIONS.
+const UOM_OPTIONS = ["Each", "Metre", "Roll", "Pack", "Box", "Set", "Pair", "Reel"];
 
 function FieldError({ message }: { message?: string }) {
   if (!message) return null;
@@ -120,6 +123,50 @@ export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
     }
   };
 
+  // Print ONLY the barcode label (image + code) via a hidden iframe — not the whole page.
+  // Waits for the image to load before printing, then cleans up. No popup-blocker issues.
+  const printBarcodeLabel = () => {
+    if (!entry.barcodeDataUri) return;
+    const code = entry.barcode ?? "";
+    const iframe = document.createElement("iframe");
+    iframe.setAttribute("aria-hidden", "true");
+    iframe.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0;";
+    document.body.appendChild(iframe);
+    const doc = iframe.contentWindow?.document;
+    if (!doc) { iframe.remove(); return; }
+    doc.open();
+    // Print page sized to the physical label (50×30mm thermal sticker) so the page IS the
+    // label — no A4 white space. The barcode PNG already renders the human-readable code
+    // beneath the bars, so we print just the image scaled to fill the label (no duplicate
+    // code line). Adjust LABEL_W/LABEL_H if your label stock differs.
+    const LABEL_W = "50mm", LABEL_H = "30mm";
+    // @page margin:0 removes the browser's auto date/title/URL/page-number header & footer
+    // (they're only drawn in the page margin), so the label prints clean. The quiet-zone
+    // padding lives on the body instead.
+    doc.write(
+      `<!doctype html><html><head><title>${code}</title>` +
+        `<style>@page{size:${LABEL_W} ${LABEL_H};margin:0}html,body{margin:0;padding:0}` +
+        `body{display:flex;align-items:center;justify-content:center;min-height:${LABEL_H};padding:2mm;box-sizing:border-box}` +
+        `img{width:100%;height:auto;max-height:calc(${LABEL_H} - 4mm);object-fit:contain}</style></head>` +
+        `<body><img src="${entry.barcodeDataUri}" alt="${code}"/></body></html>`,
+    );
+    doc.close();
+    const win = iframe.contentWindow;
+    if (!win) { iframe.remove(); return; }
+    const run = () => {
+      win.focus();
+      win.print();
+      setTimeout(() => iframe.remove(), 500);
+    };
+    const img = doc.querySelector("img");
+    if (img && !img.complete) {
+      img.onload = run;
+      img.onerror = run;
+    } else {
+      run();
+    }
+  };
+
   const isDraft = entry.status === "draft";
 
   return (
@@ -214,12 +261,13 @@ export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
                 </div>
                 <div>
                   <label className={labelCls}>Unit of measure</label>
-                  <input
-                    className={inputCls}
+                  <Select
                     value={uom}
-                    onChange={(e) => setUom(e.target.value)}
-                    placeholder="e.g. Each, Metre, Box"
+                    onChange={(v) => setUom(v)}
+                    options={UOM_OPTIONS.map((u) => ({ value: u, label: u }))}
+                    placeholder="— Select unit —"
                     disabled={!canEdit}
+                    ariaLabel="Unit of measure"
                   />
                 </div>
                 <div>
@@ -288,6 +336,10 @@ export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
                     className="max-w-xs"
                   />
                   <span className="font-mono text-sm font-bold text-[var(--ink)]">{entry.barcode}</span>
+                  <button type="button" onClick={printBarcodeLabel} className={secondaryBtn}>
+                    <Printer className="h-3.5 w-3.5" />
+                    Print label
+                  </button>
                   <p className={hintCls}>Print this barcode and attach it to the physical stock.</p>
                 </div>
               ) : (

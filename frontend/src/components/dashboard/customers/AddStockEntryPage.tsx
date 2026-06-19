@@ -11,8 +11,12 @@ import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { FormSection, FormAsideCard, RequiredMark } from "@/components/ui/FormScaffold";
 import { inputCls, labelCls, primaryBtn, hintCls } from "@/components/ui/styles";
+import { NumberInput } from "@/components/ui/NumberInput";
 import { Select } from "@/components/ui/Select";
 import type { CustomerStockEntry } from "@/types/customer";
+
+// Standard units of measure — mirrors the IRM item form + backend UOM_OPTIONS.
+const UOM_OPTIONS = ["Each", "Metre", "Roll", "Pack", "Box", "Set", "Pair", "Reel"];
 
 function FieldError({ message }: { message?: string }) {
   if (!message) return null;
@@ -256,17 +260,17 @@ export function AddStockEntryPage({ customer }: { customer: CustomerInfo }) {
                 </div>
                 <div>
                   <label className={labelCls}>Unit of measure</label>
-                  <input
-                    className={inputCls}
+                  <Select
                     value={uom}
-                    onChange={(e) => setUom(e.target.value)}
-                    placeholder="e.g. Each, Metre, Box"
+                    onChange={(v) => setUom(v)}
+                    options={UOM_OPTIONS.map((u) => ({ value: u, label: u }))}
+                    placeholder="— Select unit —"
+                    ariaLabel="Unit of measure"
                   />
                 </div>
                 <div>
                   <label className={labelCls}>Quantity<RequiredMark /></label>
-                  <input
-                    type="number"
+                  <NumberInput
                     min={1}
                     className={inputCls}
                     value={quantity}

@@ -852,12 +852,9 @@ function StockEntriesTab({
                             <Pencil className="h-4 w-4" />
                           </button>
                           {stockCaps.delete && (
-                            <button
-                              type="button"
-                              title="Delete"
-                              onClick={async (ev) => {
-                                ev.stopPropagation();
-                                if (!confirm(`Delete "${e.itemName}"?`)) return;
+                            <StockEntryDeleteButton
+                              itemName={e.itemName}
+                              onConfirm={async () => {
                                 try {
                                   await customerService.deleteStockEntry(e.id);
                                   pushToast("Stock entry deleted.", "success");
@@ -866,10 +863,7 @@ function StockEntriesTab({
                                   pushToast(err instanceof Error ? err.message : "Delete failed.", "alert");
                                 }
                               }}
-                              className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--neg)]/30 bg-[var(--neg)]/10 text-[var(--neg)] transition-all hover:bg-[var(--neg)] hover:text-white"
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </button>
+                            />
                           )}
                         </div>
                       </td>
@@ -1593,6 +1587,56 @@ function DeleteConfirmButton({
           </>
         }
         confirmLabel="Remove"
+        danger
+        busy={busy}
+        onConfirm={run}
+        onClose={() => {
+          if (!busy) setOpen(false);
+        }}
+      />
+    </>
+  );
+}
+
+// Stock-entry row delete: themed confirm modal (replaces the native confirm()), styled
+// to match the row's View/Edit buttons. Disables itself while the DELETE is in flight.
+function StockEntryDeleteButton({
+  itemName,
+  onConfirm,
+}: {
+  itemName: string;
+  onConfirm: () => Promise<void>;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+  const run = async () => {
+    setBusy(true);
+    try {
+      await onConfirm();
+      setOpen(false);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <button
+        type="button"
+        title="Delete"
+        onClick={(ev) => { ev.stopPropagation(); setOpen(true); }}
+        className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--neg)]/30 bg-[var(--neg)]/10 text-[var(--neg)] transition-all hover:bg-[var(--neg)] hover:text-white"
+      >
+        <Trash2 className="h-4 w-4" />
+      </button>
+      <ConfirmDialog
+        open={open}
+        title="Delete stock entry?"
+        message={
+          <>
+            Delete <strong className="text-[var(--ink)]">{itemName}</strong>? This can&apos;t be undone.
+          </>
+        }
+        confirmLabel="Delete"
         danger
         busy={busy}
         onConfirm={run}

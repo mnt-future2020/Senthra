@@ -7,6 +7,7 @@ import * as customerService from "@/services/customer.service";
 import { Modal } from "@/components/ui/Modal";
 import { RequiredMark } from "@/components/ui/FormScaffold";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
+import { NumberInput } from "@/components/ui/NumberInput";
 import type { StockRequest } from "@/types/customer";
 
 // Admin creates a stock submission on behalf of a customer (e.g. taken over the
@@ -100,8 +101,7 @@ export function AdminStockSubmissionModal({
             <label className={labelCls}>
               Quantity<RequiredMark />
             </label>
-            <input
-              type="number"
+            <NumberInput
               min={1}
               step={1}
               className={inputCls}

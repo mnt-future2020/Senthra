@@ -7,6 +7,7 @@ import * as customerService from "@/services/customer.service";
 import { Modal } from "@/components/ui/Modal";
 import { RequiredMark } from "@/components/ui/FormScaffold";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
+import { NumberInput } from "@/components/ui/NumberInput";
 import type { WarehouseAssignment } from "@/types/customer";
 
 export function ReceiveStockModal({
@@ -77,8 +78,7 @@ export function ReceiveStockModal({
           <label className={labelCls}>
             Quantity received<RequiredMark />
           </label>
-          <input
-            type="number"
+          <NumberInput
             min={1}
             max={remaining}
             step={1}

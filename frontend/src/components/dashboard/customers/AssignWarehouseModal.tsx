@@ -8,6 +8,7 @@ import { listWarehouses } from "@/services/warehouse.service";
 import { Modal } from "@/components/ui/Modal";
 import { Select } from "@/components/ui/Select";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
+import { NumberInput } from "@/components/ui/NumberInput";
 import type { StockRequest } from "@/types/customer";
 
 interface Row {
@@ -123,8 +124,7 @@ export function AssignWarehouseModal({
             </div>
             <div className="w-28">
               <label className={labelCls}>Qty</label>
-              <input
-                type="number"
+              <NumberInput
                 min={1}
                 step={1}
                 className={inputCls}
