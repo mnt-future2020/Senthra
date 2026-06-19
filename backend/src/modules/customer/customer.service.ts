@@ -1036,22 +1036,20 @@ export async function sendUserResetLink(
 export interface StockRequestInput {
   name: string;
   quantity: number;
-  reason: string;
+  reason?: string;
   notes?: string;
 }
 
 function toStockRequestData(input: StockRequestInput): customerRepo.StockRequestData {
   const name = input.name.trim();
-  const reason = input.reason.trim();
   if (!name) throw badRequest("Item name is required.");
   if (!Number.isFinite(input.quantity) || input.quantity < 1) {
     throw badRequest("Quantity must be at least 1.");
   }
-  if (!reason) throw badRequest("A business reason is required.");
   return {
     name,
     quantity: Math.trunc(input.quantity),
-    reason,
+    reason: trimToNull(input.reason),
     notes: trimToNull(input.notes),
   };
 }
@@ -1076,6 +1074,28 @@ export async function submitStockRequest(
   audit.record({
     actor: { id: requestedBy.userId, type: "customer", email: requestedBy.email },
     action: "customer.stock_request.submitted",
+    targetType: "customer",
+    targetId: customer.id,
+    targetLabel: `${customer.name} — ${data.name} ×${data.quantity}`,
+  });
+  return toStockRequest(created);
+}
+
+// ADMIN: create a stock submission on behalf of a customer (e.g. taken over the
+// phone). Mirrors the portal submission but records no portal user — the optional
+// `requestedByName` captures the customer contact the admin spoke to.
+export async function createStockRequestForCustomer(
+  customerId: string,
+  requestedByName: string | null,
+  input: StockRequestInput,
+  actor?: AuditActor,
+): Promise<PublicStockRequest> {
+  const customer = await requireCustomer(customerId);
+  const data = toStockRequestData(input);
+  const created = await customerRepo.createStockRequest(customerId, null, requestedByName, data);
+  audit.record({
+    actor,
+    action: "customer.stock_request.created_by_admin",
     targetType: "customer",
     targetId: customer.id,
     targetLabel: `${customer.name} — ${data.name} ×${data.quantity}`,
@@ -1255,15 +1275,25 @@ export async function receiveStockAssignment(
     await customerRepo.updateStockRequestStatus(assignment.customerStockRequestId, "partially_received");
   }
 
-  const stockEntry = await customerRepo.createStockEntry({
-    customerId: assignment.stockRequest.customerId,
-    warehouseId: assignment.warehouseId,
-    assignmentId,
-    itemName: assignment.stockRequest.editedName ?? assignment.stockRequest.name,
-    quantity: input.receivedQuantity,
-    receivedBy: actor?.email ?? null,
-    receivedAt: new Date(),
-  });
+  // Partial receives accumulate into ONE stock entry per assignment: top up the
+  // existing entry if this assignment already produced one, otherwise create it.
+  const existingEntries = await customerRepo.findStockEntriesByAssignment(assignmentId);
+  const stockEntry = existingEntries.length
+    ? await customerRepo.addStockEntryQuantity(
+        existingEntries[0].id,
+        input.receivedQuantity,
+        actor?.email ?? null,
+        new Date(),
+      )
+    : await customerRepo.createStockEntry({
+        customerId: assignment.stockRequest.customerId,
+        warehouseId: assignment.warehouseId,
+        assignmentId,
+        itemName: assignment.stockRequest.editedName ?? assignment.stockRequest.name,
+        quantity: input.receivedQuantity,
+        receivedBy: actor?.email ?? null,
+        receivedAt: new Date(),
+      });
 
   audit.record({
     actor,
@@ -1558,6 +1588,24 @@ export async function generateStockEntryBarcode(
   return toStockEntry(updated);
 }
 
+export async function deleteStockEntry(
+  entryId: string,
+  actor?: AuditActor,
+): Promise<void> {
+  const entry = await customerRepo.findStockEntryById(entryId);
+  if (!entry) throw notFound("Stock entry not found.");
+
+  await customerRepo.deleteStockEntry(entryId);
+
+  audit.record({
+    actor,
+    action: "customer.stock_entry.deleted",
+    targetType: "customer_stock_entry",
+    targetId: entryId,
+    targetLabel: `${entry.itemName} (${entry.customer.name})`,
+  });
+}
+
 export interface DirectStockEntryInput {
   warehouseId: string;
   itemName: string;
@@ -1592,18 +1640,17 @@ export async function createDirectStockEntry(
     serialized: input.serialized ?? false,
     serialNumber: input.serialNumber || null,
     highValue: input.highValue ?? false,
-    thresholdQty: input.thresholdQty ?? null,
-    attributes: input.attributes ?? null,
     status: "active",
     receivedBy: actor?.email ?? null,
     receivedAt: new Date(),
   });
 
   audit.record({
-    action: "customer_stock_entry.created",
     actor,
+    action: "customer.stock_entry.created",
     targetType: "customer_stock_entry",
     targetId: entry.id,
+    targetLabel: `${input.itemName} (${input.quantity})`,
     metadata: { itemName: input.itemName, quantity: input.quantity, warehouseId: input.warehouseId, direct: true },
   });
 

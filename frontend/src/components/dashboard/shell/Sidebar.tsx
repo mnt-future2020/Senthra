@@ -65,14 +65,14 @@ const NAV: NavItem[] = [
 ];
 
 // The customer portal nav — a separate, read-only surface (no staff permissions).
-// Everything is view-only except Stock Requests (the one place a customer writes).
+// Everything is view-only except Stock Submissions (the one place a customer writes).
 // Settings reuses the shared account page (profile + password).
 const CUSTOMER_NAV: NavItem[] = [
   { href: "/dashboard/portal", label: "Dashboard", icon: LayoutDashboard, perms: [] },
   { href: "/dashboard/portal/projects", label: "Projects", icon: FolderKanban, perms: [] },
   { href: "/dashboard/portal/sites", label: "Sites", icon: MapPin, perms: [] },
   { href: "/dashboard/stock", label: "My Stock", icon: Package, perms: [] },
-  { href: "/dashboard/portal/requests", label: "Stock Requests", icon: ClipboardList, perms: [] },
+  { href: "/dashboard/portal/requests", label: "Stock Submissions", icon: ClipboardList, perms: [] },
   { href: "/dashboard/portal/reports", label: "Reports", icon: BarChart3, perms: [] },
   { href: "/dashboard/account", label: "Settings", icon: Settings, perms: [] },
 ];

@@ -28,9 +28,12 @@ const childInclude = {
   projects: { orderBy: { name: "asc" } },
   sites: { orderBy: { name: "asc" } },
   users: { orderBy: { fullName: "asc" } },
-  // Only PENDING requests ride along on the admin detail (the review queue).
+  // In-flight submissions ride along on the admin detail (the Stock Submissions
+  // queue): everything still needing action or partway through receiving. Once a
+  // submission is fully received it becomes "completed" (and shows as a stock entry
+  // under Inventory); rejected ones are dismissed — both are excluded here.
   stockRequests: {
-    where: { status: "pending" },
+    where: { status: { in: ["pending", "approved", "assigned", "partially_received"] } },
     include: { warehouseAssignments: { include: { warehouse: { select: { id: true, name: true, code: true } } }, orderBy: { createdAt: "asc" } } },
     orderBy: { createdAt: "desc" },
   },
@@ -729,6 +732,15 @@ export function createStockEntry(data: CreateStockEntryData) {
   return prisma.customerStockEntry.create({ data });
 }
 
+// Add newly-received units onto the assignment's existing stock entry (partial
+// receives accumulate into one entry instead of spawning a new row each time).
+export function addStockEntryQuantity(id: string, addQuantity: number, receivedBy: string | null, receivedAt: Date) {
+  return prisma.customerStockEntry.update({
+    where: { id },
+    data: { quantity: { increment: addQuantity }, receivedBy, receivedAt },
+  });
+}
+
 export interface CreateDirectStockEntryData {
   customerId: string;
   warehouseId: string;
@@ -829,6 +841,10 @@ export function updateStockEntry(id: string, data: UpdateStockEntryData) {
       category: { select: { id: true, name: true } },
     },
   });
+}
+
+export function deleteStockEntry(id: string) {
+  return prisma.customerStockEntry.delete({ where: { id } });
 }
 
 export function updateStockEntryBarcode(id: string, barcode: string, barcodeDataUri: string) {

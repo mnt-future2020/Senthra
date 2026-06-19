@@ -5,6 +5,7 @@ import { param, queryInt } from "../../utils/request.js";
 import { unauthorized } from "../../utils/http-error.js";
 import { principalGrants } from "../../types/principal.js";
 import type {
+  AdminStockRequestInput,
   CreateCustomerInput,
   CustomerUserInput,
   ProjectInput,
@@ -174,6 +175,19 @@ export const listStockRequests = asyncHandler(async (req, res) => {
   res.json({ requests });
 });
 
+// POST /customers/:id/stock-requests — admin creates a submission on behalf of the
+// customer (e.g. taken over the phone). Queues it for the normal review flow.
+export const createStockRequest = asyncHandler(async (req, res) => {
+  const body = req.body as AdminStockRequestInput;
+  const request = await customerService.createStockRequestForCustomer(
+    param(req, "id"),
+    body.requestedByName?.trim() || null,
+    body,
+    actorFrom(req),
+  );
+  res.status(201).json({ request });
+});
+
 // POST /customers/:id/stock-requests/:reqId/approve — status move only (never
 // creates a stock entry or inventory record).
 export const approveStockRequest = asyncHandler(async (req, res) => {
@@ -266,6 +280,12 @@ export const updateStockEntry = asyncHandler(async (req, res) => {
 export const generateStockEntryBarcode = asyncHandler(async (req, res) => {
   const entry = await customerService.generateStockEntryBarcode(param(req, "id"), actorFrom(req));
   res.json({ entry });
+});
+
+// DELETE /stock-entries/:id — permanently remove a stock entry.
+export const deleteStockEntry = asyncHandler(async (req, res) => {
+  await customerService.deleteStockEntry(param(req, "id"), actorFrom(req));
+  res.json({ ok: true });
 });
 
 // POST /customers/:id/stock-entries — directly add a stock entry for a customer.

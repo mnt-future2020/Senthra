@@ -283,8 +283,26 @@ export function sendCustomerUserResetLink(
 export interface StockRequestPayload {
   name: string;
   quantity: number;
-  reason: string;
+  reason?: string;
   notes?: string;
+}
+
+// Admin creates a submission on behalf of a customer (e.g. taken over the phone).
+export interface AdminStockRequestPayload {
+  name: string;
+  quantity: number;
+  requestedByName?: string;
+  notes?: string;
+}
+
+export function createStockRequestForCustomer(
+  customerId: string,
+  payload: AdminStockRequestPayload,
+): Promise<StockRequest> {
+  return api<{ request: StockRequest }>(`/customers/${customerId}/stock-requests`, {
+    method: "POST",
+    body: payload,
+  }).then((r) => r.request);
 }
 
 export function listStockRequests(
@@ -419,6 +437,10 @@ export function updateStockEntry(
     method: "PUT",
     body: payload,
   }).then((r) => r.entry);
+}
+
+export function deleteStockEntry(entryId: string): Promise<void> {
+  return api(`/stock-entries/${entryId}`, { method: "DELETE" }).then(() => undefined);
 }
 
 export function generateStockEntryBarcode(entryId: string): Promise<CustomerStockEntry> {
