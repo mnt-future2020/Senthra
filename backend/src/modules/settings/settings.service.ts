@@ -43,6 +43,13 @@ export async function getCloudinaryCreds(): Promise<CloudinaryCreds | null> {
 // display name is renamed.
 export const DEFAULT_EMPLOYEE_ID_PREFIX = "SNT";
 
+// Read-time defaults for the company-profile + regional settings. Applied only when the stored
+// value is blank, so they stay fully overridable (never hardcoded into downstream documents).
+export const DEFAULT_COMPANY_COUNTRY = "United Kingdom";
+export const DEFAULT_TIMEZONE = "Europe/London";
+export const DEFAULT_DATE_FORMAT = "DD/MM/YYYY";
+export const DEFAULT_TIME_FORMAT = "24h";
+
 // Clean a stored/configured prefix into a usable code: uppercase, letters only,
 // 2–5 chars. Anything shorter/invalid falls back to the default, so employee-ID
 // generation always has a sane prefix even for legacy/blank rows.
@@ -94,6 +101,66 @@ export async function getBranding(): Promise<PublicBranding> {
   return brandingFrom(s);
 }
 
+// --- Reusable readers (the single consumption point for downstream modules) ---
+// Future modules (PO supplier email, and later PO/GRN/GDN/Delivery-Note/Job-Pack/Report documents
+// + exports) MUST call these instead of reading the raw Settings row, so company identity / regional
+// formatting stay defined in exactly one place.
+
+// The company's legal identity for official documents. `country` is default-filled (overridable);
+// `logoUrl` is a READ-ONLY passthrough of the branding logo (Settings.logoUrl) — the single source
+// of truth — so a document gets its whole letterhead from one call without a second logo field.
+export interface CompanyProfile {
+  legalName: string;
+  registrationNumber: string;
+  vatNumber: string;
+  addressLine1: string;
+  addressLine2: string;
+  city: string;
+  county: string;
+  postcode: string;
+  country: string;
+  phone: string;
+  email: string;
+  website: string;
+  logoUrl: string;
+}
+
+export async function getCompanyProfile(): Promise<CompanyProfile> {
+  const s = await settingsRepo.getOrCreate();
+  return {
+    legalName: s.companyLegalName || "",
+    registrationNumber: s.companyRegNumber || "",
+    vatNumber: s.vatNumber || "",
+    addressLine1: s.companyAddressLine1 || "",
+    addressLine2: s.companyAddressLine2 || "",
+    city: s.companyCity || "",
+    county: s.companyCounty || "",
+    postcode: s.companyPostcode || "",
+    country: s.companyCountry || DEFAULT_COMPANY_COUNTRY,
+    phone: s.companyPhone || "",
+    email: s.companyEmail || "",
+    website: s.websiteUrl || "",
+    logoUrl: s.logoUrl || "", // single source of truth = branding logo (NOT a new field)
+  };
+}
+
+// Regional formatting prefs — a cross-cutting concern (documents, emails, audit display, exports).
+// All default-filled so a consumer never has to handle null.
+export interface RegionalSettings {
+  timezone: string;
+  dateFormat: string;
+  timeFormat: string;
+}
+
+export async function getRegionalSettings(): Promise<RegionalSettings> {
+  const s = await settingsRepo.getOrCreate();
+  return {
+    timezone: s.timezone || DEFAULT_TIMEZONE,
+    dateFormat: s.dateFormat || DEFAULT_DATE_FORMAT,
+    timeFormat: s.timeFormat || DEFAULT_TIME_FORMAT,
+  };
+}
+
 // Never send secrets (Google client secret, SMTP password) to the browser —
 // only whether one is set.
 export interface PublicSettings extends PublicBranding {
@@ -113,6 +180,22 @@ export interface PublicSettings extends PublicBranding {
   cloudinaryApiSecretSet: boolean;
   cloudinaryConfigured: boolean;
   employeeIdPrefix: string;
+  // Company profile (legal identity for documents) + regional formatting. Default-filled on read.
+  companyLegalName: string;
+  companyRegNumber: string;
+  vatNumber: string;
+  companyAddressLine1: string;
+  companyAddressLine2: string;
+  companyCity: string;
+  companyCounty: string;
+  companyPostcode: string;
+  companyCountry: string;
+  companyPhone: string;
+  companyEmail: string;
+  websiteUrl: string;
+  timezone: string;
+  dateFormat: string;
+  timeFormat: string;
 }
 
 function publicSettings(s: Settings): PublicSettings {
@@ -140,6 +223,23 @@ function publicSettings(s: Settings): PublicSettings {
 
     // Staff-ID prefix (effective value, default-filled).
     employeeIdPrefix: normalizeEmployeeIdPrefix(s.employeeIdPrefix),
+
+    // Company profile (text fields empty when unset; country/regional default-filled).
+    companyLegalName: s.companyLegalName || "",
+    companyRegNumber: s.companyRegNumber || "",
+    vatNumber: s.vatNumber || "",
+    companyAddressLine1: s.companyAddressLine1 || "",
+    companyAddressLine2: s.companyAddressLine2 || "",
+    companyCity: s.companyCity || "",
+    companyCounty: s.companyCounty || "",
+    companyPostcode: s.companyPostcode || "",
+    companyCountry: s.companyCountry || DEFAULT_COMPANY_COUNTRY,
+    companyPhone: s.companyPhone || "",
+    companyEmail: s.companyEmail || "",
+    websiteUrl: s.websiteUrl || "",
+    timezone: s.timezone || DEFAULT_TIMEZONE,
+    dateFormat: s.dateFormat || DEFAULT_DATE_FORMAT,
+    timeFormat: s.timeFormat || DEFAULT_TIME_FORMAT,
 
     // Branding
     ...brandingFrom(s),
@@ -174,6 +274,22 @@ export interface UpdateSettingsParams {
   loginHeadline?: string;
   loginSubtext?: string;
   employeeIdPrefix?: string;
+  // Company profile + regional (all optional; empty string clears back to null → default on read).
+  companyLegalName?: string;
+  companyRegNumber?: string;
+  vatNumber?: string;
+  companyAddressLine1?: string;
+  companyAddressLine2?: string;
+  companyCity?: string;
+  companyCounty?: string;
+  companyPostcode?: string;
+  companyCountry?: string;
+  companyPhone?: string;
+  companyEmail?: string;
+  websiteUrl?: string;
+  timezone?: string;
+  dateFormat?: string;
+  timeFormat?: string;
 }
 
 export async function updateSettings(input: UpdateSettingsParams): Promise<PublicSettings> {
@@ -249,6 +365,23 @@ export async function updateSettings(input: UpdateSettingsParams): Promise<Publi
   if (typeof input.employeeIdPrefix === "string") {
     data.employeeIdPrefix = input.employeeIdPrefix.trim().toUpperCase() || null;
   }
+
+  // --- Company profile + regional (trim; empty string clears to null → default applies on read) ---
+  if (typeof input.companyLegalName === "string") data.companyLegalName = input.companyLegalName.trim() || null;
+  if (typeof input.companyRegNumber === "string") data.companyRegNumber = input.companyRegNumber.trim() || null;
+  if (typeof input.vatNumber === "string") data.vatNumber = input.vatNumber.trim() || null;
+  if (typeof input.companyAddressLine1 === "string") data.companyAddressLine1 = input.companyAddressLine1.trim() || null;
+  if (typeof input.companyAddressLine2 === "string") data.companyAddressLine2 = input.companyAddressLine2.trim() || null;
+  if (typeof input.companyCity === "string") data.companyCity = input.companyCity.trim() || null;
+  if (typeof input.companyCounty === "string") data.companyCounty = input.companyCounty.trim() || null;
+  if (typeof input.companyPostcode === "string") data.companyPostcode = input.companyPostcode.trim() || null;
+  if (typeof input.companyCountry === "string") data.companyCountry = input.companyCountry.trim() || null;
+  if (typeof input.companyPhone === "string") data.companyPhone = input.companyPhone.trim() || null;
+  if (typeof input.companyEmail === "string") data.companyEmail = input.companyEmail.trim() || null;
+  if (typeof input.websiteUrl === "string") data.websiteUrl = input.websiteUrl.trim() || null;
+  if (typeof input.timezone === "string") data.timezone = input.timezone.trim() || null;
+  if (typeof input.dateFormat === "string") data.dateFormat = input.dateFormat.trim() || null;
+  if (typeof input.timeFormat === "string") data.timeFormat = input.timeFormat.trim() || null;
 
   const updated = await settingsRepo.update(s.id, data);
   return publicSettings(updated);

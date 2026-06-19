@@ -66,6 +66,29 @@ model Settings {
   // employee IDs. Null falls back to the default. Only affects NEW staff.
   employeeIdPrefix   String?
 
+  // --- Company profile (legal identity for official documents — PO PDF letterhead etc.) ---
+  // Pure reference data, surfaced via getCompanyProfile(). Distinct from the display brand above
+  // (brandName) and from the app logo (logoUrl, which stays the single logo source of truth).
+  companyLegalName    String?
+  companyRegNumber    String?
+  vatNumber           String?
+  companyAddressLine1 String?
+  companyAddressLine2 String?
+  companyCity         String?
+  companyCounty       String?
+  companyPostcode     String?
+  // Editable; defaults to "United Kingdom" at READ-time (never hardcoded), so future
+  // international expansion only needs an edit here.
+  companyCountry      String?
+  companyPhone        String?
+  companyEmail        String?
+  websiteUrl          String?
+
+  // --- Regional formatting (surfaced via getRegionalSettings(); defaults applied at read-time) ---
+  timezone   String? // IANA tz; default "Europe/London"
+  dateFormat String? // "DD/MM/YYYY" (default) | "MM/DD/YYYY" | "YYYY-MM-DD"
+  timeFormat String? // "24h" (default) | "12h"
+
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 }

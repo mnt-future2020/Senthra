@@ -2,12 +2,13 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ShieldCheck, Palette, Plug, Mail, MailCheck, Paintbrush, Tag } from "lucide-react";
+import { ShieldCheck, Palette, Plug, Mail, MailCheck, Paintbrush, Tag, Building2 } from "lucide-react";
 
 import { AccountSection } from "./account/AccountSection";
 import { CategoriesView } from "./categories/CategoriesView";
 import { SecuritySection } from "./account/SecuritySection";
 import { BrandingSection } from "./branding/BrandingSection";
+import { CompanyProfileSection } from "./company/CompanyProfileSection";
 import { AppearanceSection } from "./appearance/AppearanceSection";
 import { IntegrationsSection } from "./integrations/IntegrationsSection";
 import { CloudinarySection } from "./integrations/CloudinarySection";
@@ -32,6 +33,7 @@ const NAV: {
     | "categories.view";
 }[] = [
   { id: "account", label: "Account & Security", icon: ShieldCheck, desc: "Email & password", requires: "admin" },
+  { id: "company", label: "Company", icon: Building2, desc: "Legal details & regional", requires: "settings.view" },
   { id: "branding", label: "Branding", icon: Paintbrush, desc: "Logo, name & theme text", requires: "settings.view" },
   { id: "appearance", label: "Appearance", icon: Palette, desc: "Theme & layout", requires: "settings.view" },
   { id: "integrations", label: "Integrations", icon: Plug, desc: "Google Sign-In", requires: "settings.view" },
@@ -111,6 +113,7 @@ export function SettingsPanel(appearance: AppearanceProps) {
               <SessionsCard />
             </>
           )}
+          {activeSection === "company" && <CompanyProfileSection />}
           {activeSection === "branding" && <BrandingSection />}
           {activeSection === "appearance" && <AppearanceSection {...appearance} />}
           {activeSection === "integrations" && (

@@ -1,5 +1,6 @@
 export type Section =
   | "account"
+  | "company"
   | "branding"
   | "appearance"
   | "integrations"

@@ -14,3 +14,8 @@ export const primaryBtn =
 // Secondary / outline button used for inline actions (upload, copy, etc.).
 export const ghostBtn =
   "flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-1.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)] disabled:opacity-60";
+
+// Secondary button sized to sit beside primaryBtn (same height/radius) — e.g. a
+// Cancel/Discard next to Save. Outline style so the primary stays the clear default.
+export const secondaryBtn =
+  "flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-5 py-2.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-60";
