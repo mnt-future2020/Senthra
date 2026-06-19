@@ -253,7 +253,7 @@ export const directStockEntrySchema = z.object({
   categoryId: objectIdField.optional(),
   description: z.string().trim().max(2000).optional(),
   uom: uomField,
-  quantity: z.number({ error: "Quantity is required." }).int().min(1, "Quantity must be at least 1."),
+  quantity: z.number({ error: "Quantity is required." }).int().min(1, "Quantity must be at least 1.").max(1_000_000, "Quantity is too large."),
   serialized: z.boolean().optional(),
   serialNumber: z.string().trim().max(120).optional(),
   highValue: z.boolean().optional(),

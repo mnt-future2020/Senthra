@@ -11,6 +11,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { FormSection, FormAsideCard, RequiredMark } from "@/components/ui/FormScaffold";
 import { inputCls, labelCls, primaryBtn, hintCls } from "@/components/ui/styles";
+import { Select } from "@/components/ui/Select";
 import type { CustomerStockEntry } from "@/types/customer";
 
 function FieldError({ message }: { message?: string }) {
@@ -73,6 +74,10 @@ export function AddStockEntryPage({ customer }: { customer: CustomerInfo }) {
   // Once created (e.g. by generating a barcode before saving), we update this
   // entry instead of creating a duplicate.
   const [created, setCreated] = React.useState<CustomerStockEntry | null>(null);
+  // Lock BOTH buttons while either op runs; the ref additionally blocks a fast
+  // double-trigger (Save + Generate) from creating two entries before `created` settles.
+  const busy = saving || generatingBarcode;
+  const creatingRef = React.useRef(false);
 
   const clearError = (key: string) => setErrors((prev) => { const n = { ...prev }; delete n[key]; return n; });
 
@@ -109,20 +114,28 @@ export function AddStockEntryPage({ customer }: { customer: CustomerInfo }) {
       setCreated(updated);
       return updated;
     }
-    const entry = await customerService.createDirectStockEntry(customer.id, {
-      warehouseId,
-      itemName: itemName.trim(),
-      sku: sku.trim() || undefined,
-      categoryId: categoryId || undefined,
-      description: description.trim() || undefined,
-      uom: uom.trim() || undefined,
-      quantity: parseInt(quantity, 10),
-      serialized,
-      serialNumber: serialNumber.trim() || undefined,
-      highValue,
-    });
-    setCreated(entry);
-    return entry;
+    // A create is already in flight (e.g. Save and Generate clicked together) — don't
+    // create a second entry; let the in-flight one win.
+    if (creatingRef.current) return null;
+    creatingRef.current = true;
+    try {
+      const entry = await customerService.createDirectStockEntry(customer.id, {
+        warehouseId,
+        itemName: itemName.trim(),
+        sku: sku.trim() || undefined,
+        categoryId: categoryId || undefined,
+        description: description.trim() || undefined,
+        uom: uom.trim() || undefined,
+        quantity: parseInt(quantity, 10),
+        serialized,
+        serialNumber: serialNumber.trim() || undefined,
+        highValue,
+      });
+      setCreated(entry);
+      return entry;
+    } finally {
+      creatingRef.current = false;
+    }
   };
 
   const handleSave = async (e: React.FormEvent) => {
@@ -184,7 +197,7 @@ export function AddStockEntryPage({ customer }: { customer: CustomerInfo }) {
           <button
             type="submit"
             form="entry-form"
-            disabled={saving}
+            disabled={busy}
             className={primaryBtn}
           >
             {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
@@ -222,16 +235,13 @@ export function AddStockEntryPage({ customer }: { customer: CustomerInfo }) {
                 </div>
                 <div>
                   <label className={labelCls}>Category</label>
-                  <select
-                    className={inputCls}
+                  <Select
                     value={categoryId}
-                    onChange={(e) => setCategoryId(e.target.value)}
-                  >
-                    <option value="">— Select category —</option>
-                    {categories.map((c) => (
-                      <option key={c.id} value={c.id}>{c.name}</option>
-                    ))}
-                  </select>
+                    onChange={(v) => setCategoryId(v)}
+                    options={categories.map((c) => ({ value: c.id, label: c.name }))}
+                    placeholder="— Select category —"
+                    ariaLabel="Category"
+                  />
                 </div>
                 <div className="sm:col-span-2">
                   <label className={labelCls}>Description</label>
@@ -274,18 +284,16 @@ export function AddStockEntryPage({ customer }: { customer: CustomerInfo }) {
             <FormSection title="Warehouse" description="Select the warehouse where this item will be stored.">
               <div>
                 <label className={labelCls}>Warehouse<RequiredMark /></label>
-                <select
-                  className={inputCls}
+                <Select
                   value={warehouseId}
-                  onChange={(e) => { setWarehouseId(e.target.value); clearError("warehouseId"); }}
-                  aria-invalid={Boolean(errors.warehouseId)}
+                  onChange={(v) => { setWarehouseId(v); clearError("warehouseId"); }}
+                  options={warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))}
+                  placeholder="— Select warehouse —"
+                  ariaLabel="Warehouse"
+                  required
+                  invalid={Boolean(errors.warehouseId)}
                   disabled={Boolean(created)}
-                >
-                  <option value="">— Select warehouse —</option>
-                  {warehouses.map((w) => (
-                    <option key={w.id} value={w.id}>{w.name} ({w.code})</option>
-                  ))}
-                </select>
+                />
                 {created && <p className={hintCls}>Set on creation — cannot be changed here.</p>}
                 <FieldError message={errors.warehouseId} />
               </div>
@@ -351,7 +359,7 @@ export function AddStockEntryPage({ customer }: { customer: CustomerInfo }) {
                   <button
                     type="button"
                     onClick={handleGenerateBarcode}
-                    disabled={generatingBarcode}
+                    disabled={busy}
                     className={primaryBtn}
                   >
                     {generatingBarcode ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Barcode className="h-3.5 w-3.5" />}

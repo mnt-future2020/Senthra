@@ -3,6 +3,7 @@ import { Router } from "express";
 import * as customerController from "./customer.controller.js";
 import {
   requireAuth,
+  requireAnyPermission,
   requireCustomer,
   requirePermission,
 } from "../../middleware/auth.middleware.js";
@@ -280,7 +281,9 @@ stockEntryRouter.get(
 
 stockEntryRouter.put(
   "/:id",
-  requirePermission("stock_requests.complete"),
+  // Editing a customer's stock entry is a customer_stock.edit action; warehouse managers
+  // who fill in details right after receiving also qualify via stock_requests.complete.
+  requireAnyPermission("customer_stock.edit", "stock_requests.complete"),
   writeLimiter,
   validateBody(stockEntryUpdateSchema),
   customerController.updateStockEntry,

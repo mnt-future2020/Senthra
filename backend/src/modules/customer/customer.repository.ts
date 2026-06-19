@@ -690,18 +690,22 @@ export function findPendingAssignmentsByWarehouse(warehouseId: string) {
   });
 }
 
-export function updateAssignmentReceived(id: string, receivedQuantity: number, totalReceivedSoFar: number, assignedQty: number, receivedBy: string | null, notes: string | null) {
+// Atomic, race-safe receive. The update only applies if receivedQuantity is STILL the
+// value the caller read (optimistic guard `receivedQuantity: totalReceivedSoFar`), so two
+// concurrent/double-clicked receives can't both succeed and double-count — the loser gets
+// count===0 and we return null (caller turns it into a 409). This also prevents the
+// duplicate-stock-entry race, since only the winning receive proceeds to create the entry.
+export async function updateAssignmentReceived(id: string, receivedQuantity: number, totalReceivedSoFar: number, assignedQty: number, receivedBy: string | null, notes: string | null) {
   const newTotal = totalReceivedSoFar + receivedQuantity;
   const status = newTotal >= assignedQty ? "received" : "partially_received";
-  return prisma.customerStockWarehouseAssignment.update({
+  const res = await prisma.customerStockWarehouseAssignment.updateMany({
+    where: { id, receivedQuantity: totalReceivedSoFar },
+    data: { receivedQuantity: newTotal, status, receivedBy, receivedAt: new Date(), notes },
+  });
+  if (res.count === 0) return null;
+  return prisma.customerStockWarehouseAssignment.findUnique({
     where: { id },
-    data: {
-      receivedQuantity: newTotal,
-      status,
-      receivedBy,
-      receivedAt: new Date(),
-      notes,
-    },
+    include: { warehouse: { select: { id: true, name: true, code: true } } },
   });
 }
 
@@ -728,8 +732,14 @@ export interface CreateStockEntryData {
   receivedAt: Date;
 }
 
+const stockEntryRelations = {
+  customer: { select: { id: true, name: true, customerCode: true } },
+  warehouse: { select: { id: true, name: true, code: true } },
+  category: { select: { id: true, name: true } },
+} as const;
+
 export function createStockEntry(data: CreateStockEntryData) {
-  return prisma.customerStockEntry.create({ data });
+  return prisma.customerStockEntry.create({ data, include: stockEntryRelations });
 }
 
 // Add newly-received units onto the assignment's existing stock entry (partial
@@ -738,6 +748,7 @@ export function addStockEntryQuantity(id: string, addQuantity: number, receivedB
   return prisma.customerStockEntry.update({
     where: { id },
     data: { quantity: { increment: addQuantity }, receivedBy, receivedAt },
+    include: stockEntryRelations,
   });
 }
 
@@ -785,6 +796,9 @@ export function findStockEntryById(id: string) {
 export function findStockEntriesByCustomer(customerId: string, status?: string) {
   return prisma.customerStockEntry.findMany({
     where: { customerId, ...(status ? { status } : {}) },
+    // Drop the heavy base64 barcode image from list reads — list views only show the
+    // short `barcode` string; the full image is fetched only on the single-entry detail.
+    omit: { barcodeDataUri: true },
     include: {
       customer: { select: { id: true, name: true, customerCode: true } },
       warehouse: { select: { id: true, name: true, code: true } },
@@ -797,6 +811,7 @@ export function findStockEntriesByCustomer(customerId: string, status?: string) 
 export function findStockEntriesByWarehouse(warehouseId: string, status?: string) {
   return prisma.customerStockEntry.findMany({
     where: { warehouseId, ...(status ? { status } : {}) },
+    omit: { barcodeDataUri: true },
     include: {
       customer: { select: { id: true, name: true, customerCode: true } },
       warehouse: { select: { id: true, name: true, code: true } },
@@ -859,8 +874,28 @@ export function updateStockEntryBarcode(id: string, barcode: string, barcodeData
   });
 }
 
-export function countStockEntries() {
-  return prisma.customerStockEntry.count();
+const STOCK_BARCODE_KEY = "CSE";
+
+// Atomic barcode sequence — mirrors the GRN/GDN code counters. Using an atomic Counter
+// (not a row count) means concurrent barcode generation can't collide, and deleting an
+// entry never recycles a previously-issued number.
+export async function nextStockEntryBarcodeSeq(): Promise<number> {
+  try {
+    const c = await prisma.counter.update({ where: { key: STOCK_BARCODE_KEY }, data: { seq: { increment: 1 } }, select: { seq: true } });
+    return c.seq;
+  } catch (e) {
+    if (!(e instanceof Prisma.PrismaClientKnownRequestError) || e.code !== "P2025") throw e;
+  }
+  // Counter row doesn't exist yet — seed it past any already-issued barcodes.
+  const start = await prisma.customerStockEntry.count({ where: { barcode: { not: null } } });
+  try {
+    await prisma.counter.create({ data: { key: STOCK_BARCODE_KEY, seq: start + 1 } });
+    return start + 1;
+  } catch (e) {
+    if (!(e instanceof Prisma.PrismaClientKnownRequestError) || e.code !== "P2002") throw e;
+    const c = await prisma.counter.update({ where: { key: STOCK_BARCODE_KEY }, data: { seq: { increment: 1 } }, select: { seq: true } });
+    return c.seq;
+  }
 }
 
 // True when a nested write hit a per-customer unique index (P2002) — duplicate
