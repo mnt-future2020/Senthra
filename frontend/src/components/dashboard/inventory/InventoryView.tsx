@@ -10,12 +10,12 @@ import { listIrmCategories } from "@/services/irm-category.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { Pagination } from "@/components/ui/Pagination";
+import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { INVENTORY_STATUS_LABELS, InventoryStatusBadge, formatDate, formatMoney } from "./inventoryStatus";
 import type { InventoryStatus } from "@/types/inventory";
 
 const PAGE_SIZE = 20;
-const selectCls = "rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] outline-none focus:border-[var(--accent)]";
 
 function TableSkeleton() {
   return (
@@ -120,18 +120,9 @@ export function InventoryView() {
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="Search item or SKU…" className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]" />
         </div>
-        <select value={warehouse} onChange={(e) => { setWarehouse(e.target.value); setPage(1); }} className={selectCls} aria-label="Filter by warehouse">
-          <option value="">All warehouses</option>
-          {warehouses.map((w) => (<option key={w.id} value={w.id}>{w.name} ({w.code})</option>))}
-        </select>
-        <select value={category} onChange={(e) => { setCategory(e.target.value); setPage(1); }} className={selectCls} aria-label="Filter by category">
-          <option value="">All categories</option>
-          {categories.map((c) => (<option key={c.id} value={c.id}>{c.name}</option>))}
-        </select>
-        <select value={status} onChange={(e) => { setStatus(e.target.value as "" | InventoryStatus); setPage(1); }} className={selectCls} aria-label="Filter by stock status">
-          <option value="">All statuses</option>
-          {(Object.keys(INVENTORY_STATUS_LABELS) as InventoryStatus[]).map((s) => (<option key={s} value={s}>{INVENTORY_STATUS_LABELS[s]}</option>))}
-        </select>
+        <Select size="sm" value={warehouse} onChange={(v) => { setWarehouse(v); setPage(1); }} options={[{ value: "", label: "All warehouses" }, ...warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))]} ariaLabel="Filter by warehouse" />
+        <Select size="sm" value={category} onChange={(v) => { setCategory(v); setPage(1); }} options={[{ value: "", label: "All categories" }, ...categories.map((c) => ({ value: c.id, label: c.name }))]} ariaLabel="Filter by category" />
+        <Select size="sm" value={status} onChange={(v) => { setStatus(v as "" | InventoryStatus); setPage(1); }} options={[{ value: "", label: "All statuses" }, ...(Object.keys(INVENTORY_STATUS_LABELS) as InventoryStatus[]).map((s) => ({ value: s, label: INVENTORY_STATUS_LABELS[s] }))]} ariaLabel="Filter by stock status" />
         <div className="flex items-center gap-2 lg:ml-auto">
           {can("inventory.export") && (
             <button onClick={onExport} disabled={exporting || rows.length === 0} className="flex shrink-0 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)] disabled:opacity-60" title="Export the filtered list to CSV">

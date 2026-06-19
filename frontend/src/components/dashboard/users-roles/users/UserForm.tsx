@@ -11,6 +11,7 @@ import type { Role } from "@/types/role";
 import type { User, UserStatus } from "@/types/user";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import { Avatar } from "@/components/ui/Avatar";
+import { Select } from "@/components/ui/Select";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { TempPasswordModal } from "@/components/ui/TempPasswordModal";
@@ -376,12 +377,17 @@ export function UserForm({
               </div>
               <div>
                 <label className={labelCls}>Gender</label>
-                <select className={inputCls} value={gender} onChange={(e) => setGender(e.target.value)}>
-                  <option value="">Not specified</option>
-                  <option value="male">Male</option>
-                  <option value="female">Female</option>
-                  <option value="other">Other</option>
-                </select>
+                <Select
+                  value={gender}
+                  onChange={(v) => setGender(v)}
+                  options={[
+                    { value: "male", label: "Male" },
+                    { value: "female", label: "Female" },
+                    { value: "other", label: "Other" },
+                  ]}
+                  placeholder="Not specified"
+                  ariaLabel="Gender"
+                />
               </div>
               <div>
                 <label className={labelCls}>Date of birth</label>
@@ -456,33 +462,33 @@ export function UserForm({
               </div>
               <div>
                 <label className={labelCls}>Role<RequiredMark /></label>
-                <select
-                  className={inputCls}
+                <Select
                   value={roleId}
-                  onChange={(e) => {
-                    setRoleId(e.target.value);
+                  onChange={(v) => {
+                    setRoleId(v);
                     clearError("roleId");
                   }}
-                  aria-required={true}
-                  aria-invalid={Boolean(errors.roleId)}
-                  aria-describedby={errors.roleId ? "roleId-error" : undefined}
-                >
-                  <option value="">Select a role…</option>
-                  {roles.map((r) => (
-                    <option key={r.id} value={r.id}>
-                      {r.name}
-                    </option>
-                  ))}
-                </select>
+                  options={roles.map((r) => ({ value: r.id, label: r.name }))}
+                  placeholder="Select a role…"
+                  ariaLabel="Role"
+                  required
+                  invalid={Boolean(errors.roleId)}
+                  describedBy={errors.roleId ? "roleId-error" : undefined}
+                />
                 <FieldError id="roleId-error" message={errors.roleId} />
               </div>
               <div>
                 <label className={labelCls}>Status</label>
-                <select className={inputCls} value={status} onChange={(e) => setStatus(e.target.value as UserStatus)}>
-                  <option value="active">Active</option>
-                  <option value="inactive">Inactive</option>
-                  <option value="suspended">Suspended</option>
-                </select>
+                <Select
+                  value={status}
+                  onChange={(v) => setStatus(v as UserStatus)}
+                  options={[
+                    { value: "active", label: "Active" },
+                    { value: "inactive", label: "Inactive" },
+                    { value: "suspended", label: "Suspended" },
+                  ]}
+                  ariaLabel="Status"
+                />
               </div>
             </div>
           </FormSection>

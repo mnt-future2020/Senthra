@@ -5,6 +5,7 @@ import { Loader2 } from "lucide-react";
 
 import * as customerService from "@/services/customer.service";
 import { Modal } from "@/components/ui/Modal";
+import { Select } from "@/components/ui/Select";
 import { RequiredMark } from "@/components/ui/FormScaffold";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import type { CustomerProject, ProjectStatus } from "@/types/customer";
@@ -132,15 +133,12 @@ export function ProjectModal({
           </div>
           <div>
             <label className={labelCls}>Status</label>
-            <select
-              className={inputCls}
+            <Select
               value={status}
-              onChange={(e) => setStatus(e.target.value as ProjectStatus)}
-            >
-              {STATUS_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
-            </select>
+              onChange={(v) => setStatus(v as ProjectStatus)}
+              options={STATUS_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+              ariaLabel="Status"
+            />
           </div>
           <div>
             <label className={labelCls}>Start date</label>

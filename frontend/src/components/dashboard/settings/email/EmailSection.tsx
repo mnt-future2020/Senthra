@@ -11,6 +11,7 @@ import { Notice } from "@/components/ui/Notice";
 import { Toggle } from "@/components/dashboard/settings/ui/Toggle";
 import { PasswordInput } from "@/components/ui/PasswordInput";
 import { Field } from "@/components/ui/Field";
+import { Select } from "@/components/ui/Select";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { inputCls, primaryBtn } from "@/components/ui/styles";
 import type { Msg } from "@/components/ui/types";
@@ -182,17 +183,12 @@ export function EmailSection() {
           label="Provider preset"
           hint="Auto-fills host, port and encryption."
         >
-          <select
+          <Select
             value={provider}
-            onChange={(e) => onProviderChange(e.target.value)}
-            className={inputCls}
-          >
-            {Object.entries(PROVIDERS).map(([key, p]) => (
-              <option key={key} value={key}>
-                {p.label}
-              </option>
-            ))}
-          </select>
+            onChange={(v) => onProviderChange(v)}
+            options={Object.entries(PROVIDERS).map(([key, p]) => ({ value: key, label: p.label }))}
+            ariaLabel="Provider preset"
+          />
         </Field>
 
         {/* Host + Port */}

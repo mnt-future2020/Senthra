@@ -1,11 +1,12 @@
 "use client";
 
 import * as React from "react";
-import { Loader2, Plus, Trash2, Warehouse } from "lucide-react";
+import { Loader2, Plus, Trash2 } from "lucide-react";
 
 import * as customerService from "@/services/customer.service";
 import { listWarehouses } from "@/services/warehouse.service";
 import { Modal } from "@/components/ui/Modal";
+import { Select } from "@/components/ui/Select";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import type { StockRequest } from "@/types/customer";
 
@@ -108,18 +109,17 @@ export function AssignWarehouseModal({
           <div key={i} className="flex items-end gap-2">
             <div className="flex-1">
               <label className={labelCls}>Warehouse</label>
-              <select
-                className={inputCls}
+              <Select
                 value={row.warehouseId}
-                onChange={(e) => updateRow(i, "warehouseId", e.target.value)}
-              >
-                <option value="">Select warehouse…</option>
-                {warehouses.map((w) => (
-                  <option key={w.id} value={w.id} disabled={usedIds.has(w.id) && w.id !== row.warehouseId}>
-                    {w.name} ({w.code})
-                  </option>
-                ))}
-              </select>
+                onChange={(v) => updateRow(i, "warehouseId", v)}
+                options={warehouses.map((w) => ({
+                  value: w.id,
+                  label: `${w.name} (${w.code})`,
+                  disabled: usedIds.has(w.id) && w.id !== row.warehouseId,
+                }))}
+                placeholder="Select warehouse…"
+                ariaLabel="Warehouse"
+              />
             </div>
             <div className="w-28">
               <label className={labelCls}>Qty</label>

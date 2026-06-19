@@ -7,6 +7,7 @@ import { useDashboard } from "@/hooks/useDashboard";
 import { useAuth } from "@/hooks/useAuth";
 import * as warehouseTypeService from "@/services/warehouse-type.service";
 import type { WarehouseType } from "@/types/warehouse-type";
+import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { inputCls } from "@/components/ui/styles";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
@@ -191,19 +192,20 @@ export function WarehouseTypesView() {
                 className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
               />
             </div>
-            <select
+            <Select
+              size="sm"
               value={sort}
-              onChange={(e) => {
-                setSort(e.target.value as "newest" | "oldest" | "name");
+              onChange={(v) => {
+                setSort(v as "newest" | "oldest" | "name");
                 setPage(1);
               }}
-              className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] outline-none focus:border-[var(--accent)]"
-              title="Sort"
-            >
-              <option value="newest">Newest</option>
-              <option value="oldest">Oldest</option>
-              <option value="name">Name (A–Z)</option>
-            </select>
+              options={[
+                { value: "newest", label: "Newest" },
+                { value: "oldest", label: "Oldest" },
+                { value: "name", label: "Name (A–Z)" },
+              ]}
+              ariaLabel="Sort"
+            />
           </div>
         </div>
         {canCreate && (

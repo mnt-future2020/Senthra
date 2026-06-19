@@ -26,6 +26,7 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { Avatar } from "@/components/ui/Avatar";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Pagination } from "@/components/ui/Pagination";
+import { Select } from "@/components/ui/Select";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { TempPasswordModal } from "@/components/ui/TempPasswordModal";
 
@@ -390,38 +391,39 @@ export function UsersView() {
             className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
           />
         </div>
-        <select
+        <Select
+          size="sm"
           value={statusFilter}
-          onChange={(e) => onStatusChange(e.target.value as "all" | UserStatus)}
-          className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] outline-none focus:border-[var(--accent)]"
-        >
-          <option value="all">All statuses</option>
-          <option value="active">Active</option>
-          <option value="inactive">Inactive</option>
-          <option value="suspended">Suspended</option>
-        </select>
-        <select
+          onChange={(v) => onStatusChange(v as "all" | UserStatus)}
+          ariaLabel="Status filter"
+          options={[
+            { value: "all", label: "All statuses" },
+            { value: "active", label: "Active" },
+            { value: "inactive", label: "Inactive" },
+            { value: "suspended", label: "Suspended" },
+          ]}
+        />
+        <Select
+          size="sm"
           value={roleFilter}
-          onChange={(e) => onRoleChange(e.target.value)}
-          className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] outline-none focus:border-[var(--accent)]"
-        >
-          <option value="all">All roles</option>
-          {roles.map((r) => (
-            <option key={r.id} value={r.id}>
-              {r.name}
-            </option>
-          ))}
-        </select>
-        <select
+          onChange={(v) => onRoleChange(v)}
+          ariaLabel="Role filter"
+          options={[
+            { value: "all", label: "All roles" },
+            ...roles.map((r) => ({ value: r.id, label: r.name })),
+          ]}
+        />
+        <Select
+          size="sm"
           value={sort}
-          onChange={(e) => onSortChange(e.target.value as "newest" | "oldest" | "name")}
-          className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] outline-none focus:border-[var(--accent)]"
-          title="Sort"
-        >
-          <option value="newest">Newest first</option>
-          <option value="oldest">Oldest first</option>
-          <option value="name">Name (A–Z)</option>
-        </select>
+          onChange={(v) => onSortChange(v as "newest" | "oldest" | "name")}
+          ariaLabel="Sort"
+          options={[
+            { value: "newest", label: "Newest first" },
+            { value: "oldest", label: "Oldest first" },
+            { value: "name", label: "Name (A–Z)" },
+          ]}
+        />
         {canCreate && (
           <button
             onClick={() => router.push("/dashboard/users/new")}

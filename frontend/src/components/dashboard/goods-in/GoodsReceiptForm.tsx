@@ -11,6 +11,7 @@ import { useDashboard } from "@/hooks/useDashboard";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import { inputCls, ghostBtn, labelCls, primaryBtn } from "@/components/ui/styles";
 import { NumberInput } from "@/components/ui/NumberInput";
+import { Select } from "@/components/ui/Select";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import type { GoodsReceipt } from "@/types/goods-in";
 import type { PurchaseOrder } from "@/types/purchase-order";
@@ -278,12 +279,7 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
                 <label className={labelCls}>Purchase order<RequiredMark /></label>
                 {mode === "create" ? (
                   <>
-                    <select className={inputCls} value={poId} onChange={(e) => onPickPo(e.target.value)} aria-invalid={Boolean(errors.purchaseOrderId)}>
-                      <option value="">— Select a purchase order —</option>
-                      {receivablePos.map((p) => (
-                        <option key={p.id} value={p.id}>{p.code} — {p.supplierName ?? p.supplier?.name ?? ""} ({p.status === "sent" ? "Sent" : "Partially received"})</option>
-                      ))}
-                    </select>
+                    <Select value={poId} onChange={(v) => onPickPo(v)} options={receivablePos.map((p) => ({ value: p.id, label: `${p.code} — ${p.supplierName ?? p.supplier?.name ?? ""} (${p.status === "sent" ? "Sent" : "Partially received"})` }))} placeholder="— Select a purchase order —" ariaLabel="Purchase order" invalid={Boolean(errors.purchaseOrderId)} />
                     <FieldError message={errors.purchaseOrderId} />
                     <p className="mt-1.5 text-[11px] text-[var(--faint)]">Choose a Sent or Partially Received purchase order to receive this delivery.</p>
                   </>
@@ -415,9 +411,7 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className={labelCls}>Quality status</label>
-                <select className={inputCls} value={qualityStatus} onChange={(e) => { setQualityStatus(e.target.value as typeof qualityStatus); touch(); }}>
-                  {QUALITY.map((q) => (<option key={q} value={q}>{QUALITY_LABELS[q]}</option>))}
-                </select>
+                <Select value={qualityStatus} onChange={(v) => { setQualityStatus(v as typeof qualityStatus); touch(); }} options={QUALITY.map((q) => ({ value: q, label: QUALITY_LABELS[q] }))} ariaLabel="Quality status" />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Overall quality outcome for this delivery.</p>
               </div>
               <div>

@@ -11,13 +11,13 @@ import { listManagerOptions } from "@/services/warehouse.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { Pagination } from "@/components/ui/Pagination";
+import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { GOODS_OUT_STATUS_LABELS, GoodsOutStatusBadge, formatDate } from "./goodsOutStatus";
 import type { GoodsOut, GoodsOutStatus } from "@/types/goods-out";
 
 const PAGE_SIZE = 20;
-const selectCls = "rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] outline-none focus:border-[var(--accent)]";
 
 function MenuItem({ icon: Icon, danger, onClick, children }: { icon: React.ElementType; danger?: boolean; onClick: () => void; children: React.ReactNode }) {
   return (
@@ -188,18 +188,9 @@ export function GoodsOutView() {
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="Search GDN, engineer or warehouse…" className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]" />
         </div>
-        <select value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value as "all" | GoodsOutStatus); setPage(1); }} className={selectCls} aria-label="Filter by status">
-          <option value="all">All statuses</option>
-          {(Object.keys(GOODS_OUT_STATUS_LABELS) as GoodsOutStatus[]).map((s) => (<option key={s} value={s}>{GOODS_OUT_STATUS_LABELS[s]}</option>))}
-        </select>
-        <select value={warehouse} onChange={(e) => { setWarehouse(e.target.value); setPage(1); }} className={selectCls} aria-label="Filter by warehouse">
-          <option value="">All warehouses</option>
-          {warehouses.map((w) => (<option key={w.id} value={w.id}>{w.name} ({w.code})</option>))}
-        </select>
-        <select value={engineer} onChange={(e) => { setEngineer(e.target.value); setPage(1); }} className={selectCls} aria-label="Filter by engineer">
-          <option value="">All engineers</option>
-          {engineers.map((u) => (<option key={u.id} value={u.id}>{u.name}</option>))}
-        </select>
+        <Select size="sm" value={statusFilter} onChange={(v) => { setStatusFilter(v as "all" | GoodsOutStatus); setPage(1); }} options={[{ value: "all", label: "All statuses" }, ...(Object.keys(GOODS_OUT_STATUS_LABELS) as GoodsOutStatus[]).map((s) => ({ value: s, label: GOODS_OUT_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
+        <Select size="sm" value={warehouse} onChange={(v) => { setWarehouse(v); setPage(1); }} options={[{ value: "", label: "All warehouses" }, ...warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))]} ariaLabel="Filter by warehouse" />
+        <Select size="sm" value={engineer} onChange={(v) => { setEngineer(v); setPage(1); }} options={[{ value: "", label: "All engineers" }, ...engineers.map((u) => ({ value: u.id, label: u.name }))]} ariaLabel="Filter by engineer" />
         {can("goods_out.create") && (
           <button onClick={() => router.push("/dashboard/goods-out/new")} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 lg:ml-auto">
             <Plus className="h-4 w-4" /> New dispatch

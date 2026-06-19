@@ -12,6 +12,7 @@ import { useDashboard } from "@/hooks/useDashboard";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import { NumberInput } from "@/components/ui/NumberInput";
+import { Select } from "@/components/ui/Select";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { formatMoney } from "./poStatus";
 import type { PoPriority, PurchaseOrder } from "@/types/purchase-order";
@@ -248,19 +249,13 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className={labelCls}>Supplier<RequiredMark /></label>
-                <select className={inputCls} value={supplierId} onChange={(e) => { setSupplierId(e.target.value); touch(); clearError("supplierId"); }} aria-invalid={Boolean(errors.supplierId)}>
-                  <option value="">— Select a supplier —</option>
-                  {suppliers.map((s) => (<option key={s.id} value={s.id}>{s.name} ({s.code})</option>))}
-                </select>
+                <Select value={supplierId} onChange={(v) => { setSupplierId(v); touch(); clearError("supplierId"); }} options={suppliers.map((s) => ({ value: s.id, label: `${s.name} (${s.code})` }))} placeholder="— Select a supplier —" ariaLabel="Supplier" invalid={Boolean(errors.supplierId)} />
                 <FieldError id="err-supplierId" message={errors.supplierId} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Choose who this order is being placed with.</p>
               </div>
               <div>
                 <label className={labelCls}>Delivery warehouse<RequiredMark /></label>
-                <select className={inputCls} value={warehouseId} onChange={(e) => { setWarehouseId(e.target.value); touch(); clearError("warehouseId"); }} aria-invalid={Boolean(errors.warehouseId)}>
-                  <option value="">— Select a warehouse —</option>
-                  {warehouses.map((w) => (<option key={w.id} value={w.id}>{w.name} ({w.code}){w.isDefault ? " — default" : ""}</option>))}
-                </select>
+                <Select value={warehouseId} onChange={(v) => { setWarehouseId(v); touch(); clearError("warehouseId"); }} options={warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})${w.isDefault ? " — default" : ""}` }))} placeholder="— Select a warehouse —" ariaLabel="Delivery warehouse" invalid={Boolean(errors.warehouseId)} />
                 <FieldError id="err-warehouseId" message={errors.warehouseId} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Defaults to your company default warehouse. You can change it if needed.</p>
               </div>
@@ -283,9 +278,7 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
               </div>
               <div>
                 <label className={labelCls}>Priority</label>
-                <select className={inputCls} value={priority} onChange={(e) => { setPriority(e.target.value as typeof priority); touch(); }}>
-                  {PRIORITIES.map((p) => (<option key={p} value={p}>{PRIORITY_LABELS[p]}</option>))}
-                </select>
+                <Select value={priority} onChange={(v) => { setPriority(v as typeof priority); touch(); }} options={PRIORITIES.map((p) => ({ value: p, label: PRIORITY_LABELS[p] }))} ariaLabel="Priority" />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Use Urgent only for exceptional cases.</p>
               </div>
               <div className="sm:col-span-2">
@@ -321,10 +314,7 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
                     <div className="grid gap-3 sm:grid-cols-12">
                       <div className="sm:col-span-5">
                         <label className={labelCls}>Item</label>
-                        <select className={inputCls} value={row.irmItemId} onChange={(e) => onPickItem(idx, e.target.value)}>
-                          <option value="">— Select an item —</option>
-                          {itemOptions.list.map((i) => (<option key={i.id} value={i.id}>{i.name} ({i.code})</option>))}
-                        </select>
+                        <Select value={row.irmItemId} onChange={(v) => onPickItem(idx, v)} options={itemOptions.list.map((i) => ({ value: i.id, label: `${i.name} (${i.code})` }))} placeholder="— Select an item —" ariaLabel="Item" />
                         {pickedItem && supplierId && (
                           supplierLink?.supplierSku ? (
                             <p className="mt-1.5 text-[11px] text-[var(--muted)]">Supplier item code: <span className="font-mono text-[var(--ink)]">{supplierLink.supplierSku}</span></p>

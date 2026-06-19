@@ -13,6 +13,7 @@ import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardP
 import { inputCls, ghostBtn, labelCls, primaryBtn } from "@/components/ui/styles";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { NumberInput } from "@/components/ui/NumberInput";
+import { Select } from "@/components/ui/Select";
 import { DISPATCH_REASONS, DISPATCH_REASON_LABELS } from "./goodsOutStatus";
 import type { GoodsOut } from "@/types/goods-out";
 
@@ -212,19 +213,13 @@ export function GoodsOutForm({ mode, order }: { mode: "create" | "edit"; order?:
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className={labelCls}>Source warehouse<RequiredMark /></label>
-                <select className={inputCls} value={warehouseId} onChange={(e) => onPickWarehouse(e.target.value)} aria-invalid={Boolean(errors.warehouseId)}>
-                  <option value="">— Select warehouse —</option>
-                  {warehouses.map((w) => (<option key={w.id} value={w.id}>{w.name} ({w.code})</option>))}
-                </select>
+                <Select value={warehouseId} onChange={(v) => onPickWarehouse(v)} options={warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))} placeholder="— Select warehouse —" ariaLabel="Source warehouse" invalid={Boolean(errors.warehouseId)} />
                 <FieldError message={errors.warehouseId} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Changing the warehouse re-checks available stock for each line.</p>
               </div>
               <div>
                 <label className={labelCls}>Engineer<RequiredMark /></label>
-                <select className={inputCls} value={engineerId} onChange={(e) => { setEngineerId(e.target.value); touch(); clearError("engineerId"); }} aria-invalid={Boolean(errors.engineerId)}>
-                  <option value="">— Select engineer —</option>
-                  {staff.map((s) => (<option key={s.id} value={s.id}>{engineerLabel(s)}</option>))}
-                </select>
+                <Select value={engineerId} onChange={(v) => { setEngineerId(v); touch(); clearError("engineerId"); }} options={staff.map((s) => ({ value: s.id, label: engineerLabel(s) }))} placeholder="— Select engineer —" ariaLabel="Engineer" invalid={Boolean(errors.engineerId)} />
                 <FieldError message={errors.engineerId} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">The dispatched stock is added to this engineer&apos;s personal holding.</p>
               </div>
@@ -235,10 +230,7 @@ export function GoodsOutForm({ mode, order }: { mode: "create" | "edit"; order?:
               </div>
               <div>
                 <label className={labelCls}>Dispatch reason<RequiredMark /></label>
-                <select className={inputCls} value={dispatchReason} onChange={(e) => { setDispatchReason(e.target.value); touch(); clearError("dispatchReason"); }} aria-invalid={Boolean(errors.dispatchReason)}>
-                  <option value="">— Select reason —</option>
-                  {DISPATCH_REASONS.map((r) => (<option key={r} value={r}>{DISPATCH_REASON_LABELS[r]}</option>))}
-                </select>
+                <Select value={dispatchReason} onChange={(v) => { setDispatchReason(v); touch(); clearError("dispatchReason"); }} options={DISPATCH_REASONS.map((r) => ({ value: r, label: DISPATCH_REASON_LABELS[r] }))} placeholder="— Select reason —" ariaLabel="Dispatch reason" invalid={Boolean(errors.dispatchReason)} />
                 <FieldError message={errors.dispatchReason} />
               </div>
               <div>
@@ -248,10 +240,7 @@ export function GoodsOutForm({ mode, order }: { mode: "create" | "edit"; order?:
               </div>
               <div>
                 <label className={labelCls}>Authorised by</label>
-                <select className={inputCls} value={authorizedById} onChange={(e) => { setAuthorizedById(e.target.value); touch(); }}>
-                  <option value="">— None —</option>
-                  {staff.map((s) => (<option key={s.id} value={s.id}>{engineerLabel(s)}</option>))}
-                </select>
+                <Select value={authorizedById} onChange={(v) => { setAuthorizedById(v); touch(); }} options={staff.map((s) => ({ value: s.id, label: engineerLabel(s) }))} placeholder="— None —" ariaLabel="Authorised by" />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Optional. The PM / administrator who authorised this dispatch.</p>
               </div>
               <div>
@@ -272,10 +261,7 @@ export function GoodsOutForm({ mode, order }: { mode: "create" | "edit"; order?:
                   <div className="grid gap-3 sm:grid-cols-12">
                     <div className="sm:col-span-6">
                       <label className={labelCls}>Item</label>
-                      <select className={inputCls} value={l.irmItemId} onChange={(e) => onPickItem(l._key, e.target.value)}>
-                        <option value="">— Select item —</option>
-                        {items.map((i) => (<option key={i.id} value={i.id}>{i.code} — {i.name}{i.sku ? ` (${i.sku})` : ""}</option>))}
-                      </select>
+                      <Select value={l.irmItemId} onChange={(v) => onPickItem(l._key, v)} options={items.map((i) => ({ value: i.id, label: `${i.code} — ${i.name}${i.sku ? ` (${i.sku})` : ""}` }))} placeholder="— Select item —" ariaLabel="Item" />
                     </div>
                     <div className="sm:col-span-2">
                       <label className={labelCls}>Quantity</label>

@@ -19,6 +19,7 @@ import { firstActiveId } from "@/lib/utils";
 import { useAuth } from "@/hooks/useAuth";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { CreatableSelect } from "@/components/ui/CreatableSelect";
+import { Select } from "@/components/ui/Select";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import type { UserStatus } from "@/types/user";
@@ -444,10 +445,15 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
               </div>
               <div>
                 <label className={labelCls}>Status</label>
-                <select className={inputCls} value={status} onChange={(e) => setStatus(e.target.value as "active" | "inactive")}>
-                  <option value="active">Active</option>
-                  <option value="inactive">Inactive</option>
-                </select>
+                <Select
+                  value={status}
+                  onChange={(v) => setStatus(v as "active" | "inactive")}
+                  options={[
+                    { value: "active", label: "Active" },
+                    { value: "inactive", label: "Inactive" },
+                  ]}
+                  ariaLabel="Status"
+                />
               </div>
               <div className="sm:col-span-2">
                 <label className={labelCls}>Description</label>
@@ -481,12 +487,13 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
                   <div className="grid gap-3 sm:grid-cols-12">
                     <div className="sm:col-span-5">
                       <label className={labelCls}>Supplier</label>
-                      <select className={inputCls} value={row.supplierId} onChange={(e) => updateRow(idx, { supplierId: e.target.value })}>
-                        <option value="">— Select a supplier —</option>
-                        {supplierOptions.map((s) => (
-                          <option key={s.id} value={s.id}>{s.label}</option>
-                        ))}
-                      </select>
+                      <Select
+                        value={row.supplierId}
+                        onChange={(v) => updateRow(idx, { supplierId: v })}
+                        options={supplierOptions.map((s) => ({ value: s.id, label: s.label }))}
+                        placeholder="— Select a supplier —"
+                        ariaLabel="Supplier"
+                      />
                     </div>
                     <div className="sm:col-span-2">
                       <label className={labelCls}>Priority</label>
@@ -532,11 +539,13 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
                 <label className={labelCls}>
                   Base unit<RequiredMark />
                 </label>
-                <select className={inputCls} value={baseUnit} onChange={(e) => { setBaseUnit(e.target.value); clearError("baseUnit"); }} aria-invalid={Boolean(errors.baseUnit)}>
-                  {UOM_OPTIONS.map((u) => (
-                    <option key={u} value={u}>{u}</option>
-                  ))}
-                </select>
+                <Select
+                  value={baseUnit}
+                  onChange={(v) => { setBaseUnit(v); clearError("baseUnit"); }}
+                  options={UOM_OPTIONS.map((u) => ({ value: u, label: u }))}
+                  ariaLabel="Base unit"
+                  invalid={Boolean(errors.baseUnit)}
+                />
                 <FieldError id="err-baseUnit" message={errors.baseUnit} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">The unit you store and count this item in.</p>
               </div>
@@ -593,11 +602,12 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
               </div>
               <div>
                 <label className={labelCls}>Currency</label>
-                <select className={inputCls} value={currency} onChange={(e) => setCurrency(e.target.value)}>
-                  {CURRENCY_OPTIONS.map((c) => (
-                    <option key={c} value={c}>{CURRENCY_LABELS[c] ?? c}</option>
-                  ))}
-                </select>
+                <Select
+                  value={currency}
+                  onChange={(v) => setCurrency(v)}
+                  options={CURRENCY_OPTIONS.map((c) => ({ value: c, label: CURRENCY_LABELS[c] ?? c }))}
+                  ariaLabel="Currency"
+                />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Defaults to GBP — change only if this item is priced in another currency.</p>
               </div>
               <div>
@@ -631,12 +641,13 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className={labelCls}>Internal owner</label>
-                <select className={inputCls} value={ownerUserId} onChange={(e) => setOwnerUserId(e.target.value)}>
-                  <option value="">— No owner assigned —</option>
-                  {ownerOptions.map((m) => (
-                    <option key={m.id} value={m.id}>{m.jobTitle ? `${m.name} — ${m.jobTitle}` : m.name}</option>
-                  ))}
-                </select>
+                <Select
+                  value={ownerUserId}
+                  onChange={(v) => setOwnerUserId(v)}
+                  options={ownerOptions.map((m) => ({ value: m.id, label: m.jobTitle ? `${m.name} — ${m.jobTitle}` : m.name }))}
+                  placeholder="— No owner assigned —"
+                  ariaLabel="Internal owner"
+                />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">The staff member responsible for this item (optional).</p>
               </div>
               <div className="sm:col-span-2">
