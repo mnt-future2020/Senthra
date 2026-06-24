@@ -254,7 +254,7 @@ export const receiveStockAssignment = asyncHandler(async (req, res) => {
 
 // GET /warehouses/:id/pending-stock — pending customer stock for a warehouse.
 export const getPendingStockForWarehouse = asyncHandler(async (req, res) => {
-  const items = await customerService.getPendingStockForWarehouse(param(req, "id"));
+  const items = await customerService.getPendingStockForWarehouse(param(req, "id"), actorFrom(req));
   res.json({ items });
 });
 
@@ -262,7 +262,7 @@ export const getPendingStockForWarehouse = asyncHandler(async (req, res) => {
 
 // GET /stock-entries/:id — single stock entry detail.
 export const getStockEntry = asyncHandler(async (req, res) => {
-  const entry = await customerService.getStockEntry(param(req, "id"));
+  const entry = await customerService.getStockEntry(param(req, "id"), actorFrom(req));
   res.json({ entry });
 });
 
@@ -314,6 +314,7 @@ export const listWarehouseStockEntries = asyncHandler(async (req, res) => {
   const entries = await customerService.listWarehouseStockEntries(
     param(req, "id"),
     typeof status === "string" ? status : undefined,
+    actorFrom(req),
   );
   res.json({ entries });
 });

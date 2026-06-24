@@ -18,6 +18,7 @@ import {
   Mail,
   MapPin,
   Package,
+  PackagePlus,
   Pencil,
   Phone,
   Plus,
@@ -66,7 +67,7 @@ const TABS: { id: TabId; label: string; icon: React.ElementType }[] = [
 
 // Each tab beyond Overview is gated by its sub-entity's view permission, so an admin
 // without (say) customer_sites.view never sees the Sites tab. The aggregate detail GET
-// stays gated by customers.view â€” this is purely tab visibility, no separate read API.
+// stays gated by customers.view — this is purely tab visibility, no separate read API.
 // Overview is the company record itself, so it's always shown (reaching this page
 // already required customers.view). Keys mirror the backend PERMISSION_GROUPS.
 const TAB_PERMISSION: Record<TabId, string | null> = {
@@ -78,11 +79,11 @@ const TAB_PERMISSION: Record<TabId, string | null> = {
   users: "customer_portal.view",
 };
 
-// "10 Jun 2026" â€” en-GB, matching the rest of the dashboard.
+// "10 Jun 2026" — en-GB, matching the rest of the dashboard.
 function fmtDate(iso: string | null): string {
-  if (!iso) return "â€”";
+  if (!iso) return "—";
   const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "â€”";
+  if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
 }
 
@@ -129,7 +130,7 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
   const canDelete = can("customers.delete");
   const canResendPrimary = can("customer_portal.resend_invite");
 
-  // Per-sub-entity capabilities â€” each customer detail section is gated by its own
+  // Per-sub-entity capabilities — each customer detail section is gated by its own
   // granular group, matching the backend route permissions.
   const projectCaps = {
     create: can("customer_projects.create"),
@@ -276,7 +277,7 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
         </div>
       </div>
 
-      {/* Tabs â€” URL-driven (?tab=), like the Users & Roles panel. */}
+      {/* Tabs — URL-driven (?tab=), like the Users & Roles panel. */}
       <div className="flex gap-1 overflow-x-auto rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-1">
         {visibleTabs.map((t) => (
           <button
@@ -328,7 +329,7 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
           <>
             This generates a new temporary password for{" "}
             <strong className="text-[var(--ink)]">{customer.name}</strong>&apos;s primary portal
-            user, emails it, and <strong>invalidates their current password</strong> â€” they&apos;ll
+            user, emails it, and <strong>invalidates their current password</strong> — they&apos;ll
             set a new one on next sign-in. (Manage individual users in the Users tab.)
           </>
         }
@@ -369,7 +370,7 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
   );
 }
 
-// Overview tab â€” company / contact / address / notes / audit, grouped into cards
+// Overview tab — company / contact / address / notes / audit, grouped into cards
 // with click-to-email, tap-to-call, and copy affordances.
 function OverviewTab({ customer }: { customer: Customer }) {
   const addressLines = [
@@ -449,7 +450,7 @@ function OverviewTab({ customer }: { customer: Customer }) {
             </Field>
             <div className="sm:col-span-2">
               <p className="text-[11px] text-[var(--faint)]">
-                This is the customer&apos;s portal login â€” manage it in the{" "}
+                This is the customer&apos;s portal login — manage it in the{" "}
                 <span className="font-semibold text-[var(--muted)]">Portal login</span> tab.
               </p>
             </div>
@@ -551,7 +552,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 function Dash() {
-  return <span className="text-[var(--faint)]">â€”</span>;
+  return <span className="text-[var(--faint)]">—</span>;
 }
 
 function TextValue({ value, copyLabel }: { value: string | null; copyLabel?: string }) {
@@ -599,7 +600,7 @@ function CopyButton({ value, label }: { value: string; label: string }) {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
     } catch {
-      // Clipboard API unavailable (e.g. insecure context) â€” silently ignore.
+      // Clipboard API unavailable (e.g. insecure context) — silently ignore.
     }
   };
   return (
@@ -672,7 +673,7 @@ function ProjectsSection({ customer, caps, onChange, pushToast }: SectionProps) 
         <TableShell head={["Code", "Project", "Dates", "Status", canWrite ? "" : null]}>
           {customer.projects.map((project) => (
             <tr key={project.id} className="border-b border-[var(--border)] align-top last:border-0">
-              <td className="px-3 py-2 font-mono text-xs text-[var(--muted)]">{project.code ?? "â€”"}</td>
+              <td className="px-3 py-2 font-mono text-xs text-[var(--muted)]">{project.code ?? "—"}</td>
               <td className="px-3 py-2">
                 <div className="font-semibold text-[var(--ink)]">{project.name}</div>
                 {project.type && <div className="text-[11px] text-[var(--muted)]">{project.type}</div>}
@@ -680,7 +681,7 @@ function ProjectsSection({ customer, caps, onChange, pushToast }: SectionProps) 
               <td className="px-3 py-2 text-[var(--muted)]">
                 {project.startDate || project.endDate
                   ? `${fmtDate(project.startDate)} â†’ ${fmtDate(project.endDate)}`
-                  : "â€”"}
+                  : "—"}
               </td>
               <td className="px-3 py-2"><StatusChip value={project.status} /></td>
               {canWrite && (
@@ -818,9 +819,9 @@ function StockEntriesTab({
                         <div className="text-[var(--ink)]">{e.warehouseName}</div>
                         <div className="font-mono text-[11px] text-[var(--faint)]">{e.warehouseCode}</div>
                       </td>
-                      <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.sku ?? "â€”"}</td>
+                      <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.sku ?? "—"}</td>
                       <td className="px-4 py-3 font-bold text-[var(--ink)]">{e.quantity}</td>
-                      <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.barcode ?? "â€”"}</td>
+                      <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.barcode ?? "—"}</td>
                       <td className="px-4 py-3">
                         <span
                           className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${
@@ -997,6 +998,7 @@ function StockSubmissionsTab({
                         x{req.quantity ?? "?"}
                       </span>
                       <RequestStatusBadge status={req.status} />
+                      {req.linkedStockEntryId && <TopUpBadge />}
                     </div>
                     <div className="mt-0.5 text-[11px] text-[var(--faint)]">
                       requested by {req.requestedByName ?? "a portal user"}
@@ -1183,14 +1185,14 @@ function SitesSection({ customer, caps, onChange, pushToast }: SectionProps) {
         <TableShell head={["Code", "Site", "Postcode", "Contact", "Status", canWrite ? "" : null]}>
           {customer.sites.map((site) => (
             <tr key={site.id} className="border-b border-[var(--border)] align-top last:border-0">
-              <td className="px-3 py-2 font-mono text-xs text-[var(--muted)]">{site.code ?? "â€”"}</td>
+              <td className="px-3 py-2 font-mono text-xs text-[var(--muted)]">{site.code ?? "—"}</td>
               <td className="px-3 py-2">
                 <div className="font-semibold text-[var(--ink)]">{site.name}</div>
                 {site.addressLine && (
                   <div className="text-[11px] text-[var(--muted)]">{site.addressLine}</div>
                 )}
               </td>
-              <td className="px-3 py-2 text-[var(--muted)]">{site.postcode ?? "â€”"}</td>
+              <td className="px-3 py-2 text-[var(--muted)]">{site.postcode ?? "—"}</td>
               <td className="px-3 py-2 text-[var(--muted)]">
                 {site.contactPerson || site.contactNumber ? (
                   <div>
@@ -1198,7 +1200,7 @@ function SitesSection({ customer, caps, onChange, pushToast }: SectionProps) {
                     {site.contactNumber && <div className="text-[11px]">{site.contactNumber}</div>}
                   </div>
                 ) : (
-                  "â€”"
+                  "—"
                 )}
               </td>
               <td className="px-3 py-2"><StatusChip value={site.status} /></td>
@@ -1247,7 +1249,7 @@ function PortalLoginSection({
 }: Omit<SectionProps, "caps"> & {
   caps: { manage: boolean; resendInvite: boolean; resetPassword: boolean };
 }) {
-  // One login per company â€” the user auto-created with the company.
+  // One login per company — the user auto-created with the company.
   const login = customer.users[0] ?? null;
   const [open, setOpen] = React.useState(false);
   // One-time temp-password reveal after creating / re-inviting the login.
@@ -1531,6 +1533,17 @@ function RequestStatusBadge({ status }: { status: string }) {
   return (
     <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${REQ_STATUS_COLORS[status] ?? REQ_STATUS_COLORS.pending}`}>
       {status.replace(/_/g, " ")}
+    </span>
+  );
+}
+
+// Marks a submission that tops up an existing stock line (vs. a brand-new item) — its
+// received quantity is added onto that line rather than creating a duplicate.
+function TopUpBadge() {
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full bg-[var(--accent-10)] px-2 py-0.5 text-[10px] font-bold text-[var(--accent)]">
+      <PackagePlus className="h-3 w-3" />
+      Top-up
     </span>
   );
 }

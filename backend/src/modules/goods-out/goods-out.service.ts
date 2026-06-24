@@ -8,6 +8,7 @@ import * as userRepo from "#modules/user/user.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { withTransaction } from "../../lib/prisma.js";
+import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import type { CreateGoodsOutInput, GoodsOutLineInput, UpdateGoodsOutInput } from "./goods-out.validation.js";
 
@@ -217,9 +218,9 @@ export interface ListGoodsOutParams {
   sort?: string;
 }
 
-export async function listGoodsOut(params: ListGoodsOutParams = {}): Promise<PagedGoodsOut> {
+export async function listGoodsOut(params: ListGoodsOutParams = {}, actor?: AuditActor): Promise<PagedGoodsOut> {
   const pageSize = Math.min(Math.max(Math.trunc(params.pageSize ?? 20), 1), 100);
-  const filters = { search: params.search, status: params.status, warehouseId: params.warehouse, engineerId: params.engineer };
+  const filters = { search: params.search, status: params.status, warehouseId: params.warehouse, warehouseIds: warehouseScopeFilter(actor), engineerId: params.engineer };
   const total = await goodsOutRepo.count(filters);
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const page = Math.min(Math.max(Math.trunc(params.page ?? 1), 1), totalPages);
@@ -227,21 +228,28 @@ export async function listGoodsOut(params: ListGoodsOutParams = {}): Promise<Pag
   return { goodsOut: rows.map(toPublic), total, page, pageSize, totalPages };
 }
 
-export async function getGoodsOut(idOrCode: string): Promise<PublicGoodsOut> {
+export async function getGoodsOut(idOrCode: string, actor?: AuditActor): Promise<PublicGoodsOut> {
   const g = OBJECT_ID_RE.test(idOrCode) ? await goodsOutRepo.findById(idOrCode) : await goodsOutRepo.findByCode(idOrCode);
   if (!g) throw notFound("Dispatch not found.");
+  assertWarehouseAccess(actor, g.warehouseId);
   return toPublic(g);
 }
 
-async function loadOrThrow(id: string): Promise<GoodsOutWithRelations> {
+// Loads a GDN by id for a workflow action and asserts the actor may touch its warehouse — the
+// single place that guard lives, so every current AND future workflow caller is scoped by default
+// (mirrors purchase-order.loadOrThrow). Pass the acting principal so a scoped user can't drive a
+// dispatch in a warehouse outside their assigned set.
+async function loadOrThrow(id: string, actor?: AuditActor): Promise<GoodsOutWithRelations> {
   const g = await goodsOutRepo.findById(id);
   if (!g) throw notFound("Dispatch not found.");
+  assertWarehouseAccess(actor, g.warehouseId);
   return g;
 }
 
 // ── Create / update (draft only) ────────────────────────────────────────────────────────────
 export async function createGoodsOut(input: CreateGoodsOutInput, actor?: AuditActor): Promise<PublicGoodsOut> {
   const wh = await warehouseService.requireActiveWarehouse(input.warehouseId);
+  assertWarehouseAccess(actor, wh.id);
   const engineer = await requireActiveEngineer(input.engineerId);
   const rows = await buildLineRows(input.items, wh.id, wh.name);
   const actorEmail = actor?.email ?? null;
@@ -279,6 +287,7 @@ export async function createGoodsOut(input: CreateGoodsOutInput, actor?: AuditAc
 export async function updateGoodsOut(id: string, input: UpdateGoodsOutInput, actor?: AuditActor): Promise<PublicGoodsOut> {
   const existing = await goodsOutRepo.findById(id);
   if (!existing) throw notFound("Dispatch not found.");
+  assertWarehouseAccess(actor, existing.warehouseId);
   if (existing.status !== "draft") throw conflict("Only draft dispatches can be edited.");
 
   // If the engineer or warehouse changes, re-validate them and refresh the snapshots.
@@ -287,6 +296,7 @@ export async function updateGoodsOut(id: string, input: UpdateGoodsOutInput, act
   let warehouseName = existing.warehouseName;
   if (input.warehouseId !== undefined) {
     const wh = await warehouseService.requireActiveWarehouse(input.warehouseId);
+    assertWarehouseAccess(actor, wh.id);
     warehouseId = wh.id;
     warehouseName = wh.name;
     headerPatch.warehouseId = wh.id;
@@ -325,7 +335,7 @@ export async function updateGoodsOut(id: string, input: UpdateGoodsOutInput, act
 
 // ── Dispatch (the only inventory-writing action) ───────────────────────────────────────────────
 export async function dispatchGoodsOut(id: string, actor?: AuditActor): Promise<PublicGoodsOut> {
-  const gdn = await loadOrThrow(id);
+  const gdn = await loadOrThrow(id, actor);
   assertTransition(gdn.status, "dispatched");
   if (gdn.items.length === 0) throw badRequest("Add at least one item before dispatching.");
   const actorEmail = actor?.email ?? null;
@@ -395,7 +405,7 @@ export async function dispatchGoodsOut(id: string, actor?: AuditActor): Promise<
 }
 
 export async function cancelGoodsOut(id: string, reason: string | undefined, actor?: AuditActor): Promise<PublicGoodsOut> {
-  const gdn = await loadOrThrow(id);
+  const gdn = await loadOrThrow(id, actor);
   assertTransition(gdn.status, "cancelled");
   const updated = await goodsOutRepo.update(id, { status: "cancelled", cancelledBy: actor?.email ?? null, cancelledAt: new Date(), cancelReason: trimToNull(reason) });
   audit.record({ actor, action: "goods_out.cancelled", targetType: "goods_out", targetId: id, targetLabel: updated.code });
@@ -403,7 +413,7 @@ export async function cancelGoodsOut(id: string, reason: string | undefined, act
 }
 
 export async function deleteGoodsOut(id: string, actor?: AuditActor): Promise<void> {
-  const gdn = await loadOrThrow(id);
+  const gdn = await loadOrThrow(id, actor);
   if (gdn.status !== "draft") throw conflict("Only draft dispatches can be deleted.");
   await goodsOutRepo.softDelete(id);
   audit.record({ actor, action: "goods_out.deleted", targetType: "goods_out", targetId: id, targetLabel: gdn.code });

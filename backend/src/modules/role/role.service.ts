@@ -25,6 +25,9 @@ export interface PublicRole {
   permissions: string[];
   userCount: number;
   sortOrder: number;
+  // Warehouse-scoped role → its users must be assigned warehouses and may access only those.
+  // Drives the user form's conditional "Assigned Warehouses" field.
+  isWarehouseScoped: boolean;
   createdAt: string;
 }
 
@@ -38,6 +41,7 @@ function toPublicRole(role: Role, userCount: number): PublicRole {
     permissions: role.permissions,
     userCount,
     sortOrder: role.sortOrder,
+    isWarehouseScoped: Boolean(role.isWarehouseScoped),
     createdAt: role.createdAt.toISOString(),
   };
 }

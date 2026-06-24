@@ -54,10 +54,12 @@ export function SettingsPanel(appearance: AppearanceProps) {
   );
   // The active section comes from ?section= so it survives a refresh and is
   // shareable/bookmarkable, falling back to the first section this principal can
-  // actually use (so a staff user who can't see "Account" still lands somewhere valid).
+  // actually use. It is ALWAYS one of the visible sections — never a hard-coded
+  // fallback — so a principal with no visible sections (handled below) can't be
+  // shown the admin-only "Account" section by accident.
   const requested = searchParams.get("section");
-  const activeSection: Section =
-    visible.find((s) => s.id === requested)?.id ?? visible[0]?.id ?? "account";
+  const activeSection: Section | null =
+    visible.find((s) => s.id === requested)?.id ?? visible[0]?.id ?? null;
 
   // Switching sections updates the URL. The current one may have unsaved edits, so
   // confirm first (the guard is a no-op when nothing is dirty).
@@ -67,6 +69,24 @@ export function SettingsPanel(appearance: AppearanceProps) {
       router.replace(`/dashboard/settings?section=${target}`, { scroll: false }),
     );
   };
+
+  // Defence-in-depth: if the principal has no usable section, show a neutral empty state instead of
+  // an empty nav rail + an accidental fall-through to the admin-only "Account" section. With the
+  // page/sidebar permission gates aligned to real sections, this should be unreachable in practice.
+  if (!activeSection) {
+    return (
+      <div
+        className="flex flex-col items-center justify-center gap-1.5 border border-[var(--border)] bg-[var(--surface)] px-6 py-16 text-center shadow-xs"
+        style={{ borderRadius: "var(--radius)" }}
+      >
+        <ShieldCheck className="h-7 w-7 text-[var(--faint)]" />
+        <p className="text-sm font-bold text-[var(--ink)]">No settings available</p>
+        <p className="max-w-sm text-xs text-[var(--muted)]">
+          Your role doesn&apos;t include any configurable settings. Contact an administrator if you think this is a mistake.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="w-full">

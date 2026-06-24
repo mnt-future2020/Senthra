@@ -247,6 +247,39 @@ describe("dispatchGoodsOut", () => {
   });
 });
 
+describe("warehouse-scope enforcement (loadOrThrow guards every workflow action)", () => {
+  // A warehouse-scoped principal carries assignedWarehouseIds; assertWarehouseAccess (real, not
+  // mocked here) 403s when the GDN's warehouse isn't in that set. The guard now lives inside
+  // loadOrThrow, so dispatch/cancel/delete are all covered by construction.
+  const outsider = { type: "user", email: "wm@x.com", assignedWarehouseIds: ["f".repeat(24)] } as never; // no WH_ID
+  const insider = { type: "user", email: "wm@x.com", assignedWarehouseIds: [WH_ID] } as never;
+
+  beforeEach(() => {
+    mockFindById.mockResolvedValue(gdnRow({ status: "draft" }));
+  });
+
+  it("blocks a scoped actor without access from dispatching (before any inventory move)", async () => {
+    await expect(dispatchGoodsOut(GDN_ID, outsider)).rejects.toThrow(/access to this warehouse/i);
+    expect(mockApplyOutbound).not.toHaveBeenCalled();
+    expect(mockDispatchTx).not.toHaveBeenCalled();
+  });
+
+  it("blocks a scoped actor without access from cancelling", async () => {
+    await expect(cancelGoodsOut(GDN_ID, undefined, outsider)).rejects.toThrow(/access to this warehouse/i);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it("blocks a scoped actor without access from deleting", async () => {
+    await expect(deleteGoodsOut(GDN_ID, outsider)).rejects.toThrow(/access to this warehouse/i);
+    expect(mockSoftDelete).not.toHaveBeenCalled();
+  });
+
+  it("allows a scoped actor WITH access to act on the GDN", async () => {
+    await expect(deleteGoodsOut(GDN_ID, insider)).resolves.toBeUndefined();
+    expect(mockSoftDelete).toHaveBeenCalledWith(GDN_ID);
+  });
+});
+
 describe("cancel + delete (draft-only)", () => {
   it("cancels a draft", async () => {
     mockFindById.mockResolvedValue(gdnRow({ status: "draft" }));

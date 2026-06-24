@@ -10,21 +10,24 @@ const str = (v: unknown): string | undefined => (typeof v === "string" ? v : und
 export const listGoodsOut = asyncHandler(async (req, res) => {
   const { search, status, warehouse, engineer, sort, page, pageSize } = req.query;
   res.json(
-    await goodsOutService.listGoodsOut({
-      search: str(search),
-      status: str(status),
-      warehouse: str(warehouse),
-      engineer: str(engineer),
-      sort: str(sort),
-      page: queryInt(page),
-      pageSize: queryInt(pageSize),
-    }),
+    await goodsOutService.listGoodsOut(
+      {
+        search: str(search),
+        status: str(status),
+        warehouse: str(warehouse),
+        engineer: str(engineer),
+        sort: str(sort),
+        page: queryInt(page),
+        pageSize: queryInt(pageSize),
+      },
+      actorFrom(req),
+    ),
   );
 });
 
 // GET /goods-out/:id  (id or code)
 export const getGoodsOut = asyncHandler(async (req, res) => {
-  res.json({ goodsOut: await goodsOutService.getGoodsOut(param(req, "id")) });
+  res.json({ goodsOut: await goodsOutService.getGoodsOut(param(req, "id"), actorFrom(req)) });
 });
 
 // POST /goods-out

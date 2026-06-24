@@ -8,6 +8,9 @@ import type { PoPriority, PurchaseOrder } from "@/types/purchase-order";
 export interface PoListParams {
   search?: string;
   status?: string;
+  // Several statuses in one query (sent + partially_received for the Expected-deliveries
+  // worklist). Serialized comma-separated; takes precedence over `status` on the backend.
+  statuses?: string[];
   priority?: string;
   supplier?: string;
   warehouse?: string;
@@ -48,6 +51,29 @@ export interface PurchaseOrderPayload {
   items?: PoLinePayload[];
 }
 
+// One line on the multi-warehouse split payload — like PoLinePayload but carrying its own
+// destination warehouse. The backend groups by warehouse and creates one PO per group.
+export interface SplitPoLinePayload extends PoLinePayload {
+  warehouseId: string;
+}
+
+// Create-only payload (no PATCH variant), so the fields the backend's createPurchaseOrdersSplitSchema
+// requires are required here too — keeps the FE/BE contract in lockstep and catches a missing
+// supplier/date/line at compile time instead of as a 400.
+export interface PurchaseOrderSplitPayload {
+  supplierId: string;
+  orderDate: string;
+  expectedDeliveryDate: string;
+  referenceNumber?: string;
+  description?: string;
+  priority?: PoPriority;
+  deliveryAddress?: string;
+  deliveryInstructions?: string;
+  internalNotes?: string;
+  supplierNotes?: string;
+  items: SplitPoLinePayload[];
+}
+
 export interface PoAttachmentPayload {
   label?: string;
   fileName: string;
@@ -60,6 +86,7 @@ function qs(params: PoListParams): string {
   const sp = new URLSearchParams();
   if (params.search) sp.set("search", params.search);
   if (params.status) sp.set("status", params.status);
+  if (params.statuses?.length) sp.set("statuses", params.statuses.join(","));
   if (params.priority) sp.set("priority", params.priority);
   if (params.supplier) sp.set("supplier", params.supplier);
   if (params.warehouse) sp.set("warehouse", params.warehouse);
@@ -73,7 +100,7 @@ function qs(params: PoListParams): string {
 const listCache = new Map<string, PagedPurchaseOrders>();
 registerClientCache(() => listCache.clear());
 const listCacheKey = (p: PoListParams): string =>
-  `${p.page ?? 1}|${p.pageSize ?? ""}|${p.search ?? ""}|${p.status ?? ""}|${p.priority ?? ""}|${p.supplier ?? ""}|${p.warehouse ?? ""}|${p.sort ?? ""}`;
+  `${p.page ?? 1}|${p.pageSize ?? ""}|${p.search ?? ""}|${p.status ?? ""}|${(p.statuses ?? []).join(",")}|${p.priority ?? ""}|${p.supplier ?? ""}|${p.warehouse ?? ""}|${p.sort ?? ""}`;
 
 export const getCachedPurchaseOrders = (params: PoListParams = {}): PagedPurchaseOrders | undefined =>
   listCache.get(listCacheKey(params));
@@ -103,6 +130,15 @@ const mutate = (p: Promise<{ purchaseOrder: PurchaseOrder }>): Promise<PurchaseO
 
 export function createPurchaseOrder(payload: PurchaseOrderPayload): Promise<PurchaseOrder> {
   return mutate(api<{ purchaseOrder: PurchaseOrder }>("/purchase-orders", { method: "POST", body: payload }));
+}
+
+// Multi-warehouse auto-split create: one purchasing operation → N single-warehouse POs (one per
+// warehouse group). Returns every PO created.
+export function createPurchaseOrdersSplit(payload: PurchaseOrderSplitPayload): Promise<PurchaseOrder[]> {
+  return api<{ purchaseOrders: PurchaseOrder[] }>("/purchase-orders/split", { method: "POST", body: payload }).then((r) => {
+    listCache.clear();
+    return r.purchaseOrders;
+  });
 }
 export function updatePurchaseOrder(id: string, payload: PurchaseOrderPayload): Promise<PurchaseOrder> {
   return mutate(api<{ purchaseOrder: PurchaseOrder }>(`/purchase-orders/${id}`, { method: "PATCH", body: payload }));

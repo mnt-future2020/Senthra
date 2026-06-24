@@ -21,16 +21,19 @@ vi.mock("./inventory.repository.js", () => ({
   countTransfers: vi.fn(),
   findTransferById: vi.fn(),
   createTransferWithCode: vi.fn(),
+  createStockAdjustmentWithCode: vi.fn(),
 }));
 vi.mock("#modules/warehouse/warehouse.service.js", () => ({ requireActiveWarehouse: vi.fn() }));
+vi.mock("#modules/irm/irm.service.js", () => ({ requireActiveIrmItem: vi.fn() }));
 vi.mock("#modules/purchase-order/purchase-order.service.js", () => ({ incomingForItemWarehouse: vi.fn() }));
 vi.mock("#modules/goods-in/goods-in.repository.js", () => ({ receivedHistoryForItemWarehouse: vi.fn() }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 
 import * as inventoryRepo from "./inventory.repository.js";
 import * as warehouseService from "#modules/warehouse/warehouse.service.js";
+import * as irmService from "#modules/irm/irm.service.js";
 import * as audit from "#modules/audit/audit.service.js";
-import { applyInbound, applyOutbound, listInventory, transferStock } from "./inventory.service.js";
+import { addStock, applyInbound, applyOutbound, listInventory, transferStock } from "./inventory.service.js";
 
 const IRM_ID = "c".repeat(24);
 const WH_ID = "d".repeat(24);
@@ -45,7 +48,9 @@ const mockFindAll = inventoryRepo.findAllBalances as ReturnType<typeof vi.fn>;
 const mockFindPairRel = inventoryRepo.findBalancePairWithRelations as ReturnType<typeof vi.fn>;
 const mockFindPairTx = inventoryRepo.findBalancePairTx as ReturnType<typeof vi.fn>;
 const mockCreateTransfer = inventoryRepo.createTransferWithCode as ReturnType<typeof vi.fn>;
+const mockCreateAdjustment = inventoryRepo.createStockAdjustmentWithCode as ReturnType<typeof vi.fn>;
 const mockReqWarehouse = warehouseService.requireActiveWarehouse as ReturnType<typeof vi.fn>;
+const mockReqItem = irmService.requireActiveIrmItem as ReturnType<typeof vi.fn>;
 const mockAudit = audit.record as ReturnType<typeof vi.fn>;
 
 // An InventoryBalance row with the relations the list/transfer DTOs read.
@@ -245,5 +250,61 @@ describe("transferStock — happy path", () => {
     // Source drained by a racing transfer → rolls the whole thing back.
     mockFindPairTx.mockResolvedValueOnce({ quantityOnHand: 1, quantityReserved: 0 });
     await expect(validate(tx)).rejects.toThrow(/source stock changed|not enough/i);
+  });
+});
+
+describe("addStock — manual add (existing / opening stock)", () => {
+  const base = { irmItemId: IRM_ID, warehouseId: WH_ID, quantity: 10, movementDate: "2026-06-15", reason: "opening_balance" as const };
+  const actor = { email: "ops@x.com" } as never;
+
+  // The slice requireActiveIrmItem returns (only the fields addStock reads).
+  const item = (over: Record<string, unknown> = {}) => ({ id: IRM_ID, name: "CAT6 Cable", trackInventory: true, trackSerialNumbers: false, trackBatchNumbers: false, ...over });
+
+  beforeEach(() => {
+    mockReqItem.mockResolvedValue(item());
+    mockReqWarehouse.mockResolvedValue({ id: WH_ID, name: "Leeds", code: "WH-0001" });
+    mockCreateAdjustment.mockImplementation((header: Record<string, unknown>) =>
+      Promise.resolve({
+        adjustment: {
+          id: "adj1", code: "ADJ-0001", warehouseId: WH_ID, reason: header.reason, movementDate: new Date("2026-06-15T00:00:00Z"),
+          referenceNumber: (header.referenceNumber as string) ?? null, notes: (header.notes as string) ?? null,
+          createdBy: "ops@x.com", createdAt: new Date("2026-06-15T10:00:00Z"),
+        },
+        balanceAfter: 30,
+      }),
+    );
+  });
+
+  it("creates the ADJ header + manual_add ledger, returns the DTO and audits post-commit", async () => {
+    const dto = await addStock({ ...base, referenceNumber: "  STK-1 " }, actor);
+
+    const [header, ledger] = mockCreateAdjustment.mock.calls[0];
+    expect(header).toMatchObject({ warehouseId: WH_ID, reason: "opening_balance", referenceNumber: "STK-1", createdBy: "ops@x.com" });
+    expect(ledger).toMatchObject({ irmItemId: IRM_ID, warehouseId: WH_ID, quantity: 10, createdBy: "ops@x.com" });
+    expect(dto).toMatchObject({ code: "ADJ-0001", itemName: "CAT6 Cable", warehouseName: "Leeds", quantity: 10, balanceAfter: 30, reason: "opening_balance" });
+
+    expect(mockAudit).toHaveBeenCalledTimes(1);
+    expect(mockAudit.mock.calls[0][0]).toMatchObject({ action: "inventory.stock_added", targetType: "stock_adjustment", targetId: "adj1" });
+  });
+
+  it("rejects a non-positive quantity before any lookup", async () => {
+    await expect(addStock({ ...base, quantity: 0 }, actor)).rejects.toThrow(/greater than zero/i);
+    expect(mockReqItem).not.toHaveBeenCalled();
+    expect(mockCreateAdjustment).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-inventory-tracked item", async () => {
+    mockReqItem.mockResolvedValue(item({ trackInventory: false }));
+    await expect(addStock(base, actor)).rejects.toThrow(/isn't inventory-tracked/i);
+    expect(mockCreateAdjustment).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["serial-tracked", { trackSerialNumbers: true }],
+    ["batch-tracked", { trackBatchNumbers: true }],
+  ])("rejects a %s item (must come via Goods In)", async (_label, over) => {
+    mockReqItem.mockResolvedValue(item(over));
+    await expect(addStock(base, actor)).rejects.toThrow(/Goods In/i);
+    expect(mockCreateAdjustment).not.toHaveBeenCalled();
   });
 });

@@ -6,6 +6,7 @@ import categoryRoutes from "#modules/category/category.routes.js";
 import { adminRouter as customerRoutes, portalRouter as customerPortalRoutes, stockAssignmentRouter, warehousePendingRouter, stockEntryRouter } from "#modules/customer/customer.routes.js";
 import departmentRoutes from "#modules/department/department.routes.js";
 import emailTemplateRoutes from "#modules/email/emailTemplate.routes.js";
+import engineerRoutes from "#modules/engineer/engineer.routes.js";
 import geoRoutes from "#modules/geo/geo.routes.js";
 import goodsInRoutes from "#modules/goods-in/goods-in.routes.js";
 import goodsOutRoutes from "#modules/goods-out/goods-out.routes.js";
@@ -55,6 +56,8 @@ router.use("/email-templates", emailTemplateRoutes);
 // Customer master-data (admin/PM) + the read-only customer portal API.
 router.use("/customers", customerRoutes);
 router.use("/customer", customerPortalRoutes);
+// Engineer self-service portal API (staff-only, permission-gated, scoped to the signed-in user).
+router.use("/engineer", engineerRoutes);
 // Stock assignment receive endpoint + warehouse pending stock view.
 router.use("/stock-assignments", stockAssignmentRouter);
 router.use("/stock-entries", stockEntryRouter);

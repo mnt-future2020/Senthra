@@ -9,6 +9,11 @@ import {
 
 import { prisma, withTransaction } from "../../lib/prisma.js";
 
+// Repo functions in the customer-receive path accept an optional transaction client so the
+// caller can run the assignment update, request-status update and stock-entry write atomically
+// (see receiveStockAssignment). Defaults to the shared client for all non-transactional callers.
+type Db = Prisma.TransactionClient | typeof prisma;
+
 // Data-access layer for the Customer aggregate (Customer + projects + sites +
 // users). The ONLY place Prisma is touched for customers. Soft-deleted customers
 // (deletedAt set) are excluded from normal reads.
@@ -548,6 +553,8 @@ export interface StockRequestData {
   quantity: number | null;
   reason: string | null;
   notes?: string | null;
+  // Existing stock line this submission tops up (resolved + validated in the service).
+  linkedStockEntryId?: string | null;
 }
 
 export function createStockRequest(
@@ -565,6 +572,7 @@ export function createStockRequest(
       quantity: data.quantity ?? null,
       reason: data.reason ?? null,
       notes: data.notes ?? null,
+      linkedStockEntryId: data.linkedStockEntryId ?? null,
       status: "pending",
     },
   });
@@ -638,8 +646,8 @@ export function editAndApproveStockRequest(id: string, data: StockRequestEditDat
   });
 }
 
-export function updateStockRequestStatus(id: string, status: string): Promise<CustomerStockRequest> {
-  return prisma.customerStockRequest.update({
+export function updateStockRequestStatus(id: string, status: string, client: Db = prisma): Promise<CustomerStockRequest> {
+  return client.customerStockRequest.update({
     where: { id },
     data: { status },
   });
@@ -659,8 +667,8 @@ export function createWarehouseAssignments(data: WarehouseAssignmentData[]) {
   );
 }
 
-export function findAssignmentsByRequest(requestId: string) {
-  return prisma.customerStockWarehouseAssignment.findMany({
+export function findAssignmentsByRequest(requestId: string, client: Db = prisma) {
+  return client.customerStockWarehouseAssignment.findMany({
     where: { customerStockRequestId: requestId },
     include: { warehouse: { select: { id: true, name: true, code: true } } },
     orderBy: { createdAt: "asc" },
@@ -672,7 +680,7 @@ export function findAssignmentById(id: string) {
     where: { id },
     include: {
       warehouse: { select: { id: true, name: true, code: true } },
-      stockRequest: { select: { id: true, customerId: true, name: true, editedName: true, quantity: true, status: true } },
+      stockRequest: { select: { id: true, customerId: true, name: true, editedName: true, quantity: true, status: true, linkedStockEntryId: true } },
     },
   });
 }
@@ -695,15 +703,15 @@ export function findPendingAssignmentsByWarehouse(warehouseId: string) {
 // concurrent/double-clicked receives can't both succeed and double-count — the loser gets
 // count===0 and we return null (caller turns it into a 409). This also prevents the
 // duplicate-stock-entry race, since only the winning receive proceeds to create the entry.
-export async function updateAssignmentReceived(id: string, receivedQuantity: number, totalReceivedSoFar: number, assignedQty: number, receivedBy: string | null, notes: string | null) {
+export async function updateAssignmentReceived(id: string, receivedQuantity: number, totalReceivedSoFar: number, assignedQty: number, receivedBy: string | null, notes: string | null, client: Db = prisma) {
   const newTotal = totalReceivedSoFar + receivedQuantity;
   const status = newTotal >= assignedQty ? "received" : "partially_received";
-  const res = await prisma.customerStockWarehouseAssignment.updateMany({
+  const res = await client.customerStockWarehouseAssignment.updateMany({
     where: { id, receivedQuantity: totalReceivedSoFar },
     data: { receivedQuantity: newTotal, status, receivedBy, receivedAt: new Date(), notes },
   });
   if (res.count === 0) return null;
-  return prisma.customerStockWarehouseAssignment.findUnique({
+  return client.customerStockWarehouseAssignment.findUnique({
     where: { id },
     include: { warehouse: { select: { id: true, name: true, code: true } } },
   });
@@ -730,6 +738,16 @@ export interface CreateStockEntryData {
   quantity: number;
   receivedBy: string | null;
   receivedAt: Date;
+  // Optional product details — copied from a linked existing line when a top-up
+  // submission lands in a warehouse that doesn't yet hold that product, so the new
+  // line stays consistent with its sibling instead of starting blank.
+  sku?: string | null;
+  categoryId?: string | null;
+  description?: string | null;
+  uom?: string | null;
+  serialized?: boolean;
+  highValue?: boolean;
+  thresholdQty?: number | null;
 }
 
 const stockEntryRelations = {
@@ -738,14 +756,41 @@ const stockEntryRelations = {
   category: { select: { id: true, name: true } },
 } as const;
 
-export function createStockEntry(data: CreateStockEntryData) {
-  return prisma.customerStockEntry.create({ data, include: stockEntryRelations });
+export function createStockEntry(data: CreateStockEntryData, client: Db = prisma) {
+  return client.customerStockEntry.create({ data, include: stockEntryRelations });
+}
+
+// Find an existing stock line for this customer in this warehouse that represents the
+// SAME product as `itemName` (+ optional sku) — the target a top-up submission should
+// accumulate into instead of creating a duplicate row. Matching is case-insensitive on
+// the name and exact on sku (when the linked line carries one); the per-customer,
+// per-warehouse candidate set is small, so the match is done in-process to avoid the
+// Mongo connector's collation quirks.
+export async function findStockEntryForTopUp(
+  customerId: string,
+  warehouseId: string,
+  itemName: string,
+  sku: string | null,
+  client: Db = prisma,
+): Promise<{ id: string } | null> {
+  const candidates = await client.customerStockEntry.findMany({
+    where: { customerId, warehouseId },
+    select: { id: true, itemName: true, sku: true },
+    orderBy: { createdAt: "asc" },
+  });
+  const norm = (s: string) => s.trim().toLowerCase();
+  // Match on name AND an EXACT sku equality (null matches only null). A null-sku source must never
+  // collapse onto a different same-named product that does carry a sku, and vice-versa.
+  const target = candidates.find(
+    (e) => norm(e.itemName) === norm(itemName) && e.sku === sku,
+  );
+  return target ? { id: target.id } : null;
 }
 
 // Add newly-received units onto the assignment's existing stock entry (partial
 // receives accumulate into one entry instead of spawning a new row each time).
-export function addStockEntryQuantity(id: string, addQuantity: number, receivedBy: string | null, receivedAt: Date) {
-  return prisma.customerStockEntry.update({
+export function addStockEntryQuantity(id: string, addQuantity: number, receivedBy: string | null, receivedAt: Date, client: Db = prisma) {
+  return client.customerStockEntry.update({
     where: { id },
     data: { quantity: { increment: addQuantity }, receivedBy, receivedAt },
     include: stockEntryRelations,
@@ -782,8 +827,8 @@ export function createDirectStockEntry(data: CreateDirectStockEntryData) {
   });
 }
 
-export function findStockEntryById(id: string) {
-  return prisma.customerStockEntry.findUnique({
+export function findStockEntryById(id: string, client: Db = prisma) {
+  return client.customerStockEntry.findUnique({
     where: { id },
     include: {
       customer: { select: { id: true, name: true, customerCode: true } },
@@ -821,8 +866,8 @@ export function findStockEntriesByWarehouse(warehouseId: string, status?: string
   });
 }
 
-export function findStockEntriesByAssignment(assignmentId: string) {
-  return prisma.customerStockEntry.findMany({
+export function findStockEntriesByAssignment(assignmentId: string, client: Db = prisma) {
+  return client.customerStockEntry.findMany({
     where: { assignmentId },
     include: {
       customer: { select: { id: true, name: true, customerCode: true } },

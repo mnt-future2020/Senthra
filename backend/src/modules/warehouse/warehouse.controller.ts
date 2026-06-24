@@ -7,14 +7,17 @@ import type { CreateWarehouseInput, UpdateWarehouseInput } from "./warehouse.val
 // GET /warehouses?search=&status=&type=&sort=&page=&pageSize=
 export const listWarehouses = asyncHandler(async (req, res) => {
   const { search, status, type, sort, page, pageSize } = req.query;
-  const result = await warehouseService.listWarehouses({
-    search: typeof search === "string" ? search : undefined,
-    status: typeof status === "string" ? status : undefined,
-    type: typeof type === "string" ? type : undefined,
-    sort: typeof sort === "string" ? sort : undefined,
-    page: queryInt(page),
-    pageSize: queryInt(pageSize),
-  });
+  const result = await warehouseService.listWarehouses(
+    {
+      search: typeof search === "string" ? search : undefined,
+      status: typeof status === "string" ? status : undefined,
+      type: typeof type === "string" ? type : undefined,
+      sort: typeof sort === "string" ? sort : undefined,
+      page: queryInt(page),
+      pageSize: queryInt(pageSize),
+    },
+    actorFrom(req),
+  );
   res.json(result);
 });
 
@@ -23,9 +26,15 @@ export const listManagerOptions = asyncHandler(async (_req, res) => {
   res.json({ managers: await warehouseService.listManagerOptions() });
 });
 
+// GET /warehouses/options — active warehouses (id/code/name) for assignment / PO pickers. Scoped to
+// the caller: a warehouse-scoped user only sees their assigned warehouses.
+export const listWarehouseOptions = asyncHandler(async (req, res) => {
+  res.json({ options: await warehouseService.listWarehouseOptions(actorFrom(req)) });
+});
+
 // GET /warehouses/:id  (id or code)
 export const getWarehouse = asyncHandler(async (req, res) => {
-  const warehouse = await warehouseService.getWarehouse(param(req, "id"));
+  const warehouse = await warehouseService.getWarehouse(param(req, "id"), actorFrom(req));
   res.json({ warehouse });
 });
 

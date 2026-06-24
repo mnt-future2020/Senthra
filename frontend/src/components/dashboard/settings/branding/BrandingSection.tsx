@@ -145,6 +145,7 @@ export function BrandingSection() {
   const [loginSubtext, setLoginSubtext] = React.useState("");
   const [employeeIdPrefix, setEmployeeIdPrefix] = React.useState("");
   const [stockCodePrefix, setStockCodePrefix] = React.useState("");
+  const [irmCodePrefix, setIrmCodePrefix] = React.useState("");
 
   // Snapshot of the last-persisted text fields. Logo & favicon save immediately
   // on upload/remove, so they aren't part of this form's unsaved state — only
@@ -157,6 +158,7 @@ export function BrandingSection() {
     loginSubtext: "",
     employeeIdPrefix: "",
     stockCodePrefix: "",
+    irmCodePrefix: "",
   });
 
   const isDirty =
@@ -166,7 +168,8 @@ export function BrandingSection() {
     loginHeadline !== saved.loginHeadline ||
     loginSubtext !== saved.loginSubtext ||
     employeeIdPrefix !== saved.employeeIdPrefix ||
-    stockCodePrefix !== saved.stockCodePrefix;
+    stockCodePrefix !== saved.stockCodePrefix ||
+    irmCodePrefix !== saved.irmCodePrefix;
 
   useReportDirty("branding", isDirty);
 
@@ -187,6 +190,7 @@ export function BrandingSection() {
         setLoginSubtext(s.loginSubtext);
         setEmployeeIdPrefix(s.employeeIdPrefix);
         setStockCodePrefix(s.stockCodePrefix);
+        setIrmCodePrefix(s.irmCodePrefix);
         setSaved({
           brandName: s.brandName,
           brandColor: s.brandColor,
@@ -195,6 +199,7 @@ export function BrandingSection() {
           loginSubtext: s.loginSubtext,
           employeeIdPrefix: s.employeeIdPrefix,
           stockCodePrefix: s.stockCodePrefix,
+          irmCodePrefix: s.irmCodePrefix,
         });
       } catch {
         // ignore — leave fields blank
@@ -268,7 +273,11 @@ export function BrandingSection() {
       return;
     }
     if (stockCodePrefix && !/^[A-Z]{2,5}$/.test(stockCodePrefix)) {
-      setMsg({ type: "error", text: "Stock code prefix must be 2–5 letters." });
+      setMsg({ type: "error", text: "Customer stock code prefix must be 2–5 letters." });
+      return;
+    }
+    if (irmCodePrefix && !/^[A-Z]{2,5}$/.test(irmCodePrefix)) {
+      setMsg({ type: "error", text: "IRM code prefix must be 2–5 letters." });
       return;
     }
     setSaving(true);
@@ -281,6 +290,7 @@ export function BrandingSection() {
         loginSubtext,
         employeeIdPrefix,
         stockCodePrefix,
+        irmCodePrefix,
       });
       setBranding(brandingFromSettings(settings));
       setBrandName(settings.brandName);
@@ -290,6 +300,7 @@ export function BrandingSection() {
       setLoginSubtext(settings.loginSubtext);
       setEmployeeIdPrefix(settings.employeeIdPrefix);
       setStockCodePrefix(settings.stockCodePrefix);
+      setIrmCodePrefix(settings.irmCodePrefix);
       setSaved({
         brandName: settings.brandName,
         brandColor: settings.brandColor,
@@ -298,6 +309,7 @@ export function BrandingSection() {
         loginSubtext: settings.loginSubtext,
         employeeIdPrefix: settings.employeeIdPrefix,
         stockCodePrefix: settings.stockCodePrefix,
+        irmCodePrefix: settings.irmCodePrefix,
       });
       setMsg({ type: "success", text: "Branding saved." });
     } catch (err) {
@@ -392,8 +404,8 @@ export function BrandingSection() {
         </Field>
 
         <Field
-          label="Stock code prefix"
-          hint="2–5 letters for new stock-entry barcodes. Existing barcodes don't change."
+          label="Customer stock code prefix"
+          hint="2–5 letters for new CUSTOMER stock-entry (consignment) barcodes. Existing barcodes don't change."
         >
           <div className="flex flex-wrap items-center gap-3">
             <input
@@ -413,6 +425,33 @@ export function BrandingSection() {
               Next barcode looks like{" "}
               <span className="font-mono font-bold text-[var(--muted)]">
                 {(stockCodePrefix || "CSE")}-00007
+              </span>
+            </span>
+          </div>
+        </Field>
+
+        <Field
+          label="IRM item code prefix"
+          hint="2–5 letters for new IRM catalogue item codes. Existing item codes don't change."
+        >
+          <div className="flex flex-wrap items-center gap-3">
+            <input
+              type="text"
+              value={irmCodePrefix}
+              onChange={(e) =>
+                setIrmCodePrefix(
+                  e.target.value.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 5),
+                )
+              }
+              placeholder="IRM"
+              maxLength={5}
+              spellCheck={false}
+              className={`${inputCls} max-w-[140px] font-mono uppercase tracking-widest`}
+            />
+            <span className="text-xs text-[var(--faint)]">
+              Next item looks like{" "}
+              <span className="font-mono font-bold text-[var(--muted)]">
+                {(irmCodePrefix || "IRM")}-0009
               </span>
             </span>
           </div>

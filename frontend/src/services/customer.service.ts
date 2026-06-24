@@ -285,6 +285,9 @@ export interface StockRequestPayload {
   quantity: number;
   reason?: string;
   notes?: string;
+  // When topping up an existing received stock line, the id of that line. The backend
+  // derives the item name from it and adds to its quantity instead of duplicating it.
+  linkedStockEntryId?: string;
 }
 
 // Admin creates a submission on behalf of a customer (e.g. taken over the phone).
@@ -293,6 +296,7 @@ export interface AdminStockRequestPayload {
   quantity: number;
   requestedByName?: string;
   notes?: string;
+  linkedStockEntryId?: string;
 }
 
 export function createStockRequestForCustomer(

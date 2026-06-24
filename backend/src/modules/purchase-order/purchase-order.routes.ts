@@ -6,6 +6,7 @@ import { writeLimiter, exportLimiter } from "../../middleware/rateLimit.middlewa
 import { validateBody } from "../../middleware/validate.middleware.js";
 import {
   createPurchaseOrderSchema,
+  createPurchaseOrdersSplitSchema,
   poAttachmentSchema,
   poCancelSchema,
   poRejectSchema,
@@ -29,6 +30,14 @@ router.post(
   writeLimiter,
   validateBody(createPurchaseOrderSchema),
   poController.createPurchaseOrder,
+);
+// Multi-warehouse auto-split create: one request → N single-warehouse POs (one per warehouse group).
+router.post(
+  "/split",
+  requirePermission("purchase_orders.create"),
+  writeLimiter,
+  validateBody(createPurchaseOrdersSplitSchema),
+  poController.createPurchaseOrdersSplit,
 );
 router.patch(
   "/:id",

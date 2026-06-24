@@ -87,3 +87,22 @@ describe("updateSettingsSchema — stock code prefix", () => {
     expect(updateSettingsSchema.safeParse({ stockCodePrefix: v }).success).toBe(false);
   });
 });
+
+describe("updateSettingsSchema — IRM code prefix", () => {
+  it.each([["IRM"], ["AB"], ["abcde"]])("accepts %s", (v) => {
+    expect(updateSettingsSchema.safeParse({ irmCodePrefix: v }).success).toBe(true);
+  });
+
+  it("accepts an empty string (clears back to the default)", () => {
+    expect(updateSettingsSchema.safeParse({ irmCodePrefix: "" }).success).toBe(true);
+  });
+
+  it.each([
+    ["one letter", "A"],
+    ["six letters", "ABCDEF"],
+    ["contains a digit", "IR1"],
+    ["contains a dash", "I-M"],
+  ])("rejects %s", (_label, v) => {
+    expect(updateSettingsSchema.safeParse({ irmCodePrefix: v }).success).toBe(false);
+  });
+});

@@ -6,6 +6,7 @@ import { writeLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import {
   createUserSchema,
+  updateMyProfileSchema,
   updateUserSchema,
   updateUserStatusSchema,
   uploadSignatureSchema,
@@ -17,9 +18,11 @@ const router = Router();
 // permission (the super-admin always passes).
 router.use(requireAuth);
 
-// Self-service signature (My Account) — any authenticated staff user manages their
-// OWN signature; no granular permission (mirrors the self password-change pattern).
-// Declared before "/:id" so "me" is never captured as an id.
+// Self-service (My Account) — any authenticated staff user reads/edits their OWN profile +
+// signature; no granular permission (mirrors the self password-change pattern). Declared before
+// "/:id" so "me" is never captured as an id. PUT /me is whitelisted to phone/avatar/address only.
+router.get("/me", userController.getMyProfile);
+router.put("/me", writeLimiter, validateBody(updateMyProfileSchema), userController.updateMyProfile);
 router.post("/me/signature", writeLimiter, validateBody(uploadSignatureSchema), userController.uploadMySignature);
 router.delete("/me/signature", writeLimiter, userController.removeMySignature);
 

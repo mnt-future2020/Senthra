@@ -10,6 +10,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { actionLabel, actionTone, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
+import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
 import type { AuditEntry } from "@/types/audit";
 import type { Supplier } from "@/types/supplier";
 import type { UserStatus } from "@/types/user";
@@ -331,13 +332,7 @@ function AuditTrail({ supplierId }: { supplierId: string }) {
   }, [supplierId]);
 
   if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
-  if (entries === null) {
-    return (
-      <div className="flex items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--surface)] py-16">
-        <Loader2 className="h-6 w-6 animate-spin text-[var(--muted)]" />
-      </div>
-    );
-  }
+  if (entries === null) return <AuditTrailSkeleton />;
   if (entries.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">

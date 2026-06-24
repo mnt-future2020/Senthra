@@ -12,6 +12,7 @@ vi.mock("#modules/irm-type/irm-type.service.js", () => ({ requireActiveIrmType: 
 vi.mock("#modules/irm-category/irm-category.service.js", () => ({ requireActiveIrmCategory: vi.fn() }));
 vi.mock("#modules/supplier/supplier.service.js", () => ({ requireActiveSupplier: vi.fn() }));
 vi.mock("#modules/user/user.repository.js", () => ({ findById: vi.fn() }));
+vi.mock("#modules/settings/settings.service.js", () => ({ getIrmCodePrefix: vi.fn().mockResolvedValue("IRM") }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 
 import * as irmRepo from "./irm.repository.js";

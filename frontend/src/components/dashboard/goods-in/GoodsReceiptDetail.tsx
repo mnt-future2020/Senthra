@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { CheckCircle2, Loader2, Paperclip, Pencil, ScrollText, Trash2, Upload, XCircle } from "lucide-react";
+import { CheckCircle2, Loader2, Pencil, ScrollText, XCircle } from "lucide-react";
 
 import * as grnService from "@/services/goods-in.service";
 import * as auditService from "@/services/audit.service";
@@ -10,11 +10,12 @@ import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { actionLabel, actionTone, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
+import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
 import { GRN_QUALITY_LABELS, GrnStatusBadge, formatDate } from "./grnStatus";
+import { AttachmentGrid, DocPicker, attachmentToDoc, type PickedDoc } from "./DeliveryDocuments";
 import type { AuditEntry } from "@/types/audit";
 import type { GoodsReceipt } from "@/types/goods-in";
 
-const EXT_TYPE: Record<string, string> = { pdf: "pdf", docx: "docx", png: "png", jpg: "jpg", jpeg: "jpg" };
 type Tab = "overview" | "attachments" | "audit";
 
 export function GoodsReceiptDetail({ initial }: { initial: GoodsReceipt }) {
@@ -49,7 +50,16 @@ export function GoodsReceiptDetail({ initial }: { initial: GoodsReceipt }) {
   if (s === "draft" && can("goods_in.edit"))
     actions.push(<ActionBtn key="edit" icon={Pencil} onClick={() => router.push(`/dashboard/goods-in/${grn.code}/edit`)} disabled={busy}>Edit</ActionBtn>);
   if (s === "draft" && can("goods_in.complete"))
-    actions.push(<ActionBtn key="complete" icon={CheckCircle2} primary onClick={() => setConfirmComplete(true)} disabled={busy}>Complete</ActionBtn>);
+    actions.push(<ActionBtn key="complete" icon={CheckCircle2} primary onClick={() => {
+      // The delivery-note number is the audit anchor — required before stock posts. Guard here for
+      // a clear nudge (route to Edit) instead of a round-trip; the backend is the real authority.
+      if (!grn.deliveryNoteNumber?.trim()) {
+        pushToast("Add the supplier's delivery note number before completing.", "alert");
+        router.push(`/dashboard/goods-in/${grn.code}/edit`);
+        return;
+      }
+      setConfirmComplete(true);
+    }} disabled={busy}>Complete</ActionBtn>);
   if (s === "draft" && can("goods_in.cancel"))
     actions.push(<ActionBtn key="cancel" icon={XCircle} onClick={() => { setReason(""); setCancelOpen(true); }} disabled={busy}>Cancel</ActionBtn>);
 
@@ -178,7 +188,7 @@ function Overview({ grn }: { grn: GoodsReceipt }) {
             <Field label="Purchase order">{grn.poCode}</Field>
             <Field label="Warehouse">{grn.warehouse?.name}</Field>
             <Field label="Received date">{formatDate(grn.receivedDate)}</Field>
-            <Field label="Delivery note">{grn.deliveryNoteNumber}</Field>
+            <Field label="Delivery note">{grn.deliveryNoteNumber || (grn.status === "draft" ? <span className="font-semibold text-[var(--neg)]">Required before completing</span> : undefined)}</Field>
             <Field label="Carrier">{grn.carrier}</Field>
             <Field label="Vehicle">{grn.vehicleRegistration}</Field>
             <Field label="Reference">{grn.referenceNumber}</Field>
@@ -211,37 +221,27 @@ function Overview({ grn }: { grn: GoodsReceipt }) {
           </div>
         </Card>
       </div>
+
+      <Card title={`Delivery documents${grn.attachments.length ? ` (${grn.attachments.length})` : ""}`}>
+        <AttachmentGrid items={grn.attachments.map(attachmentToDoc)} />
+      </Card>
     </div>
   );
 }
 
 function Attachments({ grn, setGrn, canEdit }: { grn: GoodsReceipt; setGrn: (g: GoodsReceipt) => void; canEdit: boolean }) {
   const { pushToast } = useDashboard();
-  const [uploading, setUploading] = React.useState(false);
   const [confirm, setConfirm] = React.useState<{ open: boolean; id: string | null }>({ open: false, id: null });
   const [deleting, setDeleting] = React.useState(false);
-  const inputRef = React.useRef<HTMLInputElement>(null);
+  const totalBytes = grn.attachments.reduce((s, a) => s + a.fileSizeBytes, 0);
 
-  const onFile = (file: File) => {
-    const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
-    const fileType = EXT_TYPE[ext];
-    if (!fileType) { pushToast("Unsupported file. Use PDF, DOCX, PNG or JPG.", "alert"); return; }
-    if (file.size > 10 * 1024 * 1024) { pushToast("File must be 10 MB or smaller.", "alert"); return; }
-    setUploading(true);
-    const reader = new FileReader();
-    reader.onload = async () => {
-      try {
-        setGrn(await grnService.addAttachment(grn.id, { fileName: file.name, fileType, fileSizeBytes: file.size, data: reader.result as string }));
-        pushToast("Attachment added.", "success");
-      } catch (e) {
-        pushToast(e instanceof Error ? e.message : "Upload failed.", "alert");
-      } finally {
-        setUploading(false);
-        if (inputRef.current) inputRef.current.value = "";
-      }
-    };
-    reader.onerror = () => { setUploading(false); pushToast("Could not read the file.", "alert"); };
-    reader.readAsDataURL(file);
+  const onPick = async (doc: PickedDoc) => {
+    try {
+      setGrn(await grnService.addAttachment(grn.id, { fileName: doc.fileName, fileType: doc.fileType, fileSizeBytes: doc.fileSizeBytes, data: doc.dataUrl }));
+      pushToast("Document added.", "success");
+    } catch (e) {
+      pushToast(e instanceof Error ? e.message : "Upload failed.", "alert");
+    }
   };
 
   const onDelete = async () => {
@@ -249,7 +249,7 @@ function Attachments({ grn, setGrn, canEdit }: { grn: GoodsReceipt; setGrn: (g: 
     setDeleting(true);
     try {
       setGrn(await grnService.removeAttachment(grn.id, confirm.id));
-      pushToast("Attachment removed.", "success");
+      pushToast("Document removed.", "success");
       setConfirm({ open: false, id: null });
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Delete failed.", "alert");
@@ -260,39 +260,13 @@ function Attachments({ grn, setGrn, canEdit }: { grn: GoodsReceipt; setGrn: (g: 
 
   return (
     <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
-      {canEdit && (
+      {canEdit && grn.status === "draft" && (
         <div className="mb-4">
-          <input ref={inputRef} type="file" accept=".pdf,.docx,.png,.jpg,.jpeg" className="hidden" onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])} />
-          <button type="button" onClick={() => inputRef.current?.click()} disabled={uploading} className="flex items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 disabled:opacity-60">
-            {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />} Upload file
-          </button>
-          <p className="mt-1.5 text-[11px] text-[var(--faint)]">Delivery note, packing slip, invoice or photo — PDF, DOCX, PNG or JPG (max 10 MB).</p>
+          <DocPicker count={grn.attachments.length} totalBytes={totalBytes} onPick={onPick} />
         </div>
       )}
-      {grn.attachments.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-2 py-12 text-center">
-          <Paperclip className="h-7 w-7 text-[var(--faint)]" />
-          <p className="text-sm font-semibold text-[var(--ink)]">No attachments yet</p>
-        </div>
-      ) : (
-        <ul className="divide-y divide-[var(--border-2)]">
-          {grn.attachments.map((a) => (
-            <li key={a.id} className="flex items-center justify-between gap-3 py-3">
-              <a href={a.url} target="_blank" rel="noopener noreferrer" className="flex min-w-0 items-center gap-2.5">
-                <Paperclip className="h-4 w-4 shrink-0 text-[var(--accent)]" />
-                <span className="min-w-0">
-                  <span className="block truncate text-sm font-bold text-[var(--accent)] hover:underline">{a.fileName}</span>
-                  <span className="text-[11px] text-[var(--faint)]">{a.fileType.toUpperCase()} · {(a.fileSizeBytes / 1024).toFixed(0)} KB</span>
-                </span>
-              </a>
-              {canEdit && (
-                <button type="button" onClick={() => setConfirm({ open: true, id: a.id })} className="rounded-lg p-1.5 text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--neg)]" aria-label="Remove attachment"><Trash2 className="h-3.5 w-3.5" /></button>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
-      <ConfirmDialog open={confirm.open} danger busy={deleting} title="Remove attachment" message="Remove this attachment from the receipt?" confirmLabel="Remove" onConfirm={onDelete} onClose={() => { if (!deleting) setConfirm({ open: false, id: null }); }} />
+      <AttachmentGrid items={grn.attachments.map(attachmentToDoc)} onRemove={canEdit && grn.status === "draft" ? (id) => setConfirm({ open: true, id }) : undefined} />
+      <ConfirmDialog open={confirm.open} danger busy={deleting} title="Remove document" message="Remove this document from the receipt?" confirmLabel="Remove" onConfirm={onDelete} onClose={() => { if (!deleting) setConfirm({ open: false, id: null }); }} />
     </div>
   );
 }
@@ -325,7 +299,7 @@ function AuditTrail({ grnId }: { grnId: string }) {
   }, [grnId]);
 
   if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
-  if (entries === null) return <div className="flex items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--surface)] py-16"><Loader2 className="h-6 w-6 animate-spin text-[var(--muted)]" /></div>;
+  if (entries === null) return <AuditTrailSkeleton />;
   if (entries.length === 0)
     return (
       <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">

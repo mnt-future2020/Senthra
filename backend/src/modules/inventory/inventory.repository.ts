@@ -1,4 +1,4 @@
-import { Prisma, type InventoryBalance, type InventoryTransaction, type StockTransfer } from "@prisma/client";
+import { Prisma, type InventoryBalance, type InventoryTransaction, type StockTransfer, type StockAdjustment } from "@prisma/client";
 
 import { prisma, withTransaction } from "../../lib/prisma.js";
 import { conflict } from "../../utils/http-error.js";
@@ -39,6 +39,9 @@ export interface InventoryListFilters {
   warehouseId?: string;
   irmCategoryId?: string;
   outOfStock?: boolean; // quantityOnHand === 0 (the one DB-expressible stock-status filter)
+  // Warehouse-access scope: undefined = unrestricted; otherwise constrain to exactly these ids
+  // (ANDed with any single `warehouseId` filter — the actor may never see beyond their assigned set).
+  warehouseIds?: string[];
 }
 
 function buildBalanceWhere(filters: InventoryListFilters): Prisma.InventoryBalanceWhereInput {
@@ -50,9 +53,13 @@ function buildBalanceWhere(filters: InventoryListFilters): Prisma.InventoryBalan
       { sku: { contains: filters.search, mode: "insensitive" } },
     ];
   }
+  const warehouseFilter: Prisma.WarehouseWhereInput = { deletedAt: null };
+  if (filters.warehouseId) warehouseFilter.id = filters.warehouseId;
+  // Scope `in` is ALWAYS ANDed on top of any single-warehouse filter (combine via `is`).
+  if (filters.warehouseIds !== undefined) warehouseFilter.id = { in: filters.warehouseIds, ...(filters.warehouseId ? { equals: filters.warehouseId } : {}) };
   const where: Prisma.InventoryBalanceWhereInput = {
     irmItem: { is: irmItemFilter },
-    warehouse: { is: { deletedAt: null, ...(filters.warehouseId ? { id: filters.warehouseId } : {}) } },
+    warehouse: { is: warehouseFilter },
   };
   if (filters.outOfStock) where.quantityOnHand = 0;
   return where;
@@ -143,12 +150,16 @@ export interface StockTransferListFilters {
   search?: string;
   irmItemId?: string;
   warehouseId?: string; // matches either from or to
+  // Warehouse-access scope: undefined = unrestricted; otherwise the row must touch (from OR to) an
+  // assigned warehouse. ANDed on top of any single-warehouse filter.
+  warehouseIds?: string[];
 }
 
 function buildTransferWhere(filters: StockTransferListFilters): Prisma.StockTransferWhereInput {
   const and: Prisma.StockTransferWhereInput[] = [{ deletedAt: null }];
   if (filters.irmItemId) and.push({ irmItemId: filters.irmItemId });
   if (filters.warehouseId) and.push({ OR: [{ fromWarehouseId: filters.warehouseId }, { toWarehouseId: filters.warehouseId }] });
+  if (filters.warehouseIds !== undefined) and.push({ OR: [{ fromWarehouseId: { in: filters.warehouseIds } }, { toWarehouseId: { in: filters.warehouseIds } }] });
   if (filters.search) {
     const s = filters.search;
     and.push({
@@ -273,4 +284,94 @@ export async function createTransferWithCode(
     }
   }
   throw new Error("Could not allocate a unique stock-transfer code.");
+}
+
+// --- ADJ code allocation + the atomic manual stock-add (prefix "ADJ") -------------------------
+// Mirrors the TRF allocation exactly, against the StockAdjustment table. The counter key "ADJ" is
+// its own namespace, independent of the displayed value — numbering never resets.
+const ADJ_CODE_PREFIX = "ADJ";
+
+async function highestAdjustmentNumber(): Promise<number> {
+  const head = `${ADJ_CODE_PREFIX}-`;
+  const rows = await prisma.stockAdjustment.findMany({ where: { code: { startsWith: head } }, select: { code: true } });
+  let max = 0;
+  for (const { code } of rows) {
+    const suffix = code.slice(head.length);
+    if (!/^\d+$/.test(suffix)) continue;
+    const n = Number(suffix);
+    if (Number.isSafeInteger(n) && n > max) max = n;
+  }
+  return max;
+}
+
+async function nextAdjustmentSequence(): Promise<number> {
+  try {
+    const c = await prisma.counter.update({ where: { key: ADJ_CODE_PREFIX }, data: { seq: { increment: 1 } }, select: { seq: true } });
+    return c.seq;
+  } catch (e) {
+    if (!isRecordNotFound(e)) throw e;
+  }
+  const start = await highestAdjustmentNumber();
+  try {
+    await prisma.counter.create({ data: { key: ADJ_CODE_PREFIX, seq: start + 1 } });
+    return start + 1;
+  } catch (e) {
+    if (!(e instanceof Prisma.PrismaClientKnownRequestError) || e.code !== "P2002") throw e;
+    const c = await prisma.counter.update({ where: { key: ADJ_CODE_PREFIX }, data: { seq: { increment: 1 } }, select: { seq: true } });
+    return c.seq;
+  }
+}
+
+async function fastForwardAdjustmentCounter(): Promise<void> {
+  const start = await highestAdjustmentNumber();
+  try {
+    await prisma.counter.upsert({ where: { key: ADJ_CODE_PREFIX }, create: { key: ADJ_CODE_PREFIX, seq: start }, update: { seq: start } });
+  } catch {
+    /* best-effort; the next nextAdjustmentSequence() increments anyway */
+  }
+}
+
+export interface StockAdjustmentHeaderInput {
+  warehouseId: string;
+  reason: string;
+  movementDate: Date;
+  referenceNumber: string | null;
+  notes: string | null;
+  createdBy: string | null;
+}
+export interface StockAdjustmentLedgerInput {
+  irmItemId: string;
+  warehouseId: string;
+  quantity: number; // POSITIVE magnitude
+  notes: string | null;
+  createdBy: string | null;
+}
+
+// The ATOMIC manual add: create the ADJ-#### header, upsert the (item, warehouse) balance (+qty)
+// and append ONE "manual_add" ledger row — all in one transaction with a unique code. Any failure
+// rolls back EVERYTHING. The upsertBalanceTx zero-floor backstop also runs here.
+export async function createStockAdjustmentWithCode(
+  header: StockAdjustmentHeaderInput,
+  ledger: StockAdjustmentLedgerInput,
+): Promise<{ adjustment: StockAdjustment; balanceAfter: number }> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const seq = await nextAdjustmentSequence();
+    const code = `${ADJ_CODE_PREFIX}-${String(seq).padStart(4, "0")}`;
+    try {
+      return await withTransaction(async (tx) => {
+        const adjustment = await tx.stockAdjustment.create({ data: { ...header, code } });
+        const bal = await upsertBalanceTx(tx, ledger.irmItemId, ledger.warehouseId, ledger.quantity);
+        await insertTransactionTx(tx, {
+          irmItemId: ledger.irmItemId, warehouseId: ledger.warehouseId, quantityDelta: ledger.quantity,
+          type: "manual_add", sourceType: "stock_adjustment", sourceId: adjustment.id, sourceCode: code,
+          balanceAfter: bal.quantityOnHand, notes: ledger.notes, createdBy: ledger.createdBy,
+        });
+        return { adjustment, balanceAfter: bal.quantityOnHand };
+      });
+    } catch (e) {
+      if (!isCodeConflict(e)) throw e;
+      await fastForwardAdjustmentCounter();
+    }
+  }
+  throw new Error("Could not allocate a unique stock-adjustment code.");
 }

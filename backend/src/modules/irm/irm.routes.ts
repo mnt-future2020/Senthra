@@ -41,4 +41,12 @@ router.patch(
 );
 router.delete("/:id", requirePermission("irm.delete"), writeLimiter, irmController.deleteIrmItem);
 
+// Barcode generate / regenerate — its own dedicated permission (separate from catalogue edits).
+router.post(
+  "/:id/generate-barcode",
+  requirePermission("irm.barcode.manage"),
+  writeLimiter,
+  irmController.generateBarcode,
+);
+
 export default router;

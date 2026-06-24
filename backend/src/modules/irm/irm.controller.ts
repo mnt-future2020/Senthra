@@ -48,3 +48,9 @@ export const deleteIrmItem = asyncHandler(async (req, res) => {
   await irmService.deleteIrmItem(param(req, "id"), actorFrom(req));
   res.json({ ok: true });
 });
+
+// POST /irm-items/:id/generate-barcode — generate / regenerate the item's barcode image.
+export const generateBarcode = asyncHandler(async (req, res) => {
+  const item = await irmService.generateBarcode(param(req, "id"), actorFrom(req));
+  res.json({ item });
+});

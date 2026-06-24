@@ -1,4 +1,5 @@
 import { ProfileCard } from "./ProfileCard";
+import { ProfileEditCard } from "./ProfileEditCard";
 import { PasswordCard } from "./PasswordCard";
 import { SessionsCard } from "./SessionsCard";
 import { SignatureCard } from "./SignatureCard";
@@ -13,17 +14,23 @@ export function AccountPanel() {
     <div className="grid gap-6 lg:grid-cols-3">
       <div className="space-y-6 lg:col-span-2">
         <div className="anim-fade-in" style={{ animationFillMode: "backwards" }}>
-          <PasswordCard />
+          <ProfileEditCard />
         </div>
         <div
           className="anim-fade-in"
           style={{ animationDelay: "70ms", animationFillMode: "backwards" }}
         >
-          <SignatureCard />
+          <PasswordCard />
         </div>
         <div
           className="anim-fade-in"
           style={{ animationDelay: "140ms", animationFillMode: "backwards" }}
+        >
+          <SignatureCard />
+        </div>
+        <div
+          className="anim-fade-in"
+          style={{ animationDelay: "210ms", animationFillMode: "backwards" }}
         >
           <SessionsCard />
         </div>
@@ -31,7 +38,7 @@ export function AccountPanel() {
       <aside className="lg:sticky lg:top-6 lg:self-start">
         <div
           className="anim-fade-in"
-          style={{ animationDelay: "210ms", animationFillMode: "backwards" }}
+          style={{ animationDelay: "280ms", animationFillMode: "backwards" }}
         >
           <ProfileCard />
         </div>

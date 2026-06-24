@@ -37,6 +37,7 @@ export const PERMISSION_CATEGORIES: string[] = [
   "Suppliers",
   "Procurement",
   "Goods Out",
+  "Engineer Portal",
   "System",
 ];
 
@@ -218,6 +219,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       { key: "irm.create", action: "Create", description: "Add new IRM items." },
       { key: "irm.edit", action: "Edit", description: "Edit IRM items; assign suppliers/owner; activate / deactivate." },
       { key: "irm.delete", action: "Delete", description: "Remove IRM items (only when no dependencies exist)." },
+      { key: "irm.barcode.manage", action: "Barcode", description: "Generate, regenerate and print IRM item barcodes." },
     ],
   },
   {
@@ -263,7 +265,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
   },
   {
     key: "goods_in",
-    label: "Goods In",
+    label: "GRN (Goods Receipt Note)",
     description: "Receiving goods against purchase orders (GRN) — records receipts, serials/batches and increases stock.",
     category: "Inventory",
     permissions: [
@@ -285,7 +287,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       { key: "inventory.move", action: "Move", description: "Transfer stock between warehouses." },
       { key: "inventory.history", action: "History", description: "View the stock-transfer movement history." },
       { key: "inventory.export", action: "Export", description: "Export the inventory list to CSV." },
-      { key: "inventory.adjust", action: "Adjust", description: "Adjust stock levels (reserved for the future Stock Adjustment module)." },
+      { key: "inventory.adjust", action: "Adjust", description: "Manually add existing/opening stock straight into a warehouse." },
       { key: "inventory.stock_take", action: "Stock take", description: "Run a stock take (reserved for the future Stock Take module)." },
     ],
   },
@@ -301,6 +303,22 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       { key: "goods_out.delete", action: "Delete", description: "Delete draft dispatches." },
       { key: "goods_out.dispatch", action: "Dispatch", description: "Dispatch a draft — posts stock from the warehouse to the engineer's holding." },
       { key: "goods_out.cancel", action: "Cancel", description: "Cancel a draft dispatch." },
+    ],
+  },
+  {
+    key: "engineer",
+    label: "Engineer Portal",
+    description:
+      "The field engineer's read-only self-service portal — their own held IRM stock, dispatches received, recent activity and profile.",
+    category: "Engineer Portal",
+    permissions: [
+      { key: "engineer.dashboard.view", action: "Dashboard", description: "Access the engineer portal — own stock summary, dispatches received and recent activity." },
+      { key: "engineer.inventory.view", action: "Inventory", description: "View own held IRM stock." },
+      // RESERVED (not yet enforced by any route): self-profile editing currently flows through the
+      // shared `/users/me` endpoints, which only require authentication — no engineer-specific
+      // permission is checked. This key is registered + seeded ahead of a future engineer-only
+      // settings/signature endpoint; wire it into that route's requirePermission(...) when it ships.
+      { key: "engineer.settings.edit", action: "Settings", description: "Manage own profile + signature from the engineer portal. (Reserved — no endpoint enforces this yet.)" },
     ],
   },
   {

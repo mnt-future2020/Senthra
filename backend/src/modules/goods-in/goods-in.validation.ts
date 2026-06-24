@@ -98,12 +98,18 @@ export type UpdateGoodsReceiptInput = z.infer<typeof updateGoodsReceiptSchema>;
 export const grnCancelSchema = z.object({ reason: z.string().trim().max(500).optional() });
 export type GRNCancelInput = z.infer<typeof grnCancelSchema>;
 
-const TEN_MB = 10 * 1024 * 1024;
+// Attachment limits — the SINGLE SOURCE OF TRUTH (the frontend mirrors these numbers).
+// Per-file size + type are enforced by the schema below; count + total are enforced in the
+// service's addAttachment (it has the GRN's existing attachments loaded).
+export const GRN_ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024; // 5 MB per file
+export const GRN_ATTACHMENT_MAX_COUNT = 5; // at most 5 documents per GRN
+export const GRN_ATTACHMENT_MAX_TOTAL_BYTES = 20 * 1024 * 1024; // 20 MB total per GRN
+
 export const grnAttachmentSchema = z.object({
   label: z.string().trim().max(80).optional(),
   fileName: z.string().trim().min(1, "File name is required.").max(200),
   fileType: z.enum(GRN_ATTACHMENT_TYPES, { error: "Unsupported file type. Use PDF, DOCX, PNG or JPG." }),
-  fileSizeBytes: z.coerce.number().int().min(1).max(TEN_MB, "File must be 10 MB or smaller."),
+  fileSizeBytes: z.coerce.number().int().min(1).max(GRN_ATTACHMENT_MAX_BYTES, "File must be 5 MB or smaller."),
   data: z.string().startsWith("data:", "Upload a valid file."),
 });
 export type GRNAttachmentInput = z.infer<typeof grnAttachmentSchema>;

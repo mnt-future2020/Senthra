@@ -11,13 +11,12 @@ export default function SettingsPage() {
   return (
     <PermissionGate
       anyOf={[
+        // Only perms that map to an actual Settings section. Domain master-data (warehouse/supplier/
+        // IRM types + IRM categories) lives in its own module's tabs, not here — so those perms must
+        // NOT grant Settings access, or the user lands on an empty Settings page.
         "settings.view",
         "email_templates.view",
         "categories.view",
-        "warehouse_types.view",
-        "supplier_types.view",
-        "irm_types.view",
-        "irm_categories.view",
       ]}
     >
       {/* Suspense satisfies useSearchParams (the ?section= the panel reads). */}

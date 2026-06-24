@@ -8,6 +8,9 @@ import { assertEmailNamespaceFree } from "#modules/auth/email-namespace.js";
 import { ALL_PERMISSIONS } from "#modules/role/permissions.js";
 import * as userRepo from "./user.repository.js";
 import type { UserWithRole } from "./user.repository.js";
+import * as userWarehouseRepo from "./user-warehouse.repository.js";
+import type { AssignedWarehouse } from "./user-warehouse.repository.js";
+import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as goodsOutRepo from "#modules/goods-out/goods-out.repository.js";
 import { generateTempPassword } from "../../utils/generate-password.js";
 import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
@@ -40,6 +43,9 @@ export interface PublicUser {
   signatureUpdatedAt: string | null;
   mustResetPassword: boolean;
   role: { id: string; key: string; name: string } | null;
+  // Warehouses this user is explicitly assigned (only populated for warehouse-scoped roles; empty
+  // otherwise). Drives the edit form's "Assigned Warehouses" prefill. Rows persist across role changes.
+  warehouses: AssignedWarehouse[];
   // Employment
   employeeId: string | null;
   jobTitle: string | null;
@@ -57,7 +63,9 @@ export interface PublicUser {
   updatedAt: string;
 }
 
-function publicUser(u: UserWithRole): PublicUser {
+// `warehouses` defaults to [] — only the single-user reads (get/create/update) pass the assigned
+// set; the list keeps it empty to avoid an N+1 (the list never needs per-row assignments).
+function publicUser(u: UserWithRole, warehouses: AssignedWarehouse[] = []): PublicUser {
   return {
     id: u.id,
     firstName: u.firstName,
@@ -75,6 +83,7 @@ function publicUser(u: UserWithRole): PublicUser {
     signatureUpdatedAt: isoOrNull(u.signatureUpdatedAt),
     mustResetPassword: u.mustResetPassword,
     role: u.role ? { id: u.role.id, key: u.role.key, name: u.role.name } : null,
+    warehouses,
     employeeId: u.employeeId,
     jobTitle: u.jobTitle,
     department: u.department,
@@ -129,6 +138,61 @@ function assertCanAssignRole(rolePermissions: string[], actor?: AuditActor): voi
     throw forbidden(
       `You can't assign a role that grants permissions you don't have: ${escalated.join(", ")}.`,
     );
+  }
+}
+
+// --- Warehouse assignment (warehouse-scoped roles, e.g. Warehouse Manager) -------------------
+// A role is warehouse-scoped when Role.isWarehouseScoped is true. Such a user may ONLY access the
+// warehouses assigned here; the assignment rows persist across role changes (removed only on
+// permanent delete / explicit un-assignment).
+function isWarehouseScopedRole(role: { isWarehouseScoped?: boolean | null } | null): boolean {
+  return Boolean(role?.isWarehouseScoped);
+}
+
+const WAREHOUSE_ASSIGNMENT_REQUIRED =
+  "Warehouse Manager must have at least one active warehouse assignment.";
+
+// Validate + normalise the requested warehouse ids for a warehouse-scoped user. Dedupes, requires
+// at least one, and rejects any id that isn't an ACTIVE, non-deleted warehouse (covers inactive,
+// soft-deleted and non-existent). Returns the clean, unique id list ready to sync.
+async function resolveWarehouseAssignmentIds(warehouseIds: string[] | undefined): Promise<string[]> {
+  const unique = [...new Set((warehouseIds ?? []).map((id) => id.trim()).filter(Boolean))];
+  if (unique.length === 0) throw badRequest(WAREHOUSE_ASSIGNMENT_REQUIRED);
+  const active = await warehouseRepo.findActiveByIds(unique);
+  if (active.length !== unique.length) {
+    throw badRequest(
+      "One or more selected warehouses are invalid, inactive or removed. Pick active warehouses only.",
+    );
+  }
+  return unique;
+}
+
+// Audit the assignment delta produced by a sync (one entry per direction, only when non-empty).
+function auditWarehouseAssignmentChanges(
+  actor: AuditActor | undefined,
+  userId: string,
+  userEmail: string,
+  changes: { added: string[]; removed: string[] },
+): void {
+  if (changes.added.length) {
+    audit.record({
+      actor,
+      action: "user.warehouse_assigned",
+      targetType: "user",
+      targetId: userId,
+      targetLabel: userEmail,
+      metadata: { warehouseIds: changes.added },
+    });
+  }
+  if (changes.removed.length) {
+    audit.record({
+      actor,
+      action: "user.warehouse_unassigned",
+      targetType: "user",
+      targetId: userId,
+      targetLabel: userEmail,
+      metadata: { warehouseIds: changes.removed },
+    });
   }
 }
 
@@ -223,7 +287,9 @@ export async function listUsers(params: ListUsersParams = {}): Promise<PagedUser
   // Clamp the requested page so an out-of-range page returns the last page.
   const page = Math.min(Math.max(Math.trunc(params.page ?? 1), 1), totalPages);
   const users = await userRepo.findMany(filters, (page - 1) * pageSize, pageSize, params.sort);
-  return { users: users.map(publicUser), total, page, pageSize, totalPages };
+  // The list intentionally omits per-user warehouse assignments (avoids an N+1); publicUser
+  // defaults them to []. The single-user reads (get/create/update) populate them.
+  return { users: users.map((u) => publicUser(u)), total, page, pageSize, totalPages };
 }
 
 // A 24-char hex string is a Mongo ObjectId; anything else is treated as the human
@@ -239,7 +305,8 @@ export async function getUser(idOrEmployeeId: string): Promise<PublicUser> {
     ? await userRepo.findById(idOrEmployeeId)
     : await userRepo.findByEmployeeIdWithRole(idOrEmployeeId);
   if (!u) throw notFound("User not found.");
-  return publicUser(u);
+  const warehouses = await userWarehouseRepo.listForUser(u.id);
+  return publicUser(u, warehouses);
 }
 
 // Optional profile fields shared by create + update. Dates arrive as ISO /
@@ -266,6 +333,8 @@ export interface CreateUserInput extends ProfileFieldsInput {
   lastName: string;
   email: string;
   roleId?: string;
+  // Warehouse ids to assign — REQUIRED (≥1) when the chosen role is warehouse-scoped, ignored otherwise.
+  warehouseIds?: string[];
 }
 
 // The temporary password is returned ONCE so the admin can copy/relay it; it is
@@ -295,13 +364,19 @@ export async function createUser(
     throw conflict("A user with that email already exists.");
   }
 
+  let role: Awaited<ReturnType<typeof roleRepo.findById>> = null;
   let roleId: string | null = null;
   if (input.roleId) {
-    const role = await roleRepo.findById(input.roleId);
+    role = await roleRepo.findById(input.roleId);
     if (!role) throw badRequest("Selected role does not exist.");
     assertCanAssignRole(role.permissions, actor);
     roleId = role.id;
   }
+
+  // A warehouse-scoped role (e.g. Warehouse Manager) must be assigned ≥1 active warehouse —
+  // validated BEFORE the write so we never create a half-provisioned account.
+  const scoped = isWarehouseScopedRole(role);
+  const assignmentIds = scoped ? await resolveWarehouseAssignmentIds(input.warehouseIds) : [];
 
   const temporaryPassword = generateTempPassword();
   // The password hash (CPU-bound bcrypt), avatar upload (network) and prefix lookup
@@ -363,6 +438,15 @@ export async function createUser(
     metadata: { roleId, revived: Boolean(existing) },
   });
 
+  // Persist warehouse assignments for a scoped role (validated above). Revive reuses the same user
+  // id, so sync overwrites any stale rows from a previous life.
+  let warehouses: AssignedWarehouse[] = [];
+  if (scoped) {
+    const changes = await userWarehouseRepo.syncAssignments(created.id, assignmentIds, actor?.email ?? null);
+    auditWarehouseAssignmentChanges(actor, created.id, created.email, changes);
+    warehouses = await userWarehouseRepo.listForUser(created.id);
+  }
+
   // Account email — fire-and-forget so a slow/unconfigured SMTP never blocks the
   // response; the failure is captured in the email delivery log.
   void sendTemplatedEmail(
@@ -380,7 +464,7 @@ export async function createUser(
     console.error("user.created email failed:", e instanceof Error ? e.message : e),
   );
 
-  return { user: publicUser(created), temporaryPassword };
+  return { user: publicUser(created, warehouses), temporaryPassword };
 }
 
 export interface UpdateUserInput extends ProfileFieldsInput {
@@ -389,6 +473,9 @@ export interface UpdateUserInput extends ProfileFieldsInput {
   email?: string;
   roleId?: string | null;
   removeProfileImage?: boolean;
+  // Warehouse ids to sync (add/remove/keep). Honoured only when the EFFECTIVE role is warehouse-
+  // scoped; omitted = leave assignments untouched. Assignments are NEVER auto-cleared on role change.
+  warehouseIds?: string[];
 }
 
 // A staff member who still HOLDS field stock (EngineerStockBalance > 0) can't be moved to a
@@ -449,14 +536,38 @@ export async function updateUser(
   if (typeof input.city === "string") data.city = trimToNull(input.city);
   if (typeof input.postcode === "string") data.postcode = trimToNull(input.postcode);
 
+  // Resolve the EFFECTIVE role after this edit (the new role if changing, else the current one) so we
+  // can decide warehouse-scoping correctly.
+  let effectiveRole: { isWarehouseScoped?: boolean | null; permissions: string[] } | null = user.role;
   if (input.roleId !== undefined) {
     if (!input.roleId) {
       data.role = { disconnect: true };
+      effectiveRole = null;
     } else {
       const role = await roleRepo.findById(input.roleId);
       if (!role) throw badRequest("Selected role does not exist.");
       assertCanAssignRole(role.permissions, actor);
       data.role = { connect: { id: role.id } };
+      effectiveRole = role;
+    }
+  }
+
+  // Warehouse assignments. Validate BEFORE the write so an invalid set never persists. When the role
+  // is NOT scoped, assignments are PRESERVED, never auto-deleted (a later re-promotion restores them).
+  // The ≥1-assignment invariant is enforced only at the moments it can be safely satisfied:
+  //   • explicit warehouseIds sent → resolveWarehouseAssignmentIds requires a non-empty active set;
+  //   • PROMOTING a user INTO a scoped role without warehouseIds → require existing assignments to
+  //     restore (mirrors create), else the promotion has no warehouses.
+  // An UNRELATED edit of an already-scoped user (e.g. phone/status) is NEVER blocked on a pre-existing
+  // zero-assignment state — an admin must always be able to fix or deactivate such a user.
+  const scoped = isWarehouseScopedRole(effectiveRole);
+  const wasScoped = isWarehouseScopedRole(user.role);
+  let assignmentIds: string[] | null = null;
+  if (scoped) {
+    if (input.warehouseIds !== undefined) {
+      assignmentIds = await resolveWarehouseAssignmentIds(input.warehouseIds);
+    } else if (!wasScoped && (await userWarehouseRepo.listWarehouseIds(id)).length === 0) {
+      throw badRequest(WAREHOUSE_ASSIGNMENT_REQUIRED);
     }
   }
 
@@ -471,7 +582,14 @@ export async function updateUser(
     targetId: id,
     targetLabel: updated.email,
   });
-  return publicUser(updated);
+
+  if (scoped && assignmentIds !== null) {
+    const changes = await userWarehouseRepo.syncAssignments(id, assignmentIds, actor?.email ?? null);
+    auditWarehouseAssignmentChanges(actor, id, updated.email, changes);
+  }
+
+  const warehouses = await userWarehouseRepo.listForUser(id);
+  return publicUser(updated, warehouses);
 }
 
 export async function setUserStatus(
@@ -549,6 +667,55 @@ export async function resendInvite(
   );
 
   return { temporaryPassword };
+}
+
+// --- Self-service profile (My Account / Engineer Portal) ------------------------------------
+// A staff user reads + edits THEIR OWN profile. STRICT whitelist: phone, avatar and address only —
+// role / status / email / employeeId / permissions / DOB are never touched here (the validation
+// schema strips them, and this mapper only reads the safe fields). Signature has its own endpoints.
+export async function getMyProfile(actor?: AuditActor): Promise<PublicUser> {
+  if (actor?.type !== "user" || !actor.id) throw forbidden("Staff account required.");
+  const user = await userRepo.findById(actor.id);
+  if (!user) throw notFound("User not found.");
+  return publicUser(user);
+}
+
+export interface UpdateMyProfileParams {
+  phone?: string;
+  profileImage?: string;
+  removeProfileImage?: boolean;
+  addressLine1?: string;
+  addressLine2?: string;
+  city?: string;
+  postcode?: string;
+}
+
+export async function updateMyProfile(
+  input: UpdateMyProfileParams,
+  actor?: AuditActor,
+): Promise<PublicUser> {
+  if (actor?.type !== "user" || !actor.id) throw forbidden("Staff account required.");
+  const user = await userRepo.findById(actor.id);
+  if (!user) throw notFound("User not found.");
+
+  const data: Prisma.UserUpdateInput = {};
+  if (typeof input.phone === "string") data.phone = trimToNull(input.phone);
+  if (typeof input.addressLine1 === "string") data.addressLine1 = trimToNull(input.addressLine1);
+  if (typeof input.addressLine2 === "string") data.addressLine2 = trimToNull(input.addressLine2);
+  if (typeof input.city === "string") data.city = trimToNull(input.city);
+  if (typeof input.postcode === "string") data.postcode = trimToNull(input.postcode);
+  if (input.removeProfileImage) data.profileImageUrl = null;
+  else if (input.profileImage) data.profileImageUrl = await uploadAvatar(input.profileImage);
+
+  const updated = await userRepo.update(user.id, data);
+  audit.record({
+    actor,
+    action: "user.profile_updated",
+    targetType: "user",
+    targetId: user.id,
+    targetLabel: updated.email,
+  });
+  return publicUser(updated);
 }
 
 // --- Self-service signature (My Account) ----------------------------------------------------

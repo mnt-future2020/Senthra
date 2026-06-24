@@ -2,21 +2,25 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { CheckCircle2, Download, Loader2, Paperclip, Pencil, ScrollText, Send, Trash2, Upload, XCircle } from "lucide-react";
+import { CheckCircle2, Download, Loader2, Package, Paperclip, Pencil, ScrollText, Send, Trash2, Upload, XCircle } from "lucide-react";
 
 import * as poService from "@/services/purchase-order.service";
 import * as auditService from "@/services/audit.service";
+import * as grnService from "@/services/goods-in.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { actionLabel, actionTone, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
+import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
+import { GrnStatusBadge, formatDate as grnDate } from "@/components/dashboard/goods-in/grnStatus";
 import { PO_PRIORITY_LABELS, PoStatusBadge, formatDate, formatMoney } from "./poStatus";
 import type { AuditEntry } from "@/types/audit";
+import type { GoodsReceipt } from "@/types/goods-in";
 import type { PurchaseOrder } from "@/types/purchase-order";
 
 const EXT_TYPE: Record<string, string> = { pdf: "pdf", docx: "docx", png: "png", jpg: "jpg", jpeg: "jpg" };
 
-type Tab = "overview" | "attachments" | "audit";
+type Tab = "overview" | "receipts" | "attachments" | "audit";
 
 export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   const router = useRouter();
@@ -24,7 +28,10 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   const { can } = useAuth();
   const { pushToast } = useDashboard();
   const [po, setPo] = React.useState<PurchaseOrder>(initial);
-  const TABS: Tab[] = ["overview", "attachments", "audit"];
+  // Read-only traceability: this PO's goods receipts. The GRN stays the single
+  // stock-affecting document — here we only LIST it, never write stock from the PO side.
+  const canViewReceipts = can("goods_in.view");
+  const TABS: Tab[] = ["overview", ...(canViewReceipts ? (["receipts"] as Tab[]) : []), "attachments", "audit"];
   const requestedTab = searchParams.get("tab");
   const tab: Tab = TABS.includes(requestedTab as Tab) ? (requestedTab as Tab) : "overview";
   const setTab = (t: Tab) => router.replace(`/dashboard/purchase-orders/${po.code}?tab=${t}`, { scroll: false });
@@ -33,6 +40,21 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   const [reason, setReason] = React.useState("");
   const [downloading, setDownloading] = React.useState(false);
   const [confirmSend, setConfirmSend] = React.useState(false);
+
+  // Eagerly load this PO's receipts so the tab label can always show the count
+  // ("Receipts (n)") and the tab body reuses the same fetch — one request, shared.
+  const [receipts, setReceipts] = React.useState<GoodsReceipt[] | null>(null);
+  const [receiptsTotal, setReceiptsTotal] = React.useState(0);
+  const [receiptsError, setReceiptsError] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    if (!canViewReceipts) return;
+    let active = true;
+    grnService
+      .listGoodsReceipts({ purchaseOrder: po.id, pageSize: 100 })
+      .then((res) => { if (active) { setReceipts(res.goodsReceipts); setReceiptsTotal(res.total); } })
+      .catch((e) => active && setReceiptsError(e instanceof Error ? e.message : "Could not load receipts."));
+    return () => { active = false; };
+  }, [canViewReceipts, po.id]);
 
   const downloadPdf = async () => {
     setDownloading(true);
@@ -88,6 +110,11 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   }
   if (s === "approved" && can("purchase_orders.send"))
     actions.push(<ActionBtn key="send" icon={Send} primary onClick={() => setConfirmSend(true)} disabled={busy}>Send to supplier</ActionBtn>);
+  // Receive: launch the existing Goods In form with this PO preselected. Only for
+  // receivable statuses (sent / partially_received) — never draft/approved (not sent yet)
+  // or fully_received/cancelled/completed (terminal). The form + backend stay authoritative.
+  if ((s === "sent" || s === "partially_received") && can("goods_in.create"))
+    actions.push(<ActionBtn key="receive" icon={Package} primary onClick={() => router.push(`/dashboard/goods-in/new?po=${po.id}`)} disabled={busy}>Receive</ActionBtn>);
   if ((s === "partially_received" || s === "fully_received") && can("purchase_orders.close"))
     actions.push(<ActionBtn key="close" icon={CheckCircle2} primary onClick={() => run(() => poService.closePurchaseOrder(po.id), "Purchase order closed.")} disabled={busy}>Close</ActionBtn>);
   if (["draft", "pending_approval", "approved", "sent"].includes(s) && can("purchase_orders.cancel"))
@@ -114,14 +141,15 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
       </div>
 
       <div className="flex gap-1 overflow-x-auto border-b border-[var(--border)]">
-        {(["overview", "attachments", "audit"] as Tab[]).map((t) => (
+        {TABS.map((t) => (
           <button key={t} onClick={() => setTab(t)} className={`shrink-0 border-b-2 px-3.5 py-2.5 text-xs font-bold capitalize transition-colors ${tab === t ? "border-[var(--accent)] text-[var(--accent)]" : "border-transparent text-[var(--muted)] hover:text-[var(--ink)]"}`}>
-            {t === "audit" ? "Audit trail" : t}
+            {t === "audit" ? "Audit trail" : t === "receipts" ? `Receipts (${receiptsTotal})` : t}
           </button>
         ))}
       </div>
 
       {tab === "overview" && <Overview po={po} />}
+      {tab === "receipts" && <Receipts receipts={receipts} error={receiptsError} />}
       {tab === "attachments" && <Attachments po={po} setPo={setPo} canEdit={can("purchase_orders.edit")} />}
       {tab === "audit" && <AuditTrail poId={po.id} />}
 
@@ -390,6 +418,52 @@ function ReasonDialog({ title, required, value, onChange, onConfirm, onClose }: 
   );
 }
 
+// Read-only list of the goods receipts raised against this PO (traceability). Data is
+// fetched once by the parent and passed down, so this is the count's single source too.
+// Rows deep-link to the authoritative GRN document; nothing here writes stock.
+function Receipts({ receipts, error }: { receipts: GoodsReceipt[] | null; error: string | null }) {
+  const router = useRouter();
+  if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
+  if (receipts === null)
+    return (
+      <div className="flex items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--surface)] py-16">
+        <Loader2 className="h-6 w-6 animate-spin text-[var(--muted)]" />
+      </div>
+    );
+  if (receipts.length === 0)
+    return (
+      <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
+        <Package className="h-7 w-7 text-[var(--faint)]" />
+        <p className="text-sm font-semibold text-[var(--ink)]">No receipts raised against this PO yet</p>
+        <p className="text-xs text-[var(--muted)]">Goods received against this order will appear here.</p>
+      </div>
+    );
+  return (
+    <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+      <ul className="divide-y divide-[var(--border)]">
+        {receipts.map((g) => (
+          <li key={g.id}>
+            <button
+              type="button"
+              onClick={() => router.push(`/dashboard/goods-in/${g.code}`)}
+              className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-[var(--surface-2)]"
+            >
+              <div className="flex min-w-0 items-center gap-3">
+                <span className="font-mono text-xs text-[var(--muted)]">{g.code}</span>
+                <GrnStatusBadge status={g.status} />
+              </div>
+              <div className="flex shrink-0 items-center gap-3 text-[11px] text-[var(--muted)]">
+                <span>{g.items.length} line{g.items.length === 1 ? "" : "s"} · {g.totalAccepted} accepted</span>
+                <span className="text-[var(--faint)]">{grnDate(g.receivedDate)}</span>
+              </div>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function AuditTrail({ poId }: { poId: string }) {
   const [entries, setEntries] = React.useState<AuditEntry[] | null>(null);
   const [error, setError] = React.useState<string | null>(null);
@@ -403,7 +477,7 @@ function AuditTrail({ poId }: { poId: string }) {
   }, [poId]);
 
   if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
-  if (entries === null) return <div className="flex items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--surface)] py-16"><Loader2 className="h-6 w-6 animate-spin text-[var(--muted)]" /></div>;
+  if (entries === null) return <AuditTrailSkeleton />;
   if (entries.length === 0)
     return (
       <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">

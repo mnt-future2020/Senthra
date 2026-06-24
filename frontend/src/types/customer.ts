@@ -73,6 +73,8 @@ export interface StockRequest {
   name: string;
   editedName: string | null;
   catalogueItemId: string | null;
+  // Set when this submission tops up an existing received stock line (no duplicate row).
+  linkedStockEntryId: string | null;
   quantity: number | null;
   reason: string | null;
   notes: string | null;

@@ -43,6 +43,7 @@ export interface IrmItem {
   sku: string | null;
   barcode: string | null;
   qrCode: string | null;
+  barcodeDataUri: string | null; // rendered Code128 image (base64) of the item code, when generated
   // Suppliers (junction; one primary).
   suppliers: IrmSupplierLink[];
   primarySupplier: { id: string; code: string; name: string } | null;

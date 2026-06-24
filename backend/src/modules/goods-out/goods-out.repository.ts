@@ -51,13 +51,20 @@ export interface GoodsOutListFilters {
   search?: string;
   status?: string;
   warehouseId?: string;
+  warehouseIds?: string[];
   engineerId?: string;
 }
 
 function buildWhere(filters: GoodsOutListFilters): Prisma.GoodsOutWhereInput {
   const where: Prisma.GoodsOutWhereInput = { deletedAt: null };
   if (filters.status) where.status = filters.status;
-  if (filters.warehouseId) where.warehouseId = filters.warehouseId;
+  if (filters.warehouseId && filters.warehouseIds !== undefined) {
+    where.AND = [{ warehouseId: filters.warehouseId }, { warehouseId: { in: filters.warehouseIds } }];
+  } else if (filters.warehouseId) {
+    where.warehouseId = filters.warehouseId;
+  } else if (filters.warehouseIds !== undefined) {
+    where.warehouseId = { in: filters.warehouseIds };
+  }
   if (filters.engineerId) where.engineerId = filters.engineerId;
   if (filters.search) {
     const q = filters.search;

@@ -30,6 +30,15 @@ const dateField = z
 // it alongside the real values; the service maps "" to null ("not specified").
 const optionalGender = genderEnum.or(z.literal("")).optional();
 
+// Warehouse ids assigned to a warehouse-scoped user. Each must be a Mongo ObjectId. The array is
+// optional here (the field only appears for warehouse-scoped roles); the "≥1 active warehouse"
+// requirement is enforced in the service, which knows the role. Capped to a sane upper bound.
+const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
+const warehouseIdsField = z
+  .array(z.string().trim().regex(OBJECT_ID_RE, "Select a valid warehouse."))
+  .max(500)
+  .optional();
+
 // Profile fields shared by create + update (all optional). The service converts
 // empty strings to null (clear) and parses the date strings.
 const sharedProfileFields = {
@@ -88,6 +97,8 @@ export const createUserSchema = z.object({
     .trim()
     .min(1, "Date of joining is required.")
     .refine((v) => !Number.isNaN(Date.parse(v)), "Enter a valid date."),
+  // Optional here; required (≥1, active) for warehouse-scoped roles — enforced in the service.
+  warehouseIds: warehouseIdsField,
 });
 export type CreateUserInput = z.infer<typeof createUserSchema>;
 
@@ -98,6 +109,8 @@ export const updateUserSchema = z.object({
   // null clears the role; a string assigns one.
   roleId: z.string().trim().nullable().optional(),
   removeProfileImage: z.boolean().optional(),
+  // Synced (add/remove/keep) only for warehouse-scoped roles; omitted = leave assignments untouched.
+  warehouseIds: warehouseIdsField,
   ...sharedProfileFields,
 });
 export type UpdateUserInput = z.infer<typeof updateUserSchema>;
@@ -114,3 +127,17 @@ export const uploadSignatureSchema = z.object({
   fileName: z.string().trim().max(200).optional(),
 });
 export type UploadSignatureInput = z.infer<typeof uploadSignatureSchema>;
+
+// Self-service profile edit (My Account / Engineer Portal). STRICT whitelist — only the fields a
+// staff member may change about themselves. zod strips every other key, so a client can NEVER set
+// email / role / status / employeeId / permissions / date-of-birth through this endpoint.
+export const updateMyProfileSchema = z.object({
+  phone: optionalPhoneField,
+  profileImage: profileImage.optional(),
+  removeProfileImage: z.boolean().optional(),
+  addressLine1: z.string().trim().max(120).optional(),
+  addressLine2: z.string().trim().max(120).optional(),
+  city: z.string().trim().max(80).optional(),
+  postcode: z.string().trim().max(12).optional(),
+});
+export type UpdateMyProfileInput = z.infer<typeof updateMyProfileSchema>;

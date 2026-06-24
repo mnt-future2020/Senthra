@@ -14,11 +14,14 @@ import { ALL_PERMISSIONS } from "#modules/role/permissions.js";
 // silently make a read-only customer a super-user, so each type is handled explicitly.
 export function actorFrom(req: Request): AuditActor {
   const principal = req.principal;
-  if (!principal) return { id: null, email: null, type: "admin", permissions: [] };
+  if (!principal) return { id: null, email: null, type: "admin", permissions: [], assignedWarehouseIds: null };
   return {
     id: principal.id,
     email: principal.email,
     type: principal.type,
     permissions: principal.type === "admin" ? [ALL_PERMISSIONS] : principal.permissions,
+    // Only a warehouse-scoped staff user is restricted; admin/customer are unrestricted here (null).
+    // The warehouse-access helpers read this to scope every warehouse-bound operation.
+    assignedWarehouseIds: principal.type === "user" ? principal.assignedWarehouseIds : null,
   };
 }

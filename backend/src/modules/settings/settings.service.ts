@@ -47,6 +47,10 @@ export const DEFAULT_EMPLOYEE_ID_PREFIX = "SNT";
 // Matches the historical hardcoded value so existing codes stay consistent.
 export const DEFAULT_STOCK_CODE_PREFIX = "CSE";
 
+// The default IRM catalogue item-code prefix when none is configured.
+// Matches the historical hardcoded value so existing item codes stay consistent.
+export const DEFAULT_IRM_CODE_PREFIX = "IRM";
+
 // Read-time defaults for the company-profile + regional settings. Applied only when the stored
 // value is blank, so they stay fully overridable (never hardcoded into downstream documents).
 export const DEFAULT_COMPANY_COUNTRY = "United Kingdom";
@@ -80,6 +84,19 @@ function normalizeStockCodePrefix(raw?: string | null): string {
 export async function getStockCodePrefix(): Promise<string> {
   const s = await settingsRepo.getOrCreate();
   return normalizeStockCodePrefix(s.stockCodePrefix);
+}
+
+// Clean a stored/configured IRM item-code prefix (uppercase, letters only, 2–5 chars);
+// falls back to the default when invalid/blank so item-code allocation always has a sane prefix.
+function normalizeIrmCodePrefix(raw?: string | null): string {
+  const clean = (raw ?? "").trim().toUpperCase().replace(/[^A-Z]/g, "");
+  return clean.length >= 2 ? clean.slice(0, 5) : DEFAULT_IRM_CODE_PREFIX;
+}
+
+// The effective IRM item-code prefix, for the IRM module's item-code allocation.
+export async function getIrmCodePrefix(): Promise<string> {
+  const s = await settingsRepo.getOrCreate();
+  return normalizeIrmCodePrefix(s.irmCodePrefix);
 }
 
 // --- Branding (all public) ---
@@ -199,6 +216,7 @@ export interface PublicSettings extends PublicBranding {
   cloudinaryConfigured: boolean;
   employeeIdPrefix: string;
   stockCodePrefix: string;
+  irmCodePrefix: string;
   // Company profile (legal identity for documents) + regional formatting. Default-filled on read.
   companyLegalName: string;
   companyRegNumber: string;
@@ -245,6 +263,9 @@ function publicSettings(s: Settings): PublicSettings {
 
     // Stock-entry barcode prefix (effective value, default-filled).
     stockCodePrefix: normalizeStockCodePrefix(s.stockCodePrefix),
+
+    // IRM item-code prefix (effective value, default-filled).
+    irmCodePrefix: normalizeIrmCodePrefix(s.irmCodePrefix),
 
     // Company profile (text fields empty when unset; country/regional default-filled).
     companyLegalName: s.companyLegalName || "",
@@ -297,6 +318,7 @@ export interface UpdateSettingsParams {
   loginSubtext?: string;
   employeeIdPrefix?: string;
   stockCodePrefix?: string;
+  irmCodePrefix?: string;
   // Company profile + regional (all optional; empty string clears back to null → default on read).
   companyLegalName?: string;
   companyRegNumber?: string;
@@ -390,6 +412,9 @@ export async function updateSettings(input: UpdateSettingsParams): Promise<Publi
   }
   if (typeof input.stockCodePrefix === "string") {
     data.stockCodePrefix = input.stockCodePrefix.trim().toUpperCase() || null;
+  }
+  if (typeof input.irmCodePrefix === "string") {
+    data.irmCodePrefix = input.irmCodePrefix.trim().toUpperCase() || null;
   }
 
   // --- Company profile + regional (trim; empty string clears to null → default applies on read) ---

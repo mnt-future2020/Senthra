@@ -74,17 +74,33 @@ export interface PoTotals {
 export interface PurchaseOrderListFilters {
   search?: string;
   status?: string;
+  // Multiple statuses (e.g. the warehouse "Expected deliveries" worklist wants sent +
+  // partially_received in one query). Takes precedence over `status` when non-empty.
+  statuses?: string[];
   priority?: string;
   supplierId?: string;
   warehouseId?: string;
+  // Warehouse-access scope (from warehouseScopeFilter): `undefined` = unrestricted (no filter);
+  // an array constrains the list to POs delivering to those warehouses. NOTE: a scoped actor only
+  // ever sees POs WITH a warehouseId in their set — POs whose warehouseId is still null (header not
+  // yet assigned) are excluded from a scoped user's list. That's acceptable: unassigned POs aren't
+  // "theirs" until a warehouse is set. Unrestricted actors are entirely unaffected.
+  warehouseIds?: string[];
 }
 
-function buildWhere(filters: PurchaseOrderListFilters): Prisma.PurchaseOrderWhereInput {
+// Exported for unit testing — pure where-clause builder, no Prisma I/O.
+export function buildWhere(filters: PurchaseOrderListFilters): Prisma.PurchaseOrderWhereInput {
   const where: Prisma.PurchaseOrderWhereInput = { deletedAt: null };
-  if (filters.status) where.status = filters.status;
+  if (filters.statuses?.length) where.status = { in: filters.statuses };
+  else if (filters.status) where.status = filters.status;
   if (filters.priority) where.priority = filters.priority;
   if (filters.supplierId) where.supplierId = filters.supplierId;
   if (filters.warehouseId) where.warehouseId = filters.warehouseId;
+  // Warehouse-access scoping — AND with any explicit warehouse filter above. When a scoped actor
+  // also filters by a specific warehouse, both must hold (an out-of-scope pick correctly matches none).
+  if (filters.warehouseIds !== undefined) {
+    where.AND = [...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []), { warehouseId: { in: filters.warehouseIds } }];
+  }
   if (filters.search) {
     const q = filters.search;
     where.OR = [
@@ -251,6 +267,71 @@ async function nextSequence(): Promise<number> {
 async function fastForwardCounter(): Promise<void> {
   const max = await highestPoNumber();
   await prisma.counter.upsert({ where: { key: PO_CODE_PREFIX }, create: { key: PO_CODE_PREFIX, seq: max }, update: { seq: max } });
+}
+
+// P2034 — Prisma surfaces a MongoDB transaction write-conflict / deadlock as this code. Two
+// concurrent multi-creates both incrementing the PO counter inside their transactions race here;
+// the loser retries the whole transaction (the counter increment rolled back, so no number lost).
+function isWriteConflict(e: unknown): boolean {
+  return e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2034";
+}
+
+// Ensure the PO counter row exists (idempotent). Seeds it at the current high-water mark so the
+// FIRST in-transaction increment yields max+1 — seeding itself consumes no number. Done OUTSIDE the
+// transaction so the in-tx increment never has to create-then-conflict.
+async function ensurePoCounter(): Promise<void> {
+  if (await prisma.counter.findUnique({ where: { key: PO_CODE_PREFIX } })) return;
+  const start = await highestPoNumber();
+  try {
+    await prisma.counter.create({ data: { key: PO_CODE_PREFIX, seq: start } });
+  } catch (e) {
+    if (!isUniqueConflict(e)) throw e; // a concurrent request seeded it first — fine
+  }
+}
+
+// Create MANY POs (one per warehouse group) as a SINGLE all-or-nothing transaction: either every PO
+// (header + lines + its code) commits, or none does. CRITICALLY the code allocation happens INSIDE
+// the transaction (tx.counter.$inc), so a rollback RECLAIMS the numbers — a failed split never
+// permanently consumes PO numbers (gap-safe). Each PO still gets its own distinct, sequential code.
+// Retries the whole transaction on an out-of-band code collision (fast-forward) or a transient
+// write-conflict. Returns the created POs IN INPUT ORDER.
+export async function createManyWithCodes(
+  groups: { header: Omit<Prisma.PurchaseOrderUncheckedCreateInput, "code">; lines: PoLineRow[] }[],
+): Promise<PurchaseOrderWithRelations[]> {
+  if (groups.length === 0) return [];
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await ensurePoCounter();
+    try {
+      return await withTransaction(async (tx) => {
+        const createdIds: string[] = [];
+        for (const g of groups) {
+          // Allocate INSIDE the tx → a rollback un-does the increment (no gap / no consumed number).
+          const c = await tx.counter.update({
+            where: { key: PO_CODE_PREFIX },
+            data: { seq: { increment: 1 } },
+            select: { seq: true },
+          });
+          const code = `${PO_CODE_PREFIX}-${String(c.seq).padStart(4, "0")}`;
+          const po = await tx.purchaseOrder.create({ data: { deletedAt: null, ...g.header, code } });
+          if (g.lines.length) {
+            await tx.purchaseOrderItem.createMany({ data: g.lines.map((l) => ({ purchaseOrderId: po.id, ...l })) });
+          }
+          createdIds.push(po.id);
+        }
+        const rows = await tx.purchaseOrder.findMany({ where: { id: { in: createdIds } }, include: withRelations });
+        const byId = new Map(rows.map((r) => [r.id, r]));
+        return createdIds.map((id) => byId.get(id)).filter((r): r is PurchaseOrderWithRelations => Boolean(r));
+      });
+    } catch (e) {
+      if (isCodeConflict(e)) {
+        await fastForwardCounter();
+        continue;
+      }
+      if (isWriteConflict(e)) continue; // transient — retry the whole transaction
+      throw e;
+    }
+  }
+  throw new Error("Could not allocate unique purchase-order codes.");
 }
 
 // Create a PO (header + lines + totals) atomically with a freshly-allocated, collision-safe code.

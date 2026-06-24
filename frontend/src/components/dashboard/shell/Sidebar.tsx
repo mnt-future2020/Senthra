@@ -47,14 +47,17 @@ const NAV: NavItem[] = [
   { href: "/dashboard/suppliers", label: "Suppliers", icon: Truck, perms: ["suppliers.view"] },
   { href: "/dashboard/irm", label: "IRM Catalogue", icon: PackageSearch, perms: ["irm.view"] },
   { href: "/dashboard/purchase-orders", label: "Purchase Orders", icon: ClipboardList, perms: ["purchase_orders.view"] },
-  { href: "/dashboard/goods-in", label: "Goods In", icon: PackageCheck, perms: ["goods_in.view"] },
+  { href: "/dashboard/goods-in", label: "GRN", icon: PackageCheck, perms: ["goods_in.view"] },
   { href: "/dashboard/inventory", label: "Inventory", icon: Boxes, perms: ["inventory.view"] },
   { href: "/dashboard/goods-out", label: "Goods Out", icon: PackageMinus, perms: ["goods_out.view"] },
   {
+    // Only the perms that map to a real Settings section (see SettingsPanel). Master-data view perms
+    // (warehouse/supplier/IRM types + IRM categories) belong to their own modules' tabs, so they must
+    // NOT surface Settings here — otherwise the user opens an empty Settings page.
     href: "/dashboard/settings",
     label: "Settings",
     icon: Settings,
-    perms: ["settings.view", "email_templates.view", "categories.view", "warehouse_types.view", "supplier_types.view", "irm_types.view", "irm_categories.view"],
+    perms: ["settings.view", "email_templates.view", "categories.view"],
   },
   {
     href: "/dashboard/audit",
@@ -74,6 +77,16 @@ const CUSTOMER_NAV: NavItem[] = [
   { href: "/dashboard/stock", label: "My Stock", icon: Package, perms: [] },
   { href: "/dashboard/portal/requests", label: "Stock Submissions", icon: ClipboardList, perms: [] },
   { href: "/dashboard/portal/reports", label: "Reports", icon: BarChart3, perms: [] },
+  { href: "/dashboard/account", label: "Settings", icon: Settings, perms: [] },
+];
+
+// The engineer portal nav — a separate, isolated surface for staff field engineers, exactly like the
+// customer portal above. Shown ONLY when the engineer portal is the user's only surface (see
+// `isEngineer` below) — it is NEVER mixed into the admin nav.
+const ENGINEER_NAV: NavItem[] = [
+  { href: "/dashboard/engineer", label: "Dashboard", icon: LayoutDashboard, perms: [] },
+  { href: "/dashboard/engineer/jobs", label: "Jobs", icon: ClipboardList, perms: [] },
+  { href: "/dashboard/engineer/inventory", label: "Stock", icon: Boxes, perms: [] },
   { href: "/dashboard/account", label: "Settings", icon: Settings, perms: [] },
 ];
 
@@ -100,11 +113,39 @@ export function Sidebar({
 
   const isCustomer = principal?.type === "customer";
 
-  // A customer sees their own read-only portal nav; staff see the permission-filtered
-  // admin nav.
-  const nav: NavItem[] = isCustomer
-    ? CUSTOMER_NAV
-    : NAV.filter((item) => item.perms.some((p) => can(p)));
+  // Staff admin nav, permission-filtered. Warehouse-scoped roles (e.g. Warehouse Manager) do their
+  // receiving inside their Warehouse Detail page (the primary GRN workspace), so by default the GLOBAL
+  // "GRN" entry is hidden for them (Option A). The module + routes stay reachable and the global list is
+  // already auto-scoped server-side — flip HIDE_GLOBAL_GRN_FOR_SCOPED to false to show it (Option B).
+  const HIDE_GLOBAL_GRN_FOR_SCOPED = true;
+  const isWarehouseScoped = principal?.type === "user" && principal.isWarehouseScoped === true;
+  const adminNav = NAV.filter((item) => {
+    if (!item.perms.some((p) => can(p))) return false;
+    if (HIDE_GLOBAL_GRN_FOR_SCOPED && isWarehouseScoped && item.href === "/dashboard/goods-in") return false;
+    return true;
+  });
+
+  // Engineer-portal access is for STAFF users (principal.type === "user") who hold the engineer
+  // dashboard permission. Keyed on the user type (not on adminNav being empty) so a mixed-role staff
+  // member — engineer permission PLUS some admin sections — sees BOTH groups instead of losing the
+  // engineer nav. The super-admin (a different principal type) is intentionally excluded, even though
+  // its "*" technically grants engineer.* — its surface stays the Admin Suite.
+  const canEngineer = principal?.type === "user" && can("engineer.dashboard.view");
+  const isEngineerOnly = canEngineer && adminNav.length === 0;
+
+  // Engineer items shown alongside the admin menu drop the shared account "Settings" link (admins
+  // reach their account via the profile menu) to avoid a duplicate Settings entry. A pure engineer
+  // keeps the full portal nav, exactly as before.
+  const engineerNav = isEngineerOnly ? ENGINEER_NAV : ENGINEER_NAV.filter((i) => i.href !== "/dashboard/account");
+
+  // Nav groups. Customers get a single surface; staff get the admin menu and/or the engineer portal.
+  type NavGroup = { key: string; label: string; items: NavItem[] };
+  const navGroups: NavGroup[] = isCustomer
+    ? [{ key: "menu", label: "Menu", items: CUSTOMER_NAV }]
+    : [
+        ...(adminNav.length > 0 ? [{ key: "menu", label: "Menu", items: adminNav }] : []),
+        ...(canEngineer ? [{ key: "engineer", label: "Engineer Portal", items: engineerNav }] : []),
+      ];
 
   // Profile chip — super-admin, staff user, or customer.
   const isUser = principal?.type === "user";
@@ -196,7 +237,7 @@ export function Sidebar({
               {brandName}
             </h2>
             <span className="text-[10px] uppercase font-bold tracking-widest text-[var(--faint)] mt-0.5 block">
-              {isCustomer ? "Customer Portal" : "Admin Suite"}
+              {isCustomer ? "Customer Portal" : isEngineerOnly ? "Engineer Portal" : "Admin Suite"}
             </span>
           </div>
           <button
@@ -207,19 +248,21 @@ export function Sidebar({
           </button>
         </div>
 
-        {/* Nav */}
-        {nav.length > 0 && (
+        {/* Nav — one labelled group per surface (admin menu and/or engineer portal). */}
+        {navGroups.length > 0 && (
           <div className="space-y-5">
-            <div>
-              <span
-                className={`text-[10px] font-extrabold text-[var(--faint)] uppercase tracking-wider px-3 block mb-2 transition-all duration-300 overflow-hidden whitespace-nowrap ${
-                  collapsed ? "max-h-0 opacity-0 mb-0" : "max-h-6 opacity-100"
-                }`}
-              >
-                Menu
-              </span>
-              <nav className="space-y-0.5">{renderNav(nav)}</nav>
-            </div>
+            {navGroups.map((group) => (
+              <div key={group.key}>
+                <span
+                  className={`text-[10px] font-extrabold text-[var(--faint)] uppercase tracking-wider px-3 block mb-2 transition-all duration-300 overflow-hidden whitespace-nowrap ${
+                    collapsed ? "max-h-0 opacity-0 mb-0" : "max-h-6 opacity-100"
+                  }`}
+                >
+                  {group.label}
+                </span>
+                <nav className="space-y-0.5">{renderNav(group.items)}</nav>
+              </div>
+            ))}
           </div>
         )}
       </div>

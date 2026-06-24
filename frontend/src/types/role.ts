@@ -10,6 +10,8 @@ export interface Role {
   permissions: string[];
   userCount: number;
   sortOrder: number;
+  // Warehouse-scoped role → the user form shows the required "Assigned Warehouses" multi-select.
+  isWarehouseScoped: boolean;
   createdAt: string;
 }
 

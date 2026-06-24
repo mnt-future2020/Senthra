@@ -89,6 +89,43 @@ export const createPurchaseOrderSchema = z
   .refine(datesOk, datesError);
 export type CreatePurchaseOrderInput = z.infer<typeof createPurchaseOrderSchema>;
 
+// --- multi-warehouse auto-split create --------------------------------------
+// One purchasing operation whose lines each carry their OWN destination warehouse. The service
+// groups lines by warehouse and creates ONE single-warehouse PO per group (a PO never spans
+// warehouses). A line therefore extends the standard PO line with a `warehouseId`.
+const splitLineSchema = lineSchema.extend({
+  warehouseId: z.string({ error: "Select a warehouse." }).regex(OBJECT_ID_RE, "Select a warehouse."),
+});
+export type SplitPOLineInput = z.infer<typeof splitLineSchema>;
+
+// The SAME item to DIFFERENT warehouses is allowed (separate POs); the same item TWICE for the
+// SAME warehouse is not (it would violate the per-PO unique-item rule) — reject with a clear hint.
+const noDupItemPerWarehouse = (lines: { irmItemId: string; warehouseId: string }[]) => {
+  const seen = new Set<string>();
+  for (const l of lines) {
+    const key = `${l.warehouseId}:${l.irmItemId}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+  }
+  return true;
+};
+
+export const createPurchaseOrdersSplitSchema = z
+  .object({
+    supplierId: z.string({ error: "Select a supplier." }).regex(OBJECT_ID_RE, "Select a supplier."),
+    orderDate: requiredDate("Order date"),
+    expectedDeliveryDate: requiredDate("Expected delivery date"),
+    ...sharedHeader,
+    items: z
+      .array(splitLineSchema)
+      .min(1, "Add at least one item.")
+      .refine(noDupItemPerWarehouse, {
+        message: "The same item can't be added twice for the same warehouse. Combine those into one row.",
+      }),
+  })
+  .refine(datesOk, datesError);
+export type CreatePurchaseOrdersSplitInput = z.infer<typeof createPurchaseOrdersSplitSchema>;
+
 // Update = a full DRAFT re-save (the service blocks edits on any non-draft PO).
 export const updatePurchaseOrderSchema = z
   .object({

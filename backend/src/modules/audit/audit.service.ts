@@ -13,6 +13,10 @@ export interface AuditActor {
   // row — carried so authorization guards can enforce a no-escalation rule (a
   // delegate must not grant permissions it doesn't itself hold).
   permissions?: string[];
+  // The actor's accessible warehouse-id set, or null/absent = unrestricted. Not persisted — carried
+  // so the warehouse-access helpers (getAccessibleWarehouseIds/assertWarehouseAccess/scopeFilter)
+  // can scope every warehouse-bound operation to a warehouse-scoped role's assignments.
+  assignedWarehouseIds?: string[] | null;
 }
 
 export interface AuditEntry {

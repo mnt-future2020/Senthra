@@ -27,6 +27,9 @@ export interface UserPrincipal {
   role: UserRoleRef | null;
   // Effective permissions (the assigned role's permissions; "*" = all).
   permissions: string[];
+  // True when the user's role is warehouse-scoped (Role.isWarehouseScoped). Optional so a principal
+  // cached before this field shipped still type-checks; always read as `=== true`.
+  isWarehouseScoped?: boolean;
 }
 
 // An external customer (Customer PM). Read-only, scoped to a single customer
