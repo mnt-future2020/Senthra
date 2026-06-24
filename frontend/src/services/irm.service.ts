@@ -119,6 +119,14 @@ export function deleteIrmItem(id: string): Promise<void> {
   });
 }
 
+// Generate / regenerate the item's Code128 barcode image (server renders + stores it).
+export function generateBarcode(id: string): Promise<IrmItem> {
+  return api<{ item: IrmItem }>(`/irm-items/${id}/generate-barcode`, { method: "POST" }).then((r) => {
+    listCache.clear();
+    return r.item;
+  });
+}
+
 // Active staff users for the owner dropdown.
 export function listOwnerOptions(): Promise<IrmOwner[]> {
   return api<{ owners: IrmOwner[] }>("/irm-items/owner-options").then((r) => r.owners);

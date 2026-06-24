@@ -15,13 +15,13 @@ export const listGoodsReceipts = asyncHandler(async (req, res) => {
     sort: typeof sort === "string" ? sort : undefined,
     page: queryInt(page),
     pageSize: queryInt(pageSize),
-  });
+  }, actorFrom(req));
   res.json(result);
 });
 
 // GET /goods-in/:id  (id or code)
 export const getGoodsReceipt = asyncHandler(async (req, res) => {
-  res.json({ goodsReceipt: await grnService.getGoodsReceipt(param(req, "id")) });
+  res.json({ goodsReceipt: await grnService.getGoodsReceipt(param(req, "id"), actorFrom(req)) });
 });
 
 // POST /goods-in

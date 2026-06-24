@@ -3,7 +3,7 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
-import { MoreHorizontal, PackageCheck, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { MoreHorizontal, PackageCheck, Pencil, Search, Trash2 } from "lucide-react";
 
 import * as grnService from "@/services/goods-in.service";
 import { useAuth } from "@/hooks/useAuth";
@@ -98,7 +98,10 @@ function TableSkeleton({ actions }: { actions: boolean }) {
   );
 }
 
-export function GoodsReceiptsView() {
+// `warehouseId` locks the list to one warehouse and `embedded` drops the standalone page header +
+// full-height layout — both used when this renders inside the Warehouse detail "Incoming stock"
+// Company (GRN) pane. No props = the global GRN page. Mirrors InventoryView's embedded contract.
+export function GoodsReceiptsView({ warehouseId, embedded }: { warehouseId?: string; embedded?: boolean } = {}) {
   const router = useRouter();
   const { can } = useAuth();
   const { pushToast } = useDashboard();
@@ -108,7 +111,7 @@ export function GoodsReceiptsView() {
   const [statusFilter, setStatusFilter] = React.useState<"all" | GrnStatus>("all");
   const [page, setPage] = React.useState(1);
   const [refreshKey, setRefreshKey] = React.useState(0);
-  const [data, setData] = React.useState(() => grnService.getCachedGoodsReceipts({ pageSize: PAGE_SIZE }));
+  const [data, setData] = React.useState(() => grnService.getCachedGoodsReceipts({ warehouse: warehouseId, pageSize: PAGE_SIZE }));
   const [loading, setLoading] = React.useState(!data);
   const [error, setError] = React.useState<string | null>(null);
   const [confirm, setConfirm] = React.useState<{ open: boolean; grn: GoodsReceipt | null }>({ open: false, grn: null });
@@ -117,6 +120,9 @@ export function GoodsReceiptsView() {
   const canEdit = can("goods_in.edit");
   const canDelete = can("goods_in.delete");
   const showActions = canEdit || canDelete;
+  // When embedded in a warehouse, carry that warehouse into the New receipt form so its PO
+  // list is scoped to this warehouse (the global GRN page passes no warehouse → all POs).
+  const newReceiptHref = warehouseId ? `/dashboard/goods-in/new?warehouse=${warehouseId}` : "/dashboard/goods-in/new";
 
   React.useEffect(() => {
     const t = setTimeout(() => setDebounced(search.trim()), 300);
@@ -126,7 +132,7 @@ export function GoodsReceiptsView() {
   React.useEffect(() => {
     let active = true;
     (async () => {
-      const params = { search: debounced || undefined, status: statusFilter === "all" ? undefined : statusFilter, page, pageSize: PAGE_SIZE };
+      const params = { search: debounced || undefined, status: statusFilter === "all" ? undefined : statusFilter, warehouse: warehouseId, page, pageSize: PAGE_SIZE };
       const cached = grnService.getCachedGoodsReceipts(params);
       if (active && cached) setData(cached);
       setLoading(true);
@@ -142,7 +148,7 @@ export function GoodsReceiptsView() {
       }
     })();
     return () => { active = false; };
-  }, [debounced, statusFilter, page, refreshKey]);
+  }, [debounced, statusFilter, page, refreshKey, warehouseId]);
 
   const rows = data?.goodsReceipts ?? [];
   const showSkeleton = loading && rows.length === 0;
@@ -165,11 +171,13 @@ export function GoodsReceiptsView() {
   };
 
   return (
-    <div className="flex h-full flex-col gap-5">
-      <div className="shrink-0 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs" style={{ borderRadius: "var(--radius)" }}>
-        <h2 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">Goods In</h2>
-        <p className="mt-0.5 text-xs text-[var(--muted)]">Receive deliveries against purchase orders. Completing a receipt increases warehouse stock.</p>
-      </div>
+    <div className={embedded ? "flex flex-col gap-4" : "flex h-full flex-col gap-5"}>
+      {!embedded && (
+        <div className="shrink-0 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs" style={{ borderRadius: "var(--radius)" }}>
+          <h2 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">Goods Receipt Notes (GRN)</h2>
+          <p className="mt-0.5 text-xs text-[var(--muted)]">Search, track and audit goods receipts across every warehouse. Receive a delivery here, from a Purchase Order, or from a warehouse&apos;s Incoming stock — all feed the same flow.</p>
+        </div>
+      )}
 
       <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center">
         <div className="relative w-full sm:max-w-xs">
@@ -177,14 +185,17 @@ export function GoodsReceiptsView() {
           <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="Search GRN, PO or delivery note…" className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]" />
         </div>
         <Select size="sm" value={statusFilter} onChange={(v) => { setStatusFilter(v as "all" | GrnStatus); setPage(1); }} options={[{ value: "all", label: "All statuses" }, ...(Object.keys(GRN_STATUS_LABELS) as GrnStatus[]).map((s) => ({ value: s, label: GRN_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
-        {can("goods_in.create") && (
-          <button onClick={() => router.push("/dashboard/goods-in/new")} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 sm:ml-auto">
-            <Plus className="h-4 w-4" /> New receipt
+        {/* Embedded in a warehouse, this is the Received (history) view — receiving lives in the
+            sibling "Expected deliveries" worklist, so no create action here. The Global GRN page
+            (not embedded) keeps its Receive delivery button. */}
+        {!embedded && can("goods_in.create") && (
+          <button onClick={() => router.push(newReceiptHref)} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 sm:ml-auto">
+            <PackageCheck className="h-4 w-4" /> Receive delivery
           </button>
         )}
       </div>
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+      <div className={`flex flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)] ${embedded ? "" : "min-h-0 flex-1"}`}>
         {showSkeleton ? (
           <TableSkeleton actions={showActions} />
         ) : error ? (
@@ -193,12 +204,12 @@ export function GoodsReceiptsView() {
           <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
             <PackageCheck className="h-7 w-7 text-[var(--faint)]" />
             <p className="text-sm font-semibold text-[var(--ink)]">{isFiltered ? "No goods receipts match" : "No goods receipts yet"}</p>
-            {!isFiltered && can("goods_in.create") && (
-              <button onClick={() => router.push("/dashboard/goods-in/new")} className="mt-1 text-xs font-bold text-[var(--accent)] hover:opacity-80">Receive your first delivery</button>
+            {!embedded && !isFiltered && can("goods_in.create") && (
+              <button onClick={() => router.push(newReceiptHref)} className="mt-1 text-xs font-bold text-[var(--accent)] hover:opacity-80">Receive your first delivery</button>
             )}
           </div>
         ) : (
-          <div className="min-h-0 flex-1 overflow-auto">
+          <div className={embedded ? "overflow-x-auto" : "min-h-0 flex-1 overflow-auto"}>
             <table className="w-full min-w-[900px] text-left text-sm">
               <thead>
                 <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">

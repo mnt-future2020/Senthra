@@ -2,6 +2,7 @@ import type { Request, RequestHandler } from "express";
 
 import * as adminRepo from "#modules/auth/admin.repository.js";
 import * as userRepo from "#modules/user/user.repository.js";
+import * as userWarehouseRepo from "#modules/user/user-warehouse.repository.js";
 import * as customerRepo from "#modules/customer/customer.repository.js";
 import * as sessionService from "#modules/auth/session.service.js";
 import { roleGrants } from "#modules/role/permissions.js";
@@ -60,7 +61,13 @@ export const requireAuth: RequestHandler = async (req, res, next) => {
         });
         return;
       }
-      req.principal = userPrincipal(user);
+      // Warehouse-scoped roles carry their assigned warehouse-id set on the principal — the single
+      // place this is loaded, so no downstream module re-queries assignments. Non-scoped roles stay
+      // unrestricted (null). One indexed lookup, only for scoped users.
+      const assignedWarehouseIds = user.role?.isWarehouseScoped
+        ? await userWarehouseRepo.listWarehouseIds(user.id)
+        : null;
+      req.principal = userPrincipal(user, assignedWarehouseIds);
       req.userId = user.id;
       req.userEmail = user.email;
       next();

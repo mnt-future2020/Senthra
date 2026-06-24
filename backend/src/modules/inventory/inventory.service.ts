@@ -5,10 +5,12 @@ import type { InventoryBalanceWithRelations } from "./inventory.repository.js";
 import * as poService from "#modules/purchase-order/purchase-order.service.js";
 import * as grnRepo from "#modules/goods-in/goods-in.repository.js";
 import * as warehouseService from "#modules/warehouse/warehouse.service.js";
+import * as irmService from "#modules/irm/irm.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
+import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
-import type { CreateTransferInput } from "./inventory.validation.js";
+import type { AddStockInput, CreateTransferInput } from "./inventory.validation.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 const EXPORT_MAX = 50_000;
@@ -135,6 +137,23 @@ export interface PublicStockTransfer {
   createdAt: string;
 }
 
+export interface PublicStockAdjustment {
+  id: string;
+  code: string;
+  warehouseId: string;
+  warehouseName: string;
+  irmItemId: string;
+  itemName: string;
+  quantity: number;
+  balanceAfter: number;
+  reason: string;
+  movementDate: string;
+  referenceNumber: string | null;
+  notes: string | null;
+  createdBy: string | null;
+  createdAt: string;
+}
+
 const trimToNull = (v: string | null | undefined): string | null => {
   const t = v?.trim();
   return t ? t : null;
@@ -225,20 +244,21 @@ export interface PagedInventory {
 // All filtered balance DTOs (warehouse/category/search at the DB; status computed in-service because
 // `onHand ≤ irmItem.reorderLevel` is a cross-document comparison Mongo can't express in a `where`).
 // Bounded by items×warehouses; the result is paginated/serialised by the callers.
-async function filteredBalanceDTOs(params: ListInventoryParams): Promise<PublicInventoryBalance[]> {
+async function filteredBalanceDTOs(params: ListInventoryParams, actor?: AuditActor): Promise<PublicInventoryBalance[]> {
   const rows = await inventoryRepo.findAllBalances({
     search: params.search?.trim() || undefined,
     warehouseId: params.warehouse,
     irmCategoryId: params.category,
+    warehouseIds: warehouseScopeFilter(actor),
   });
   const status = params.status && ["in_stock", "low_stock", "out_of_stock"].includes(params.status) ? (params.status as InventoryStatus) : undefined;
   const dtos = rows.map(toBalanceDTO);
   return status ? dtos.filter((d) => d.status === status) : dtos;
 }
 
-export async function listInventory(params: ListInventoryParams = {}): Promise<PagedInventory> {
+export async function listInventory(params: ListInventoryParams = {}, actor?: AuditActor): Promise<PagedInventory> {
   const pageSize = clamp(params.pageSize ?? 20, 1, 100);
-  const all = await filteredBalanceDTOs(params);
+  const all = await filteredBalanceDTOs(params, actor);
   const total = all.length;
   const totalValuePence = all.reduce((s, d) => s + d.valuePence, 0);
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -253,8 +273,9 @@ async function loadBalanceOrThrow(balanceId: string): Promise<InventoryBalanceWi
   return b;
 }
 
-export async function getInventory(balanceId: string): Promise<PublicInventoryDetail> {
+export async function getInventory(balanceId: string, actor?: AuditActor): Promise<PublicInventoryDetail> {
   const b = await loadBalanceOrThrow(balanceId);
+  assertWarehouseAccess(actor, b.warehouseId);
   const dto = toBalanceDTO(b);
   const incoming = await poService.incomingForItemWarehouse(b.irmItemId, b.warehouseId);
   return { ...dto, incoming, outgoing: b.quantityReserved };
@@ -268,8 +289,9 @@ export interface PagedTransactions {
   totalPages: number;
 }
 
-export async function listInventoryTransactions(balanceId: string, page = 1, pageSize = 20): Promise<PagedTransactions> {
+export async function listInventoryTransactions(balanceId: string, page = 1, pageSize = 20, actor?: AuditActor): Promise<PagedTransactions> {
   const b = await loadBalanceOrThrow(balanceId);
+  assertWarehouseAccess(actor, b.warehouseId);
   const size = clamp(pageSize, 1, 100);
   const total = await inventoryRepo.countTransactions(b.irmItemId, b.warehouseId);
   const totalPages = Math.max(1, Math.ceil(total / size));
@@ -289,8 +311,9 @@ export async function listInventoryTransactions(balanceId: string, page = 1, pag
   return { transactions: rows.map(toTx), total, page: p, pageSize: size, totalPages };
 }
 
-export async function listPurchaseHistory(balanceId: string): Promise<PublicPurchaseHistoryRow[]> {
+export async function listPurchaseHistory(balanceId: string, actor?: AuditActor): Promise<PublicPurchaseHistoryRow[]> {
   const b = await loadBalanceOrThrow(balanceId);
+  assertWarehouseAccess(actor, b.warehouseId);
   const rows = await grnRepo.receivedHistoryForItemWarehouse(b.irmItemId, b.warehouseId);
   return rows.map((r) => ({
     grnCode: r.goodsReceipt.code,
@@ -308,8 +331,9 @@ export interface AvailabilityResult {
   reserved: number;
   available: number;
 }
-export async function getAvailability(irmItemId: string, warehouseId: string): Promise<AvailabilityResult> {
+export async function getAvailability(irmItemId: string, warehouseId: string, actor?: AuditActor): Promise<AvailabilityResult> {
   if (!OBJECT_ID_RE.test(irmItemId) || !OBJECT_ID_RE.test(warehouseId)) throw badRequest("Select an item and warehouse.");
+  assertWarehouseAccess(actor, warehouseId);
   const b = await inventoryRepo.findBalancePair(irmItemId, warehouseId);
   const onHand = b?.quantityOnHand ?? 0;
   const reserved = b?.quantityReserved ?? 0;
@@ -323,6 +347,9 @@ export async function transferStock(input: CreateTransferInput, actor?: AuditAct
 
   const fromWh = await warehouseService.requireActiveWarehouse(input.fromWarehouseId);
   const toWh = await warehouseService.requireActiveWarehouse(input.toWarehouseId);
+  // A scoped user must own BOTH ends of the move (assert on the resolved canonical ids).
+  assertWarehouseAccess(actor, fromWh.id);
+  assertWarehouseAccess(actor, toWh.id);
 
   const source = await inventoryRepo.findBalancePairWithRelations(input.irmItemId, input.fromWarehouseId);
   if (!source) throw conflict("There is no stock of this item at the source warehouse.");
@@ -367,6 +394,62 @@ export async function transferStock(input: CreateTransferInput, actor?: AuditAct
   return toTransferDTO(transfer);
 }
 
+// ── Manual stock add (existing / opening / legacy stock straight into a warehouse) ─────────────
+// Inbound-only. Validates the item is active + inventory-tracked (and not serial/batch-tracked —
+// those must come through Goods In), then atomically creates an ADJ-#### header, increments the
+// (item, warehouse) balance and writes ONE "manual_add" ledger row.
+export async function addStock(input: AddStockInput, actor?: AuditActor): Promise<PublicStockAdjustment> {
+  if (input.quantity <= 0) throw badRequest("Quantity must be greater than zero.");
+
+  const item = await irmService.requireActiveIrmItem(input.irmItemId);
+  if (item.trackInventory === false) throw badRequest(`${item.name} isn't inventory-tracked, so stock can't be added for it.`);
+  if (item.trackSerialNumbers || item.trackBatchNumbers) {
+    throw conflict("Serial- and batch-tracked items can't be added this way yet — receive them via Goods In.");
+  }
+  const wh = await warehouseService.requireActiveWarehouse(input.warehouseId);
+  assertWarehouseAccess(actor, wh.id);
+  const actorEmail = actor?.email ?? null;
+  const notes = trimToNull(input.notes);
+
+  const { adjustment, balanceAfter } = await inventoryRepo.createStockAdjustmentWithCode(
+    {
+      warehouseId: input.warehouseId,
+      reason: input.reason,
+      movementDate: new Date(input.movementDate),
+      referenceNumber: trimToNull(input.referenceNumber),
+      notes,
+      createdBy: actorEmail,
+    },
+    { irmItemId: input.irmItemId, warehouseId: input.warehouseId, quantity: input.quantity, notes, createdBy: actorEmail },
+  );
+
+  // Audit AFTER commit, fire-and-forget — a logging failure must never roll back a real stock add.
+  audit.record({
+    actor,
+    action: "inventory.stock_added",
+    targetType: "stock_adjustment",
+    targetId: adjustment.id,
+    targetLabel: `${adjustment.code} · +${input.quantity} ${item.name} @ ${wh.name}`,
+  });
+
+  return {
+    id: adjustment.id,
+    code: adjustment.code,
+    warehouseId: input.warehouseId,
+    warehouseName: wh.name,
+    irmItemId: input.irmItemId,
+    itemName: item.name,
+    quantity: input.quantity,
+    balanceAfter,
+    reason: adjustment.reason,
+    movementDate: adjustment.movementDate.toISOString(),
+    referenceNumber: adjustment.referenceNumber,
+    notes: adjustment.notes,
+    createdBy: adjustment.createdBy,
+    createdAt: adjustment.createdAt.toISOString(),
+  };
+}
+
 // ── Movement history (transfers) ───────────────────────────────────────────────────────────────
 export interface ListTransfersParams {
   search?: string;
@@ -382,9 +465,9 @@ export interface PagedTransfers {
   pageSize: number;
   totalPages: number;
 }
-export async function listTransfers(params: ListTransfersParams = {}): Promise<PagedTransfers> {
+export async function listTransfers(params: ListTransfersParams = {}, actor?: AuditActor): Promise<PagedTransfers> {
   const pageSize = clamp(params.pageSize ?? 20, 1, 100);
-  const filters = { search: params.search?.trim() || undefined, irmItemId: params.irmItem, warehouseId: params.warehouse };
+  const filters = { search: params.search?.trim() || undefined, irmItemId: params.irmItem, warehouseId: params.warehouse, warehouseIds: warehouseScopeFilter(actor) };
   const total = await inventoryRepo.countTransfers(filters);
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const page = clamp(params.page ?? 1, 1, totalPages);
@@ -407,7 +490,7 @@ export interface InventoryCsvResult {
 }
 
 export async function exportInventoryCsv(params: ListInventoryParams = {}, actor?: AuditActor): Promise<InventoryCsvResult> {
-  const all = await filteredBalanceDTOs(params);
+  const all = await filteredBalanceDTOs(params, actor);
   const rows = all.slice(0, EXPORT_MAX);
   const header = ["Item Code", "Item", "SKU", "Warehouse", "Category", "Unit", "On Hand", "Reserved", "Available", "Value (GBP)", "Last Movement (UTC)", "Status"];
   const lines = [header.map(csvEscape).join(",")];

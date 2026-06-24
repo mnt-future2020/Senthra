@@ -41,12 +41,16 @@ export interface WarehouseListFilters {
   search?: string;
   status?: string;
   typeId?: string;
+  // Warehouse-access scope: when present, restrict to exactly these ids (a warehouse-scoped user's
+  // assigned set). `undefined` = unrestricted. An empty array correctly matches nothing.
+  ids?: string[];
 }
 
 function buildWhere(filters: WarehouseListFilters): Prisma.WarehouseWhereInput {
   const where: Prisma.WarehouseWhereInput = { deletedAt: null };
   if (filters.status) where.status = filters.status;
   if (filters.typeId) where.typeId = filters.typeId;
+  if (filters.ids !== undefined) where.id = { in: filters.ids };
   if (filters.search) {
     const q = filters.search;
     where.OR = [
@@ -106,6 +110,29 @@ export function findByCode(code: string): Promise<WarehouseWithRelations | null>
 // `typeId` can be the single source of truth.
 export function findIdsMissingType(): Promise<{ id: string }[]> {
   return prisma.warehouse.findMany({ where: { typeId: null }, select: { id: true } });
+}
+
+// The ACTIVE, non-deleted warehouses among `ids` (id only). Used to validate user→warehouse
+// assignments: any requested id NOT returned here is inactive, soft-deleted or non-existent.
+export function findActiveByIds(ids: string[]): Promise<{ id: string }[]> {
+  if (!ids.length) return Promise.resolve([]);
+  return prisma.warehouse.findMany({
+    where: { id: { in: ids }, status: "active", deletedAt: null },
+    select: { id: true },
+  });
+}
+
+// Lean active-warehouse options for a picker (id/code/name only), code-sorted. Mirrors
+// findManagerOptions — a trimmed list instead of paging the full warehouse records. `ids` scopes
+// the result to a warehouse-scoped user's assigned set (undefined = unrestricted).
+export function findOptions(ids?: string[]): Promise<{ id: string; code: string; name: string }[]> {
+  const where: Prisma.WarehouseWhereInput = { status: "active", deletedAt: null };
+  if (ids !== undefined) where.id = { in: ids };
+  return prisma.warehouse.findMany({
+    where,
+    select: { id: true, code: true, name: true },
+    orderBy: { code: "asc" },
+  });
 }
 
 // Unchecked update input so the service can set the scalar `managerUserId` FK

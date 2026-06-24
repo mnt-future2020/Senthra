@@ -8,6 +8,12 @@ import { Modal } from "@/components/ui/Modal";
 import { RequiredMark } from "@/components/ui/FormScaffold";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import { NumberInput } from "@/components/ui/NumberInput";
+import {
+  StockItemPicker,
+  toStockItemOptions,
+  type StockItemOption,
+  type StockItemValue,
+} from "@/components/dashboard/stock/StockItemPicker";
 import type { StockRequest } from "@/types/customer";
 
 // Admin creates a stock submission on behalf of a customer (e.g. taken over the
@@ -24,7 +30,9 @@ export function AdminStockSubmissionModal({
   onClose: () => void;
   onCreated: (request: StockRequest) => void;
 }) {
-  const [name, setName] = React.useState("");
+  const [item, setItem] = React.useState<StockItemValue>({ entryId: null, name: "" });
+  const [options, setOptions] = React.useState<StockItemOption[]>([]);
+  const [loadingItems, setLoadingItems] = React.useState(true);
   const [quantity, setQuantity] = React.useState("");
   const [requestedByName, setRequestedByName] = React.useState("");
   const [notes, setNotes] = React.useState("");
@@ -32,10 +40,23 @@ export function AdminStockSubmissionModal({
   const [errors, setErrors] = React.useState<{ name?: string; quantity?: string }>({});
   const [error, setError] = React.useState<string | null>(null);
 
+  // This customer's existing stock — pick one to top up instead of creating a duplicate.
+  React.useEffect(() => {
+    let alive = true;
+    customerService
+      .listCustomerStockEntries(customerId)
+      .then((entries) => alive && setOptions(toStockItemOptions(entries)))
+      .catch(() => alive && setOptions([]))
+      .finally(() => alive && setLoadingItems(false));
+    return () => {
+      alive = false;
+    };
+  }, [customerId]);
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     const errs: typeof errors = {};
-    if (!name.trim()) errs.name = "Item name is required.";
+    if (!item.name.trim()) errs.name = "Select an existing item or enter an item name.";
     const qty = Number(quantity);
     if (!quantity.trim() || !Number.isInteger(qty) || qty < 1) {
       errs.quantity = "Enter a whole quantity of 1 or more.";
@@ -47,10 +68,11 @@ export function AdminStockSubmissionModal({
     setError(null);
     try {
       const request = await customerService.createStockRequestForCustomer(customerId, {
-        name: name.trim(),
+        name: item.name.trim(),
         quantity: qty,
         requestedByName: requestedByName.trim() || undefined,
         notes: notes.trim() || undefined,
+        linkedStockEntryId: item.entryId ?? undefined,
       });
       onCreated(request);
     } catch (err) {
@@ -81,19 +103,18 @@ export function AdminStockSubmissionModal({
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="sm:col-span-2">
             <label className={labelCls}>
-              Item name<RequiredMark />
+              Item<RequiredMark />
             </label>
-            <input
-              className={inputCls}
-              value={name}
-              onChange={(e) => {
-                setName(e.target.value);
+            <StockItemPicker
+              items={options}
+              value={item}
+              onChange={(v) => {
+                setItem(v);
                 setErrors((p) => ({ ...p, name: undefined }));
               }}
-              placeholder="e.g. SFP-LX optical module"
-              maxLength={160}
+              loading={loadingItems}
+              invalid={Boolean(errors.name)}
               autoFocus
-              aria-invalid={Boolean(errors.name)}
             />
             <FieldErr msg={errors.name} />
           </div>

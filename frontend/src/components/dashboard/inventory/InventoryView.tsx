@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeftRight, Boxes, Download, Loader2, Search } from "lucide-react";
+import { ArrowLeftRight, Boxes, Download, Loader2, PackagePlus, Search } from "lucide-react";
 
 import * as inventoryService from "@/services/inventory.service";
 import { listWarehouses } from "@/services/warehouse.service";
@@ -40,14 +40,17 @@ function TableSkeleton() {
   );
 }
 
-export function InventoryView() {
+// `warehouseId` locks the view to one warehouse (hides the warehouse filter/column) and
+// `embedded` drops the standalone page header + full-height layout — both used when this is
+// rendered inside the Warehouse detail "IRM stock" tab. No props = the global inventory page.
+export function InventoryView({ warehouseId, embedded }: { warehouseId?: string; embedded?: boolean } = {}) {
   const router = useRouter();
   const { can } = useAuth();
   const { pushToast } = useDashboard();
 
   const [search, setSearch] = React.useState("");
   const [debounced, setDebounced] = React.useState("");
-  const [warehouse, setWarehouse] = React.useState("");
+  const [warehouse, setWarehouse] = React.useState(warehouseId ?? "");
   const [category, setCategory] = React.useState("");
   const [status, setStatus] = React.useState<"" | InventoryStatus>("");
   const [page, setPage] = React.useState(1);
@@ -58,6 +61,19 @@ export function InventoryView() {
   const [warehouses, setWarehouses] = React.useState<{ id: string; name: string; code: string }[]>([]);
   const [categories, setCategories] = React.useState<{ id: string; name: string }[]>([]);
 
+  // Keep the warehouse filter in sync when this component is reused for a DIFFERENT warehouse via
+  // client-side navigation (e.g. moving between Warehouse detail pages without unmounting). The
+  // `warehouse` state is seeded from the prop only at mount, so without this the previous
+  // warehouse's inventory would render under the new warehouse's header. Adjusting state during
+  // render (the React-recommended pattern for "reset state when a prop changes") avoids an extra
+  // commit and a cascading-render lint error.
+  const [prevWarehouseId, setPrevWarehouseId] = React.useState(warehouseId);
+  if (warehouseId !== prevWarehouseId) {
+    setPrevWarehouseId(warehouseId);
+    setWarehouse(warehouseId ?? "");
+    setPage(1);
+  }
+
   React.useEffect(() => {
     const t = setTimeout(() => setDebounced(search.trim()), 300);
     return () => clearTimeout(t);
@@ -66,10 +82,11 @@ export function InventoryView() {
   // Filter option lists (active warehouses + IRM categories), loaded once.
   React.useEffect(() => {
     let active = true;
-    listWarehouses({ status: "active", pageSize: 100 }).then((r) => active && setWarehouses(r.warehouses.map((w) => ({ id: w.id, name: w.name, code: w.code }))), () => {});
+    // Warehouse filter is hidden when locked to one warehouse, so skip that fetch.
+    if (!warehouseId) listWarehouses({ status: "active", pageSize: 100 }).then((r) => active && setWarehouses(r.warehouses.map((w) => ({ id: w.id, name: w.name, code: w.code }))), () => {});
     listIrmCategories().then((cs) => active && setCategories(cs.map((c) => ({ id: c.id, name: c.name }))), () => {});
     return () => { active = false; };
-  }, []);
+  }, [warehouseId]);
 
   React.useEffect(() => {
     let active = true;
@@ -109,24 +126,33 @@ export function InventoryView() {
   };
 
   return (
-    <div className="flex h-full flex-col gap-5">
-      <div className="shrink-0 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs" style={{ borderRadius: "var(--radius)" }}>
-        <h2 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">Warehouse Inventory</h2>
-        <p className="mt-0.5 text-xs text-[var(--muted)]">Live on-hand stock per item and warehouse. Move stock between warehouses or open a record for its full movement history.</p>
-      </div>
+    <div className={embedded ? "flex flex-col gap-4" : "flex h-full flex-col gap-5"}>
+      {!embedded && (
+        <div className="shrink-0 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs" style={{ borderRadius: "var(--radius)" }}>
+          <h2 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">Warehouse Inventory</h2>
+          <p className="mt-0.5 text-xs text-[var(--muted)]">Live on-hand stock per item and warehouse. Move stock between warehouses or open a record for its full movement history.</p>
+        </div>
+      )}
 
       <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:items-center">
         <div className="relative w-full lg:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="Search item or SKU…" className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]" />
         </div>
-        <Select size="sm" value={warehouse} onChange={(v) => { setWarehouse(v); setPage(1); }} options={[{ value: "", label: "All warehouses" }, ...warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))]} ariaLabel="Filter by warehouse" />
+        {!warehouseId && (
+          <Select size="sm" value={warehouse} onChange={(v) => { setWarehouse(v); setPage(1); }} options={[{ value: "", label: "All warehouses" }, ...warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))]} ariaLabel="Filter by warehouse" />
+        )}
         <Select size="sm" value={category} onChange={(v) => { setCategory(v); setPage(1); }} options={[{ value: "", label: "All categories" }, ...categories.map((c) => ({ value: c.id, label: c.name }))]} ariaLabel="Filter by category" />
         <Select size="sm" value={status} onChange={(v) => { setStatus(v as "" | InventoryStatus); setPage(1); }} options={[{ value: "", label: "All statuses" }, ...(Object.keys(INVENTORY_STATUS_LABELS) as InventoryStatus[]).map((s) => ({ value: s, label: INVENTORY_STATUS_LABELS[s] }))]} ariaLabel="Filter by stock status" />
         <div className="flex items-center gap-2 lg:ml-auto">
           {can("inventory.export") && (
             <button onClick={onExport} disabled={exporting || rows.length === 0} className="flex shrink-0 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)] disabled:opacity-60" title="Export the filtered list to CSV">
               {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />} Export CSV
+            </button>
+          )}
+          {can("inventory.adjust") && (
+            <button onClick={() => router.push(`/dashboard/inventory/add-stock${warehouseId ? `?warehouse=${warehouseId}` : ""}`)} className="flex shrink-0 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)]" title="Add existing / opening stock into a warehouse">
+              <PackagePlus className="h-4 w-4" /> Add Stock
             </button>
           )}
           {can("inventory.move") && (
@@ -137,7 +163,7 @@ export function InventoryView() {
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+      <div className={`flex flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)] ${embedded ? "" : "min-h-0 flex-1"}`}>
         {showSkeleton ? (
           <TableSkeleton />
         ) : error ? (
@@ -150,7 +176,7 @@ export function InventoryView() {
           </div>
         ) : (
           <>
-            <div className="min-h-0 flex-1 overflow-auto">
+            <div className={embedded ? "overflow-x-auto" : "min-h-0 flex-1 overflow-auto"}>
               <table className="w-full min-w-[1040px] text-left text-sm">
                 <thead>
                   <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">

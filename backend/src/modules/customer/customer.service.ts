@@ -16,9 +16,11 @@ import { issueResetEmail } from "#modules/auth/auth.service.js";
 import * as sessionService from "#modules/auth/session.service.js";
 import { getCustomerStock, type CustomerStock } from "./customer.stock.service.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
+import { withTransaction } from "../../lib/prisma.js";
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
 import { geocodePostcode } from "../../lib/geocode.js";
 import { getCloudinaryCreds, getStockCodePrefix } from "#modules/settings/settings.service.js";
+import { assertWarehouseAccess } from "../../lib/warehouse-access.js";
 import { generateTempPassword } from "../../utils/generate-password.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import { hashPassword } from "../../utils/password.js";
@@ -125,6 +127,8 @@ export interface PublicStockRequest {
   name: string;
   editedName: string | null;
   catalogueItemId: string | null;
+  // Set when this submission tops up an existing received stock line.
+  linkedStockEntryId: string | null;
   quantity: number | null;
   reason: string | null;
   notes: string | null;
@@ -287,6 +291,7 @@ function toStockRequest(r: StockRequestRow): PublicStockRequest {
     name: r.name,
     editedName: r.editedName ?? null,
     catalogueItemId: r.catalogueItemId ?? null,
+    linkedStockEntryId: r.linkedStockEntryId ?? null,
     quantity: r.quantity,
     reason: r.reason,
     notes: r.notes,
@@ -1035,24 +1040,45 @@ export async function sendUserResetLink(
 // --- customer stock requests (portal submit → internal review) --------------
 
 export interface StockRequestInput {
-  name: string;
+  // Either a free-text new item name OR a link to an existing stock line — the service
+  // requires exactly one and derives the stored name from the link when present.
+  name?: string;
+  linkedStockEntryId?: string;
   quantity: number;
   reason?: string;
   notes?: string;
 }
 
-function toStockRequestData(input: StockRequestInput): customerRepo.StockRequestData {
-  const name = input.name.trim();
-  if (!name) throw badRequest("Item name is required.");
+// Turn a portal/admin submission into the row to persist. The item is EITHER a
+// free-text new name OR a link to an existing stock line this submission tops up. When
+// linked, we load + ownership-check that line and derive the canonical name from it (so
+// the link is authoritative and a spoofed/foreign id can't slip through). Scoped to
+// `customerId` — never trust a client to point at another customer's stock.
+async function resolveStockRequestData(
+  customerId: string,
+  input: StockRequestInput,
+): Promise<customerRepo.StockRequestData> {
   if (!Number.isFinite(input.quantity) || input.quantity < 1) {
     throw badRequest("Quantity must be at least 1.");
   }
-  return {
-    name,
+  const base = {
     quantity: Math.trunc(input.quantity),
     reason: trimToNull(input.reason),
     notes: trimToNull(input.notes),
   };
+
+  const linkedId = trimToNull(input.linkedStockEntryId);
+  if (linkedId) {
+    const entry = await customerRepo.findStockEntryById(linkedId);
+    if (!entry || entry.customerId !== customerId) {
+      throw badRequest("The selected existing item could not be found.");
+    }
+    return { ...base, name: entry.itemName, linkedStockEntryId: entry.id };
+  }
+
+  const name = input.name?.trim();
+  if (!name) throw badRequest("Item name is required.");
+  return { ...base, name, linkedStockEntryId: null };
 }
 
 // PORTAL: a customer user submits a stock / replenishment request. Scoped to the
@@ -1065,7 +1091,7 @@ export async function submitStockRequest(
   input: StockRequestInput,
 ): Promise<PublicStockRequest> {
   const customer = await requireCustomer(customerId);
-  const data = toStockRequestData(input);
+  const data = await resolveStockRequestData(customerId, input);
   const created = await customerRepo.createStockRequest(
     customerId,
     requestedBy.userId,
@@ -1092,7 +1118,7 @@ export async function createStockRequestForCustomer(
   actor?: AuditActor,
 ): Promise<PublicStockRequest> {
   const customer = await requireCustomer(customerId);
-  const data = toStockRequestData(input);
+  const data = await resolveStockRequestData(customerId, input);
   const created = await customerRepo.createStockRequest(customerId, null, requestedByName, data);
   audit.record({
     actor,
@@ -1259,6 +1285,87 @@ export interface ReceiveStockInput {
   notes?: string;
 }
 
+type AssignmentWithRequest = NonNullable<Awaited<ReturnType<typeof customerRepo.findAssignmentById>>>;
+
+// On a receive, decide which stock line the newly-received units land on:
+//  1. If THIS assignment already produced an entry (an earlier partial receive), keep
+//     accumulating into it — one entry per assignment.
+//  2. Otherwise, if the submission was explicitly linked to an existing product (a
+//     top-up), add to the matching line in THIS warehouse instead of spawning a
+//     duplicate — opening a fresh line that carries the linked product's details if the
+//     warehouse doesn't hold it yet.
+//  3. Otherwise it's a genuinely new product → create a fresh entry.
+async function resolveReceivedStockEntry(
+  assignment: AssignmentWithRequest,
+  assignmentId: string,
+  receivedQuantity: number,
+  receivedByEmail: string | null,
+  tx: Prisma.TransactionClient,
+) {
+  const now = new Date();
+
+  // (1) Partial receives accumulate into the assignment's own entry.
+  const existingEntries = await customerRepo.findStockEntriesByAssignment(assignmentId, tx);
+  if (existingEntries.length) {
+    return customerRepo.addStockEntryQuantity(existingEntries[0].id, receivedQuantity, receivedByEmail, now, tx);
+  }
+
+  const customerId = assignment.stockRequest.customerId;
+  const fallbackName = assignment.stockRequest.editedName ?? assignment.stockRequest.name;
+
+  // (2) Explicit top-up of an existing product line.
+  const linkedId = assignment.stockRequest.linkedStockEntryId;
+  const linked = linkedId ? await customerRepo.findStockEntryById(linkedId, tx) : null;
+  if (linked) {
+    // When the linked line lives in the SAME warehouse this assignment delivers to, it IS the
+    // canonical target — top it up directly. Never re-resolve it by name/sku (a same-named sibling
+    // line, e.g. an older one with no SKU, could otherwise be picked and corrupt the wrong product).
+    if (linked.warehouseId === assignment.warehouseId) {
+      return customerRepo.addStockEntryQuantity(linked.id, receivedQuantity, receivedByEmail, now, tx);
+    }
+    // Linked line is in a DIFFERENT warehouse → find the matching line in THIS warehouse (same
+    // product, identified by name + exact sku) or create a fresh one below.
+    const target = await customerRepo.findStockEntryForTopUp(
+      customerId,
+      assignment.warehouseId,
+      linked.itemName,
+      linked.sku,
+      tx,
+    );
+    if (target) {
+      return customerRepo.addStockEntryQuantity(target.id, receivedQuantity, receivedByEmail, now, tx);
+    }
+    // Same product, warehouse that doesn't hold it yet → fresh line copying the details.
+    return customerRepo.createStockEntry({
+      customerId,
+      warehouseId: assignment.warehouseId,
+      assignmentId,
+      itemName: linked.itemName,
+      quantity: receivedQuantity,
+      receivedBy: receivedByEmail,
+      receivedAt: now,
+      sku: linked.sku,
+      categoryId: linked.categoryId,
+      description: linked.description,
+      uom: linked.uom,
+      serialized: linked.serialized,
+      highValue: linked.highValue,
+      thresholdQty: linked.thresholdQty,
+    }, tx);
+  }
+
+  // (3) Genuinely new product.
+  return customerRepo.createStockEntry({
+    customerId,
+    warehouseId: assignment.warehouseId,
+    assignmentId,
+    itemName: fallbackName,
+    quantity: receivedQuantity,
+    receivedBy: receivedByEmail,
+    receivedAt: now,
+  }, tx);
+}
+
 export async function receiveStockAssignment(
   assignmentId: string,
   input: ReceiveStockInput,
@@ -1266,6 +1373,8 @@ export async function receiveStockAssignment(
 ): Promise<{ assignment: PublicWarehouseAssignment; stockEntryId: string }> {
   const assignment = await customerRepo.findAssignmentById(assignmentId);
   if (!assignment) throw notFound("Assignment not found.");
+  // Scope to the warehouse this assignment physically lives at.
+  assertWarehouseAccess(actor, assignment.warehouseId);
   if (assignment.status === "received") throw badRequest("This assignment is already fully received.");
 
   const remaining = assignment.quantity - assignment.receivedQuantity;
@@ -1273,49 +1382,39 @@ export async function receiveStockAssignment(
     throw badRequest(`Only ${remaining} remaining to receive. You entered ${input.receivedQuantity}.`);
   }
 
-  const updated = await customerRepo.updateAssignmentReceived(
-    assignmentId,
-    input.receivedQuantity,
-    assignment.receivedQuantity,
-    assignment.quantity,
-    actor?.email ?? null,
-    trimToNull(input.notes),
-  );
-  // Lost the optimistic race — another receive updated this assignment first. Bail BEFORE
-  // creating a stock entry, so we never double-count or spawn a duplicate entry.
-  if (!updated) {
-    throw conflict("This assignment was just updated by someone else. Please refresh and try again.");
-  }
+  // All-or-nothing: the assignment counter bump, the parent request status, and the stock-entry
+  // write must commit together. A crash between them would otherwise mark an assignment received
+  // with no matching stock line (consigned units lost, and the status guard blocks a re-receive).
+  // Mirrors the transactional posting in goods-in/goods-out.
+  const { updated, stockEntry } = await withTransaction(async (tx) => {
+    const updated = await customerRepo.updateAssignmentReceived(
+      assignmentId,
+      input.receivedQuantity,
+      assignment.receivedQuantity,
+      assignment.quantity,
+      actor?.email ?? null,
+      trimToNull(input.notes),
+      tx,
+    );
+    // Lost the optimistic race — another receive updated this assignment first. Throwing rolls back
+    // the whole transaction, so we never double-count or spawn a duplicate entry.
+    if (!updated) {
+      throw conflict("This assignment was just updated by someone else. Please refresh and try again.");
+    }
 
-  const allAssignments = await customerRepo.findAssignmentsByRequest(assignment.customerStockRequestId);
-  const allReceived = allAssignments.every((a) => a.status === "received");
-  const someReceived = allAssignments.some((a) => a.status === "received" || a.status === "partially_received");
+    const allAssignments = await customerRepo.findAssignmentsByRequest(assignment.customerStockRequestId, tx);
+    const allReceived = allAssignments.every((a) => a.status === "received");
+    const someReceived = allAssignments.some((a) => a.status === "received" || a.status === "partially_received");
 
-  if (allReceived) {
-    await customerRepo.updateStockRequestStatus(assignment.customerStockRequestId, "completed");
-  } else if (someReceived) {
-    await customerRepo.updateStockRequestStatus(assignment.customerStockRequestId, "partially_received");
-  }
+    if (allReceived) {
+      await customerRepo.updateStockRequestStatus(assignment.customerStockRequestId, "completed", tx);
+    } else if (someReceived) {
+      await customerRepo.updateStockRequestStatus(assignment.customerStockRequestId, "partially_received", tx);
+    }
 
-  // Partial receives accumulate into ONE stock entry per assignment: top up the
-  // existing entry if this assignment already produced one, otherwise create it.
-  const existingEntries = await customerRepo.findStockEntriesByAssignment(assignmentId);
-  const stockEntry = existingEntries.length
-    ? await customerRepo.addStockEntryQuantity(
-        existingEntries[0].id,
-        input.receivedQuantity,
-        actor?.email ?? null,
-        new Date(),
-      )
-    : await customerRepo.createStockEntry({
-        customerId: assignment.stockRequest.customerId,
-        warehouseId: assignment.warehouseId,
-        assignmentId,
-        itemName: assignment.stockRequest.editedName ?? assignment.stockRequest.name,
-        quantity: input.receivedQuantity,
-        receivedBy: actor?.email ?? null,
-        receivedAt: new Date(),
-      });
+    const stockEntry = await resolveReceivedStockEntry(assignment, assignmentId, input.receivedQuantity, actor?.email ?? null, tx);
+    return { updated, stockEntry };
+  });
 
   audit.record({
     actor,
@@ -1363,7 +1462,12 @@ export interface PendingStockItem {
   createdAt: string;
 }
 
-export async function getPendingStockForWarehouse(warehouseId: string): Promise<PendingStockItem[]> {
+export async function getPendingStockForWarehouse(
+  warehouseId: string,
+  actor?: AuditActor,
+): Promise<PendingStockItem[]> {
+  // The route param IS the canonical warehouse id (the repo filters on it directly).
+  assertWarehouseAccess(actor, warehouseId);
   const assignments = await customerRepo.findPendingAssignmentsByWarehouse(warehouseId);
   return assignments.map((a) => ({
     assignmentId: a.id,
@@ -1526,9 +1630,13 @@ function toStockEntry(e: StockEntryRow): PublicStockEntry {
   };
 }
 
-export async function getStockEntry(entryId: string): Promise<PublicStockEntry> {
+export async function getStockEntry(
+  entryId: string,
+  actor?: AuditActor,
+): Promise<PublicStockEntry> {
   const entry = await customerRepo.findStockEntryById(entryId);
   if (!entry) throw notFound("Stock entry not found.");
+  assertWarehouseAccess(actor, entry.warehouseId);
   return toStockEntry(entry);
 }
 
@@ -1551,6 +1659,7 @@ export async function updateStockEntry(
 ): Promise<PublicStockEntry> {
   const entry = await customerRepo.findStockEntryById(entryId);
   if (!entry) throw notFound("Stock entry not found.");
+  assertWarehouseAccess(actor, entry.warehouseId);
 
   const updated = await customerRepo.updateStockEntry(entryId, {
     itemName: input.itemName.trim(),
@@ -1582,6 +1691,7 @@ export async function generateStockEntryBarcode(
 ): Promise<PublicStockEntry> {
   const entry = await customerRepo.findStockEntryById(entryId);
   if (!entry) throw notFound("Stock entry not found.");
+  assertWarehouseAccess(actor, entry.warehouseId);
 
   const [prefix, seq] = await Promise.all([
     getStockCodePrefix(),
@@ -1619,6 +1729,7 @@ export async function deleteStockEntry(
 ): Promise<void> {
   const entry = await customerRepo.findStockEntryById(entryId);
   if (!entry) throw notFound("Stock entry not found.");
+  assertWarehouseAccess(actor, entry.warehouseId);
 
   await customerRepo.deleteStockEntry(entryId);
 
@@ -1657,6 +1768,7 @@ export async function createDirectStockEntry(
   // (MongoDB has no FK enforcement, so this must be checked explicitly).
   const warehouse = await warehouseRepo.findById(input.warehouseId);
   if (!warehouse) throw badRequest("Selected warehouse no longer exists.");
+  assertWarehouseAccess(actor, warehouse.id);
 
   const entry = await customerRepo.createDirectStockEntry({
     customerId,
@@ -1700,7 +1812,10 @@ export async function listCustomerStockEntries(
 export async function listWarehouseStockEntries(
   warehouseId: string,
   status?: string,
+  actor?: AuditActor,
 ): Promise<PublicStockEntry[]> {
+  // The route param IS the canonical warehouse id (the repo filters on it directly).
+  assertWarehouseAccess(actor, warehouseId);
   const entries = await customerRepo.findStockEntriesByWarehouse(warehouseId, status);
   return entries.map((e) => toStockEntry(e as StockEntryRow));
 }

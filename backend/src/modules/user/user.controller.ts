@@ -4,6 +4,7 @@ import { asyncHandler } from "../../utils/async-handler.js";
 import { param, queryInt } from "../../utils/request.js";
 import type {
   CreateUserInput,
+  UpdateMyProfileInput,
   UpdateUserInput,
   UpdateUserStatusInput,
   UploadSignatureInput,
@@ -63,6 +64,17 @@ export const resendInvite = asyncHandler(async (req, res) => {
 export const deleteUser = asyncHandler(async (req, res) => {
   await userService.deleteUser(param(req, "id"), actorFrom(req));
   res.json({ ok: true });
+});
+
+// GET /users/me  (self-service) — the signed-in staff user's own profile.
+export const getMyProfile = asyncHandler(async (req, res) => {
+  res.json({ user: await userService.getMyProfile(actorFrom(req)) });
+});
+
+// PUT /users/me  (self-service) — edit own profile (phone/avatar/address only).
+export const updateMyProfile = asyncHandler(async (req, res) => {
+  const user = await userService.updateMyProfile(req.body as UpdateMyProfileInput, actorFrom(req));
+  res.json({ user });
 });
 
 // POST /users/me/signature  (self-service) — upload the signed-in user's signature.

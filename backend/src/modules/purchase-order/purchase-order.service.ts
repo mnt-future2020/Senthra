@@ -11,9 +11,11 @@ import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
+import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import type {
   CreatePurchaseOrderInput,
+  CreatePurchaseOrdersSplitInput,
   POLineInput,
   PoAttachmentInput,
   UpdatePurchaseOrderInput,
@@ -270,6 +272,7 @@ async function buildLineRows(items: POLineInput[]): Promise<PoLineRow[]> {
 export interface ListPurchaseOrdersParams {
   search?: string;
   status?: string;
+  statuses?: string[];
   priority?: string;
   supplier?: string;
   warehouse?: string;
@@ -278,14 +281,17 @@ export interface ListPurchaseOrdersParams {
   sort?: string;
 }
 
-export async function listPurchaseOrders(params: ListPurchaseOrdersParams = {}): Promise<PagedPurchaseOrders> {
+export async function listPurchaseOrders(params: ListPurchaseOrdersParams = {}, actor?: AuditActor): Promise<PagedPurchaseOrders> {
   const pageSize = Math.min(Math.max(Math.trunc(params.pageSize ?? 20), 1), 100);
   const filters = {
     search: params.search,
     status: params.status,
+    statuses: params.statuses,
     priority: params.priority,
     supplierId: params.supplier,
     warehouseId: params.warehouse,
+    // Unrestricted actor → undefined → no filter (unchanged). Scoped actor → their warehouse ids.
+    warehouseIds: warehouseScopeFilter(actor),
   };
   const total = await poRepo.count(filters);
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -294,21 +300,28 @@ export async function listPurchaseOrders(params: ListPurchaseOrdersParams = {}):
   return { purchaseOrders: rows.map(toPublic), total, page, pageSize, totalPages };
 }
 
-export async function getPurchaseOrder(idOrCode: string): Promise<PublicPurchaseOrder> {
+export async function getPurchaseOrder(idOrCode: string, actor?: AuditActor): Promise<PublicPurchaseOrder> {
   const po = OBJECT_ID_RE.test(idOrCode) ? await poRepo.findById(idOrCode) : await poRepo.findByCode(idOrCode);
   if (!po) throw notFound("Purchase order not found.");
+  // Assert only when the PO has a delivery warehouse; a null warehouseId (header not yet assigned)
+  // is never blocked. Unrestricted actors are a no-op.
+  if (po.warehouseId) assertWarehouseAccess(actor, po.warehouseId);
   return toPublic(po);
 }
 
 // Load the raw PO (with relations) for the Document Platform — the PO PDF (supplier email +
 // staff download) builds from this. Throws 404 when missing/soft-deleted.
-export async function loadPurchaseOrderEntity(idOrCode: string): Promise<PurchaseOrderWithRelations> {
+export async function loadPurchaseOrderEntity(idOrCode: string, actor?: AuditActor): Promise<PurchaseOrderWithRelations> {
   const po = OBJECT_ID_RE.test(idOrCode) ? await poRepo.findById(idOrCode) : await poRepo.findByCode(idOrCode);
   if (!po) throw notFound("Purchase order not found.");
+  if (po.warehouseId) assertWarehouseAccess(actor, po.warehouseId);
   return po;
 }
 
 export async function createPurchaseOrder(input: CreatePurchaseOrderInput, actor?: AuditActor): Promise<PublicPurchaseOrder> {
+  // A scoped actor may only create POs delivering to a warehouse in their set (no-op if unrestricted
+  // or if no warehouse provided).
+  if (input.warehouseId) assertWarehouseAccess(actor, input.warehouseId);
   const supplier = await supplierService.requireActiveSupplier(input.supplierId);
   await warehouseService.requireActiveWarehouse(input.warehouseId);
   const lineRows = await buildLineRows(input.items);
@@ -341,9 +354,79 @@ export async function createPurchaseOrder(input: CreatePurchaseOrderInput, actor
   return toPublic(created);
 }
 
+// Multi-warehouse "purchase request": one operation whose lines each carry their own destination
+// warehouse. The lines are GROUPED by warehouse and ONE single-warehouse PO is created per group —
+// a PO never spans warehouses. Every group is validated UP FRONT (supplier once; per-warehouse
+// access + active; every IRM line active) BEFORE any write, and the creation itself is a single
+// all-or-nothing transaction (gap-safe numbering), so the whole request either yields all POs or
+// none — never a partial set. Each resulting PO is fully independent (own code, warehouse, audit,
+// lifecycle) and receivable in Goods In exactly like a normally-created PO.
+export async function createPurchaseOrdersBySplit(
+  input: CreatePurchaseOrdersSplitInput,
+  actor?: AuditActor,
+): Promise<PublicPurchaseOrder[]> {
+  const supplier = await supplierService.requireActiveSupplier(input.supplierId);
+  const actorLabel = actor?.email ?? null;
+
+  // Group lines by destination warehouse, preserving first-appearance order (predictable PO sequence).
+  const order: string[] = [];
+  const byWarehouse = new Map<string, typeof input.items>();
+  for (const line of input.items) {
+    let bucket = byWarehouse.get(line.warehouseId);
+    if (!bucket) {
+      bucket = [];
+      byWarehouse.set(line.warehouseId, bucket);
+      order.push(line.warehouseId);
+    }
+    bucket.push(line);
+  }
+
+  // Pre-validate EVERY group and build its header + lines BEFORE any write, so an invalid group
+  // (inaccessible / inactive warehouse, inactive item) fails the whole request with zero side effects.
+  const groups: { header: Omit<Prisma.PurchaseOrderUncheckedCreateInput, "code">; lines: PoLineRow[] }[] = [];
+  for (const warehouseId of order) {
+    assertWarehouseAccess(actor, warehouseId); // scoped actor: 403 on an unassigned warehouse
+    await warehouseService.requireActiveWarehouse(warehouseId);
+    const lineRows = await buildLineRows(byWarehouse.get(warehouseId) ?? []);
+    const totals = computeTotals(lineRows);
+    groups.push({
+      header: {
+        supplierId: input.supplierId,
+        supplierName: supplier.name,
+        warehouseId,
+        status: "draft",
+        priority: input.priority ?? "normal",
+        referenceNumber: trimToNull(input.referenceNumber),
+        description: trimToNull(input.description),
+        orderDate: new Date(input.orderDate),
+        expectedDeliveryDate: new Date(input.expectedDeliveryDate),
+        currency: "GBP",
+        ...totals,
+        deliveryAddress: trimToNull(input.deliveryAddress),
+        deliveryInstructions: trimToNull(input.deliveryInstructions),
+        internalNotes: trimToNull(input.internalNotes),
+        supplierNotes: trimToNull(input.supplierNotes),
+        createdBy: actorLabel,
+        updatedBy: actorLabel,
+      },
+      lines: lineRows,
+    });
+  }
+
+  const created = await poRepo.createManyWithCodes(groups);
+
+  // One audit row per resulting PO — each is an independent purchase order.
+  for (const po of created) {
+    audit.record({ actor, action: "purchase_order.created", targetType: "purchase_order", targetId: po.id, targetLabel: po.code });
+  }
+  return created.map(toPublic);
+}
+
 export async function updatePurchaseOrder(id: string, input: UpdatePurchaseOrderInput, actor?: AuditActor): Promise<PublicPurchaseOrder> {
   const existing = await poRepo.findById(id);
   if (!existing) throw notFound("Purchase order not found.");
+  // A scoped actor may only edit POs whose (current) delivery warehouse is in their set; null = not blocked.
+  if (existing.warehouseId) assertWarehouseAccess(actor, existing.warehouseId);
   // EDITABLE ONLY IN DRAFT — supplier/warehouse/quantities/prices/header all lock once submitted.
   if (existing.status !== "draft") {
     throw conflict("Only draft purchase orders can be edited. Reject it back to draft first.");
@@ -358,6 +441,8 @@ export async function updatePurchaseOrder(id: string, input: UpdatePurchaseOrder
     headerPatch.supplierName = s.name;
   }
   if (input.warehouseId !== undefined && input.warehouseId !== existing.warehouseId) {
+    // Can't move a PO to a warehouse outside the scoped actor's set either (no-op if unrestricted).
+    if (input.warehouseId) assertWarehouseAccess(actor, input.warehouseId);
     await warehouseService.requireActiveWarehouse(input.warehouseId);
     headerPatch.warehouseId = input.warehouseId;
   }
@@ -384,9 +469,13 @@ export async function updatePurchaseOrder(id: string, input: UpdatePurchaseOrder
 }
 
 // ── Workflow actions (each transition-guarded + stamped + audited) ───────────────────────────
-async function loadOrThrow(id: string): Promise<PurchaseOrderWithRelations> {
+// Load a PO for a write/workflow action and enforce warehouse-access scoping in one place. The
+// assertion is a no-op for unrestricted actors and is skipped when the PO has no delivery warehouse
+// yet (null warehouseId) — only a set warehouse outside the scoped actor's set is blocked (403).
+async function loadOrThrow(id: string, actor?: AuditActor): Promise<PurchaseOrderWithRelations> {
   const po = await poRepo.findById(id);
   if (!po) throw notFound("Purchase order not found.");
+  if (po.warehouseId) assertWarehouseAccess(actor, po.warehouseId);
   return po;
 }
 function recordStatus(actor: AuditActor | undefined, id: string, code: string, action: string): void {
@@ -394,7 +483,7 @@ function recordStatus(actor: AuditActor | undefined, id: string, code: string, a
 }
 
 export async function submitPurchaseOrder(id: string, actor?: AuditActor): Promise<PublicPurchaseOrder> {
-  const po = await loadOrThrow(id);
+  const po = await loadOrThrow(id, actor);
   assertTransition(po.status, "pending_approval");
   if (po.items.length === 0) throw badRequest("Add at least one item before submitting.");
   const updated = await poRepo.update(id, { status: "pending_approval", submittedBy: actor?.email ?? null, submittedAt: new Date() });
@@ -403,7 +492,7 @@ export async function submitPurchaseOrder(id: string, actor?: AuditActor): Promi
 }
 
 export async function approvePurchaseOrder(id: string, actor?: AuditActor): Promise<PublicPurchaseOrder> {
-  const po = await loadOrThrow(id);
+  const po = await loadOrThrow(id, actor);
   assertTransition(po.status, "approved");
   const updated = await poRepo.update(id, { status: "approved", approvedBy: actor?.email ?? null, approvedAt: new Date() });
   recordStatus(actor, id, updated.code, "purchase_order.approved");
@@ -411,7 +500,7 @@ export async function approvePurchaseOrder(id: string, actor?: AuditActor): Prom
 }
 
 export async function rejectPurchaseOrder(id: string, reason: string, actor?: AuditActor): Promise<PublicPurchaseOrder> {
-  const po = await loadOrThrow(id);
+  const po = await loadOrThrow(id, actor);
   assertTransition(po.status, "draft"); // reject = back to draft for rework
   const updated = await poRepo.update(id, { status: "draft", rejectionReason: reason.trim() });
   recordStatus(actor, id, updated.code, "purchase_order.rejected");
@@ -419,7 +508,7 @@ export async function rejectPurchaseOrder(id: string, reason: string, actor?: Au
 }
 
 export async function sendPurchaseOrder(id: string, actor?: AuditActor): Promise<PublicPurchaseOrder> {
-  const po = await loadOrThrow(id);
+  const po = await loadOrThrow(id, actor);
   assertTransition(po.status, "sent");
   // sentBy is the issuer — the signer printed on the PO document (deterministic for email + download).
   const updated = await poRepo.update(id, { status: "sent", sentAt: new Date(), sentBy: actor?.email ?? null });
@@ -432,7 +521,7 @@ export async function sendPurchaseOrder(id: string, actor?: AuditActor): Promise
 }
 
 export async function cancelPurchaseOrder(id: string, reason: string | undefined, actor?: AuditActor): Promise<PublicPurchaseOrder> {
-  const po = await loadOrThrow(id);
+  const po = await loadOrThrow(id, actor);
   assertTransition(po.status, "cancelled");
   const updated = await poRepo.update(id, { status: "cancelled", cancelledAt: new Date(), cancelReason: trimToNull(reason) });
   recordStatus(actor, id, updated.code, "purchase_order.cancelled");
@@ -444,7 +533,7 @@ export async function cancelPurchaseOrder(id: string, reason: string | undefined
 }
 
 export async function closePurchaseOrder(id: string, actor?: AuditActor): Promise<PublicPurchaseOrder> {
-  const po = await loadOrThrow(id);
+  const po = await loadOrThrow(id, actor);
   assertTransition(po.status, "closed");
   const updated = await poRepo.update(id, { status: "closed", closedAt: new Date() });
   recordStatus(actor, id, updated.code, "purchase_order.closed");
@@ -452,7 +541,7 @@ export async function closePurchaseOrder(id: string, actor?: AuditActor): Promis
 }
 
 export async function deletePurchaseOrder(id: string, actor?: AuditActor): Promise<void> {
-  const po = await loadOrThrow(id);
+  const po = await loadOrThrow(id, actor);
   if (po.status !== "draft") throw conflict("Only draft purchase orders can be deleted.");
   await poRepo.softDelete(id);
   audit.record({ actor, action: "purchase_order.deleted", targetType: "purchase_order", targetId: id, targetLabel: po.code });
@@ -468,7 +557,7 @@ function assertAttachmentsEditable(status: string): void {
 }
 
 export async function addAttachment(poId: string, input: PoAttachmentInput, actor?: AuditActor): Promise<PublicPurchaseOrder> {
-  const po = await loadOrThrow(poId);
+  const po = await loadOrThrow(poId, actor);
   assertAttachmentsEditable(po.status);
   const creds = await getCloudinaryCreds();
   if (!creds) throw badRequest("File uploads aren't configured. Add Cloudinary credentials in Settings first.");
@@ -483,17 +572,17 @@ export async function addAttachment(poId: string, input: PoAttachmentInput, acto
     uploadedBy: actor?.email ?? null,
   });
   audit.record({ actor, action: "purchase_order.attachment_added", targetType: "purchase_order", targetId: poId, targetLabel: po.code });
-  return getPurchaseOrder(poId);
+  return getPurchaseOrder(poId, actor);
 }
 
 export async function removeAttachment(poId: string, attachmentId: string, actor?: AuditActor): Promise<PublicPurchaseOrder> {
-  const po = await loadOrThrow(poId);
+  const po = await loadOrThrow(poId, actor);
   assertAttachmentsEditable(po.status);
   const att = await poRepo.findAttachment(attachmentId);
   if (!att || att.purchaseOrderId !== poId) throw notFound("Attachment not found.");
   await poRepo.removeAttachment(attachmentId);
   audit.record({ actor, action: "purchase_order.attachment_removed", targetType: "purchase_order", targetId: poId, targetLabel: po.code });
-  return getPurchaseOrder(poId);
+  return getPurchaseOrder(poId, actor);
 }
 
 // ── Seams for the FUTURE Goods In module (NOT wired to any PO endpoint) ───────────────────────
@@ -546,8 +635,11 @@ export async function applyGoodsReceipt(
   for (const d of deltas) {
     const l = liveById.get(d.purchaseOrderItemId);
     if (!l) throw conflict("A received line no longer exists on the purchase order.");
-    if (d.receivedDelta > l.quantity - l.receivedQuantity) {
-      throw conflict("Can't receive more than the quantity remaining on the purchase order.");
+    const remaining = l.quantity - l.receivedQuantity;
+    if (d.receivedDelta > remaining) {
+      throw conflict(
+        `Can't receive ${d.receivedDelta} on ${header.code} — only ${remaining} remaining (ordered ${l.quantity}, already received ${l.receivedQuantity}).`,
+      );
     }
   }
   for (const d of deltas) {

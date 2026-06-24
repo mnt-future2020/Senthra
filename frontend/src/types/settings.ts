@@ -34,6 +34,9 @@ export interface Settings extends Branding {
   // Display prefix for customer stock-entry barcodes (e.g. "CSE" → CSE-00006).
   // Effective value (default-filled by the backend). Only affects new barcodes.
   stockCodePrefix: string;
+  // Display prefix for IRM catalogue item codes (e.g. "IRM" → IRM-0004).
+  // Effective value (default-filled by the backend). Only affects new items.
+  irmCodePrefix: string;
   // Company profile (legal identity for official documents) + regional formatting.
   // Default-filled by the backend (country/timezone/dateFormat/timeFormat).
   companyLegalName: string;

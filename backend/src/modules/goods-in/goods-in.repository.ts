@@ -121,6 +121,9 @@ export interface GoodsReceiptListFilters {
   search?: string;
   status?: string;
   warehouseId?: string;
+  // Warehouse-access scope. `undefined` = unrestricted (no constraint); an array constrains to those
+  // warehouses (an empty array correctly matches nothing). Applied alongside `warehouseId` — both apply.
+  warehouseIds?: string[];
   purchaseOrderId?: string;
 }
 
@@ -128,6 +131,7 @@ function buildWhere(filters: GoodsReceiptListFilters): Prisma.GoodsReceiptWhereI
   const where: Prisma.GoodsReceiptWhereInput = { deletedAt: null };
   if (filters.status) where.status = filters.status;
   if (filters.warehouseId) where.warehouseId = filters.warehouseId;
+  if (filters.warehouseIds !== undefined) where.warehouseId = { ...(where.warehouseId ? { equals: where.warehouseId as string } : {}), in: filters.warehouseIds };
   if (filters.purchaseOrderId) where.purchaseOrderId = filters.purchaseOrderId;
   if (filters.search) {
     const q = filters.search;

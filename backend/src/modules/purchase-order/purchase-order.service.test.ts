@@ -3,9 +3,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("./purchase-order.repository.js", () => ({
   findById: vi.fn(),
   findByCode: vi.fn(),
+  findMany: vi.fn(),
+  count: vi.fn(),
   update: vi.fn(),
   softDelete: vi.fn(),
   createWithCode: vi.fn(),
+  createManyWithCodes: vi.fn(),
   replaceItemsAndTotals: vi.fn(),
   // Goods In seam (tx-aware writers).
   headerForReceiptTx: vi.fn(),
@@ -44,7 +47,9 @@ import {
   cancelPurchaseOrder,
   closePurchaseOrder,
   createPurchaseOrder,
+  createPurchaseOrdersBySplit,
   deletePurchaseOrder,
+  listPurchaseOrders,
   rejectPurchaseOrder,
   removeAttachment,
   sendPurchaseOrder,
@@ -56,6 +61,7 @@ import * as poEmail from "./purchase-order.email.js";
 const PO_ID = "f".repeat(24);
 const SUP_ID = "a".repeat(24);
 const WH_ID = "b".repeat(24);
+const WH_ID_2 = "e".repeat(24);
 const IRM_ID = "c".repeat(24);
 const IRM_ID_2 = "d".repeat(24);
 
@@ -103,9 +109,12 @@ function poRow(over: Record<string, unknown> = {}) {
 }
 
 const mockFindById = poRepo.findById as ReturnType<typeof vi.fn>;
+const mockFindMany = poRepo.findMany as ReturnType<typeof vi.fn>;
+const mockCount = poRepo.count as ReturnType<typeof vi.fn>;
 const mockUpdate = poRepo.update as ReturnType<typeof vi.fn>;
 const mockSoftDelete = poRepo.softDelete as ReturnType<typeof vi.fn>;
 const mockCreateWithCode = poRepo.createWithCode as ReturnType<typeof vi.fn>;
+const mockCreateMany = poRepo.createManyWithCodes as ReturnType<typeof vi.fn>;
 const mockReqSupplier = supplierService.requireActiveSupplier as ReturnType<typeof vi.fn>;
 const mockReqWarehouse = warehouseService.requireActiveWarehouse as ReturnType<typeof vi.fn>;
 const mockReqIrm = irmService.requireActiveIrmItem as ReturnType<typeof vi.fn>;
@@ -145,6 +154,109 @@ describe("createPurchaseOrder — financials (server-calculated pence)", () => {
     expect(header.status).toBe("draft");
     expect(lines[0]).toMatchObject({ irmItemId: IRM_ID, itemName: "CAT6", lineTotalPence: 5000, vatRate: 20 });
     expect(auditActions()).toContain("purchase_order.created");
+  });
+});
+
+describe("createPurchaseOrdersBySplit — multi-warehouse auto-split", () => {
+  // The repo multi-create returns one PO per group, echoing each group's warehouse + lines.
+  const wireCreateMany = () =>
+    mockCreateMany.mockImplementation((groups: { header: Record<string, unknown>; lines: unknown[] }[]) =>
+      Promise.resolve(
+        groups.map((g, i) => poRow({ ...g.header, id: `${"1".repeat(23)}${i}`, code: `PO-000${i + 1}`, items: g.lines })),
+      ),
+    );
+
+  const splitInput = (over: Record<string, unknown> = {}) =>
+    ({
+      supplierId: SUP_ID,
+      orderDate: "2026-06-01",
+      expectedDeliveryDate: "2026-06-10",
+      items: [
+        { irmItemId: IRM_ID, warehouseId: WH_ID, quantity: 10, unitPricePence: 500, vatRate: 20 },
+        { irmItemId: IRM_ID_2, warehouseId: WH_ID, quantity: 2, unitPricePence: 1000, vatRate: 20 },
+        { irmItemId: IRM_ID, warehouseId: WH_ID_2, quantity: 5, unitPricePence: 800, vatRate: 20 },
+      ],
+      ...over,
+    }) as Parameters<typeof createPurchaseOrdersBySplit>[0];
+
+  it("groups lines into ONE PO per warehouse (each PO single-warehouse)", async () => {
+    wireCreateMany();
+    await createPurchaseOrdersBySplit(splitInput());
+
+    const groups = mockCreateMany.mock.calls[0][0];
+    expect(groups).toHaveLength(2); // WH_ID + WH_ID_2
+    expect(groups[0].header.warehouseId).toBe(WH_ID);
+    expect(groups[0].lines).toHaveLength(2); // both WH_ID items
+    expect(groups[1].header.warehouseId).toBe(WH_ID_2);
+    expect(groups[1].lines).toHaveLength(1);
+    // Each group is a complete single-warehouse header (supplier snapshot + draft + totals).
+    expect(groups[0].header).toMatchObject({ supplierId: SUP_ID, supplierName: "Acme", status: "draft" });
+    expect(groups[0].header.subtotalPence).toBe(10 * 500 + 2 * 1000);
+  });
+
+  it("returns every created PO and audits one purchase_order.created per PO", async () => {
+    wireCreateMany();
+    const result = await createPurchaseOrdersBySplit(splitInput());
+    expect(result).toHaveLength(2);
+    expect(auditActions().filter((a) => a === "purchase_order.created")).toHaveLength(2);
+  });
+
+  it("creates a SINGLE PO when every line targets the same warehouse", async () => {
+    wireCreateMany();
+    const result = await createPurchaseOrdersBySplit(
+      splitInput({
+        items: [
+          { irmItemId: IRM_ID, warehouseId: WH_ID, quantity: 1, unitPricePence: 500, vatRate: 20 },
+          { irmItemId: IRM_ID_2, warehouseId: WH_ID, quantity: 1, unitPricePence: 500, vatRate: 20 },
+        ],
+      }),
+    );
+    expect(mockCreateMany.mock.calls[0][0]).toHaveLength(1);
+    expect(result).toHaveLength(1);
+  });
+
+  it("blocks a warehouse-scoped actor from a warehouse they aren't assigned (403, no write)", async () => {
+    wireCreateMany();
+    const actor = { type: "user", email: "wm@x.com", assignedWarehouseIds: [WH_ID] } as never;
+    await expect(createPurchaseOrdersBySplit(splitInput(), actor)).rejects.toThrow(/access to this warehouse/i);
+    expect(mockCreateMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects up front when a group's warehouse is inactive (no partial creation)", async () => {
+    wireCreateMany();
+    mockReqWarehouse.mockRejectedValueOnce(new Error("Selected warehouse is inactive."));
+    await expect(createPurchaseOrdersBySplit(splitInput())).rejects.toThrow();
+    expect(mockCreateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe("listPurchaseOrders — warehouse-access scoping", () => {
+  beforeEach(() => {
+    mockCount.mockResolvedValue(0);
+    mockFindMany.mockResolvedValue([]);
+  });
+
+  // A scoped actor's assigned set MUST reach the repository as `warehouseIds`, on BOTH the count
+  // and the find — otherwise a warehouse-restricted user's list leaks POs from every warehouse.
+  it("constrains the query to a scoped actor's assigned warehouses", async () => {
+    const actor = { type: "user", email: "wm@x.com", assignedWarehouseIds: [WH_ID, WH_ID_2] } as never;
+    await listPurchaseOrders({}, actor);
+    expect(mockCount.mock.calls[0][0]).toMatchObject({ warehouseIds: [WH_ID, WH_ID_2] });
+    expect(mockFindMany.mock.calls[0][0]).toMatchObject({ warehouseIds: [WH_ID, WH_ID_2] });
+  });
+
+  // An unrestricted principal (admin / non-scoped role) carries null → no warehouse constraint.
+  it("applies no warehouse constraint for an unrestricted actor", async () => {
+    const actor = { type: "admin", email: "a@x.com", assignedWarehouseIds: null } as never;
+    await listPurchaseOrders({}, actor);
+    expect(mockFindMany.mock.calls[0][0].warehouseIds).toBeUndefined();
+  });
+
+  // A scoped actor with NO assignments yields an empty set → matches nothing (never "everything").
+  it("matches nothing for a scoped actor with an empty assigned set", async () => {
+    const actor = { type: "user", email: "wm@x.com", assignedWarehouseIds: [] } as never;
+    await listPurchaseOrders({}, actor);
+    expect(mockFindMany.mock.calls[0][0].warehouseIds).toEqual([]);
   });
 });
 

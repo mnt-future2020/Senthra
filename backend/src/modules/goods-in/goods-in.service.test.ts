@@ -19,6 +19,7 @@ vi.mock("#modules/purchase-order/purchase-order.service.js", () => ({
   requireReceivablePurchaseOrder: vi.fn(),
   applyGoodsReceipt: vi.fn(),
 }));
+vi.mock("#modules/purchase-order/purchase-order.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/inventory/inventory.service.js", () => ({ applyInbound: vi.fn() }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn() }));
@@ -27,11 +28,12 @@ vi.mock("../../lib/prisma.js", () => ({ withTransaction: (fn: (tx: unknown) => u
 
 import * as grnRepo from "./goods-in.repository.js";
 import * as poService from "#modules/purchase-order/purchase-order.service.js";
+import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import * as inventoryService from "#modules/inventory/inventory.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
-import { addAttachment, cancelGoodsReceipt, completeGoodsReceipt, createGoodsReceipt, deleteGoodsReceipt, removeAttachment, updateGoodsReceipt } from "./goods-in.service.js";
+import { addAttachment, cancelGoodsReceipt, completeGoodsReceipt, createGoodsReceipt, deleteGoodsReceipt, getGoodsReceipt, removeAttachment, updateGoodsReceipt } from "./goods-in.service.js";
 
 const GRN_ID = "e".repeat(24);
 const PO_ID = "f".repeat(24);
@@ -89,7 +91,7 @@ function grnRow(over: Record<string, unknown> = {}) {
     receivedDate: new Date("2026-06-15T00:00:00Z"),
     referenceNumber: null,
     carrier: null,
-    deliveryNoteNumber: null,
+    deliveryNoteNumber: "DN-0001", // present by default so complete-path tests pass the DN guard
     vehicleRegistration: null,
     description: null,
     qualityStatus: "passed",
@@ -122,6 +124,7 @@ const mockSerialConflicts = grnRepo.findSerialConflicts as ReturnType<typeof vi.
 const mockReqReceivable = poService.requireReceivablePurchaseOrder as ReturnType<typeof vi.fn>;
 const mockApplyReceipt = poService.applyGoodsReceipt as ReturnType<typeof vi.fn>;
 const mockApplyInbound = inventoryService.applyInbound as ReturnType<typeof vi.fn>;
+const mockPoRepoFindById = poRepo.findById as ReturnType<typeof vi.fn>;
 const mockAudit = audit.record as ReturnType<typeof vi.fn>;
 const auditActions = () => mockAudit.mock.calls.map((c) => c[0].action);
 
@@ -132,6 +135,33 @@ beforeEach(() => {
   mockFlags.mockResolvedValue([{ id: IRM_ID, trackInventory: true, trackSerialNumbers: false, trackBatchNumbers: false }]);
   mockSerialConflicts.mockResolvedValue([]);
   mockCreateWithCode.mockImplementation((header: Record<string, unknown>) => Promise.resolve(grnRow({ ...header, items: [] })));
+});
+
+describe("getGoodsReceipt — previouslyReceived freshness", () => {
+  it("recomputes a DRAFT's previouslyReceived LIVE from the PO (stale snapshot ignored)", async () => {
+    // Draft created when nothing was received (snapshot 0); since then a sibling GRN received 70.
+    mockFindById.mockResolvedValue(
+      grnRow({ status: "draft", items: [grnItem({ orderedQuantity: 100, previouslyReceived: 0, receivedQuantity: 30 })] }),
+    );
+    mockPoRepoFindById.mockResolvedValue({ id: PO_ID, items: [{ id: POI_ID, quantity: 100, receivedQuantity: 70 }] });
+
+    const grn = await getGoodsReceipt(GRN_ID);
+
+    // The form computes remaining = ordered − previouslyReceived = 100 − 70 = 30 (not 100).
+    expect(grn.items[0].previouslyReceived).toBe(70);
+    expect(mockPoRepoFindById).toHaveBeenCalledWith(PO_ID);
+  });
+
+  it("keeps a COMPLETED GRN's frozen snapshot (no live lookup)", async () => {
+    mockFindById.mockResolvedValue(
+      grnRow({ status: "completed", items: [grnItem({ orderedQuantity: 100, previouslyReceived: 70, receivedQuantity: 30 })] }),
+    );
+
+    const grn = await getGoodsReceipt(GRN_ID);
+
+    expect(grn.items[0].previouslyReceived).toBe(70);
+    expect(mockPoRepoFindById).not.toHaveBeenCalled();
+  });
 });
 
 describe("createGoodsReceipt — quantity maths + snapshots", () => {
@@ -215,6 +245,14 @@ describe("completeGoodsReceipt — the only inventory-writing action", () => {
     mockFindById.mockResolvedValue(grnRow({ status: "completed", items: [grnItem()] }));
     await expect(completeGoodsReceipt(GRN_ID)).rejects.toThrow(/can't move/i);
     expect(mockApplyInbound).not.toHaveBeenCalled();
+  });
+
+  it("requires a delivery note number before completing (audit anchor)", async () => {
+    mockFindById.mockResolvedValue(grnRow({ status: "draft", items: [grnItem()], deliveryNoteNumber: "  " }));
+    await expect(completeGoodsReceipt(GRN_ID)).rejects.toThrow(/delivery note number/i);
+    expect(mockApplyInbound).not.toHaveBeenCalled();
+    expect(mockApplyReceipt).not.toHaveBeenCalled();
+    expect(mockCompleteTx).not.toHaveBeenCalled();
   });
 });
 
@@ -302,6 +340,22 @@ describe("attachments — draft-only guard", () => {
     await addAttachment(GRN_ID, att, { type: "admin", email: "x@x.com" });
     expect(mockAddAtt).toHaveBeenCalledTimes(1);
     expect(auditActions()).toContain("goods_in.attachment_added");
+  });
+
+  it("blocks the 6th file (max 5 documents) before any upload", async () => {
+    const five = Array.from({ length: 5 }, (_, i) => ({ id: `a${i}`, fileSizeBytes: 1000 }));
+    mockFindById.mockResolvedValue(grnRow({ status: "draft", attachments: five }));
+    await expect(addAttachment(GRN_ID, att)).rejects.toThrow(/at most 5 documents/i);
+    expect(mockUpload).not.toHaveBeenCalled();
+    expect(mockAddAtt).not.toHaveBeenCalled();
+  });
+
+  it("blocks a file that pushes the running total over 20 MB", async () => {
+    mockFindById.mockResolvedValue(grnRow({ status: "draft", attachments: [{ id: "a0", fileSizeBytes: 20 * 1024 * 1024 - 100 }] }));
+    const big = { ...att, fileSizeBytes: 1000 };
+    await expect(addAttachment(GRN_ID, big)).rejects.toThrow(/20 MB/i);
+    expect(mockUpload).not.toHaveBeenCalled();
+    expect(mockAddAtt).not.toHaveBeenCalled();
   });
 
   it("blocks adding an attachment on a COMPLETED receipt", async () => {

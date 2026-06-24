@@ -3,14 +3,17 @@ import { randomUUID } from "node:crypto";
 import * as grnRepo from "./goods-in.repository.js";
 import type { GoodsReceiptWithRelations, GRNLineRow } from "./goods-in.repository.js";
 import * as poService from "#modules/purchase-order/purchase-order.service.js";
+import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import * as inventoryService from "#modules/inventory/inventory.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
+import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { withTransaction } from "../../lib/prisma.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import type { CreateGoodsReceiptInput, GRNLineInput, GRNAttachmentInput, UpdateGoodsReceiptInput } from "./goods-in.validation.js";
+import { GRN_ATTACHMENT_MAX_COUNT, GRN_ATTACHMENT_MAX_TOTAL_BYTES } from "./goods-in.validation.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 
@@ -137,7 +140,9 @@ function warehouseAddress(w: GoodsReceiptWithRelations["warehouse"]): string | n
   return parts.length ? parts.join(", ") : null;
 }
 
-function toPublic(grn: GoodsReceiptWithRelations): PublicGoodsReceipt {
+// `liveReceived` (poItemId → current PO line receivedQuantity) is passed ONLY for draft
+// reads, to replace each line's stale `previouslyReceived` snapshot with the live value.
+function toPublic(grn: GoodsReceiptWithRelations, liveReceived?: Map<string, number>): PublicGoodsReceipt {
   const supplier = grn.purchaseOrder?.supplier;
   let totalReceived = 0;
   let totalAccepted = 0;
@@ -185,7 +190,8 @@ function toPublic(grn: GoodsReceiptWithRelations): PublicGoodsReceipt {
       sku: i.sku,
       baseUnit: i.baseUnit,
       orderedQuantity: i.orderedQuantity,
-      previouslyReceived: i.previouslyReceived,
+      // Nullish-coalesce so a live 0 (nothing received elsewhere yet) still wins over the snapshot.
+      previouslyReceived: liveReceived?.get(i.purchaseOrderItemId) ?? i.previouslyReceived,
       receivedQuantity: i.receivedQuantity,
       damagedQuantity: i.damagedQuantity,
       acceptedQuantity: i.acceptedQuantity,
@@ -326,20 +332,37 @@ export interface ListGoodsReceiptsParams {
   sort?: string;
 }
 
-export async function listGoodsReceipts(params: ListGoodsReceiptsParams = {}): Promise<PagedGoodsReceipts> {
+export async function listGoodsReceipts(params: ListGoodsReceiptsParams = {}, actor?: AuditActor): Promise<PagedGoodsReceipts> {
   const pageSize = Math.min(Math.max(Math.trunc(params.pageSize ?? 20), 1), 100);
-  const filters = { search: params.search, status: params.status, warehouseId: params.warehouse, purchaseOrderId: params.purchaseOrder };
+  const filters = { search: params.search, status: params.status, warehouseId: params.warehouse, warehouseIds: warehouseScopeFilter(actor), purchaseOrderId: params.purchaseOrder };
   const total = await grnRepo.count(filters);
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const page = Math.min(Math.max(Math.trunc(params.page ?? 1), 1), totalPages);
   const rows = await grnRepo.findMany(filters, (page - 1) * pageSize, pageSize, params.sort);
-  return { goodsReceipts: rows.map(toPublic), total, page, pageSize, totalPages };
+  // List rows use the stored snapshot (no live override) — the per-line remaining only matters on
+  // the single-GRN edit/detail read, and a live lookup per row here would be an N+1.
+  return { goodsReceipts: rows.map((g) => toPublic(g)), total, page, pageSize, totalPages };
 }
 
-export async function getGoodsReceipt(idOrCode: string): Promise<PublicGoodsReceipt> {
+export async function getGoodsReceipt(idOrCode: string, actor?: AuditActor): Promise<PublicGoodsReceipt> {
   const grn = OBJECT_ID_RE.test(idOrCode) ? await grnRepo.findById(idOrCode) : await grnRepo.findByCode(idOrCode);
   if (!grn) throw notFound("Goods receipt not found.");
-  return toPublic(grn);
+  assertWarehouseAccess(actor, grn.warehouseId);
+  // Each line's `previouslyReceived` is a snapshot frozen when the draft was created; it goes
+  // stale the moment another GRN against the same PO completes afterwards. For a DRAFT (the only
+  // editable state) recompute it live from the PO's current line receipts — which still EXCLUDE
+  // this draft — so the edit form shows the true remaining and its inline check matches the
+  // authoritative completion guard. Completed/cancelled GRNs keep their frozen historical snapshot
+  // (the PO line now includes their own received units, so a live value would be wrong there).
+  const liveReceived = grn.status === "draft" ? await livePreviouslyReceived(grn.purchaseOrderId) : undefined;
+  return toPublic(grn, liveReceived);
+}
+
+// poItemId → the PO line's current receivedQuantity (sum of all COMPLETED receipts; drafts don't
+// count until completed). Used only to refresh a draft's stale `previouslyReceived` on read.
+async function livePreviouslyReceived(purchaseOrderId: string): Promise<Map<string, number>> {
+  const po = await poRepo.findById(purchaseOrderId);
+  return new Map((po?.items ?? []).map((l) => [l.id, l.receivedQuantity]));
 }
 
 async function loadOrThrow(id: string): Promise<GoodsReceiptWithRelations> {
@@ -351,6 +374,7 @@ async function loadOrThrow(id: string): Promise<GoodsReceiptWithRelations> {
 // ── Create / update (draft only) ────────────────────────────────────────────────────────────
 export async function createGoodsReceipt(input: CreateGoodsReceiptInput, actor?: AuditActor): Promise<PublicGoodsReceipt> {
   const po = await poService.requireReceivablePurchaseOrder(input.purchaseOrderId);
+  assertWarehouseAccess(actor, po.warehouseId);
   const poLines = poLineMap(po);
   const flags = await loadFlags(poLines, input.items);
   const rows = buildLineRows(input.items, poLines, flags);
@@ -386,6 +410,7 @@ export async function createGoodsReceipt(input: CreateGoodsReceiptInput, actor?:
 export async function updateGoodsReceipt(id: string, input: UpdateGoodsReceiptInput, actor?: AuditActor): Promise<PublicGoodsReceipt> {
   const existing = await grnRepo.findById(id);
   if (!existing) throw notFound("Goods receipt not found.");
+  assertWarehouseAccess(actor, existing.warehouseId);
   if (existing.status !== "draft") throw conflict("Only draft goods receipts can be edited.");
 
   const headerPatch: Record<string, unknown> = { updatedBy: actor?.email ?? null };
@@ -417,8 +442,12 @@ export async function updateGoodsReceipt(id: string, input: UpdateGoodsReceiptIn
 // ── Complete (the only inventory-writing action) ──────────────────────────────────────────────
 export async function completeGoodsReceipt(id: string, actor?: AuditActor): Promise<PublicGoodsReceipt> {
   const grn = await loadOrThrow(id);
+  assertWarehouseAccess(actor, grn.warehouseId);
   assertTransition(grn.status, "completed");
   if (grn.items.length === 0) throw badRequest("Add at least one received item before completing.");
+  // The supplier's delivery/dispatch note number is the audit anchor for the receipt — required
+  // before stock posts (the attachment of the actual note stays optional). Draft saves don't enforce it.
+  if (!trimToNull(grn.deliveryNoteNumber)) throw badRequest("Enter the supplier's delivery note number before completing this receipt.");
   const actorEmail = actor?.email ?? null;
 
   await withTransaction(async (tx) => {
@@ -467,6 +496,7 @@ export async function completeGoodsReceipt(id: string, actor?: AuditActor): Prom
 
 export async function cancelGoodsReceipt(id: string, reason: string | undefined, actor?: AuditActor): Promise<PublicGoodsReceipt> {
   const grn = await loadOrThrow(id);
+  assertWarehouseAccess(actor, grn.warehouseId);
   assertTransition(grn.status, "cancelled");
   const updated = await grnRepo.update(id, { status: "cancelled", cancelledBy: actor?.email ?? null, cancelledAt: new Date(), cancelReason: trimToNull(reason) });
   audit.record({ actor, action: "goods_in.cancelled", targetType: "goods_receipt", targetId: id, targetLabel: updated.code });
@@ -475,6 +505,7 @@ export async function cancelGoodsReceipt(id: string, reason: string | undefined,
 
 export async function deleteGoodsReceipt(id: string, actor?: AuditActor): Promise<void> {
   const grn = await loadOrThrow(id);
+  assertWarehouseAccess(actor, grn.warehouseId);
   if (grn.status !== "draft") throw conflict("Only draft goods receipts can be deleted.");
   await grnRepo.softDelete(id);
   audit.record({ actor, action: "goods_in.deleted", targetType: "goods_receipt", targetId: id, targetLabel: grn.code });
@@ -483,9 +514,19 @@ export async function deleteGoodsReceipt(id: string, actor?: AuditActor): Promis
 // ── Attachments ──────────────────────────────────────────────────────────────────────────────
 export async function addAttachment(grnId: string, input: GRNAttachmentInput, actor?: AuditActor): Promise<PublicGoodsReceipt> {
   const grn = await loadOrThrow(grnId);
+  assertWarehouseAccess(actor, grn.warehouseId);
   // Attachments are editable on a DRAFT receipt only — a completed or cancelled GRN is
   // immutable (mirrors the edit/delete guards).
   if (grn.status !== "draft") throw conflict("Only draft goods receipts can have attachments changed.");
+  // Enterprise caps — fail fast BEFORE uploading to Cloudinary (per-file size + type are already
+  // validated by grnAttachmentSchema; count + running total are checked here against the loaded set).
+  if (grn.attachments.length >= GRN_ATTACHMENT_MAX_COUNT) {
+    throw badRequest(`A goods receipt can have at most ${GRN_ATTACHMENT_MAX_COUNT} documents.`);
+  }
+  const totalBytes = grn.attachments.reduce((sum, a) => sum + a.fileSizeBytes, 0);
+  if (totalBytes + input.fileSizeBytes > GRN_ATTACHMENT_MAX_TOTAL_BYTES) {
+    throw badRequest("Total documents on a goods receipt can't exceed 20 MB.");
+  }
   const creds = await getCloudinaryCreds();
   if (!creds) throw badRequest("File uploads aren't configured. Add Cloudinary credentials in Settings first.");
   const url = await uploadFileToCloudinary(input.data, randomUUID(), creds, "senthra/goods-in");
@@ -504,6 +545,7 @@ export async function addAttachment(grnId: string, input: GRNAttachmentInput, ac
 
 export async function removeAttachment(grnId: string, attachmentId: string, actor?: AuditActor): Promise<PublicGoodsReceipt> {
   const grn = await loadOrThrow(grnId);
+  assertWarehouseAccess(actor, grn.warehouseId);
   if (grn.status !== "draft") throw conflict("Only draft goods receipts can have attachments changed.");
   const att = await grnRepo.findAttachment(attachmentId);
   if (!att || att.goodsReceiptId !== grnId) throw notFound("Attachment not found.");

@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ClipboardList, Plus } from "lucide-react";
+import { ClipboardList, PackagePlus, Plus } from "lucide-react";
 
 import * as customerService from "@/services/customer.service";
 import { Notice } from "@/components/ui/Notice";
@@ -98,7 +98,15 @@ export function StockRequestsView() {
           {requests.map((r) => (
             <tr key={r.id} className="border-b border-[var(--border)] align-top last:border-0">
               <td className="px-4 py-3">
-                <div className="font-semibold text-[var(--ink)]">{r.editedName ?? r.name}</div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-semibold text-[var(--ink)]">{r.editedName ?? r.name}</span>
+                  {r.linkedStockEntryId && (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-[var(--accent-10)] px-2 py-0.5 text-[10px] font-bold text-[var(--accent)]">
+                      <PackagePlus className="h-3 w-3" />
+                      Top-up
+                    </span>
+                  )}
+                </div>
                 {r.editedName && r.editedName !== r.name && (
                   <div className="mt-0.5 text-[11px] text-[var(--faint)] line-through">{r.name}</div>
                 )}

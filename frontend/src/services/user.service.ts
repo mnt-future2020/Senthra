@@ -50,6 +50,8 @@ export interface CreateUserPayload extends ProfileFieldsPayload {
   jobTitle: string;
   department: string;
   dateOfJoining: string;
+  // Required (≥1) when the chosen role is warehouse-scoped; omitted otherwise.
+  warehouseIds?: string[];
 }
 
 export interface UpdateUserPayload extends ProfileFieldsPayload {
@@ -58,6 +60,8 @@ export interface UpdateUserPayload extends ProfileFieldsPayload {
   email?: string;
   roleId?: string | null;
   removeProfileImage?: boolean;
+  // Synced (add/remove/keep) when the effective role is warehouse-scoped.
+  warehouseIds?: string[];
 }
 
 export interface CreateUserResult {
@@ -141,4 +145,25 @@ export function uploadMySignature(signature: string, fileName?: string): Promise
 
 export function removeMySignature(): Promise<User> {
   return api<{ user: User }>("/users/me/signature", { method: "DELETE" }).then((r) => r.user);
+}
+
+// --- Self-service profile (My Account) ---
+// Read / edit the signed-in user's OWN profile. The backend whitelist accepts only these fields
+// (phone, avatar, address) — role/status/email/etc. can never be self-set.
+export interface MyProfileUpdate {
+  phone?: string;
+  profileImage?: string; // data URI
+  removeProfileImage?: boolean;
+  addressLine1?: string;
+  addressLine2?: string;
+  city?: string;
+  postcode?: string;
+}
+
+export function getMyProfile(): Promise<User> {
+  return api<{ user: User }>("/users/me").then((r) => r.user);
+}
+
+export function updateMyProfile(payload: MyProfileUpdate): Promise<User> {
+  return api<{ user: User }>("/users/me", { method: "PUT", body: payload, timeout: 60_000 }).then((r) => r.user);
 }

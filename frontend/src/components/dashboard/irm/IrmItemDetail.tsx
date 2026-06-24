@@ -6,10 +6,15 @@ import { Activity, Boxes, ClipboardList, Loader2, Pencil, Power, ScrollText } fr
 
 import * as irmService from "@/services/irm.service";
 import * as auditService from "@/services/audit.service";
+import { printSingleLabel } from "@/lib/printBarcode";
+import { BarcodePanel } from "@/components/dashboard/irm/BarcodePanel";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
+
+type PushToast = (msg: string, type?: "success" | "info" | "alert") => void;
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { actionLabel, actionTone, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
+import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
 import type { AuditEntry } from "@/types/audit";
 import type { IrmItem } from "@/types/irm";
 import type { UserStatus } from "@/types/user";
@@ -47,6 +52,7 @@ export function IrmItemDetail({ initial }: { initial: IrmItem }) {
   const [i, setI] = React.useState<IrmItem>(initial);
   const [busy, setBusy] = React.useState(false);
   const canEdit = can("irm.edit");
+  const canManageBarcode = can("irm.barcode.manage");
 
   const requestedTab = searchParams.get("tab");
   const tab: Tab = TABS.find((t) => t.key === requestedTab)?.key ?? "overview";
@@ -122,7 +128,9 @@ export function IrmItemDetail({ initial }: { initial: IrmItem }) {
         ))}
       </div>
 
-      {tab === "overview" && <Overview i={i} costLabel={fmtCost(i)} />}
+      {tab === "overview" && (
+        <Overview i={i} costLabel={fmtCost(i)} canManageBarcode={canManageBarcode} onChange={setI} pushToast={pushToast} />
+      )}
       {tab === "stock" && (
         <Placeholder icon={Boxes} title="Stock Levels" body="On-hand and available quantities per warehouse will appear here once the inventory module is connected." />
       )}
@@ -155,7 +163,19 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-function Overview({ i, costLabel }: { i: IrmItem; costLabel: string }) {
+function Overview({
+  i,
+  costLabel,
+  canManageBarcode,
+  onChange,
+  pushToast,
+}: {
+  i: IrmItem;
+  costLabel: string;
+  canManageBarcode: boolean;
+  onChange: (item: IrmItem) => void;
+  pushToast: PushToast;
+}) {
   const num = (n: number | null) => (n == null ? "" : String(n));
   return (
     <div className="grid gap-4 lg:grid-cols-2">
@@ -180,6 +200,8 @@ function Overview({ i, costLabel }: { i: IrmItem; costLabel: string }) {
           <Field label="Conversion ratio">{num(i.conversionRatio)}</Field>
         </div>
       </Card>
+
+      <BarcodeCard i={i} canManage={canManageBarcode} onChange={onChange} pushToast={pushToast} />
 
       <Card title="Suppliers">
         {i.suppliers.length === 0 ? (
@@ -253,6 +275,54 @@ function Overview({ i, costLabel }: { i: IrmItem; costLabel: string }) {
   );
 }
 
+// Barcode card: render the item's Code128 image (permanently encodes the item code, e.g. IRM-0004).
+// Generate is a ONE-TIME action; once a barcode exists only "Reprint Label" is offered (reuses the
+// stored barcode + image — never a new value/number). Bulk printing is a future seam (printBulkLabels).
+function BarcodeCard({
+  i,
+  canManage,
+  onChange,
+  pushToast,
+}: {
+  i: IrmItem;
+  canManage: boolean;
+  onChange: (item: IrmItem) => void;
+  pushToast: PushToast;
+}) {
+  const [busy, setBusy] = React.useState(false);
+
+  const generate = async () => {
+    setBusy(true);
+    try {
+      const updated = await irmService.generateBarcode(i.id);
+      onChange(updated);
+      pushToast("Barcode generated.", "success");
+    } catch (e) {
+      pushToast(e instanceof Error ? e.message : "Could not generate the barcode.", "alert");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const print = () => {
+    if (!i.barcodeDataUri) return;
+    printSingleLabel({ dataUri: i.barcodeDataUri, code: i.code });
+  };
+
+  return (
+    <Card title="Barcode">
+      <BarcodePanel
+        code={i.code}
+        barcodeDataUri={i.barcodeDataUri}
+        canManage={canManage}
+        busy={busy}
+        onGenerate={generate}
+        onPrint={print}
+      />
+    </Card>
+  );
+}
+
 function Placeholder({ icon: Icon, title, body }: { icon: React.ElementType; title: string; body: string }) {
   return (
     <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] px-6 py-16 text-center">
@@ -286,13 +356,7 @@ function AuditTrail({ itemId }: { itemId: string }) {
   }, [itemId]);
 
   if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
-  if (entries === null) {
-    return (
-      <div className="flex items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--surface)] py-16">
-        <Loader2 className="h-6 w-6 animate-spin text-[var(--muted)]" />
-      </div>
-    );
-  }
+  if (entries === null) return <AuditTrailSkeleton />;
   if (entries.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">

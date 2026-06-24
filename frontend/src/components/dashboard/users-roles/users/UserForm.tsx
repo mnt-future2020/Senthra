@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { AlertCircle, Loader2, Trash2, Upload } from "lucide-react";
 
 import * as userService from "@/services/user.service";
+import { listWarehouseOptions, type WarehouseOption } from "@/services/warehouse.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import type { Role } from "@/types/role";
@@ -12,6 +13,7 @@ import type { User, UserStatus } from "@/types/user";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import { Avatar } from "@/components/ui/Avatar";
 import { Select } from "@/components/ui/Select";
+import { MultiSelect } from "@/components/ui/MultiSelect";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { TempPasswordModal } from "@/components/ui/TempPasswordModal";
@@ -37,6 +39,8 @@ function validateUserForm(v: {
   dateOfJoining: string;
   dateOfBirth: string;
   postcode: string;
+  isWarehouseScoped: boolean;
+  warehouseIds: string[];
 }): Record<string, string> {
   const errs: Record<string, string> = {};
   const first = v.firstName.trim();
@@ -60,6 +64,10 @@ function validateUserForm(v: {
   }
 
   if (!v.roleId) errs.roleId = "Role is required.";
+  // A warehouse-scoped role must be assigned at least one warehouse.
+  if (v.isWarehouseScoped && v.warehouseIds.length === 0) {
+    errs.warehouseIds = "Select at least one warehouse.";
+  }
   if (!v.jobTitle.trim()) errs.jobTitle = "Job title is required.";
   if (!v.department.trim()) errs.department = "Department is required.";
   if (!v.dateOfJoining) errs.dateOfJoining = "Date of joining is required.";
@@ -112,6 +120,11 @@ export function UserForm({
   const [dateOfBirth, setDateOfBirth] = React.useState(toDateInput(user?.dateOfBirth));
   const [roleId, setRoleId] = React.useState(user?.role?.id ?? "");
   const [status, setStatus] = React.useState<UserStatus>(user?.status ?? "active");
+  // Warehouse assignments — only relevant for warehouse-scoped roles (prefilled on edit).
+  const [warehouseIds, setWarehouseIds] = React.useState<string[]>(
+    user?.warehouses?.map((w) => w.id) ?? [],
+  );
+  const [warehouseOptions, setWarehouseOptions] = React.useState<WarehouseOption[]>([]);
   const [jobTitle, setJobTitle] = React.useState(user?.jobTitle ?? "");
   const [department, setDepartment] = React.useState(user?.department ?? "");
   const [dateOfJoining, setDateOfJoining] = React.useState(toDateInput(user?.dateOfJoining));
@@ -129,6 +142,25 @@ export function UserForm({
   const [errors, setErrors] = React.useState<Record<string, string>>({});
   const [tempPw, setTempPw] = React.useState<{ email: string; password: string } | null>(null);
   const fileRef = React.useRef<HTMLInputElement>(null);
+
+  // Whether the chosen role is warehouse-scoped (drives the conditional "Assigned Warehouses" field).
+  // Detected via the role's flag — NOT its display name — so future scoped roles work automatically.
+  const selectedRole = roles.find((r) => r.id === roleId) ?? null;
+  const isWarehouseScoped = Boolean(selectedRole?.isWarehouseScoped);
+  const initialWarehouseIds = (user?.warehouses ?? []).map((w) => w.id);
+  const sameIds = (a: string[], b: string[]) =>
+    a.length === b.length && [...a].sort().join(",") === [...b].sort().join(",");
+
+  // Load active-warehouse options the first time a warehouse-scoped role is selected (lean endpoint;
+  // only fetched when the field actually becomes relevant).
+  React.useEffect(() => {
+    if (!isWarehouseScoped || warehouseOptions.length > 0) return;
+    let active = true;
+    listWarehouseOptions().then((opts) => active && setWarehouseOptions(opts), () => {});
+    return () => {
+      active = false;
+    };
+  }, [isWarehouseScoped, warehouseOptions.length]);
 
   const isDirty =
     !saved &&
@@ -149,7 +181,8 @@ export function UserForm({
       postcode !== (user?.postcode ?? "") ||
       notes !== (user?.notes ?? "") ||
       imageData !== null ||
-      removeImage);
+      removeImage ||
+      !sameIds(warehouseIds, initialWarehouseIds));
 
   useReportDirty("user-form", isDirty);
 
@@ -203,6 +236,8 @@ export function UserForm({
       dateOfJoining,
       dateOfBirth,
       postcode,
+      isWarehouseScoped,
+      warehouseIds,
     });
     if (Object.keys(fieldErrors).length > 0) {
       setErrors(fieldErrors);
@@ -231,6 +266,8 @@ export function UserForm({
           postcode: postcode.trim() || undefined,
           notes: notes.trim() || undefined,
           profileImage: imageData ?? undefined,
+          // Only send assignments for a warehouse-scoped role (backend requires ≥1 then).
+          warehouseIds: isWarehouseScoped ? warehouseIds : undefined,
         });
         setSaved(true);
         setTempPw({ email: result.user.email, password: result.temporaryPassword });
@@ -253,6 +290,9 @@ export function UserForm({
           postcode: postcode.trim(),
           notes: notes.trim(),
         };
+        // Sync assignments only when the effective role is warehouse-scoped (backend never auto-
+        // clears them on role change, so a non-scoped role simply omits the field).
+        if (isWarehouseScoped) payload.warehouseIds = warehouseIds;
         if (imageData) payload.profileImage = imageData;
         else if (removeImage) payload.removeProfileImage = true;
         await userService.updateUser(user.id, payload);
@@ -477,6 +517,30 @@ export function UserForm({
                 />
                 <FieldError id="roleId-error" message={errors.roleId} />
               </div>
+              {/* Assigned Warehouses — shown only for a warehouse-scoped role (e.g. Warehouse Manager).
+                  Required (≥1); the user may then access only these warehouses. */}
+              {isWarehouseScoped && (
+                <div className="sm:col-span-2">
+                  <label className={labelCls}>Assigned warehouses<RequiredMark /></label>
+                  <MultiSelect
+                    values={warehouseIds}
+                    onChange={(v) => {
+                      setWarehouseIds(v);
+                      clearError("warehouseIds");
+                    }}
+                    options={warehouseOptions.map((w) => ({ value: w.id, label: `${w.code} — ${w.name}` }))}
+                    placeholder="Select one or more warehouses…"
+                    ariaLabel="Assigned warehouses"
+                    invalid={Boolean(errors.warehouseIds)}
+                    describedBy={errors.warehouseIds ? "warehouseIds-error" : undefined}
+                    emptyText="No active warehouses found."
+                  />
+                  <FieldError id="warehouseIds-error" message={errors.warehouseIds} />
+                  <p className="mt-1.5 text-[11px] text-[var(--faint)]">
+                    This user will only be able to access the warehouses selected here.
+                  </p>
+                </div>
+              )}
               <div>
                 <label className={labelCls}>Status</label>
                 <Select
@@ -609,6 +673,14 @@ export function UserForm({
                 <div className="flex items-center justify-between gap-3">
                   <dt className="text-[var(--muted)]">Department</dt>
                   <dd className="truncate font-semibold text-[var(--ink)]">{department}</dd>
+                </div>
+              )}
+              {isWarehouseScoped && (
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="text-[var(--muted)]">Warehouses</dt>
+                  <dd className="font-semibold text-[var(--ink)]">
+                    {warehouseIds.length > 0 ? `${warehouseIds.length} assigned` : "None"}
+                  </dd>
                 </div>
               )}
             </dl>

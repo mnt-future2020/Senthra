@@ -11,6 +11,7 @@ import * as goodsOutRepo from "#modules/goods-out/goods-out.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
+import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { geocodePostcode } from "../../lib/geocode.js";
 import type { CreateWarehouseInput, UpdateWarehouseInput } from "./warehouse.validation.js";
 
@@ -171,13 +172,17 @@ export interface ListWarehousesParams {
   sort?: string;
 }
 
-export async function listWarehouses(params: ListWarehousesParams = {}): Promise<PagedWarehouses> {
+export async function listWarehouses(
+  params: ListWarehousesParams = {},
+  actor?: AuditActor,
+): Promise<PagedWarehouses> {
   const pageSize = Math.min(Math.max(Math.trunc(params.pageSize ?? 20), 1), 100);
   const status =
     params.status && (STATUSES as readonly string[]).includes(params.status)
       ? params.status
       : undefined;
-  const filters = { search: params.search, status, typeId: params.type };
+  // Warehouse-scoped users only ever see their assigned warehouses (undefined = unrestricted).
+  const filters = { search: params.search, status, typeId: params.type, ids: warehouseScopeFilter(actor) };
   const total = await warehouseRepo.count(filters);
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const page = Math.min(Math.max(Math.trunc(params.page ?? 1), 1), totalPages);
@@ -185,12 +190,15 @@ export async function listWarehouses(params: ListWarehousesParams = {}): Promise
   return { warehouses: rows.map(toPublic), total, page, pageSize, totalPages };
 }
 
-// Resolve by database id (24-hex) or warehouse code (so pages can route by the code).
-export async function getWarehouse(idOrCode: string): Promise<PublicWarehouse> {
+// Resolve by database id (24-hex) or warehouse code (so pages can route by the code). Enforces
+// warehouse access on the RESOLVED id, so a scoped user can't reach an unassigned warehouse by
+// either id OR code (direct-URL block).
+export async function getWarehouse(idOrCode: string, actor?: AuditActor): Promise<PublicWarehouse> {
   const w = OBJECT_ID_RE.test(idOrCode)
     ? await warehouseRepo.findById(idOrCode)
     : await warehouseRepo.findByCode(idOrCode);
   if (!w) throw notFound("Warehouse not found.");
+  assertWarehouseAccess(actor, w.id);
   return toPublic(w);
 }
 
@@ -244,6 +252,7 @@ export async function updateWarehouse(
 ): Promise<PublicWarehouse> {
   const existing = await warehouseRepo.findById(id);
   if (!existing) throw notFound("Warehouse not found.");
+  assertWarehouseAccess(actor, existing.id);
 
   // The default warehouse cannot become inactive — a default must always be live.
   const finalIsDefault = input.isDefault ?? existing.isDefault;
@@ -372,6 +381,7 @@ async function assertWarehouseDeletable(warehouseId: string): Promise<void> {
 export async function deleteWarehouse(id: string, actor?: AuditActor): Promise<void> {
   const w = await warehouseRepo.findById(id);
   if (!w) throw notFound("Warehouse not found.");
+  assertWarehouseAccess(actor, w.id);
 
   // The default warehouse can never be removed — a default must always exist (mirrors
   // the deactivate-default guard in updateWarehouse). Promote another first.
@@ -389,6 +399,19 @@ export async function deleteWarehouse(id: string, actor?: AuditActor): Promise<v
     targetId: id,
     targetLabel: `${w.name} (${w.code})`,
   });
+}
+
+// Active warehouses for a picker (id/code/name only) — e.g. the user form's "Assigned Warehouses"
+// multi-select. Lean by design (mirrors listManagerOptions): never pages the full warehouse records.
+export interface PublicWarehouseOption {
+  id: string;
+  code: string;
+  name: string;
+}
+// Scoped to the actor: a warehouse-scoped user (e.g. Warehouse Manager) only gets their assigned
+// warehouses; everyone else gets all active warehouses. Server-side — the picker can't be widened.
+export async function listWarehouseOptions(actor?: AuditActor): Promise<PublicWarehouseOption[]> {
+  return warehouseRepo.findOptions(warehouseScopeFilter(actor));
 }
 
 // Active staff users for the manager dropdown (id + display name + email + job title).

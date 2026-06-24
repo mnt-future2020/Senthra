@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  adminStockRequestSchema,
   createCustomerSchema,
   customerUserSchema,
   projectSchema,
   siteSchema,
+  stockRequestSchema,
 } from "./customer.validation.js";
 
 // These cover the customer module's INPUT contract — the zod schemas are the
@@ -117,5 +119,48 @@ describe("createCustomerSchema", () => {
     expect(createCustomerSchema.safeParse({ name: "BT", email: "a@b.com", postcode: "ZZ" }).success).toBe(
       false,
     );
+  });
+});
+
+// A stock submission's item is EITHER a free-text new name OR a link to an existing
+// stock line (top-up). Exactly one is required; the link must be a valid object id.
+describe("stockRequestSchema", () => {
+  const OID = "a".repeat(24);
+
+  it("accepts a new item name with no link", () => {
+    expect(stockRequestSchema.safeParse({ name: "SFP-LX", quantity: 5 }).success).toBe(true);
+  });
+  it("accepts a link with no typed name (name derived server-side)", () => {
+    const r = stockRequestSchema.safeParse({ linkedStockEntryId: OID, quantity: 5 });
+    expect(r.success).toBe(true);
+  });
+  it("rejects when NEITHER a name nor a link is given", () => {
+    const r = stockRequestSchema.safeParse({ quantity: 5 });
+    expect(r.success).toBe(false);
+    if (!r.success) expect(r.error.issues[0]?.path).toContain("name");
+  });
+  it("rejects a malformed linked id", () => {
+    expect(stockRequestSchema.safeParse({ linkedStockEntryId: "nope", quantity: 5 }).success).toBe(false);
+  });
+  it("requires a quantity of at least 1", () => {
+    expect(stockRequestSchema.safeParse({ name: "SFP-LX", quantity: 0 }).success).toBe(false);
+    expect(stockRequestSchema.safeParse({ name: "SFP-LX" }).success).toBe(false);
+  });
+});
+
+describe("adminStockRequestSchema", () => {
+  const OID = "b".repeat(24);
+
+  it("carries the optional requested-by contact alongside a link", () => {
+    const r = adminStockRequestSchema.safeParse({
+      linkedStockEntryId: OID,
+      quantity: 3,
+      requestedByName: "Jane (phone)",
+    });
+    expect(r.success).toBe(true);
+    if (r.success) expect(r.data.requestedByName).toBe("Jane (phone)");
+  });
+  it("still enforces name-or-link", () => {
+    expect(adminStockRequestSchema.safeParse({ quantity: 3 }).success).toBe(false);
   });
 });

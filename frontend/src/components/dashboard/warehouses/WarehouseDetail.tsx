@@ -10,8 +10,13 @@ import * as auditService from "@/services/audit.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { Skeleton } from "@/components/ui/Skeleton";
 import { actionLabel, actionTone, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
+import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
 import { ReceiveStockModal } from "@/components/dashboard/customers/ReceiveStockModal";
+import { InventoryView } from "@/components/dashboard/inventory/InventoryView";
+import { GoodsReceiptsView } from "@/components/dashboard/goods-in/GoodsReceiptsView";
+import { ExpectedDeliveries } from "./ExpectedDeliveries";
 import type { AuditEntry } from "@/types/audit";
 import type { CustomerStockEntry, PendingStockItem, WarehouseAssignment } from "@/types/customer";
 import type { Warehouse } from "@/types/warehouse";
@@ -24,10 +29,42 @@ function fmtDate(iso: string | null): string {
   return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
 }
 
-type Tab = "overview" | "incoming" | "inventory" | "transactions" | "audit";
-const TABS: { key: Tab; label: string; perm?: string }[] = [
+// First-load placeholder mirroring a data table — keeps the warehouse panes' loading style
+// consistent with the GRN list (skeleton rows, not a spinner). Pass the column headers + min width.
+function TableSkeleton({ headers, minWidth }: { headers: string[]; minWidth: number }) {
+  return (
+    <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+      <table className="w-full text-left text-sm" style={{ minWidth }}>
+        <thead>
+          <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
+            {headers.map((h, i) => (<th key={i} className="px-4 py-3">{h}</th>))}
+          </tr>
+        </thead>
+        <tbody>
+          {Array.from({ length: 6 }).map((_, i) => (
+            <tr key={i} className="border-b border-[var(--border)] last:border-0">
+              {headers.map((_h, j) => (<td key={j} className="px-4 py-3"><Skeleton className="h-3 w-20" /></td>))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// "Incoming stock" is a receive worklist (what's still arriving), so it sits before the
+// "Inventory" holdings view — you receive first, then it shows up in stock. The "Inventory"
+// tab holds BOTH stock pools behind an inner toggle: company-owned IRM inventory (the
+// catalogue's per-warehouse balances) and customer consignment stock the customer shipped in.
+// (Incoming tab is gated by stock_requests.view; customer stock under Inventory is visible to
+// all; the IRM pool inside is gated by inventory.view.)
+type Tab = "overview" | "inventory" | "incoming" | "transactions" | "audit";
+// `perms` is an anyOf gate. "Incoming stock" hosts BOTH receiving flows behind an inner toggle —
+// company goods receipts (goods_in.view) and customer consignment intake (stock_requests.view) — so
+// it shows if the user can see EITHER pool.
+const TABS: { key: Tab; label: string; perms?: string[] }[] = [
   { key: "overview", label: "Overview" },
-  { key: "incoming", label: "Incoming stock", perm: "stock_requests.view" },
+  { key: "incoming", label: "Incoming stock", perms: ["goods_in.view", "stock_requests.view"] },
   { key: "inventory", label: "Inventory" },
   { key: "transactions", label: "Transactions" },
   { key: "audit", label: "Audit trail" },
@@ -42,7 +79,7 @@ export function WarehouseDetail({ initial }: { initial: Warehouse }) {
   const [busy, setBusy] = React.useState(false);
   const canEdit = can("warehouse.edit");
 
-  const visibleTabs = TABS.filter((t) => !t.perm || can(t.perm));
+  const visibleTabs = TABS.filter((t) => !t.perms || t.perms.some((p) => can(p)));
   const requestedTab = searchParams.get("tab");
   const tab: Tab = visibleTabs.find((t) => t.key === requestedTab)?.key ?? "overview";
 
@@ -123,8 +160,8 @@ export function WarehouseDetail({ initial }: { initial: Warehouse }) {
       </div>
 
       {tab === "overview" && <Overview w={w} />}
-      {tab === "incoming" && <IncomingStock warehouseId={w.id} pushToast={pushToast} />}
-      {tab === "inventory" && <WarehouseStockEntries warehouseId={w.id} router={router} />}
+      {tab === "inventory" && <StockTab warehouseCode={w.code} warehouseId={w.id} router={router} />}
+      {tab === "incoming" && <IncomingTab warehouseCode={w.code} warehouseId={w.id} router={router} pushToast={pushToast} />}
       {tab === "transactions" && (
         <Placeholder
           icon={Activity}
@@ -258,6 +295,106 @@ function Overview({ w }: { w: Warehouse }) {
   );
 }
 
+// "Incoming stock" tab: a pill toggle between the two RECEIVING flows at this warehouse — company
+// goods receipts (GRN, gated by goods_in.view) and customer consignment intake (gated by
+// stock_requests.view). Mirrors the Inventory tab's owner toggle; the two pools NEVER co-mingle (each
+// pane renders only its own owner's data). The chosen pool lives in ?pool= so it survives a refresh.
+function IncomingTab({
+  warehouseCode,
+  warehouseId,
+  router,
+  pushToast,
+}: {
+  warehouseCode: string;
+  warehouseId: string;
+  router: ReturnType<typeof useRouter>;
+  pushToast: (msg: string, type?: "success" | "alert") => void;
+}) {
+  const { can } = useAuth();
+  const searchParams = useSearchParams();
+  const canGrn = can("goods_in.view");
+  const canCustomer = can("stock_requests.view");
+
+  const requested = searchParams.get("pool");
+  const pool: "grn" | "customer" =
+    requested === "customer" || requested === "grn" ? requested : canGrn ? "grn" : "customer";
+  const active: "grn" | "customer" = canGrn && canCustomer ? pool : canGrn ? "grn" : "customer";
+
+  const setPool = (p: "grn" | "customer") =>
+    router.replace(`/dashboard/warehouses/${warehouseCode}?tab=incoming&pool=${p}`, { scroll: false });
+
+  // Within the Company (GRN) pool: "Expected deliveries" (open POs to receive — the WM worklist)
+  // vs "Received" (GRN history). Persisted in ?inbound= so a refresh keeps the chosen view.
+  // Expected needs PO read access; without it, only Received shows.
+  const canExpected = can("purchase_orders.view");
+  const inbound: "expected" | "received" =
+    !canExpected ? "received" : searchParams.get("inbound") === "received" ? "received" : "expected";
+  const setInbound = (v: "expected" | "received") =>
+    router.replace(`/dashboard/warehouses/${warehouseCode}?tab=incoming&pool=grn&inbound=${v}`, { scroll: false });
+
+  const showOwnerToggle = canGrn && canCustomer;
+  const showViewSwitcher = active === "grn" && canExpected;
+
+  return (
+    <div className="space-y-4">
+      {/* One toolbar row: owner toggle (Company/Customer) on the left — matching the Inventory tab —
+          and, only while Company is active, the Expected/Received view switcher on the right. */}
+      {(showOwnerToggle || showViewSwitcher) && (
+        <div className="flex flex-wrap items-center gap-2">
+          {showOwnerToggle &&
+            ([
+              { key: "grn", label: "Company (GRN)" },
+              { key: "customer", label: "Customer" },
+            ] as const).map((p) => (
+              <button
+                key={p.key}
+                type="button"
+                onClick={() => setPool(p.key)}
+                className={`rounded-full px-3 py-1.5 text-[11px] font-bold transition-all ${
+                  active === p.key
+                    ? "bg-[var(--accent)] text-white"
+                    : "border border-[var(--border)] bg-[var(--surface-2)] text-[var(--muted)] hover:text-[var(--ink)]"
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          {showViewSwitcher && (
+            <div className={`inline-flex items-center rounded-full border border-[var(--border)] bg-[var(--surface-2)] p-0.5 ${showOwnerToggle ? "ml-auto" : ""}`}>
+              {([
+                { key: "expected", label: "Expected" },
+                { key: "received", label: "Received" },
+              ] as const).map((v) => (
+                <button
+                  key={v.key}
+                  type="button"
+                  onClick={() => setInbound(v.key)}
+                  className={`rounded-full px-3 py-1 text-[11px] font-bold transition-all ${
+                    inbound === v.key
+                      ? "bg-[var(--accent)] text-white"
+                      : "text-[var(--muted)] hover:text-[var(--ink)]"
+                  }`}
+                >
+                  {v.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      {active === "grn" ? (
+        inbound === "expected" ? (
+          <ExpectedDeliveries warehouseId={warehouseId} />
+        ) : (
+          <GoodsReceiptsView warehouseId={warehouseId} embedded />
+        )
+      ) : (
+        <IncomingStock warehouseId={warehouseId} pushToast={pushToast} />
+      )}
+    </div>
+  );
+}
+
 function IncomingStock({
   warehouseId,
   pushToast,
@@ -303,13 +440,7 @@ function IncomingStock({
   };
 
   if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
-  if (items === null) {
-    return (
-      <div className="flex items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--surface)] py-16">
-        <Loader2 className="h-6 w-6 animate-spin text-[var(--muted)]" />
-      </div>
-    );
-  }
+  if (items === null) return <TableSkeleton headers={["Customer", "Item", "Qty", "Received", "Status", "Requested", ""]} minWidth={700} />;
   if (items.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
@@ -402,6 +533,63 @@ function IncomingStock({
   );
 }
 
+// "Stock" tab: a pill toggle between the two stock pools held at this warehouse — company
+// IRM inventory (gated by inventory.view) and customer consignment stock. The chosen pool
+// lives in ?pool= so it survives a refresh / is shareable. A user without inventory.view
+// sees only the customer pool, with no toggle.
+function StockTab({
+  warehouseCode,
+  warehouseId,
+  router,
+}: {
+  warehouseCode: string;
+  warehouseId: string;
+  router: ReturnType<typeof useRouter>;
+}) {
+  const { can } = useAuth();
+  const searchParams = useSearchParams();
+  const canIrm = can("inventory.view");
+
+  const requested = searchParams.get("pool");
+  const pool: "irm" | "customer" =
+    requested === "customer" || requested === "irm" ? requested : canIrm ? "irm" : "customer";
+  const active: "irm" | "customer" = canIrm ? pool : "customer";
+
+  const setPool = (p: "irm" | "customer") =>
+    router.replace(`/dashboard/warehouses/${warehouseCode}?tab=inventory&pool=${p}`, { scroll: false });
+
+  return (
+    <div className="space-y-4">
+      {canIrm && (
+        <div className="flex items-center gap-2">
+          {([
+            { key: "irm", label: "Company (IRM)" },
+            { key: "customer", label: "Customer" },
+          ] as const).map((p) => (
+            <button
+              key={p.key}
+              type="button"
+              onClick={() => setPool(p.key)}
+              className={`rounded-full px-3 py-1.5 text-[11px] font-bold transition-all ${
+                active === p.key
+                  ? "bg-[var(--accent)] text-white"
+                  : "border border-[var(--border)] bg-[var(--surface-2)] text-[var(--muted)] hover:text-[var(--ink)]"
+              }`}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+      )}
+      {active === "irm" ? (
+        <InventoryView warehouseId={warehouseId} embedded />
+      ) : (
+        <WarehouseStockEntries warehouseId={warehouseId} router={router} />
+      )}
+    </div>
+  );
+}
+
 function WarehouseStockEntries({
   warehouseId,
   router,
@@ -424,11 +612,7 @@ function WarehouseStockEntries({
 
   if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
   if (entries === null) {
-    return (
-      <div className="flex items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--surface)] py-16">
-        <Loader2 className="h-6 w-6 animate-spin text-[var(--muted)]" />
-      </div>
-    );
+    return <TableSkeleton headers={["Item", "Customer", "SKU", "Qty", "Barcode", "Status", "Received", ""]} minWidth={750} />;
   }
 
   return (
@@ -568,13 +752,7 @@ function AuditTrail({ warehouseId }: { warehouseId: string }) {
   }, [warehouseId]);
 
   if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
-  if (entries === null) {
-    return (
-      <div className="flex items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--surface)] py-16">
-        <Loader2 className="h-6 w-6 animate-spin text-[var(--muted)]" />
-      </div>
-    );
-  }
+  if (entries === null) return <AuditTrailSkeleton />;
   if (entries.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">

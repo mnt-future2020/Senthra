@@ -65,11 +65,15 @@ model Settings {
   // brandName on purpose: renaming the brand must not silently change permanent
   // employee IDs. Null falls back to the default. Only affects NEW staff.
   employeeIdPrefix   String?
-  // Display prefix for customer stock-entry barcodes (e.g. "CSE" -> CSE-00006).
+  // Display prefix for CUSTOMER stock-entry (consignment) barcodes (e.g. "CSE" -> CSE-00006).
   // Only the human-readable prefix is configurable — the underlying sequence
   // counter is a fixed internal namespace, so changing this never resets or
   // collides numbering. Null falls back to the default. Only affects NEW barcodes.
   stockCodePrefix    String?
+  // Display prefix for IRM catalogue ITEM codes (e.g. "IRM" -> IRM-0004). Same rule: the
+  // numeric sequence lives under a fixed internal counter, so changing this never resets or
+  // collides numbering and EXISTING item codes are immutable. Only affects NEW items.
+  irmCodePrefix      String?
 
   // --- Company profile (legal identity for official documents — PO PDF letterhead etc.) ---
   // Pure reference data, surfaced via getCompanyProfile(). Distinct from the display brand above
@@ -115,6 +119,11 @@ model Role {
   // keeps its new fields nullable). Absent/null is treated as "can't hold stock" everywhere,
   // and @default(false) stamps new rows; the seed grants it to field-operations roles.
   canHoldStock Boolean? @default(false)
+  // Warehouse-scoping capability: members of this role may ONLY access the warehouses they are
+  // explicitly assigned (UserWarehouseAssignment). Drives the principal's assignedWarehouseIds and
+  // every warehouse-bound access check. NULLABLE for the same added-to-existing-collection reason as
+  // canHoldStock; absent/null = unrestricted. The seed grants it to WAREHOUSE_SCOPED_ROLE_KEYS.
+  isWarehouseScoped Boolean? @default(false)
   sortOrder   Int      @default(0)
   users       User[]
   createdAt   DateTime @default(now())
@@ -214,12 +223,16 @@ model Warehouse {
   // Stock transfers leaving / arriving at this warehouse (back-relations; no DB column).
   stockTransfersFrom StockTransfer[] @relation("StockTransferFrom")
   stockTransfersTo   StockTransfer[] @relation("StockTransferTo")
+  // Manual stock adjustments (existing/opening stock) added at this warehouse (back-relation).
+  stockAdjustments StockAdjustment[]
   // Goods Out dispatches from this warehouse (back-relation; no DB column).
   goodsOuts          GoodsOut[]
   // Customer stock assignments destined for this warehouse (back-relation; no DB column).
   customerStockAssignments CustomerStockWarehouseAssignment[]
   // Received customer stock physically at this warehouse (back-relation; no DB column).
   customerStockEntries     CustomerStockEntry[]
+  // Users explicitly assigned to this warehouse (warehouse-scoped roles) (back-relation; no DB column).
+  userAssignments          UserWarehouseAssignment[]
 
   deletedAt DateTime? // soft delete — excluded from listings; history stays intact
 
@@ -381,6 +394,10 @@ model IrmItem {
   skuLower String?
   barcode  String?
   qrCode   String?
+  // Rendered Code128 barcode image (base64 PNG data URI) — generated on demand from the
+  // item's own `code` (e.g. IRM-0004), printable as a label. Regenerating just re-renders it.
+  // Free-text `barcode`/`qrCode` above are left untouched (manual/manufacturer values).
+  barcodeDataUri String?
 
   // Suppliers — at least one, exactly one primary (junction; enforced in the service).
   suppliers IrmItemSupplier[]
@@ -760,11 +777,11 @@ model InventoryTransaction {
   warehouseId String    @db.ObjectId
   warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
 
-  quantityDelta Int // + inbound (Goods In) / − outbound (future)
-  type          String // goods_in (future: transfer_in/out, goods_out, adjustment, return)
-  sourceType    String // goods_receipt
-  sourceId      String  @db.ObjectId
-  sourceCode    String? // snapshot, e.g. GRN-0001
+  quantityDelta Int // + inbound (Goods In / manual_add) / − outbound (transfer/goods_out)
+  type          String // goods_in | manual_add | transfer_in | transfer_out | goods_out (future: return)
+  sourceType    String // goods_receipt | stock_transfer | stock_adjustment
+  sourceId      String  @db.ObjectId // id of the source record (GoodsReceipt / StockTransfer / StockAdjustment)
+  sourceCode    String? // snapshot, e.g. GRN-0001 / TRF-0001 / ADJ-0001
   balanceAfter  Int // on-hand snapshot after applying this row
   notes         String?
   createdBy     String?
@@ -818,6 +835,30 @@ model StockTransfer {
   @@index([fromWarehouseId])
   @@index([toWarehouseId])
   @@index([movementDate])
+}
+
+// A lightweight header for a MANUAL stock addition (existing / opening / legacy stock added
+// straight into a warehouse, NOT received via Goods In). Each add allocates an ADJ-#### code and
+// is applied atomically: upsert the InventoryBalance + append ONE "manual_add" InventoryTransaction
+// whose sourceType="stock_adjustment" and sourceId=this row's id (loose coupling, mirroring how the
+// ledger references goods_receipt). The item + quantity live on the ledger row, so this header stays
+// forward-compatible with multi-line adds later. Inbound-only in v1.
+model StockAdjustment {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  code        String    @unique // auto-allocated, e.g. ADJ-0001
+  warehouseId String    @db.ObjectId
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
+
+  reason          String // opening_balance | legacy_stock | found | other
+  movementDate    DateTime
+  referenceNumber String?
+  notes           String?
+
+  createdBy String? // staff email that performed the add
+  createdAt DateTime @default(now())
+
+  @@index([warehouseId])
+  @@index([createdAt])
 }
 
 // A warehouse → engineer stock dispatch (GDN-0001). Twin of GoodsReceipt: Draft (editable/deletable)
@@ -1028,6 +1069,9 @@ model User {
 
   // Warehouses this user is the primary manager of (back-relation; no DB column).
   managedWarehouses Warehouse[]
+  // Explicit warehouse assignments (for warehouse-scoped roles). Rows PERSIST across role changes —
+  // only removed on permanent user delete or explicit admin un-assignment (back-relation).
+  warehouseAssignments UserWarehouseAssignment[]
   // Suppliers this user is the internal owner of (back-relation; no DB column).
   ownedSuppliers    Supplier[]
   // IRM items this user is the internal owner of (back-relation; no DB column).
@@ -1039,6 +1083,27 @@ model User {
 
   @@index([roleId])
   @@index([status])
+}
+
+// Explicit user↔warehouse assignment (many-to-many) for warehouse-scoped roles (e.g. Warehouse
+// Manager). A scoped user may ONLY access the warehouses they have a row for here — enforced on
+// EVERY warehouse-bound endpoint via the principal's assignedWarehouseIds. Normalized junction (no
+// JSON arrays / CSV ids). Rows PERSIST across role changes (a user demoted then re-promoted keeps
+// their warehouses); they are removed ONLY on permanent user delete or explicit admin un-assignment.
+// MongoDB has no FK cascade, so deletes are done in the application/repository layer.
+model UserWarehouseAssignment {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId      String    @db.ObjectId
+  user        User      @relation(fields: [userId], references: [id])
+  warehouseId String    @db.ObjectId
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
+
+  assignedAt  DateTime  @default(now())
+  assignedBy  String? // staff email that made the assignment
+
+  @@unique([userId, warehouseId]) // a user can't be assigned the same warehouse twice
+  @@index([userId])
+  @@index([warehouseId])
 }
 
 // A customer company (e.g. "BT"). Created by an admin/PM from the dashboard; the
@@ -1202,6 +1267,11 @@ model CustomerStockRequest {
   // PM edits: corrected item name + optional link to catalogue item.
   editedName        String?   // PM-corrected name (e.g. "spf" → "SFP-LX")
   catalogueItemId   String?   @db.ObjectId // optional link (legacy, being phased out)
+
+  // Optional link to an existing received stock line (CustomerStockEntry) this
+  // submission is a TOP-UP of. When set, receiving the stock adds to that product's
+  // existing quantity (matched by product + warehouse) instead of creating a duplicate.
+  linkedStockEntryId String?  @db.ObjectId
 
   // Warehouse assignments (back-relation; no DB column).
   warehouseAssignments CustomerStockWarehouseAssignment[]

@@ -22,6 +22,15 @@ router.get(
   warehouseController.listManagerOptions,
 );
 
+// Active-warehouse options (scoped to the caller) for pickers — the user form's "Assigned
+// Warehouses" and the purchase-order per-row warehouse. Available to whoever manages users or
+// creates POs. Static route BEFORE /:id so "options" isn't captured as an id.
+router.get(
+  "/options",
+  requireAnyPermission("users.create", "users.edit", "purchase_orders.create"),
+  warehouseController.listWarehouseOptions,
+);
+
 router.get("/", requirePermission("warehouse.view"), warehouseController.listWarehouses);
 router.get("/:id", requirePermission("warehouse.view"), warehouseController.getWarehouse);
 

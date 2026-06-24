@@ -210,7 +210,7 @@ function Purchases({ balanceId }: { balanceId: string }) {
         <table className="w-full min-w-[640px] text-left text-sm">
           <thead>
             <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-              <th className="px-4 py-3">Goods receipt</th><th className="px-4 py-3">Purchase order</th><th className="px-4 py-3">Supplier</th>
+              <th className="px-4 py-3">GRN</th><th className="px-4 py-3">Purchase order</th><th className="px-4 py-3">Supplier</th>
               <th className="px-4 py-3 text-right">Received</th><th className="px-4 py-3">Date</th>
             </tr>
           </thead>

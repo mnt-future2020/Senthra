@@ -35,6 +35,11 @@ export type IrmItemWithRelations = IrmItem & {
   suppliers: SupplierLink[];
 };
 
+// List/search rows deliberately OMIT the heavy base64 barcode image — it's only needed on the
+// detail page and the generate endpoint. Dropping it keeps list/search/dropdown payloads small
+// even when 100+ items have a generated barcode (the image is fetched lazily by the detail view).
+export type IrmItemListRow = Omit<IrmItemWithRelations, "barcodeDataUri">;
+
 const withRelations = {
   irmType: { select: { id: true, name: true } },
   irmCategory: { select: { id: true, name: true } },
@@ -98,10 +103,11 @@ export function findMany(
   skip = 0,
   take = 20,
   sort?: string,
-): Promise<IrmItemWithRelations[]> {
+): Promise<IrmItemListRow[]> {
   return prisma.irmItem.findMany({
     where: buildWhere(filters),
     include: withRelations,
+    omit: { barcodeDataUri: true }, // keep list/search/dropdown payloads small — see IrmItemListRow
     orderBy: irmOrderBy(sort),
     skip,
     take,
@@ -157,6 +163,12 @@ export function softDelete(id: string): Promise<IrmItem> {
   return prisma.irmItem.update({ where: { id }, data: { deletedAt: new Date() } });
 }
 
+// Store (or replace) the rendered Code128 barcode image. Only touches barcodeDataUri — the
+// free-text barcode/qrCode fields are never overwritten by the generator.
+export function updateBarcodeImage(id: string, barcodeDataUri: string): Promise<IrmItemWithRelations> {
+  return prisma.irmItem.update({ where: { id }, data: { barcodeDataUri }, include: withRelations });
+}
+
 // --- delete-guard counter (Supplier can't be deleted while linked to live IRM items) ---------
 // Counts IrmItemSupplier links to NON-deleted IRM items for the given supplier, so deleting a
 // supplier that still supplies catalogue items is blocked.
@@ -195,8 +207,11 @@ export async function replaceSuppliers(irmItemId: string, rows: SupplierLinkRow[
   });
 }
 
-// --- code allocation (atomic Counter, prefix "IRM") -------------------------
-const IRM_CODE_PREFIX = "IRM";
+// --- code allocation (atomic Counter) ---------------------------------------
+// The numeric sequence lives under a FIXED counter key. The DISPLAY prefix (default "IRM") is
+// configurable in Settings and passed into createWithCode — it only changes how NEW codes are
+// rendered, so changing it never resets or collides numbering and existing codes stay immutable.
+const IRM_COUNTER_KEY = "IRM";
 
 function isCodeConflict(e: unknown): boolean {
   if (!(e instanceof Prisma.PrismaClientKnownRequestError) || e.code !== "P2002") return false;
@@ -223,14 +238,15 @@ function isUniqueConflict(e: unknown): boolean {
   return e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002";
 }
 
+// Highest item-number across ALL IRM codes, regardless of prefix (every code is "<PREFIX>-<NNNN>").
+// Prefix-agnostic so re-seeding / recovery stays correct even after the configured prefix changes.
 async function highestIrmNumber(): Promise<number> {
-  const head = `${IRM_CODE_PREFIX}-`;
-  const rows = await prisma.irmItem.findMany({ where: { code: { startsWith: head } }, select: { code: true } });
+  const rows = await prisma.irmItem.findMany({ select: { code: true } });
   let max = 0;
   for (const { code } of rows) {
-    const suffix = code.slice(head.length);
-    if (!/^\d+$/.test(suffix)) continue;
-    const n = Number(suffix);
+    const m = /-(\d+)$/.exec(code);
+    if (!m) continue;
+    const n = Number(m[1]);
     if (Number.isSafeInteger(n) && n > max) max = n;
   }
   return max;
@@ -238,33 +254,35 @@ async function highestIrmNumber(): Promise<number> {
 
 async function nextSequence(): Promise<number> {
   try {
-    const c = await prisma.counter.update({ where: { key: IRM_CODE_PREFIX }, data: { seq: { increment: 1 } }, select: { seq: true } });
+    const c = await prisma.counter.update({ where: { key: IRM_COUNTER_KEY }, data: { seq: { increment: 1 } }, select: { seq: true } });
     return c.seq;
   } catch (e) {
     if (!isRecordNotFound(e)) throw e;
   }
   const start = await highestIrmNumber();
   try {
-    await prisma.counter.create({ data: { key: IRM_CODE_PREFIX, seq: start } });
+    await prisma.counter.create({ data: { key: IRM_COUNTER_KEY, seq: start } });
   } catch (e) {
     if (!isUniqueConflict(e)) throw e;
   }
-  const c = await prisma.counter.update({ where: { key: IRM_CODE_PREFIX }, data: { seq: { increment: 1 } }, select: { seq: true } });
+  const c = await prisma.counter.update({ where: { key: IRM_COUNTER_KEY }, data: { seq: { increment: 1 } }, select: { seq: true } });
   return c.seq;
 }
 
 async function fastForwardCounter(): Promise<void> {
   const max = await highestIrmNumber();
-  await prisma.counter.upsert({ where: { key: IRM_CODE_PREFIX }, create: { key: IRM_CODE_PREFIX, seq: max }, update: { seq: max } });
+  await prisma.counter.upsert({ where: { key: IRM_COUNTER_KEY }, create: { key: IRM_COUNTER_KEY, seq: max }, update: { seq: max } });
 }
 
 // Create an item with a freshly-allocated, collision-safe code (suppliers added separately).
+// `prefix` is the configured display prefix (e.g. "IRM"); the number comes from the fixed counter.
 export async function createWithCode(
   data: Omit<Prisma.IrmItemCreateInput, "code">,
+  prefix: string,
 ): Promise<IrmItemWithRelations> {
   for (let attempt = 0; attempt < 5; attempt++) {
     const seq = await nextSequence();
-    const code = `${IRM_CODE_PREFIX}-${String(seq).padStart(4, "0")}`;
+    const code = `${prefix}-${String(seq).padStart(4, "0")}`;
     try {
       return await prisma.irmItem.create({ data: { deletedAt: null, ...data, code }, include: withRelations });
     } catch (e) {

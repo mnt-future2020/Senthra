@@ -1,7 +1,7 @@
 import type { Prisma } from "@prisma/client";
 
 import * as irmRepo from "./irm.repository.js";
-import type { IrmItemWithRelations, SupplierLinkRow } from "./irm.repository.js";
+import type { IrmItemWithRelations, IrmItemListRow, SupplierLinkRow } from "./irm.repository.js";
 import * as irmTypeService from "#modules/irm-type/irm-type.service.js";
 import * as irmCategoryService from "#modules/irm-category/irm-category.service.js";
 import * as supplierService from "#modules/supplier/supplier.service.js";
@@ -10,6 +10,7 @@ import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import * as grnRepo from "#modules/goods-in/goods-in.repository.js";
 import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
 import * as goodsOutRepo from "#modules/goods-out/goods-out.repository.js";
+import { getIrmCodePrefix } from "#modules/settings/settings.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
@@ -57,6 +58,7 @@ export interface PublicIrmItem {
   sku: string | null;
   barcode: string | null;
   qrCode: string | null;
+  barcodeDataUri: string | null; // rendered Code128 image (base64) of the item code, when generated
   // Suppliers (junction).
   suppliers: PublicIrmSupplierLink[];
   primarySupplier: { id: string; code: string; name: string } | null;
@@ -126,7 +128,9 @@ function toSupplierLink(l: SupplierLink): PublicIrmSupplierLink {
   };
 }
 
-function toPublic(i: IrmItemWithRelations): PublicIrmItem {
+// Accepts either a full item (detail/generate) or a list row that omits the barcode image.
+// `barcodeDataUri` is only present on the full shape — list rows resolve to null in the DTO.
+function toPublic(i: IrmItemWithRelations | IrmItemListRow): PublicIrmItem {
   const primary = i.suppliers.find((s) => s.isPrimary) ?? null;
   return {
     id: i.id,
@@ -144,6 +148,7 @@ function toPublic(i: IrmItemWithRelations): PublicIrmItem {
     sku: i.sku,
     barcode: i.barcode,
     qrCode: i.qrCode,
+    barcodeDataUri: "barcodeDataUri" in i ? i.barcodeDataUri : null,
     suppliers: i.suppliers.map(toSupplierLink),
     primarySupplier: primary?.supplier ? { id: primary.supplier.id, code: primary.supplier.code, name: primary.supplier.name } : null,
     baseUnit: i.baseUnit,
@@ -305,6 +310,35 @@ export async function getIrmItem(idOrCode: string): Promise<PublicIrmItem> {
   return toPublic(i);
 }
 
+// Generate (or regenerate) the item's Code128 barcode image. The encoded value is the item's own
+// permanent `code` (e.g. IRM-0004), so regenerating simply re-renders the PNG — useful when a stored
+// image is missing/corrupt. The free-text `barcode`/`qrCode` fields are deliberately left untouched.
+export async function generateBarcode(idOrCode: string, actor?: AuditActor): Promise<PublicIrmItem> {
+  const item = OBJECT_ID_RE.test(idOrCode) ? await irmRepo.findById(idOrCode) : await irmRepo.findByCode(idOrCode);
+  if (!item) throw notFound("IRM item not found.");
+
+  const bwipjs = await import("bwip-js");
+  const pngBuffer = await bwipjs.default.toBuffer({
+    bcid: "code128",
+    text: item.code,
+    scale: 3,
+    height: 10,
+    includetext: true,
+    textxalign: "center",
+  });
+  const dataUri = `data:image/png;base64,${pngBuffer.toString("base64")}`;
+
+  const updated = await irmRepo.updateBarcodeImage(item.id, dataUri);
+  audit.record({
+    actor,
+    action: "irm.barcode_generated",
+    targetType: "irm_item",
+    targetId: item.id,
+    targetLabel: `${item.name} (${item.code})`,
+  });
+  return toPublic(updated);
+}
+
 export async function createIrmItem(input: CreateIrmItemInput, actor?: AuditActor): Promise<PublicIrmItem> {
   const name = input.name.trim();
   if (!name) throw badRequest("Item name is required.");
@@ -315,19 +349,23 @@ export async function createIrmItem(input: CreateIrmItemInput, actor?: AuditActo
   const { skuLower } = await resolveSku(input.sku);
   const supplierRows = await buildSupplierRows(input.suppliers);
   const standardCostPence = costToPence(input.standardCost);
+  const codePrefix = await getIrmCodePrefix();
   const actorLabel = actor?.email ?? null;
 
   let created: IrmItemWithRelations;
   try {
-    created = await irmRepo.createWithCode({
-      name,
-      ...irmColumns(input, skuLower, standardCostPence),
-      irmType: { connect: { id: input.typeId } },
-      irmCategory: { connect: { id: input.irmCategoryId } },
-      ...(ownerUserId ? { owner: { connect: { id: ownerUserId } } } : {}),
-      createdBy: actorLabel,
-      updatedBy: actorLabel,
-    });
+    created = await irmRepo.createWithCode(
+      {
+        name,
+        ...irmColumns(input, skuLower, standardCostPence),
+        irmType: { connect: { id: input.typeId } },
+        irmCategory: { connect: { id: input.irmCategoryId } },
+        ...(ownerUserId ? { owner: { connect: { id: ownerUserId } } } : {}),
+        createdBy: actorLabel,
+        updatedBy: actorLabel,
+      },
+      codePrefix,
+    );
   } catch (e) {
     if (irmRepo.isSkuConflict(e)) throw skuConflict(input.sku);
     throw e;

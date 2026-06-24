@@ -104,3 +104,13 @@ export function deleteWarehouse(id: string): Promise<void> {
 export function listManagerOptions(): Promise<WarehouseManager[]> {
   return api<{ managers: WarehouseManager[] }>("/warehouses/manager-options").then((r) => r.managers);
 }
+
+// Lean active-warehouse options (id/code/name) for the user form's "Assigned Warehouses" picker.
+export interface WarehouseOption {
+  id: string;
+  code: string;
+  name: string;
+}
+export function listWarehouseOptions(): Promise<WarehouseOption[]> {
+  return api<{ options: WarehouseOption[] }>("/warehouses/options").then((r) => r.options);
+}

@@ -7,6 +7,13 @@ export interface UserRoleRef {
   name: string;
 }
 
+// A warehouse a (warehouse-scoped) user is assigned to. Populated only for warehouse-scoped roles.
+export interface AssignedWarehouse {
+  id: string;
+  code: string;
+  name: string;
+}
+
 export interface User {
   id: string;
   firstName: string;
@@ -25,6 +32,8 @@ export interface User {
   signatureUpdatedAt: string | null;
   mustResetPassword: boolean;
   role: UserRoleRef | null;
+  // Warehouses explicitly assigned to this user (only populated for warehouse-scoped roles).
+  warehouses: AssignedWarehouse[];
   // Employment
   employeeId: string | null;
   jobTitle: string | null;

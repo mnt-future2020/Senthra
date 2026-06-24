@@ -81,6 +81,8 @@ function staffPrincipal(permissions: string[]): Principal {
     mustResetPassword: false,
     role: null,
     permissions,
+    isWarehouseScoped: false,
+    assignedWarehouseIds: null,
   };
 }
 

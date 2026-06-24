@@ -137,15 +137,20 @@ export type CustomerUserInput = z.infer<typeof customerUserSchema>;
 
 // --- customer stock requests (portal-submitted stock requests) ----------------
 
-// What a portal user submits to REQUEST stock — an order / replenishment ask. Item
-// name + quantity are MANDATORY. Reason and notes are optional free-text. Categories
-// are internal master-data and never appear on a customer request.
-export const stockRequestSchema = z.object({
-  name: z
-    .string({ error: "Item name is required." })
+// What a portal user submits to REQUEST stock — an order / replenishment ask.
+// Quantity is MANDATORY. The item is EITHER a free-text new name OR a link to an
+// existing stock line (`linkedStockEntryId`) the submission tops up — exactly one is
+// required (enforced by the refine below). Reason and notes are optional free-text.
+// Categories are internal master-data and never appear on a customer request.
+const stockRequestBase = z.object({
+  name: z.string().trim().max(160).optional(),
+  // Existing stock line this submission adds to (top-up). When present, the item name
+  // is derived server-side from that line, so `name` becomes optional.
+  linkedStockEntryId: z
+    .string()
     .trim()
-    .min(1, "Item name is required.")
-    .max(160),
+    .regex(/^[a-f0-9]{24}$/i, "Invalid item.")
+    .optional(),
   quantity: z.coerce
     .number({ error: "Quantity is required." })
     .int("Use a whole number.")
@@ -154,13 +159,22 @@ export const stockRequestSchema = z.object({
   reason: z.string().trim().max(1000).optional(),
   notes: z.string().trim().max(2000).optional(),
 });
+
+const hasNameOrLink = (v: { name?: string; linkedStockEntryId?: string }) =>
+  Boolean((v.name && v.name.trim().length > 0) || v.linkedStockEntryId);
+const nameOrLinkIssue: { message: string; path: PropertyKey[] } = {
+  message: "Enter an item name or select an existing item.",
+  path: ["name"],
+};
+
+export const stockRequestSchema = stockRequestBase.refine(hasNameOrLink, nameOrLinkIssue);
 export type StockRequestInput = z.infer<typeof stockRequestSchema>;
 
 // ADMIN creates a submission on behalf of a customer (e.g. taken over the phone).
 // Same shape as the portal submission plus an optional "requested by" contact name.
-export const adminStockRequestSchema = stockRequestSchema.extend({
-  requestedByName: z.string().trim().max(160).optional(),
-});
+export const adminStockRequestSchema = stockRequestBase
+  .extend({ requestedByName: z.string().trim().max(160).optional() })
+  .refine(hasNameOrLink, nameOrLinkIssue);
 export type AdminStockRequestInput = z.infer<typeof adminStockRequestSchema>;
 
 // Optional admin response note when approving / rejecting a request (shown to the

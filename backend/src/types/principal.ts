@@ -28,6 +28,14 @@ export interface UserPrincipal {
   role: { id: string; key: string; name: string } | null;
   // Effective permissions (the assigned role's permissions; "*" = all).
   permissions: string[];
+  // True when the assigned role is warehouse-scoped (Role.isWarehouseScoped). Drives client UI such as
+  // steering Warehouse Managers to their Warehouse Detail page. Read from the role flag (NOT from
+  // whether assignedWarehouseIds was loaded this request), so it's consistent on login/refresh/me.
+  isWarehouseScoped: boolean;
+  // Warehouse access scope. `null` = unrestricted (the role isn't warehouse-scoped). A (possibly
+  // empty) array = a warehouse-scoped role restricted to EXACTLY those warehouse ids. Populated once
+  // in requireAuth from UserWarehouseAssignment; consumed by the warehouse-access helpers.
+  assignedWarehouseIds: string[] | null;
 }
 
 // An external customer portal user (e.g. a Customer PM). Read-only, scoped to a
@@ -80,7 +88,13 @@ export function customerPrincipal(user: CustomerUser, customer: Customer): Custo
   };
 }
 
-export function userPrincipal(user: UserWithRole): UserPrincipal {
+// `assignedWarehouseIds` defaults to null (unrestricted). requireAuth passes the loaded set for a
+// warehouse-scoped role; other callers (login, refresh) leave it null — the per-request principal is
+// rebuilt by requireAuth on every protected call, which is the only path that enforces warehouse scope.
+export function userPrincipal(
+  user: UserWithRole,
+  assignedWarehouseIds: string[] | null = null,
+): UserPrincipal {
   return {
     type: "user",
     id: user.id,
@@ -95,6 +109,8 @@ export function userPrincipal(user: UserWithRole): UserPrincipal {
       ? { id: user.role.id, key: user.role.key, name: user.role.name }
       : null,
     permissions: user.role?.permissions ?? [],
+    isWarehouseScoped: user.role?.isWarehouseScoped ?? false,
+    assignedWarehouseIds,
   };
 }
 

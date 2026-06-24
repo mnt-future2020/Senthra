@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Loader2, Plus, Trash2 } from "lucide-react";
 
 import * as grnService from "@/services/goods-in.service";
@@ -13,7 +13,8 @@ import { inputCls, ghostBtn, labelCls, primaryBtn } from "@/components/ui/styles
 import { NumberInput } from "@/components/ui/NumberInput";
 import { Select } from "@/components/ui/Select";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
-import type { GoodsReceipt } from "@/types/goods-in";
+import { AttachmentGrid, DocPicker, attachmentToDoc, type DocItem, type PickedDoc } from "./DeliveryDocuments";
+import type { GoodsReceipt, GrnAttachment } from "@/types/goods-in";
 import type { PurchaseOrder } from "@/types/purchase-order";
 
 const GRN_LIST = "/dashboard/goods-in";
@@ -51,10 +52,44 @@ function FieldError({ message }: { message?: string }) {
   return <p className="mt-1.5 text-[11px] font-semibold text-[var(--neg)]">{message}</p>;
 }
 
+// Build the received-item lines for a picked PO (only lines with remaining > 0). Pure —
+// shared by the user's manual pick and the ?po= deep-link preselect, so both paths
+// produce identical rows (incl. serial/batch tracking flags).
+function buildLines(po: PurchaseOrder, flags: Map<string, { serials: boolean; batches: boolean }>): LineState[] {
+  return po.items
+    .filter((i) => i.quantity - i.receivedQuantity > 0)
+    .map((i) => {
+      const f = flags.get(i.irmItemId);
+      return {
+        purchaseOrderItemId: i.id,
+        irmItemId: i.irmItemId,
+        itemName: i.itemName,
+        sku: i.sku,
+        baseUnit: i.baseUnit,
+        ordered: i.quantity,
+        previouslyReceived: i.receivedQuantity,
+        trackSerials: f?.serials ?? false,
+        trackBatches: f?.batches ?? false,
+        receive: "",
+        damaged: "0",
+        notes: "",
+        serialsText: "",
+        batches: [],
+      };
+    });
+}
+
 export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; order?: GoodsReceipt | null }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const guard = useNavigationGuard();
   const { pushToast } = useDashboard();
+
+  // Deep-link from the PO detail "Receive" action: ?po=<id> preselects that PO on create.
+  const presetPoId = mode === "create" ? searchParams.get("po") : null;
+  // Deep-link from a warehouse's Incoming-stock tab: ?warehouse=<id> scopes the PO list to it.
+  const presetWarehouseId = mode === "create" ? searchParams.get("warehouse") : null;
+  const preselectDone = React.useRef(false);
 
   const o = order;
   const [poId, setPoId] = React.useState(o?.purchaseOrderId ?? "");
@@ -67,6 +102,10 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
   const [qualityStatus, setQualityStatus] = React.useState(o?.qualityStatus ?? "passed");
   const [qualityNotes, setQualityNotes] = React.useState(o?.qualityNotes ?? "");
   const [internalNotes, setInternalNotes] = React.useState(o?.internalNotes ?? "");
+  // Delivery documents — edit: live (uploaded immediately to the existing draft); create: staged
+  // in memory and uploaded right after the draft is created. Limits/validation live in DocPicker.
+  const [attachments, setAttachments] = React.useState<GrnAttachment[]>(o?.attachments ?? []);
+  const [staged, setStaged] = React.useState<{ key: string; fileName: string; fileType: string; fileSizeBytes: number; dataUrl: string }[]>([]);
 
   const [lines, setLines] = React.useState<LineState[]>(() =>
     o
@@ -90,10 +129,16 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
   );
 
   const [receivablePos, setReceivablePos] = React.useState<PurchaseOrder[]>([]);
+  // True once the receivable-PO fetch settles — lets us tell "still loading" (don't nag) from
+  // "genuinely none" (show a clear empty-state instead of a bare placeholder).
+  const [posLoaded, setPosLoaded] = React.useState(false);
   const [flags, setFlags] = React.useState<Map<string, { serials: boolean; batches: boolean }>>(new Map());
   const [dirty, setDirty] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
+  // Remember the draft created on the first submit so a retry (after a document upload failed) reuses
+  // it instead of creating a duplicate GRN.
+  const [createdRef, setCreatedRef] = React.useState<{ id: string; code: string } | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [errors, setErrors] = React.useState<Record<string, string>>({});
   const touch = () => setDirty(true);
@@ -103,59 +148,63 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
   const supplierPanel = o?.supplier ?? selectedPo?.supplier ?? null;
   const warehousePanel = o?.warehouse ?? selectedPo?.warehouse ?? null;
   const supplierName = o?.supplierName ?? selectedPo?.supplierName ?? null;
+  // When the list is scoped to a warehouse, name it (all loaded POs share that warehouse).
+  const scopedWarehouseName = presetWarehouseId ? receivablePos[0]?.warehouse?.name ?? null : null;
 
   React.useEffect(() => {
     if (mode !== "create") return;
     let active = true;
-    // Receivable POs = sent + partially_received.
-    Promise.all([
-      listPurchaseOrders({ status: "sent", pageSize: 100 }),
-      listPurchaseOrders({ status: "partially_received", pageSize: 100 }),
-    ]).then(([a, b]) => active && setReceivablePos([...a.purchaseOrders, ...b.purchaseOrders]), () => {});
-    // IRM tracking flags, to decide which lines capture serials / batches.
-    listIrmItems({ status: "active", pageSize: 200 }).then(
-      (r) => active && setFlags(new Map(r.items.map((i) => [i.id, { serials: i.trackSerialNumbers, batches: i.trackBatchNumbers }]))),
-      () => {},
-    );
+    // Load in one pass so the ?po= preselect can run with BOTH the receivable POs and the
+    // IRM tracking flags resolved (otherwise a preselected line could miss serial/batch
+    // capture). allSettled keeps the two independent — one failing never blocks the other.
+    Promise.allSettled([
+      // receivable = sent + partially_received. `warehouse` scopes the list when opened from a
+      // warehouse's Incoming-stock tab (undefined on the global GRN page → all warehouses).
+      listPurchaseOrders({ status: "sent", warehouse: presetWarehouseId ?? undefined, pageSize: 100 }),
+      listPurchaseOrders({ status: "partially_received", warehouse: presetWarehouseId ?? undefined, pageSize: 100 }),
+      listIrmItems({ status: "active", pageSize: 200 }), // which lines capture serials / batches
+    ]).then(([sent, partial, irm]) => {
+      if (!active) return;
+      const pos = [
+        ...(sent.status === "fulfilled" ? sent.value.purchaseOrders : []),
+        ...(partial.status === "fulfilled" ? partial.value.purchaseOrders : []),
+      ];
+      const flagMap = new Map(
+        (irm.status === "fulfilled" ? irm.value.items : []).map(
+          (i) => [i.id, { serials: i.trackSerialNumbers, batches: i.trackBatchNumbers }] as const,
+        ),
+      );
+      setReceivablePos(pos);
+      setFlags(flagMap);
+      setPosLoaded(true);
+
+      // Preselect a deep-linked PO once. This is NOT a user edit, so it must not set the
+      // dirty flag (a freshly opened form shouldn't trip the unsaved-changes guard).
+      if (!preselectDone.current && presetPoId) {
+        preselectDone.current = true;
+        const po = pos.find((p) => p.id === presetPoId);
+        if (po) {
+          setPoId(po.id);
+          setLines(buildLines(po, flagMap));
+        } else {
+          pushToast("That purchase order isn't available to receive.", "info");
+        }
+      }
+    });
     return () => { active = false; };
-  }, [mode]);
+  }, [mode, presetPoId, presetWarehouseId, pushToast]);
 
   useReportDirty("grn-form", dirty && !saved);
 
-  // On create: when a PO is picked, build the received-item lines (only lines with remaining > 0).
+  // On create: when the user picks a PO, build the received-item lines (only lines with
+  // remaining > 0). This IS a user edit, so it marks the form dirty.
   const onPickPo = (id: string) => {
     setPoId(id);
     touch();
     clearError("purchaseOrderId");
     clearError("items");
     const po = receivablePos.find((p) => p.id === id);
-    if (!po) {
-      setLines([]);
-      return;
-    }
-    setLines(
-      po.items
-        .filter((i) => i.quantity - i.receivedQuantity > 0)
-        .map((i) => {
-          const f = flags.get(i.irmItemId);
-          return {
-            purchaseOrderItemId: i.id,
-            irmItemId: i.irmItemId,
-            itemName: i.itemName,
-            sku: i.sku,
-            baseUnit: i.baseUnit,
-            ordered: i.quantity,
-            previouslyReceived: i.receivedQuantity,
-            trackSerials: f?.serials ?? false,
-            trackBatches: f?.batches ?? false,
-            receive: "",
-            damaged: "0",
-            notes: "",
-            serialsText: "",
-            batches: [],
-          };
-        }),
-    );
+    setLines(po ? buildLines(po, flags) : []);
   };
 
   const clearError = (f: string) => setErrors((p) => { if (!p[f]) return p; const n = { ...p }; delete n[f]; return n; });
@@ -221,6 +270,40 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
       })),
   });
 
+  // Unify saved (edit) + staged (create) docs for the grid; counts feed the picker's caps.
+  const docItems: DocItem[] = mode === "edit"
+    ? attachments.map(attachmentToDoc)
+    : staged.map((s) => ({ id: s.key, fileName: s.fileName, fileType: s.fileType, fileSizeBytes: s.fileSizeBytes, src: s.dataUrl }));
+  const docTotalBytes = (mode === "edit" ? attachments : staged).reduce((sum, a) => sum + a.fileSizeBytes, 0);
+  const canEditDocs = mode === "create" || o?.status === "draft";
+
+  const onPickDoc = async (doc: PickedDoc) => {
+    if (mode === "edit" && o) {
+      try {
+        const updated = await grnService.addAttachment(o.id, { fileName: doc.fileName, fileType: doc.fileType, fileSizeBytes: doc.fileSizeBytes, data: doc.dataUrl });
+        setAttachments(updated.attachments);
+        pushToast("Document added.", "success");
+      } catch (e) {
+        pushToast(e instanceof Error ? e.message : "Upload failed.", "alert");
+      }
+      return;
+    }
+    setStaged((prev) => [...prev, { key: crypto.randomUUID(), ...doc }]);
+    touch();
+  };
+
+  const onRemoveDoc = async (id: string) => {
+    if (mode === "edit" && o) {
+      try {
+        setAttachments((await grnService.removeAttachment(o.id, id)).attachments);
+      } catch (e) {
+        pushToast(e instanceof Error ? e.message : "Delete failed.", "alert");
+      }
+      return;
+    }
+    setStaged((prev) => prev.filter((s) => s.key !== id));
+  };
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -234,7 +317,29 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
     setSaving(true);
     try {
       if (mode === "create") {
-        const created = await grnService.createGoodsReceipt(buildPayload());
+        // Create the draft once; on a retry (a previous document upload failed) reuse it so we never
+        // spawn a duplicate GRN.
+        const created = createdRef ?? (await grnService.createGoodsReceipt(buildPayload()));
+        if (!createdRef) setCreatedRef({ id: created.id, code: created.code });
+        // Upload staged delivery documents against the draft. Any that fail STAY staged and the user
+        // stays on the form so they can retry or remove them — the files are never silently dropped by
+        // navigating away.
+        const failed: typeof staged = [];
+        for (const doc of staged) {
+          try {
+            await grnService.addAttachment(created.id, { fileName: doc.fileName, fileType: doc.fileType, fileSizeBytes: doc.fileSizeBytes, data: doc.dataUrl });
+          } catch {
+            failed.push(doc);
+          }
+        }
+        setStaged(failed);
+        if (failed.length > 0) {
+          const msg = `Goods receipt ${created.code} created, but ${failed.length} document${failed.length > 1 ? "s" : ""} didn't upload. Press the button again to retry, or remove ${failed.length > 1 ? "them" : "it"}.`;
+          setError(msg);
+          pushToast(msg, "alert");
+          setSaving(false);
+          return;
+        }
         setSaved(true);
         pushToast(`Goods receipt ${created.code} created.`, "success");
         router.replace(`/dashboard/goods-in/${created.code}`);
@@ -255,7 +360,7 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
   return (
     <form onSubmit={submit} className="space-y-6">
       <FormPageHeader
-        title={mode === "create" ? "New goods receipt" : `Edit ${o?.code ?? "receipt"}`}
+        title={mode === "create" ? "New GRN" : `Edit ${o?.code ?? "GRN"}`}
         subtitle={mode === "edit" && o ? o.code : "Receive a delivery against a purchase order"}
         onBack={goBack}
         actions={
@@ -273,7 +378,7 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
 
       <div className="grid gap-6 lg:grid-cols-3">
         <div className="space-y-6 lg:col-span-2">
-          <FormSection title="Goods In information" description="Which delivery this is and against which order.">
+          <FormSection title="GRN Information" description="Which delivery this is and against which order.">
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="sm:col-span-2">
                 <label className={labelCls}>Purchase order<RequiredMark /></label>
@@ -281,7 +386,21 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
                   <>
                     <Select value={poId} onChange={(v) => onPickPo(v)} options={receivablePos.map((p) => ({ value: p.id, label: `${p.code} — ${p.supplierName ?? p.supplier?.name ?? ""} (${p.status === "sent" ? "Sent" : "Partially received"})` }))} placeholder="— Select a purchase order —" ariaLabel="Purchase order" invalid={Boolean(errors.purchaseOrderId)} />
                     <FieldError message={errors.purchaseOrderId} />
-                    <p className="mt-1.5 text-[11px] text-[var(--faint)]">Choose a Sent or Partially Received purchase order to receive this delivery.</p>
+                    {posLoaded && receivablePos.length === 0 ? (
+                      <p className="mt-1.5 text-[11px] font-semibold text-[var(--muted)]">
+                        {presetWarehouseId
+                          ? "No open purchase orders for this warehouse yet — a purchase order must be Sent (delivering here) before you can receive against it."
+                          : "No open purchase orders to receive against — a purchase order must be Sent before goods can be received."}
+                      </p>
+                    ) : (
+                      <p className="mt-1.5 text-[11px] text-[var(--faint)]">
+                        {presetWarehouseId
+                          ? scopedWarehouseName
+                            ? `Showing open purchase orders for ${scopedWarehouseName}.`
+                            : "Showing this warehouse's open purchase orders only."
+                          : "Choose a Sent or Partially Received purchase order to receive this delivery."}
+                      </p>
+                    )}
                   </>
                 ) : (
                   <input className={inputCls} value={`${o?.poCode ?? ""}`} disabled />
@@ -301,7 +420,7 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
               <div>
                 <label className={labelCls}>Delivery note number</label>
                 <input className={inputCls} value={deliveryNoteNumber} onChange={(e) => { setDeliveryNoteNumber(e.target.value); touch(); }} maxLength={80} placeholder="e.g. DN-2026-001" />
-                <p className="mt-1.5 text-[11px] text-[var(--faint)]">Enter the supplier&apos;s delivery note or dispatch reference if available.</p>
+                <p className="mt-1.5 text-[11px] text-[var(--faint)]">The supplier&apos;s delivery / dispatch note number — <span className="font-semibold text-[var(--muted)]">required before you can complete this receipt</span>.</p>
               </div>
               <div>
                 <label className={labelCls}>Carrier</label>
@@ -349,20 +468,34 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
                   const accepted = acceptedOf(l);
                   const batchSum = l.batches.reduce((a, b) => a + num(b.quantity), 0);
                   const serialCount = parseSerials(l.serialsText).length;
+                  // Live, per-field validation (mirrors the submit-time checks) so an
+                  // over-receive / over-damage is flagged the moment it's typed.
+                  const receiveNum = num(l.receive);
+                  const over = receiveNum > remaining;
+                  const damagedOver = num(l.damaged) > receiveNum;
                   return (
                     <div key={l.purchaseOrderItemId} className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/30 p-3">
                       <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
                         <span className="text-sm font-bold text-[var(--ink)]">{l.itemName}{l.sku ? <span className="ml-1.5 text-[11px] font-normal text-[var(--faint)]">{l.sku}</span> : null}</span>
-                        <span className="text-[11px] text-[var(--muted)]">Ordered {l.ordered} · Already received {l.previouslyReceived} · <strong className="text-[var(--ink)]">Remaining {remaining}</strong></span>
+                        <span className="text-[11px] text-[var(--muted)]">Ordered {l.ordered} · Already received {l.previouslyReceived} · <strong className={over ? "text-[var(--neg)]" : "text-[var(--ink)]"}>Remaining {remaining}</strong></span>
                       </div>
                       <div className="grid gap-3 sm:grid-cols-4">
                         <div>
-                          <label className={labelCls}>Receive qty</label>
-                          <NumberInput className={inputCls} min={0} max={remaining} value={l.receive} onChange={(e) => updateLine(idx, { receive: e.target.value })} placeholder="e.g. 100" />
+                          <div className="mb-1.5 flex items-center justify-between gap-2">
+                            <label className="text-xs font-bold uppercase tracking-wider text-[var(--muted)]">Receive qty</label>
+                            {remaining > 0 && receiveNum !== remaining && (
+                              <button type="button" onClick={() => updateLine(idx, { receive: String(remaining) })} className="text-[11px] font-bold text-[var(--accent)] hover:underline">
+                                Receive all ({remaining})
+                              </button>
+                            )}
+                          </div>
+                          <NumberInput className={inputCls} min={0} max={remaining} value={l.receive} onChange={(e) => updateLine(idx, { receive: e.target.value })} placeholder="e.g. 100" aria-invalid={over} />
+                          {over && <p className="mt-1 text-[11px] font-semibold text-[var(--neg)]">Only {remaining} left to receive on this line.</p>}
                         </div>
                         <div>
                           <label className={labelCls}>Damaged</label>
-                          <NumberInput className={inputCls} min={0} value={l.damaged} onChange={(e) => updateLine(idx, { damaged: e.target.value })} placeholder="e.g. 2" />
+                          <NumberInput className={inputCls} min={0} value={l.damaged} onChange={(e) => updateLine(idx, { damaged: e.target.value })} placeholder="e.g. 2" aria-invalid={damagedOver} />
+                          {damagedOver && <p className="mt-1 text-[11px] font-semibold text-[var(--neg)]">Damaged can&apos;t exceed received ({receiveNum}).</p>}
                         </div>
                         <div>
                           <label className={labelCls}>Accepted</label>
@@ -425,6 +558,16 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Internal notes visible only to staff.</p>
               </div>
             </div>
+          </FormSection>
+
+          <FormSection title="Delivery documents" description="Attach the supplier's delivery / dispatch note (plus any packing slip or photo). Retained against this receipt for audit.">
+            {canEditDocs && (
+              <div className="mb-4">
+                <DocPicker count={docItems.length} totalBytes={docTotalBytes} onPick={onPickDoc} />
+                {mode === "create" && <p className="mt-1.5 text-[11px] text-[var(--faint)]">Files upload automatically when you create the draft.</p>}
+              </div>
+            )}
+            <AttachmentGrid items={docItems} onRemove={canEditDocs ? onRemoveDoc : undefined} />
           </FormSection>
         </div>
 

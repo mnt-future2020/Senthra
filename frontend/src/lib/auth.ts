@@ -26,6 +26,9 @@ export const DASHBOARD_SECTIONS: { path: string; anyOf: string[] }[] = [
   { path: "/dashboard/goods-in", anyOf: ["goods_in.view"] },
   { path: "/dashboard/inventory", anyOf: ["inventory.view"] },
   { path: "/dashboard/goods-out", anyOf: ["goods_out.view"] },
+  // Engineer Portal — kept LAST so a staff user with real module access lands on that first; an
+  // engineer-only user (no other sections) falls through here to their own portal dashboard.
+  { path: "/dashboard/engineer", anyOf: ["engineer.dashboard.view"] },
 ];
 
 // The customer portal's landing inside the shared dashboard shell — the portal

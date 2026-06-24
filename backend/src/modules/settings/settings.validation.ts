@@ -63,12 +63,20 @@ export const updateSettingsSchema = z.object({
     .regex(/^[A-Za-z]{2,5}$/, "Employee ID prefix must be 2–5 letters.")
     .or(z.literal(""))
     .optional(),
-  // Stock-entry barcode prefix: 2–5 letters (case-insensitive; the service
+  // Customer stock-entry barcode prefix: 2–5 letters (case-insensitive; the service
   // uppercases it). Empty string clears it back to the default.
   stockCodePrefix: z
     .string()
     .trim()
     .regex(/^[A-Za-z]{2,5}$/, "Stock code prefix must be 2–5 letters.")
+    .or(z.literal(""))
+    .optional(),
+  // IRM item-code prefix: 2–5 letters (case-insensitive; the service uppercases it).
+  // Empty string clears it back to the default.
+  irmCodePrefix: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z]{2,5}$/, "IRM code prefix must be 2–5 letters.")
     .or(z.literal(""))
     .optional(),
 

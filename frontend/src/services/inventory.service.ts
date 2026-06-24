@@ -130,6 +130,43 @@ export function createTransfer(payload: TransferPayload): Promise<StockTransfer>
   });
 }
 
+// Manual stock add (existing / opening / legacy stock). Reasons mirror the backend enum.
+export type StockAdjustmentReason = "opening_balance" | "legacy_stock" | "found" | "other";
+
+export interface AddStockPayload {
+  irmItemId: string;
+  warehouseId: string;
+  quantity: number | string;
+  movementDate: string;
+  reason: StockAdjustmentReason;
+  referenceNumber?: string;
+  notes?: string;
+}
+
+export interface StockAdjustment {
+  id: string;
+  code: string;
+  warehouseId: string;
+  warehouseName: string;
+  irmItemId: string;
+  itemName: string;
+  quantity: number;
+  balanceAfter: number;
+  reason: string;
+  movementDate: string;
+  referenceNumber: string | null;
+  notes: string | null;
+  createdBy: string | null;
+  createdAt: string;
+}
+
+export function addStock(payload: AddStockPayload): Promise<StockAdjustment> {
+  return api<{ adjustment: StockAdjustment }>("/inventory/add-stock", { method: "POST", body: payload }).then((r) => {
+    listCache.clear(); // a manual add changes the warehouse on-hand balance
+    return r.adjustment;
+  });
+}
+
 // The CSV endpoint returns a file, not JSON, so it bypasses api() and makes a direct authenticated
 // blob request (mirrors the audit export). Returns whether the export was capped by the server.
 export async function exportInventoryCsv(params: InventoryListParams = {}): Promise<{ capped: boolean }> {

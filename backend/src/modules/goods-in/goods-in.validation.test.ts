@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createGoodsReceiptSchema, grnAttachmentSchema, grnCancelSchema, updateGoodsReceiptSchema } from "./goods-in.validation.js";
+import { createGoodsReceiptSchema, grnAttachmentSchema, GRN_ATTACHMENT_MAX_BYTES, grnCancelSchema, updateGoodsReceiptSchema } from "./goods-in.validation.js";
 
 const PO = "a".repeat(24);
 const POI = "b".repeat(24);
@@ -72,8 +72,11 @@ describe("grnAttachmentSchema", () => {
   it("rejects an unsupported type", () => {
     expect(grnAttachmentSchema.safeParse({ ...att, fileType: "exe" }).success).toBe(false);
   });
-  it("rejects a file over 10 MB", () => {
-    expect(grnAttachmentSchema.safeParse({ ...att, fileSizeBytes: 11 * 1024 * 1024 }).success).toBe(false);
+  it("accepts a file at exactly the 5 MB limit", () => {
+    expect(grnAttachmentSchema.safeParse({ ...att, fileSizeBytes: GRN_ATTACHMENT_MAX_BYTES }).success).toBe(true);
+  });
+  it("rejects a file just over the 5 MB limit", () => {
+    expect(grnAttachmentSchema.safeParse({ ...att, fileSizeBytes: GRN_ATTACHMENT_MAX_BYTES + 1 }).success).toBe(false);
   });
   it("rejects a non data: URI", () => {
     expect(grnAttachmentSchema.safeParse({ ...att, data: "http://x/y.pdf" }).success).toBe(false);
