@@ -17,6 +17,7 @@ import { ReceiveStockModal } from "@/components/dashboard/customers/ReceiveStock
 import { InventoryView } from "@/components/dashboard/inventory/InventoryView";
 import { GoodsReceiptsView } from "@/components/dashboard/goods-in/GoodsReceiptsView";
 import { GoodsManagementTab } from "@/components/dashboard/goods-management/GoodsManagementTab";
+import { DamagedStockView } from "@/components/dashboard/goods-management/DamagedStockView";
 import { ExpectedDeliveries } from "./ExpectedDeliveries";
 import type { AuditEntry } from "@/types/audit";
 import type { CustomerStockEntry, PendingStockItem, WarehouseAssignment } from "@/types/customer";
@@ -532,10 +533,11 @@ function IncomingStock({
   );
 }
 
-// "Stock" tab: a pill toggle between the two stock pools held at this warehouse — company
-// IRM inventory (gated by inventory.view) and customer consignment stock. The chosen pool
-// lives in ?pool= so it survives a refresh / is shareable. A user without inventory.view
-// sees only the customer pool, with no toggle.
+// "Stock" tab: a pill toggle between three stock pools held at this warehouse —
+// company IRM inventory (gated by inventory.view), customer consignment stock, and
+// the damaged pool (also gated by inventory.view). The chosen pool lives in ?pool=
+// so it survives a refresh / is shareable. A user without inventory.view sees only
+// the customer pool, with no toggle.
 function StockTab({
   warehouseCode,
   warehouseId,
@@ -550,21 +552,30 @@ function StockTab({
   const canIrm = can("inventory.view");
 
   const requested = searchParams.get("pool");
-  const pool: "irm" | "customer" =
-    requested === "customer" || requested === "irm" ? requested : canIrm ? "irm" : "customer";
-  const active: "irm" | "customer" = canIrm ? pool : "customer";
+  const pool: "irm" | "customer" | "damaged" =
+    requested === "customer" || requested === "irm" || requested === "damaged"
+      ? requested
+      : canIrm
+        ? "irm"
+        : "customer";
+  const active: "irm" | "customer" | "damaged" = canIrm ? pool : "customer";
 
-  const setPool = (p: "irm" | "customer") =>
+  const setPool = (p: "irm" | "customer" | "damaged") =>
     router.replace(`/dashboard/warehouses/${warehouseCode}?tab=inventory&pool=${p}`, { scroll: false });
+
+  const POOL_PILLS = canIrm
+    ? ([
+        { key: "irm", label: "Company (IRM)" },
+        { key: "customer", label: "Customer" },
+        { key: "damaged", label: "Damaged" },
+      ] as const)
+    : ([] as const);
 
   return (
     <div className="space-y-4">
       {canIrm && (
         <div className="flex items-center gap-2">
-          {([
-            { key: "irm", label: "Company (IRM)" },
-            { key: "customer", label: "Customer" },
-          ] as const).map((p) => (
+          {POOL_PILLS.map((p) => (
             <button
               key={p.key}
               type="button"
@@ -582,6 +593,8 @@ function StockTab({
       )}
       {active === "irm" ? (
         <InventoryView warehouseId={warehouseId} embedded />
+      ) : active === "damaged" ? (
+        <DamagedStockView warehouseId={warehouseId} />
       ) : (
         <WarehouseStockEntries warehouseId={warehouseId} router={router} />
       )}
