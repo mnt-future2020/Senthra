@@ -455,3 +455,137 @@ describe("recordConsumeAndComplete", () => {
     expect(mockUpsertSummaryTx).toHaveBeenCalledTimes(1);
   });
 });
+
+// ── closeReconcile ───────────────────────────────────────────────────────────────────────────
+import { closeReconcile } from "./goods-management.service.js";
+
+const RECONCILE_JOB_ID = "a".repeat(24);
+
+// Helper to build a posted movement stub with given direction + items.
+function makeMovement(direction: string, items: { jobKitLineId: string; irmItemId: string | null; customerStockEntryId: string | null; qty: number; condition?: string }[]) {
+  return { status: "posted", direction, items: items.map((i) => ({ ...i, condition: i.condition ?? "good" })) };
+}
+
+describe("closeReconcile", () => {
+  // Common mocks reset per-test.
+  beforeEach(() => {
+    // A job in awaiting_return status, single IRM kit line.
+    mockJob.mockResolvedValue({
+      id: RECONCILE_JOB_ID,
+      status: "completed",
+      assignedEngineerId: ENG_ID,
+      assignedEngineerName: "Bob Smith",
+      assignedEngineerEmail: "bob@x.com",
+      kitLines: [
+        { id: "k1", lineType: "irm", irmItemId: IRM_ID, customerStockEntryId: null, warehouseId: WH_ID, itemName: "CAT6", qty: 10, warehouseName: "WH1", warehouseCode: "W1" },
+      ],
+    });
+    // Summary shows awaiting_return.
+    const mockGetSummary = repo.getSummary as ReturnType<typeof vi.fn>;
+    mockGetSummary.mockResolvedValue({ goodsStatus: "awaiting_return", workSummary: "Done", lastMovementAt: new Date() });
+    // Default movement picture: 10 issued, 10 returned (balanced).
+    mockMoves.mockResolvedValue([
+      makeMovement("issue",  [{ jobKitLineId: "k1", irmItemId: IRM_ID, customerStockEntryId: null, qty: 10 }]),
+      makeMovement("return", [{ jobKitLineId: "k1", irmItemId: IRM_ID, customerStockEntryId: null, qty: 10, condition: "good" }]),
+    ]);
+    // createMovementWithCode invokes the apply callback synchronously.
+    mockCreateMovement.mockImplementation(async (_h: unknown, _l: unknown, apply: (tx: unknown, id: string, code: string) => Promise<void>) => {
+      await apply({}, "m4", "GM-0004");
+      return { id: "m4", code: "GM-0004", direction: "consume", items: [], job: { id: RECONCILE_JOB_ID } };
+    });
+    // Engineer holds 0 by default (fully returned in the balanced scenario).
+    mockFindEngBalTx.mockResolvedValue({ quantityOnHand: 0 });
+    mockUpsertEngBalTx.mockResolvedValue({ quantityOnHand: 0 });
+    mockInsertEngTxnTx.mockResolvedValue({});
+    mockUpsertSummaryTx.mockResolvedValue({});
+  });
+
+  it("reconciles a balanced job (all returned) to goodsStatus = reconciled and returns no unaccounted", async () => {
+    const result = await closeReconcile(RECONCILE_JOB_ID, {}, { email: "wm@x.com" } as never);
+    expect(result.unaccounted).toHaveLength(0);
+    expect(mockUpsertSummaryTx).toHaveBeenCalledWith(
+      expect.anything(), // tx
+      RECONCILE_JOB_ID,
+      expect.objectContaining({ goodsStatus: "reconciled" }),
+    );
+  });
+
+  it("returns unaccounted list and leaves job open when writeOffLost is false/absent and there is a shortfall", async () => {
+    // Only 6 returned out of 10 issued, 4 still with the engineer.
+    mockMoves.mockResolvedValue([
+      makeMovement("issue",  [{ jobKitLineId: "k1", irmItemId: IRM_ID, customerStockEntryId: null, qty: 10 }]),
+      makeMovement("return", [{ jobKitLineId: "k1", irmItemId: IRM_ID, customerStockEntryId: null, qty: 6, condition: "good" }]),
+    ]);
+    const result = await closeReconcile(RECONCILE_JOB_ID, {}, { email: "wm@x.com" } as never);
+    expect(result.unaccounted).toHaveLength(1);
+    expect(result.unaccounted[0]).toMatchObject({ itemName: "CAT6", qty: 4 });
+    // Summary NOT set to reconciled — job stays open.
+    expect(mockUpsertSummaryTx).not.toHaveBeenCalledWith(
+      expect.anything(),
+      RECONCILE_JOB_ID,
+      expect.objectContaining({ goodsStatus: "reconciled" }),
+    );
+  });
+
+  it("writes off lost units and reconciles when writeOffLost = true", async () => {
+    // 4 still unaccounted.
+    mockMoves.mockResolvedValue([
+      makeMovement("issue",  [{ jobKitLineId: "k1", irmItemId: IRM_ID, customerStockEntryId: null, qty: 10 }]),
+      makeMovement("return", [{ jobKitLineId: "k1", irmItemId: IRM_ID, customerStockEntryId: null, qty: 6, condition: "good" }]),
+    ]);
+    // Engineer still holds 4.
+    mockFindEngBalTx.mockResolvedValue({ quantityOnHand: 4 });
+    mockUpsertEngBalTx.mockResolvedValue({ quantityOnHand: 0 });
+
+    const result = await closeReconcile(RECONCILE_JOB_ID, { writeOffLost: true }, { email: "wm@x.com" } as never);
+    expect(result.unaccounted).toHaveLength(0);
+    // Engineer holding was drained (lost write-off).
+    expect(mockUpsertEngBalTx).toHaveBeenCalledWith({}, IRM_ID, ENG_ID, -4);
+    // Ledger row written with type "job_lost".
+    expect(mockInsertEngTxnTx).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({ irmItemId: IRM_ID, quantityDelta: -4, type: "job_lost" }),
+    );
+    // Summary set to reconciled.
+    expect(mockUpsertSummaryTx).toHaveBeenCalledWith(
+      {},
+      RECONCILE_JOB_ID,
+      expect.objectContaining({ goodsStatus: "reconciled" }),
+    );
+  });
+
+  it("rejects reconciling a job that is already reconciled", async () => {
+    const mockGetSummary = repo.getSummary as ReturnType<typeof vi.fn>;
+    mockGetSummary.mockResolvedValue({ goodsStatus: "reconciled", workSummary: null, lastMovementAt: new Date() });
+    await expect(closeReconcile(RECONCILE_JOB_ID, {}, { email: "wm@x.com" } as never)).rejects.toThrow(/already reconciled/i);
+  });
+
+  it("rejects issue when summary is already reconciled", async () => {
+    // Simulate the postIssue reconciled-guard.
+    const mockGetSummaryForIssue = repo.getSummary as ReturnType<typeof vi.fn>;
+    mockGetSummaryForIssue.mockResolvedValue({ goodsStatus: "reconciled", workSummary: null, lastMovementAt: new Date() });
+    mockJob.mockResolvedValue({
+      id: RECONCILE_JOB_ID, status: "in_progress", assignedEngineerId: ENG_ID,
+      assignedEngineerName: "Bob", assignedEngineerEmail: null,
+      kitLines: [{ id: "k1", lineType: "irm", irmItemId: IRM_ID, customerStockEntryId: null, warehouseId: WH_ID, itemName: "CAT6", qty: 10, warehouseName: "WH1", warehouseCode: "W1" }],
+    });
+    const mockRequireIrm = irmService.requireActiveIrmItem as ReturnType<typeof vi.fn>;
+    mockRequireIrm.mockResolvedValue({ id: IRM_ID, name: "CAT6", baseUnit: "Box", trackSerialNumbers: false, trackBatchNumbers: false });
+    await expect(
+      postIssue(RECONCILE_JOB_ID, { direction: "issue", lines: [{ source: "irm", irmItemId: IRM_ID, jobKitLineId: "k1", qty: 1 }] }, { email: "wm@x.com" } as never),
+    ).rejects.toThrow(/reconciled|locked/i);
+  });
+
+  it("rejects return when summary is already reconciled", async () => {
+    const mockGetSummaryForReturn = repo.getSummary as ReturnType<typeof vi.fn>;
+    mockGetSummaryForReturn.mockResolvedValue({ goodsStatus: "reconciled", workSummary: null, lastMovementAt: new Date() });
+    mockJob.mockResolvedValue({
+      id: RECONCILE_JOB_ID, status: "completed", assignedEngineerId: ENG_ID,
+      assignedEngineerName: "Bob", assignedEngineerEmail: null,
+      kitLines: [{ id: "k1", lineType: "irm", irmItemId: IRM_ID, customerStockEntryId: null, warehouseId: WH_ID, itemName: "CAT6", qty: 10, warehouseName: "WH1", warehouseCode: "W1" }],
+    });
+    await expect(
+      postReturn(RECONCILE_JOB_ID, { direction: "return", lines: [{ source: "irm", irmItemId: IRM_ID, qty: 1, condition: "good", jobKitLineId: "k1" }] }, { email: "wm@x.com" } as never),
+    ).rejects.toThrow(/reconciled|locked/i);
+  });
+});

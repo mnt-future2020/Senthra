@@ -9,7 +9,8 @@ import * as inventoryService from "#modules/inventory/inventory.service.js";
 import * as goodsOutRepo from "#modules/goods-out/goods-out.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import * as goodsManagementRepo from "./goods-management.repository.js";
-import type { PostMovementInput, ScanLookupInput } from "./goods-management.validation.js";
+import type { CloseReconcileInput, PostMovementInput, ScanLookupInput } from "./goods-management.validation.js";
+import { withTransaction } from "../../lib/prisma.js";
 
 export interface ScanMatch {
   source: "irm" | "customer";
@@ -128,6 +129,8 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
   if (!["accepted", "in_progress"].includes(job.status)) {
     throw conflict("Stock can only be issued for an accepted/in-progress job.");
   }
+  const summary = await goodsManagementRepo.getSummary(job.id);
+  if (summary?.goodsStatus === "reconciled") throw conflict("This job has already been reconciled and is locked.");
   const movements = await goodsManagementRepo.findMovementsByJob(job.id);
 
   // Resolve + validate every line against the kit list BEFORE opening the tx.
@@ -428,6 +431,8 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
   if (!["accepted", "in_progress", "completed"].includes(job.status)) {
     throw conflict("Stock can only be returned for an accepted/in-progress/completed job.");
   }
+  const returnSummary = await goodsManagementRepo.getSummary(job.id);
+  if (returnSummary?.goodsStatus === "reconciled") throw conflict("This job has already been reconciled and is locked.");
   const actorEmail = actor?.email ?? null;
 
   // Resolve line details + warehouse for the movement header (derived from kit lines).
@@ -806,4 +811,228 @@ export async function recordConsumeAndComplete(
       });
     },
   );
+}
+
+// ── Close & reconcile ─────────────────────────────────────────────────────────────────────────
+// Computes per-item tally: issued − consumed − returnedGood − returnedDamaged.
+// If all zero → goodsStatus = "reconciled" (locked).
+// If any positive and writeOffLost → drain remaining engineer holding with type "job_lost" + reconcile.
+// If any positive and no writeOffLost → return the unaccounted list and leave open.
+
+interface UnaccountedItem {
+  itemName: string;
+  qty: number;
+  source: "irm" | "customer";
+  irmItemId: string | null;
+  customerStockEntryId: string | null;
+  warehouseId: string | null;
+  customerId: string | null;
+}
+
+type TallyEntry = { itemName: string; source: "irm" | "customer"; irmItemId: string | null; customerStockEntryId: string | null; issued: number; consumed: number; returnedGood: number; returnedDamaged: number };
+
+function computeTallies(
+  movements: Awaited<ReturnType<typeof goodsManagementRepo.findMovementsByJob>>,
+  kitLines?: NonNullable<JobWithRelations["kitLines"]>,
+): Map<string, TallyEntry> {
+  // Keyed by irmItemId or customerStockEntryId.
+  const tallies = new Map<string, TallyEntry>();
+
+  // Build a quick lookup from kit lines for item names.
+  const kitNameByIrmId = new Map<string, string>();
+  const kitNameByCseId = new Map<string, string>();
+  for (const kl of kitLines ?? []) {
+    if (kl.irmItemId) kitNameByIrmId.set(kl.irmItemId, kl.itemName);
+    if (kl.customerStockEntryId) kitNameByCseId.set(kl.customerStockEntryId, kl.itemName);
+  }
+
+  for (const m of movements) {
+    if (m.status !== "posted") continue;
+    for (const l of m.items) {
+      const key = l.irmItemId ?? l.customerStockEntryId ?? "unknown";
+      if (!tallies.has(key)) {
+        // Use item name from the movement line; fall back to kit line snapshot.
+        const itemName: string =
+          (l.itemName as string | undefined) ??
+          (l.irmItemId ? kitNameByIrmId.get(l.irmItemId) : undefined) ??
+          (l.customerStockEntryId ? kitNameByCseId.get(l.customerStockEntryId) : undefined) ??
+          key;
+        // Determine source: prefer the recorded value, fall back to which id is present.
+        const source: "irm" | "customer" =
+          (l.source === "irm" || l.source === "customer") ? l.source :
+          l.irmItemId ? "irm" : "customer";
+        tallies.set(key, {
+          itemName,
+          source,
+          irmItemId: l.irmItemId,
+          customerStockEntryId: l.customerStockEntryId,
+          issued: 0,
+          consumed: 0,
+          returnedGood: 0,
+          returnedDamaged: 0,
+        });
+      }
+      const t = tallies.get(key)!;
+      if (m.direction === "issue") t.issued += l.qty;
+      else if (m.direction === "consume") t.consumed += l.qty;
+      else if (m.direction === "return") {
+        if (l.condition === "damaged") t.returnedDamaged += l.qty;
+        else t.returnedGood += l.qty;
+      }
+    }
+  }
+
+  return tallies;
+}
+
+export async function closeReconcile(
+  jobId: string,
+  input: CloseReconcileInput,
+  actor?: AuditActor,
+): Promise<{ summary: { goodsStatus: string; workSummary: string | null; lastMovementAt: Date | null }; unaccounted: { itemName: string; qty: number }[] }> {
+  const job = await loadJobOrThrow(jobId);
+  const existingSummary = await goodsManagementRepo.getSummary(job.id);
+
+  if (existingSummary?.goodsStatus === "reconciled") {
+    throw conflict("This job is already reconciled and locked.");
+  }
+
+  const movements = await goodsManagementRepo.findMovementsByJob(job.id);
+  const tallies = computeTallies(movements, job.kitLines ?? []);
+
+  // Compute unaccounted per item: issued − consumed − returnedGood − returnedDamaged.
+  const unaccountedItems: UnaccountedItem[] = [];
+  for (const [, t] of tallies) {
+    const remaining = t.issued - t.consumed - t.returnedGood - t.returnedDamaged;
+    if (remaining > 0) {
+      // Find the warehouseId from the job's kit lines for this item.
+      const kit = (job.kitLines ?? []).find((kl) =>
+        t.source === "irm" ? kl.irmItemId === t.irmItemId : kl.customerStockEntryId === t.customerStockEntryId,
+      );
+      unaccountedItems.push({
+        itemName: t.itemName,
+        qty: remaining,
+        source: t.source,
+        irmItemId: t.irmItemId,
+        customerStockEntryId: t.customerStockEntryId,
+        warehouseId: kit?.warehouseId ?? null,
+        customerId: null,
+      });
+    }
+  }
+
+  const actorEmail = actor?.email ?? null;
+
+  if (unaccountedItems.length > 0 && !input.writeOffLost) {
+    // Return unaccounted list, do not reconcile.
+    return {
+      summary: existingSummary
+        ? { goodsStatus: existingSummary.goodsStatus, workSummary: existingSummary.workSummary, lastMovementAt: existingSummary.lastMovementAt }
+        : { goodsStatus: "awaiting_return", workSummary: null, lastMovementAt: null },
+      unaccounted: unaccountedItems.map((u) => ({ itemName: u.itemName, qty: u.qty })),
+    };
+  }
+
+  // Either balanced (no unaccounted) or writeOffLost = true.
+  // Build lost movement lines for unaccounted items.
+  const lostLines: goodsManagementRepo.MovementLineRow[] = unaccountedItems.map((u) => ({
+    source: u.source,
+    irmItemId: u.irmItemId,
+    customerStockEntryId: u.customerStockEntryId,
+    itemName: u.itemName,
+    sku: null,
+    uom: null,
+    qty: u.qty,
+    condition: "good",
+    jobKitLineId: null,
+    scannedCode: null,
+    damagePhotoUrl: null,
+    damageReason: "written off as lost",
+    notes: null,
+  }));
+
+  if (lostLines.length > 0) {
+    // Write the lost movement + drain holdings + upsert summary in one transaction.
+    await goodsManagementRepo.createMovementWithCode(
+      {
+        jobId: job.id,
+        direction: "consume",
+        engineerId: job.assignedEngineerId!,
+        engineerName: job.assignedEngineerName ?? "",
+        engineerEmail: job.assignedEngineerEmail ?? null,
+        warehouseId: null,
+        warehouseName: null,
+        warehouseCode: null,
+        status: "posted",
+        postedAt: new Date(),
+        performedBy: actorEmail,
+        createdBy: actorEmail,
+      },
+      lostLines,
+      async (tx, movementId, code) => {
+        for (const u of unaccountedItems) {
+          if (u.source === "irm") {
+            const held = await goodsOutRepo.findEngineerBalanceTx(tx, u.irmItemId!, job.assignedEngineerId!);
+            const heldQty = held?.quantityOnHand ?? 0;
+            // Drain however much is actually held (may be less than unaccounted if already written off).
+            if (heldQty > 0) {
+              const drainQty = Math.min(u.qty, heldQty);
+              const eng = await goodsOutRepo.upsertEngineerBalanceTx(tx, u.irmItemId!, job.assignedEngineerId!, -drainQty);
+              await goodsOutRepo.insertEngineerTxnTx(tx, {
+                irmItemId: u.irmItemId!,
+                engineerId: job.assignedEngineerId!,
+                quantityDelta: -drainQty,
+                type: "job_lost",
+                sourceType: "goods_management",
+                sourceId: movementId,
+                sourceCode: code,
+                balanceAfter: eng.quantityOnHand,
+                createdBy: actorEmail,
+              });
+            }
+          } else {
+            const held = await goodsManagementRepo.findCustomerHoldingTx(tx, u.customerStockEntryId!, job.assignedEngineerId!);
+            const heldQty = held?.quantityOnHand ?? 0;
+            if (heldQty > 0) {
+              const drainQty = Math.min(u.qty, heldQty);
+              const hold = await goodsManagementRepo.upsertCustomerHoldingTx(
+                tx,
+                u.customerStockEntryId!,
+                job.assignedEngineerId!,
+                -drainQty,
+                { customerId: held!.customerId, itemName: held!.itemName },
+              );
+              await goodsManagementRepo.insertCustomerHoldingTxnTx(tx, {
+                customerStockEntryId: u.customerStockEntryId!,
+                engineerId: job.assignedEngineerId!,
+                quantityDelta: -drainQty,
+                type: "job_lost",
+                sourceType: "goods_management",
+                sourceId: movementId,
+                sourceCode: code,
+                balanceAfter: hold.quantityOnHand,
+                createdBy: actorEmail,
+              });
+            }
+          }
+        }
+        await goodsManagementRepo.upsertSummaryTx(tx, job.id, { goodsStatus: "reconciled" });
+      },
+    );
+  } else {
+    // Balanced (no unaccounted) — just update the summary.
+    await withTransaction(async (tx) => {
+      await goodsManagementRepo.upsertSummaryTx(tx, job.id, { goodsStatus: "reconciled" });
+    });
+  }
+
+  audit.record({ actor, action: "goods_management.reconciled", targetType: "job", targetId: job.id, targetLabel: job.jobNumber ?? job.id });
+
+  const updatedSummary = await goodsManagementRepo.getSummary(job.id);
+  return {
+    summary: updatedSummary
+      ? { goodsStatus: updatedSummary.goodsStatus, workSummary: updatedSummary.workSummary, lastMovementAt: updatedSummary.lastMovementAt }
+      : { goodsStatus: "reconciled", workSummary: null, lastMovementAt: null },
+    unaccounted: [],
+  };
 }
