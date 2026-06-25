@@ -1,4 +1,6 @@
 import * as goodsOutService from "#modules/goods-out/goods-out.service.js";
+import * as jobService from "#modules/job/job.service.js";
+import type { AuditActor } from "#modules/audit/audit.service.js";
 import * as engineerRepo from "./engineer.repository.js";
 
 // The Engineer Portal READ surface. Every function takes the engineer's own User.id (resolved from
@@ -82,4 +84,24 @@ export async function getOwnOverview(engineerId: string): Promise<EngineerOvervi
     dispatches: { total: dispatched.total },
     recentActivity,
   };
+}
+
+// --- Engineer's own jobs -----------------------------------------------------
+// Delegates entirely to the job service (the single source of truth for the job status machine,
+// realtime emits, and audit). The engineer id is always the signed-in user's id, never a route param.
+
+export function getOwnJobs(engineerId: string) {
+  return jobService.listJobsForEngineer(engineerId);
+}
+
+export function getOwnJob(engineerId: string, jobId: string) {
+  return jobService.getJobForEngineer(engineerId, jobId);
+}
+
+export function acceptOwnJob(engineerId: string, jobId: string, actor?: AuditActor) {
+  return jobService.acceptJobForEngineer(engineerId, jobId, actor);
+}
+
+export function rejectOwnJob(engineerId: string, jobId: string, reason: string | undefined, actor?: AuditActor) {
+  return jobService.rejectJobForEngineer(engineerId, jobId, reason, actor);
 }

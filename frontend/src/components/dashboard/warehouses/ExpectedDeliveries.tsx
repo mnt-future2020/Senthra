@@ -110,7 +110,12 @@ function WorklistSkeleton() {
   );
 }
 
-export function ExpectedDeliveries({ warehouseId }: { warehouseId: string }) {
+export function ExpectedDeliveries({ warehouseId, warehouseCode }: { warehouseId: string; warehouseCode?: string }) {
+  // Where the GRN form returns to when opened from here — back to THIS warehouse's Incoming-stock
+  // tab, not the global GRN list (so a warehouse user never gets dumped out of their warehouse).
+  const returnTo = warehouseCode ? `/dashboard/warehouses/${warehouseCode}?tab=incoming` : undefined;
+  const receiveHref = (poId: string) =>
+    `/dashboard/goods-in/new?po=${poId}&warehouse=${warehouseId}${returnTo ? `&returnTo=${encodeURIComponent(returnTo)}` : ""}`;
   const router = useRouter();
   const { can } = useAuth();
   const canReceive = can("goods_in.create");
@@ -246,7 +251,7 @@ export function ExpectedDeliveries({ warehouseId }: { warehouseId: string }) {
                           {canReceive && (
                             <button
                               type="button"
-                              onClick={() => router.push(`/dashboard/goods-in/new?po=${po.id}`)}
+                              onClick={() => router.push(receiveHref(po.id))}
                               className="flex items-center gap-1.5 rounded-lg bg-[var(--pos)] px-2.5 py-1.5 text-[11px] font-bold text-white transition-all hover:opacity-90"
                             >
                               <PackageCheck className="h-3.5 w-3.5" /> Receive

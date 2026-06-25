@@ -37,6 +37,7 @@ export const PERMISSION_CATEGORIES: string[] = [
   "Suppliers",
   "Procurement",
   "Goods Out",
+  "Jobs",
   "Engineer Portal",
   "System",
 ];
@@ -306,6 +307,20 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     ],
   },
   {
+    key: "jobs",
+    label: "Jobs",
+    description: "Field jobs — created for a customer/project, assigned to engineers and tracked through to completion.",
+    category: "Jobs",
+    permissions: [
+      { key: "jobs.view", action: "View", description: "View jobs and their details." },
+      { key: "jobs.create", action: "Create", description: "Create new jobs (job packs) and assign an engineer." },
+      { key: "jobs.edit", action: "Edit", description: "Edit a job's details and kit list." },
+      { key: "jobs.assign", action: "Assign", description: "Assign or reassign a job to an engineer." },
+      { key: "jobs.cancel", action: "Cancel", description: "Cancel a job." },
+      { key: "jobs.delete", action: "Delete", description: "Delete a draft job." },
+    ],
+  },
+  {
     key: "engineer",
     label: "Engineer Portal",
     description:
@@ -314,6 +329,9 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     permissions: [
       { key: "engineer.dashboard.view", action: "Dashboard", description: "Access the engineer portal — own stock summary, dispatches received and recent activity." },
       { key: "engineer.inventory.view", action: "Inventory", description: "View own held IRM stock." },
+      { key: "engineer.jobs.view", action: "Jobs", description: "View jobs assigned to them and a job's details." },
+      { key: "engineer.jobs.accept", action: "Accept job", description: "Accept a job assigned to them." },
+      { key: "engineer.jobs.reject", action: "Reject job", description: "Decline a job assigned to them (with a reason)." },
       // RESERVED (not yet enforced by any route): self-profile editing currently flows through the
       // shared `/users/me` endpoints, which only require authentication — no engineer-specific
       // permission is checked. This key is registered + seeded ahead of a future engineer-only

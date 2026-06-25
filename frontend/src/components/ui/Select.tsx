@@ -69,13 +69,13 @@ export function Select({
         aria-required={required || undefined}
         className={`${triggerBase} flex items-center justify-between gap-2 text-left ${className ?? ""}`}
       >
-        <BaseSelect.Value placeholder={placeholder}>
+        <BaseSelect.Value placeholder={placeholder} className="min-w-0 flex-1 overflow-hidden text-left">
           {(val) => {
             const found = options.find((o) => o.value === val);
             return found ? (
-              <span className="truncate text-[var(--ink)]">{found.label}</span>
+              <span className="block truncate text-[var(--ink)]">{found.label}</span>
             ) : (
-              <span className="truncate text-[var(--faint)]">{placeholder}</span>
+              <span className="block truncate text-[var(--faint)]">{placeholder}</span>
             );
           }}
         </BaseSelect.Value>
