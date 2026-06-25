@@ -9,6 +9,7 @@ import { EmptyState, fmtDate, PortalHeader, TableCard, TableCardSkeleton } from 
 import type { EngineerStockItem } from "@/types/engineer";
 import type { CustomerHolding } from "@/types/goodsManagement";
 import type { Msg } from "@/components/ui/types";
+import { useGoodsSocket } from "@/hooks/useGoodsSocket";
 
 // Engineer Portal — My Stock (IRM + customer consignment).
 const HEADERS = ["Item", "Code", "On hand", "Last updated"];
@@ -26,6 +27,10 @@ export function EngineerInventory() {
   const [customerStock, setCustomerStock] = React.useState<CustomerHolding[]>([]);
   const [customerLoading, setCustomerLoading] = React.useState(true);
   const [customerMsg, setCustomerMsg] = React.useState<Msg>(null);
+  const [reloadTick, setReloadTick] = React.useState(0);
+
+  // Live-refresh stock whenever a goods event fires (issue / return / reconcile).
+  useGoodsSocket(React.useCallback(() => setReloadTick((t) => t + 1), []));
 
   React.useEffect(() => {
     let active = true;
@@ -57,7 +62,7 @@ export function EngineerInventory() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [reloadTick]);
 
   // Fetch customer-consignment stock held by this engineer (separate endpoint, non-blocking).
   React.useEffect(() => {
@@ -77,7 +82,7 @@ export function EngineerInventory() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [reloadTick]);
 
   if (loading) {
     return (

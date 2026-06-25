@@ -11,6 +11,7 @@ import * as audit from "#modules/audit/audit.service.js";
 import * as goodsManagementRepo from "./goods-management.repository.js";
 import type { CloseReconcileInput, PostMovementInput, ScanLookupInput } from "./goods-management.validation.js";
 import { withTransaction } from "../../lib/prisma.js";
+import { emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
 
 export interface ScanMatch {
   source: "irm" | "customer";
@@ -261,6 +262,12 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
   );
 
   audit.record({ actor, action: "goods_management.issued", targetType: "job", targetId: job.id, targetLabel: created.code });
+
+  // Realtime: notify the engineer + all office staff watching the jobs list.
+  const issuePayload = { jobId: job.id, movementId: created.id, code: created.code, direction: "issue" };
+  emitToUser(job.assignedEngineerId!, "goods:issued", issuePayload);
+  emitToRoom(OFFICE_JOBS_ROOM, "goods:updated", issuePayload);
+
   return toPublic(created);
 }
 
@@ -661,6 +668,12 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
   );
 
   audit.record({ actor, action: "goods_management.return_posted", targetType: "job", targetId: job.id, targetLabel: created.code });
+
+  // Realtime: notify the engineer + all office staff.
+  const returnPayload = { jobId: job.id, movementId: created.id, code: created.code, direction: "return" };
+  emitToUser(job.assignedEngineerId!, "goods:returned", returnPayload);
+  emitToRoom(OFFICE_JOBS_ROOM, "goods:updated", returnPayload);
+
   return toPublic(created);
 }
 
@@ -1171,6 +1184,11 @@ export async function closeReconcile(
   }
 
   audit.record({ actor, action: "goods_management.reconciled", targetType: "job", targetId: job.id, targetLabel: job.jobNumber ?? job.id });
+
+  // Realtime: notify the engineer + all office staff.
+  const reconcilePayload = { jobId: job.id, direction: "reconcile" };
+  emitToUser(job.assignedEngineerId!, "goods:returned", reconcilePayload);
+  emitToRoom(OFFICE_JOBS_ROOM, "goods:updated", reconcilePayload);
 
   const updatedSummary = await goodsManagementRepo.getSummary(job.id);
   return {

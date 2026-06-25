@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../lib/prisma.js", () => ({ withTransaction: (fn: (tx: unknown) => unknown) => fn({}) }));
+vi.mock("../../lib/realtime.js", () => ({ emitToUser: vi.fn(), emitToRoom: vi.fn(), OFFICE_JOBS_ROOM: "jobs:office" }));
 vi.mock("./goods-management.repository.js", () => ({
   createMovementWithCode: vi.fn(), findMovementsByJob: vi.fn(), getSummary: vi.fn(), upsertSummaryTx: vi.fn(),
   upsertCustomerHoldingTx: vi.fn(), findCustomerHoldingTx: vi.fn(), insertCustomerHoldingTxnTx: vi.fn(), findCustomerHoldingsByEngineer: vi.fn(),
   adjustCustomerStockEntryQtyTx: vi.fn(), findCustomerStockEntryById: vi.fn(), findCustomerStockEntryByBarcode: vi.fn(),
   upsertDamagedBalanceTx: vi.fn(), insertDamagedTxnTx: vi.fn(), findDamagedByWarehouse: vi.fn(), findDamagedByCustomer: vi.fn(), findAllDamaged: vi.fn(), findRecentMovementsForOverdue: vi.fn(),
+  findLatestDamagedTxnsByBalances: vi.fn(),
 }));
 vi.mock("#modules/job/job.repository.js", () => ({ findById: vi.fn(), findActiveForGoodsManagement: vi.fn(), completeIfInProgressTx: vi.fn() }));
 vi.mock("#modules/irm/irm.service.js", () => ({ requireActiveIrmItem: vi.fn(), findActiveByCodeOrBarcode: vi.fn() }));
@@ -621,6 +623,7 @@ import { listDamaged } from "./goods-management.service.js";
 const mockFindDamagedByWarehouse = repo.findDamagedByWarehouse as ReturnType<typeof vi.fn>;
 const mockFindDamagedByCustomer = repo.findDamagedByCustomer as ReturnType<typeof vi.fn>;
 const mockFindAllDamaged = repo.findAllDamaged as ReturnType<typeof vi.fn>;
+const mockFindLatestDamagedTxns = repo.findLatestDamagedTxnsByBalances as ReturnType<typeof vi.fn>;
 
 const damagedRow = {
   id: "dmg1",
@@ -632,6 +635,7 @@ const damagedRow = {
   itemName: "CAT6",
   quantity: 3,
   updatedAt: new Date(),
+  warehouse: { name: "Main Warehouse" },
 };
 
 describe("listDamaged", () => {
@@ -639,6 +643,8 @@ describe("listDamaged", () => {
     mockFindDamagedByWarehouse.mockResolvedValue([damagedRow]);
     mockFindDamagedByCustomer.mockResolvedValue([]);
     mockFindAllDamaged.mockResolvedValue([damagedRow]);
+    // Return an empty Map by default (no latest txn enrichment needed for basic assertions).
+    mockFindLatestDamagedTxns.mockResolvedValue(new Map());
   });
 
   it("filters by warehouseId and returns rows without cost/value", async () => {

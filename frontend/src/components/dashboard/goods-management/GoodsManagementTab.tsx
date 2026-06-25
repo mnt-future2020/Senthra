@@ -11,6 +11,7 @@ import { ClipboardList, Clock, Loader2 } from "lucide-react";
 
 import * as gmService from "@/services/goodsManagement.service";
 import type { QueueRow } from "@/types/goodsManagement";
+import { useGoodsSocket } from "@/hooks/useGoodsSocket";
 import { JobScanPanel } from "./JobScanPanel";
 import { OverdueHoldingsView } from "./OverdueHoldingsView";
 
@@ -79,6 +80,9 @@ export function GoodsManagementTab({
   const load = React.useCallback(() => {
     setLoadTick((t) => t + 1);
   }, []);
+
+  // Live-refresh whenever any goods event fires on the socket (issue / return / reconcile).
+  useGoodsSocket(load);
 
   React.useEffect(() => {
     if (section !== "queue") return;
