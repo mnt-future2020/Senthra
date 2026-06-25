@@ -4,7 +4,7 @@ vi.mock("../../lib/prisma.js", () => ({ withTransaction: (fn: (tx: unknown) => u
 vi.mock("./goods-management.repository.js", () => ({
   createMovementWithCode: vi.fn(), findMovementsByJob: vi.fn(), getSummary: vi.fn(), upsertSummaryTx: vi.fn(),
   upsertCustomerHoldingTx: vi.fn(), findCustomerHoldingTx: vi.fn(), insertCustomerHoldingTxnTx: vi.fn(), findCustomerHoldingsByEngineer: vi.fn(),
-  adjustCustomerStockEntryQtyTx: vi.fn(), findCustomerStockEntryById: vi.fn(),
+  adjustCustomerStockEntryQtyTx: vi.fn(), findCustomerStockEntryById: vi.fn(), findCustomerStockEntryByBarcode: vi.fn(),
   upsertDamagedBalanceTx: vi.fn(), insertDamagedTxnTx: vi.fn(), findDamagedByWarehouse: vi.fn(), findDamagedByCustomer: vi.fn(), findRecentMovementsForOverdue: vi.fn(),
 }));
 vi.mock("#modules/job/job.repository.js", () => ({ findById: vi.fn() }));
@@ -20,14 +20,17 @@ import * as irmService from "#modules/irm/irm.service.js";
 import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
 import { scanLookup } from "./goods-management.service.js";
 
-const JOB_ID = "a".repeat(24), IRM_ID = "d".repeat(24), WH_ID = "b".repeat(24);
+const JOB_ID = "a".repeat(24), IRM_ID = "d".repeat(24), WH_ID = "b".repeat(24), CSE_ID = "f".repeat(24);
 const mockJob = jobRepo.findById as ReturnType<typeof vi.fn>;
 const mockIrm = irmService.findActiveByCodeOrBarcode as ReturnType<typeof vi.fn>;
 const mockBal = inventoryRepo.findBalancePair as ReturnType<typeof vi.fn>;
 const mockMoves = repo.findMovementsByJob as ReturnType<typeof vi.fn>;
+const mockCseByBarcode = repo.findCustomerStockEntryByBarcode as ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  void CSE_ID; // referenced in Task 8 postIssue / customer-line tests
+  void mockCseByBarcode; // referenced in Task 8 postIssue / customer-line tests
   mockJob.mockResolvedValue({ id: JOB_ID, status: "accepted", assignedEngineerId: "c".repeat(24),
     kitLines: [{ id: "k1", lineType: "irm", irmItemId: IRM_ID, warehouseId: WH_ID, itemName: "CAT6", qty: 10 }] });
   mockIrm.mockResolvedValue({ id: IRM_ID, code: "IRM-0004", name: "CAT6", baseUnit: "Box", barcode: "5012345678900", trackInventory: true, trackSerialNumbers: false, trackBatchNumbers: false });
