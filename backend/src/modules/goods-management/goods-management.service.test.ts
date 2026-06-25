@@ -29,13 +29,13 @@ const mockCseByBarcode = repo.findCustomerStockEntryByBarcode as ReturnType<type
 
 beforeEach(() => {
   vi.clearAllMocks();
-  void CSE_ID; // referenced in Task 8 postIssue / customer-line tests
-  void mockCseByBarcode; // referenced in Task 8 postIssue / customer-line tests
   mockJob.mockResolvedValue({ id: JOB_ID, status: "accepted", assignedEngineerId: "c".repeat(24),
     kitLines: [{ id: "k1", lineType: "irm", irmItemId: IRM_ID, warehouseId: WH_ID, itemName: "CAT6", qty: 10 }] });
   mockIrm.mockResolvedValue({ id: IRM_ID, code: "IRM-0004", name: "CAT6", baseUnit: "Box", barcode: "5012345678900", trackInventory: true, trackSerialNumbers: false, trackBatchNumbers: false });
   mockBal.mockResolvedValue({ quantityOnHand: 4, quantityReserved: 0 });
   mockMoves.mockResolvedValue([]);
+  // Default: no customer stock entry found (IRM path is primary)
+  mockCseByBarcode.mockResolvedValue(null);
 });
 
 describe("scanLookup (issue)", () => {
@@ -50,6 +50,49 @@ describe("scanLookup (issue)", () => {
   it("rejects a serial-tracked item", async () => {
     mockIrm.mockResolvedValue({ id: IRM_ID, code: "IRM-0004", name: "SFP", trackInventory: true, trackSerialNumbers: true, trackBatchNumbers: false });
     await expect(scanLookup({ jobId: JOB_ID, direction: "issue", code: "IRM-0004" })).rejects.toThrow(/serial|batch/i);
+  });
+
+  // Customer stock path — IRM lookup returns null, falls through to barcode lookup.
+  describe("customer stock path", () => {
+    beforeEach(() => {
+      // No IRM item matches — force the customer-stock branch.
+      mockIrm.mockResolvedValue(null);
+      // Job has a customer-stock kit line referencing CSE_ID.
+      mockJob.mockResolvedValue({
+        id: JOB_ID, status: "accepted", assignedEngineerId: "c".repeat(24),
+        kitLines: [{ id: "k2", lineType: "customer_stock", customerStockEntryId: CSE_ID, warehouseId: WH_ID, itemName: "SFP-LX", qty: 5 }],
+      });
+      // Repository returns a matching customer stock entry.
+      mockCseByBarcode.mockResolvedValue({ id: CSE_ID, itemName: "SFP-LX", uom: "Each", warehouseId: WH_ID, quantity: 3, status: "active" });
+    });
+
+    it("resolves a customer-stock barcode to its kit line and reports remaining + available", async () => {
+      const m = await scanLookup({ jobId: JOB_ID, direction: "issue", code: "CSE-00001" });
+      expect(m).toMatchObject({
+        source: "customer",
+        customerStockEntryId: CSE_ID,
+        jobKitLineId: "k2",
+        itemName: "SFP-LX",
+        plannedQty: 5,
+        alreadyIssued: 0,
+        remainingIssuable: 5,
+        available: 3,
+      });
+    });
+
+    it("rejects a customer barcode whose entry is not on the job kit list", async () => {
+      // Entry exists but job has no kit line for it.
+      mockJob.mockResolvedValue({
+        id: JOB_ID, status: "accepted", assignedEngineerId: "c".repeat(24),
+        kitLines: [], // no lines at all
+      });
+      await expect(scanLookup({ jobId: JOB_ID, direction: "issue", code: "CSE-00001" })).rejects.toThrow(/not on this job/i);
+    });
+
+    it("rejects a code that matches neither IRM nor customer stock", async () => {
+      mockCseByBarcode.mockResolvedValue(null);
+      await expect(scanLookup({ jobId: JOB_ID, direction: "issue", code: "UNKNOWN-XYZ" })).rejects.toThrow(/no item matches/i);
+    });
   });
 });
 

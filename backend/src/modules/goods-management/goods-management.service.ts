@@ -64,9 +64,9 @@ export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Pr
   // 2) Customer stock entry lookup by barcode.
   const entry = await goodsManagementRepo.findCustomerStockEntryByBarcode(code);
   if (entry) {
+    if (entry.warehouseId) assertWarehouseAccess(actor, entry.warehouseId);
     const kit = (job.kitLines ?? []).find((k) => k.lineType === "customer_stock" && k.customerStockEntryId === entry.id);
     if (!kit) throw badRequest(`${entry.itemName} is not on this job's kit list.`);
-    if (entry.warehouseId) assertWarehouseAccess(actor, entry.warehouseId);
     const already = issuedForKitLine(movements, kit.id);
     return {
       source: "customer", customerStockEntryId: entry.id, jobKitLineId: kit.id, itemName: entry.itemName, uom: entry.uom,
