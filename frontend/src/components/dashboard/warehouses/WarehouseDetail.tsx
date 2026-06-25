@@ -384,9 +384,9 @@ function IncomingTab({
       )}
       {active === "grn" ? (
         inbound === "expected" ? (
-          <ExpectedDeliveries warehouseId={warehouseId} />
+          <ExpectedDeliveries warehouseId={warehouseId} warehouseCode={warehouseCode} />
         ) : (
-          <GoodsReceiptsView warehouseId={warehouseId} embedded />
+          <GoodsReceiptsView warehouseId={warehouseId} warehouseCode={warehouseCode} embedded />
         )
       ) : (
         <IncomingStock warehouseId={warehouseId} pushToast={pushToast} />

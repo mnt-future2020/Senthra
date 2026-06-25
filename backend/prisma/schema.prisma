@@ -233,6 +233,8 @@ model Warehouse {
   customerStockEntries     CustomerStockEntry[]
   // Users explicitly assigned to this warehouse (warehouse-scoped roles) (back-relation; no DB column).
   userAssignments          UserWarehouseAssignment[]
+  // Job kit lines collected from this warehouse (back-relation; no DB column).
+  jobKitLines              JobKitLine[]
 
   deletedAt DateTime? // soft delete — excluded from listings; history stays intact
 
@@ -317,6 +319,8 @@ model Supplier {
   irmLinks IrmItemSupplier[]
   // Purchase orders raised against this supplier (back-relation; no DB column).
   purchaseOrders PurchaseOrder[]
+  // Field jobs using this supplier as external installer (back-relation; no DB column).
+  jobs           Job[]
 
   deletedAt DateTime? // soft delete — excluded from listings; history stays intact
 
@@ -443,6 +447,8 @@ model IrmItem {
   goodsOutItems            GoodsOutItem[]
   engineerStockBalances    EngineerStockBalance[]
   engineerStockTransactions EngineerStockTransaction[]
+  // Job kit lines drawing this IRM item (back-relation; no DB column).
+  jobKitLines              JobKitLine[]
 
   deletedAt DateTime? // soft delete — excluded from listings; history stays intact
 
@@ -1080,6 +1086,8 @@ model User {
   goodsOutsReceived         GoodsOut[]                 @relation("GoodsOutEngineer")
   engineerStockBalances     EngineerStockBalance[]     @relation("EngineerStockOwner")
   engineerStockTransactions EngineerStockTransaction[] @relation("EngineerStockTxnOwner")
+  // Field jobs assigned to this engineer (back-relation; no DB column).
+  assignedJobs              Job[]                      @relation("JobAssignedEngineer")
 
   @@index([roleId])
   @@index([status])
@@ -1162,6 +1170,8 @@ model Customer {
   users         CustomerUser[]
   stockRequests CustomerStockRequest[]
   stockEntries  CustomerStockEntry[]
+  // Field jobs raised for this customer (back-relation; no DB column).
+  jobs          Job[]
 
   @@index([status])
 }
@@ -1182,6 +1192,8 @@ model CustomerProject {
   endDate     DateTime?
   status      String    @default("active") // active | planned | on_hold | completed
   description String?
+  // Field jobs under this project (back-relation; no DB column).
+  jobs        Job[]
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
@@ -1205,6 +1217,8 @@ model CustomerSite {
   latitude      Float?
   longitude     Float?
   status        String   @default("active") // active | inactive
+  // Field jobs at this site (back-relation; no DB column).
+  jobs          Job[]
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
@@ -1348,6 +1362,146 @@ model CustomerStockEntry {
   @@index([customerId])
   @@index([warehouseId, status])
   @@index([assignmentId])
+}
+
+// ── JOBS — field-work job pack (header + kit lines) ─────────────────────────────────────
+// A field-work job raised for a customer/project, optionally tied to a CustomerSite (or
+// free-text site address), assigned to an engineer (staff User). jobNumber is Counter-
+// allocated per-year (JOB-2026-0001), same atomic mechanism as GDN/PO codes (Counter key
+// "JOB:<year>"). Status is a forward String machine enforced in the service (NOT a Prisma
+// enum — matches every other model). Soft-deleted rows (deletedAt set) are excluded from
+// normal reads; `deletedAt` is written EXPLICITLY as null on create. assignedEngineerId is
+// app-required (zod) but DB-nullable (Prisma+Mongo reads break on an absent required field).
+model Job {
+  id        String @id @default(auto()) @map("_id") @db.ObjectId
+  jobNumber String @unique // auto-allocated per year, e.g. JOB-2026-0001
+
+  // Customer-facing references (the customer's own scheme/order numbers).
+  customerRef String? // the customer's own reference for this job
+  schemeNo    String? // scheme / order number, e.g. 5432471
+  name        String
+  jobType     String  @default("installation") // installation | survey | maintenance | decommission | other (app-validated)
+  technology  String? // optional, e.g. "WDM" | "Fibre"
+
+  // Customer + project (required relations — every job belongs to a customer + project).
+  // Names are snapshotted at create/edit (history-safe after a rename), same as goods-out.
+  customerId   String   @db.ObjectId
+  customer     Customer @relation(fields: [customerId], references: [id])
+  customerName String? // snapshot
+  projectId    String          @db.ObjectId
+  project      CustomerProject @relation(fields: [projectId], references: [id])
+  projectName  String? // snapshot
+
+  // Site — EITHER a linked CustomerSite (optional relation) OR free-text site fields below.
+  siteId String?       @db.ObjectId
+  site   CustomerSite? @relation(fields: [siteId], references: [id])
+
+  // Free-text site (used when no siteId). All optional.
+  siteName  String?
+  trsArea   String?
+  address   String?
+  postcode  String?
+  latitude  Float?  // derived server-side from postcode (never hand-entered)
+  longitude Float?
+  floor     String?
+  suite     String?
+  rack      String?
+  shelf     String?
+
+  completionDate DateTime?
+  priority       String    @default("normal") // low | normal | high | urgent
+
+  // Assigned engineer (app-required staff User; DB-nullable for the Prisma+Mongo reason above).
+  assignedEngineerId    String? @db.ObjectId
+  assignedEngineer      User?   @relation("JobAssignedEngineer", fields: [assignedEngineerId], references: [id])
+  assignedEngineerName  String? // snapshot at assign-time (history-safe after renames)
+  assignedEngineerEmail String? // snapshot
+
+  // External supplier / installer (optional relation + flag).
+  supplierId    String?   @db.ObjectId
+  supplier      Supplier? @relation(fields: [supplierId], references: [id])
+  supplierName  String? // snapshot
+  installerType String    @default("internal") // internal | external
+
+  status String @default("draft") // draft | assigned | accepted | in_progress | completed | cancelled
+
+  // Planner contact (optional, snapshotted off the customer's pack).
+  plannerName  String?
+  plannerPhone String?
+
+  notes       String?
+  attachments String[] @default([]) // Cloudinary URLs of the original job-pack files
+
+  // Kit lines (back-relation; no DB column).
+  kitLines JobKitLine[]
+
+  // Workflow snapshots (who/when). Emails are snapshots, not FKs.
+  assignedAt   DateTime?
+  acceptedAt   DateTime?
+  acceptedBy   String?   // engineer email that accepted
+  rejectedAt   DateTime?
+  rejectedBy   String?   // engineer email that rejected
+  rejectReason String?   // why the engineer declined (shown to the PM)
+  cancelledAt  DateTime?
+  cancelReason String?
+
+  // Audit — staff that created it. createdByUserId drives realtime "job:accepted" targeting
+  // (no relation — a loose socket, like GoodsOut.jobId); createdBy is the email snapshot.
+  createdByUserId String?   @db.ObjectId
+  createdBy       String?   // staff email that created the job (snapshot)
+  updatedBy       String?
+  deletedAt       DateTime? // soft delete — excluded from listings; history stays intact
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([customerId])
+  @@index([projectId])
+  @@index([siteId])
+  @@index([assignedEngineerId])
+  @@index([supplierId])
+}
+
+// A kit line on a Job — what the engineer needs to take/use. lineType selects the source
+// pool: customer-owned consignment stock, the company IRM catalogue, or a free-text MISC item
+// (services / patch cords / charges). Only the matching id is set per line (app-enforced).
+// lineType is a String (NOT a Prisma enum) per the house convention. irmItemId is a real
+// relation; customerStockEntryId is a loose socket (no relation, mirroring GoodsOut's sockets).
+model JobKitLine {
+  id    String @id @default(auto()) @map("_id") @db.ObjectId
+  jobId String @db.ObjectId
+  job   Job    @relation(fields: [jobId], references: [id])
+
+  lineType    String  // customer_stock | irm | misc
+  seCode      String? // optional scheme/equipment code snapshot (the customer SKU / SE Code)
+  itemName    String
+  description String?
+
+  // Source ids — at most one set per line, depending on lineType.
+  customerStockEntryId String? @db.ObjectId // loose socket (no relation) — customer consignment line
+  irmItemId            String?  @db.ObjectId
+  irmItem              IrmItem? @relation(fields: [irmItemId], references: [id])
+
+  // Pickup warehouse — WHERE the engineer collects this item. For customer_stock it's the entry's
+  // own warehouse (derived server-side); for irm the PM picks it. misc lines have none. A real
+  // relation so the engineer's job view can show the warehouse's LIVE address (they have no
+  // warehouse-module access); name/code are also snapshotted so the line reads correctly after a
+  // rename or if the warehouse is later removed.
+  warehouseId   String?    @db.ObjectId
+  warehouse     Warehouse? @relation(fields: [warehouseId], references: [id])
+  warehouseName String? // snapshot
+  warehouseCode String? // snapshot
+
+  qty   Int
+  notes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([jobId])
+  @@index([irmItemId])
+  @@index([warehouseId])
 }
 
 // A dynamic, admin-editable email template. Every email the app sends is

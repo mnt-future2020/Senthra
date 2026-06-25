@@ -1,0 +1,260 @@
+"use client";
+
+import * as React from "react";
+import { createPortal } from "react-dom";
+import { useRouter } from "next/navigation";
+import { ClipboardList, MoreHorizontal, Pencil, Plus, Search, Trash2 } from "lucide-react";
+
+import * as jobService from "@/services/job.service";
+import { listCustomers } from "@/services/customer.service";
+import { listManagerOptions } from "@/services/warehouse.service";
+import { useAuth } from "@/hooks/useAuth";
+import { useDashboard } from "@/hooks/useDashboard";
+import { useJobSocket } from "@/hooks/useJobSocket";
+import { Pagination } from "@/components/ui/Pagination";
+import { Select } from "@/components/ui/Select";
+import { Skeleton } from "@/components/ui/Skeleton";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { JOB_STATUS_LABELS, JobStatusChip, formatDate } from "./jobStatus";
+import type { Job, JobStatus } from "@/types/job";
+
+const PAGE_SIZE = 20;
+
+function MenuItem({ icon: Icon, danger, onClick, children }: { icon: React.ElementType; danger?: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button role="menuitem" onClick={onClick} className={`flex w-full items-center gap-2.5 px-3.5 py-2 text-left text-xs font-bold transition-colors hover:bg-[var(--surface-2)] focus:bg-[var(--surface-2)] focus:outline-none ${danger ? "text-[var(--neg)]" : "text-[var(--ink)]"}`}>
+      <Icon className="h-3.5 w-3.5 shrink-0" />
+      {children}
+    </button>
+  );
+}
+
+function RowActions({ job, canEdit, canDelete, onEdit, onDelete }: { job: Job; canEdit: boolean; canDelete: boolean; onEdit: () => void; onDelete: () => void }) {
+  const [open, setOpen] = React.useState(false);
+  const [pos, setPos] = React.useState<{ top?: number; bottom?: number; right: number } | null>(null);
+  const btnRef = React.useRef<HTMLButtonElement>(null);
+  const menuRef = React.useRef<HTMLDivElement>(null);
+  const close = () => { setOpen(false); btnRef.current?.focus(); };
+  const openMenu = () => {
+    const rect = btnRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const right = Math.max(8, window.innerWidth - rect.right);
+    const spaceBelow = window.innerHeight - rect.bottom;
+    setPos(spaceBelow < 140 ? { bottom: window.innerHeight - rect.top + 4, right } : { top: rect.bottom + 4, right });
+    setOpen(true);
+  };
+  React.useEffect(() => {
+    if (!open) return;
+    const onMove = () => close();
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
+    window.addEventListener("scroll", onMove, true);
+    window.addEventListener("resize", onMove);
+    window.addEventListener("keydown", onKey);
+    menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    return () => {
+      window.removeEventListener("scroll", onMove, true);
+      window.removeEventListener("resize", onMove);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  // Only draft/cancelled jobs can be deleted; edit is allowed broadly (the API enforces the rule).
+  const deletable = job.status === "draft" || job.status === "cancelled";
+  if ((!canEdit && !(canDelete && deletable))) return null;
+  return (
+    <div className="flex justify-end">
+      <button ref={btnRef} onClick={(e) => { e.stopPropagation(); if (open) close(); else openMenu(); }} className="rounded-lg p-1.5 text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--ink)]" aria-label="Actions" aria-haspopup="menu" aria-expanded={open}>
+        <MoreHorizontal className="h-4 w-4" />
+      </button>
+      {open && pos && createPortal(
+        <>
+          <div className="fixed inset-0 z-[55]" onClick={close} />
+          <div ref={menuRef} role="menu" className="anim-fade-in fixed z-[60] w-44 rounded-xl border border-[var(--border)] bg-[var(--surface)] py-1 shadow-2xl" style={{ top: pos.top, bottom: pos.bottom, right: pos.right }}>
+            {canEdit && <MenuItem icon={Pencil} onClick={() => { close(); onEdit(); }}>Edit job</MenuItem>}
+            {canDelete && deletable && <MenuItem icon={Trash2} danger onClick={() => { close(); onDelete(); }}>Delete job</MenuItem>}
+          </div>
+        </>,
+        document.body,
+      )}
+    </div>
+  );
+}
+
+function TableSkeleton({ actions }: { actions: boolean }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[900px] text-sm">
+        <thead>
+          <tr className="border-b border-[var(--border)] text-left text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
+            <th className="px-4 py-3">Job</th><th className="px-4 py-3">Name</th><th className="px-4 py-3">Customer</th>
+            <th className="px-4 py-3">Engineer</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Completion</th>{actions && <th className="px-4 py-3" />}
+          </tr>
+        </thead>
+        <tbody>
+          {Array.from({ length: 6 }).map((_, i) => (
+            <tr key={i} className="border-b border-[var(--border)] last:border-0">
+              {Array.from({ length: actions ? 7 : 6 }).map((__, j) => (<td key={j} className="px-4 py-3"><Skeleton className="h-3 w-20" /></td>))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+export function JobsView() {
+  const router = useRouter();
+  const { can } = useAuth();
+  const { pushToast } = useDashboard();
+
+  const [search, setSearch] = React.useState("");
+  const [debounced, setDebounced] = React.useState("");
+  const [statusFilter, setStatusFilter] = React.useState<"all" | JobStatus>("all");
+  const [customer, setCustomer] = React.useState("");
+  const [engineer, setEngineer] = React.useState("");
+  const [page, setPage] = React.useState(1);
+  const [refreshKey, setRefreshKey] = React.useState(0);
+  const [data, setData] = React.useState(() => jobService.getCachedJobs({ pageSize: PAGE_SIZE }));
+  const [loading, setLoading] = React.useState(!data);
+  const [error, setError] = React.useState<string | null>(null);
+  const [confirm, setConfirm] = React.useState<{ open: boolean; job: Job | null }>({ open: false, job: null });
+  const [deleting, setDeleting] = React.useState(false);
+  const [customers, setCustomers] = React.useState<{ id: string; name: string }[]>([]);
+  const [engineers, setEngineers] = React.useState<{ id: string; name: string }[]>([]);
+
+  const canEdit = can("jobs.edit");
+  const canDelete = can("jobs.delete");
+  const showActions = canEdit || canDelete;
+
+  // Live-refresh the list when a job is created/assigned/accepted anywhere.
+  useJobSocket(React.useCallback(() => setRefreshKey((k) => k + 1), []));
+
+  React.useEffect(() => {
+    const t = setTimeout(() => setDebounced(search.trim()), 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  React.useEffect(() => {
+    let active = true;
+    listCustomers({ status: "active", pageSize: 200 }).then((r) => active && setCustomers(r.customers.map((c) => ({ id: c.id, name: c.name }))), () => {});
+    listManagerOptions().then((us) => active && setEngineers(us.map((u) => ({ id: u.id, name: u.name }))), () => {});
+    return () => { active = false; };
+  }, []);
+
+  React.useEffect(() => {
+    let active = true;
+    (async () => {
+      const params = { search: debounced || undefined, status: statusFilter === "all" ? undefined : statusFilter, customer: customer || undefined, engineer: engineer || undefined, page, pageSize: PAGE_SIZE };
+      const cached = jobService.getCachedJobs(params);
+      if (active && cached) setData(cached);
+      setLoading(true);
+      try {
+        const res = await jobService.listJobs(params);
+        if (!active) return;
+        setData(res);
+        setError(null);
+      } catch (e) {
+        if (active) setError(e instanceof Error ? e.message : "Could not load jobs.");
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => { active = false; };
+  }, [debounced, statusFilter, customer, engineer, page, refreshKey]);
+
+  const rows = data?.jobs ?? [];
+  const showSkeleton = loading && rows.length === 0;
+  const isFiltered = statusFilter !== "all" || Boolean(debounced) || Boolean(customer) || Boolean(engineer);
+
+  const onDelete = async () => {
+    if (!confirm.job) return;
+    setDeleting(true);
+    try {
+      await jobService.deleteJob(confirm.job.id);
+      setConfirm({ open: false, job: null });
+      pushToast("Job removed.", "success");
+      if (rows.length === 1 && page > 1) setPage(page - 1);
+      else setRefreshKey((k) => k + 1);
+    } catch (e) {
+      pushToast(e instanceof Error ? e.message : "Delete failed.", "alert");
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <div className="flex h-full flex-col gap-5">
+      <div className="shrink-0 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs" style={{ borderRadius: "var(--radius)" }}>
+        <h2 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">Jobs</h2>
+        <p className="mt-0.5 text-xs text-[var(--muted)]">Create and assign installation, survey and maintenance jobs. Assigning a job notifies the engineer in real time; they accept it from their portal.</p>
+      </div>
+
+      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:items-center">
+        <div className="relative w-full lg:max-w-xs">
+          <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
+          <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="Search job, name, customer or engineer…" className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]" />
+        </div>
+        <Select size="sm" value={statusFilter} onChange={(v) => { setStatusFilter(v as "all" | JobStatus); setPage(1); }} options={[{ value: "all", label: "All statuses" }, ...(Object.keys(JOB_STATUS_LABELS) as JobStatus[]).map((s) => ({ value: s, label: JOB_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
+        <Select size="sm" value={customer} onChange={(v) => { setCustomer(v); setPage(1); }} options={[{ value: "", label: "All customers" }, ...customers.map((c) => ({ value: c.id, label: c.name }))]} ariaLabel="Filter by customer" />
+        <Select size="sm" value={engineer} onChange={(v) => { setEngineer(v); setPage(1); }} options={[{ value: "", label: "All engineers" }, ...engineers.map((u) => ({ value: u.id, label: u.name }))]} ariaLabel="Filter by engineer" />
+        {can("jobs.create") && (
+          <button onClick={() => router.push("/dashboard/jobs/new")} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 lg:ml-auto">
+            <Plus className="h-4 w-4" /> New job
+          </button>
+        )}
+      </div>
+
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+        {showSkeleton ? (
+          <TableSkeleton actions={showActions} />
+        ) : error ? (
+          <p className="py-16 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>
+        ) : rows.length === 0 ? (
+          <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
+            <ClipboardList className="h-7 w-7 text-[var(--faint)]" />
+            <p className="text-sm font-semibold text-[var(--ink)]">{isFiltered ? "No jobs match" : "No jobs yet"}</p>
+            {!isFiltered && can("jobs.create") && (
+              <button onClick={() => router.push("/dashboard/jobs/new")} className="mt-1 text-xs font-bold text-[var(--accent)] hover:opacity-80">Create your first job</button>
+            )}
+          </div>
+        ) : (
+          <div className="min-h-0 flex-1 overflow-auto">
+            <table className="w-full min-w-[900px] text-left text-sm">
+              <thead>
+                <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
+                  <th className="px-4 py-3">Job</th><th className="px-4 py-3">Name</th><th className="px-4 py-3">Customer</th>
+                  <th className="px-4 py-3">Engineer</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Completion</th>{showActions && <th className="px-4 py-3" />}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((job) => (
+                  <tr key={job.id} onClick={() => router.push(`/dashboard/jobs/${job.jobNumber}`)} className="cursor-pointer border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]">
+                    <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{job.jobNumber}</td>
+                    <td className="px-4 py-3 font-semibold text-[var(--ink)]">{job.name}</td>
+                    <td className="px-4 py-3 text-[var(--muted)]">{job.customerName ?? "—"}</td>
+                    <td className="px-4 py-3 text-[var(--muted)]">{job.assignedEngineerName ?? "—"}</td>
+                    <td className="px-4 py-3"><JobStatusChip status={job.status} /></td>
+                    <td className="px-4 py-3 text-[var(--muted)]">{formatDate(job.completionDate)}</td>
+                    {showActions && (
+                      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                        <RowActions job={job} canEdit={canEdit} canDelete={canDelete} onEdit={() => router.push(`/dashboard/jobs/${job.jobNumber}/edit`)} onDelete={() => setConfirm({ open: true, job })} />
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {data && data.total > 0 && (
+        <div className="shrink-0">
+          <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="jobs" onPage={setPage} />
+        </div>
+      )}
+
+      <ConfirmDialog open={confirm.open} title="Remove job?" message={<>This deletes job <strong className="text-[var(--ink)]">{confirm.job?.jobNumber}</strong>. Only draft or cancelled jobs can be deleted.</>} confirmLabel="Remove" danger busy={deleting} onConfirm={onDelete} onClose={() => setConfirm({ open: false, job: null })} />
+    </div>
+  );
+}

@@ -143,6 +143,22 @@ If anything has already been dispatched, contact us before sending it.
 Regards,
 {{companyLegalName}}`,
   },
+  {
+    key: "job.assigned",
+    name: "Job Assigned to Engineer",
+    category: "notification",
+    subject: "You've been assigned job {{jobNumber}}",
+    variables: ["engineerName", "jobNumber", "jobName", "brandName", "loginUrl", "currentYear"],
+    // The job number ties the email to the work; it must stay in the message.
+    requiredVariables: ["jobNumber"],
+    body: `Hello {{engineerName}},
+
+You have been assigned job {{jobNumber}} — {{jobName}}.
+
+Sign in to view the details and accept it: {{loginUrl}}
+
+— {{brandName}}`,
+  },
 ];
 
 export function findDefaultTemplate(key: string): EmailTemplateDefault | undefined {

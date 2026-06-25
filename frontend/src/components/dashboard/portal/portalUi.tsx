@@ -4,6 +4,7 @@ import * as React from "react";
 
 import { Skeleton } from "@/components/ui/Skeleton";
 import type { StockRequestStatus } from "@/types/customer";
+import type { JobStatus } from "@/types/job";
 
 // Shared presentation helpers for the customer portal pages. Keeping them in one
 // place keeps the portal's look (header cards, status pills, dates, tables, and the
@@ -104,6 +105,30 @@ const REQ_STATUS_STYLE: Record<StockRequestStatus, { cls: string; dot: string; l
 
 export function RequestStatusChip({ value }: { value: StockRequestStatus }) {
   const s = REQ_STATUS_STYLE[value] ?? REQ_STATUS_STYLE.pending;
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-wider ${s.cls}`}
+    >
+      <span className={`h-1.5 w-1.5 rounded-full ${s.dot}`} />
+      {s.label}
+    </span>
+  );
+}
+
+// Job lifecycle status pill (engineer portal Jobs). Mirrors RequestStatusChip's style block but
+// carries the Job status machine: draft → assigned → accepted → in_progress → completed (or cancelled).
+const JOB_STATUS_STYLE: Record<JobStatus, { cls: string; dot: string; label: string }> = {
+  draft: { cls: "border-[var(--border)] bg-[var(--surface-2)] text-[var(--muted)]", dot: "bg-[var(--faint)]", label: "Draft" },
+  assigned: { cls: "border-amber-500/30 bg-amber-500/10 text-amber-600", dot: "bg-amber-500", label: "Assigned" },
+  accepted: { cls: "border-[var(--accent)]/30 bg-[var(--accent-10)] text-[var(--accent)]", dot: "bg-[var(--accent)]", label: "Accepted" },
+  in_progress: { cls: "border-blue-500/30 bg-blue-500/10 text-blue-600", dot: "bg-blue-500", label: "In progress" },
+  completed: { cls: "border-[var(--pos)]/30 bg-[var(--pos)]/10 text-[var(--pos)]", dot: "bg-[var(--pos)]", label: "Completed" },
+  rejected: { cls: "border-orange-500/30 bg-orange-500/10 text-orange-600", dot: "bg-orange-500", label: "Rejected" },
+  cancelled: { cls: "border-[var(--neg)]/30 bg-[var(--neg)]/10 text-[var(--neg)]", dot: "bg-[var(--neg)]", label: "Cancelled" },
+};
+
+export function JobStatusChip({ value }: { value: string }) {
+  const s = JOB_STATUS_STYLE[value as JobStatus] ?? JOB_STATUS_STYLE.draft;
   return (
     <span
       className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-wider ${s.cls}`}

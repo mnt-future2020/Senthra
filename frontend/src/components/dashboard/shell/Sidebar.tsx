@@ -43,13 +43,14 @@ type NavItem = {
 const NAV: NavItem[] = [
   { href: "/dashboard/users", label: "Users & Roles", icon: UserCog, perms: ["users.view", "roles.view"] },
   { href: "/dashboard/customers", label: "Customers", icon: Building2, perms: ["customers.view"] },
+  { href: "/dashboard/jobs", label: "Jobs", icon: ClipboardList, perms: ["jobs.view"] },
   { href: "/dashboard/warehouses", label: "Warehouses", icon: Warehouse, perms: ["warehouse.view"] },
   { href: "/dashboard/suppliers", label: "Suppliers", icon: Truck, perms: ["suppliers.view"] },
   { href: "/dashboard/irm", label: "IRM Catalogue", icon: PackageSearch, perms: ["irm.view"] },
   { href: "/dashboard/purchase-orders", label: "Purchase Orders", icon: ClipboardList, perms: ["purchase_orders.view"] },
   { href: "/dashboard/goods-in", label: "GRN", icon: PackageCheck, perms: ["goods_in.view"] },
   { href: "/dashboard/inventory", label: "Inventory", icon: Boxes, perms: ["inventory.view"] },
-  { href: "/dashboard/goods-out", label: "Goods Out", icon: PackageMinus, perms: ["goods_out.view"] },
+  // { href: "/dashboard/goods-out", label: "Goods Out", icon: PackageMinus, perms: ["goods_out.view"] },
   {
     // Only the perms that map to a real Settings section (see SettingsPanel). Master-data view perms
     // (warehouse/supplier/IRM types + IRM categories) belong to their own modules' tabs, so they must
@@ -84,9 +85,9 @@ const CUSTOMER_NAV: NavItem[] = [
 // customer portal above. Shown ONLY when the engineer portal is the user's only surface (see
 // `isEngineer` below) — it is NEVER mixed into the admin nav.
 const ENGINEER_NAV: NavItem[] = [
-  { href: "/dashboard/engineer", label: "Dashboard", icon: LayoutDashboard, perms: [] },
-  { href: "/dashboard/engineer/jobs", label: "Jobs", icon: ClipboardList, perms: [] },
-  { href: "/dashboard/engineer/inventory", label: "Stock", icon: Boxes, perms: [] },
+  { href: "/dashboard/engineer", label: "Dashboard", icon: LayoutDashboard, perms: ["engineer.dashboard.view"] },
+  { href: "/dashboard/engineer/jobs", label: "Jobs", icon: ClipboardList, perms: ["engineer.jobs.view"] },
+  { href: "/dashboard/engineer/inventory", label: "Stock", icon: Boxes, perms: ["engineer.inventory.view"] },
   { href: "/dashboard/account", label: "Settings", icon: Settings, perms: [] },
 ];
 
@@ -136,7 +137,11 @@ export function Sidebar({
   // Engineer items shown alongside the admin menu drop the shared account "Settings" link (admins
   // reach their account via the profile menu) to avoid a duplicate Settings entry. A pure engineer
   // keeps the full portal nav, exactly as before.
-  const engineerNav = isEngineerOnly ? ENGINEER_NAV : ENGINEER_NAV.filter((i) => i.href !== "/dashboard/account");
+  const engineerNav = ENGINEER_NAV.filter(
+    (i) =>
+      (i.perms.length === 0 || i.perms.some((p) => can(p))) &&
+      (isEngineerOnly || i.href !== "/dashboard/account"),
+  );
 
   // Nav groups. Customers get a single surface; staff get the admin menu and/or the engineer portal.
   type NavGroup = { key: string; label: string; items: NavItem[] };

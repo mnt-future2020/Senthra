@@ -89,6 +89,16 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
   const presetPoId = mode === "create" ? searchParams.get("po") : null;
   // Deep-link from a warehouse's Incoming-stock tab: ?warehouse=<id> scopes the PO list to it.
   const presetWarehouseId = mode === "create" ? searchParams.get("warehouse") : null;
+  // ?returnTo=<path> — where Back/Cancel goes when opened from a warehouse's Incoming-stock tab, so a
+  // warehouse user returns to their warehouse instead of the global GRN list. Only accept a safe
+  // SAME-ORIGIN relative path ("/x", not "//host" or "https://…") to prevent an open-redirect.
+  const rawReturnTo = mode === "create" ? searchParams.get("returnTo") : null;
+  // Accept ONLY a same-origin relative path. Reject protocol-relative ("//host") AND the backslash
+  // variant ("/\\host" / "\\") that browsers normalise to "//" — both are open-redirect vectors.
+  const returnTo =
+    rawReturnTo && rawReturnTo.startsWith("/") && !rawReturnTo.startsWith("//") && !rawReturnTo.includes("\\")
+      ? rawReturnTo
+      : null;
   const preselectDone = React.useRef(false);
 
   const o = order;
@@ -208,7 +218,7 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
   };
 
   const clearError = (f: string) => setErrors((p) => { if (!p[f]) return p; const n = { ...p }; delete n[f]; return n; });
-  const goBack = () => guard.attemptLeave(() => router.push(GRN_LIST));
+  const goBack = () => guard.attemptLeave(() => router.push(returnTo ?? GRN_LIST));
   const updateLine = (idx: number, patch: Partial<LineState>) => {
     setLines((rows) => rows.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
     touch();

@@ -3,7 +3,7 @@ import { EngineerJobs } from "@/components/dashboard/engineer/EngineerJobs";
 
 export default function EngineerJobsPage() {
   return (
-    <EngineerGuard>
+    <EngineerGuard perm="engineer.jobs.view">
       <EngineerJobs />
     </EngineerGuard>
   );

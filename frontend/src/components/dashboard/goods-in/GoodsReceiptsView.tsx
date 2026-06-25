@@ -101,7 +101,7 @@ function TableSkeleton({ actions }: { actions: boolean }) {
 // `warehouseId` locks the list to one warehouse and `embedded` drops the standalone page header +
 // full-height layout — both used when this renders inside the Warehouse detail "Incoming stock"
 // Company (GRN) pane. No props = the global GRN page. Mirrors InventoryView's embedded contract.
-export function GoodsReceiptsView({ warehouseId, embedded }: { warehouseId?: string; embedded?: boolean } = {}) {
+export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { warehouseId?: string; warehouseCode?: string; embedded?: boolean } = {}) {
   const router = useRouter();
   const { can } = useAuth();
   const { pushToast } = useDashboard();
@@ -120,9 +120,12 @@ export function GoodsReceiptsView({ warehouseId, embedded }: { warehouseId?: str
   const canEdit = can("goods_in.edit");
   const canDelete = can("goods_in.delete");
   const showActions = canEdit || canDelete;
-  // When embedded in a warehouse, carry that warehouse into the New receipt form so its PO
-  // list is scoped to this warehouse (the global GRN page passes no warehouse → all POs).
-  const newReceiptHref = warehouseId ? `/dashboard/goods-in/new?warehouse=${warehouseId}` : "/dashboard/goods-in/new";
+  // When embedded in a warehouse, carry that warehouse into the New receipt form so its PO list is
+  // scoped to this warehouse (the global GRN page passes no warehouse → all POs), AND a returnTo so
+  // the form's Back returns to this warehouse's Incoming-stock tab rather than the global GRN list.
+  const newReceiptHref = warehouseId
+    ? `/dashboard/goods-in/new?warehouse=${warehouseId}${warehouseCode ? `&returnTo=${encodeURIComponent(`/dashboard/warehouses/${warehouseCode}?tab=incoming`)}` : ""}`
+    : "/dashboard/goods-in/new";
 
   React.useEffect(() => {
     const t = setTimeout(() => setDebounced(search.trim()), 300);
