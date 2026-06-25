@@ -2,6 +2,7 @@ import type { AuditActor } from "#modules/audit/audit.service.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import * as jobRepo from "#modules/job/job.repository.js";
+import type { JobWithRelations } from "#modules/job/job.repository.js";
 import * as irmService from "#modules/irm/irm.service.js";
 import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
 import * as inventoryService from "#modules/inventory/inventory.service.js";
@@ -418,4 +419,155 @@ export async function getJobGoods(jobId: string, actor?: AuditActor): Promise<Jo
     movements: movements.map(toPublic),
     lines,
   };
+}
+
+// ── Consume movement (engineer Complete) ─────────────────────────────────────────────────────
+// Called from job.service.completeJobForEngineer. Takes the already-loaded job to avoid a circular
+// import (goods-management.service → job.repository; job.service → goods-management.service).
+// Opens a single transaction that:
+//   1. For each used line, drains the engineer holding (IRM via goodsOutRepo, customer via gmRepo).
+//   2. Appends ledger rows with type "job_consume".
+//   3. Creates a "consume" JobStockMovement (warehouseId null).
+//   4. Stamps the job "completed" via jobRepository.completeIfInProgressTx.
+//   5. Upserts the summary with goodsStatus "awaiting_return" + workSummary.
+export interface ConsumeUsedLine {
+  source: "irm" | "customer";
+  irmItemId?: string;
+  customerStockEntryId?: string;
+  qty: number;
+}
+
+export async function recordConsumeAndComplete(
+  job: JobWithRelations,
+  engineerId: string,
+  workSummary: string | null,
+  usedLines: ConsumeUsedLine[],
+  actorEmail: string | null,
+): Promise<void> {
+  const jobId = job.id;
+
+  // Pre-build movement lines (item names from kit list snapshots); balances are re-checked inside tx.
+  const movementLines: goodsManagementRepo.MovementLineRow[] = usedLines
+    .filter((u) => u.qty > 0)
+    .map((used) => {
+      if (used.source === "irm") {
+        const kitLine = job.kitLines.find((kl) => kl.irmItemId === used.irmItemId);
+        return {
+          source: "irm",
+          irmItemId: used.irmItemId ?? null,
+          customerStockEntryId: null,
+          itemName: kitLine?.itemName ?? (used.irmItemId ?? ""),
+          sku: null,
+          uom: null,
+          qty: used.qty,
+          condition: "good",
+          jobKitLineId: kitLine?.id ?? null,
+          scannedCode: null,
+          damagePhotoUrl: null,
+          damageReason: null,
+          notes: null,
+        };
+      } else {
+        const kitLine = job.kitLines.find((kl) => kl.customerStockEntryId === used.customerStockEntryId);
+        return {
+          source: "customer",
+          irmItemId: null,
+          customerStockEntryId: used.customerStockEntryId ?? null,
+          itemName: kitLine?.itemName ?? (used.customerStockEntryId ?? ""),
+          sku: null,
+          uom: null,
+          qty: used.qty,
+          condition: "good",
+          jobKitLineId: kitLine?.id ?? null,
+          scannedCode: null,
+          damagePhotoUrl: null,
+          damageReason: null,
+          notes: null,
+        };
+      }
+    });
+
+  // Use the GM code allocator so consume movements get proper GM-#### codes.
+  await goodsManagementRepo.createMovementWithCode(
+    {
+      jobId,
+      direction: "consume",
+      engineerId,
+      engineerName: job.assignedEngineerName ?? "",
+      engineerEmail: job.assignedEngineerEmail ?? null,
+      warehouseId: null,  // consume is engineer-declared; no warehouse
+      warehouseName: null,
+      warehouseCode: null,
+      status: "posted",
+      postedAt: new Date(),
+      performedBy: actorEmail,
+      createdBy: actorEmail,
+    },
+    movementLines,
+    async (tx, movementId, code) => {
+      // Inside the same transaction: drain holdings + ledger + stamp job + summary.
+      for (const used of usedLines) {
+        if (used.qty <= 0) continue;
+
+        if (used.source === "irm") {
+          if (!used.irmItemId) throw badRequest("IRM used line missing irmItemId.");
+          // Pre-check: engineer must hold at least this qty.
+          const held = await goodsOutRepo.findEngineerBalanceTx(tx, used.irmItemId, engineerId);
+          if (!held || held.quantityOnHand < used.qty) {
+            throw conflict(`Engineer doesn't hold ${used.qty} of this IRM item. Held: ${held?.quantityOnHand ?? 0}.`);
+          }
+          // Drain the engineer holding.
+          const eng = await goodsOutRepo.upsertEngineerBalanceTx(tx, used.irmItemId, engineerId, -used.qty);
+          // Append ledger row.
+          await goodsOutRepo.insertEngineerTxnTx(tx, {
+            irmItemId: used.irmItemId,
+            engineerId,
+            quantityDelta: -used.qty,
+            type: "job_consume",
+            sourceType: "goods_management",
+            sourceId: movementId,
+            sourceCode: code,
+            balanceAfter: eng.quantityOnHand,
+            createdBy: actorEmail,
+          });
+        } else {
+          if (!used.customerStockEntryId) throw badRequest("Customer used line missing customerStockEntryId.");
+          // Pre-check: engineer must hold at least this qty.
+          const held = await goodsManagementRepo.findCustomerHoldingTx(tx, used.customerStockEntryId, engineerId);
+          if (!held || held.quantityOnHand < used.qty) {
+            throw conflict(`Engineer doesn't hold ${used.qty} of this customer item. Held: ${held?.quantityOnHand ?? 0}.`);
+          }
+          // Drain the customer holding.
+          const hold = await goodsManagementRepo.upsertCustomerHoldingTx(tx, used.customerStockEntryId, engineerId, -used.qty, {
+            customerId: held.customerId,
+            itemName: held.itemName,
+          });
+          // Append ledger row.
+          await goodsManagementRepo.insertCustomerHoldingTxnTx(tx, {
+            customerStockEntryId: used.customerStockEntryId,
+            engineerId,
+            quantityDelta: -used.qty,
+            type: "job_consume",
+            sourceType: "goods_management",
+            sourceId: movementId,
+            sourceCode: code,
+            balanceAfter: hold.quantityOnHand,
+            createdBy: actorEmail,
+          });
+        }
+      }
+
+      // Stamp job completed (atomic guard).
+      const stamped = await jobRepo.completeIfInProgressTx(tx, jobId, engineerId);
+      if (stamped.count !== 1) {
+        throw conflict("Job can't be completed right now. Refresh and try again.");
+      }
+
+      // Upsert the summary.
+      await goodsManagementRepo.upsertSummaryTx(tx, jobId, {
+        goodsStatus: "awaiting_return",
+        workSummary: workSummary ?? null,
+      });
+    },
+  );
 }

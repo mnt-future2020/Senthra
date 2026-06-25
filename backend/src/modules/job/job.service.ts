@@ -10,8 +10,9 @@ import type { AuditActor } from "#modules/audit/audit.service.js";
 import { sendTemplatedEmail } from "#modules/email/email.service.js";
 import { roleGrants } from "#modules/role/permissions.js";
 import { emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
-import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
-import type { CreateJobInput, JobKitLineInput, UpdateJobInput } from "./job.validation.js";
+import { conflict, forbidden, notFound, badRequest } from "../../utils/http-error.js";
+import type { CreateJobInput, JobKitLineInput, UpdateJobInput, CompleteJobInput } from "./job.validation.js";
+import * as goodsManagementService from "#modules/goods-management/goods-management.service.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 
@@ -654,4 +655,49 @@ export async function rejectJobForEngineer(
     metadata: { reason: job.rejectReason },
   });
   return job;
+}
+
+// ── Engineer Start (accepted → in_progress) ───────────────────────────────────────────────────
+export async function startJobForEngineer(jobId: string, engineerId: string, actor?: AuditActor): Promise<PublicJob> {
+  const job = await jobRepo.findById(jobId);
+  if (!job || job.deletedAt) throw notFound("Job not found.");
+  if (job.assignedEngineerId !== engineerId) throw forbidden("This job isn't assigned to you.");
+  assertTransition(job.status, "in_progress");
+
+  // Atomic ownership + status guard: if the job was reassigned or someone else started it between
+  // the read above and this write, startIfAccepted returns null and we 409.
+  const updated = await jobRepo.startIfAccepted(jobId, engineerId);
+  if (!updated) throw conflict("This job can't be started right now. Refresh and try again.");
+
+  const pub = toPublic(updated);
+  emitToUser(engineerId, "job:updated", pub);
+  emitToRoom(OFFICE_JOBS_ROOM, "job:updated", pub);
+  audit.record({ actor, action: "job.started", targetType: "job", targetId: jobId, targetLabel: job.jobNumber });
+  return pub;
+}
+
+// ── Engineer Complete (in_progress → completed + consume movement) ────────────────────────────
+export async function completeJobForEngineer(jobId: string, engineerId: string, input: CompleteJobInput, actor?: AuditActor): Promise<PublicJob> {
+  const job = await jobRepo.findById(jobId);
+  if (!job || job.deletedAt) throw notFound("Job not found.");
+  if (job.assignedEngineerId !== engineerId) throw forbidden("This job isn't assigned to you.");
+  assertTransition(job.status, "completed");
+  const actorEmail = actor?.email ?? null;
+  const used = input.usedLines.filter((l) => l.qty > 0).map((l) => ({
+    source: l.source,
+    irmItemId: l.irmItemId,
+    customerStockEntryId: l.customerStockEntryId,
+    qty: l.qty,
+  }));
+
+  // Delegate the transactional consume + job-stamp to goods-management.service to avoid a circular
+  // dependency (goods-management.service never imports back from job.service).
+  await goodsManagementService.recordConsumeAndComplete(job, engineerId, input.workSummary ?? null, used, actorEmail);
+
+  const updated = await jobRepo.findById(jobId);
+  const pub = toPublic(updated!);
+  emitToUser(engineerId, "job:updated", pub);
+  emitToRoom(OFFICE_JOBS_ROOM, "job:updated", pub);
+  audit.record({ actor, action: "job.completed", targetType: "job", targetId: jobId, targetLabel: job.jobNumber });
+  return pub;
 }

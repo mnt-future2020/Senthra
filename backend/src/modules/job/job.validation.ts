@@ -119,3 +119,21 @@ export type CancelJobInput = z.infer<typeof cancelJobSchema>;
 // Engineer reject — a reason is optional but encouraged (surfaced to the PM).
 export const rejectJobSchema = z.object({ reason: z.string().trim().max(500).optional() });
 export type RejectJobInput = z.infer<typeof rejectJobSchema>;
+
+// Engineer complete — declares used quantities and an optional work summary.
+// usedLines defaults to [] so a completion with no stock usage is valid.
+export const completeJobSchema = z.object({
+  workSummary: z.string().trim().max(4000).optional(),
+  usedLines: z
+    .array(
+      z.object({
+        source: z.enum(["irm", "customer"]),
+        irmItemId: optionalObjectId("an IRM item"),
+        customerStockEntryId: optionalObjectId("a customer stock item"),
+        qty: z.coerce.number().int().min(0).max(10_000_000),
+      }),
+    )
+    .max(500)
+    .default([]),
+});
+export type CompleteJobInput = z.infer<typeof completeJobSchema>;

@@ -181,6 +181,26 @@ export async function acceptIfAssigned(
   return res.count;
 }
 
+// Atomic, race-safe start: flips status accepted → in_progress ONLY when the job is still owned by
+// this engineer AND still in "accepted". Returns the updated job or null on a concurrent race.
+export async function startIfAccepted(id: string, engineerId: string): Promise<JobWithRelations | null> {
+  const res = await prisma.job.updateMany({
+    where: { id, assignedEngineerId: engineerId, status: "accepted", deletedAt: null },
+    data: { status: "in_progress" },
+  });
+  if (res.count !== 1) return null;
+  return findById(id);
+}
+
+// Atomic, race-safe complete (tx-aware): flips status in_progress → completed ONLY when the job is
+// still owned by this engineer AND still in "in_progress".
+export function completeIfInProgressTx(tx: Prisma.TransactionClient, id: string, engineerId: string): Promise<{ count: number }> {
+  return tx.job.updateMany({
+    where: { id, assignedEngineerId: engineerId, status: "in_progress", deletedAt: null },
+    data: { status: "completed" },
+  });
+}
+
 // Atomic, race-safe reject — same guard as acceptIfAssigned (assigned + owned), flips to "rejected".
 export async function rejectIfAssigned(
   jobId: string,
