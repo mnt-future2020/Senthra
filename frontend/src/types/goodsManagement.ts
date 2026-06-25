@@ -188,3 +188,10 @@ export interface CompleteJobPayload {
   workSummary?: string;
   usedLines: UsedLinePayload[];
 }
+
+// ── Query-param shapes ────────────────────────────────────────────────────────
+
+export interface ListDamagedParams {
+  warehouseId?: string;
+  customerId?: string;
+}

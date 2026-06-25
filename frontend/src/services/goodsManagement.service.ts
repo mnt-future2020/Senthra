@@ -6,17 +6,15 @@ import type {
   PublicMovement,
   DamagedRow,
   OverdueRow,
-  CustomerHolding,
   PostMovementPayload,
   CloseReconcilePayload,
   CloseReconcileResult,
-  CompleteJobPayload,
+  ListDamagedParams,
 } from "@/types/goodsManagement";
-import type { Job } from "@/types/job";
 
 // Typed wrappers around the backend /goods-management endpoints (scan-driven job-scoped issue,
-// return, reconcile) and the engineer portal additions (start/complete/customer stock).
-// Components call these — never api() directly. No price/cost fields on any response type.
+// return, reconcile). Components call these — never api() directly. No price/cost fields on any response type.
+// Engineer portal additions (startOwnJob, completeOwnJob, getOwnCustomerStock) live in engineer.service.ts.
 
 // ── Scan-lookup ──────────────────────────────────────────────────────────────
 
@@ -82,11 +80,6 @@ export function closeReconcile(jobId: string, writeOffLost?: boolean): Promise<C
 
 // ── Damaged pool reads ────────────────────────────────────────────────────────
 
-export interface ListDamagedParams {
-  warehouseId?: string;
-  customerId?: string;
-}
-
 /**
  * List damaged-stock rows. Pass either warehouseId (warehouse tab) or customerId (customer page).
  * No price/cost fields are returned by the backend.
@@ -110,28 +103,3 @@ export function listOverdue(days?: number): Promise<OverdueRow[]> {
   return api<{ overdue: OverdueRow[] }>(`/goods-management/overdue${qs}`).then((r) => r.overdue);
 }
 
-// ── Engineer additions (added to engineer.service.ts namespace here for convenience) ────
-
-/**
- * Mark an accepted job as in-progress (Start work).
- * The engineer's own id is resolved server-side from the session.
- */
-export function startOwnJob(id: string): Promise<Job> {
-  return api<{ job: Job }>(`/engineer/jobs/${id}/start`, { method: "POST" }).then((r) => r.job);
-}
-
-/**
- * Mark an in-progress job as completed, declaring used quantities and an optional work summary.
- * Creates a `consume` movement draining the engineer's holdings by the declared amounts.
- */
-export function completeOwnJob(id: string, payload: CompleteJobPayload): Promise<Job> {
-  return api<{ job: Job }>(`/engineer/jobs/${id}/complete`, { method: "POST", body: payload }).then((r) => r.job);
-}
-
-/**
- * Return the signed-in engineer's held customer stock (consignment items issued from a job).
- * No price/cost fields — only item/qty/customer label.
- */
-export function getOwnCustomerStock(): Promise<CustomerHolding[]> {
-  return api<{ stock: CustomerHolding[] }>("/engineer/customer-stock").then((r) => r.stock);
-}
