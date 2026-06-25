@@ -11,3 +11,11 @@ export const scanLookup = asyncHandler(async (req, res) => {
 export const postIssue = asyncHandler(async (req, res) => {
   res.status(201).json({ movement: await service.postIssue(param(req, "jobId"), req.body as PostMovementInput, actorFrom(req)) });
 });
+
+export const listQueue = asyncHandler(async (req, res) => {
+  res.json({ queue: await service.listQueue(actorFrom(req)) });
+});
+
+export const getJobGoods = asyncHandler(async (req, res) => {
+  res.json(await service.getJobGoods(param(req, "jobId"), actorFrom(req)));
+});

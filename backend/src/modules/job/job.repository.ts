@@ -127,6 +127,29 @@ export function findByNumber(jobNumber: string): Promise<JobWithRelations | null
   return prisma.job.findFirst({ where: { jobNumber, deletedAt: null }, include: withRelations });
 }
 
+// --- goods-management queue read: active jobs (accepted / in_progress / completed) -----------
+// Returns jobs whose kit lines have at least one line pointing at a warehouse the actor can access.
+// `warehouseIds` = undefined means unrestricted; [] means no-match (scoped user with no warehouses).
+export function findActiveForGoodsManagement(warehouseIds?: string[]): Promise<JobWithRelations[]> {
+  const warehouseWhere: Prisma.WarehouseWhereInput | undefined =
+    warehouseIds !== undefined ? { id: { in: warehouseIds } } : undefined;
+  // We filter kit lines per-warehouse in the service after fetch; here just fetch active jobs.
+  // If the actor is scoped (warehouseIds is an array) filter to jobs that have ANY kit line for those warehouses.
+  const where: Prisma.JobWhereInput = {
+    deletedAt: null,
+    status: { in: ["accepted", "in_progress", "completed"] },
+    ...(warehouseIds !== undefined && {
+      kitLines: {
+        some: {
+          warehouseId: { in: warehouseIds },
+        },
+      },
+    }),
+  };
+  void warehouseWhere; // consumed inline above
+  return prisma.job.findMany({ where, include: withRelations, orderBy: { createdAt: "desc" } });
+}
+
 // --- engineer-scoped reads (engineer portal) -------------------------------------------------
 // Every job assigned to one engineer, newest first. Scoped on assignedEngineerId so an engineer can
 // only ever read their OWN jobs.

@@ -253,3 +253,159 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
   audit.record({ actor, action: "goods_management.issued", targetType: "job", targetId: job.id, targetLabel: created.code });
   return toPublic(created);
 }
+
+// ── Queue: planned vs available ───────────────────────────────────────────────────────────────
+
+export interface QueueKitLine {
+  kitLineId: string;
+  lineType: string;
+  irmItemId: string | null;
+  customerStockEntryId: string | null;
+  itemName: string;
+  warehouseId: string | null;
+  warehouseName: string | null;
+  warehouseCode: string | null;
+  planned: number;
+  issued: number;
+  available: number; // warehouse pool (no cost/value exposed)
+}
+
+export interface QueueRow {
+  jobId: string;
+  jobNumber: string;
+  jobName: string;
+  customerId: string;
+  customerName: string | null;
+  assignedEngineerId: string | null;
+  assignedEngineerName: string | null;
+  status: string;
+  goodsStatus: string; // from JobStockSummary (default not_issued)
+  kitLines: QueueKitLine[];
+}
+
+export interface JobGoodsDetail {
+  job: {
+    id: string;
+    jobNumber: string;
+    name: string;
+    customerId: string;
+    customerName: string | null;
+    assignedEngineerId: string | null;
+    assignedEngineerName: string | null;
+    status: string;
+  };
+  summary: { goodsStatus: string; workSummary: string | null; lastMovementAt: Date | null } | null;
+  movements: PublicMovement[];
+  kitLines: QueueKitLine[];
+}
+
+export async function listQueue(actor?: AuditActor): Promise<QueueRow[]> {
+  const scopeIds = warehouseScopeFilter(actor);
+  const jobs = await jobRepo.findActiveForGoodsManagement(scopeIds);
+
+  const rows: QueueRow[] = [];
+  for (const job of jobs) {
+    const movements = await goodsManagementRepo.findMovementsByJob(job.id);
+    const summary = await goodsManagementRepo.getSummary(job.id);
+
+    // Build per-kit-line tallies. Only include lines that belong to accessible warehouses.
+    const kitLineRows: QueueKitLine[] = [];
+    for (const kl of job.kitLines ?? []) {
+      // For warehouse-scoped actors, skip lines outside their scope.
+      if (scopeIds !== undefined && kl.warehouseId && !scopeIds.includes(kl.warehouseId)) continue;
+
+      const issued = issuedForKitLine(movements, kl.id);
+      let available = 0;
+      if (kl.lineType === "irm" && kl.irmItemId && kl.warehouseId) {
+        const bal = await inventoryRepo.findBalancePair(kl.irmItemId, kl.warehouseId);
+        available = (bal?.quantityOnHand ?? 0) - (bal?.quantityReserved ?? 0);
+      } else if (kl.lineType === "customer_stock" && kl.customerStockEntryId) {
+        const entry = await goodsManagementRepo.findCustomerStockEntryById(kl.customerStockEntryId);
+        available = entry?.quantity ?? 0;
+        // NOTE: no cost/value exposed — only qty
+      }
+      kitLineRows.push({
+        kitLineId: kl.id,
+        lineType: kl.lineType,
+        irmItemId: kl.irmItemId,
+        customerStockEntryId: kl.customerStockEntryId,
+        itemName: kl.itemName,
+        warehouseId: kl.warehouseId,
+        warehouseName: kl.warehouseName,
+        warehouseCode: kl.warehouseCode,
+        planned: kl.qty,
+        issued,
+        available,
+      });
+    }
+
+    rows.push({
+      jobId: job.id,
+      jobNumber: job.jobNumber,
+      jobName: job.name,
+      customerId: job.customerId,
+      customerName: job.customerName,
+      assignedEngineerId: job.assignedEngineerId,
+      assignedEngineerName: job.assignedEngineerName,
+      status: job.status,
+      goodsStatus: summary?.goodsStatus ?? "not_issued",
+      kitLines: kitLineRows,
+    });
+  }
+  return rows;
+}
+
+export async function getJobGoods(jobId: string, actor?: AuditActor): Promise<JobGoodsDetail> {
+  const job = await jobRepo.findById(jobId);
+  if (!job) throw notFound("Job not found.");
+
+  const movements = await goodsManagementRepo.findMovementsByJob(job.id);
+  const summary = await goodsManagementRepo.getSummary(job.id);
+
+  const kitLines: QueueKitLine[] = [];
+  for (const kl of job.kitLines ?? []) {
+    if (kl.warehouseId) assertWarehouseAccess(actor, kl.warehouseId);
+
+    const issued = issuedForKitLine(movements, kl.id);
+    let available = 0;
+    if (kl.lineType === "irm" && kl.irmItemId && kl.warehouseId) {
+      const bal = await inventoryRepo.findBalancePair(kl.irmItemId, kl.warehouseId);
+      available = (bal?.quantityOnHand ?? 0) - (bal?.quantityReserved ?? 0);
+    } else if (kl.lineType === "customer_stock" && kl.customerStockEntryId) {
+      const entry = await goodsManagementRepo.findCustomerStockEntryById(kl.customerStockEntryId);
+      available = entry?.quantity ?? 0;
+      // NOTE: no cost/value exposed
+    }
+    kitLines.push({
+      kitLineId: kl.id,
+      lineType: kl.lineType,
+      irmItemId: kl.irmItemId,
+      customerStockEntryId: kl.customerStockEntryId,
+      itemName: kl.itemName,
+      warehouseId: kl.warehouseId,
+      warehouseName: kl.warehouseName,
+      warehouseCode: kl.warehouseCode,
+      planned: kl.qty,
+      issued,
+      available,
+    });
+  }
+
+  return {
+    job: {
+      id: job.id,
+      jobNumber: job.jobNumber,
+      name: job.name,
+      customerId: job.customerId,
+      customerName: job.customerName,
+      assignedEngineerId: job.assignedEngineerId,
+      assignedEngineerName: job.assignedEngineerName,
+      status: job.status,
+    },
+    summary: summary
+      ? { goodsStatus: summary.goodsStatus, workSummary: summary.workSummary, lastMovementAt: summary.lastMovementAt }
+      : null,
+    movements: movements.map(toPublic),
+    kitLines,
+  };
+}

@@ -9,6 +9,8 @@ import { postMovementSchema, scanLookupSchema } from "./goods-management.validat
 const router = Router();
 router.use(requireAuth);
 
+router.get("/queue", requirePermission("goods_management.view"), controller.listQueue);
+router.get("/jobs/:jobId", requirePermission("goods_management.view"), controller.getJobGoods);
 router.post("/scan-lookup", requirePermission("goods_management.view"), writeLimiter, validateBody(scanLookupSchema), controller.scanLookup);
 router.post("/jobs/:jobId/issue", requirePermission("goods_management.issue"), writeLimiter, validateBody(postMovementSchema), controller.postIssue);
 

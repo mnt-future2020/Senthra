@@ -7,7 +7,7 @@ vi.mock("./goods-management.repository.js", () => ({
   adjustCustomerStockEntryQtyTx: vi.fn(), findCustomerStockEntryById: vi.fn(), findCustomerStockEntryByBarcode: vi.fn(),
   upsertDamagedBalanceTx: vi.fn(), insertDamagedTxnTx: vi.fn(), findDamagedByWarehouse: vi.fn(), findDamagedByCustomer: vi.fn(), findRecentMovementsForOverdue: vi.fn(),
 }));
-vi.mock("#modules/job/job.repository.js", () => ({ findById: vi.fn() }));
+vi.mock("#modules/job/job.repository.js", () => ({ findById: vi.fn(), findActiveForGoodsManagement: vi.fn() }));
 vi.mock("#modules/irm/irm.service.js", () => ({ requireActiveIrmItem: vi.fn(), findActiveByCodeOrBarcode: vi.fn() }));
 vi.mock("#modules/inventory/inventory.repository.js", () => ({ findBalancePair: vi.fn(), findBalancePairTx: vi.fn(), upsertBalanceTx: vi.fn(), insertTransactionTx: vi.fn() }));
 vi.mock("#modules/inventory/inventory.service.js", () => ({ applyOutbound: vi.fn(), applyInbound: vi.fn() }));
@@ -53,7 +53,7 @@ describe("scanLookup (issue)", () => {
   });
 });
 
-import { postIssue } from "./goods-management.service.js";
+import { listQueue, postIssue } from "./goods-management.service.js";
 import * as inventoryService from "#modules/inventory/inventory.service.js";
 import * as goodsOutRepo from "#modules/goods-out/goods-out.repository.js";
 
@@ -88,5 +88,26 @@ describe("postIssue", () => {
     mockMoves.mockResolvedValue([{ status: "posted", direction: "issue", items: [{ jobKitLineId: "k1", qty: 6 }] }]);
     await expect(postIssue(JOB_ID, { direction: "issue", lines: [{ source: "irm", irmItemId: IRM_ID, jobKitLineId: "k1", qty: 6, scannedCode: "IRM-0004" }] }, { email: "wm@x.com" } as never)).rejects.toThrow(/remaining|kit/i);
     expect(mockCreateMovement).not.toHaveBeenCalled();
+  });
+});
+
+describe("listQueue", () => {
+  it("reports planned: 10, issued: 6, available: 4 given existing movements and balance", async () => {
+    const mockFindActive = jobRepo.findActiveForGoodsManagement as ReturnType<typeof vi.fn>;
+    mockFindActive.mockResolvedValue([{
+      id: JOB_ID, jobNumber: "JOB-2026-0001", name: "Test Job", customerId: "x".repeat(24),
+      customerName: "Acme", assignedEngineerId: ENG_ID, assignedEngineerName: "Bob", status: "accepted",
+      kitLines: [{ id: "k1", lineType: "irm", irmItemId: IRM_ID, warehouseId: WH_ID, itemName: "CAT6", qty: 10, warehouseName: "WH1", warehouseCode: "W1", customerStockEntryId: null }],
+    }]);
+    // 6 already issued
+    mockMoves.mockResolvedValue([{ status: "posted", direction: "issue", items: [{ jobKitLineId: "k1", qty: 6 }] }]);
+    // 4 available in warehouse
+    mockBal.mockResolvedValue({ quantityOnHand: 4, quantityReserved: 0 });
+    const mockGetSummary = repo.getSummary as ReturnType<typeof vi.fn>;
+    mockGetSummary.mockResolvedValue(null);
+
+    const queue = await listQueue();
+    expect(queue).toHaveLength(1);
+    expect(queue[0].kitLines[0]).toMatchObject({ planned: 10, issued: 6, available: 4 });
   });
 });
