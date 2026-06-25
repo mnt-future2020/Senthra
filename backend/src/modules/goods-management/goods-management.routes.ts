@@ -15,5 +15,7 @@ router.post("/scan-lookup", requirePermission("goods_management.view"), writeLim
 router.post("/jobs/:jobId/issue", requirePermission("goods_management.issue"), writeLimiter, validateBody(postMovementSchema), controller.postIssue);
 router.post("/jobs/:jobId/return", requirePermission("goods_management.receive_return"), writeLimiter, validateBody(postMovementSchema), controller.postReturn);
 router.post("/jobs/:jobId/close", requirePermission("goods_management.reconcile"), writeLimiter, validateBody(closeReconcileSchema), controller.closeReconcile);
+router.get("/damaged", requirePermission("goods_management.view"), controller.listDamaged);
+router.get("/overdue", requirePermission("goods_management.view"), controller.listOverdue);
 
 export default router;

@@ -3,6 +3,7 @@ import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
 import { param } from "../../utils/request.js";
 import type { CloseReconcileInput, PostMovementInput, ScanLookupInput } from "./goods-management.validation.js";
+import { badRequest } from "../../utils/http-error.js";
 
 export const scanLookup = asyncHandler(async (req, res) => {
   res.json({ match: await service.scanLookup(req.body as ScanLookupInput, actorFrom(req)) });
@@ -26,4 +27,17 @@ export const getJobGoods = asyncHandler(async (req, res) => {
 
 export const closeReconcile = asyncHandler(async (req, res) => {
   res.json(await service.closeReconcile(param(req, "jobId"), req.body as CloseReconcileInput, actorFrom(req)));
+});
+
+export const listDamaged = asyncHandler(async (req, res) => {
+  const warehouseId = req.query["warehouseId"] as string | undefined;
+  const customerId = req.query["customerId"] as string | undefined;
+  res.json({ damaged: await service.listDamaged({ warehouseId, customerId }, actorFrom(req)) });
+});
+
+export const listOverdue = asyncHandler(async (req, res) => {
+  const rawDays = req.query["days"];
+  const days = rawDays !== undefined ? Number(rawDays) : 14;
+  if (!Number.isFinite(days) || days < 1) throw badRequest("days must be a positive integer.");
+  res.json({ overdue: await service.listOverdue(actorFrom(req), days) });
 });

@@ -813,6 +813,156 @@ export async function recordConsumeAndComplete(
   );
 }
 
+// ── Damaged stock read ────────────────────────────────────────────────────────────────────────
+// Exposes NO cost/value — only item/qty/serial/location/flag.
+export interface DamagedRow {
+  id: string;
+  warehouseId: string;
+  ownerType: string; // "company" | "customer"
+  irmItemId: string | null;
+  customerStockEntryId: string | null;
+  customerId: string | null;
+  itemName: string;
+  quantity: number;
+}
+
+export async function listDamaged(
+  filter: { warehouseId?: string; customerId?: string },
+  actor?: AuditActor,
+): Promise<DamagedRow[]> {
+  const scopeIds = warehouseScopeFilter(actor);
+
+  let rows: DamagedRow[] = [];
+
+  if (filter.customerId) {
+    const raw = await goodsManagementRepo.findDamagedByCustomer(filter.customerId);
+    rows = raw
+      .filter((r) => scopeIds === undefined || scopeIds.includes(r.warehouseId))
+      .map((r) => ({
+        id: r.id,
+        warehouseId: r.warehouseId,
+        ownerType: r.ownerType,
+        irmItemId: r.irmItemId,
+        customerStockEntryId: r.customerStockEntryId,
+        customerId: r.customerId,
+        itemName: r.itemName,
+        quantity: r.quantity,
+      }));
+  } else if (filter.warehouseId) {
+    assertWarehouseAccess(actor, filter.warehouseId);
+    const raw = await goodsManagementRepo.findDamagedByWarehouse(filter.warehouseId);
+    rows = raw.map((r) => ({
+      id: r.id,
+      warehouseId: r.warehouseId,
+      ownerType: r.ownerType,
+      irmItemId: r.irmItemId,
+      customerStockEntryId: r.customerStockEntryId,
+      customerId: r.customerId,
+      itemName: r.itemName,
+      quantity: r.quantity,
+    }));
+  } else {
+    // No filter: return all warehouses the actor can access.
+    // For scoped actors, we need to list per accessible warehouse; for global actors list all.
+    const allWarehouseIds = scopeIds;
+    if (allWarehouseIds !== undefined) {
+      // Scoped: fetch per warehouse then merge.
+      for (const whId of allWarehouseIds) {
+        const raw = await goodsManagementRepo.findDamagedByWarehouse(whId);
+        for (const r of raw) {
+          rows.push({
+            id: r.id,
+            warehouseId: r.warehouseId,
+            ownerType: r.ownerType,
+            irmItemId: r.irmItemId,
+            customerStockEntryId: r.customerStockEntryId,
+            customerId: r.customerId,
+            itemName: r.itemName,
+            quantity: r.quantity,
+          });
+        }
+      }
+    } else {
+      // Global actor: use repo's findAll-style query (no filter).
+      const raw = await goodsManagementRepo.findAllDamaged();
+      rows = raw.map((r) => ({
+        id: r.id,
+        warehouseId: r.warehouseId,
+        ownerType: r.ownerType,
+        irmItemId: r.irmItemId,
+        customerStockEntryId: r.customerStockEntryId,
+        customerId: r.customerId,
+        itemName: r.itemName,
+        quantity: r.quantity,
+      }));
+    }
+  }
+
+  return rows;
+}
+
+// ── Overdue holdings ──────────────────────────────────────────────────────────────────────────
+// Issue movements older than `days` whose job's engineer still holds stock
+// (goodsStatus !== "reconciled").
+export interface OverdueRow {
+  jobId: string;
+  jobNumber: string;
+  jobName: string;
+  engineerId: string;
+  engineerName: string;
+  warehouseId: string | null;
+  issuedAt: Date;
+  goodsStatus: string;
+  lines: { source: string; irmItemId: string | null; customerStockEntryId: string | null; itemName: string; qty: number }[];
+}
+
+export async function listOverdue(actor?: AuditActor, days = 14): Promise<OverdueRow[]> {
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const movements = await goodsManagementRepo.findRecentMovementsForOverdue(cutoff);
+
+  // Group by job, filter to jobs not yet reconciled.
+  const seenJobIds = new Set<string>();
+  const rows: OverdueRow[] = [];
+
+  for (const m of movements) {
+    if (seenJobIds.has(m.jobId)) continue;
+
+    // Check warehouse scope access.
+    if (m.warehouseId) {
+      try {
+        assertWarehouseAccess(actor, m.warehouseId);
+      } catch {
+        continue; // skip movements the actor can't access
+      }
+    }
+
+    const summary = await goodsManagementRepo.getSummary(m.jobId);
+    if (summary?.goodsStatus === "reconciled") continue;
+
+    seenJobIds.add(m.jobId);
+
+    rows.push({
+      jobId: m.jobId,
+      jobNumber: m.job?.jobNumber ?? m.jobId,
+      jobName: m.job?.name ?? "",
+      engineerId: m.engineerId,
+      engineerName: m.engineerName,
+      warehouseId: m.warehouseId,
+      issuedAt: m.createdAt,
+      goodsStatus: summary?.goodsStatus ?? "issued",
+      lines: m.items.map((l) => ({
+        source: l.source,
+        irmItemId: l.irmItemId,
+        customerStockEntryId: l.customerStockEntryId,
+        itemName: l.itemName,
+        qty: l.qty,
+      })),
+    });
+  }
+
+  return rows;
+}
+
 // ── Close & reconcile ─────────────────────────────────────────────────────────────────────────
 // Computes per-item tally: issued − consumed − returnedGood − returnedDamaged.
 // If all zero → goodsStatus = "reconciled" (locked).

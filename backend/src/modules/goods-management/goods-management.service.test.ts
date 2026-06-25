@@ -5,7 +5,7 @@ vi.mock("./goods-management.repository.js", () => ({
   createMovementWithCode: vi.fn(), findMovementsByJob: vi.fn(), getSummary: vi.fn(), upsertSummaryTx: vi.fn(),
   upsertCustomerHoldingTx: vi.fn(), findCustomerHoldingTx: vi.fn(), insertCustomerHoldingTxnTx: vi.fn(), findCustomerHoldingsByEngineer: vi.fn(),
   adjustCustomerStockEntryQtyTx: vi.fn(), findCustomerStockEntryById: vi.fn(), findCustomerStockEntryByBarcode: vi.fn(),
-  upsertDamagedBalanceTx: vi.fn(), insertDamagedTxnTx: vi.fn(), findDamagedByWarehouse: vi.fn(), findDamagedByCustomer: vi.fn(), findRecentMovementsForOverdue: vi.fn(),
+  upsertDamagedBalanceTx: vi.fn(), insertDamagedTxnTx: vi.fn(), findDamagedByWarehouse: vi.fn(), findDamagedByCustomer: vi.fn(), findAllDamaged: vi.fn(), findRecentMovementsForOverdue: vi.fn(),
 }));
 vi.mock("#modules/job/job.repository.js", () => ({ findById: vi.fn(), findActiveForGoodsManagement: vi.fn(), completeIfInProgressTx: vi.fn() }));
 vi.mock("#modules/irm/irm.service.js", () => ({ requireActiveIrmItem: vi.fn(), findActiveByCodeOrBarcode: vi.fn() }));
@@ -612,5 +612,129 @@ describe("closeReconcile", () => {
     await expect(
       postReturn(RECONCILE_JOB_ID, { direction: "return", lines: [{ source: "irm", irmItemId: IRM_ID, qty: 1, condition: "good", jobKitLineId: "k1" }] }, { email: "wm@x.com" } as never),
     ).rejects.toThrow(/reconciled|locked/i);
+  });
+});
+
+// ── listDamaged ──────────────────────────────────────────────────────────────────────────────
+import { listDamaged } from "./goods-management.service.js";
+
+const mockFindDamagedByWarehouse = repo.findDamagedByWarehouse as ReturnType<typeof vi.fn>;
+const mockFindDamagedByCustomer = repo.findDamagedByCustomer as ReturnType<typeof vi.fn>;
+const mockFindAllDamaged = repo.findAllDamaged as ReturnType<typeof vi.fn>;
+
+const damagedRow = {
+  id: "dmg1",
+  warehouseId: WH_ID,
+  ownerType: "company",
+  irmItemId: IRM_ID,
+  customerStockEntryId: null,
+  customerId: null,
+  itemName: "CAT6",
+  quantity: 3,
+  updatedAt: new Date(),
+};
+
+describe("listDamaged", () => {
+  beforeEach(() => {
+    mockFindDamagedByWarehouse.mockResolvedValue([damagedRow]);
+    mockFindDamagedByCustomer.mockResolvedValue([]);
+    mockFindAllDamaged.mockResolvedValue([damagedRow]);
+  });
+
+  it("filters by warehouseId and returns rows without cost/value", async () => {
+    const rows = await listDamaged({ warehouseId: WH_ID });
+    expect(mockFindDamagedByWarehouse).toHaveBeenCalledWith(WH_ID);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: "dmg1", warehouseId: WH_ID, ownerType: "company", irmItemId: IRM_ID, quantity: 3 });
+    // No cost/value fields exposed.
+    expect(Object.keys(rows[0])).not.toContain("cost");
+    expect(Object.keys(rows[0])).not.toContain("value");
+  });
+
+  it("filters by customerId and returns customer-owned damaged rows", async () => {
+    const customerDamagedRow = { ...damagedRow, id: "dmg2", ownerType: "customer", customerId: "cust1", irmItemId: null, customerStockEntryId: CSE_ID, itemName: "SFP-LX", quantity: 1 };
+    mockFindDamagedByCustomer.mockResolvedValue([customerDamagedRow]);
+    const rows = await listDamaged({ customerId: "cust1" });
+    expect(mockFindDamagedByCustomer).toHaveBeenCalledWith("cust1");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: "dmg2", ownerType: "customer", customerStockEntryId: CSE_ID, quantity: 1 });
+  });
+
+  it("returns all damaged rows for a global actor when no filter given", async () => {
+    const rows = await listDamaged({});
+    expect(mockFindAllDamaged).toHaveBeenCalled();
+    expect(rows).toHaveLength(1);
+  });
+});
+
+// ── listOverdue ──────────────────────────────────────────────────────────────────────────────
+import { listOverdue } from "./goods-management.service.js";
+
+const mockFindRecentMovementsForOverdue = repo.findRecentMovementsForOverdue as ReturnType<typeof vi.fn>;
+
+describe("listOverdue", () => {
+  beforeEach(() => {
+    const mockGetSummary = repo.getSummary as ReturnType<typeof vi.fn>;
+    // Default: one overdue issue movement, job not yet reconciled.
+    mockFindRecentMovementsForOverdue.mockResolvedValue([
+      {
+        id: "m1",
+        code: "GM-0001",
+        jobId: JOB_ID,
+        direction: "issue",
+        status: "posted",
+        engineerId: ENG_ID,
+        engineerName: "Bob Smith",
+        warehouseId: WH_ID,
+        createdAt: new Date(Date.now() - 20 * 24 * 60 * 60 * 1000), // 20 days ago
+        job: { id: JOB_ID, jobNumber: "JOB-0001", name: "Test Job", customerId: "cust1", customerName: "Acme" },
+        items: [{ source: "irm", irmItemId: IRM_ID, customerStockEntryId: null, itemName: "CAT6", qty: 5, condition: "good" }],
+      },
+    ]);
+    mockGetSummary.mockResolvedValue({ goodsStatus: "issued", workSummary: null, lastMovementAt: new Date() });
+  });
+
+  it("returns issue movements older than the cutoff whose job is not reconciled", async () => {
+    const rows = await listOverdue();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      jobId: JOB_ID,
+      jobNumber: "JOB-0001",
+      engineerName: "Bob Smith",
+      goodsStatus: "issued",
+    });
+    expect(rows[0].lines).toHaveLength(1);
+    expect(rows[0].lines[0]).toMatchObject({ source: "irm", irmItemId: IRM_ID, qty: 5 });
+  });
+
+  it("excludes jobs that are already reconciled", async () => {
+    const mockGetSummaryReconciled = repo.getSummary as ReturnType<typeof vi.fn>;
+    mockGetSummaryReconciled.mockResolvedValue({ goodsStatus: "reconciled", workSummary: null, lastMovementAt: new Date() });
+    const rows = await listOverdue();
+    expect(rows).toHaveLength(0);
+  });
+
+  it("deduplicates the same job appearing in multiple issue movements", async () => {
+    // Two issue movements for the same job.
+    const baseMovement = {
+      id: "m1",
+      code: "GM-0001",
+      jobId: JOB_ID,
+      direction: "issue",
+      status: "posted",
+      engineerId: ENG_ID,
+      engineerName: "Bob Smith",
+      warehouseId: WH_ID,
+      createdAt: new Date(Date.now() - 20 * 24 * 60 * 60 * 1000),
+      job: { id: JOB_ID, jobNumber: "JOB-0001", name: "Test Job", customerId: "cust1", customerName: "Acme" },
+      items: [{ source: "irm", irmItemId: IRM_ID, customerStockEntryId: null, itemName: "CAT6", qty: 5, condition: "good" }],
+    };
+    mockFindRecentMovementsForOverdue.mockResolvedValue([
+      { ...baseMovement },
+      { ...baseMovement, id: "m2", code: "GM-0002" },
+    ]);
+    const rows = await listOverdue();
+    // The same job appears only once even with two issue movements.
+    expect(rows).toHaveLength(1);
   });
 });

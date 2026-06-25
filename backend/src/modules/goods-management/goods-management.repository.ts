@@ -170,6 +170,9 @@ export function findDamagedByWarehouse(warehouseId: string) {
 export function findDamagedByCustomer(customerId: string) {
   return prisma.damagedStockBalance.findMany({ where: { customerId, quantity: { gt: 0 } }, orderBy: { updatedAt: "desc" } });
 }
+export function findAllDamaged() {
+  return prisma.damagedStockBalance.findMany({ where: { quantity: { gt: 0 } }, orderBy: { updatedAt: "desc" } });
+}
 
 // --- overdue holdings (jobs whose stock is still out > N days) --------------------------------
 export function findRecentMovementsForOverdue(cutoff: Date) {
