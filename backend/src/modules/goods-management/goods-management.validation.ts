@@ -27,7 +27,7 @@ const movementLineSchema = z
     qty: z.coerce.number({ error: "Quantity is required." }).int("Whole number.").min(1, "At least 1.").max(10_000_000),
     condition: z.enum(LINE_CONDITIONS).optional(), // returns only; defaults to "good" server-side
     scannedCode: z.string().trim().max(120).optional(),
-    damagePhotoUrl: z.string().trim().max(1000).optional(),
+    damagePhotoUrl: z.string().trim().max(2000).optional(),
     damageReason: z.string().trim().max(500).optional(),
     notes: z.string().trim().max(2000).optional(),
   })
@@ -47,6 +47,21 @@ export const postMovementSchema = z.object({
   lines: z.array(movementLineSchema).min(1, "Scan at least one item.").max(500),
 });
 export type PostMovementInput = z.infer<typeof postMovementSchema>;
+
+// Damage-photo upload: the raw data URI from the client, uploaded server-side to Cloudinary.
+// ~15 MB cap (base64 inflates ~33%, so this allows ≈11 MB of binary data — more than enough
+// for a mobile photo taken at medium quality).
+const MAX_DAMAGE_PHOTO_CHARS = 15_000_000;
+export const uploadDamagePhotoSchema = z.object({
+  image: z
+    .string({ error: "Image is required." })
+    .max(MAX_DAMAGE_PHOTO_CHARS, "Image is too large (max ~10 MB).")
+    .regex(
+      /^data:image\/(png|jpe?g|gif|webp|svg\+xml|x-icon|vnd\.microsoft\.icon);base64,/i,
+      "Image must be a base64 data URI (PNG, JPG, GIF, WEBP, SVG or ICO).",
+    ),
+});
+export type UploadDamagePhotoInput = z.infer<typeof uploadDamagePhotoSchema>;
 
 export const closeReconcileSchema = z.object({
   writeOffLost: z.boolean().optional(), // book any unaccounted units as lost on close

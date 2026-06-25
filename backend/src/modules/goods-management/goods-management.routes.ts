@@ -4,7 +4,7 @@ import * as controller from "./goods-management.controller.js";
 import { requireAuth, requirePermission } from "../../middleware/auth.middleware.js";
 import { writeLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
-import { closeReconcileSchema, postMovementSchema, scanLookupSchema } from "./goods-management.validation.js";
+import { closeReconcileSchema, postMovementSchema, scanLookupSchema, uploadDamagePhotoSchema } from "./goods-management.validation.js";
 
 const router = Router();
 router.use(requireAuth);
@@ -17,5 +17,6 @@ router.post("/jobs/:jobId/return", requirePermission("goods_management.receive_r
 router.post("/jobs/:jobId/close", requirePermission("goods_management.reconcile"), writeLimiter, validateBody(closeReconcileSchema), controller.closeReconcile);
 router.get("/damaged", requirePermission("goods_management.view"), controller.listDamaged);
 router.get("/overdue", requirePermission("goods_management.view"), controller.listOverdue);
+router.post("/damage-photo", requirePermission("goods_management.receive_return"), writeLimiter, validateBody(uploadDamagePhotoSchema), controller.uploadDamagePhoto);
 
 export default router;

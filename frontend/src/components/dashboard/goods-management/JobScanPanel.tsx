@@ -37,8 +37,9 @@ interface ScanLine {
   match: ScanMatch;
   qty: number;
   condition: LineCondition;
-  damagePhotoDataUrl?: string; // data URI before upload
-  damagePhotoUrl?: string; // final value sent to backend
+  damagePhotoDataUrl?: string; // data URI — kept for the preview image only
+  damagePhotoUrl?: string; // Cloudinary-hosted URL sent to backend
+  damagePhotoUploading?: boolean; // true while the upload is in flight
   damageReason?: string;
 }
 
@@ -179,14 +180,33 @@ export function JobScanPanel({
     // Reset so the same file can be re-picked if needed.
     const input = photoRefs.current.get(key);
     if (input) input.value = "";
+    let dataUrl: string;
     try {
-      const dataUrl = await readFileAsDataUrl(file);
-      updateLine(key, {
-        damagePhotoDataUrl: dataUrl,
-        damagePhotoUrl: dataUrl, // send data URI; backend handles Cloudinary upload
-      });
+      dataUrl = await readFileAsDataUrl(file);
     } catch {
       pushToast("Could not read the photo.", "alert");
+      return;
+    }
+    // Show preview immediately; mark upload in-flight.
+    updateLine(key, {
+      damagePhotoDataUrl: dataUrl,
+      damagePhotoUrl: undefined,
+      damagePhotoUploading: true,
+    });
+    try {
+      const hostedUrl = await gmService.uploadDamagePhoto(dataUrl);
+      updateLine(key, { damagePhotoUrl: hostedUrl, damagePhotoUploading: false });
+    } catch (err) {
+      // Clear the preview so the user knows the upload failed and must re-pick.
+      updateLine(key, {
+        damagePhotoDataUrl: undefined,
+        damagePhotoUrl: undefined,
+        damagePhotoUploading: false,
+      });
+      pushToast(
+        err instanceof Error ? err.message : "Could not upload the damage photo.",
+        "alert",
+      );
     }
   };
 
@@ -199,6 +219,10 @@ export function JobScanPanel({
     // Validate damage lines.
     for (const l of lines) {
       if (direction === "return" && l.condition === "damaged") {
+        if (l.damagePhotoUploading) {
+          pushToast(`${l.match.itemName}: photo upload still in progress — please wait.`, "alert");
+          return;
+        }
         if (!l.damagePhotoUrl) {
           pushToast(`${l.match.itemName}: a damage photo is required.`, "alert");
           return;
@@ -456,6 +480,8 @@ export function JobScanPanel({
                                 c === "good"
                                   ? undefined
                                   : line.damagePhotoDataUrl,
+                              damagePhotoUploading:
+                                c === "good" ? undefined : line.damagePhotoUploading,
                               damageReason:
                                 c === "good" ? undefined : line.damageReason,
                             })
@@ -489,19 +515,26 @@ export function JobScanPanel({
                                 alt="Damage preview"
                                 className="h-16 w-24 rounded-lg object-cover border border-[var(--border)]"
                               />
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  updateLine(line.key, {
-                                    damagePhotoDataUrl: undefined,
-                                    damagePhotoUrl: undefined,
-                                  })
-                                }
-                                className="flex items-center gap-1 text-[11px] font-bold text-[var(--neg)] hover:underline"
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                                Remove
-                              </button>
+                              {line.damagePhotoUploading ? (
+                                <span className="flex items-center gap-1 text-[11px] text-[var(--muted)]">
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  Uploading…
+                                </span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    updateLine(line.key, {
+                                      damagePhotoDataUrl: undefined,
+                                      damagePhotoUrl: undefined,
+                                    })
+                                  }
+                                  className="flex items-center gap-1 text-[11px] font-bold text-[var(--neg)] hover:underline"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                  Remove
+                                </button>
+                              )}
                             </div>
                           ) : (
                             <button

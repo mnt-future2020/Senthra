@@ -1,6 +1,8 @@
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
+import { uploadToCloudinary } from "../../lib/cloudinary.js";
+import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import * as jobRepo from "#modules/job/job.repository.js";
 import type { JobWithRelations } from "#modules/job/job.repository.js";
 import * as irmService from "#modules/irm/irm.service.js";
@@ -78,6 +80,25 @@ export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Pr
   }
 
   throw notFound(`No item matches "${code}".`);
+}
+
+// ── Damage-photo upload ───────────────────────────────────────────────────────────────────────
+// Receives a data URI from the WM scan panel, uploads it to Cloudinary, and returns the hosted URL.
+// The caller (JobScanPanel) stores this URL in the movement line's damagePhotoUrl field, so no raw
+// data URI ever reaches the movement-post endpoint (which validates max 2000 chars — a Cloudinary
+// URL is always shorter).
+export async function uploadDamagePhoto(image: string): Promise<{ url: string }> {
+  const creds = await getCloudinaryCreds();
+  if (!creds) {
+    throw badRequest(
+      "Cloudinary isn't configured. Add your Cloudinary credentials in Settings → Integrations (or set CLOUDINARY_* in the backend env).",
+    );
+  }
+  // Use a timestamp-based unique publicId so each damage photo is stored as a distinct asset
+  // (no overwrite — unlike branding, damage photos must be preserved for audit purposes).
+  const publicId = `damage_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const url = await uploadToCloudinary(image, publicId, creds, "senthra/damage-photos");
+  return { url };
 }
 
 export { warehouseScopeFilter }; // re-export for the queue task
@@ -257,7 +278,20 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
           });
         }
       }
-      await goodsManagementRepo.upsertSummaryTx(tx, job.id, { goodsStatus: "issued" });
+      // Determine the correct goodsStatus after this movement:
+      // "issued" if every kit line is now fully issued, otherwise "partially_issued".
+      // Re-fetch movements from within the transaction is not available, so we compute
+      // using the pre-movement snapshot plus the lines we're adding now.
+      const allKitLines = job.kitLines ?? [];
+      const isFullyIssued = allKitLines.every((kl) => {
+        // Accumulate issued qty for this kit line from existing movements.
+        let issued = issuedForKitLine(movements, kl.id);
+        // Add the qty being posted in this movement.
+        const matchingNewLine = resolved.find((r) => r.kit.id === kl.id);
+        if (matchingNewLine) issued += matchingNewLine.line.qty;
+        return issued >= kl.qty;
+      });
+      await goodsManagementRepo.upsertSummaryTx(tx, job.id, { goodsStatus: isFullyIssued ? "issued" : "partially_issued" });
     },
   );
 

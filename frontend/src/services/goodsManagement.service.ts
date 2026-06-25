@@ -41,7 +41,7 @@ export function getQueue(): Promise<QueueRow[]> {
 
 /** Full goods detail for a single job: summary + all movements + kit-line tallies. */
 export function getJobGoods(jobId: string): Promise<JobGoodsDetail> {
-  return api<{ goods: JobGoodsDetail }>(`/goods-management/jobs/${jobId}`).then((r) => r.goods);
+  return api<JobGoodsDetail>(`/goods-management/jobs/${jobId}`);
 }
 
 // ── Issue (WM scan-out) ───────────────────────────────────────────────────────
@@ -90,6 +90,19 @@ export function listDamaged(params: ListDamagedParams = {}): Promise<DamagedRow[
   if (params.customerId) sp.set("customerId", params.customerId);
   const qs = sp.toString();
   return api<{ damaged: DamagedRow[] }>(`/goods-management/damaged${qs ? `?${qs}` : ""}`).then((r) => r.damaged);
+}
+
+// ── Damage-photo upload ───────────────────────────────────────────────────────
+
+/**
+ * Upload a damage photo data URI to the backend (which relays it to Cloudinary).
+ * Returns the resulting hosted URL — store this in the movement line's damagePhotoUrl field.
+ */
+export function uploadDamagePhoto(dataUri: string): Promise<string> {
+  return api<{ url: string }>("/goods-management/damage-photo", {
+    method: "POST",
+    body: { image: dataUri },
+  }).then((r) => r.url);
 }
 
 // ── Overdue holdings ──────────────────────────────────────────────────────────

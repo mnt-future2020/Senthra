@@ -54,5 +54,5 @@ export function completeOwnJob(id: string, payload: CompleteJobPayload): Promise
  * No price/cost fields — only item/qty/customer label.
  */
 export function getOwnCustomerStock(): Promise<CustomerHolding[]> {
-  return api<{ stock: CustomerHolding[] }>("/engineer/customer-stock").then((r) => r.stock);
+  return api<{ customerStock: CustomerHolding[] }>("/engineer/customer-stock").then((r) => r.customerStock ?? []);
 }
