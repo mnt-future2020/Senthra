@@ -1,7 +1,7 @@
 import type { Request } from "express";
 
 import * as engineerService from "./engineer.service.js";
-import type { RejectJobInput } from "#modules/job/job.validation.js";
+import type { CompleteJobInput, RejectJobInput } from "#modules/job/job.validation.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
 import { forbidden } from "../../utils/http-error.js";
@@ -44,4 +44,19 @@ export const acceptOwnJob = asyncHandler(async (req, res) => {
 export const rejectOwnJob = asyncHandler(async (req, res) => {
   const { reason } = req.body as RejectJobInput;
   res.json({ job: await engineerService.rejectOwnJob(ownId(req), param(req, "id"), reason, actorFrom(req)) });
+});
+
+// POST /engineer/jobs/:id/start — mark an accepted job in-progress (start work on site).
+export const startOwnJob = asyncHandler(async (req, res) => {
+  res.json({ job: await engineerService.startOwnJob(ownId(req), param(req, "id"), actorFrom(req)) });
+});
+
+// POST /engineer/jobs/:id/complete — mark a job completed, declaring used quantities + a work summary.
+export const completeOwnJob = asyncHandler(async (req, res) => {
+  res.json({ job: await engineerService.completeOwnJob(ownId(req), param(req, "id"), req.body as CompleteJobInput, actorFrom(req)) });
+});
+
+// GET /engineer/customer-stock — customer consignment stock the engineer currently holds (no pricing).
+export const getOwnCustomerStock = asyncHandler(async (req, res) => {
+  res.json({ customerStock: await engineerService.getOwnCustomerStock(ownId(req)) });
 });
