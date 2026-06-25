@@ -131,8 +131,6 @@ export function findByNumber(jobNumber: string): Promise<JobWithRelations | null
 // Returns jobs whose kit lines have at least one line pointing at a warehouse the actor can access.
 // `warehouseIds` = undefined means unrestricted; [] means no-match (scoped user with no warehouses).
 export function findActiveForGoodsManagement(warehouseIds?: string[]): Promise<JobWithRelations[]> {
-  const warehouseWhere: Prisma.WarehouseWhereInput | undefined =
-    warehouseIds !== undefined ? { id: { in: warehouseIds } } : undefined;
   // We filter kit lines per-warehouse in the service after fetch; here just fetch active jobs.
   // If the actor is scoped (warehouseIds is an array) filter to jobs that have ANY kit line for those warehouses.
   const where: Prisma.JobWhereInput = {
@@ -146,7 +144,6 @@ export function findActiveForGoodsManagement(warehouseIds?: string[]): Promise<J
       },
     }),
   };
-  void warehouseWhere; // consumed inline above
   return prisma.job.findMany({ where, include: withRelations, orderBy: { createdAt: "desc" } });
 }
 

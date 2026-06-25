@@ -300,13 +300,19 @@ export interface JobGoodsDetail {
   };
   summary: { goodsStatus: string; workSummary: string | null; lastMovementAt: Date | null } | null;
   movements: PublicMovement[];
-  kitLines: QueueKitLine[];
+  /** Per-kit-line tallies (plan spec key: `lines`). */
+  lines: QueueKitLine[];
 }
 
 export async function listQueue(actor?: AuditActor): Promise<QueueRow[]> {
   const scopeIds = warehouseScopeFilter(actor);
   const jobs = await jobRepo.findActiveForGoodsManagement(scopeIds);
 
+  // TODO(perf): N+1 pattern — for each job we issue 2 DB calls (findMovementsByJob +
+  // getSummary) then 1 call per kit line (findBalancePair / findCustomerStockEntryById).
+  // At scale (e.g. 50 jobs × 10 lines) this produces 600+ serial Mongo round-trips per
+  // request. Fix: batch movements via a single findMany({ where: { jobId: { in: jobIds } } })
+  // and batch balance lookups; defer until the queue endpoint shows measurable latency.
   const rows: QueueRow[] = [];
   for (const job of jobs) {
     const movements = await goodsManagementRepo.findMovementsByJob(job.id);
@@ -366,7 +372,7 @@ export async function getJobGoods(jobId: string, actor?: AuditActor): Promise<Jo
   const movements = await goodsManagementRepo.findMovementsByJob(job.id);
   const summary = await goodsManagementRepo.getSummary(job.id);
 
-  const kitLines: QueueKitLine[] = [];
+  const lines: QueueKitLine[] = [];
   for (const kl of job.kitLines ?? []) {
     if (kl.warehouseId) assertWarehouseAccess(actor, kl.warehouseId);
 
@@ -380,7 +386,7 @@ export async function getJobGoods(jobId: string, actor?: AuditActor): Promise<Jo
       available = entry?.quantity ?? 0;
       // NOTE: no cost/value exposed
     }
-    kitLines.push({
+    lines.push({
       kitLineId: kl.id,
       lineType: kl.lineType,
       irmItemId: kl.irmItemId,
@@ -410,6 +416,6 @@ export async function getJobGoods(jobId: string, actor?: AuditActor): Promise<Jo
       ? { goodsStatus: summary.goodsStatus, workSummary: summary.workSummary, lastMovementAt: summary.lastMovementAt }
       : null,
     movements: movements.map(toPublic),
-    kitLines,
+    lines,
   };
 }
