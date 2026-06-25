@@ -105,6 +105,11 @@ export function listManagerOptions(): Promise<WarehouseManager[]> {
   return api<{ managers: WarehouseManager[] }>("/warehouses/manager-options").then((r) => r.managers);
 }
 
+// Active field engineers (canHoldStock roles) for the "assign an engineer" dropdowns on jobs.
+export function listEngineerOptions(): Promise<WarehouseManager[]> {
+  return api<{ engineers: WarehouseManager[] }>("/warehouses/engineer-options").then((r) => r.engineers);
+}
+
 // Lean active-warehouse options (id/code/name) for the user form's "Assigned Warehouses" picker.
 export interface WarehouseOption {
   id: string;

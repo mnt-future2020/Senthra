@@ -22,6 +22,21 @@ router.get(
   warehouseController.listManagerOptions,
 );
 
+// Field-engineer picker (canHoldStock roles only) for the job + dispatch "assign an engineer"
+// dropdowns. Available to whoever can create/edit/assign a job or create/edit a dispatch.
+router.get(
+  "/engineer-options",
+  requireAnyPermission(
+    "jobs.view",
+    "jobs.create",
+    "jobs.edit",
+    "jobs.assign",
+    "goods_out.create",
+    "goods_out.edit",
+  ),
+  warehouseController.listEngineerOptions,
+);
+
 // Active-warehouse options (scoped to the caller) for pickers — the user form's "Assigned
 // Warehouses" and the purchase-order per-row warehouse. Available to whoever manages users or
 // creates POs. Static route BEFORE /:id so "options" isn't captured as an id.

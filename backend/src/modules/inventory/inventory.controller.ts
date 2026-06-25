@@ -6,14 +6,15 @@ import type { AddStockInput, CreateTransferInput } from "./inventory.validation.
 
 const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 
-// GET /inventory?search=&warehouse=&category=&status=&page=&pageSize=
+// GET /inventory?search=&warehouse=&irmItem=&category=&status=&page=&pageSize=
 export const listInventory = asyncHandler(async (req, res) => {
-  const { search, warehouse, category, status, page, pageSize } = req.query;
+  const { search, warehouse, irmItem, category, status, page, pageSize } = req.query;
   res.json(
     await inventoryService.listInventory(
       {
         search: str(search),
         warehouse: str(warehouse),
+        irmItem: str(irmItem),
         category: str(category),
         status: str(status),
         page: queryInt(page),

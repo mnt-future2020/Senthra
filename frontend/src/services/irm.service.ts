@@ -43,8 +43,6 @@ export interface IrmItemPayload {
   irmCategoryId?: string;
   status?: IrmStatus;
   sku?: string;
-  barcode?: string;
-  qrCode?: string;
   suppliers?: IrmSupplierRowPayload[];
   baseUnit?: string;
   packSize?: number | string;

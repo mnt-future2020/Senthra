@@ -7,7 +7,7 @@ import { ClipboardList, MoreHorizontal, Pencil, Plus, Search, Trash2 } from "luc
 
 import * as jobService from "@/services/job.service";
 import { listCustomers } from "@/services/customer.service";
-import { listManagerOptions } from "@/services/warehouse.service";
+import { listEngineerOptions } from "@/services/warehouse.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useJobSocket } from "@/hooks/useJobSocket";
@@ -137,7 +137,7 @@ export function JobsView() {
   React.useEffect(() => {
     let active = true;
     listCustomers({ status: "active", pageSize: 200 }).then((r) => active && setCustomers(r.customers.map((c) => ({ id: c.id, name: c.name }))), () => {});
-    listManagerOptions().then((us) => active && setEngineers(us.map((u) => ({ id: u.id, name: u.name }))), () => {});
+    listEngineerOptions().then((us) => active && setEngineers(us.map((u) => ({ id: u.id, name: u.name }))), () => {});
     return () => { active = false; };
   }, []);
 

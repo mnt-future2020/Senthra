@@ -214,12 +214,17 @@ async function requireCustomer(customerId: string) {
   return c;
 }
 
-// The assigned engineer must be an ACTIVE staff member.
+// The assigned engineer must be an ACTIVE staff member whose role grants the field-operations
+// capability (canHoldStock) — the same gate goods-out enforces for dispatch recipients. This keeps
+// admins / finance / warehouse managers off jobs even if a client bypasses the filtered dropdown.
 async function requireEngineer(engineerId: string) {
   if (!OBJECT_ID_RE.test(engineerId)) throw badRequest("Select an engineer.");
   const u = await userRepo.findById(engineerId);
   if (!u) throw badRequest("Selected engineer no longer exists.");
   if ((u.status ?? "active") !== "active") throw conflict("Selected engineer is inactive and can't be assigned jobs.");
+  if (!u.role?.canHoldStock) {
+    throw conflict("Selected staff member isn't a field engineer. Assign a field-operations role first.");
+  }
   return u;
 }
 

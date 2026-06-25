@@ -45,5 +45,10 @@ function EntryLoader({ id }: { id: string }) {
 
   if (loading) return <FormPageSkeleton />;
   if (error || !entry) return <FormError message={error ?? "Stock entry not found."} />;
-  return <StockEntryDetail initial={entry} />;
+  // Suspense satisfies useSearchParams (the ?from= context) during prerender.
+  return (
+    <React.Suspense fallback={<FormPageSkeleton />}>
+      <StockEntryDetail initial={entry} />
+    </React.Suspense>
+  );
 }

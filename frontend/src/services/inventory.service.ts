@@ -12,6 +12,7 @@ import type { Availability, InventoryBalance, InventoryDetail, InventoryTransact
 export interface InventoryListParams {
   search?: string;
   warehouse?: string;
+  irmItem?: string; // exact item id — list only that item's per-warehouse balances
   category?: string;
   status?: string; // in_stock | low_stock | out_of_stock
   page?: number;
@@ -68,6 +69,7 @@ function listQs(params: InventoryListParams): string {
   const sp = new URLSearchParams();
   if (params.search) sp.set("search", params.search);
   if (params.warehouse) sp.set("warehouse", params.warehouse);
+  if (params.irmItem) sp.set("irmItem", params.irmItem);
   if (params.category) sp.set("category", params.category);
   if (params.status) sp.set("status", params.status);
   if (params.page) sp.set("page", String(params.page));
@@ -117,6 +119,14 @@ export function listPurchaseHistory(id: string): Promise<PurchaseHistoryRow[]> {
 
 export function getAvailability(irmItemId: string, warehouseId: string): Promise<Availability> {
   return api<Availability>(`/inventory/availability?irmItem=${irmItemId}&warehouse=${warehouseId}`);
+}
+
+// Per-warehouse balances for a single IRM item — feeds the job kit picker so its warehouse dropdown
+// only offers warehouses that actually hold the item. Uncached + bypasses the list cache (a small,
+// selection-time lookup whose key would otherwise collide with the inventory-list cache).
+export function listItemWarehouseStock(irmItemId: string): Promise<InventoryBalance[]> {
+  if (!irmItemId) return Promise.resolve([]);
+  return api<PagedInventory>(`/inventory${listQs({ irmItem: irmItemId, pageSize: 200 })}`).then((r) => r.inventory);
 }
 
 export function listTransfers(params: TransferListParams = {}): Promise<PagedTransfers> {

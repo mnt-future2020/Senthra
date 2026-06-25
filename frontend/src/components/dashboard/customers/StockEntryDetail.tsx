@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowLeft, Barcode, Loader2, Printer, Save } from "lucide-react";
 
 import * as customerService from "@/services/customer.service";
@@ -37,9 +37,15 @@ function EntryStatusBadge({ status }: { status: StockEntryStatus }) {
 
 export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { can } = useAuth();
   const { pushToast } = useDashboard();
-  const canEdit = can("stock_requests.complete");
+  // Editing, activating, generating + printing a barcode are all WAREHOUSE-MANAGER actions, done from
+  // the warehouse's Customer-pool inventory (?from=warehouse). Opened from the CUSTOMER module
+  // (?from=customer, or no param) the page is strictly READ-ONLY — a PM only views; they never edit
+  // or activate a customer's stock. So edit-ability is gated on BOTH the permission AND the context.
+  const fromWarehouse = searchParams.get("from") === "warehouse";
+  const canEdit = can("stock_requests.complete") && fromWarehouse;
 
   const [entry, setEntry] = React.useState(initial);
   const [categories, setCategories] = React.useState<{ id: string; name: string }[]>(() =>
@@ -64,9 +70,6 @@ export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
   const [categoryId, setCategoryId] = React.useState(entry.categoryId ?? "");
   const [description, setDescription] = React.useState(entry.description ?? "");
   const [uom, setUom] = React.useState(entry.uom ?? "");
-  const [serialized, setSerialized] = React.useState(entry.serialized);
-  const [serialNumber, setSerialNumber] = React.useState(entry.serialNumber ?? "");
-  const [highValue, setHighValue] = React.useState(entry.highValue);
 
   const [errors, setErrors] = React.useState<Record<string, string>>({});
   const [saving, setSaving] = React.useState(false);
@@ -74,10 +77,30 @@ export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
 
   const clearError = (key: string) => setErrors((prev) => { const n = { ...prev }; delete n[key]; return n; });
 
+  // Warehouse-manager action only — generate the Code128 barcode for this entry (then Print label).
+  const handleGenerateBarcode = async () => {
+    setGeneratingBarcode(true);
+    try {
+      const updated = await customerService.generateStockEntryBarcode(entry.id);
+      setEntry(updated);
+      clearError("barcode");
+      pushToast("Barcode generated.", "success");
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : "Could not generate barcode.", "alert");
+    } finally {
+      setGeneratingBarcode(false);
+    }
+  };
+
   const validate = (): Record<string, string> => {
     const errs: Record<string, string> = {};
     if (!itemName.trim()) errs.itemName = "Item name is required.";
-    if (serialized && !serialNumber.trim()) errs.serialNumber = "Serial number is required for serialized items.";
+    // Category is a required field for a trackable customer-stock entry.
+    if (!categoryId) errs.categoryId = "Select a category.";
+    // A draft can't go ACTIVE without a barcode — the WM must generate it (+ print + attach the
+    // label) first. Surfaced as a section-level error below (mirrored server-side). An already-active
+    // entry doesn't re-require it.
+    if (entry.status === "draft" && !entry.barcode) errs.barcode = "Generate the barcode to activate this entry.";
     return errs;
   };
 
@@ -86,6 +109,8 @@ export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
     const errs = validate();
     if (Object.keys(errs).length) {
       setErrors(errs);
+      // The barcode requirement lives at the bottom of the form, so flag it with a toast too.
+      pushToast("Please fix the highlighted fields.", "alert");
       return;
     }
     setSaving(true);
@@ -97,29 +122,17 @@ export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
         categoryId: categoryId || undefined,
         description: description.trim() || undefined,
         uom: uom.trim() || undefined,
-        serialized,
-        serialNumber: serialNumber.trim() || undefined,
-        highValue,
+        // Tracking flags are set during receive — preserved here as-is (not editable on this screen).
+        serialized: entry.serialized,
+        serialNumber: entry.serialNumber ?? undefined,
+        highValue: entry.highValue,
       });
       setEntry(updated);
-      pushToast("Stock entry updated and activated.", "success");
+      pushToast(isDraft ? "Stock entry activated." : "Stock entry updated.", "success");
     } catch (err) {
       pushToast(err instanceof Error ? err.message : "Could not save.", "alert");
     } finally {
       setSaving(false);
-    }
-  };
-
-  const handleGenerateBarcode = async () => {
-    setGeneratingBarcode(true);
-    try {
-      const updated = await customerService.generateStockEntryBarcode(entry.id);
-      setEntry(updated);
-      pushToast("Barcode generated.", "success");
-    } catch (err) {
-      pushToast(err instanceof Error ? err.message : "Could not generate barcode.", "alert");
-    } finally {
-      setGeneratingBarcode(false);
     }
   };
 
@@ -237,15 +250,17 @@ export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
                   />
                 </div>
                 <div>
-                  <label className={labelCls}>Category</label>
+                  <label className={labelCls}>Category<RequiredMark /></label>
                   <Select
                     value={categoryId}
-                    onChange={(v) => setCategoryId(v)}
+                    onChange={(v) => { setCategoryId(v); clearError("categoryId"); }}
                     options={categories.map((c) => ({ value: c.id, label: c.name }))}
                     placeholder="— Select category —"
                     ariaLabel="Category"
+                    invalid={Boolean(errors.categoryId)}
                     disabled={!canEdit}
                   />
+                  <FieldError message={errors.categoryId} />
                 </div>
                 <div className="sm:col-span-2">
                   <label className={labelCls}>Description</label>
@@ -282,52 +297,12 @@ export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
               </div>
             </FormSection>
 
-            <FormSection title="Tracking" description="Serial number and high-value designation.">
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="flex items-center gap-3">
-                  <input
-                    type="checkbox"
-                    id="serialized"
-                    checked={serialized}
-                    onChange={(e) => { setSerialized(e.target.checked); if (!e.target.checked) clearError("serialNumber"); }}
-                    className="h-4 w-4 rounded border-[var(--border)] accent-[var(--accent)]"
-                    disabled={!canEdit}
-                  />
-                  <label htmlFor="serialized" className="text-sm font-semibold text-[var(--ink)]">
-                    Serialized item
-                  </label>
-                </div>
-                <div className="flex items-center gap-3">
-                  <input
-                    type="checkbox"
-                    id="highValue"
-                    checked={highValue}
-                    onChange={(e) => setHighValue(e.target.checked)}
-                    className="h-4 w-4 rounded border-[var(--border)] accent-[var(--accent)]"
-                    disabled={!canEdit}
-                  />
-                  <label htmlFor="highValue" className="text-sm font-semibold text-[var(--ink)]">
-                    High-value item
-                  </label>
-                </div>
-                {serialized && (
-                  <div className="sm:col-span-2">
-                    <label className={labelCls}>Serial number<RequiredMark /></label>
-                    <input
-                      className={inputCls}
-                      value={serialNumber}
-                      onChange={(e) => { setSerialNumber(e.target.value); clearError("serialNumber"); }}
-                      aria-invalid={Boolean(errors.serialNumber)}
-                      disabled={!canEdit}
-                    />
-                    <FieldError message={errors.serialNumber} />
-                  </div>
-                )}
-              </div>
-            </FormSection>
-
             {/* Barcode section */}
-            <FormSection title="Barcode" description="Generate a unique Code128 barcode for this stock entry.">
+            <FormSection
+              title={<>Barcode{isDraft && <RequiredMark />}</>}
+              description="Code128 barcode for this stock entry. Generated by the warehouse manager, who prints the label and attaches it to the physical stock."
+              invalid={Boolean(errors.barcode)}
+            >
               {entry.barcodeDataUri ? (
                 <div className="flex flex-col items-center gap-3 py-4">
                   <img
@@ -336,29 +311,39 @@ export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
                     className="max-w-xs"
                   />
                   <span className="font-mono text-sm font-bold text-[var(--ink)]">{entry.barcode}</span>
-                  <button type="button" onClick={printBarcodeLabel} className={secondaryBtn}>
-                    <Printer className="h-3.5 w-3.5" />
-                    Print label
-                  </button>
-                  <p className={hintCls}>Print this barcode and attach it to the physical stock.</p>
+                  {fromWarehouse && (
+                    <>
+                      <button type="button" onClick={printBarcodeLabel} className={secondaryBtn}>
+                        <Printer className="h-3.5 w-3.5" />
+                        Print label
+                      </button>
+                      <p className={hintCls}>Print this barcode and attach it to the physical stock.</p>
+                    </>
+                  )}
                 </div>
-              ) : (
+              ) : canEdit ? (
                 <div className="flex flex-col items-center gap-3 py-6">
                   <Barcode className="h-10 w-10 text-[var(--faint)]" />
                   <p className="text-sm text-[var(--muted)]">No barcode generated yet.</p>
-                  {canEdit && (
-                    <button
-                      type="button"
-                      onClick={handleGenerateBarcode}
-                      disabled={generatingBarcode}
-                      className={primaryBtn}
-                    >
-                      {generatingBarcode ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Barcode className="h-3.5 w-3.5" />}
-                      Generate barcode
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    onClick={handleGenerateBarcode}
+                    disabled={generatingBarcode}
+                    className={primaryBtn}
+                  >
+                    {generatingBarcode ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Barcode className="h-3.5 w-3.5" />}
+                    Generate barcode
+                  </button>
+                  <p className={hintCls}>Generate, print the label and attach it to the stock before activating.</p>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center gap-2 py-6 text-center">
+                  <Barcode className="h-10 w-10 text-[var(--faint)]" />
+                  <p className="text-sm text-[var(--muted)]">No barcode yet.</p>
+                  <p className={hintCls}>The warehouse manager generates the barcode when handling this stock.</p>
                 </div>
               )}
+              <FieldError message={errors.barcode} />
             </FormSection>
           </div>
 

@@ -47,15 +47,19 @@ export function FormPageHeader({
 export function FormSection({
   title,
   description,
+  invalid,
   children,
 }: {
-  title: string;
+  title: React.ReactNode;
   description?: string;
+  // When true, the section shows a red ring — flags a section-level requirement (e.g. a barcode that
+  // must be generated before activating) the same way a field error is flagged.
+  invalid?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <section
-      className="border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:p-6"
+      className={`border bg-[var(--surface)] p-5 shadow-xs sm:p-6 ${invalid ? "border-[var(--neg)]" : "border-[var(--border)]"}`}
       style={{ borderRadius: "var(--radius)" }}
     >
       <div className="mb-5">

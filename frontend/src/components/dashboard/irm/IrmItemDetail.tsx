@@ -194,8 +194,6 @@ function Overview({
         <div className="grid grid-cols-2 gap-3">
           <Field label="SKU">{i.sku}</Field>
           <Field label="Base unit">{i.baseUnit}</Field>
-          <Field label="Barcode">{i.barcode}</Field>
-          <Field label="QR code">{i.qrCode}</Field>
           <Field label="Pack size">{num(i.packSize)}</Field>
           <Field label="Conversion ratio">{num(i.conversionRatio)}</Field>
         </div>
@@ -343,9 +341,9 @@ function AuditTrail({ itemId }: { itemId: string }) {
   React.useEffect(() => {
     let active = true;
     auditService
-      .listAuditLogs({ targetType: "irm_item", pageSize: 100 })
+      .listAuditLogs({ targetType: "irm_item", targetId: itemId, pageSize: 100 })
       .then((res) => {
-        if (active) setEntries(res.entries.filter((e) => e.targetId === itemId));
+        if (active) setEntries(res.entries);
       })
       .catch((e) => {
         if (active) setError(e instanceof Error ? e.message : "Could not load the audit trail.");
