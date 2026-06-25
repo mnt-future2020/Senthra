@@ -12,6 +12,10 @@ export const postIssue = asyncHandler(async (req, res) => {
   res.status(201).json({ movement: await service.postIssue(param(req, "jobId"), req.body as PostMovementInput, actorFrom(req)) });
 });
 
+export const postReturn = asyncHandler(async (req, res) => {
+  res.status(201).json({ movement: await service.postReturn(param(req, "jobId"), req.body as PostMovementInput, actorFrom(req)) });
+});
+
 export const listQueue = asyncHandler(async (req, res) => {
   res.json({ queue: await service.listQueue(actorFrom(req)) });
 });

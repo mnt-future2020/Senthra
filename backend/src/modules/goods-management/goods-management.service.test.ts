@@ -155,6 +155,140 @@ describe("listQueue", () => {
   });
 });
 
+// ── shared mock aliases (used by both postReturn and recordConsumeAndComplete) ────────────────
+const mockFindCustHoldingTx = repo.findCustomerHoldingTx as ReturnType<typeof vi.fn>;
+const mockUpsertCustHoldingTx = repo.upsertCustomerHoldingTx as ReturnType<typeof vi.fn>;
+const mockInsertCustHoldingTxnTx = repo.insertCustomerHoldingTxnTx as ReturnType<typeof vi.fn>;
+const mockUpsertSummaryTx = repo.upsertSummaryTx as ReturnType<typeof vi.fn>;
+
+// ── postReturn ───────────────────────────────────────────────────────────────────────────────
+import { postReturn } from "./goods-management.service.js";
+
+const mockApplyInbound = inventoryService.applyInbound as ReturnType<typeof vi.fn>;
+const mockUpsertDamagedBalance = repo.upsertDamagedBalanceTx as ReturnType<typeof vi.fn>;
+const mockInsertDamagedTxn = repo.insertDamagedTxnTx as ReturnType<typeof vi.fn>;
+const mockFindEngBalTxForReturn = goodsOutRepo.findEngineerBalanceTx as ReturnType<typeof vi.fn>;
+const mockUpsertEngForReturn = goodsOutRepo.upsertEngineerBalanceTx as ReturnType<typeof vi.fn>;
+const mockAdjustCseQty = repo.adjustCustomerStockEntryQtyTx as ReturnType<typeof vi.fn>;
+
+// Base job with kit lines covering both IRM and customer scenarios.
+const returnBaseJob = {
+  id: JOB_ID,
+  status: "in_progress",
+  assignedEngineerId: ENG_ID,
+  assignedEngineerName: "Bob Smith",
+  assignedEngineerEmail: "bob@x.com",
+  kitLines: [
+    { id: "k1", lineType: "irm", irmItemId: IRM_ID, customerStockEntryId: null, warehouseId: WH_ID, itemName: "CAT6", qty: 10, warehouseName: "WH1", warehouseCode: "W1" },
+    { id: "k2", lineType: "customer_stock", irmItemId: null, customerStockEntryId: CSE_ID, warehouseId: WH_ID, itemName: "SFP-LX", qty: 5, warehouseName: "WH1", warehouseCode: "W1" },
+  ],
+};
+
+describe("postReturn", () => {
+  beforeEach(() => {
+    mockJob.mockResolvedValue({ ...returnBaseJob });
+    // createMovementWithCode invokes the apply callback synchronously.
+    mockCreateMovement.mockImplementation(async (_h: unknown, _l: unknown, apply: (tx: unknown, id: string, code: string) => Promise<void>) => {
+      await apply({}, "m3", "GM-0003");
+      return { id: "m3", code: "GM-0003", direction: "return", items: [], job: { id: JOB_ID } };
+    });
+    // Default: engineer holds 8 of the IRM item.
+    mockFindEngBalTxForReturn.mockResolvedValue({ quantityOnHand: 8 });
+    mockUpsertEngForReturn.mockResolvedValue({ quantityOnHand: 3 });
+    // Customer stock holding: engineer holds 4.
+    mockFindCustHoldingTx.mockResolvedValue({ quantityOnHand: 4, customerId: "cust1", itemName: "SFP-LX" });
+    mockUpsertCustHoldingTx.mockResolvedValue({ quantityOnHand: 2 });
+    mockAdjustCseQty.mockResolvedValue({ id: CSE_ID, itemName: "SFP-LX", quantity: 6, customerId: "cust1", uom: "Each", warehouseId: WH_ID });
+    mockApplyInbound.mockResolvedValue(undefined);
+    mockUpsertDamagedBalance.mockResolvedValue({ id: "dmg1", quantity: 1 });
+    mockInsertDamagedTxn.mockResolvedValue({});
+    mockUpsertSummaryTx.mockResolvedValue({});
+  });
+
+  it("good IRM return: calls applyInbound and drains the engineer holding", async () => {
+    await postReturn(
+      JOB_ID,
+      {
+        direction: "return",
+        lines: [{ source: "irm", irmItemId: IRM_ID, qty: 3, condition: "good", scannedCode: "IRM-0004", jobKitLineId: "k1" }],
+      },
+      { email: "wm@x.com" } as never,
+    );
+    // Engineer balance pre-check + drain.
+    expect(mockFindEngBalTxForReturn).toHaveBeenCalledWith({}, IRM_ID, ENG_ID);
+    expect(mockUpsertEngForReturn).toHaveBeenCalledWith({}, IRM_ID, ENG_ID, -3);
+    // Warehouse credited back via applyInbound.
+    expect(mockApplyInbound).toHaveBeenCalledTimes(1);
+    expect(mockApplyInbound.mock.calls[0][1]).toMatchObject({
+      irmItemId: IRM_ID,
+      warehouseId: WH_ID,
+      quantity: 3,
+      sourceType: "goods_management",
+      sourceCode: "GM-0003",
+    });
+    // Damaged pool NOT touched.
+    expect(mockUpsertDamagedBalance).not.toHaveBeenCalled();
+  });
+
+  it("damaged customer return: credits damaged pool (with photo + reason) and does NOT credit the customer stock pool", async () => {
+    await postReturn(
+      JOB_ID,
+      {
+        direction: "return",
+        lines: [{
+          source: "customer",
+          customerStockEntryId: CSE_ID,
+          qty: 2,
+          condition: "damaged",
+          damagePhotoUrl: "https://cdn.example.com/photo.jpg",
+          damageReason: "Cracked housing",
+          jobKitLineId: "k2",
+        }],
+      },
+      { email: "wm@x.com" } as never,
+    );
+    // Engineer customer holding drained.
+    expect(mockFindCustHoldingTx).toHaveBeenCalledWith({}, CSE_ID, ENG_ID);
+    expect(mockUpsertCustHoldingTx).toHaveBeenCalledWith({}, CSE_ID, ENG_ID, -2, expect.objectContaining({ customerId: "cust1" }));
+    // Damaged pool credited.
+    expect(mockUpsertDamagedBalance).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({ ownerType: "customer", customerStockEntryId: CSE_ID }),
+      2,
+    );
+    expect(mockInsertDamagedTxn).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({
+        ownerType: "customer",
+        photoUrl: "https://cdn.example.com/photo.jpg",
+        reason: "Cracked housing",
+        sourceType: "goods_management_return",
+      }),
+    );
+    // Customer stock entry qty NOT credited back (damaged stock stays out).
+    expect(mockAdjustCseQty).not.toHaveBeenCalled();
+    // Warehouse also NOT credited (applyInbound not called).
+    expect(mockApplyInbound).not.toHaveBeenCalled();
+  });
+
+  it("rejects returning more IRM than the engineer holds", async () => {
+    // Engineer only holds 2, but 5 are requested.
+    mockFindEngBalTxForReturn.mockResolvedValue({ quantityOnHand: 2 });
+    await expect(
+      postReturn(
+        JOB_ID,
+        {
+          direction: "return",
+          lines: [{ source: "irm", irmItemId: IRM_ID, qty: 5, condition: "good", jobKitLineId: "k1" }],
+        },
+        { email: "wm@x.com" } as never,
+      ),
+    ).rejects.toThrow(/doesn't hold|held/i);
+    expect(mockUpsertEngForReturn).not.toHaveBeenCalled();
+    expect(mockApplyInbound).not.toHaveBeenCalled();
+  });
+});
+
 // ── recordConsumeAndComplete ──────────────────────────────────────────────────────────────────
 import { recordConsumeAndComplete } from "./goods-management.service.js";
 
@@ -162,10 +296,6 @@ const mockCompleteIfInProgress = jobRepo.completeIfInProgressTx as ReturnType<ty
 const mockFindEngBalTx = goodsOutRepo.findEngineerBalanceTx as ReturnType<typeof vi.fn>;
 const mockUpsertEngBalTx = goodsOutRepo.upsertEngineerBalanceTx as ReturnType<typeof vi.fn>;
 const mockInsertEngTxnTx = goodsOutRepo.insertEngineerTxnTx as ReturnType<typeof vi.fn>;
-const mockFindCustHoldingTx = repo.findCustomerHoldingTx as ReturnType<typeof vi.fn>;
-const mockUpsertCustHoldingTx = repo.upsertCustomerHoldingTx as ReturnType<typeof vi.fn>;
-const mockInsertCustHoldingTxnTx = repo.insertCustomerHoldingTxnTx as ReturnType<typeof vi.fn>;
-const mockUpsertSummaryTx = repo.upsertSummaryTx as ReturnType<typeof vi.fn>;
 
 // A minimal JobWithRelations shape sufficient for recordConsumeAndComplete.
 const baseJobForConsume = {

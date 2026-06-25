@@ -421,6 +421,242 @@ export async function getJobGoods(jobId: string, actor?: AuditActor): Promise<Jo
   };
 }
 
+// ── Return flow: scan-in engineer → warehouse (good) or damaged pool (damaged) ──────────────
+export async function postReturn(jobId: string, input: PostMovementInput, actor?: AuditActor): Promise<PublicMovement> {
+  if (input.direction !== "return") throw badRequest("Wrong direction for return.");
+  const job = await loadJobOrThrow(jobId);
+  if (!["accepted", "in_progress", "completed"].includes(job.status)) {
+    throw conflict("Stock can only be returned for an accepted/in-progress/completed job.");
+  }
+  const actorEmail = actor?.email ?? null;
+
+  // Resolve line details + warehouse for the movement header (derived from kit lines).
+  // For returns we derive item names + warehouse from the kit list (already on the job), not by
+  // re-fetching the IRM item or CSE — this keeps the pre-validation fast and test-friendly.
+  type Resolved = {
+    line: (typeof input.lines)[number];
+    itemName: string;
+    uom: string | null;
+    sku: string | null;
+    warehouseId: string;
+    warehouseName: string | null;
+    warehouseCode: string | null;
+    customerId: string | null;
+    condition: "good" | "damaged";
+  };
+  const resolved: Resolved[] = [];
+
+  for (const line of input.lines) {
+    const condition = (line.condition ?? "good") as "good" | "damaged";
+    if (line.source === "irm") {
+      if (!line.irmItemId) throw badRequest("IRM return line is missing irmItemId.");
+      // Find the kit line to get warehouseId and item name snapshots.
+      const kit = (job.kitLines ?? []).find((k) => k.lineType === "irm" && k.irmItemId === line.irmItemId);
+      if (!kit?.warehouseId) throw badRequest("Cannot determine warehouse for this IRM return line.");
+      assertWarehouseAccess(actor, kit.warehouseId);
+      resolved.push({
+        line, itemName: kit.itemName, uom: null, sku: null, warehouseId: kit.warehouseId,
+        warehouseName: kit.warehouseName ?? null, warehouseCode: kit.warehouseCode ?? null,
+        customerId: null, condition,
+      });
+    } else {
+      if (!line.customerStockEntryId) throw badRequest("Customer return line is missing customerStockEntryId.");
+      // Derive warehouse + item name from the kit line (snapshot). Fall back to CSE fetch if needed.
+      const kit = (job.kitLines ?? []).find((k) => k.lineType === "customer_stock" && k.customerStockEntryId === line.customerStockEntryId);
+      if (kit?.warehouseId) {
+        assertWarehouseAccess(actor, kit.warehouseId);
+        resolved.push({
+          line, itemName: kit.itemName, uom: null, sku: null, warehouseId: kit.warehouseId,
+          warehouseName: kit.warehouseName ?? null, warehouseCode: kit.warehouseCode ?? null,
+          customerId: null, condition,
+        });
+      } else {
+        // Kit line absent or has no warehouseId — fall back to live CSE lookup.
+        const entry = await goodsManagementRepo.findCustomerStockEntryById(line.customerStockEntryId);
+        if (!entry) throw badRequest("Customer stock item not found.");
+        if (!entry.warehouseId) throw badRequest("Cannot determine warehouse for this customer return line.");
+        assertWarehouseAccess(actor, entry.warehouseId);
+        resolved.push({
+          line, itemName: entry.itemName, uom: entry.uom ?? null, sku: null, warehouseId: entry.warehouseId,
+          warehouseName: null, warehouseCode: null,
+          customerId: entry.customerId ?? null, condition,
+        });
+      }
+    }
+  }
+
+  const warehouseId = resolved[0].warehouseId;
+  const warehouseName = resolved[0].warehouseName;
+  const warehouseCode = resolved[0].warehouseCode;
+  const engineerName = job.assignedEngineerName ?? "";
+  const engineerEmail = job.assignedEngineerEmail ?? null;
+
+  const movementLines: goodsManagementRepo.MovementLineRow[] = resolved.map((r) => ({
+    source: r.line.source,
+    irmItemId: r.line.source === "irm" ? (r.line.irmItemId ?? null) : null,
+    customerStockEntryId: r.line.source === "customer" ? (r.line.customerStockEntryId ?? null) : null,
+    itemName: r.itemName,
+    sku: r.sku,
+    uom: r.uom,
+    qty: r.line.qty,
+    condition: r.condition,
+    jobKitLineId: r.line.jobKitLineId ?? null,
+    scannedCode: r.line.scannedCode ?? null,
+    damagePhotoUrl: r.condition === "damaged" ? (r.line.damagePhotoUrl ?? null) : null,
+    damageReason: r.condition === "damaged" ? (r.line.damageReason ?? null) : null,
+    notes: r.line.notes ?? null,
+  }));
+
+  const created = await goodsManagementRepo.createMovementWithCode(
+    {
+      jobId: job.id,
+      direction: "return",
+      engineerId: job.assignedEngineerId!,
+      engineerName,
+      engineerEmail,
+      warehouseId,
+      warehouseName,
+      warehouseCode,
+      status: "posted",
+      postedAt: new Date(),
+      performedBy: actorEmail,
+      createdBy: actorEmail,
+    },
+    movementLines,
+    async (tx, movementId, code) => {
+      for (const r of resolved) {
+        const { line, condition, warehouseId: wh } = r;
+        const qty = line.qty;
+
+        if (line.source === "irm") {
+          const irmItemId = line.irmItemId!;
+          // Pre-check: engineer must hold at least qty.
+          const held = await goodsOutRepo.findEngineerBalanceTx(tx, irmItemId, job.assignedEngineerId!);
+          if (!held || held.quantityOnHand < qty) {
+            throw conflict(`Engineer doesn't hold ${qty} of this IRM item. Held: ${held?.quantityOnHand ?? 0}.`);
+          }
+          // Drain the engineer holding.
+          const eng = await goodsOutRepo.upsertEngineerBalanceTx(tx, irmItemId, job.assignedEngineerId!, -qty);
+          // Ledger row with type "job_return".
+          await goodsOutRepo.insertEngineerTxnTx(tx, {
+            irmItemId,
+            engineerId: job.assignedEngineerId!,
+            quantityDelta: -qty,
+            type: "job_return",
+            sourceType: "goods_management",
+            sourceId: movementId,
+            sourceCode: code,
+            balanceAfter: eng.quantityOnHand,
+            createdBy: actorEmail,
+          });
+
+          if (condition === "good") {
+            // Credit the warehouse back via applyInbound.
+            await inventoryService.applyInbound(tx, {
+              irmItemId,
+              warehouseId: wh,
+              quantity: qty,
+              sourceType: "goods_management",
+              sourceId: movementId,
+              sourceCode: code,
+              createdBy: actorEmail,
+            });
+          } else {
+            // Damaged: credit the damaged pool.
+            const damageKey: goodsManagementRepo.DamagedKey = {
+              warehouseId: wh,
+              ownerType: "company",
+              irmItemId,
+              customerStockEntryId: null,
+              customerId: null,
+              itemName: r.itemName,
+            };
+            const dmgBal = await goodsManagementRepo.upsertDamagedBalanceTx(tx, damageKey, qty);
+            await goodsManagementRepo.insertDamagedTxnTx(tx, {
+              warehouseId: wh,
+              ownerType: "company",
+              irmItemId,
+              customerStockEntryId: null,
+              customerId: null,
+              quantityDelta: qty,
+              reason: line.damageReason ?? "Damaged on return",
+              notes: line.notes ?? null,
+              photoUrl: line.damagePhotoUrl ?? null,
+              sourceType: "goods_management_return",
+              sourceId: movementId,
+              sourceCode: code,
+              balanceAfter: dmgBal.quantity,
+              createdBy: actorEmail,
+            });
+          }
+        } else {
+          const customerStockEntryId = line.customerStockEntryId!;
+          // Pre-check: engineer must hold at least qty.
+          const held = await goodsManagementRepo.findCustomerHoldingTx(tx, customerStockEntryId, job.assignedEngineerId!);
+          if (!held || held.quantityOnHand < qty) {
+            throw conflict(`Engineer doesn't hold ${qty} of this customer item. Held: ${held?.quantityOnHand ?? 0}.`);
+          }
+          // Drain the customer holding.
+          const hold = await goodsManagementRepo.upsertCustomerHoldingTx(tx, customerStockEntryId, job.assignedEngineerId!, -qty, {
+            customerId: held.customerId,
+            itemName: held.itemName,
+          });
+          // Ledger row.
+          await goodsManagementRepo.insertCustomerHoldingTxnTx(tx, {
+            customerStockEntryId,
+            engineerId: job.assignedEngineerId!,
+            quantityDelta: -qty,
+            type: "job_return",
+            sourceType: "goods_management",
+            sourceId: movementId,
+            sourceCode: code,
+            balanceAfter: hold.quantityOnHand,
+            createdBy: actorEmail,
+          });
+
+          if (condition === "good") {
+            // Credit the customer stock pool back.
+            await goodsManagementRepo.adjustCustomerStockEntryQtyTx(tx, customerStockEntryId, qty);
+          } else {
+            // Damaged: credit the damaged pool (customer-owned). No pool credit for the customer entry.
+            // Use customerId from the live holding (snapshot on the balance row).
+            const effectiveCustomerId = held.customerId ?? r.customerId;
+            const damageKey: goodsManagementRepo.DamagedKey = {
+              warehouseId: wh,
+              ownerType: "customer",
+              irmItemId: null,
+              customerStockEntryId,
+              customerId: effectiveCustomerId,
+              itemName: held.itemName,
+            };
+            const dmgBal = await goodsManagementRepo.upsertDamagedBalanceTx(tx, damageKey, qty);
+            await goodsManagementRepo.insertDamagedTxnTx(tx, {
+              warehouseId: wh,
+              ownerType: "customer",
+              irmItemId: null,
+              customerStockEntryId,
+              customerId: effectiveCustomerId,
+              quantityDelta: qty,
+              reason: line.damageReason ?? "Damaged on return",
+              notes: line.notes ?? null,
+              photoUrl: line.damagePhotoUrl ?? null,
+              sourceType: "goods_management_return",
+              sourceId: movementId,
+              sourceCode: code,
+              balanceAfter: dmgBal.quantity,
+              createdBy: actorEmail,
+            });
+          }
+        }
+      }
+      await goodsManagementRepo.upsertSummaryTx(tx, job.id, { goodsStatus: "awaiting_return" });
+    },
+  );
+
+  audit.record({ actor, action: "goods_management.return_posted", targetType: "job", targetId: job.id, targetLabel: created.code });
+  return toPublic(created);
+}
+
 // ── Consume movement (engineer Complete) ─────────────────────────────────────────────────────
 // Called from job.service.completeJobForEngineer. Takes the already-loaded job to avoid a circular
 // import (goods-management.service → job.repository; job.service → goods-management.service).

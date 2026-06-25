@@ -13,5 +13,6 @@ router.get("/queue", requirePermission("goods_management.view"), controller.list
 router.get("/jobs/:jobId", requirePermission("goods_management.view"), controller.getJobGoods);
 router.post("/scan-lookup", requirePermission("goods_management.view"), writeLimiter, validateBody(scanLookupSchema), controller.scanLookup);
 router.post("/jobs/:jobId/issue", requirePermission("goods_management.issue"), writeLimiter, validateBody(postMovementSchema), controller.postIssue);
+router.post("/jobs/:jobId/return", requirePermission("goods_management.receive_return"), writeLimiter, validateBody(postMovementSchema), controller.postReturn);
 
 export default router;
