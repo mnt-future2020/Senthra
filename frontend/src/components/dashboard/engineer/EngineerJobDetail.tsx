@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { CheckCircle2, MapPin, ExternalLink, X, XCircle } from "lucide-react";
+import { CheckCircle2, MapPin, ExternalLink, X, XCircle, PlayCircle, ClipboardCheck } from "lucide-react";
 
 import * as engineerService from "@/services/engineer.service";
 import { Notice } from "@/components/ui/Notice";
@@ -10,6 +10,7 @@ import { fmtDate, JobStatusChip, PortalHeader, TableCard } from "@/components/da
 import { FormError, FormPageSkeleton } from "@/components/ui/FormScaffold";
 import type { Job, JobKitLine, JobKitWarehouse } from "@/types/job";
 import type { Msg } from "@/components/ui/types";
+import type { UsedLinePayload } from "@/types/goodsManagement";
 
 // Engineer Portal — single assigned job. Loads the engineer's own job by id, shows the
 // identification / site / schedule cards + kit list, and an Accept button (only while the job is
@@ -43,6 +44,16 @@ function Card({ title, children }: { title: string; children: React.ReactNode })
   );
 }
 
+// Used-qty row for a kit line in the Complete work form.
+interface UsedRow {
+  kitLineId: string;
+  source: "irm" | "customer";
+  irmItemId: string | null;
+  customerStockEntryId: string | null;
+  itemName: string;
+  qty: number; // declared used quantity
+}
+
 export function EngineerJobDetail({ id }: { id: string }) {
   const [job, setJob] = React.useState<Job | null>(null);
   const [loading, setLoading] = React.useState(true);
@@ -52,7 +63,12 @@ export function EngineerJobDetail({ id }: { id: string }) {
   const [rejecting, setRejecting] = React.useState(false);
   const [rejectMode, setRejectMode] = React.useState(false);
   const [rejectReason, setRejectReason] = React.useState("");
-  const busy = accepting || rejecting;
+  const [starting, setStarting] = React.useState(false);
+  const [completing, setCompleting] = React.useState(false);
+  const [completeMode, setCompleteMode] = React.useState(false);
+  const [workSummary, setWorkSummary] = React.useState("");
+  const [usedRows, setUsedRows] = React.useState<UsedRow[]>([]);
+  const busy = accepting || rejecting || starting || completing;
   const [whModal, setWhModal] = React.useState<JobKitWarehouse | null>(null);
 
   React.useEffect(() => {
@@ -103,10 +119,69 @@ export function EngineerJobDetail({ id }: { id: string }) {
     }
   };
 
+  const onStart = async () => {
+    setStarting(true);
+    setMsg(null);
+    try {
+      const updated = await engineerService.startOwnJob(id);
+      setJob(updated); // status now "in_progress"
+      setMsg({ type: "success", text: "Job started. You are now on site." });
+    } catch (err) {
+      setMsg({ type: "error", text: err instanceof Error ? err.message : "Could not start this job." });
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  // Build the used-qty form rows from the current job's kit lines (IRM + customer_stock only).
+  const openCompleteForm = (currentJob: Job) => {
+    const rows: UsedRow[] = currentJob.kitLines
+      .filter((l) => l.lineType === "irm" || l.lineType === "customer_stock")
+      .map((l) => ({
+        kitLineId: l.id,
+        source: l.lineType === "irm" ? "irm" : "customer",
+        irmItemId: l.irmItemId,
+        customerStockEntryId: l.customerStockEntryId,
+        itemName: l.itemName,
+        qty: 0,
+      }));
+    setUsedRows(rows);
+    setWorkSummary("");
+    setCompleteMode(true);
+  };
+
+  const onComplete = async () => {
+    setCompleting(true);
+    setMsg(null);
+    try {
+      const usedLines: UsedLinePayload[] = usedRows
+        .filter((r) => r.qty > 0)
+        .map((r) => ({
+          source: r.source,
+          irmItemId: r.source === "irm" ? (r.irmItemId ?? undefined) : undefined,
+          customerStockEntryId: r.source === "customer" ? (r.customerStockEntryId ?? undefined) : undefined,
+          qty: r.qty,
+        }));
+      const updated = await engineerService.completeOwnJob(id, {
+        workSummary: workSummary.trim() || undefined,
+        usedLines,
+      });
+      setJob(updated); // status now "completed"
+      setCompleteMode(false);
+      setMsg({ type: "success", text: "Job marked as complete. Well done!" });
+    } catch (err) {
+      setMsg({ type: "error", text: err instanceof Error ? err.message : "Could not complete this job." });
+    } finally {
+      setCompleting(false);
+    }
+  };
+
   if (loading) return <FormPageSkeleton />;
   if (error || !job) return <FormError message={error ?? "Job not found."} />;
 
   const canAccept = job.status === "assigned";
+  const canStart = job.status === "accepted";
+  const canComplete = job.status === "in_progress";
   const addressLines = [job.address, job.postcode].filter(Boolean).join(", ");
   const fixings = [
     job.floor ? `Floor ${job.floor}` : null,
@@ -132,6 +207,14 @@ export function EngineerJobDetail({ id }: { id: string }) {
                 <XCircle className="h-4 w-4" /> Reject
               </button>
             </div>
+          ) : canStart ? (
+            <button type="button" onClick={onStart} disabled={busy} className={primaryBtn}>
+              <PlayCircle className="h-4 w-4" /> {starting ? "Starting…" : "Start work"}
+            </button>
+          ) : canComplete ? (
+            <button type="button" onClick={() => openCompleteForm(job)} disabled={busy} className={primaryBtn}>
+              <ClipboardCheck className="h-4 w-4" /> Complete work
+            </button>
           ) : (
             <JobStatusChip value={job.status} />
           )
@@ -163,6 +246,79 @@ export function EngineerJobDetail({ id }: { id: string }) {
       {job.status === "rejected" && (
         <Card title="Rejected">
           <Field label="Reason" value={job.rejectReason} />
+        </Card>
+      )}
+
+      {canComplete && completeMode && (
+        <Card title="Complete this job">
+          <p className="mb-4 text-xs text-[var(--muted)]">
+            Declare how many of each item you used on site. Leave at 0 if unused. Stock adjustments are written on confirmation.
+          </p>
+
+          {usedRows.length > 0 && (
+            <div className="mb-4 overflow-x-auto rounded-xl border border-[var(--border)]">
+              <table className="w-full text-sm" style={{ minWidth: 420 }}>
+                <thead>
+                  <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
+                    <th className="px-4 py-2 text-left">Item</th>
+                    <th className="px-4 py-2 text-left">Type</th>
+                    <th className="w-28 px-4 py-2 text-right">Used qty</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {usedRows.map((row, i) => (
+                    <tr key={row.kitLineId} className="border-b border-[var(--border)] last:border-0">
+                      <td className="px-4 py-2 font-semibold text-[var(--ink)]">{row.itemName}</td>
+                      <td className="px-4 py-2 text-[var(--muted)]">{row.source === "irm" ? "IRM" : "Customer stock"}</td>
+                      <td className="px-4 py-2">
+                        <input
+                          type="number"
+                          min={0}
+                          step={1}
+                          value={row.qty}
+                          onChange={(e) => {
+                            const v = Math.max(0, Math.floor(Number(e.target.value) || 0));
+                            setUsedRows((rows) => rows.map((r, j) => j === i ? { ...r, qty: v } : r));
+                          }}
+                          className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-2 py-1 text-right text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <label className="mb-1 block text-xs font-bold text-[var(--faint)]">Work summary (optional)</label>
+          <textarea
+            value={workSummary}
+            onChange={(e) => setWorkSummary(e.target.value)}
+            rows={4}
+            maxLength={4000}
+            placeholder="Describe the work completed on site…"
+            className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+          />
+
+          <div className="mt-3 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setCompleteMode(false)}
+              disabled={completing}
+              className={ghostBtn}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={onComplete}
+              disabled={completing}
+              className="flex items-center gap-1.5 rounded-xl bg-[var(--pos)] px-3.5 py-2 text-xs font-extrabold text-white hover:opacity-90 disabled:opacity-60"
+            >
+              <ClipboardCheck className="h-3.5 w-3.5" />
+              {completing ? "Completing…" : "Confirm complete"}
+            </button>
+          </div>
         </Card>
       )}
 
