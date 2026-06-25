@@ -37,6 +37,7 @@ export const PERMISSION_CATEGORIES: string[] = [
   "Suppliers",
   "Procurement",
   "Goods Out",
+  "Goods Management",
   "Jobs",
   "Engineer Portal",
   "System",
@@ -307,6 +308,18 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     ],
   },
   {
+    key: "goods_management",
+    label: "Goods Management",
+    description: "Job-scoped scan flow — issue kit stock to an engineer, receive returns (good/damaged), and reconcile a job's stock.",
+    category: "Goods Management",
+    permissions: [
+      { key: "goods_management.view", action: "View", description: "View the goods-management queue and a job's stock movements." },
+      { key: "goods_management.issue", action: "Issue", description: "Scan stock out to an engineer for a job." },
+      { key: "goods_management.receive_return", action: "Receive return", description: "Scan returned stock in (good/damaged) for a job." },
+      { key: "goods_management.reconcile", action: "Reconcile", description: "Close & reconcile a job's stock and write off unaccounted (lost) units." },
+    ],
+  },
+  {
     key: "jobs",
     label: "Jobs",
     description: "Field jobs — created for a customer/project, assigned to engineers and tracked through to completion.",
@@ -332,6 +345,8 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       { key: "engineer.jobs.view", action: "Jobs", description: "View jobs assigned to them and a job's details." },
       { key: "engineer.jobs.accept", action: "Accept job", description: "Accept a job assigned to them." },
       { key: "engineer.jobs.reject", action: "Reject job", description: "Decline a job assigned to them (with a reason)." },
+      { key: "engineer.jobs.start", action: "Start job", description: "Mark an accepted job in-progress (start work on site)." },
+      { key: "engineer.jobs.complete", action: "Complete job", description: "Mark a job completed, declaring used quantities + a work summary." },
       // RESERVED (not yet enforced by any route): self-profile editing currently flows through the
       // shared `/users/me` endpoints, which only require authentication — no engineer-specific
       // permission is checked. This key is registered + seeded ahead of a future engineer-only
