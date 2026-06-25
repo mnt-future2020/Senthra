@@ -231,6 +231,10 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
             createdBy: actorEmail,
           });
         } else {
+          const liveEntry = await goodsManagementRepo.findCustomerStockEntryQtyTx(tx, r.line.customerStockEntryId!);
+          if (r.line.qty > (liveEntry?.quantity ?? 0)) {
+            throw conflict(`${r.itemName}: only ${liveEntry?.quantity ?? 0} available — customer stock changed.`);
+          }
           const entry = await goodsManagementRepo.adjustCustomerStockEntryQtyTx(tx, r.line.customerStockEntryId!, -r.line.qty);
           const hold = await goodsManagementRepo.upsertCustomerHoldingTx(tx, r.line.customerStockEntryId!, job.assignedEngineerId!, r.line.qty, { customerId: entry.customerId, itemName: entry.itemName });
           await goodsManagementRepo.insertCustomerHoldingTxnTx(tx, {

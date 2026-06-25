@@ -140,7 +140,10 @@ export async function adjustCustomerStockEntryQtyTx(tx: Prisma.TransactionClient
   return e;
 }
 export function findCustomerStockEntryById(entryId: string) {
-  return prisma.customerStockEntry.findFirst({ where: { id: entryId } });
+  return prisma.customerStockEntry.findFirst({ where: { id: entryId, status: "active" } });
+}
+export function findCustomerStockEntryQtyTx(tx: Prisma.TransactionClient, entryId: string) {
+  return tx.customerStockEntry.findUnique({ where: { id: entryId }, select: { quantity: true } });
 }
 export function findCustomerStockEntryByBarcode(barcode: string) {
   return prisma.customerStockEntry.findFirst({ where: { barcode, status: "active" } });
