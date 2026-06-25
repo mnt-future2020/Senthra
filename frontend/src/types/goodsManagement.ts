@@ -142,6 +142,7 @@ export interface CustomerHolding {
   customerStockEntryId: string;
   engineerId: string;
   customerId: string | null;
+  customerName: string | null;
   itemName: string;
   quantityOnHand: number;
   updatedAt: string;

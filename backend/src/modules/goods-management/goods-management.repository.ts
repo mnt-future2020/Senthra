@@ -114,10 +114,10 @@ export function upsertSummaryTx(tx: Prisma.TransactionClient, jobId: string, dat
 }
 
 // --- engineer customer-stock holding (tx-aware) ----------------------------------------------
-export async function upsertCustomerHoldingTx(tx: Prisma.TransactionClient, customerStockEntryId: string, engineerId: string, delta: number, snap: { customerId: string | null; itemName: string }): Promise<EngineerCustomerStockHolding> {
+export async function upsertCustomerHoldingTx(tx: Prisma.TransactionClient, customerStockEntryId: string, engineerId: string, delta: number, snap: { customerId: string | null; customerName?: string | null; itemName: string }): Promise<EngineerCustomerStockHolding> {
   const bal = await tx.engineerCustomerStockHolding.upsert({
     where: { customerStockEntryId_engineerId: { customerStockEntryId, engineerId } },
-    create: { customerStockEntryId, engineerId, quantityOnHand: delta, customerId: snap.customerId, itemName: snap.itemName },
+    create: { customerStockEntryId, engineerId, quantityOnHand: delta, customerId: snap.customerId, customerName: snap.customerName ?? null, itemName: snap.itemName },
     update: { quantityOnHand: { increment: delta } },
   });
   if (bal.quantityOnHand < 0) throw conflict("Engineer doesn't hold that much of this customer item. Refresh and try again.");
@@ -140,7 +140,10 @@ export async function adjustCustomerStockEntryQtyTx(tx: Prisma.TransactionClient
   return e;
 }
 export function findCustomerStockEntryById(entryId: string) {
-  return prisma.customerStockEntry.findFirst({ where: { id: entryId, status: "active" } });
+  return prisma.customerStockEntry.findFirst({
+    where: { id: entryId, status: "active" },
+    include: { customer: { select: { name: true } } },
+  });
 }
 export function findCustomerStockEntryQtyTx(tx: Prisma.TransactionClient, entryId: string) {
   return tx.customerStockEntry.findUnique({ where: { id: entryId }, select: { quantity: true } });

@@ -122,6 +122,7 @@ export interface CustomerHoldingItem {
   id: string;
   customerStockEntryId: string;
   customerId: string | null;
+  customerName: string | null;
   itemName: string;
   quantityOnHand: number;
 }
@@ -132,6 +133,7 @@ export async function getOwnCustomerStock(engineerId: string): Promise<CustomerH
     id: h.id,
     customerStockEntryId: h.customerStockEntryId,
     customerId: h.customerId,
+    customerName: h.customerName ?? null,
     itemName: h.itemName,
     quantityOnHand: h.quantityOnHand,
   }));

@@ -132,7 +132,7 @@ export function EngineerInventory() {
             {customerStock.map((h) => (
               <tr key={h.id} className="border-b border-[var(--border)] last:border-0">
                 <td className="px-4 py-3 font-semibold text-[var(--ink)]">{h.itemName}</td>
-                <td className="px-4 py-3 text-[var(--muted)]">{h.customerId ?? "—"}</td>
+                <td className="px-4 py-3 text-[var(--muted)]">{h.customerName ?? "—"}</td>
                 <td className="px-4 py-3 font-bold text-[var(--ink)]">{h.quantityOnHand}</td>
               </tr>
             ))}

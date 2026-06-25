@@ -140,6 +140,8 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
     itemName: string;
     uom: string | null;
     warehouseId: string;
+    customerId?: string | null;
+    customerName?: string | null;
   };
   const resolved: Resolved[] = [];
   for (const line of input.lines) {
@@ -159,7 +161,7 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
     } else {
       const entry = await goodsManagementRepo.findCustomerStockEntryById(line.customerStockEntryId!);
       if (!entry) throw badRequest("Customer stock item not found.");
-      resolved.push({ line, kit, itemName: entry.itemName, uom: entry.uom, warehouseId: entry.warehouseId! });
+      resolved.push({ line, kit, itemName: entry.itemName, uom: entry.uom, warehouseId: entry.warehouseId!, customerId: entry.customerId, customerName: entry.customer?.name ?? null });
     }
     assertWarehouseAccess(actor, resolved[resolved.length - 1].warehouseId);
   }
@@ -240,7 +242,7 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
             throw conflict(`${r.itemName}: only ${liveEntry?.quantity ?? 0} available — customer stock changed.`);
           }
           const entry = await goodsManagementRepo.adjustCustomerStockEntryQtyTx(tx, r.line.customerStockEntryId!, -r.line.qty);
-          const hold = await goodsManagementRepo.upsertCustomerHoldingTx(tx, r.line.customerStockEntryId!, job.assignedEngineerId!, r.line.qty, { customerId: entry.customerId, itemName: entry.itemName });
+          const hold = await goodsManagementRepo.upsertCustomerHoldingTx(tx, r.line.customerStockEntryId!, job.assignedEngineerId!, r.line.qty, { customerId: entry.customerId, customerName: r.customerName ?? null, itemName: entry.itemName });
           await goodsManagementRepo.insertCustomerHoldingTxnTx(tx, {
             customerStockEntryId: r.line.customerStockEntryId!,
             engineerId: job.assignedEngineerId!,

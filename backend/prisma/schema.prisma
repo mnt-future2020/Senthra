@@ -1073,6 +1073,7 @@ model EngineerCustomerStockHolding {
   engineer             User   @relation("EngineerCustomerStockOwner", fields: [engineerId], references: [id])
 
   customerId   String? @db.ObjectId // snapshot for filtering by customer
+  customerName String? // snapshot — human-readable customer label
   itemName     String  // snapshot
   quantityOnHand Int   @default(0)
 
