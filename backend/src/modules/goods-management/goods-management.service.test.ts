@@ -52,3 +52,41 @@ describe("scanLookup (issue)", () => {
     await expect(scanLookup({ jobId: JOB_ID, direction: "issue", code: "IRM-0004" })).rejects.toThrow(/serial|batch/i);
   });
 });
+
+import { postIssue } from "./goods-management.service.js";
+import * as inventoryService from "#modules/inventory/inventory.service.js";
+import * as goodsOutRepo from "#modules/goods-out/goods-out.repository.js";
+
+const ENG_ID = "c".repeat(24);
+const mockCreateMovement = repo.createMovementWithCode as ReturnType<typeof vi.fn>;
+const mockApplyOutbound = inventoryService.applyOutbound as ReturnType<typeof vi.fn>;
+const mockUpsertEng = goodsOutRepo.upsertEngineerBalanceTx as ReturnType<typeof vi.fn>;
+const mockBalTx = inventoryRepo.findBalancePairTx as ReturnType<typeof vi.fn>;
+
+describe("postIssue", () => {
+  beforeEach(() => {
+    mockBalTx.mockResolvedValue({ quantityOnHand: 100, quantityReserved: 0 });
+    mockUpsertEng.mockResolvedValue({ quantityOnHand: 10 });
+    // createMovementWithCode runs the apply() callback with a fake tx + ids, then returns a row.
+    mockCreateMovement.mockImplementation(async (_h: unknown, _l: unknown, apply: (tx: unknown, id: string, code: string) => Promise<void>) => {
+      await apply({}, "m1", "GM-0001");
+      return { id: "m1", code: "GM-0001", direction: "issue", items: [], job: { id: JOB_ID } };
+    });
+  });
+
+  it("decrements the warehouse and increments the engineer holding for an IRM issue", async () => {
+    void ENG_ID;
+    const mockRequireIrm = irmService.requireActiveIrmItem as ReturnType<typeof vi.fn>;
+    mockRequireIrm.mockResolvedValue({ id: IRM_ID, code: "IRM-0004", name: "CAT6", baseUnit: "Box", trackSerialNumbers: false, trackBatchNumbers: false });
+    await postIssue(JOB_ID, { direction: "issue", lines: [{ source: "irm", irmItemId: IRM_ID, jobKitLineId: "k1", qty: 10, scannedCode: "IRM-0004" }] }, { email: "wm@x.com" } as never);
+    expect(mockApplyOutbound).toHaveBeenCalledTimes(1);
+    expect(mockApplyOutbound.mock.calls[0][1]).toMatchObject({ irmItemId: IRM_ID, warehouseId: WH_ID, quantity: 10, sourceType: "goods_management", sourceCode: "GM-0001" });
+    expect(mockUpsertEng).toHaveBeenCalledWith({}, IRM_ID, ENG_ID, 10);
+  });
+
+  it("rejects issuing more than the kit-line remaining", async () => {
+    mockMoves.mockResolvedValue([{ status: "posted", direction: "issue", items: [{ jobKitLineId: "k1", qty: 6 }] }]);
+    await expect(postIssue(JOB_ID, { direction: "issue", lines: [{ source: "irm", irmItemId: IRM_ID, jobKitLineId: "k1", qty: 6, scannedCode: "IRM-0004" }] }, { email: "wm@x.com" } as never)).rejects.toThrow(/remaining|kit/i);
+    expect(mockCreateMovement).not.toHaveBeenCalled();
+  });
+});

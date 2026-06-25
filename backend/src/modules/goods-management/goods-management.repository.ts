@@ -140,10 +140,10 @@ export async function adjustCustomerStockEntryQtyTx(tx: Prisma.TransactionClient
   return e;
 }
 export function findCustomerStockEntryById(entryId: string) {
-  return prisma.customerStockEntry.findFirst({ where: { id: entryId, deletedAt: null } });
+  return prisma.customerStockEntry.findFirst({ where: { id: entryId } });
 }
 export function findCustomerStockEntryByBarcode(code: string) {
-  return prisma.customerStockEntry.findFirst({ where: { barcode: code, status: "active", deletedAt: null } });
+  return prisma.customerStockEntry.findFirst({ where: { barcode: code, status: "active" } });
 }
 
 // --- damaged pool (tx-aware) -----------------------------------------------------------------

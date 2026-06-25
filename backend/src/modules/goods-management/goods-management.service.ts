@@ -4,8 +4,11 @@ import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse
 import * as jobRepo from "#modules/job/job.repository.js";
 import * as irmService from "#modules/irm/irm.service.js";
 import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
+import * as inventoryService from "#modules/inventory/inventory.service.js";
+import * as goodsOutRepo from "#modules/goods-out/goods-out.repository.js";
+import * as audit from "#modules/audit/audit.service.js";
 import * as goodsManagementRepo from "./goods-management.repository.js";
-import type { ScanLookupInput } from "./goods-management.validation.js";
+import type { PostMovementInput, ScanLookupInput } from "./goods-management.validation.js";
 
 export interface ScanMatch {
   source: "irm" | "customer";
@@ -48,10 +51,10 @@ export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Pr
     }
     const kit = (job.kitLines ?? []).find((k) => k.lineType === "irm" && k.irmItemId === irmItem.id);
     if (!kit) throw badRequest(`${irmItem.name} is not on this job's kit list.`);
+    if (kit.warehouseId) assertWarehouseAccess(actor, kit.warehouseId);
     const already = issuedForKitLine(movements, kit.id);
     const bal = await inventoryRepo.findBalancePair(irmItem.id, kit.warehouseId!);
     const available = (bal?.quantityOnHand ?? 0) - (bal?.quantityReserved ?? 0);
-    if (kit.warehouseId) assertWarehouseAccess(actor, kit.warehouseId);
     return {
       source: "irm", irmItemId: irmItem.id, jobKitLineId: kit.id, itemName: irmItem.name, uom: irmItem.baseUnit,
       plannedQty: kit.qty, alreadyIssued: already, remainingIssuable: kit.qty - already, available,
@@ -63,8 +66,8 @@ export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Pr
   if (entry) {
     const kit = (job.kitLines ?? []).find((k) => k.lineType === "customer_stock" && k.customerStockEntryId === entry.id);
     if (!kit) throw badRequest(`${entry.itemName} is not on this job's kit list.`);
-    const already = issuedForKitLine(movements, kit.id);
     if (entry.warehouseId) assertWarehouseAccess(actor, entry.warehouseId);
+    const already = issuedForKitLine(movements, kit.id);
     return {
       source: "customer", customerStockEntryId: entry.id, jobKitLineId: kit.id, itemName: entry.itemName, uom: entry.uom,
       plannedQty: kit.qty, alreadyIssued: already, remainingIssuable: kit.qty - already, available: entry.quantity,
@@ -75,3 +78,178 @@ export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Pr
 }
 
 export { warehouseScopeFilter }; // re-export for the queue task
+
+// ── Public shape returned to callers ───────────────────────────────────────────────────────────
+export interface PublicMovement {
+  id: string;
+  code: string;
+  jobId: string;
+  direction: string;
+  status: string;
+  engineerId: string;
+  engineerName: string;
+  warehouseId: string | null;
+  lines: { source: string; irmItemId: string | null; customerStockEntryId: string | null; itemName: string; qty: number; condition: string }[];
+}
+
+function toPublic(m: goodsManagementRepo.JobStockMovementWithRelations): PublicMovement {
+  return {
+    id: m.id,
+    code: m.code,
+    jobId: m.jobId,
+    direction: m.direction,
+    status: m.status,
+    engineerId: m.engineerId,
+    engineerName: m.engineerName,
+    warehouseId: m.warehouseId,
+    lines: m.items.map((l) => ({
+      source: l.source,
+      irmItemId: l.irmItemId,
+      customerStockEntryId: l.customerStockEntryId,
+      itemName: l.itemName,
+      qty: l.qty,
+      condition: l.condition,
+    })),
+  };
+}
+
+async function loadJobOrThrow(jobId: string) {
+  const job = await jobRepo.findById(jobId);
+  if (!job) throw notFound("Job not found.");
+  if (!job.assignedEngineerId) throw conflict("This job has no assigned engineer.");
+  return job;
+}
+
+// ── Issue flow: scan-out warehouse → engineer ─────────────────────────────────────────────────
+export async function postIssue(jobId: string, input: PostMovementInput, actor?: AuditActor): Promise<PublicMovement> {
+  if (input.direction !== "issue") throw badRequest("Wrong direction for issue.");
+  const job = await loadJobOrThrow(jobId);
+  if (!["accepted", "in_progress"].includes(job.status)) {
+    throw conflict("Stock can only be issued for an accepted/in-progress job.");
+  }
+  const movements = await goodsManagementRepo.findMovementsByJob(job.id);
+
+  // Resolve + validate every line against the kit list BEFORE opening the tx.
+  type Resolved = {
+    line: (typeof input.lines)[number];
+    kit: NonNullable<typeof job.kitLines>[number];
+    itemName: string;
+    uom: string | null;
+    warehouseId: string;
+  };
+  const resolved: Resolved[] = [];
+  for (const line of input.lines) {
+    if (!line.jobKitLineId) throw badRequest("Each issued line must reference a kit line.");
+    const kit = (job.kitLines ?? []).find((k) => k.id === line.jobKitLineId);
+    if (!kit) throw badRequest("Kit line not found on this job.");
+    const already = issuedForKitLine(movements, kit.id);
+    if (line.qty > kit.qty - already) {
+      throw conflict(`${kit.itemName}: only ${kit.qty - already} remaining on the kit list.`);
+    }
+    if (line.source === "irm") {
+      const irm = await irmService.requireActiveIrmItem(line.irmItemId!);
+      if (irm.trackSerialNumbers || irm.trackBatchNumbers) {
+        throw conflict(`${irm.name} is serial/batch-tracked and can't be moved here.`);
+      }
+      resolved.push({ line, kit, itemName: irm.name, uom: irm.baseUnit, warehouseId: kit.warehouseId! });
+    } else {
+      const entry = await goodsManagementRepo.findCustomerStockEntryById(line.customerStockEntryId!);
+      if (!entry) throw badRequest("Customer stock item not found.");
+      resolved.push({ line, kit, itemName: entry.itemName, uom: entry.uom, warehouseId: entry.warehouseId! });
+    }
+    assertWarehouseAccess(actor, resolved[resolved.length - 1].warehouseId);
+  }
+
+  const warehouseId = resolved[0].warehouseId;
+  const actorEmail = actor?.email ?? null;
+  // derive engineerName from snapshot fields (set at assign-time)
+  const engineerName = job.assignedEngineerName ?? "";
+  const engineerEmail = job.assignedEngineerEmail ?? null;
+  // derive warehouseName/warehouseCode from the first kit line's snapshots
+  const warehouseName = resolved[0].kit.warehouseName ?? null;
+  const warehouseCode = resolved[0].kit.warehouseCode ?? null;
+
+  const lines = resolved.map((r) => ({
+    source: r.line.source,
+    irmItemId: r.line.source === "irm" ? r.line.irmItemId! : null,
+    customerStockEntryId: r.line.source === "customer" ? r.line.customerStockEntryId! : null,
+    itemName: r.itemName,
+    sku: null,
+    uom: r.uom,
+    qty: r.line.qty,
+    condition: "good",
+    jobKitLineId: r.kit.id,
+    scannedCode: r.line.scannedCode ?? null,
+    damagePhotoUrl: null,
+    damageReason: null,
+    notes: r.line.notes ?? null,
+  }));
+
+  const created = await goodsManagementRepo.createMovementWithCode(
+    {
+      jobId: job.id,
+      direction: "issue",
+      engineerId: job.assignedEngineerId!,
+      engineerName,
+      engineerEmail,
+      warehouseId,
+      warehouseName,
+      warehouseCode,
+      status: "posted",
+      postedAt: new Date(),
+      performedBy: actorEmail,
+      createdBy: actorEmail,
+    },
+    lines,
+    async (tx, movementId, code) => {
+      for (const r of resolved) {
+        if (r.line.source === "irm") {
+          const live = await inventoryRepo.findBalancePairTx(tx, r.line.irmItemId!, r.warehouseId);
+          const available = (live?.quantityOnHand ?? 0) - (live?.quantityReserved ?? 0);
+          if (r.line.qty > available) {
+            throw conflict(`${r.itemName}: only ${available} available — stock changed.`);
+          }
+          await inventoryService.applyOutbound(tx, {
+            irmItemId: r.line.irmItemId!,
+            warehouseId: r.warehouseId,
+            quantity: r.line.qty,
+            sourceType: "goods_management",
+            sourceId: movementId,
+            sourceCode: code,
+            createdBy: actorEmail,
+          });
+          const eng = await goodsOutRepo.upsertEngineerBalanceTx(tx, r.line.irmItemId!, job.assignedEngineerId!, r.line.qty);
+          await goodsOutRepo.insertEngineerTxnTx(tx, {
+            irmItemId: r.line.irmItemId!,
+            engineerId: job.assignedEngineerId!,
+            quantityDelta: r.line.qty,
+            type: "job_issue",
+            sourceType: "goods_management",
+            sourceId: movementId,
+            sourceCode: code,
+            balanceAfter: eng.quantityOnHand,
+            createdBy: actorEmail,
+          });
+        } else {
+          const entry = await goodsManagementRepo.adjustCustomerStockEntryQtyTx(tx, r.line.customerStockEntryId!, -r.line.qty);
+          const hold = await goodsManagementRepo.upsertCustomerHoldingTx(tx, r.line.customerStockEntryId!, job.assignedEngineerId!, r.line.qty, { customerId: entry.customerId, itemName: entry.itemName });
+          await goodsManagementRepo.insertCustomerHoldingTxnTx(tx, {
+            customerStockEntryId: r.line.customerStockEntryId!,
+            engineerId: job.assignedEngineerId!,
+            quantityDelta: r.line.qty,
+            type: "job_issue",
+            sourceType: "goods_management",
+            sourceId: movementId,
+            sourceCode: code,
+            balanceAfter: hold.quantityOnHand,
+            createdBy: actorEmail,
+          });
+        }
+      }
+      await goodsManagementRepo.upsertSummaryTx(tx, job.id, { goodsStatus: "issued" });
+    },
+  );
+
+  audit.record({ actor, action: "goods_management.issued", targetType: "job", targetId: job.id, targetLabel: created.code });
+  return toPublic(created);
+}
