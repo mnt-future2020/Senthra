@@ -7,7 +7,7 @@ vi.mock("./goods-management.repository.js", () => ({
   adjustCustomerStockEntryQtyTx: vi.fn(), findCustomerStockEntryById: vi.fn(), findCustomerStockEntryByBarcode: vi.fn(),
   upsertDamagedBalanceTx: vi.fn(), insertDamagedTxnTx: vi.fn(), findDamagedByWarehouse: vi.fn(), findDamagedByCustomer: vi.fn(), findRecentMovementsForOverdue: vi.fn(),
 }));
-vi.mock("#modules/job/job.repository.js", () => ({ findById: vi.fn(), findActiveForGoodsManagement: vi.fn() }));
+vi.mock("#modules/job/job.repository.js", () => ({ findById: vi.fn(), findActiveForGoodsManagement: vi.fn(), completeIfInProgressTx: vi.fn() }));
 vi.mock("#modules/irm/irm.service.js", () => ({ requireActiveIrmItem: vi.fn(), findActiveByCodeOrBarcode: vi.fn() }));
 vi.mock("#modules/inventory/inventory.repository.js", () => ({ findBalancePair: vi.fn(), findBalancePairTx: vi.fn(), upsertBalanceTx: vi.fn(), insertTransactionTx: vi.fn() }));
 vi.mock("#modules/inventory/inventory.service.js", () => ({ applyOutbound: vi.fn(), applyInbound: vi.fn() }));
@@ -152,5 +152,176 @@ describe("listQueue", () => {
     const queue = await listQueue();
     expect(queue).toHaveLength(1);
     expect(queue[0].kitLines[0]).toMatchObject({ planned: 10, issued: 6, available: 4 });
+  });
+});
+
+// ── recordConsumeAndComplete ──────────────────────────────────────────────────────────────────
+import { recordConsumeAndComplete } from "./goods-management.service.js";
+
+const mockCompleteIfInProgress = jobRepo.completeIfInProgressTx as ReturnType<typeof vi.fn>;
+const mockFindEngBalTx = goodsOutRepo.findEngineerBalanceTx as ReturnType<typeof vi.fn>;
+const mockUpsertEngBalTx = goodsOutRepo.upsertEngineerBalanceTx as ReturnType<typeof vi.fn>;
+const mockInsertEngTxnTx = goodsOutRepo.insertEngineerTxnTx as ReturnType<typeof vi.fn>;
+const mockFindCustHoldingTx = repo.findCustomerHoldingTx as ReturnType<typeof vi.fn>;
+const mockUpsertCustHoldingTx = repo.upsertCustomerHoldingTx as ReturnType<typeof vi.fn>;
+const mockInsertCustHoldingTxnTx = repo.insertCustomerHoldingTxnTx as ReturnType<typeof vi.fn>;
+const mockUpsertSummaryTx = repo.upsertSummaryTx as ReturnType<typeof vi.fn>;
+
+// A minimal JobWithRelations shape sufficient for recordConsumeAndComplete.
+const baseJobForConsume = {
+  id: JOB_ID,
+  jobNumber: "JOB-2026-0001",
+  status: "in_progress",
+  assignedEngineerId: ENG_ID,
+  assignedEngineerName: "Bob Smith",
+  assignedEngineerEmail: "bob@x.com",
+  kitLines: [
+    { id: "k1", lineType: "irm", irmItemId: IRM_ID, customerStockEntryId: null, warehouseId: WH_ID, itemName: "CAT6", qty: 10 },
+    { id: "k2", lineType: "customer_stock", irmItemId: null, customerStockEntryId: CSE_ID, warehouseId: WH_ID, itemName: "SFP-LX", qty: 5 },
+  ],
+} as never;
+
+describe("recordConsumeAndComplete", () => {
+  beforeEach(() => {
+    // createMovementWithCode invokes the apply callback synchronously in the fake tx.
+    mockCreateMovement.mockImplementation(async (_h: unknown, _l: unknown, apply: (tx: unknown, id: string, code: string) => Promise<void>) => {
+      await apply({}, "m2", "GM-0002");
+      return { id: "m2", code: "GM-0002", direction: "consume", items: [], job: { id: JOB_ID } };
+    });
+    // Default: engineer holds 8 of the IRM item.
+    mockFindEngBalTx.mockResolvedValue({ quantityOnHand: 8 });
+    // Drain returns updated balance.
+    mockUpsertEngBalTx.mockResolvedValue({ quantityOnHand: 3 });
+    mockInsertEngTxnTx.mockResolvedValue({});
+    // Default: engineer holds 4 of the customer stock item.
+    mockFindCustHoldingTx.mockResolvedValue({ quantityOnHand: 4, customerId: "cust1", itemName: "SFP-LX" });
+    mockUpsertCustHoldingTx.mockResolvedValue({ quantityOnHand: 2 });
+    mockInsertCustHoldingTxnTx.mockResolvedValue({});
+    // Job stamp succeeds.
+    mockCompleteIfInProgress.mockResolvedValue({ count: 1 });
+    mockUpsertSummaryTx.mockResolvedValue({});
+  });
+
+  it("drains engineer IRM holding and writes a job_consume ledger row", async () => {
+    await recordConsumeAndComplete(
+      baseJobForConsume,
+      ENG_ID,
+      "All done",
+      [{ source: "irm", irmItemId: IRM_ID, qty: 5 }],
+      "eng@x.com",
+    );
+    // Engineer balance reader was called inside the tx.
+    expect(mockFindEngBalTx).toHaveBeenCalledWith({}, IRM_ID, ENG_ID);
+    // Balance was decremented by 5.
+    expect(mockUpsertEngBalTx).toHaveBeenCalledWith({}, IRM_ID, ENG_ID, -5);
+    // Ledger row was written with type "job_consume".
+    expect(mockInsertEngTxnTx).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({ irmItemId: IRM_ID, quantityDelta: -5, type: "job_consume" }),
+    );
+  });
+
+  it("transitions job in_progress → completed and sets goodsStatus = awaiting_return", async () => {
+    await recordConsumeAndComplete(
+      baseJobForConsume,
+      ENG_ID,
+      "Work summary text",
+      [{ source: "irm", irmItemId: IRM_ID, qty: 3 }],
+      "eng@x.com",
+    );
+    // Job stamped completed.
+    expect(mockCompleteIfInProgress).toHaveBeenCalledWith({}, JOB_ID, ENG_ID);
+    // Summary upserted with goodsStatus = awaiting_return.
+    expect(mockUpsertSummaryTx).toHaveBeenCalledWith(
+      {},
+      JOB_ID,
+      expect.objectContaining({ goodsStatus: "awaiting_return", workSummary: "Work summary text" }),
+    );
+  });
+
+  it("drains engineer customer-stock holding and writes a job_consume ledger row", async () => {
+    await recordConsumeAndComplete(
+      baseJobForConsume,
+      ENG_ID,
+      null,
+      [{ source: "customer", customerStockEntryId: CSE_ID, qty: 2 }],
+      "eng@x.com",
+    );
+    // Customer holding reader was called.
+    expect(mockFindCustHoldingTx).toHaveBeenCalledWith({}, CSE_ID, ENG_ID);
+    // Customer holding was decremented by 2.
+    expect(mockUpsertCustHoldingTx).toHaveBeenCalledWith(
+      {},
+      CSE_ID,
+      ENG_ID,
+      -2,
+      expect.objectContaining({ customerId: "cust1", itemName: "SFP-LX" }),
+    );
+    // Ledger row written with type "job_consume".
+    expect(mockInsertCustHoldingTxnTx).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({ customerStockEntryId: CSE_ID, quantityDelta: -2, type: "job_consume" }),
+    );
+  });
+
+  it("rejects an IRM used qty greater than the engineer's held amount", async () => {
+    // Engineer only holds 3, but 10 are requested.
+    mockFindEngBalTx.mockResolvedValue({ quantityOnHand: 3 });
+    await expect(
+      recordConsumeAndComplete(
+        baseJobForConsume,
+        ENG_ID,
+        null,
+        [{ source: "irm", irmItemId: IRM_ID, qty: 10 }],
+        "eng@x.com",
+      ),
+    ).rejects.toThrow(/doesn't hold|held/i);
+    // Balance must not have been drained.
+    expect(mockUpsertEngBalTx).not.toHaveBeenCalled();
+  });
+
+  it("rejects a customer used qty greater than the engineer's held amount", async () => {
+    // Engineer only holds 1, but 5 are requested.
+    mockFindCustHoldingTx.mockResolvedValue({ quantityOnHand: 1, customerId: "cust1", itemName: "SFP-LX" });
+    await expect(
+      recordConsumeAndComplete(
+        baseJobForConsume,
+        ENG_ID,
+        null,
+        [{ source: "customer", customerStockEntryId: CSE_ID, qty: 5 }],
+        "eng@x.com",
+      ),
+    ).rejects.toThrow(/doesn't hold|held/i);
+    expect(mockUpsertCustHoldingTx).not.toHaveBeenCalled();
+  });
+
+  it("rejects completion when the job stamp guard fails (concurrent race)", async () => {
+    mockCompleteIfInProgress.mockResolvedValue({ count: 0 });
+    await expect(
+      recordConsumeAndComplete(
+        baseJobForConsume,
+        ENG_ID,
+        null,
+        [{ source: "irm", irmItemId: IRM_ID, qty: 2 }],
+        "eng@x.com",
+      ),
+    ).rejects.toThrow(/can't be completed|refresh/i);
+  });
+
+  it("skips zero-qty used lines without touching balances", async () => {
+    const completedSpy = mockCompleteIfInProgress;
+    await recordConsumeAndComplete(
+      baseJobForConsume,
+      ENG_ID,
+      null,
+      [{ source: "irm", irmItemId: IRM_ID, qty: 0 }],
+      "eng@x.com",
+    );
+    // No balance reads/writes for the zero-qty line.
+    expect(mockFindEngBalTx).not.toHaveBeenCalled();
+    expect(mockUpsertEngBalTx).not.toHaveBeenCalled();
+    // But job still gets stamped and summary upserted.
+    expect(completedSpy).toHaveBeenCalledTimes(1);
+    expect(mockUpsertSummaryTx).toHaveBeenCalledTimes(1);
   });
 });
