@@ -897,6 +897,12 @@ export async function closeReconcile(
     throw conflict("This job is already reconciled and locked.");
   }
 
+  // Guard: only jobs that have had stock issued (awaiting_return / issued / partially_issued)
+  // can be reconciled. Attempting to reconcile a job with no movements would silently lock it.
+  if (!existingSummary || !["awaiting_return", "issued", "partially_issued"].includes(existingSummary.goodsStatus)) {
+    throw conflict("Cannot reconcile a job that has not had stock issued yet.");
+  }
+
   const movements = await goodsManagementRepo.findMovementsByJob(job.id);
   const tallies = computeTallies(movements, job.kitLines ?? []);
 
@@ -935,6 +941,7 @@ export async function closeReconcile(
 
   // Either balanced (no unaccounted) or writeOffLost = true.
   // Build lost movement lines for unaccounted items.
+  // condition: "lost" distinguishes these write-off consume lines from normal consumes in the audit ledger.
   const lostLines: goodsManagementRepo.MovementLineRow[] = unaccountedItems.map((u) => ({
     source: u.source,
     irmItemId: u.irmItemId,
@@ -943,7 +950,7 @@ export async function closeReconcile(
     sku: null,
     uom: null,
     qty: u.qty,
-    condition: "good",
+    condition: "lost",
     jobKitLineId: null,
     scannedCode: null,
     damagePhotoUrl: null,

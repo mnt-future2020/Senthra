@@ -462,8 +462,19 @@ import { closeReconcile } from "./goods-management.service.js";
 const RECONCILE_JOB_ID = "a".repeat(24);
 
 // Helper to build a posted movement stub with given direction + items.
-function makeMovement(direction: string, items: { jobKitLineId: string; irmItemId: string | null; customerStockEntryId: string | null; qty: number; condition?: string }[]) {
-  return { status: "posted", direction, items: items.map((i) => ({ ...i, condition: i.condition ?? "good" })) };
+// itemName is included so that the primary itemName path in computeTallies() is exercised
+// (without it computeTallies falls back to the kit-line snapshot name, which is valid but untested).
+function makeMovement(direction: string, items: { jobKitLineId: string; irmItemId: string | null; customerStockEntryId: string | null; qty: number; condition?: string; source?: string }[]) {
+  return {
+    status: "posted",
+    direction,
+    items: items.map((i) => ({
+      ...i,
+      itemName: "CAT6",
+      source: i.source ?? (i.irmItemId ? "irm" : "customer"),
+      condition: i.condition ?? "good",
+    })),
+  };
 }
 
 describe("closeReconcile", () => {
@@ -558,6 +569,20 @@ describe("closeReconcile", () => {
     const mockGetSummary = repo.getSummary as ReturnType<typeof vi.fn>;
     mockGetSummary.mockResolvedValue({ goodsStatus: "reconciled", workSummary: null, lastMovementAt: new Date() });
     await expect(closeReconcile(RECONCILE_JOB_ID, {}, { email: "wm@x.com" } as never)).rejects.toThrow(/already reconciled/i);
+  });
+
+  it("rejects reconciling a job whose goodsStatus is not_issued (no stock has moved)", async () => {
+    // Summary exists but status is not_issued — no movements have happened yet.
+    const mockGetSummary = repo.getSummary as ReturnType<typeof vi.fn>;
+    mockGetSummary.mockResolvedValue({ goodsStatus: "not_issued", workSummary: null, lastMovementAt: null });
+    await expect(closeReconcile(RECONCILE_JOB_ID, {}, { email: "wm@x.com" } as never)).rejects.toThrow(/not had stock issued/i);
+  });
+
+  it("rejects reconciling a job with no summary at all (no stock has ever moved)", async () => {
+    // No summary at all — job has never had stock issued.
+    const mockGetSummary = repo.getSummary as ReturnType<typeof vi.fn>;
+    mockGetSummary.mockResolvedValue(null);
+    await expect(closeReconcile(RECONCILE_JOB_ID, {}, { email: "wm@x.com" } as never)).rejects.toThrow(/not had stock issued/i);
   });
 
   it("rejects issue when summary is already reconciled", async () => {
