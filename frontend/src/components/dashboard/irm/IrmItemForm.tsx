@@ -58,8 +58,6 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
   const [mpn, setMpn] = React.useState(o?.mpn ?? "");
   const [status, setStatus] = React.useState<"active" | "inactive">(o?.status ?? "active");
   const [sku, setSku] = React.useState(o?.sku ?? "");
-  const [barcode, setBarcode] = React.useState(o?.barcode ?? "");
-  const [qrCode, setQrCode] = React.useState(o?.qrCode ?? "");
   const [baseUnit, setBaseUnit] = React.useState(o?.baseUnit ?? "Each");
   const [packSize, setPackSize] = React.useState(numStr(o?.packSize));
   const [conversionRatio, setConversionRatio] = React.useState(numStr(o?.conversionRatio));
@@ -72,9 +70,11 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
   const [standardCost, setStandardCost] = React.useState(numStr(o?.standardCost));
   const [currency, setCurrency] = React.useState(o?.currency ?? "GBP");
   const [vatRatePercent, setVatRatePercent] = React.useState(o ? numStr(o.vatRatePercent) : "20");
-  const [trackInventory, setTrackInventory] = React.useState(o?.trackInventory ?? true);
-  const [trackSerialNumbers, setTrackSerialNumbers] = React.useState(o?.trackSerialNumbers ?? false);
-  const [trackBatchNumbers, setTrackBatchNumbers] = React.useState(o?.trackBatchNumbers ?? false);
+  // Tracking flags are code defaults (no UI): IRM items are inventory-tracked; serial/batch tracking
+  // isn't used here. Existing values are preserved on edit; new items default to inventory-tracked.
+  const trackInventory = o?.trackInventory ?? true;
+  const trackSerialNumbers = o?.trackSerialNumbers ?? false;
+  const trackBatchNumbers = o?.trackBatchNumbers ?? false;
   const [ownerUserId, setOwnerUserId] = React.useState(o?.ownerUserId ?? "");
   const [notes, setNotes] = React.useState(o?.notes ?? "");
 
@@ -164,7 +164,7 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
 
   // Dirty detection — snapshot of every field captured on the first render.
   const liveKey = JSON.stringify({
-    name, typeId, irmCategoryId, description, brand, manufacturer, mpn, status, sku, barcode, qrCode,
+    name, typeId, irmCategoryId, description, brand, manufacturer, mpn, status, sku,
     baseUnit, packSize, conversionRatio, minimumStock, reorderLevel, reorderQuantity, maximumStock, safetyStock,
     criticalLevel, standardCost, currency, vatRatePercent, trackInventory, trackSerialNumbers, trackBatchNumbers,
     ownerUserId, notes, supplierRows,
@@ -185,8 +185,6 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
         mpn: o?.mpn ?? "",
         status: o?.status ?? "active",
         sku: o?.sku ?? "",
-        barcode: o?.barcode ?? "",
-        qrCode: o?.qrCode ?? "",
         baseUnit: o?.baseUnit ?? "Each",
         packSize: numStr(o?.packSize),
         conversionRatio: numStr(o?.conversionRatio),
@@ -296,8 +294,6 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
     mpn: mpn.trim(),
     status,
     sku: sku.trim(),
-    barcode: barcode.trim(),
-    qrCode: qrCode.trim(),
     suppliers: buildSuppliersPayload(),
     baseUnit,
     packSize: packSize.trim(),
@@ -462,20 +458,12 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
             </div>
           </FormSection>
 
-          <FormSection title="Identification" description="SKU, barcode and QR code (all optional). A SKU is unique forever once used.">
-            <div className="grid gap-4 sm:grid-cols-3">
+          <FormSection title="Identification" description="The item's internal SKU (optional). Unique forever once used. The printable Code128 label is generated separately from the item code.">
+            <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className={labelCls}>SKU</label>
                 <input className={inputCls} value={sku} onChange={(e) => setSku(e.target.value)} maxLength={80} placeholder="e.g. IRM-CAT6-305" />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Your internal code. Unique forever — it can&apos;t be reused once set.</p>
-              </div>
-              <div>
-                <label className={labelCls}>Barcode</label>
-                <input className={inputCls} value={barcode} onChange={(e) => setBarcode(e.target.value)} maxLength={80} placeholder="e.g. 5012345678900" />
-              </div>
-              <div>
-                <label className={labelCls}>QR code</label>
-                <input className={inputCls} value={qrCode} onChange={(e) => setQrCode(e.target.value)} maxLength={80} placeholder="Internal QR reference" />
               </div>
             </div>
           </FormSection>
@@ -616,24 +604,6 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
                 <FieldError id="err-vatRatePercent" message={errors.vatRatePercent} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">UK standard rate is 20%. Use 5% or 0% where applicable.</p>
               </div>
-            </div>
-          </FormSection>
-
-          <FormSection title="Tracking" description="How this item is tracked once inventory is live.">
-            <div className="grid gap-2.5 sm:grid-cols-2">
-              {[
-                { label: "Track inventory", checked: trackInventory, set: setTrackInventory, hint: "Keep stock balances for this item once inventory is live." },
-                { label: "Track serial numbers", checked: trackSerialNumbers, set: setTrackSerialNumbers, hint: "Each unit is tracked by a unique serial number." },
-                { label: "Track batch numbers", checked: trackBatchNumbers, set: setTrackBatchNumbers, hint: "Units are grouped and tracked by batch / lot." },
-              ].map((f) => (
-                <label key={f.label} className="flex items-start gap-2.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/40 px-3.5 py-3">
-                  <input type="checkbox" checked={f.checked} onChange={(e) => f.set(e.target.checked)} className="mt-0.5 h-4 w-4 accent-[var(--accent)]" />
-                  <span className="text-xs text-[var(--ink)]">
-                    <span className="font-bold">{f.label}</span>
-                    <span className="block text-[11px] text-[var(--faint)]">{f.hint}</span>
-                  </span>
-                </label>
-              ))}
             </div>
           </FormSection>
 

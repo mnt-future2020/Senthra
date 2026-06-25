@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Loader2, Pencil, UserCog, XCircle } from "lucide-react";
 
 import * as jobService from "@/services/job.service";
-import { listManagerOptions } from "@/services/warehouse.service";
+import { listEngineerOptions } from "@/services/warehouse.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { Select } from "@/components/ui/Select";
@@ -241,7 +241,7 @@ function ReassignDialog({ current, busy, onConfirm, onClose }: { current: string
   const [engineerId, setEngineerId] = React.useState(current ?? "");
   React.useEffect(() => {
     let active = true;
-    listManagerOptions().then((us) => active && setEngineers(us.map((u) => ({ id: u.id, name: u.name, jobTitle: u.jobTitle }))), () => {});
+    listEngineerOptions().then((us) => active && setEngineers(us.map((u) => ({ id: u.id, name: u.name, jobTitle: u.jobTitle }))), () => {});
     return () => { active = false; };
   }, []);
   return (

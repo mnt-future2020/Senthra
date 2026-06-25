@@ -104,8 +104,6 @@ const sharedIrmFields = {
   typeId: optionalTypeIdField,
   irmCategoryId: optionalCategoryIdField,
   sku: z.string().trim().max(80).optional(),
-  barcode: z.string().trim().max(80).optional(),
-  qrCode: z.string().trim().max(80).optional(),
   baseUnit: baseUnitUpdate,
   packSize: packSizeField,
   conversionRatio: conversionField,

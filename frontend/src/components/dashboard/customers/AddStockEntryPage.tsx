@@ -88,6 +88,7 @@ export function AddStockEntryPage({ customer }: { customer: CustomerInfo }) {
   const validate = (): Record<string, string> => {
     const errs: Record<string, string> = {};
     if (!itemName.trim()) errs.itemName = "Item name is required.";
+    if (!categoryId) errs.categoryId = "Select a category.";
     if (!warehouseId) errs.warehouseId = "Select a warehouse.";
     const qty = parseInt(quantity, 10);
     if (!quantity || isNaN(qty) || qty < 1) errs.quantity = "Quantity must be at least 1.";
@@ -238,14 +239,16 @@ export function AddStockEntryPage({ customer }: { customer: CustomerInfo }) {
                   />
                 </div>
                 <div>
-                  <label className={labelCls}>Category</label>
+                  <label className={labelCls}>Category<RequiredMark /></label>
                   <Select
                     value={categoryId}
-                    onChange={(v) => setCategoryId(v)}
+                    onChange={(v) => { setCategoryId(v); clearError("categoryId"); }}
                     options={categories.map((c) => ({ value: c.id, label: c.name }))}
                     placeholder="— Select category —"
                     ariaLabel="Category"
+                    invalid={Boolean(errors.categoryId)}
                   />
+                  <FieldError message={errors.categoryId} />
                 </div>
                 <div className="sm:col-span-2">
                   <label className={labelCls}>Description</label>

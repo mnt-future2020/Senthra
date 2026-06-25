@@ -37,6 +37,7 @@ export type InventoryBalanceWithRelations = Prisma.InventoryBalanceGetPayload<{ 
 export interface InventoryListFilters {
   search?: string;
   warehouseId?: string;
+  irmItemId?: string; // exact item — used by the job kit picker to list only the warehouses holding it
   irmCategoryId?: string;
   outOfStock?: boolean; // quantityOnHand === 0 (the one DB-expressible stock-status filter)
   // Warehouse-access scope: undefined = unrestricted; otherwise constrain to exactly these ids
@@ -61,6 +62,7 @@ function buildBalanceWhere(filters: InventoryListFilters): Prisma.InventoryBalan
     irmItem: { is: irmItemFilter },
     warehouse: { is: warehouseFilter },
   };
+  if (filters.irmItemId) where.irmItemId = filters.irmItemId;
   if (filters.outOfStock) where.quantityOnHand = 0;
   return where;
 }

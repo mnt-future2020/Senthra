@@ -252,8 +252,6 @@ function irmColumns(input: CreateIrmItemInput, skuLower: string | null, standard
     mpn: trimToNull(input.mpn),
     sku: trimToNull(input.sku),
     skuLower,
-    barcode: trimToNull(input.barcode),
-    qrCode: trimToNull(input.qrCode),
     baseUnit: input.baseUnit,
     packSize: input.packSize ?? null,
     conversionRatio: input.conversionRatio ?? null,
@@ -393,8 +391,6 @@ export async function updateIrmItem(id: string, input: UpdateIrmItemInput, actor
   if (input.brand !== undefined) data.brand = trimToNull(input.brand);
   if (input.manufacturer !== undefined) data.manufacturer = trimToNull(input.manufacturer);
   if (input.mpn !== undefined) data.mpn = trimToNull(input.mpn);
-  if (input.barcode !== undefined) data.barcode = trimToNull(input.barcode);
-  if (input.qrCode !== undefined) data.qrCode = trimToNull(input.qrCode);
   if (input.baseUnit !== undefined) data.baseUnit = input.baseUnit;
   if (input.packSize !== undefined) data.packSize = input.packSize;
   if (input.conversionRatio !== undefined) data.conversionRatio = input.conversionRatio;

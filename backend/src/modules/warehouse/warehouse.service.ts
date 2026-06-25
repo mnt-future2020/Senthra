@@ -425,6 +425,18 @@ export async function listManagerOptions(): Promise<PublicWarehouseManager[]> {
   }));
 }
 
+// Active FIELD ENGINEERS (canHoldStock roles) for the "assign an engineer" dropdowns on jobs and
+// dispatches — same shape as listManagerOptions but role-filtered so only assignable engineers show.
+export async function listEngineerOptions(): Promise<PublicWarehouseManager[]> {
+  const users = await warehouseRepo.findEngineerOptions();
+  return users.map((u) => ({
+    id: u.id,
+    name: `${u.firstName} ${u.lastName}`.trim() || u.email,
+    email: u.email,
+    jobTitle: u.jobTitle ?? u.role?.name ?? null,
+  }));
+}
+
 // Plug-in seam for FUTURE inventory modules (Goods In/Out, Transfers, Dispatch):
 // assert a warehouse id points to an existing ACTIVE warehouse before recording a
 // movement against it. Mirrors categoryService.requireActiveCategory.

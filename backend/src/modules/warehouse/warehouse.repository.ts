@@ -181,6 +181,34 @@ export function findManagerOptions(): Promise<
   });
 }
 
+// Active, non-deleted FIELD ENGINEERS for the job/dispatch engineer picker — only users whose role
+// grants the field-operations stock-holding capability (canHoldStock). Same minimal slice/sort as
+// findManagerOptions; the role filter is what keeps admins / finance / warehouse managers out of the
+// "assign an engineer" dropdowns. Mirrors the canHoldStock gate the goods-out + job services enforce.
+export function findEngineerOptions(): Promise<
+  {
+    id: string;
+    firstName: string;
+    lastName: string;
+    email: string;
+    jobTitle: string | null;
+    role: { name: string } | null;
+  }[]
+> {
+  return prisma.user.findMany({
+    where: { status: "active", deletedAt: null, role: { is: { canHoldStock: true } } },
+    select: {
+      id: true,
+      firstName: true,
+      lastName: true,
+      email: true,
+      jobTitle: true,
+      role: { select: { name: true } },
+    },
+    orderBy: [{ firstName: "asc" }, { lastName: "asc" }],
+  });
+}
+
 // --- code allocation (atomic Counter, prefix "WH") --------------------------
 //
 // Same mechanism as customerCode / employeeId: a single $inc on one Counter row hands

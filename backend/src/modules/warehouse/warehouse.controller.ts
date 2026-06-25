@@ -26,6 +26,12 @@ export const listManagerOptions = asyncHandler(async (_req, res) => {
   res.json({ managers: await warehouseService.listManagerOptions() });
 });
 
+// GET /warehouses/engineer-options — active FIELD ENGINEERS (canHoldStock roles) for the
+// "assign an engineer" pickers on jobs and dispatches.
+export const listEngineerOptions = asyncHandler(async (_req, res) => {
+  res.json({ engineers: await warehouseService.listEngineerOptions() });
+});
+
 // GET /warehouses/options — active warehouses (id/code/name) for assignment / PO pickers. Scoped to
 // the caller: a warehouse-scoped user only sees their assigned warehouses.
 export const listWarehouseOptions = asyncHandler(async (req, res) => {

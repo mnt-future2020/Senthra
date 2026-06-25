@@ -402,6 +402,7 @@ function IncomingStock({
   warehouseId: string;
   pushToast: (msg: string, type?: "success" | "alert") => void;
 }) {
+  const router = useRouter();
   const [items, setItems] = React.useState<PendingStockItem[] | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [receiveTarget, setReceiveTarget] = React.useState<PendingStockItem | null>(null);
@@ -415,28 +416,23 @@ function IncomingStock({
 
   React.useEffect(() => { load(); }, [load]);
 
-  const onReceived = (updated: WarehouseAssignment) => {
-    if (!receiveTarget) return;
-    setItems((prev) =>
-      (prev ?? [])
-        .map((it) => {
-          if (it.assignmentId !== updated.id) return it;
-          return {
-            ...it,
-            receivedQuantity: updated.receivedQuantity,
-            status: updated.status,
-          };
-        })
-        .filter((it) => it.status !== "received"),
-    );
+  const onReceived = (updated: WarehouseAssignment, stockEntryId: string) => {
     setReceiveTarget(null);
-    const done = updated.status === "received";
     pushToast(
-      done
-        ? `Fully received at ${updated.warehouseName}. View it under Inventory.`
+      updated.status === "received"
+        ? `Fully received at ${updated.warehouseName}.`
         : `Received ${updated.receivedQuantity}/${updated.quantity} at ${updated.warehouseName}.`,
       "success",
     );
+    // Jump straight into the just-received draft entry (warehouse context) so the WM can fill the
+    // product details, generate the barcode + print the label, and activate — no hunting for it in the
+    // Inventory tab. A PARTIAL receipt tops up the SAME entry, so this opens it either way. The
+    // Incoming list re-loads when the WM navigates back. Falls back to a refresh if the id is missing.
+    if (stockEntryId) {
+      router.push(`/dashboard/stock-entries/${stockEntryId}?from=warehouse`);
+    } else {
+      load();
+    }
   };
 
   if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
@@ -663,7 +659,7 @@ function WarehouseStockEntries({
                 <tr
                   key={e.id}
                   className="cursor-pointer border-b border-[var(--border)] align-top transition-colors last:border-0 hover:bg-[var(--surface-2)]"
-                  onClick={() => router.push(`/dashboard/stock-entries/${e.id}`)}
+                  onClick={() => router.push(`/dashboard/stock-entries/${e.id}?from=warehouse`)}
                 >
                   <td className="px-4 py-3 font-semibold text-[var(--ink)]">{e.itemName}</td>
                   <td className="px-4 py-3">
@@ -690,7 +686,7 @@ function WarehouseStockEntries({
                       <button
                         type="button"
                         title="View"
-                        onClick={(ev) => { ev.stopPropagation(); router.push(`/dashboard/stock-entries/${e.id}`); }}
+                        onClick={(ev) => { ev.stopPropagation(); router.push(`/dashboard/stock-entries/${e.id}?from=warehouse`); }}
                         className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface-2)] text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)]"
                       >
                         <Eye className="h-4 w-4" />
@@ -698,7 +694,7 @@ function WarehouseStockEntries({
                       <button
                         type="button"
                         title="Edit"
-                        onClick={(ev) => { ev.stopPropagation(); router.push(`/dashboard/stock-entries/${e.id}`); }}
+                        onClick={(ev) => { ev.stopPropagation(); router.push(`/dashboard/stock-entries/${e.id}?from=warehouse`); }}
                         className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--accent)] text-white transition-all hover:opacity-90"
                       >
                         <Pencil className="h-4 w-4" />

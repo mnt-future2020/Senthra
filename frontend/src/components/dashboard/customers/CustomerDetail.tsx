@@ -303,7 +303,6 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
         <StockEntriesTab
           customer={customer}
           stockCaps={stockCaps}
-          pushToast={pushToast}
           router={router}
         />
       )}
@@ -503,11 +502,11 @@ function OverviewTab({ customer }: { customer: Customer }) {
       <InfoCard title="Record" icon={Calendar} className="lg:col-span-2">
         <Field label="Added">
           <span>{fmtDate(customer.createdAt)}</span>
-          {customer.createdBy && <span className="truncate text-[var(--muted)]"> Â· {customer.createdBy}</span>}
+          {customer.createdBy && <span className="truncate text-[var(--muted)]"> · {customer.createdBy}</span>}
         </Field>
         <Field label="Last updated">
           <span>{fmtDate(customer.updatedAt)}</span>
-          {customer.updatedBy && <span className="truncate text-[var(--muted)]"> Â· {customer.updatedBy}</span>}
+          {customer.updatedBy && <span className="truncate text-[var(--muted)]"> · {customer.updatedBy}</span>}
         </Field>
       </InfoCard>
     </div>
@@ -724,12 +723,10 @@ function ProjectsSection({ customer, caps, onChange, pushToast }: SectionProps) 
 function StockEntriesTab({
   customer,
   stockCaps,
-  pushToast,
   router,
 }: {
   customer: Customer;
   stockCaps: SectionCaps;
-  pushToast: PushToast;
   router: ReturnType<typeof useRouter>;
 }) {
   // --- stock entries list ---
@@ -812,7 +809,7 @@ function StockEntriesTab({
                     <tr
                       key={e.id}
                       className="cursor-pointer border-b border-[var(--border)] align-top transition-colors last:border-0 hover:bg-[var(--surface-2)]"
-                      onClick={() => router.push(`/dashboard/stock-entries/${e.id}`)}
+                      onClick={() => router.push(`/dashboard/stock-entries/${e.id}?from=customer`)}
                     >
                       <td className="px-4 py-3 font-semibold text-[var(--ink)]">{e.itemName}</td>
                       <td className="px-4 py-3">
@@ -839,33 +836,14 @@ function StockEntriesTab({
                           <button
                             type="button"
                             title="View"
-                            onClick={(ev) => { ev.stopPropagation(); router.push(`/dashboard/stock-entries/${e.id}`); }}
+                            onClick={(ev) => { ev.stopPropagation(); router.push(`/dashboard/stock-entries/${e.id}?from=customer`); }}
                             className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface-2)] text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)]"
                           >
                             <Eye className="h-4 w-4" />
                           </button>
-                          <button
-                            type="button"
-                            title="Edit"
-                            onClick={(ev) => { ev.stopPropagation(); router.push(`/dashboard/stock-entries/${e.id}`); }}
-                            className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--accent)] text-white transition-all hover:opacity-90"
-                          >
-                            <Pencil className="h-4 w-4" />
-                          </button>
-                          {stockCaps.delete && (
-                            <StockEntryDeleteButton
-                              itemName={e.itemName}
-                              onConfirm={async () => {
-                                try {
-                                  await customerService.deleteStockEntry(e.id);
-                                  pushToast("Stock entry deleted.", "success");
-                                  load();
-                                } catch (err) {
-                                  pushToast(err instanceof Error ? err.message : "Delete failed.", "alert");
-                                }
-                              }}
-                            />
-                          )}
+                          {/* View only. Managing a customer's stock (edit / activate / barcode / delete)
+                              is a warehouse-manager action done from the warehouse's Customer-pool
+                              inventory — in the customer module a PM only VIEWS. */}
                         </div>
                       </td>
                     </tr>
@@ -1611,52 +1589,3 @@ function DeleteConfirmButton({
   );
 }
 
-// Stock-entry row delete: themed confirm modal (replaces the native confirm()), styled
-// to match the row's View/Edit buttons. Disables itself while the DELETE is in flight.
-function StockEntryDeleteButton({
-  itemName,
-  onConfirm,
-}: {
-  itemName: string;
-  onConfirm: () => Promise<void>;
-}) {
-  const [open, setOpen] = React.useState(false);
-  const [busy, setBusy] = React.useState(false);
-  const run = async () => {
-    setBusy(true);
-    try {
-      await onConfirm();
-      setOpen(false);
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <>
-      <button
-        type="button"
-        title="Delete"
-        onClick={(ev) => { ev.stopPropagation(); setOpen(true); }}
-        className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--neg)]/30 bg-[var(--neg)]/10 text-[var(--neg)] transition-all hover:bg-[var(--neg)] hover:text-white"
-      >
-        <Trash2 className="h-4 w-4" />
-      </button>
-      <ConfirmDialog
-        open={open}
-        title="Delete stock entry?"
-        message={
-          <>
-            Delete <strong className="text-[var(--ink)]">{itemName}</strong>? This can&apos;t be undone.
-          </>
-        }
-        confirmLabel="Delete"
-        danger
-        busy={busy}
-        onConfirm={run}
-        onClose={() => {
-          if (!busy) setOpen(false);
-        }}
-      />
-    </>
-  );
-}

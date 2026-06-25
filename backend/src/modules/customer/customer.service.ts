@@ -1661,6 +1661,18 @@ export async function updateStockEntry(
   if (!entry) throw notFound("Stock entry not found.");
   assertWarehouseAccess(actor, entry.warehouseId);
 
+  // Activation = the draft → active transition. A trackable stock entry needs more than just a name
+  // before it goes live: enforce a category here (server-side trust boundary, mirrored on the form).
+  const activating = entry.status === "draft";
+  if (activating && !trimToNull(input.categoryId)) {
+    throw badRequest("Select a category before activating this stock entry.");
+  }
+  // A draft can't go active without a barcode — the warehouse manager generates + prints + attaches
+  // the label before activating (front-end mirrors this; this is the trust boundary).
+  if (activating && !entry.barcode) {
+    throw badRequest("Generate the barcode before activating this stock entry.");
+  }
+
   const updated = await customerRepo.updateStockEntry(entryId, {
     itemName: input.itemName.trim(),
     sku: trimToNull(input.sku),
@@ -1682,6 +1694,9 @@ export async function updateStockEntry(
     targetLabel: `${updated.itemName} at ${updated.warehouse.name}`,
   });
 
+  // NOTE: the barcode is NOT generated here. The warehouse manager generates it explicitly (from the
+  // warehouse Inventory → Customer pool view) so they can print + attach the label to the physical
+  // stock before activating — see generateStockEntryBarcode.
   return toStockEntry(updated);
 }
 
@@ -1763,6 +1778,10 @@ export async function createDirectStockEntry(
   actor?: AuditActor,
 ): Promise<PublicStockEntry> {
   await requireCustomer(customerId);
+
+  // A direct add creates ACTIVE stock — hold the same invariant as activation: a category is
+  // required (so every active customer-stock entry is categorised regardless of the path in).
+  if (!trimToNull(input.categoryId)) throw badRequest("Select a category for this stock entry.");
 
   // Guard against a well-formed-but-nonexistent warehouseId creating an orphan entry
   // (MongoDB has no FK enforcement, so this must be checked explicitly).

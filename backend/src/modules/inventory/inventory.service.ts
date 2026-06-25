@@ -225,6 +225,7 @@ function toTransferDTO(t: StockTransfer): PublicStockTransfer {
 export interface ListInventoryParams {
   search?: string;
   warehouse?: string;
+  irmItem?: string; // exact item id — restricts the result to that item's per-warehouse balances
   category?: string;
   status?: string; // in_stock | low_stock | out_of_stock
   page?: number;
@@ -248,6 +249,7 @@ async function filteredBalanceDTOs(params: ListInventoryParams, actor?: AuditAct
   const rows = await inventoryRepo.findAllBalances({
     search: params.search?.trim() || undefined,
     warehouseId: params.warehouse,
+    irmItemId: params.irmItem,
     irmCategoryId: params.category,
     warehouseIds: warehouseScopeFilter(actor),
   });
