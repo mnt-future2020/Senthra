@@ -111,7 +111,7 @@ export interface JobGoodsDetail {
 export interface DamagedRow {
   id: string;
   warehouseId: string;
-  warehouseName?: string | null;
+  warehouseName: string | null;
   ownerType: "company" | "customer";
   irmItemId: string | null;
   customerStockEntryId: string | null;
@@ -119,6 +119,8 @@ export interface DamagedRow {
   itemName: string;
   quantity: number;
   updatedAt: string;
+  reason: string | null;
+  photoUrl: string | null;
 }
 
 // ── Overdue holdings ──────────────────────────────────────────────────────────

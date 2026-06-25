@@ -167,14 +167,67 @@ export async function upsertDamagedBalanceTx(tx: Prisma.TransactionClient, key: 
 export function insertDamagedTxnTx(tx: Prisma.TransactionClient, data: Prisma.DamagedStockTransactionUncheckedCreateInput): Promise<DamagedStockTransaction> {
   return tx.damagedStockTransaction.create({ data });
 }
-export function findDamagedByWarehouse(warehouseId: string) {
-  return prisma.damagedStockBalance.findMany({ where: { warehouseId, quantity: { gt: 0 } }, orderBy: { updatedAt: "desc" } });
+const damagedBalanceInclude = {
+  warehouse: { select: { id: true, name: true } },
+} satisfies Prisma.DamagedStockBalanceInclude;
+
+export type DamagedBalanceWithWarehouse = Prisma.DamagedStockBalanceGetPayload<{
+  include: typeof damagedBalanceInclude;
+}>;
+
+export function findDamagedByWarehouse(warehouseId: string): Promise<DamagedBalanceWithWarehouse[]> {
+  return prisma.damagedStockBalance.findMany({ where: { warehouseId, quantity: { gt: 0 } }, include: damagedBalanceInclude, orderBy: { updatedAt: "desc" } });
 }
-export function findDamagedByCustomer(customerId: string) {
-  return prisma.damagedStockBalance.findMany({ where: { customerId, quantity: { gt: 0 } }, orderBy: { updatedAt: "desc" } });
+export function findDamagedByCustomer(customerId: string): Promise<DamagedBalanceWithWarehouse[]> {
+  return prisma.damagedStockBalance.findMany({ where: { customerId, quantity: { gt: 0 } }, include: damagedBalanceInclude, orderBy: { updatedAt: "desc" } });
 }
-export function findAllDamaged() {
-  return prisma.damagedStockBalance.findMany({ where: { quantity: { gt: 0 } }, orderBy: { updatedAt: "desc" } });
+export function findAllDamaged(): Promise<DamagedBalanceWithWarehouse[]> {
+  return prisma.damagedStockBalance.findMany({ where: { quantity: { gt: 0 } }, include: damagedBalanceInclude, orderBy: { updatedAt: "desc" } });
+}
+
+/** Returns the most-recent DamagedStockTransaction for each balance row, keyed by balanceId.
+ *  We match on warehouseId + ownerType + irmItemId + customerStockEntryId (the natural key).
+ */
+export async function findLatestDamagedTxnsByBalances(
+  balances: Pick<DamagedBalanceWithWarehouse, "id" | "warehouseId" | "ownerType" | "irmItemId" | "customerStockEntryId">[],
+): Promise<Map<string, { reason: string; photoUrl: string | null }>> {
+  const result = new Map<string, { reason: string; photoUrl: string | null }>();
+  if (balances.length === 0) return result;
+
+  // Fetch the latest transaction per natural key via a single query, then pick the max.
+  // We fetch all matching transactions (in practice each balance has few txns) and reduce in-memory.
+  const txns = await prisma.damagedStockTransaction.findMany({
+    where: {
+      OR: balances.map((b) => ({
+        warehouseId: b.warehouseId,
+        ownerType: b.ownerType,
+        irmItemId: b.irmItemId ?? null,
+        customerStockEntryId: b.customerStockEntryId ?? null,
+      })),
+    },
+    select: { warehouseId: true, ownerType: true, irmItemId: true, customerStockEntryId: true, reason: true, photoUrl: true, createdAt: true },
+    orderBy: { createdAt: "desc" },
+  });
+
+  // Build a lookup: natural-key → latest txn seen (since query is desc, first hit wins).
+  const seen = new Set<string>();
+  const latestByKey = new Map<string, { reason: string; photoUrl: string | null }>();
+  for (const t of txns) {
+    const key = `${t.warehouseId}|${t.ownerType}|${t.irmItemId ?? ""}|${t.customerStockEntryId ?? ""}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      latestByKey.set(key, { reason: t.reason, photoUrl: t.photoUrl });
+    }
+  }
+
+  // Map balanceId → latest txn data.
+  for (const b of balances) {
+    const key = `${b.warehouseId}|${b.ownerType}|${b.irmItemId ?? ""}|${b.customerStockEntryId ?? ""}`;
+    const txn = latestByKey.get(key);
+    if (txn) result.set(b.id, txn);
+  }
+
+  return result;
 }
 
 // --- overdue holdings (jobs whose stock is still out > N days) --------------------------------

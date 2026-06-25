@@ -820,12 +820,16 @@ export async function recordConsumeAndComplete(
 export interface DamagedRow {
   id: string;
   warehouseId: string;
+  warehouseName: string | null;
   ownerType: string; // "company" | "customer"
   irmItemId: string | null;
   customerStockEntryId: string | null;
   customerId: string | null;
   itemName: string;
   quantity: number;
+  updatedAt: string; // ISO date from DamagedStockBalance.updatedAt
+  reason: string | null; // from latest DamagedStockTransaction
+  photoUrl: string | null; // from latest DamagedStockTransaction
 }
 
 export async function listDamaged(
@@ -834,71 +838,52 @@ export async function listDamaged(
 ): Promise<DamagedRow[]> {
   const scopeIds = warehouseScopeFilter(actor);
 
-  let rows: DamagedRow[] = [];
+  // Step 1: collect raw balance rows (now includes warehouse relation).
+  type RawBalance = Awaited<ReturnType<typeof goodsManagementRepo.findDamagedByWarehouse>>[number];
+  let rawBalances: RawBalance[] = [];
 
   if (filter.customerId) {
     const raw = await goodsManagementRepo.findDamagedByCustomer(filter.customerId);
-    rows = raw
-      .filter((r) => scopeIds === undefined || scopeIds.includes(r.warehouseId))
-      .map((r) => ({
-        id: r.id,
-        warehouseId: r.warehouseId,
-        ownerType: r.ownerType,
-        irmItemId: r.irmItemId,
-        customerStockEntryId: r.customerStockEntryId,
-        customerId: r.customerId,
-        itemName: r.itemName,
-        quantity: r.quantity,
-      }));
+    rawBalances = raw.filter((r) => scopeIds === undefined || scopeIds.includes(r.warehouseId));
   } else if (filter.warehouseId) {
     assertWarehouseAccess(actor, filter.warehouseId);
-    const raw = await goodsManagementRepo.findDamagedByWarehouse(filter.warehouseId);
-    rows = raw.map((r) => ({
+    rawBalances = await goodsManagementRepo.findDamagedByWarehouse(filter.warehouseId);
+  } else {
+    // No filter: return all warehouses the actor can access.
+    const allWarehouseIds = scopeIds;
+    if (allWarehouseIds !== undefined) {
+      // Scoped: fetch per warehouse then merge.
+      for (const whId of allWarehouseIds) {
+        const raw = await goodsManagementRepo.findDamagedByWarehouse(whId);
+        rawBalances.push(...raw);
+      }
+    } else {
+      // Global actor: use repo's findAll-style query (no filter).
+      rawBalances = await goodsManagementRepo.findAllDamaged();
+    }
+  }
+
+  // Step 2: batch-fetch the latest transaction for each balance (reason + photoUrl).
+  const latestTxnMap = await goodsManagementRepo.findLatestDamagedTxnsByBalances(rawBalances);
+
+  // Step 3: assemble final rows.
+  const rows: DamagedRow[] = rawBalances.map((r) => {
+    const txn = latestTxnMap.get(r.id);
+    return {
       id: r.id,
       warehouseId: r.warehouseId,
+      warehouseName: r.warehouse?.name ?? null,
       ownerType: r.ownerType,
       irmItemId: r.irmItemId,
       customerStockEntryId: r.customerStockEntryId,
       customerId: r.customerId,
       itemName: r.itemName,
       quantity: r.quantity,
-    }));
-  } else {
-    // No filter: return all warehouses the actor can access.
-    // For scoped actors, we need to list per accessible warehouse; for global actors list all.
-    const allWarehouseIds = scopeIds;
-    if (allWarehouseIds !== undefined) {
-      // Scoped: fetch per warehouse then merge.
-      for (const whId of allWarehouseIds) {
-        const raw = await goodsManagementRepo.findDamagedByWarehouse(whId);
-        for (const r of raw) {
-          rows.push({
-            id: r.id,
-            warehouseId: r.warehouseId,
-            ownerType: r.ownerType,
-            irmItemId: r.irmItemId,
-            customerStockEntryId: r.customerStockEntryId,
-            customerId: r.customerId,
-            itemName: r.itemName,
-            quantity: r.quantity,
-          });
-        }
-      }
-    } else {
-      // Global actor: use repo's findAll-style query (no filter).
-      const raw = await goodsManagementRepo.findAllDamaged();
-      rows = raw.map((r) => ({
-        id: r.id,
-        warehouseId: r.warehouseId,
-        ownerType: r.ownerType,
-        irmItemId: r.irmItemId,
-        customerStockEntryId: r.customerStockEntryId,
-        customerId: r.customerId,
-        itemName: r.itemName,
-        quantity: r.quantity,
-      }));
-    }
-  }
+      updatedAt: r.updatedAt.toISOString(),
+      reason: txn?.reason ?? null,
+      photoUrl: txn?.photoUrl ?? null,
+    };
+  });
 
   return rows;
 }

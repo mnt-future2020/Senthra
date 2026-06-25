@@ -731,6 +731,10 @@ function StockEntriesTab({
   router: ReturnType<typeof useRouter>;
 }) {
   const { can } = useAuth();
+  // goods_management.view gates the damaged-stock section — this is the same permission
+  // that controls the broader Goods Management feature access (warehouse damaged tab,
+  // overdue view, etc.), so it is the correct gate here. The warehouse pill on stock
+  // entries uses inventory.view, which is a separate concern.
   const canViewDamaged = can("goods_management.view");
 
   // --- stock entries list ---

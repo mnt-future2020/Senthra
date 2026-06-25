@@ -5,11 +5,13 @@
 
 import * as React from "react";
 import { AlertTriangle, Loader2 } from "lucide-react";
+import Image from "next/image";
 
 import * as gmService from "@/services/goodsManagement.service";
 import type { DamagedRow } from "@/types/goodsManagement";
 
-function fmtDate(iso: string): string {
+function fmtDate(iso: string | null | undefined): string {
+  if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleDateString("en-GB", {
@@ -82,14 +84,16 @@ export function DamagedStockView({
 
   return (
     <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
-      <table className="w-full text-left text-sm" style={{ minWidth: 600 }}>
+      <table className="w-full text-left text-sm" style={{ minWidth: 700 }}>
         <thead>
           <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
+            <th className="px-4 py-3">Photo</th>
             <th className="px-4 py-3">Item</th>
             <th className="px-4 py-3">Owner</th>
             {warehouseId ? null : (
               <th className="px-4 py-3">Warehouse</th>
             )}
+            <th className="px-4 py-3">Reason</th>
             <th className="px-4 py-3 text-right">Qty</th>
             <th className="px-4 py-3">Last updated</th>
           </tr>
@@ -100,6 +104,28 @@ export function DamagedStockView({
               key={row.id}
               className="border-b border-[var(--border)] align-middle last:border-0"
             >
+              {/* Photo thumbnail */}
+              <td className="px-4 py-3">
+                {row.photoUrl ? (
+                  <a
+                    href={row.photoUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block h-10 w-10 overflow-hidden rounded-lg border border-[var(--border)] transition-opacity hover:opacity-80"
+                  >
+                    <Image
+                      src={row.photoUrl}
+                      alt="Damage photo"
+                      width={40}
+                      height={40}
+                      className="h-10 w-10 object-cover"
+                      unoptimized
+                    />
+                  </a>
+                ) : (
+                  <span className="text-xs text-[var(--faint)]">—</span>
+                )}
+              </td>
               <td className="px-4 py-3 font-semibold text-[var(--ink)]">
                 {row.itemName}
               </td>
@@ -119,6 +145,10 @@ export function DamagedStockView({
                   {row.warehouseName ?? "—"}
                 </td>
               )}
+              {/* Reason from latest DamagedStockTransaction */}
+              <td className="max-w-[180px] px-4 py-3 text-xs text-[var(--muted)]">
+                {row.reason ?? <span className="text-[var(--faint)]">—</span>}
+              </td>
               <td className="px-4 py-3 text-right font-bold text-[var(--neg)]">
                 {row.quantity}
               </td>

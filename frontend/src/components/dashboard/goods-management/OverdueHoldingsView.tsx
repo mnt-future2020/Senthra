@@ -51,6 +51,8 @@ export function OverdueHoldingsView({ days = 14 }: { days?: number }) {
   const [rows, setRows] = React.useState<OverdueRow[] | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [writingOff, setWritingOff] = React.useState<string | null>(null);
+  // confirmWriteOff holds the jobId pending user confirmation; null = no pending confirm.
+  const [confirmWriteOff, setConfirmWriteOff] = React.useState<OverdueRow | null>(null);
 
   const [tick, setTick] = React.useState(0);
   const reload = React.useCallback(() => setTick((n) => n + 1), []);
@@ -76,6 +78,7 @@ export function OverdueHoldingsView({ days = 14 }: { days?: number }) {
   }, [days, tick]);
 
   const handleWriteOff = async (row: OverdueRow) => {
+    setConfirmWriteOff(null);
     setWritingOff(row.jobId);
     try {
       await gmService.closeReconcile(row.jobId, true);
@@ -165,17 +168,44 @@ export function OverdueHoldingsView({ days = 14 }: { days?: number }) {
               <td className="px-4 py-3">{statusChip(row.goodsStatus)}</td>
               <td className="px-4 py-3">
                 {row.goodsStatus !== "reconciled" && (
-                  <button
-                    type="button"
-                    onClick={() => handleWriteOff(row)}
-                    disabled={writingOff === row.jobId}
-                    className="flex items-center gap-1.5 rounded-xl bg-[var(--neg)] px-3 py-1.5 text-[11px] font-extrabold text-white transition-all hover:opacity-90 disabled:opacity-60"
-                  >
-                    {writingOff === row.jobId ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : null}
-                    Write off (lost)
-                  </button>
+                  confirmWriteOff?.jobId === row.jobId ? (
+                    // Inline confirmation — prevents accidental irreversible write-offs.
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] font-semibold text-[var(--neg)]">
+                        Write off as lost?
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleWriteOff(row)}
+                        disabled={writingOff === row.jobId}
+                        className="flex items-center gap-1 rounded-xl bg-[var(--neg)] px-2.5 py-1 text-[11px] font-extrabold text-white transition-all hover:opacity-90 disabled:opacity-60"
+                      >
+                        {writingOff === row.jobId ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : null}
+                        Confirm
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmWriteOff(null)}
+                        className="rounded-xl border border-[var(--border)] px-2.5 py-1 text-[11px] font-bold text-[var(--muted)] transition-all hover:text-[var(--ink)]"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmWriteOff(row)}
+                      disabled={writingOff === row.jobId}
+                      className="flex items-center gap-1.5 rounded-xl bg-[var(--neg)] px-3 py-1.5 text-[11px] font-extrabold text-white transition-all hover:opacity-90 disabled:opacity-60"
+                    >
+                      {writingOff === row.jobId ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : null}
+                      Write off (lost)
+                    </button>
+                  )
                 )}
               </td>
             </tr>
