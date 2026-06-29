@@ -17,6 +17,7 @@ import { ReceiveStockModal } from "@/components/dashboard/customers/ReceiveStock
 import { InventoryView } from "@/components/dashboard/inventory/InventoryView";
 import { GoodsReceiptsView } from "@/components/dashboard/goods-in/GoodsReceiptsView";
 import { GoodsManagementTab } from "@/components/dashboard/goods-management/GoodsManagementTab";
+import { DemandTab } from "@/components/dashboard/goods-management/DemandTab";
 import { DamagedStockView } from "@/components/dashboard/goods-management/DamagedStockView";
 import { ExpectedDeliveries } from "./ExpectedDeliveries";
 import type { AuditEntry } from "@/types/audit";
@@ -60,7 +61,7 @@ function TableSkeleton({ headers, minWidth }: { headers: string[]; minWidth: num
 // catalogue's per-warehouse balances) and customer consignment stock the customer shipped in.
 // (Incoming tab is gated by stock_requests.view; customer stock under Inventory is visible to
 // all; the IRM pool inside is gated by inventory.view.)
-type Tab = "overview" | "inventory" | "incoming" | "goods" | "transactions" | "audit";
+type Tab = "overview" | "inventory" | "incoming" | "goods" | "demand" | "transactions" | "audit";
 // `perms` is an anyOf gate. "Incoming stock" hosts BOTH receiving flows behind an inner toggle —
 // company goods receipts (goods_in.view) and customer consignment intake (stock_requests.view) — so
 // it shows if the user can see EITHER pool.
@@ -69,6 +70,7 @@ const TABS: { key: Tab; label: string; perms?: string[] }[] = [
   { key: "incoming", label: "Incoming stock", perms: ["goods_in.view", "stock_requests.view"] },
   { key: "inventory", label: "Inventory" },
   { key: "goods", label: "Goods Management", perms: ["goods_management.view"] },
+  { key: "demand", label: "Demand", perms: ["inventory.view"] },
   { key: "transactions", label: "Transactions" },
   { key: "audit", label: "Audit trail" },
 ];
@@ -166,6 +168,7 @@ export function WarehouseDetail({ initial }: { initial: Warehouse }) {
       {tab === "inventory" && <StockTab warehouseCode={w.code} warehouseId={w.id} router={router} />}
       {tab === "incoming" && <IncomingTab warehouseCode={w.code} warehouseId={w.id} router={router} pushToast={pushToast} />}
       {tab === "goods" && <GoodsManagementTab warehouseId={w.id} warehouseCode={w.code} router={router} />}
+      {tab === "demand" && <DemandTab warehouseId={w.id} />}
       {tab === "transactions" && (
         <Placeholder
           icon={Activity}

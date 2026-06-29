@@ -10,6 +10,9 @@ const router = Router();
 router.use(requireAuth);
 
 router.get("/queue", requirePermission("goods_management.view"), controller.listQueue);
+// Cross-job demand — gated by inventory.view (planners + warehouse staff have it, like /availability).
+router.get("/demand", requirePermission("inventory.view"), controller.getDemand);
+router.get("/warehouses/:warehouseId/demand", requirePermission("inventory.view"), controller.getWarehouseDemand);
 router.get("/jobs/:jobId", requirePermission("goods_management.view"), controller.getJobGoods);
 router.post("/scan-lookup", requirePermission("goods_management.view"), writeLimiter, validateBody(scanLookupSchema), controller.scanLookup);
 router.post("/jobs/:jobId/issue", requirePermission("goods_management.issue"), writeLimiter, validateBody(postMovementSchema), controller.postIssue);

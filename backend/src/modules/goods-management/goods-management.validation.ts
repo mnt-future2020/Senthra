@@ -8,11 +8,12 @@ const objectId = (label: string) => z.string({ error: `Select ${label}.` }).rege
 const optionalObjectId = (label: string) => z.preprocess(emptyToUndef, z.string().regex(OBJECT_ID_RE, `Select ${label}.`).optional());
 
 export const MOVEMENT_DIRECTIONS = ["issue", "return"] as const; // consume is engineer-only (job module)
-export const LINE_SOURCES = ["irm", "customer"] as const;
+export const LINE_SOURCES = ["irm", "customer", "misc"] as const; // misc = free-text kit line, no stock/barcode
 export const LINE_CONDITIONS = ["good", "damaged"] as const;
 
 export const scanLookupSchema = z.object({
   jobId: objectId("a job"),
+  warehouseId: objectId("a warehouse"), // the warehouse the WM is issuing/receiving FROM
   direction: z.enum(MOVEMENT_DIRECTIONS, { error: "Pick a direction." }),
   code: z.string({ error: "Scan or enter a code." }).trim().min(1, "Scan or enter a code.").max(120),
 });
@@ -34,6 +35,8 @@ const movementLineSchema = z
   .superRefine((l, ctx) => {
     if (l.source === "irm" && !l.irmItemId) ctx.addIssue({ code: "custom", path: ["irmItemId"], message: "Select an IRM item." });
     if (l.source === "customer" && !l.customerStockEntryId) ctx.addIssue({ code: "custom", path: ["customerStockEntryId"], message: "Select a customer stock item." });
+    // misc lines reference only their kit line (no barcode/stock) — issued by count, not scan.
+    if (l.source === "misc" && !l.jobKitLineId) ctx.addIssue({ code: "custom", path: ["jobKitLineId"], message: "Select a misc kit line." });
     if (l.condition === "damaged") {
       if (!l.damagePhotoUrl) ctx.addIssue({ code: "custom", path: ["damagePhotoUrl"], message: "Attach a photo of the damage." });
       if (!l.damageReason) ctx.addIssue({ code: "custom", path: ["damageReason"], message: "Give a reason for the damage." });
@@ -43,6 +46,7 @@ export type MovementLineInput = z.infer<typeof movementLineSchema>;
 
 export const postMovementSchema = z.object({
   direction: z.enum(MOVEMENT_DIRECTIONS, { error: "Pick a direction." }),
+  warehouseId: objectId("a warehouse"), // the warehouse the WM is issuing/receiving FROM
   notes: z.string().trim().max(2000).optional(),
   lines: z.array(movementLineSchema).min(1, "Scan at least one item.").max(500),
 });

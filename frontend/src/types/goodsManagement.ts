@@ -6,7 +6,7 @@
 // ── Enums / union types ──────────────────────────────────────────────────────
 
 export type MovementDirection = "issue" | "return" | "consume";
-export type LineSource = "irm" | "customer";
+export type LineSource = "irm" | "customer" | "misc"; // misc = free-text kit line (no stock/barcode)
 export type LineCondition = "good" | "damaged";
 
 export type GoodsStatus =
@@ -28,6 +28,8 @@ export interface ScanMatch {
   plannedQty: number;
   alreadyIssued: number;
   remainingIssuable: number;
+  // Qty the engineer still holds for this line (issued − used − already-returned) — the cap for returns.
+  heldByEngineer: number;
   available: number; // current warehouse stock available (net of reserved)
 }
 
@@ -66,17 +68,43 @@ export interface JobStockSummary {
   lastMovementAt: string | null;
 }
 
+// ── Cross-job demand ──────────────────────────────────────────────────────────
+
+// Open demand = stock active jobs have planned but not yet issued (per item+warehouse / entry).
+export interface DemandEntry {
+  irmItemId: string | null;
+  customerStockEntryId: string | null;
+  warehouseId: string | null;
+  itemName: string;
+  warehouseName: string | null;
+  demand: number;
+}
+
+// One row of a warehouse demand board: current stock vs total planned across jobs.
+export interface WarehouseDemandRow {
+  source: "irm" | "customer";
+  itemName: string;
+  inStock: number;
+  planned: number;
+  free: number; // inStock − planned (negative ⇒ short)
+}
+
 // ── Queue row (planned vs issued vs available per kit line) ───────────────────
 
 export interface QueueKitLine {
   id: string; // kit line id
   lineType: "irm" | "customer_stock" | "misc";
+  irmItemId: string | null;
+  customerStockEntryId: string | null;
   itemName: string;
   warehouseId: string | null;
   warehouseName: string | null;
   warehouseCode: string | null;
   plannedQty: number;
-  issuedQty: number;
+  issuedQty: number; // GROSS issued (total sent out, before returns)
+  usedQty: number; // consumed/used on site
+  returnedQty: number; // returned to the warehouse
+  engineerHeld: number; // engineer's real current holding of this item (caps what can be returned)
   available: number; // current net warehouse availability
 }
 
@@ -89,6 +117,25 @@ export interface QueueRow {
   goodsStatus: GoodsStatus;
   kitLines: QueueKitLine[];
 }
+
+// One page of the warehouse Goods Management queue (server-side filtered + paginated).
+export interface QueuePage {
+  rows: QueueRow[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+// Queue status filter. "active" = everything still needing work (all but reconciled); "reconciled"
+// backs the read-only Closed view; the others target one exact stage.
+export type QueueStatusFilter =
+  | "active"
+  | "not_issued"
+  | "partially_issued"
+  | "issued"
+  | "awaiting_return"
+  | "reconciled";
 
 // ── Per-job goods detail ──────────────────────────────────────────────────────
 
@@ -167,6 +214,7 @@ export interface MovementLinePayload {
 
 export interface PostMovementPayload {
   direction: "issue" | "return";
+  warehouseId: string; // the warehouse the WM is issuing/receiving FROM
   notes?: string;
   lines: MovementLinePayload[];
 }
@@ -184,6 +232,7 @@ export interface UsedLinePayload {
   source: LineSource;
   irmItemId?: string;
   customerStockEntryId?: string;
+  jobKitLineId?: string; // the exact kit line used — disambiguates an item issued from >1 warehouse
   qty: number;
 }
 

@@ -23,5 +23,6 @@ router.post("/jobs/:id/reject", requirePermission("engineer.jobs.reject"), write
 router.post("/jobs/:id/start", requirePermission("engineer.jobs.start"), writeLimiter, engineerController.startOwnJob);
 router.post("/jobs/:id/complete", requirePermission("engineer.jobs.complete"), writeLimiter, validateBody(completeJobSchema), engineerController.completeOwnJob);
 router.get("/customer-stock", requirePermission("engineer.inventory.view"), engineerController.getOwnCustomerStock);
+router.get("/misc-stock", requirePermission("engineer.inventory.view"), engineerController.getOwnMiscStock);
 
 export default router;

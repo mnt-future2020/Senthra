@@ -60,3 +60,7 @@ export const completeOwnJob = asyncHandler(async (req, res) => {
 export const getOwnCustomerStock = asyncHandler(async (req, res) => {
   res.json({ customerStock: await engineerService.getOwnCustomerStock(ownId(req)) });
 });
+
+export const getOwnMiscStock = asyncHandler(async (req, res) => {
+  res.json({ misc: await engineerService.getOwnMiscStock(ownId(req)) });
+});

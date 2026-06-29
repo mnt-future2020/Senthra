@@ -56,3 +56,13 @@ export function completeOwnJob(id: string, payload: CompleteJobPayload): Promise
 export function getOwnCustomerStock(): Promise<CustomerHolding[]> {
   return api<{ customerStock: CustomerHolding[] }>("/engineer/customer-stock").then((r) => r.customerStock ?? []);
 }
+
+export interface MiscHeldItem {
+  itemName: string;
+  quantityOnHand: number;
+}
+
+/** Misc items issued to the engineer (free-text kit lines, no barcode/stock) — summed by item name. */
+export function getOwnMiscStock(): Promise<MiscHeldItem[]> {
+  return api<{ misc: MiscHeldItem[] }>("/engineer/misc-stock").then((r) => r.misc ?? []);
+}

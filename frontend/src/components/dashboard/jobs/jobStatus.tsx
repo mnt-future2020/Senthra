@@ -1,4 +1,4 @@
-import type { JobLineType, JobPriority, JobStatus, JobType } from "@/types/job";
+import type { JobKitLine, JobLineType, JobPriority, JobStatus, JobType } from "@/types/job";
 
 // Shared presentation helpers for the Jobs module — status chip, labels, UK date.
 // Self-contained: does NOT depend on the portal's JobStatusChip (owned elsewhere).
@@ -28,6 +28,34 @@ export function JobStatusChip({ status }: { status: string }) {
   return (
     <span className={`inline-block whitespace-nowrap rounded-full px-2.5 py-0.5 text-[11px] font-bold ${JOB_STATUS_CLASSES[s] ?? JOB_STATUS_CLASSES.draft}`}>
       {JOB_STATUS_LABELS[s] ?? status}
+    </span>
+  );
+}
+
+// Goods-lifecycle (stock) status — shows whether warehouse stock has been issued for a job.
+export const GOODS_STATUS_LABELS: Record<string, string> = {
+  not_issued: "Not issued",
+  partially_issued: "Partial",
+  issued: "Issued",
+  awaiting_return: "Awaiting return",
+  reconciled: "Reconciled",
+};
+
+const GOODS_STATUS_CLASSES: Record<string, string> = {
+  not_issued: "bg-[var(--surface-2)] text-[var(--faint)]",
+  partially_issued: "bg-amber-500/15 text-amber-600",
+  issued: "bg-sky-500/12 text-sky-600",
+  awaiting_return: "bg-indigo-500/12 text-indigo-600",
+  reconciled: "bg-emerald-500/12 text-emerald-600",
+};
+
+export function GoodsStatusChip({ status }: { status?: string | null }) {
+  if (!status) return <span className="text-[var(--faint)]">—</span>;
+  const label = GOODS_STATUS_LABELS[status] ?? status.replace(/_/g, " ");
+  const cls = GOODS_STATUS_CLASSES[status] ?? "bg-[var(--surface-2)] text-[var(--faint)]";
+  return (
+    <span className={`inline-block whitespace-nowrap rounded-full px-2.5 py-0.5 text-[11px] font-bold ${cls}`}>
+      {label}
     </span>
   );
 }
@@ -68,4 +96,30 @@ export function formatDate(iso: string | null | undefined): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleDateString("en-GB");
+}
+
+// Date + time — used for start/complete timestamps where the time of day matters.
+export function formatDateTime(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+// When the engineer returns units of an item at one warehouse that were actually issued from ANOTHER
+// warehouse (the same fungible item is on the job at >1 warehouse), this line's Returned exceeds its
+// Issued. This note explains the surplus and names the source warehouse(s) — the same item's sibling
+// lines that are still short a return. Returns null for ordinary lines (Returned ≤ Issued).
+export function crossWarehouseReturnNote(line: JobKitLine, lines: JobKitLine[]): string | null {
+  const excess = line.returned - line.issued;
+  if (excess <= 0) return null;
+  const sources = lines.filter(
+    (l) =>
+      l.id !== line.id &&
+      ((line.irmItemId && l.irmItemId === line.irmItemId) ||
+        (line.customerStockEntryId && l.customerStockEntryId === line.customerStockEntryId)) &&
+      l.issued - l.returned > 0,
+  );
+  const names = [...new Set(sources.map((l) => l.warehouseName).filter((n): n is string => !!n))];
+  return `+${excess} from ${names.length ? names.join(", ") : "another warehouse"}`;
 }

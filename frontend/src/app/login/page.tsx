@@ -38,7 +38,7 @@ const inputCls =
 const QUICK_LOGINS: { label: string; email?: string; password?: string }[] = [
   { label: "🔑 Admin", email: process.env.NEXT_PUBLIC_QUICK_ADMIN_EMAIL, password: process.env.NEXT_PUBLIC_QUICK_ADMIN_PASSWORD },
   { label: "👤 Customer", email: process.env.NEXT_PUBLIC_QUICK_CUSTOMER_EMAIL, password: process.env.NEXT_PUBLIC_QUICK_CUSTOMER_PASSWORD },
-  { label: "🧑‍🔧 User", email: process.env.NEXT_PUBLIC_QUICK_USER_EMAIL, password: process.env.NEXT_PUBLIC_QUICK_USER_PASSWORD },
+  { label: "🧑‍🔧 Engineer", email: process.env.NEXT_PUBLIC_QUICK_ENGINEER_EMAIL, password: process.env.NEXT_PUBLIC_QUICK_ENGINEER_PASSWORD },
 ].filter((q) => q.email && q.password);
 
 export default function LoginPage() {

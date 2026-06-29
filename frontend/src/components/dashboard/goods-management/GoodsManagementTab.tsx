@@ -1,27 +1,35 @@
 "use client";
 
 // GoodsManagementTab — warehouse "Goods Management" tab.
-// Two sections toggled by pills:
-//   "Queue"   — active jobs filtered to this warehouse, per-kit-line planned / issued / available
-//               tallies; clicking a row opens JobScanPanel.
+// Sections (pills):
+//   "Queue"   — ACTIVE jobs for this warehouse (everything except reconciled), text search +
+//               pagination. Each row → JobScanPanel via "Manage".
+//   "Closed"  — reconciled (done) jobs, read-only (no Manage) — kept for audit/history.
 //   "Overdue" — holdings out > 14 days with a "Write off (lost)" action per job.
+// The STATUS column is PER ITEM (per kit line) — each line shows its own issuance (Not issued /
+// Partial / Issued), since one job's lines can sit in different warehouses. Search + pagination
+// are server-side (goodsManagement.service).
 
 import * as React from "react";
-import { ClipboardList, Clock, Loader2 } from "lucide-react";
+import { ClipboardList, Clock, PackageCheck, Search } from "lucide-react";
 
 import * as gmService from "@/services/goodsManagement.service";
-import type { QueueRow } from "@/types/goodsManagement";
+import type { QueuePage, QueueKitLine } from "@/types/goodsManagement";
 import { useGoodsSocket } from "@/hooks/useGoodsSocket";
+import { Skeleton } from "@/components/ui/Skeleton";
+import { Pagination } from "@/components/ui/Pagination";
 import { JobScanPanel } from "./JobScanPanel";
 import { OverdueHoldingsView } from "./OverdueHoldingsView";
 
-type GmSection = "queue" | "overdue";
+type GmSection = "queue" | "closed" | "overdue";
 
 type GoodsStatusKey =
   | "not_issued"
   | "partially_issued"
   | "issued"
   | "awaiting_return"
+  | "returned"
+  | "used"
   | "reconciled";
 
 const STATUS_LABELS: Record<GoodsStatusKey, string> = {
@@ -29,6 +37,8 @@ const STATUS_LABELS: Record<GoodsStatusKey, string> = {
   partially_issued: "Partial",
   issued: "Issued",
   awaiting_return: "Awaiting return",
+  returned: "Returned",
+  used: "Used",
   reconciled: "Reconciled",
 };
 
@@ -37,18 +47,83 @@ const STATUS_COLORS: Record<GoodsStatusKey, string> = {
   partially_issued: "bg-amber-500/15 text-amber-600",
   issued: "bg-[var(--accent)]/12 text-[var(--accent)]",
   awaiting_return: "bg-indigo-500/12 text-indigo-600",
+  returned: "bg-teal-500/12 text-teal-600",
+  used: "bg-violet-500/12 text-violet-600",
   reconciled: "bg-[var(--pos)]/12 text-[var(--pos)]",
 };
 
-function statusChip(s: string) {
-  const key = s as GoodsStatusKey;
-  const label = STATUS_LABELS[key] ?? s.replace(/_/g, " ");
-  const color = STATUS_COLORS[key] ?? "bg-[var(--surface-2)] text-[var(--faint)]";
+const PAGE_SIZE = 20;
+const QUEUE_HEADERS = ["Job", "Engineer", "Item", "Status", "Planned", "Issued", "Used", "Returned", "To return", "Available", ""];
+
+function statusChip(s: GoodsStatusKey) {
   return (
-    <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${color}`}>
-      {label}
+    <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${STATUS_COLORS[s]}`}>
+      {STATUS_LABELS[s]}
     </span>
   );
+}
+
+// Per-LINE lifecycle status. The job's goodsStatus gates the return phase: stock that's been issued
+// is just OUT WITH THE ENGINEER ("Issued") while they do the work — it only becomes "Awaiting return"
+// once the engineer completes the job and declares what they used (backend flips goodsStatus to
+// "awaiting_return" then, or when a return is posted). Within the return phase the per-line state then
+// derives from the engineer's REAL holding (toReturn) + actual returns/used.
+//   Not issued → Partial → Issued → [job completed] → Awaiting return (still held) → Returned / Used.
+function lineStatus(line: QueueKitLine, goodsStatus: string, returned: number, toReturn: number): GoodsStatusKey {
+  const { lineType, plannedQty, issuedQty, usedQty } = line;
+  if (issuedQty <= 0) return "not_issued";
+  if (issuedQty < plannedQty) return "partially_issued";
+  if (lineType === "misc") return "issued"; // misc is free-text — only issuance applies
+  // Not in the return phase yet → the engineer is still using the stock; show plain "Issued".
+  if (goodsStatus !== "awaiting_return") return "issued";
+  if (toReturn > 0) return "awaiting_return"; // job completed but engineer still holds some
+  if (returned > 0) return "returned";
+  if (usedQty > 0) return "used";
+  return "issued";
+}
+
+// Groups a job's kit lines by item identity (misc is its own group, keyed by line id).
+function groupByItem(lines: QueueKitLine[]): QueueKitLine[][] {
+  const groups = new Map<string, QueueKitLine[]>();
+  for (const l of lines) {
+    const key = l.irmItemId ? `irm:${l.irmItemId}` : l.customerStockEntryId ? `cse:${l.customerStockEntryId}` : `misc:${l.id}`;
+    const g = groups.get(key);
+    if (g) g.push(l);
+    else groups.set(key, [l]);
+  }
+  return [...groups.values()];
+}
+
+// Actual returns, normalised across an item's warehouse lines — a fungible item is returned wherever
+// it's handed back, so raw per-line returned can exceed one line's issued. Drives the Returned column.
+function effectiveReturns(lines: QueueKitLine[]): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const group of groupByItem(lines)) {
+    let remaining = group.reduce((s, l) => s + l.returnedQty, 0); // the item's total returned
+    for (const l of group) {
+      const assigned = Math.min(remaining, Math.max(0, l.issuedQty - l.usedQty));
+      out.set(l.id, assigned);
+      remaining -= assigned;
+    }
+  }
+  return out;
+}
+
+// "To return" per line, from the engineer's REAL holding (engineerHeld is the global per-item balance
+// the return scan checks). Distributed across the item's lines (capped at issued − used per line) so
+// the queue never asks for a return the scan would refuse — even when the holding is shared across
+// jobs/warehouses. Keyed by kit-line id.
+function distributeToReturn(lines: QueueKitLine[]): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const group of groupByItem(lines)) {
+    let remaining = group[0]?.engineerHeld ?? 0; // global held for this item (same on every line)
+    for (const l of group) {
+      const assigned = Math.min(remaining, Math.max(0, l.issuedQty - l.usedQty));
+      out.set(l.id, assigned);
+      remaining -= assigned;
+    }
+  }
+  return out;
 }
 
 function shortfallColor(planned: number, issued: number) {
@@ -59,8 +134,35 @@ function shortfallColor(planned: number, issued: number) {
 
 const SECTION_PILLS: { key: GmSection; label: string; icon: React.ElementType }[] = [
   { key: "queue", label: "Queue", icon: ClipboardList },
+  { key: "closed", label: "Closed", icon: PackageCheck },
   { key: "overdue", label: "Overdue", icon: Clock },
 ];
+
+// Loading skeleton — mirrors the queue table shape (matches the warehouse detail's other tabs).
+function QueueSkeleton() {
+  return (
+    <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)] shadow-xs">
+      <table className="w-full text-left text-sm" style={{ minWidth: 1020 }}>
+        <thead>
+          <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
+            {QUEUE_HEADERS.map((h, i) => (
+              <th key={i} className={`px-4 py-3 ${i >= 4 && i <= 9 ? "text-right" : ""}`}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {Array.from({ length: 6 }).map((_, i) => (
+            <tr key={i} className="border-b border-[var(--border)] last:border-0">
+              {QUEUE_HEADERS.map((_h, j) => (
+                <td key={j} className="px-4 py-3"><Skeleton className="h-3 w-20" /></td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
 export function GoodsManagementTab({
   warehouseId,
@@ -71,48 +173,59 @@ export function GoodsManagementTab({
   router?: unknown; // kept for forward-compat signature
 }) {
   const [section, setSection] = React.useState<GmSection>("queue");
-  const [queue, setQueue] = React.useState<QueueRow[] | null>(null);
+  const [search, setSearch] = React.useState("");
+  const [debouncedSearch, setDebouncedSearch] = React.useState("");
+  const [page, setPage] = React.useState(1);
+
+  const [data, setData] = React.useState<QueuePage | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [selectedJobId, setSelectedJobId] = React.useState<string | null>(null);
   const [loadTick, setLoadTick] = React.useState(0);
 
-  // Trigger a reload from external callers (e.g. after a scan-panel movement posts).
-  const load = React.useCallback(() => {
-    setLoadTick((t) => t + 1);
-  }, []);
+  const isClosed = section === "closed";
+  const showsTable = section === "queue" || section === "closed";
 
+  const load = React.useCallback(() => setLoadTick((t) => t + 1), []);
   // Live-refresh whenever any goods event fires on the socket (issue / return / reconcile).
   useGoodsSocket(load);
 
+  // Debounce the search box.
   React.useEffect(() => {
-    if (section !== "queue") return;
+    const t = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  // Fetch the current page whenever the view, search or page changes.
+  React.useEffect(() => {
+    if (!showsTable) return;
     let active = true;
     gmService
-      .getQueue()
-      .then((rows) => {
+      .getQueue({ warehouseId, status: isClosed ? "reconciled" : "active", search: debouncedSearch || undefined, page, pageSize: PAGE_SIZE })
+      .then((res) => {
         if (!active) return;
         setError(null);
-        const filtered = rows.filter((r) =>
-          r.kitLines.some(
-            (k) => !k.warehouseId || k.warehouseId === warehouseId,
-          ),
-        );
-        setQueue(filtered);
+        setData(res);
       })
       .catch((e) => {
         if (!active) return;
-        setError(
-          e instanceof Error ? e.message : "Could not load the goods queue.",
-        );
+        setError(e instanceof Error ? e.message : "Could not load the goods queue.");
       });
     return () => {
       active = false;
     };
-  }, [warehouseId, loadTick, section]);
+  }, [warehouseId, section, isClosed, showsTable, debouncedSearch, page, loadTick]);
 
-  const selectedRow = queue?.find((r) => r.jobId === selectedJobId) ?? null;
+  const goToSection = (key: GmSection) => {
+    setSection(key);
+    setPage(1);
+    setSearch("");
+    setDebouncedSearch("");
+    setData(null); // show the skeleton while the new section loads (event handler — safe to setState)
+  };
 
-  // When a job row is selected, show the full-screen scan panel (no section nav).
+  const selectedRow = data?.rows.find((r) => r.jobId === selectedJobId) ?? null;
+
+  // When a job row is selected (active queue only), show the full-screen scan panel.
   if (selectedJobId && selectedRow) {
     return (
       <JobScanPanel
@@ -121,9 +234,10 @@ export function GoodsManagementTab({
         jobName={selectedRow.jobName}
         warehouseId={warehouseId}
         warehouseCode={warehouseCode}
+        miscLines={selectedRow.kitLines.filter((k) => k.lineType === "misc")}
         onBack={() => {
           setSelectedJobId(null);
-          load(); // refresh queue after any movements
+          load(); // refresh after any movements
         }}
       />
     );
@@ -131,17 +245,18 @@ export function GoodsManagementTab({
 
   return (
     <div className="space-y-4">
-      {/* Section pills — Queue / Overdue */}
-      <div className="flex items-center gap-2">
+      {/* Section switcher — Queue / Closed / Overdue (segmented control, matches the scan panel) */}
+      <div className="inline-flex rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-1">
         {SECTION_PILLS.map(({ key, label, icon: Icon }) => (
           <button
             key={key}
             type="button"
-            onClick={() => setSection(key)}
-            className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-bold transition-all ${
+            onClick={() => goToSection(key)}
+            aria-pressed={section === key}
+            className={`flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-[11px] font-bold transition-all ${
               section === key
-                ? "bg-[var(--accent)] text-white"
-                : "border border-[var(--border)] bg-[var(--surface-2)] text-[var(--muted)] hover:text-[var(--ink)]"
+                ? "bg-[var(--accent)] text-white shadow-xs"
+                : "text-[var(--muted)] hover:text-[var(--ink)]"
             }`}
           >
             <Icon className="h-3.5 w-3.5" />
@@ -153,118 +268,152 @@ export function GoodsManagementTab({
       {/* Overdue section */}
       {section === "overdue" && <OverdueHoldingsView days={14} />}
 
-      {/* Queue section */}
-      {section === "queue" && (
+      {/* Queue / Closed sections */}
+      {showsTable && (
         <>
-          {error && (
-            <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">
-              {error}
-            </p>
-          )}
+          {/* Search */}
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--faint)]" />
+            <input
+              type="search"
+              value={search}
+              onChange={(e) => {
+                setSearch(e.target.value);
+                setPage(1);
+              }}
+              placeholder="Search job no., name, customer or engineer…"
+              className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] py-2.5 pl-9 pr-3 text-sm text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
+            />
+          </div>
 
-          {!error && queue === null && (
-            <div className="flex items-center justify-center gap-2 py-16 text-[var(--muted)]">
-              <Loader2 className="h-5 w-5 animate-spin" />
-              <span className="text-sm">Loading queue…</span>
-            </div>
-          )}
-
-          {!error && queue !== null && queue.length === 0 && (
+          {error ? (
+            <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>
+          ) : data === null ? (
+            <QueueSkeleton />
+          ) : data.rows.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
-              <ClipboardList className="h-7 w-7 text-[var(--faint)]" />
-              <p className="text-sm font-semibold text-[var(--ink)]">No active jobs</p>
+              {isClosed ? <PackageCheck className="h-7 w-7 text-[var(--faint)]" /> : <ClipboardList className="h-7 w-7 text-[var(--faint)]" />}
+              <p className="text-sm font-semibold text-[var(--ink)]">
+                {debouncedSearch ? "No jobs match your search" : isClosed ? "No closed jobs yet" : "No active jobs"}
+              </p>
               <p className="text-xs text-[var(--muted)]">
-                Accepted or in-progress jobs with kit lines at this warehouse will
-                appear here.
+                {isClosed
+                  ? "Reconciled jobs for this warehouse will appear here for reference."
+                  : "Accepted or in-progress jobs with kit lines at this warehouse will appear here."}
               </p>
             </div>
-          )}
+          ) : (
+            <>
+              <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)] shadow-xs">
+                <table className="w-full text-left text-sm" style={{ minWidth: 1020 }}>
+                  <thead>
+                    <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
+                      <th className="px-4 py-3">Job</th>
+                      <th className="px-4 py-3">Engineer</th>
+                      <th className="px-4 py-3">Item</th>
+                      <th className="px-4 py-3">Status</th>
+                      <th className="px-4 py-3 text-right">Planned</th>
+                      <th className="px-4 py-3 text-right">Issued</th>
+                      <th className="px-4 py-3 text-right">Used</th>
+                      <th className="px-4 py-3 text-right">Returned</th>
+                      <th className="px-4 py-3 text-right">To return</th>
+                      <th className="px-4 py-3 text-right">Available</th>
+                      <th className="px-4 py-3" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.rows.map((row, jobIdx) => {
+                      // Show the FULL kit list. A line is actionable HERE when it's a real item stocked
+                      // at this warehouse, or a misc line not yet fully issued. Everything else is greyed:
+                      // other-warehouse real items (issue them from their warehouse) + already-done misc.
+                      const visibleLines = row.kitLines;
+                      const rowCount = visibleLines.length || 1;
+                      // Returned = actual returns; To return = engineer's real holding (so it always
+                      // matches what the return scan will accept), both spread across the item's lines.
+                      const effReturns = effectiveReturns(visibleLines);
+                      const toReturns = distributeToReturn(visibleLines);
+                      return visibleLines.map((line, lineIdx) => {
+                        const isMisc = line.lineType === "misc";
+                        const atWh = !!line.warehouseId && line.warehouseId === warehouseId;
+                        const miscDone = isMisc && line.issuedQty >= line.plannedQty;
+                        const active = isMisc ? !miscDone : atWh;
+                        const dim = active ? "" : "opacity-45";
+                        const effReturned = effReturns.get(line.id) ?? line.returnedQty;
+                        const toReturn = toReturns.get(line.id) ?? 0;
+                        // "To return" is only meaningful once the engineer has completed the job and
+                        // declared usage (job in the return phase); before that the stock is just issued.
+                        const inReturnPhase = row.goodsStatus === "awaiting_return";
+                        const issuedColor = isClosed ? "text-[var(--ink)]" : shortfallColor(line.plannedQty, line.issuedQty);
+                        // Thicker rule between job groups (rows within a job have no divider) for readability.
+                        const jobSep = lineIdx === 0 && jobIdx > 0 ? "border-t-2 border-[var(--border)]" : "";
+                        return (
+                          <tr key={`${row.jobId}-${line.id}`} className={`align-middle transition-colors hover:bg-[var(--surface-2)] ${jobSep}`}>
+                            {lineIdx === 0 && (
+                              <>
+                                <td className="px-4 py-3" rowSpan={rowCount}>
+                                  <div className="font-bold text-[var(--ink)]">{row.jobNumber}</div>
+                                  <div className="text-xs text-[var(--muted)]">{row.jobName}</div>
+                                </td>
+                                <td className="px-4 py-3 text-xs text-[var(--muted)]" rowSpan={rowCount}>
+                                  {row.engineerName ?? "—"}
+                                </td>
+                              </>
+                            )}
+                            <td className={`px-4 py-3 ${active ? "font-medium text-[var(--ink)]" : "text-[var(--faint)]"} ${dim}`}>
+                              {line.itemName}
+                              {isMisc ? (
+                                <span className="ml-1 text-[10px] text-[var(--faint)]">(misc)</span>
+                              ) : atWh ? (
+                                <span className="ml-1 rounded-full bg-[var(--accent)]/10 px-1.5 py-0.5 text-[10px] font-bold text-[var(--accent)]">This warehouse</span>
+                              ) : line.warehouseName ? (
+                                <span className="ml-1 text-[10px] font-semibold text-[var(--faint)]">Other: {line.warehouseName}</span>
+                              ) : null}
+                            </td>
+                            {/* Per-item status — this line's own issuance (Closed view → reconciled). */}
+                            <td className={`px-4 py-3 ${dim}`}>
+                              {statusChip(isClosed ? "reconciled" : lineStatus(line, row.goodsStatus, effReturned, toReturn))}
+                            </td>
+                            {/* Counts stay full-strength even on greyed (other-warehouse) lines so the WM can
+                                still see how much is planned/issued/available there. */}
+                            {/* Number treatment (matches the Inventory table): the key figures — Issued
+                                and To return — carry weight/colour; Planned/Used/Available and any 0
+                                recede, so the meaningful numbers read at a glance instead of a wall of bold. */}
+                            <td className="px-4 py-3 text-right tabular-nums text-[var(--muted)]">{line.plannedQty}</td>
+                            <td className={`px-4 py-3 text-right font-semibold tabular-nums ${issuedColor}`}>{line.issuedQty}</td>
+                            {/* Used + To return don't apply to misc (free-text, not stock-tracked) → show — */}
+                            <td className={`px-4 py-3 text-right tabular-nums ${isMisc || line.usedQty === 0 ? "text-[var(--faint)]" : "text-[var(--ink)]"}`}>{isMisc ? "—" : line.usedQty}</td>
+                            {/* Returned (normalized across the item's warehouses) — teal when any came back. */}
+                            <td className={`px-4 py-3 text-right tabular-nums ${!isMisc && effReturned > 0 ? "text-teal-600" : "text-[var(--faint)]"}`}>{isMisc ? "—" : effReturned}</td>
+                            <td className={`px-4 py-3 text-right tabular-nums ${!isMisc && inReturnPhase && toReturn > 0 ? "font-semibold text-indigo-600" : "text-[var(--faint)]"}`}>
+                              {isMisc || !inReturnPhase ? "—" : toReturn}
+                            </td>
+                            <td className={`px-4 py-3 text-right tabular-nums ${line.available < line.plannedQty - line.issuedQty ? "font-semibold text-[var(--neg)]" : "text-[var(--muted)]"}`}>
+                              {line.available}
+                            </td>
+                            {lineIdx === 0 && (
+                              <td className="px-4 py-3" rowSpan={rowCount}>
+                                {/* Closed (reconciled) jobs are read-only — no dead-end Manage button. */}
+                                {!isClosed && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setSelectedJobId(row.jobId)}
+                                    className="rounded-xl bg-[var(--accent)] px-3 py-1.5 text-[11px] font-extrabold text-white transition-all hover:opacity-90"
+                                  >
+                                    Manage
+                                  </button>
+                                )}
+                              </td>
+                            )}
+                          </tr>
+                        );
+                      });
+                    })}
+                  </tbody>
+                </table>
+              </div>
 
-          {!error && queue !== null && queue.length > 0 && (
-            <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
-              <table className="w-full text-left text-sm" style={{ minWidth: 750 }}>
-                <thead>
-                  <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                    <th className="px-4 py-3">Job</th>
-                    <th className="px-4 py-3">Engineer</th>
-                    <th className="px-4 py-3">Status</th>
-                    <th className="px-4 py-3">Item</th>
-                    <th className="px-4 py-3 text-right">Planned</th>
-                    <th className="px-4 py-3 text-right">Issued</th>
-                    <th className="px-4 py-3 text-right">Available</th>
-                    <th className="px-4 py-3" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {queue.map((row) => {
-                    const visibleLines = row.kitLines.filter(
-                      (k) => !k.warehouseId || k.warehouseId === warehouseId,
-                    );
-                    const rowCount = visibleLines.length || 1;
-                    return visibleLines.map((line, lineIdx) => (
-                      <tr
-                        key={`${row.jobId}-${line.id}`}
-                        className="border-b border-[var(--border)] align-middle transition-colors last:border-0 hover:bg-[var(--surface-2)]"
-                      >
-                        {lineIdx === 0 && (
-                          <>
-                            <td className="px-4 py-3" rowSpan={rowCount}>
-                              <div className="font-bold text-[var(--ink)]">
-                                {row.jobNumber}
-                              </div>
-                              <div className="text-xs text-[var(--muted)]">
-                                {row.jobName}
-                              </div>
-                            </td>
-                            <td
-                              className="px-4 py-3 text-xs text-[var(--muted)]"
-                              rowSpan={rowCount}
-                            >
-                              {row.engineerName ?? "—"}
-                            </td>
-                            <td className="px-4 py-3" rowSpan={rowCount}>
-                              {statusChip(row.goodsStatus)}
-                            </td>
-                          </>
-                        )}
-                        <td className="px-4 py-3 text-[var(--ink)]">
-                          {line.itemName}
-                          {line.lineType !== "irm" && line.lineType !== "customer_stock" ? (
-                            <span className="ml-1 text-[10px] text-[var(--faint)]">
-                              (misc)
-                            </span>
-                          ) : null}
-                        </td>
-                        <td className="px-4 py-3 text-right font-semibold text-[var(--ink)]">
-                          {line.plannedQty}
-                        </td>
-                        <td
-                          className={`px-4 py-3 text-right font-bold ${shortfallColor(line.plannedQty, line.issuedQty)}`}
-                        >
-                          {line.issuedQty}
-                        </td>
-                        <td
-                          className={`px-4 py-3 text-right font-semibold ${line.available < line.plannedQty - line.issuedQty ? "text-[var(--neg)]" : "text-[var(--ink)]"}`}
-                        >
-                          {line.available}
-                        </td>
-                        {lineIdx === 0 && (
-                          <td className="px-4 py-3" rowSpan={rowCount}>
-                            <button
-                              type="button"
-                              onClick={() => setSelectedJobId(row.jobId)}
-                              className="rounded-xl bg-[var(--accent)] px-3 py-1.5 text-[11px] font-extrabold text-white transition-all hover:opacity-90"
-                            >
-                              Manage
-                            </button>
-                          </td>
-                        )}
-                      </tr>
-                    ));
-                  })}
-                </tbody>
-              </table>
-            </div>
+              <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="jobs" onPage={setPage} />
+            </>
           )}
         </>
       )}

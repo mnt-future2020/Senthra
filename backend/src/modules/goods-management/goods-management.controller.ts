@@ -1,7 +1,7 @@
 import * as service from "./goods-management.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
-import { param } from "../../utils/request.js";
+import { param, queryInt } from "../../utils/request.js";
 import type { CloseReconcileInput, PostMovementInput, ScanLookupInput, UploadDamagePhotoInput } from "./goods-management.validation.js";
 import { badRequest } from "../../utils/http-error.js";
 
@@ -18,11 +18,36 @@ export const postReturn = asyncHandler(async (req, res) => {
 });
 
 export const listQueue = asyncHandler(async (req, res) => {
-  res.json({ queue: await service.listQueue(actorFrom(req)) });
+  const warehouseId = (req.query["warehouseId"] as string | undefined)?.trim();
+  if (!warehouseId) throw badRequest("warehouseId is required.");
+  res.json(
+    await service.listQueue(
+      {
+        warehouseId,
+        status: (req.query["status"] as string | undefined)?.trim() || undefined,
+        search: (req.query["search"] as string | undefined) ?? undefined,
+        page: queryInt(req.query["page"]),
+        pageSize: queryInt(req.query["pageSize"]),
+      },
+      actorFrom(req),
+    ),
+  );
 });
 
 export const getJobGoods = asyncHandler(async (req, res) => {
   res.json(await service.getJobGoods(param(req, "jobId"), actorFrom(req)));
+});
+
+// Open demand across active jobs (planned-but-not-issued) — the planner uses it to show TRUE free
+// stock per item+warehouse. excludeJobId drops the job currently being edited.
+export const getDemand = asyncHandler(async (req, res) => {
+  const excludeJobId = (req.query["excludeJobId"] as string | undefined)?.trim() || undefined;
+  res.json({ demand: [...(await service.getOpenDemand(excludeJobId)).values()] });
+});
+
+// Demand board for one warehouse: on-hand vs total planned per item, shortfalls first.
+export const getWarehouseDemand = asyncHandler(async (req, res) => {
+  res.json({ rows: await service.getWarehouseDemand(param(req, "warehouseId")) });
 });
 
 export const closeReconcile = asyncHandler(async (req, res) => {

@@ -3,6 +3,7 @@ import type { JobWithRelations, JobKitLineRow } from "./job.repository.js";
 import * as customerRepo from "#modules/customer/customer.repository.js";
 import * as supplierRepo from "#modules/supplier/supplier.repository.js";
 import * as irmRepo from "#modules/irm/irm.repository.js";
+import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as userRepo from "#modules/user/user.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
@@ -61,6 +62,13 @@ export interface PublicJobKitLine {
   } | null;
   qty: number;
   notes: string | null;
+  // Goods-management tallies for this line (0 until the warehouse issues stock against it): issued to
+  // the engineer, used (consumed) on site, returned to the warehouse, and remaining still held.
+  // Invariant: issued = used + returned + remaining.
+  issued: number;
+  used: number;
+  returned: number;
+  remaining: number;
 }
 
 export interface PublicJob {
@@ -95,6 +103,9 @@ export interface PublicJob {
   supplierName: string | null;
   installerType: string;
   status: string;
+  // Goods-lifecycle status from JobStockSummary ("not_issued" until stock moves). Populated on the
+  // jobs list + single-job detail so the PM can see issuance at a glance. Not part of the raw record.
+  goodsStatus: string;
   plannerName: string | null;
   plannerPhone: string | null;
   notes: string | null;
@@ -106,6 +117,8 @@ export interface PublicJob {
   rejectedAt: string | null;
   rejectedBy: string | null;
   rejectReason: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
   cancelledAt: string | null;
   cancelReason: string | null;
   createdBy: string | null;
@@ -161,6 +174,7 @@ function toPublic(j: JobWithRelations): PublicJob {
     supplierName: j.supplier?.name ?? j.supplierName ?? null,
     installerType: j.installerType ?? "internal",
     status: j.status ?? "assigned",
+    goodsStatus: "not_issued", // overwritten by listJobs / withGoodsTallies from the stock summary
     plannerName: j.plannerName,
     plannerPhone: j.plannerPhone,
     notes: j.notes,
@@ -192,6 +206,10 @@ function toPublic(j: JobWithRelations): PublicJob {
         : null,
       qty: l.qty,
       notes: l.notes,
+      issued: 0,
+      used: 0,
+      returned: 0,
+      remaining: 0,
     })),
     assignedAt: iso(j.assignedAt),
     acceptedAt: iso(j.acceptedAt),
@@ -199,6 +217,8 @@ function toPublic(j: JobWithRelations): PublicJob {
     rejectedAt: iso(j.rejectedAt),
     rejectedBy: j.rejectedBy,
     rejectReason: j.rejectReason,
+    startedAt: iso(j.startedAt),
+    completedAt: iso(j.completedAt),
     cancelledAt: iso(j.cancelledAt),
     cancelReason: j.cancelReason,
     createdBy: j.createdBy,
@@ -304,6 +324,22 @@ async function resolveKitLineRows(lines: JobKitLineInput[], customerId: string):
   return rows;
 }
 
+// Physical free stock at a kit line's location: on-hand − reserved for IRM, consignment qty for
+// customer stock. Infinity for misc / unresolved lines (no stock limit). The form already caps planned
+// qty at this (minus other jobs' demand), so this server-side guard never blocks a real form submit —
+// it just stops a direct API call from promising more stock than physically exists.
+async function availableForLine(line: { irmItemId: string | null; warehouseId: string | null; customerStockEntryId: string | null }): Promise<number> {
+  if (line.irmItemId && line.warehouseId) {
+    const bal = await inventoryRepo.findBalancePair(line.irmItemId, line.warehouseId);
+    return (bal?.quantityOnHand ?? 0) - (bal?.quantityReserved ?? 0);
+  }
+  if (line.customerStockEntryId) {
+    const entry = await customerRepo.findStockEntryById(line.customerStockEntryId);
+    return entry?.quantity ?? 0;
+  }
+  return Infinity;
+}
+
 // ── Notify the assigned engineer (fire-and-forget; never blocks/rolls back) ───────────────────
 function notifyAssignedEngineer(job: PublicJob): void {
   if (!job.assignedEngineerEmail) return;
@@ -333,13 +369,40 @@ export async function listJobs(params: ListJobsParams = {}, _actor?: AuditActor)
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const page = Math.min(Math.max(Math.trunc(params.page ?? 1), 1), totalPages);
   const rows = await jobRepo.findMany(filters, (page - 1) * pageSize, pageSize, params.sort);
-  return { jobs: rows.map(toPublic), total, page, pageSize, totalPages };
+  // Merge each job's goods-lifecycle status in ONE batched query (so the PM sees issuance per row).
+  const goodsStatusByJob = await goodsManagementService.getGoodsStatusByJobs(rows.map((r) => r.id));
+  const jobs = rows.map((r) => {
+    const pub = toPublic(r);
+    pub.goodsStatus = goodsStatusByJob.get(r.id) ?? "not_issued";
+    return pub;
+  });
+  return { jobs, total, page, pageSize, totalPages };
+}
+
+// Fill in each kit line's goods tallies (issued/used/returned/remaining) + the job's goods-lifecycle
+// status from its stock movements. Used on the single-job detail views (office + engineer "job pack").
+async function withGoodsTallies(pub: PublicJob): Promise<PublicJob> {
+  const [tallies, goodsStatus] = await Promise.all([
+    goodsManagementService.getJobKitTallies(pub.id),
+    goodsManagementService.getGoodsStatus(pub.id),
+  ]);
+  pub.goodsStatus = goodsStatus;
+  for (const kl of pub.kitLines) {
+    const t = tallies[kl.id];
+    if (t) {
+      kl.issued = t.issued;
+      kl.used = t.used;
+      kl.returned = t.returned;
+      kl.remaining = t.remaining;
+    }
+  }
+  return pub;
 }
 
 export async function getJob(idOrCode: string, _actor?: AuditActor): Promise<PublicJob> {
   const j = OBJECT_ID_RE.test(idOrCode) ? await jobRepo.findById(idOrCode) : await jobRepo.findByNumber(idOrCode);
   if (!j) throw notFound("Job not found.");
-  return toPublic(j);
+  return withGoodsTallies(toPublic(j));
 }
 
 // ── Create / update ─────────────────────────────────────────────────────────────────────────
@@ -350,6 +413,12 @@ export async function createJob(input: CreateJobInput, actor?: AuditActor): Prom
   const site = input.siteId ? await requireSite(input.siteId, customer.id) : null;
   const supplier = input.supplierId ? await requireSupplier(input.supplierId) : null;
   const rows = await resolveKitLineRows(input.kitLines, customer.id);
+  // Can't plan more than physically exists at the warehouse (server-side backstop for the form cap).
+  for (const r of rows) {
+    if (r.lineType === "misc") continue;
+    const avail = await availableForLine(r);
+    if (r.qty > avail) throw badRequest(`"${r.itemName}" — only ${avail} in stock at that warehouse, but ${r.qty} planned.`);
+  }
   const actorEmail = actor?.email ?? null;
   const now = new Date();
 
@@ -404,6 +473,89 @@ export async function createJob(input: CreateJobInput, actor?: AuditActor): Prom
   return job;
 }
 
+// Signature of a kit line over the fields a planner controls (item identity + warehouse + qty +
+// labels). Used to tell whether an incoming kit list actually differs from what's stored.
+function kitLineSignature(l: {
+  lineType: string;
+  irmItemId: string | null;
+  customerStockEntryId: string | null;
+  warehouseId: string | null;
+  qty: number;
+  itemName: string;
+  seCode: string | null;
+  description: string | null;
+  notes: string | null;
+}): string {
+  return [
+    l.lineType,
+    l.irmItemId ?? "",
+    l.customerStockEntryId ?? "",
+    l.warehouseId ?? "",
+    l.qty,
+    l.itemName,
+    l.seCode ?? "",
+    l.description ?? "",
+    l.notes ?? "",
+  ].join("|");
+}
+
+// True when the incoming (already-resolved) kit lines differ from the stored ones in any
+// planner-controlled field — an added/removed line, or a changed item / warehouse / qty / label.
+// Order-independent. A no-op resend (the edit form re-sending the same kit list while only header
+// fields changed) returns false, so the kit-line ids aren't needlessly regenerated.
+export function kitLinesChanged(
+  incoming: Array<Parameters<typeof kitLineSignature>[0]>,
+  existing: Array<Parameters<typeof kitLineSignature>[0]>,
+): boolean {
+  if (incoming.length !== existing.length) return true;
+  const a = incoming.map(kitLineSignature).sort();
+  const b = existing.map(kitLineSignature).sort();
+  return a.some((sig, i) => sig !== b[i]);
+}
+
+// Identity of a kit line = the item it represents (NOT its quantity). Used to match an incoming kit
+// list against the stored one so a line's quantity can be edited in place (keeping its id). irm and
+// customer lines are unique by item (+warehouse) — guaranteed by validation; misc has no id, so it's
+// matched greedily by name.
+function kitLineIdentity(l: { irmItemId: string | null; customerStockEntryId: string | null; warehouseId: string | null; itemName: string }): string {
+  if (l.irmItemId) return `irm|${l.irmItemId}|${l.warehouseId ?? ""}`;
+  if (l.customerStockEntryId) return `customer|${l.customerStockEntryId}|${l.warehouseId ?? ""}`;
+  return `misc|${l.itemName}`;
+}
+
+type ExistingKitLine = NonNullable<JobWithRelations["kitLines"]>[number];
+export interface KitLineDiff {
+  updates: { id: string; qty: number; existingQty: number; itemName: string; seCode: string | null; description: string | null; notes: string | null }[];
+  creates: JobKitLineRow[];
+  removed: { id: string; itemName: string }[];
+}
+
+// Diff an incoming (already-resolved) kit list against the stored one, matching by item identity:
+// matched → update (qty/labels may differ); unmatched incoming → create; unmatched stored → removed.
+// This lets the caller preserve ids (no orphaned movements) and enforce per-line edit rules.
+export function diffKitLines(incoming: JobKitLineRow[], existing: ExistingKitLine[]): KitLineDiff {
+  const pool = new Map<string, ExistingKitLine[]>();
+  for (const e of existing) {
+    const k = kitLineIdentity(e);
+    const bucket = pool.get(k);
+    if (bucket) bucket.push(e);
+    else pool.set(k, [e]);
+  }
+  const updates: KitLineDiff["updates"] = [];
+  const creates: JobKitLineRow[] = [];
+  for (const inc of incoming) {
+    const match = pool.get(kitLineIdentity(inc))?.shift();
+    if (match) {
+      updates.push({ id: match.id, qty: inc.qty, existingQty: match.qty, itemName: inc.itemName, seCode: inc.seCode, description: inc.description, notes: inc.notes });
+    } else {
+      creates.push(inc);
+    }
+  }
+  const removed: KitLineDiff["removed"] = [];
+  for (const bucket of pool.values()) for (const e of bucket) removed.push({ id: e.id, itemName: e.itemName });
+  return { updates, creates, removed };
+}
+
 export async function updateJob(id: string, input: UpdateJobInput, actor?: AuditActor): Promise<PublicJob> {
   const existing = await jobRepo.findById(id);
   if (!existing) throw notFound("Job not found.");
@@ -411,6 +563,10 @@ export async function updateJob(id: string, input: UpdateJobInput, actor?: Audit
   // trustworthy. Re-assignment / edits go through the live states only.
   if (existing.status === "completed" || existing.status === "cancelled") {
     throw conflict(`A ${existing.status} job can't be edited.`);
+  }
+  // Reconciled goods lock the job too (it can be reconciled before the job status is "completed").
+  if ((await goodsManagementService.getGoodsStatus(id)) === "reconciled") {
+    throw conflict("This job's goods have been reconciled and locked — it can no longer be edited.");
   }
 
   const headerPatch: Record<string, unknown> = { updatedBy: actor?.email ?? null };
@@ -492,7 +648,55 @@ export async function updateJob(id: string, input: UpdateJobInput, actor?: Audit
   let result: JobWithRelations;
   if (input.kitLines !== undefined) {
     const rows = await resolveKitLineRows(input.kitLines, customerId);
-    result = await jobRepo.replaceKitLines(id, rows, headerPatch);
+    if (!kitLinesChanged(rows, existing.kitLines ?? [])) {
+      // Kit list unchanged (only header fields differ) — header patch only, ids untouched.
+      result = await jobRepo.update(id, headerPatch);
+    } else {
+      const diff = diffKitLines(rows, existing.kitLines ?? []);
+      // Stock cap: new lines must fit current stock; an increase to an existing line needs only the
+      // INCREMENT to fit (its prior qty was validated when set — re-checking unchanged lines would
+      // false-block on later stock drift). Only changed/added lines are checked.
+      for (const c of diff.creates) {
+        if (c.lineType === "misc") continue;
+        const avail = await availableForLine(c);
+        if (c.qty > avail) throw badRequest(`"${c.itemName}" — only ${avail} in stock at that warehouse, but ${c.qty} planned.`);
+      }
+      for (const u of diff.updates) {
+        const inc = u.qty - u.existingQty;
+        if (inc <= 0) continue;
+        const kl = (existing.kitLines ?? []).find((k) => k.id === u.id);
+        if (!kl || kl.lineType === "misc") continue;
+        const avail = await availableForLine(kl);
+        if (inc > avail) throw badRequest(`"${u.itemName}" — only ${avail} more available to add at that warehouse (have ${u.existingQty}, requested ${u.qty}).`);
+      }
+      // Once a kit line has had stock ISSUED against it, it's locked: it can't be removed and its
+      // quantity can only INCREASE (never decrease). New items and lines that have never been issued
+      // stay fully editable. (Changing an issued line's item/warehouse reads as remove+add, so the
+      // removal guard blocks it.) This protects the posted stock movements + the engineer's holdings.
+      const goodsStatus = await goodsManagementService.getGoodsStatus(id);
+      if (goodsStatus !== "not_issued") {
+        const tallies = await goodsManagementService.getJobKitTallies(id);
+        const issued = (lineId: string) => (tallies[lineId]?.issued ?? 0) > 0;
+
+        const removedIssued = diff.removed.find((r) => issued(r.id));
+        if (removedIssued) {
+          throw conflict(`"${removedIssued.itemName}" has already had stock issued, so it can't be removed from this job. You can add new items or increase quantities, but issued items must stay.`);
+        }
+        const reduced = diff.updates.find((u) => issued(u.id) && u.qty < u.existingQty);
+        if (reduced) {
+          throw conflict(`"${reduced.itemName}" has already had stock issued (qty ${reduced.existingQty}) — its quantity can only be increased, not reduced. Return and reconcile the issued stock first if you need fewer.`);
+        }
+      }
+      result = await jobRepo.mergeKitLines(
+        id,
+        {
+          updates: diff.updates.map((u) => ({ id: u.id, qty: u.qty, seCode: u.seCode, description: u.description, notes: u.notes })),
+          creates: diff.creates,
+          deleteIds: diff.removed.map((r) => r.id),
+        },
+        headerPatch,
+      );
+    }
   } else {
     result = await jobRepo.update(id, headerPatch);
   }
@@ -591,7 +795,7 @@ export async function listJobsForEngineer(engineerId: string): Promise<PublicJob
 export async function getJobForEngineer(engineerId: string, jobId: string): Promise<PublicJob> {
   const j = await jobRepo.findByIdForEngineer(jobId, engineerId);
   if (!j) throw notFound("Job not found.");
-  return toPublic(j);
+  return withGoodsTallies(toPublic(j));
 }
 
 export async function acceptJobForEngineer(engineerId: string, jobId: string, actor?: AuditActor): Promise<PublicJob> {
@@ -664,6 +868,16 @@ export async function startJobForEngineer(jobId: string, engineerId: string, act
   if (job.assignedEngineerId !== engineerId) throw forbidden("This job isn't assigned to you.");
   assertTransition(job.status, "in_progress");
 
+  // Engineer can't start until they've COLLECTED the kit — every stock-tracked line (IRM / customer
+  // stock) must be fully issued to them by the warehouse first. Misc/free-text lines aren't warehouse
+  // stock, so they don't block; a job with no stock lines starts freely.
+  const stockLines = (job.kitLines ?? []).filter((l) => l.lineType === "irm" || l.lineType === "customer_stock");
+  if (stockLines.length > 0) {
+    const tallies = await goodsManagementService.getJobKitTallies(jobId);
+    const allCollected = stockLines.every((l) => (tallies[l.id]?.issued ?? 0) >= l.qty);
+    if (!allCollected) throw conflict("Collect the kit from the warehouse before starting work — not all items have been issued to you yet.");
+  }
+
   // Atomic ownership + status guard: if the job was reassigned or someone else started it between
   // the read above and this write, startIfAccepted returns null and we 409.
   const updated = await jobRepo.startIfAccepted(jobId, engineerId);
@@ -687,6 +901,7 @@ export async function completeJobForEngineer(jobId: string, engineerId: string, 
     source: l.source,
     irmItemId: l.irmItemId,
     customerStockEntryId: l.customerStockEntryId,
+    jobKitLineId: l.jobKitLineId,
     qty: l.qty,
   }));
 

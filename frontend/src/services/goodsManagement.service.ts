@@ -1,7 +1,8 @@
 import { api } from "@/lib/api";
 import type {
   ScanMatch,
-  QueueRow,
+  QueuePage,
+  QueueStatusFilter,
   JobGoodsDetail,
   PublicMovement,
   DamagedRow,
@@ -10,6 +11,8 @@ import type {
   CloseReconcilePayload,
   CloseReconcileResult,
   ListDamagedParams,
+  DemandEntry,
+  WarehouseDemandRow,
 } from "@/types/goodsManagement";
 
 // Typed wrappers around the backend /goods-management endpoints (scan-driven job-scoped issue,
@@ -23,18 +26,32 @@ export function scanLookup(
   jobId: string,
   direction: "issue" | "return",
   code: string,
+  warehouseId: string,
 ): Promise<ScanMatch> {
   return api<{ match: ScanMatch }>("/goods-management/scan-lookup", {
     method: "POST",
-    body: { jobId, direction, code },
+    body: { jobId, warehouseId, direction, code },
   }).then((r) => r.match);
 }
 
-// ── Queue (warehouse-side list of active jobs) ────────────────────────────────
+// ── Queue (warehouse-side, server-filtered + paginated) ───────────────────────
 
-/** All jobs in the active goods-management queue visible to the current user's warehouse scope. */
-export function getQueue(): Promise<QueueRow[]> {
-  return api<{ queue: QueueRow[] }>("/goods-management/queue").then((r) => r.queue);
+export interface GetQueueParams {
+  warehouseId: string;
+  status?: QueueStatusFilter; // defaults to "active" server-side
+  search?: string;
+  page?: number;
+  pageSize?: number;
+}
+
+/** One page of the Goods Management queue for a warehouse (filtered by status + search). */
+export function getQueue(params: GetQueueParams): Promise<QueuePage> {
+  const q = new URLSearchParams({ warehouseId: params.warehouseId });
+  if (params.status) q.set("status", params.status);
+  if (params.search?.trim()) q.set("search", params.search.trim());
+  if (params.page) q.set("page", String(params.page));
+  if (params.pageSize) q.set("pageSize", String(params.pageSize));
+  return api<QueuePage>(`/goods-management/queue?${q.toString()}`);
 }
 
 // ── Per-job goods detail ──────────────────────────────────────────────────────
@@ -114,5 +131,19 @@ export function uploadDamagePhoto(dataUri: string): Promise<string> {
 export function listOverdue(days?: number): Promise<OverdueRow[]> {
   const qs = days != null ? `?days=${days}` : "";
   return api<{ overdue: OverdueRow[] }>(`/goods-management/overdue${qs}`).then((r) => r.overdue);
+}
+
+/**
+ * Open demand across active jobs (planned-but-not-issued), per item+warehouse. The job form uses it
+ * to show TRUE free stock (available − demand elsewhere). excludeJobId drops the job being edited.
+ */
+export function getJobsDemand(excludeJobId?: string): Promise<DemandEntry[]> {
+  const qs = excludeJobId ? `?excludeJobId=${excludeJobId}` : "";
+  return api<{ demand: DemandEntry[] }>(`/goods-management/demand${qs}`).then((r) => r.demand);
+}
+
+/** Demand board for one warehouse: each item's current stock vs total planned, shortfalls first. */
+export function getWarehouseDemand(warehouseId: string): Promise<WarehouseDemandRow[]> {
+  return api<{ rows: WarehouseDemandRow[] }>(`/goods-management/warehouses/${warehouseId}/demand`).then((r) => r.rows);
 }
 

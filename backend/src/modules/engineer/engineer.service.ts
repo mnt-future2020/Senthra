@@ -129,12 +129,32 @@ export interface CustomerHoldingItem {
 
 export async function getOwnCustomerStock(engineerId: string): Promise<CustomerHoldingItem[]> {
   const rows = await goodsManagementRepo.findCustomerHoldingsByEngineer(engineerId);
+  // Backfill the customer label for holdings whose snapshot is null (legacy rows) — resolve by id.
+  const missingIds = [...new Set(rows.filter((h) => !h.customerName && h.customerId).map((h) => h.customerId!))];
+  const nameById = new Map<string, string>();
+  if (missingIds.length) {
+    for (const c of await goodsManagementRepo.findCustomerNamesByIds(missingIds)) nameById.set(c.id, c.name);
+  }
   return rows.map((h) => ({
     id: h.id,
     customerStockEntryId: h.customerStockEntryId,
     customerId: h.customerId,
-    customerName: h.customerName ?? null,
+    customerName: h.customerName ?? (h.customerId ? nameById.get(h.customerId) ?? null : null),
     itemName: h.itemName,
     quantityOnHand: h.quantityOnHand,
   }));
+}
+
+export interface MiscHeldItem {
+  itemName: string;
+  quantityOnHand: number;
+}
+
+// Misc items issued to the engineer (free-text kit lines, no stock balance) — summed by item name
+// from their posted issue movements. Misc has no return flow, so held = total issued.
+export async function getOwnMiscStock(engineerId: string): Promise<MiscHeldItem[]> {
+  const lines = await goodsManagementRepo.findMiscIssueLinesByEngineer(engineerId);
+  const agg = new Map<string, number>();
+  for (const l of lines) agg.set(l.itemName, (agg.get(l.itemName) ?? 0) + l.qty);
+  return [...agg.entries()].map(([itemName, quantityOnHand]) => ({ itemName, quantityOnHand }));
 }

@@ -19,6 +19,14 @@ export function fmtDate(iso: string | null): string {
   return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
 }
 
+// Date + time — for start/complete timestamps where the time of day matters.
+export function fmtDateTime(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
 // Page header rendered as a surface card (mirrors the admin list pages), with an
 // optional right-aligned action (e.g. the "Request stock" button).
 export function PortalHeader({

@@ -1124,6 +1124,11 @@ model DamagedStockBalance {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  // One balance row per natural key (the find-or-create key in the repo). Guarantees concurrent
+  // damage reports for the same item+warehouse increment a single row instead of racing to insert
+  // duplicates. The two loose sockets are null for the other owner type, which MongoDB indexes as
+  // distinct tuples — so company (irmItemId set) and customer (customerStockEntryId set) rows never collide.
+  @@unique([warehouseId, ownerType, irmItemId, customerStockEntryId])
   @@index([warehouseId])
   @@index([ownerType])
   @@index([customerId])
@@ -1631,6 +1636,8 @@ model Job {
   rejectedAt   DateTime?
   rejectedBy   String?   // engineer email that rejected
   rejectReason String?   // why the engineer declined (shown to the PM)
+  startedAt    DateTime? // when the engineer started work (accepted → in_progress)
+  completedAt  DateTime? // when the engineer completed work (in_progress → completed)
   cancelledAt  DateTime?
   cancelReason String?
 

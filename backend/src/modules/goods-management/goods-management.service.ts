@@ -25,6 +25,8 @@ export interface ScanMatch {
   plannedQty: number;
   alreadyIssued: number;
   remainingIssuable: number;
+  // Qty the engineer still holds for this line (issued − used − already-returned) — the cap for returns.
+  heldByEngineer: number;
   available: number; // current warehouse availability of this item
 }
 
@@ -42,6 +44,194 @@ function issuedForKitLine(movements: Awaited<ReturnType<typeof goodsManagementRe
   return n;
 }
 
+// Split a kit line's posted movements into GROSS issued / used (consumed, incl. lost) / returned.
+// Powers the queue's per-item lifecycle status (issued → awaiting return → returned/used).
+function kitLineSplit(movements: Awaited<ReturnType<typeof goodsManagementRepo.findMovementsByJob>>, kitLineId: string): { issued: number; used: number; returned: number } {
+  let issued = 0;
+  let used = 0;
+  let returned = 0;
+  for (const m of movements) {
+    if (m.status !== "posted") continue;
+    for (const l of m.items) {
+      if (l.jobKitLineId !== kitLineId) continue;
+      if (m.direction === "issue") issued += l.qty;
+      else if (m.direction === "consume") used += l.qty;
+      else if (m.direction === "return") returned += l.qty;
+    }
+  }
+  return { issued, used, returned };
+}
+
+export interface KitLineTally {
+  issued: number;
+  used: number; // consumed/used on site (incl. lost write-offs)
+  returned: number;
+  remaining: number; // still held by the engineer = issued − used − returned
+}
+
+// Per-kit-line goods tallies for a single job, keyed by jobKitLineId. Used on the job-detail "job
+// pack" views so the engineer/office can see issued / returned / remaining per item.
+export async function getJobKitTallies(jobId: string): Promise<Record<string, KitLineTally>> {
+  const job = await jobRepo.findById(jobId);
+  const movements = await goodsManagementRepo.findMovementsByJob(jobId);
+  const acc: Record<string, { issued: number; returned: number; consumed: number }> = {};
+  for (const m of movements) {
+    if (m.status !== "posted") continue;
+    for (const l of m.items) {
+      if (!l.jobKitLineId) continue;
+      const e = (acc[l.jobKitLineId] ??= { issued: 0, returned: 0, consumed: 0 });
+      if (m.direction === "issue") e.issued += l.qty;
+      else if (m.direction === "return") e.returned += l.qty;
+      else if (m.direction === "consume") e.consumed += l.qty;
+    }
+  }
+
+  // "Remaining" must reflect what the engineer ACTUALLY still holds (global per item), not raw issued −
+  // returned − used. A unit returned at another warehouse, or handed back under another job (a shared
+  // customer-stock entry), correctly shows remaining 0 here too — matching the scan / queue / reconcile.
+  const engId = job?.assignedEngineerId ?? null;
+  const irmHeld = new Map<string, number>();
+  const cseHeld = new Map<string, number>();
+  if (engId) {
+    for (const b of await goodsOutRepo.findEngineerBalances(engId)) irmHeld.set(b.irmItemId, b.quantityOnHand);
+    for (const h of await goodsManagementRepo.findCustomerHoldingsByEngineer(engId)) cseHeld.set(h.customerStockEntryId, h.quantityOnHand);
+  }
+
+  // Distribute each item's real held across its kit lines (capped at each line's raw remaining), so the
+  // per-line "remaining" sums to the engineer's true holding. Misc lines aren't engineer-tracked, so
+  // they keep their raw remaining. Keyed by current kit lines (orphaned movements are ignored).
+  const out: Record<string, KitLineTally> = {};
+  const groups = new Map<string, NonNullable<JobWithRelations["kitLines"]>>();
+  for (const kl of job?.kitLines ?? []) {
+    const key = kl.irmItemId ? `irm:${kl.irmItemId}` : kl.customerStockEntryId ? `cse:${kl.customerStockEntryId}` : `misc:${kl.id}`;
+    const g = groups.get(key);
+    if (g) g.push(kl);
+    else groups.set(key, [kl]);
+  }
+  for (const group of groups.values()) {
+    let remainingHeld = group[0].lineType === "misc"
+      ? Number.MAX_SAFE_INTEGER // misc isn't engineer-tracked → keep its raw remaining
+      : group[0].irmItemId ? irmHeld.get(group[0].irmItemId) ?? 0 : cseHeld.get(group[0].customerStockEntryId!) ?? 0;
+    for (const kl of group) {
+      const e = acc[kl.id] ?? { issued: 0, returned: 0, consumed: 0 };
+      const rawRemaining = Math.max(0, e.issued - e.returned - e.consumed);
+      const remaining = Math.min(rawRemaining, remainingHeld);
+      remainingHeld -= remaining;
+      out[kl.id] = { issued: e.issued, used: e.consumed, returned: e.returned, remaining };
+    }
+  }
+  return out;
+}
+
+// Current goods-lifecycle status for a job ("not_issued" if no stock has moved yet). The job module
+// uses this to lock the kit list once stock has been issued (changing it would orphan movements).
+export async function getGoodsStatus(jobId: string): Promise<string> {
+  const summary = await goodsManagementRepo.getSummary(jobId);
+  return summary?.goodsStatus ?? "not_issued";
+}
+
+// Goods-lifecycle status for many jobs in ONE query, keyed by jobId (missing → "not_issued"). Lets
+// the jobs list show each job's issuance state without an N+1 over the summary collection.
+export async function getGoodsStatusByJobs(jobIds: string[]): Promise<Map<string, string>> {
+  const summaries = await goodsManagementRepo.getSummariesByJobs(jobIds);
+  return new Map(summaries.map((s) => [s.jobId, s.goodsStatus]));
+}
+
+// ── Open demand (cross-job stock commitments) ───────────────────────────────────────────────────
+// "Open demand" = stock that ACTIVE jobs have planned but NOT yet issued. Issued stock has already
+// left the warehouse (on-hand reflects it), so demand = Σ max(0, planned − grossIssued) over the kit
+// lines of jobs whose goods aren't fully issued. This is the missing piece the per-job qty cap can't
+// see: it lets the planner (and the warehouse demand board) work off TRUE free stock across ALL jobs,
+// not just one — so the same units can't be silently promised to two jobs.
+export interface DemandEntry {
+  irmItemId: string | null;
+  customerStockEntryId: string | null;
+  warehouseId: string | null;
+  itemName: string;
+  warehouseName: string | null;
+  demand: number;
+}
+
+// Keyed by item+warehouse (irm) / entry (customer). excludeJobId drops the job being edited.
+export async function getOpenDemand(excludeJobId?: string): Promise<Map<string, DemandEntry>> {
+  const jobs = await jobRepo.findActiveWithKitLines(excludeJobId);
+  const out = new Map<string, DemandEntry>();
+  if (jobs.length === 0) return out;
+
+  const ids = jobs.map((j) => j.id);
+  const [summaries, movements] = await Promise.all([
+    goodsManagementRepo.getSummariesByJobs(ids),
+    goodsManagementRepo.findMovementsByJobs(ids),
+  ]);
+  const goodsStatusOf = new Map(summaries.map((s) => [s.jobId, s.goodsStatus]));
+  // Gross issued (issue movements only) per kit line — the part already drawn from the warehouse.
+  const issuedByLine = new Map<string, number>();
+  for (const m of movements) {
+    if (m.status !== "posted" || m.direction !== "issue") continue;
+    for (const l of m.items) {
+      if (l.jobKitLineId) issuedByLine.set(l.jobKitLineId, (issuedByLine.get(l.jobKitLineId) ?? 0) + l.qty);
+    }
+  }
+
+  for (const job of jobs) {
+    const gs = goodsStatusOf.get(job.id) ?? "not_issued";
+    // Once goods are fully issued/returned/reconciled there's no future warehouse draw left.
+    if (gs === "issued" || gs === "awaiting_return" || gs === "reconciled") continue;
+    for (const kl of job.kitLines ?? []) {
+      if (kl.lineType === "misc") continue; // misc isn't stock-tracked
+      const demand = Math.max(0, kl.qty - (issuedByLine.get(kl.id) ?? 0));
+      if (demand <= 0) continue;
+      // Key by item + warehouse for BOTH sources (customer stock too) so the per-warehouse demand
+      // board attributes each line to its own warehouse — never collapses two warehouses' demand onto
+      // whichever kit line happened to land in the map first.
+      const key = kl.irmItemId ? `irm|${kl.irmItemId}|${kl.warehouseId}` : `cse|${kl.customerStockEntryId}|${kl.warehouseId}`;
+      const e = out.get(key);
+      if (e) e.demand += demand;
+      else out.set(key, {
+        irmItemId: kl.irmItemId ?? null,
+        customerStockEntryId: kl.customerStockEntryId ?? null,
+        warehouseId: kl.warehouseId ?? null,
+        itemName: kl.itemName,
+        warehouseName: kl.warehouseName ?? null,
+        demand,
+      });
+    }
+  }
+  return out;
+}
+
+export interface WarehouseDemandRow {
+  source: "irm" | "customer";
+  itemName: string;
+  inStock: number; // current free warehouse stock (on-hand − reserved / customer entry qty)
+  planned: number; // open demand across active jobs
+  free: number; // inStock − planned (negative ⇒ short)
+}
+
+// Demand board for ONE warehouse: every item that active jobs plan to draw FROM this warehouse, with
+// its current stock vs total planned, shortfalls first. Reuses getOpenDemand so the numbers always
+// match the planner's "free" figure.
+export async function getWarehouseDemand(warehouseId: string): Promise<WarehouseDemandRow[]> {
+  const demand = [...(await getOpenDemand()).values()].filter((d) => d.warehouseId === warehouseId);
+  if (demand.length === 0) return [];
+
+  const irmIds = demand.filter((d) => d.irmItemId).map((d) => d.irmItemId!);
+  const cseIds = demand.filter((d) => d.customerStockEntryId).map((d) => d.customerStockEntryId!);
+  const balByItem = new Map(
+    (await inventoryRepo.findBalancesByItemsAndWarehouses(irmIds, [warehouseId])).map((b) => [b.irmItemId, b]),
+  );
+  const cseQty = new Map((await goodsManagementRepo.findCustomerStockEntriesByIds(cseIds)).map((e) => [e.id, e.quantity]));
+
+  return demand
+    .map((d) => {
+      const inStock = d.irmItemId
+        ? (balByItem.get(d.irmItemId)?.quantityOnHand ?? 0) - (balByItem.get(d.irmItemId)?.quantityReserved ?? 0)
+        : cseQty.get(d.customerStockEntryId!) ?? 0;
+      return { source: d.irmItemId ? ("irm" as const) : ("customer" as const), itemName: d.itemName, inStock, planned: d.demand, free: inStock - d.demand };
+    })
+    .sort((a, b) => a.free - b.free); // shortfalls (most negative free) first
+}
+
 export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Promise<ScanMatch> {
   const job = await jobRepo.findById(input.jobId);
   if (!job) throw notFound("Job not found.");
@@ -54,28 +244,60 @@ export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Pr
     if (irmItem.trackSerialNumbers || irmItem.trackBatchNumbers) {
       throw conflict(`${irmItem.name} is serial/batch-tracked — those items can't be moved here yet.`);
     }
-    const kit = (job.kitLines ?? []).find((k) => k.lineType === "irm" && k.irmItemId === irmItem.id);
-    if (!kit) throw badRequest(`${irmItem.name} is not on this job's kit list.`);
-    if (kit.warehouseId) assertWarehouseAccess(actor, kit.warehouseId);
+    // Match the kit line for THIS item AT THIS warehouse — a job can list the same IRM item at more
+    // than one warehouse, so picking the first by item id alone would resolve the wrong warehouse.
+    const kit = (job.kitLines ?? []).find((k) => k.lineType === "irm" && k.irmItemId === irmItem.id && k.warehouseId === input.warehouseId);
+    if (!kit) {
+      const onJobElsewhere = (job.kitLines ?? []).some((k) => k.lineType === "irm" && k.irmItemId === irmItem.id);
+      throw badRequest(onJobElsewhere
+        ? `${irmItem.name} is on this job but assigned to a different warehouse — issue it from there.`
+        : `${irmItem.name} is not on this job's kit list.`);
+    }
+    assertWarehouseAccess(actor, input.warehouseId);
     const already = issuedForKitLine(movements, kit.id);
     const bal = await inventoryRepo.findBalancePair(irmItem.id, kit.warehouseId!);
     const available = (bal?.quantityOnHand ?? 0) - (bal?.quantityReserved ?? 0);
+    // Return cap = what's still out FROM THIS warehouse's kit line (issued − used − returned), bounded
+    // by the engineer's REAL global holding. Per-warehouse, NOT raw global: an item issued from two
+    // warehouses must only allow back at each warehouse what actually left it — else returning all of a
+    // multi-warehouse holding at one warehouse would over-credit it (and short the other). The global
+    // bound also covers the cross-job case (item handed back under another job → global lower).
+    const split = kitLineSplit(movements, kit.id);
+    const lineOutstanding = Math.max(0, split.issued - split.used - split.returned);
+    const globalHeld = job.assignedEngineerId
+      ? (await goodsOutRepo.findEngineerBalance(irmItem.id, job.assignedEngineerId))?.quantityOnHand ?? 0
+      : 0;
+    const held = Math.min(lineOutstanding, globalHeld);
     return {
       source: "irm", irmItemId: irmItem.id, jobKitLineId: kit.id, itemName: irmItem.name, uom: irmItem.baseUnit,
-      plannedQty: kit.qty, alreadyIssued: already, remainingIssuable: kit.qty - already, available,
+      plannedQty: kit.qty, alreadyIssued: already, remainingIssuable: kit.qty - already,
+      heldByEngineer: held, available,
     };
   }
 
   // 2) Customer stock entry lookup by barcode.
   const entry = await goodsManagementRepo.findCustomerStockEntryByBarcode(code);
   if (entry) {
-    if (entry.warehouseId) assertWarehouseAccess(actor, entry.warehouseId);
-    const kit = (job.kitLines ?? []).find((k) => k.lineType === "customer_stock" && k.customerStockEntryId === entry.id);
-    if (!kit) throw badRequest(`${entry.itemName} is not on this job's kit list.`);
+    const kit = (job.kitLines ?? []).find((k) => k.lineType === "customer_stock" && k.customerStockEntryId === entry.id && k.warehouseId === input.warehouseId);
+    if (!kit) {
+      const onJobElsewhere = (job.kitLines ?? []).some((k) => k.lineType === "customer_stock" && k.customerStockEntryId === entry.id);
+      throw badRequest(onJobElsewhere
+        ? `${entry.itemName} is on this job but assigned to a different warehouse.`
+        : `${entry.itemName} is not on this job's kit list.`);
+    }
+    assertWarehouseAccess(actor, input.warehouseId);
     const already = issuedForKitLine(movements, kit.id);
+    // Per-warehouse return cap (see IRM branch): still-out from this line, bounded by global holding.
+    const split = kitLineSplit(movements, kit.id);
+    const lineOutstanding = Math.max(0, split.issued - split.used - split.returned);
+    const globalHeld = job.assignedEngineerId
+      ? (await goodsManagementRepo.findCustomerHolding(entry.id, job.assignedEngineerId))?.quantityOnHand ?? 0
+      : 0;
+    const held = Math.min(lineOutstanding, globalHeld);
     return {
       source: "customer", customerStockEntryId: entry.id, jobKitLineId: kit.id, itemName: entry.itemName, uom: entry.uom,
-      plannedQty: kit.qty, alreadyIssued: already, remainingIssuable: kit.qty - already, available: entry.quantity,
+      plannedQty: kit.qty, alreadyIssued: already, remainingIssuable: kit.qty - already,
+      heldByEngineer: held, available: entry.quantity,
     };
   }
 
@@ -161,7 +383,7 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
     kit: NonNullable<typeof job.kitLines>[number];
     itemName: string;
     uom: string | null;
-    warehouseId: string;
+    warehouseId: string | null; // null for misc lines (no stock / no warehouse)
     customerId?: string | null;
     customerName?: string | null;
   };
@@ -180,22 +402,34 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
         throw conflict(`${irm.name} is serial/batch-tracked and can't be moved here.`);
       }
       resolved.push({ line, kit, itemName: irm.name, uom: irm.baseUnit, warehouseId: kit.warehouseId! });
-    } else {
+    } else if (line.source === "customer") {
       const entry = await goodsManagementRepo.findCustomerStockEntryById(line.customerStockEntryId!);
       if (!entry) throw badRequest("Customer stock item not found.");
       resolved.push({ line, kit, itemName: entry.itemName, uom: entry.uom, warehouseId: entry.warehouseId!, customerId: entry.customerId, customerName: entry.customer?.name ?? null });
+    } else {
+      // misc — free-text kit line, no stock / no warehouse. Issued by count (handed over), no ledger.
+      if (kit.lineType !== "misc") throw badRequest("This kit line isn't a misc item.");
+      resolved.push({ line, kit, itemName: kit.itemName, uom: null, warehouseId: null });
     }
-    assertWarehouseAccess(actor, resolved[resolved.length - 1].warehouseId);
+    // Real lines can only be issued FROM their own pickup warehouse (admins are unrestricted
+    // otherwise). Misc lines have no warehouse and may be issued from any warehouse.
+    if (line.source !== "misc") {
+      if (kit.warehouseId !== input.warehouseId) {
+        throw badRequest(`${kit.itemName} isn't stocked at this warehouse and can't be issued from here.`);
+      }
+      assertWarehouseAccess(actor, input.warehouseId);
+    }
   }
 
-  const warehouseId = resolved[0].warehouseId;
+  const warehouseId = input.warehouseId; // the warehouse being managed (always set; misc has no own wh)
   const actorEmail = actor?.email ?? null;
   // derive engineerName from snapshot fields (set at assign-time)
   const engineerName = job.assignedEngineerName ?? "";
   const engineerEmail = job.assignedEngineerEmail ?? null;
-  // derive warehouseName/warehouseCode from the first kit line's snapshots
-  const warehouseName = resolved[0].kit.warehouseName ?? null;
-  const warehouseCode = resolved[0].kit.warehouseCode ?? null;
+  // warehouse snapshot from the first REAL line at this warehouse (misc lines carry no warehouse).
+  const realLine = resolved.find((r) => r.line.source !== "misc");
+  const warehouseName = realLine?.kit.warehouseName ?? null;
+  const warehouseCode = realLine?.kit.warehouseCode ?? null;
 
   const lines = resolved.map((r) => ({
     source: r.line.source,
@@ -232,14 +466,14 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
     async (tx, movementId, code) => {
       for (const r of resolved) {
         if (r.line.source === "irm") {
-          const live = await inventoryRepo.findBalancePairTx(tx, r.line.irmItemId!, r.warehouseId);
+          const live = await inventoryRepo.findBalancePairTx(tx, r.line.irmItemId!, r.warehouseId!);
           const available = (live?.quantityOnHand ?? 0) - (live?.quantityReserved ?? 0);
           if (r.line.qty > available) {
             throw conflict(`${r.itemName}: only ${available} available — stock changed.`);
           }
           await inventoryService.applyOutbound(tx, {
             irmItemId: r.line.irmItemId!,
-            warehouseId: r.warehouseId,
+            warehouseId: r.warehouseId!,
             quantity: r.line.qty,
             sourceType: "goods_management",
             sourceId: movementId,
@@ -258,7 +492,7 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
             balanceAfter: eng.quantityOnHand,
             createdBy: actorEmail,
           });
-        } else {
+        } else if (r.line.source === "customer") {
           const liveEntry = await goodsManagementRepo.findCustomerStockEntryQtyTx(tx, r.line.customerStockEntryId!);
           if (r.line.qty > (liveEntry?.quantity ?? 0)) {
             throw conflict(`${r.itemName}: only ${liveEntry?.quantity ?? 0} available — customer stock changed.`);
@@ -278,19 +512,20 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
           });
         }
       }
-      // Determine the correct goodsStatus after this movement:
-      // "issued" if every kit line is now fully issued, otherwise "partially_issued".
-      // Re-fetch movements from within the transaction is not available, so we compute
-      // using the pre-movement snapshot plus the lines we're adding now.
+      // Determine the correct goodsStatus after this movement: "issued" only when EVERY kit line —
+      // including misc — is fully issued; otherwise "partially_issued". Misc lines are issued by
+      // count in the panel, so a pending misc item keeps the job "partially_issued" until it's done.
       const allKitLines = job.kitLines ?? [];
-      const isFullyIssued = allKitLines.every((kl) => {
-        // Accumulate issued qty for this kit line from existing movements.
-        let issued = issuedForKitLine(movements, kl.id);
-        // Add the qty being posted in this movement.
-        const matchingNewLine = resolved.find((r) => r.kit.id === kl.id);
-        if (matchingNewLine) issued += matchingNewLine.line.qty;
-        return issued >= kl.qty;
-      });
+      const isFullyIssued =
+        allKitLines.length > 0 &&
+        allKitLines.every((kl) => {
+          // Accumulate issued qty for this kit line from existing movements + ALL qty being posted now.
+          // SUM the new lines (not .find) — a single issue request can carry more than one line for the
+          // same kit line, and counting only the first would mis-set the status.
+          let issued = issuedForKitLine(movements, kl.id);
+          for (const r of resolved) if (r.kit.id === kl.id) issued += r.line.qty;
+          return issued >= kl.qty;
+        });
       await goodsManagementRepo.upsertSummaryTx(tx, job.id, { goodsStatus: isFullyIssued ? "issued" : "partially_issued" });
     },
   );
@@ -308,7 +543,7 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
 // ── Queue: planned vs available ───────────────────────────────────────────────────────────────
 
 export interface QueueKitLine {
-  kitLineId: string;
+  id: string; // kit line id
   lineType: string;
   irmItemId: string | null;
   customerStockEntryId: string | null;
@@ -316,8 +551,12 @@ export interface QueueKitLine {
   warehouseId: string | null;
   warehouseName: string | null;
   warehouseCode: string | null;
-  planned: number;
-  issued: number;
+  plannedQty: number;
+  issuedQty: number; // GROSS issued (total sent out, before returns)
+  usedQty: number; // consumed/used on site (incl. lost write-offs)
+  returnedQty: number; // returned to the warehouse
+  engineerHeld: number; // engineer's REAL current holding of this item (same balance the return scan
+  // checks; shared per item across jobs/warehouses) — caps how much can actually be returned
   available: number; // warehouse pool (no cost/value exposed)
 }
 
@@ -328,7 +567,7 @@ export interface QueueRow {
   customerId: string;
   customerName: string | null;
   assignedEngineerId: string | null;
-  assignedEngineerName: string | null;
+  engineerName: string | null;
   status: string;
   goodsStatus: string; // from JobStockSummary (default not_issued)
   kitLines: QueueKitLine[];
@@ -351,65 +590,167 @@ export interface JobGoodsDetail {
   lines: QueueKitLine[];
 }
 
-export async function listQueue(actor?: AuditActor): Promise<QueueRow[]> {
-  const scopeIds = warehouseScopeFilter(actor);
-  const jobs = await jobRepo.findActiveForGoodsManagement(scopeIds);
+export interface QueuePage {
+  rows: QueueRow[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
 
-  // TODO(perf): N+1 pattern — for each job we issue 2 DB calls (findMovementsByJob +
-  // getSummary) then 1 call per kit line (findBalancePair / findCustomerStockEntryById).
-  // At scale (e.g. 50 jobs × 10 lines) this produces 600+ serial Mongo round-trips per
-  // request. Fix: batch movements via a single findMany({ where: { jobId: { in: jobIds } } })
-  // and batch balance lookups; defer until the queue endpoint shows measurable latency.
-  const rows: QueueRow[] = [];
-  for (const job of jobs) {
-    const movements = await goodsManagementRepo.findMovementsByJob(job.id);
-    const summary = await goodsManagementRepo.getSummary(job.id);
+// Queue status filters. "active" = anything still needing work (everything except reconciled); the
+// others target one exact goodsStatus. "reconciled" backs the read-only Closed / history view.
+export const QUEUE_STATUSES = ["active", "not_issued", "partially_issued", "issued", "awaiting_return", "reconciled"] as const;
+export type QueueStatusFilter = (typeof QUEUE_STATUSES)[number];
 
-    // Build per-kit-line tallies. Only include lines that belong to accessible warehouses.
-    const kitLineRows: QueueKitLine[] = [];
-    for (const kl of job.kitLines ?? []) {
-      // For warehouse-scoped actors, skip lines outside their scope.
-      if (scopeIds !== undefined && kl.warehouseId && !scopeIds.includes(kl.warehouseId)) continue;
+export interface QueueParams {
+  warehouseId: string;
+  status?: string; // one of QUEUE_STATUSES; defaults to "active"
+  search?: string; // job number / name / customer / engineer (DB-filtered)
+  page?: number;
+  pageSize?: number;
+}
 
-      const issued = issuedForKitLine(movements, kl.id);
-      let available = 0;
+const DEFAULT_QUEUE_PAGE_SIZE = 20;
+const MAX_QUEUE_PAGE_SIZE = 100;
+
+// Assemble one QueueKitLine from pre-batched lookups: warehouse availability, the movement split
+// (issued/used/returned) and the engineer's real holding. Shared by the queue list and the single-job
+// detail so the two views can never drift on how "available"/"held"/the split are computed (the bug the
+// detail N+1 fix exposed). Each caller batches the lookups its own way and passes the engineer holding in.
+function buildKitLineRow(
+  kl: {
+    id: string;
+    lineType: string;
+    irmItemId: string | null;
+    customerStockEntryId: string | null;
+    itemName: string;
+    warehouseId: string | null;
+    warehouseName: string | null;
+    warehouseCode: string | null;
+    qty: number;
+  },
+  movements: Awaited<ReturnType<typeof goodsManagementRepo.findMovementsByJob>>,
+  balByKey: Map<string, Awaited<ReturnType<typeof inventoryRepo.findBalancesByItemsAndWarehouses>>[number]>,
+  cseQty: Map<string, number>,
+  engineerHeld: number,
+): QueueKitLine {
+  let available = 0;
+  if (kl.lineType === "irm" && kl.irmItemId && kl.warehouseId) {
+    const bal = balByKey.get(`${kl.irmItemId}|${kl.warehouseId}`);
+    available = (bal?.quantityOnHand ?? 0) - (bal?.quantityReserved ?? 0);
+  } else if (kl.lineType === "customer_stock" && kl.customerStockEntryId) {
+    available = cseQty.get(kl.customerStockEntryId) ?? 0; // qty only — no cost/value exposed
+  }
+  const split = kitLineSplit(movements, kl.id);
+  return {
+    id: kl.id,
+    lineType: kl.lineType,
+    irmItemId: kl.irmItemId,
+    customerStockEntryId: kl.customerStockEntryId,
+    itemName: kl.itemName,
+    warehouseId: kl.warehouseId,
+    warehouseName: kl.warehouseName,
+    warehouseCode: kl.warehouseCode,
+    plannedQty: kl.qty,
+    issuedQty: split.issued, // gross issued (the per-item lifecycle status derives the rest)
+    usedQty: split.used,
+    returnedQty: split.returned,
+    engineerHeld,
+    available,
+  };
+}
+
+// The Goods Management queue for ONE warehouse: candidate jobs (a real line stocked here OR any misc
+// line) filtered by goodsStatus + search, then paginated. Reconciled jobs are EXCLUDED from the
+// default "active" view (they're done) and surfaced only via status="reconciled" (the read-only
+// Closed view). Movements + balances are enriched for the CURRENT PAGE ONLY, in batched queries — so
+// the endpoint stays ~5 round-trips regardless of how many jobs exist (was an N+1 of 600+).
+export async function listQueue(params: QueueParams, actor?: AuditActor): Promise<QueuePage> {
+  assertWarehouseAccess(actor, params.warehouseId);
+  const status = params.status ?? "active";
+  if (!QUEUE_STATUSES.includes(status as QueueStatusFilter)) throw badRequest(`Invalid status filter "${status}".`);
+  const pageSize = Math.min(Math.max(Math.trunc(params.pageSize ?? DEFAULT_QUEUE_PAGE_SIZE), 1), MAX_QUEUE_PAGE_SIZE);
+  const search = params.search?.trim() || undefined;
+
+  // 1) Candidate jobs for this warehouse, DB-filtered by job status + search, newest first.
+  const jobs = await jobRepo.findActiveForGoodsManagement(params.warehouseId, search);
+
+  // 2) goodsStatus per job (one batched query) → active / closed / exact-status filter.
+  const summaries = await goodsManagementRepo.getSummariesByJobs(jobs.map((j) => j.id));
+  const statusByJob = new Map(summaries.map((s) => [s.jobId, s.goodsStatus]));
+  const goodsStatusOf = (jobId: string) => statusByJob.get(jobId) ?? "not_issued";
+  const matchesStatus = (gs: string) => (status === "active" ? gs !== "reconciled" : gs === status);
+  const filtered = jobs.filter((j) => matchesStatus(goodsStatusOf(j.id)));
+
+  // 3) Paginate (createdAt-desc order preserved from the query).
+  const total = filtered.length;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const page = Math.min(Math.max(Math.trunc(params.page ?? 1), 1), totalPages);
+  const pageJobs = filtered.slice((page - 1) * pageSize, page * pageSize);
+
+  // 4) Enrich ONLY the page, in batched queries (movements grouped by job; IRM balances; customer qty).
+  const movementsByJob = new Map<string, Awaited<ReturnType<typeof goodsManagementRepo.findMovementsByJobs>>>();
+  for (const m of await goodsManagementRepo.findMovementsByJobs(pageJobs.map((j) => j.id))) {
+    const list = movementsByJob.get(m.jobId);
+    if (list) list.push(m);
+    else movementsByJob.set(m.jobId, [m]);
+  }
+  const irmItemIds = new Set<string>();
+  const whIds = new Set<string>();
+  const cseIds = new Set<string>();
+  for (const j of pageJobs) {
+    for (const kl of j.kitLines ?? []) {
       if (kl.lineType === "irm" && kl.irmItemId && kl.warehouseId) {
-        const bal = await inventoryRepo.findBalancePair(kl.irmItemId, kl.warehouseId);
-        available = (bal?.quantityOnHand ?? 0) - (bal?.quantityReserved ?? 0);
+        irmItemIds.add(kl.irmItemId);
+        whIds.add(kl.warehouseId);
       } else if (kl.lineType === "customer_stock" && kl.customerStockEntryId) {
-        const entry = await goodsManagementRepo.findCustomerStockEntryById(kl.customerStockEntryId);
-        available = entry?.quantity ?? 0;
-        // NOTE: no cost/value exposed — only qty
+        cseIds.add(kl.customerStockEntryId);
       }
-      kitLineRows.push({
-        kitLineId: kl.id,
-        lineType: kl.lineType,
-        irmItemId: kl.irmItemId,
-        customerStockEntryId: kl.customerStockEntryId,
-        itemName: kl.itemName,
-        warehouseId: kl.warehouseId,
-        warehouseName: kl.warehouseName,
-        warehouseCode: kl.warehouseCode,
-        planned: kl.qty,
-        issued,
-        available,
-      });
     }
+  }
+  const balByKey = new Map(
+    (await inventoryRepo.findBalancesByItemsAndWarehouses([...irmItemIds], [...whIds])).map((b) => [`${b.irmItemId}|${b.warehouseId}`, b]),
+  );
+  const cseQty = new Map((await goodsManagementRepo.findCustomerStockEntriesByIds([...cseIds])).map((e) => [e.id, e.quantity]));
 
-    rows.push({
+  // Engineer's REAL holding per item (same balance the return scan checks) — keyed by
+  // `${engineerId}|${itemId}`. The holding is global per item (shared across jobs/warehouses), so this
+  // is the only honest source for "to return": it can never claim more than the engineer actually has.
+  // Batched per engineer (the page has only a handful), not per line.
+  const engHeld = new Map<string, number>();
+  for (const engId of [...new Set(pageJobs.map((j) => j.assignedEngineerId).filter((id): id is string => !!id))]) {
+    for (const b of await goodsOutRepo.findEngineerBalances(engId)) engHeld.set(`${engId}|${b.irmItemId}`, b.quantityOnHand);
+    for (const h of await goodsManagementRepo.findCustomerHoldingsByEngineer(engId)) engHeld.set(`${engId}|${h.customerStockEntryId}`, h.quantityOnHand);
+  }
+
+  const rows: QueueRow[] = pageJobs.map((job) => {
+    const movements = movementsByJob.get(job.id) ?? [];
+    const heldOf = (kl: { irmItemId: string | null; customerStockEntryId: string | null }) => {
+      if (!job.assignedEngineerId) return 0;
+      const itemId = kl.irmItemId ?? kl.customerStockEntryId;
+      return itemId ? engHeld.get(`${job.assignedEngineerId}|${itemId}`) ?? 0 : 0;
+    };
+    const kitLines: QueueKitLine[] = (job.kitLines ?? []).map((kl) => buildKitLineRow(kl, movements, balByKey, cseQty, heldOf(kl)));
+    return {
       jobId: job.id,
       jobNumber: job.jobNumber,
       jobName: job.name,
       customerId: job.customerId,
       customerName: job.customerName,
       assignedEngineerId: job.assignedEngineerId,
-      assignedEngineerName: job.assignedEngineerName,
+      // Prefer the assign-time snapshot; fall back to the live engineer relation so the queue still
+      // shows a name for jobs assigned before the snapshot was populated.
+      engineerName:
+        job.assignedEngineerName ??
+        (job.assignedEngineer ? `${job.assignedEngineer.firstName} ${job.assignedEngineer.lastName}`.trim() : null),
       status: job.status,
-      goodsStatus: summary?.goodsStatus ?? "not_issued",
-      kitLines: kitLineRows,
-    });
-  }
-  return rows;
+      goodsStatus: goodsStatusOf(job.id),
+      kitLines,
+    };
+  });
+
+  return { rows, total, page, pageSize, totalPages };
 }
 
 export async function getJobGoods(jobId: string, actor?: AuditActor): Promise<JobGoodsDetail> {
@@ -419,34 +760,40 @@ export async function getJobGoods(jobId: string, actor?: AuditActor): Promise<Jo
   const movements = await goodsManagementRepo.findMovementsByJob(job.id);
   const summary = await goodsManagementRepo.getSummary(job.id);
 
-  const lines: QueueKitLine[] = [];
+  // Enforce per-line warehouse access before any enrichment.
   for (const kl of job.kitLines ?? []) {
     if (kl.warehouseId) assertWarehouseAccess(actor, kl.warehouseId);
-
-    const issued = issuedForKitLine(movements, kl.id);
-    let available = 0;
-    if (kl.lineType === "irm" && kl.irmItemId && kl.warehouseId) {
-      const bal = await inventoryRepo.findBalancePair(kl.irmItemId, kl.warehouseId);
-      available = (bal?.quantityOnHand ?? 0) - (bal?.quantityReserved ?? 0);
-    } else if (kl.lineType === "customer_stock" && kl.customerStockEntryId) {
-      const entry = await goodsManagementRepo.findCustomerStockEntryById(kl.customerStockEntryId);
-      available = entry?.quantity ?? 0;
-      // NOTE: no cost/value exposed
-    }
-    lines.push({
-      kitLineId: kl.id,
-      lineType: kl.lineType,
-      irmItemId: kl.irmItemId,
-      customerStockEntryId: kl.customerStockEntryId,
-      itemName: kl.itemName,
-      warehouseId: kl.warehouseId,
-      warehouseName: kl.warehouseName,
-      warehouseCode: kl.warehouseCode,
-      planned: kl.qty,
-      issued,
-      available,
-    });
   }
+
+  // Enrich in batched queries (was an N+1 of ~3 round-trips per kit line) — same approach as listQueue.
+  const irmItemIds = new Set<string>();
+  const whIds = new Set<string>();
+  const cseIds = new Set<string>();
+  for (const kl of job.kitLines ?? []) {
+    if (kl.lineType === "irm" && kl.irmItemId && kl.warehouseId) {
+      irmItemIds.add(kl.irmItemId);
+      whIds.add(kl.warehouseId);
+    } else if (kl.lineType === "customer_stock" && kl.customerStockEntryId) {
+      cseIds.add(kl.customerStockEntryId);
+    }
+  }
+  const balByKey = new Map(
+    (await inventoryRepo.findBalancesByItemsAndWarehouses([...irmItemIds], [...whIds])).map((b) => [`${b.irmItemId}|${b.warehouseId}`, b]),
+  );
+  const cseQty = new Map((await goodsManagementRepo.findCustomerStockEntriesByIds([...cseIds])).map((e) => [e.id, e.quantity]));
+  // Engineer's REAL holding per item (global per item) — batched once for the job's single engineer.
+  const engHeld = new Map<string, number>();
+  if (job.assignedEngineerId) {
+    for (const b of await goodsOutRepo.findEngineerBalances(job.assignedEngineerId)) engHeld.set(b.irmItemId, b.quantityOnHand);
+    for (const h of await goodsManagementRepo.findCustomerHoldingsByEngineer(job.assignedEngineerId)) engHeld.set(h.customerStockEntryId, h.quantityOnHand);
+  }
+
+  const heldOf = (kl: { irmItemId: string | null; customerStockEntryId: string | null }) => {
+    if (!job.assignedEngineerId) return 0;
+    const itemId = kl.irmItemId ?? kl.customerStockEntryId;
+    return itemId ? engHeld.get(itemId) ?? 0 : 0;
+  };
+  const lines: QueueKitLine[] = (job.kitLines ?? []).map((kl) => buildKitLineRow(kl, movements, balByKey, cseQty, heldOf(kl)));
 
   return {
     job: {
@@ -498,10 +845,10 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
     const condition = (line.condition ?? "good") as "good" | "damaged";
     if (line.source === "irm") {
       if (!line.irmItemId) throw badRequest("IRM return line is missing irmItemId.");
-      // Find the kit line to get warehouseId and item name snapshots.
-      const kit = (job.kitLines ?? []).find((k) => k.lineType === "irm" && k.irmItemId === line.irmItemId);
+      // Match the kit line for this item AT THIS warehouse (an item may be listed at several).
+      const kit = (job.kitLines ?? []).find((k) => k.lineType === "irm" && k.irmItemId === line.irmItemId && k.warehouseId === input.warehouseId);
       if (!kit?.warehouseId) throw badRequest("Cannot determine warehouse for this IRM return line.");
-      assertWarehouseAccess(actor, kit.warehouseId);
+      assertWarehouseAccess(actor, input.warehouseId);
       resolved.push({
         line, itemName: kit.itemName, uom: null, sku: null, warehouseId: kit.warehouseId,
         warehouseName: kit.warehouseName ?? null, warehouseCode: kit.warehouseCode ?? null,
@@ -509,10 +856,10 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
       });
     } else {
       if (!line.customerStockEntryId) throw badRequest("Customer return line is missing customerStockEntryId.");
-      // Derive warehouse + item name from the kit line (snapshot). Fall back to CSE fetch if needed.
-      const kit = (job.kitLines ?? []).find((k) => k.lineType === "customer_stock" && k.customerStockEntryId === line.customerStockEntryId);
+      // Derive warehouse + item name from the kit line (at THIS warehouse). Fall back to CSE fetch.
+      const kit = (job.kitLines ?? []).find((k) => k.lineType === "customer_stock" && k.customerStockEntryId === line.customerStockEntryId && k.warehouseId === input.warehouseId);
       if (kit?.warehouseId) {
-        assertWarehouseAccess(actor, kit.warehouseId);
+        assertWarehouseAccess(actor, input.warehouseId);
         resolved.push({
           line, itemName: kit.itemName, uom: null, sku: null, warehouseId: kit.warehouseId,
           warehouseName: kit.warehouseName ?? null, warehouseCode: kit.warehouseCode ?? null,
@@ -530,6 +877,13 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
           customerId: entry.customerId ?? null, condition,
         });
       }
+    }
+  }
+
+  // Every return line must belong to THIS warehouse — can't receive another warehouse's items here.
+  for (const r of resolved) {
+    if (r.warehouseId !== input.warehouseId) {
+      throw badRequest(`${r.itemName} isn't stocked at this warehouse and can't be received here.`);
     }
   }
 
@@ -555,6 +909,19 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
     notes: r.line.notes ?? null,
   }));
 
+  // Per-warehouse return cap: each line can return only what's still out FROM ITS kit line
+  // (issued − used − returned), so a multi-warehouse holding can't be fully returned at one warehouse
+  // (which would over-credit it + short the other). Computed from the current movements; a running
+  // budget handles multiple lines (e.g. good + damaged split) against the same kit line in one request.
+  const returnMovements = await goodsManagementRepo.findMovementsByJob(job.id);
+  const outstandingByLine = new Map<string, number>();
+  for (const r of resolved) {
+    const klId = r.line.jobKitLineId;
+    if (!klId || outstandingByLine.has(klId)) continue;
+    const s = kitLineSplit(returnMovements, klId);
+    outstandingByLine.set(klId, Math.max(0, s.issued - s.used - s.returned));
+  }
+
   const created = await goodsManagementRepo.createMovementWithCode(
     {
       jobId: job.id,
@@ -575,6 +942,15 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
       for (const r of resolved) {
         const { line, condition, warehouseId: wh } = r;
         const qty = line.qty;
+
+        // Per-warehouse cap: can't return more at this warehouse than its kit line still has out.
+        if (line.jobKitLineId) {
+          const remaining = outstandingByLine.get(line.jobKitLineId) ?? 0;
+          if (qty > remaining) {
+            throw conflict(`Only ${remaining} of ${r.itemName} can be returned at this warehouse — that's all that's still out from here.`);
+          }
+          outstandingByLine.set(line.jobKitLineId, remaining - qty);
+        }
 
         if (line.source === "irm") {
           const irmItemId = line.irmItemId!;
@@ -724,7 +1100,25 @@ export interface ConsumeUsedLine {
   source: "irm" | "customer";
   irmItemId?: string;
   customerStockEntryId?: string;
+  jobKitLineId?: string; // the exact kit line used — disambiguates an item issued from >1 warehouse
   qty: number;
+}
+
+// Match an engineer-declared "used" line to the EXACT kit line it came from: by declared kit-line id
+// (precise when an item was issued from more than one warehouse), else by item id for older clients
+// without jobKitLineId. The declared item MUST be on this job's kit list — otherwise we'd drain the
+// engineer's (global) holding for an unrelated item with no traceable attribution. An unmatched line
+// (off-job item, or a stale/edited jobKitLineId) is rejected, never silently orphaned.
+function resolveUsedKitLine(job: JobWithRelations, used: ConsumeUsedLine): JobWithRelations["kitLines"][number] {
+  const kitLine = job.kitLines.find((kl) =>
+    used.jobKitLineId
+      ? kl.id === used.jobKitLineId
+      : used.source === "irm"
+        ? kl.lineType === "irm" && kl.irmItemId === used.irmItemId
+        : kl.lineType === "customer_stock" && kl.customerStockEntryId === used.customerStockEntryId,
+  );
+  if (!kitLine) throw badRequest("A declared 'used' item isn't on this job's kit list (or its line was edited) — refresh the job and try again.");
+  return kitLine;
 }
 
 export async function recordConsumeAndComplete(
@@ -740,42 +1134,38 @@ export async function recordConsumeAndComplete(
   const movementLines: goodsManagementRepo.MovementLineRow[] = usedLines
     .filter((u) => u.qty > 0)
     .map((used) => {
-      if (used.source === "irm") {
-        const kitLine = job.kitLines.find((kl) => kl.irmItemId === used.irmItemId);
-        return {
-          source: "irm",
-          irmItemId: used.irmItemId ?? null,
-          customerStockEntryId: null,
-          itemName: kitLine?.itemName ?? (used.irmItemId ?? ""),
-          sku: null,
-          uom: null,
-          qty: used.qty,
-          condition: "good",
-          jobKitLineId: kitLine?.id ?? null,
-          scannedCode: null,
-          damagePhotoUrl: null,
-          damageReason: null,
-          notes: null,
-        };
-      } else {
-        const kitLine = job.kitLines.find((kl) => kl.customerStockEntryId === used.customerStockEntryId);
-        return {
-          source: "customer",
-          irmItemId: null,
-          customerStockEntryId: used.customerStockEntryId ?? null,
-          itemName: kitLine?.itemName ?? (used.customerStockEntryId ?? ""),
-          sku: null,
-          uom: null,
-          qty: used.qty,
-          condition: "good",
-          jobKitLineId: kitLine?.id ?? null,
-          scannedCode: null,
-          damagePhotoUrl: null,
-          damageReason: null,
-          notes: null,
-        };
-      }
+      const kitLine = resolveUsedKitLine(job, used);
+      return {
+        source: used.source === "irm" ? "irm" : "customer",
+        irmItemId: used.source === "irm" ? used.irmItemId ?? null : null,
+        customerStockEntryId: used.source === "irm" ? null : used.customerStockEntryId ?? null,
+        itemName: kitLine.itemName,
+        sku: null,
+        uom: null,
+        qty: used.qty,
+        condition: "good",
+        jobKitLineId: kitLine.id,
+        scannedCode: null,
+        damagePhotoUrl: null,
+        damageReason: null,
+        notes: null,
+      };
     });
+
+  // Decide the goods status AFTER this consume: if the engineer is left holding NOTHING for the job
+  // (used everything — nothing to return), auto-reconcile instead of parking it in "awaiting_return"
+  // and forcing a manual Close & Reconcile. Outstanding per line = issued − used (prior + this) −
+  // returned; if every line nets to 0, there's nothing to hand back.
+  const priorMovements = await goodsManagementRepo.findMovementsByJob(jobId);
+  const newUsedByLine = new Map<string, number>();
+  for (const m of movementLines) if (m.jobKitLineId) newUsedByLine.set(m.jobKitLineId, (newUsedByLine.get(m.jobKitLineId) ?? 0) + m.qty);
+  let totalOutstanding = 0;
+  for (const kl of job.kitLines) {
+    if (kl.lineType === "misc") continue; // misc isn't stock-tracked
+    const s = kitLineSplit(priorMovements, kl.id);
+    totalOutstanding += Math.max(0, s.issued - s.used - s.returned - (newUsedByLine.get(kl.id) ?? 0));
+  }
+  const finalGoodsStatus = totalOutstanding > 0 ? "awaiting_return" : "reconciled";
 
   // Use the GM code allocator so consume movements get proper GM-#### codes.
   await goodsManagementRepo.createMovementWithCode(
@@ -853,9 +1243,9 @@ export async function recordConsumeAndComplete(
         throw conflict("Job can't be completed right now. Refresh and try again.");
       }
 
-      // Upsert the summary.
+      // Upsert the summary (auto-reconciled when nothing's left to return — see above).
       await goodsManagementRepo.upsertSummaryTx(tx, jobId, {
-        goodsStatus: "awaiting_return",
+        goodsStatus: finalGoodsStatus,
         workSummary: workSummary ?? null,
       });
     },
@@ -1013,52 +1403,42 @@ interface UnaccountedItem {
   customerId: string | null;
 }
 
-type TallyEntry = { itemName: string; source: "irm" | "customer"; irmItemId: string | null; customerStockEntryId: string | null; issued: number; consumed: number; returnedGood: number; returnedDamaged: number };
+type TallyEntry = { jobKitLineId: string; itemName: string; source: "irm" | "customer"; irmItemId: string | null; customerStockEntryId: string | null; warehouseId: string | null; issued: number; consumed: number; returnedGood: number; returnedDamaged: number };
 
+// Tally goods for reconciliation, keyed by the job's CURRENT, stock-tracked kit lines (jobKitLineId).
+// Keying by kit line — not by item id — keeps this consistent with the held / queue / job-pack views
+// and ignores movements left over from kit lines that were later edited or removed (whose ids no
+// longer match), which would otherwise double-count an item. Misc lines are free-text (not
+// stock-tracked) and can never be returned, so they're excluded from reconciliation entirely.
 function computeTallies(
   movements: Awaited<ReturnType<typeof goodsManagementRepo.findMovementsByJob>>,
   kitLines?: NonNullable<JobWithRelations["kitLines"]>,
 ): Map<string, TallyEntry> {
-  // Keyed by irmItemId or customerStockEntryId.
   const tallies = new Map<string, TallyEntry>();
-
-  // Build a quick lookup from kit lines for item names.
-  const kitNameByIrmId = new Map<string, string>();
-  const kitNameByCseId = new Map<string, string>();
   for (const kl of kitLines ?? []) {
-    if (kl.irmItemId) kitNameByIrmId.set(kl.irmItemId, kl.itemName);
-    if (kl.customerStockEntryId) kitNameByCseId.set(kl.customerStockEntryId, kl.itemName);
+    if (kl.lineType === "misc") continue; // misc is not stock-tracked → never reconciled
+    tallies.set(kl.id, {
+      jobKitLineId: kl.id,
+      itemName: kl.itemName,
+      source: kl.irmItemId ? "irm" : "customer",
+      irmItemId: kl.irmItemId ?? null,
+      customerStockEntryId: kl.customerStockEntryId ?? null,
+      warehouseId: kl.warehouseId ?? null,
+      issued: 0,
+      consumed: 0,
+      returnedGood: 0,
+      returnedDamaged: 0,
+    });
   }
 
   for (const m of movements) {
     if (m.status !== "posted") continue;
     for (const l of m.items) {
-      const key = l.irmItemId ?? l.customerStockEntryId ?? "unknown";
-      if (!tallies.has(key)) {
-        // Use item name from the movement line; fall back to kit line snapshot.
-        const itemName: string =
-          (l.itemName as string | undefined) ??
-          (l.irmItemId ? kitNameByIrmId.get(l.irmItemId) : undefined) ??
-          (l.customerStockEntryId ? kitNameByCseId.get(l.customerStockEntryId) : undefined) ??
-          key;
-        // Determine source: prefer the recorded value, fall back to which id is present.
-        const source: "irm" | "customer" =
-          (l.source === "irm" || l.source === "customer") ? l.source :
-          l.irmItemId ? "irm" : "customer";
-        tallies.set(key, {
-          itemName,
-          source,
-          irmItemId: l.irmItemId,
-          customerStockEntryId: l.customerStockEntryId,
-          issued: 0,
-          consumed: 0,
-          returnedGood: 0,
-          returnedDamaged: 0,
-        });
-      }
-      const t = tallies.get(key)!;
+      if (!l.jobKitLineId) continue;
+      const t = tallies.get(l.jobKitLineId);
+      if (!t) continue; // orphaned (kit line edited/removed) or misc — not part of this job's reconcile
       if (m.direction === "issue") t.issued += l.qty;
-      else if (m.direction === "consume") t.consumed += l.qty;
+      else if (m.direction === "consume") t.consumed += l.qty; // includes "lost" write-offs
       else if (m.direction === "return") {
         if (l.condition === "damaged") t.returnedDamaged += l.qty;
         else t.returnedGood += l.qty;
@@ -1081,33 +1461,59 @@ export async function closeReconcile(
     throw conflict("This job is already reconciled and locked.");
   }
 
-  // Guard: only jobs that have had stock issued (awaiting_return / issued / partially_issued)
-  // can be reconciled. Attempting to reconcile a job with no movements would silently lock it.
-  if (!existingSummary || !["awaiting_return", "issued", "partially_issued"].includes(existingSummary.goodsStatus)) {
-    throw conflict("Cannot reconcile a job that has not had stock issued yet.");
+  // Guard: reconcile ONLY once the engineer has completed the job (goodsStatus "awaiting_return").
+  // Before that the stock is still in use on site — reconciling would write off live stock as "lost"
+  // and lock the job. Issued / partially_issued jobs must wait for the engineer to declare usage.
+  if (existingSummary?.goodsStatus !== "awaiting_return") {
+    throw conflict("This job can only be reconciled after the engineer completes it and declares what was used.");
   }
 
   const movements = await goodsManagementRepo.findMovementsByJob(job.id);
   const tallies = computeTallies(movements, job.kitLines ?? []);
 
-  // Compute unaccounted per item: issued − consumed − returnedGood − returnedDamaged.
+  // "Unaccounted" must reflect what the engineer ACTUALLY still holds — not raw per-line issued −
+  // returned. Stock returned at a different warehouse, or (for a customer-stock entry shared across
+  // jobs) handed back under another job, is genuinely accounted even though THIS job's per-line
+  // movements don't record the return. So cap each item's unaccounted at the engineer's real held
+  // balance (the same source the scan/queue use), distributed across the item's kit lines. Without
+  // this, reconcile shows phantom shortfalls and the only escapes are a wrong "write off as lost" or
+  // leaving the job stuck open.
+  const engId = job.assignedEngineerId;
+  const irmHeld = new Map<string, number>();
+  const cseHeld = new Map<string, number>();
+  if (engId) {
+    for (const b of await goodsOutRepo.findEngineerBalances(engId)) irmHeld.set(b.irmItemId, b.quantityOnHand);
+    for (const h of await goodsManagementRepo.findCustomerHoldingsByEngineer(engId)) cseHeld.set(h.customerStockEntryId, h.quantityOnHand);
+  }
+
+  // Group the tallies by item (the engineer holding is global per item, not per kit line) and spread
+  // each item's real held across its lines, capped at each line's raw remaining.
+  const talliesByItem = new Map<string, TallyEntry[]>();
+  for (const t of tallies.values()) {
+    const key = t.source === "irm" ? `irm:${t.irmItemId}` : `cse:${t.customerStockEntryId}`;
+    const g = talliesByItem.get(key);
+    if (g) g.push(t);
+    else talliesByItem.set(key, [t]);
+  }
+
   const unaccountedItems: UnaccountedItem[] = [];
-  for (const [, t] of tallies) {
-    const remaining = t.issued - t.consumed - t.returnedGood - t.returnedDamaged;
-    if (remaining > 0) {
-      // Find the warehouseId from the job's kit lines for this item.
-      const kit = (job.kitLines ?? []).find((kl) =>
-        t.source === "irm" ? kl.irmItemId === t.irmItemId : kl.customerStockEntryId === t.customerStockEntryId,
-      );
-      unaccountedItems.push({
-        itemName: t.itemName,
-        qty: remaining,
-        source: t.source,
-        irmItemId: t.irmItemId,
-        customerStockEntryId: t.customerStockEntryId,
-        warehouseId: kit?.warehouseId ?? null,
-        customerId: null,
-      });
+  for (const group of talliesByItem.values()) {
+    let remainingHeld = group[0].source === "irm" ? irmHeld.get(group[0].irmItemId!) ?? 0 : cseHeld.get(group[0].customerStockEntryId!) ?? 0;
+    for (const t of group) {
+      const rawRemaining = Math.max(0, t.issued - t.consumed - t.returnedGood - t.returnedDamaged);
+      const qty = Math.min(rawRemaining, remainingHeld); // never more than the engineer truly holds
+      remainingHeld -= qty;
+      if (qty > 0) {
+        unaccountedItems.push({
+          itemName: t.itemName,
+          qty,
+          source: t.source,
+          irmItemId: t.irmItemId,
+          customerStockEntryId: t.customerStockEntryId,
+          warehouseId: t.warehouseId,
+          customerId: null,
+        });
+      }
     }
   }
 

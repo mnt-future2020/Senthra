@@ -5,7 +5,7 @@ const OID = "a".repeat(24);
 
 describe("scanLookupSchema", () => {
   it("accepts a valid issue lookup", () => {
-    const r = scanLookupSchema.safeParse({ jobId: OID, direction: "issue", code: "IRM-0004" });
+    const r = scanLookupSchema.safeParse({ jobId: OID, warehouseId: OID, direction: "issue", code: "IRM-0004" });
     expect(r.success).toBe(true);
   });
   it("rejects an unknown direction", () => {
@@ -25,6 +25,7 @@ describe("postMovementSchema", () => {
   it("accepts a good return line without a photo", () => {
     const r = postMovementSchema.safeParse({
       direction: "return",
+      warehouseId: OID,
       lines: [{ source: "irm", irmItemId: OID, qty: 1, condition: "good" }],
     });
     expect(r.success).toBe(true);

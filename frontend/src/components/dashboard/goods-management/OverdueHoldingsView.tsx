@@ -8,7 +8,10 @@ import { Clock, Loader2 } from "lucide-react";
 
 import * as gmService from "@/services/goodsManagement.service";
 import { useDashboard } from "@/hooks/useDashboard";
+import { Skeleton } from "@/components/ui/Skeleton";
 import type { OverdueRow } from "@/types/goodsManagement";
+
+const OVERDUE_HEADERS = ["Job", "Engineer", "Issued", "Days out", "Status", ""];
 
 const STATUS_LABELS: Record<string, string> = {
   not_issued: "Not issued",
@@ -107,9 +110,25 @@ export function OverdueHoldingsView({ days = 14 }: { days?: number }) {
 
   if (rows === null) {
     return (
-      <div className="flex items-center justify-center gap-2 py-12 text-[var(--muted)]">
-        <Loader2 className="h-5 w-5 animate-spin" />
-        <span className="text-sm">Loading overdue holdings…</span>
+      <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+        <table className="w-full text-left text-sm" style={{ minWidth: 650 }}>
+          <thead>
+            <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
+              {OVERDUE_HEADERS.map((h, i) => (
+                <th key={i} className={`px-4 py-3 ${i === 3 ? "text-right" : ""}`}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {Array.from({ length: 5 }).map((_, i) => (
+              <tr key={i} className="border-b border-[var(--border)] last:border-0">
+                {OVERDUE_HEADERS.map((_h, j) => (
+                  <td key={j} className="px-4 py-3"><Skeleton className="h-3 w-20" /></td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     );
   }

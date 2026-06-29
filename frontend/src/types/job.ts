@@ -39,6 +39,11 @@ export interface JobKitLine {
   warehouse: JobKitWarehouse | null;
   qty: number;
   notes: string | null;
+  // Goods-management tallies (0 until stock is issued against this line). issued = used + returned + remaining.
+  issued: number;
+  used: number;
+  returned: number;
+  remaining: number;
 }
 
 export interface JobKitWarehouse {
@@ -86,6 +91,7 @@ export interface Job {
   supplierName: string | null;
   installerType: string;
   status: string;
+  goodsStatus: string; // goods-lifecycle: not_issued | partially_issued | issued | awaiting_return | reconciled
   plannerName: string | null;
   plannerPhone: string | null;
   notes: string | null;
@@ -97,6 +103,8 @@ export interface Job {
   rejectedAt: string | null;
   rejectedBy: string | null;
   rejectReason: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
   cancelledAt: string | null;
   cancelReason: string | null;
   createdBy: string | null;
