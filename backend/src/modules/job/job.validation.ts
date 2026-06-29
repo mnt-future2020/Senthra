@@ -62,7 +62,31 @@ const kitLineSchema = z
   });
 export type JobKitLineInput = z.infer<typeof kitLineSchema>;
 
-const kitLinesField = z.array(kitLineSchema).min(1, "Add at least one kit line.").max(500, "Too many kit lines on one job.");
+// No duplicate SOURCE item on one job: the same IRM item / customer-stock entry must appear at most
+// once on the kit list (combine the quantities into a single line instead). Misc lines have no source
+// id, so they're exempt — two free-text misc lines with the same name are allowed.
+const kitLinesField = z
+  .array(kitLineSchema)
+  .min(1, "Add at least one kit line.")
+  .max(500, "Too many kit lines on one job.")
+  .superRefine((lines, ctx) => {
+    const seenIrm = new Set<string>();
+    const seenCse = new Set<string>();
+    lines.forEach((l, i) => {
+      if (l.lineType === "irm" && l.irmItemId) {
+        // Key on item + warehouse: the same IRM item may legitimately appear once PER warehouse
+        // (split pickup), but not twice for the same warehouse.
+        const key = `${l.irmItemId}@${l.warehouseId ?? ""}`;
+        if (seenIrm.has(key)) {
+          ctx.addIssue({ code: "custom", path: [i, "irmItemId"], message: "This IRM item is already on the kit list for this warehouse — increase its quantity instead." });
+        } else seenIrm.add(key);
+      } else if (l.lineType === "customer_stock" && l.customerStockEntryId) {
+        if (seenCse.has(l.customerStockEntryId)) {
+          ctx.addIssue({ code: "custom", path: [i, "customerStockEntryId"], message: "This customer stock item is already on the kit list — increase its quantity instead." });
+        } else seenCse.add(l.customerStockEntryId);
+      }
+    });
+  });
 
 // Shared header fields (create + update). Required-on-create fields are added per-schema.
 const sharedHeader = {
@@ -119,3 +143,28 @@ export type CancelJobInput = z.infer<typeof cancelJobSchema>;
 // Engineer reject — a reason is optional but encouraged (surfaced to the PM).
 export const rejectJobSchema = z.object({ reason: z.string().trim().max(500).optional() });
 export type RejectJobInput = z.infer<typeof rejectJobSchema>;
+
+// Engineer complete — declares used quantities and an optional work summary.
+// usedLines defaults to [] so a completion with no stock usage is valid.
+export const completeJobSchema = z.object({
+  workSummary: z.string().trim().max(4000).optional(),
+  usedLines: z
+    .array(
+      z
+        .object({
+          source: z.enum(["irm", "customer"]),
+          irmItemId: optionalObjectId("an IRM item"),
+          customerStockEntryId: optionalObjectId("a customer stock item"),
+          jobKitLineId: optionalObjectId("a kit line"), // exact line used — disambiguates an item on >1 warehouse
+          qty: z.coerce.number().int().min(0).max(10_000_000),
+        })
+        // The id must match the source — an "irm" line needs irmItemId, a "customer" line needs
+        // customerStockEntryId. Caught here so the contract is explicit, not deep in the service.
+        .refine((l) => (l.source === "irm" ? !!l.irmItemId : !!l.customerStockEntryId), {
+          message: "Each used line needs the item id matching its source (irmItemId for irm, customerStockEntryId for customer).",
+        }),
+    )
+    .max(500)
+    .default([]),
+});
+export type CompleteJobInput = z.infer<typeof completeJobSchema>;

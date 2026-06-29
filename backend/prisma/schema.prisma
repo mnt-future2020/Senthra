@@ -235,6 +235,9 @@ model Warehouse {
   userAssignments          UserWarehouseAssignment[]
   // Job kit lines collected from this warehouse (back-relation; no DB column).
   jobKitLines              JobKitLine[]
+  // Goods Management (back-relations; no DB column).
+  jobStockMovements     JobStockMovement[]
+  damagedStockBalances  DamagedStockBalance[]
 
   deletedAt DateTime? // soft delete — excluded from listings; history stays intact
 
@@ -449,6 +452,9 @@ model IrmItem {
   engineerStockTransactions EngineerStockTransaction[]
   // Job kit lines drawing this IRM item (back-relation; no DB column).
   jobKitLines              JobKitLine[]
+  // Goods Management (back-relations; no DB column).
+  jobStockMovementLines JobStockMovementLine[]
+  damagedStockBalances  DamagedStockBalance[]
 
   deletedAt DateTime? // soft delete — excluded from listings; history stays intact
 
@@ -989,6 +995,187 @@ model EngineerStockTransaction {
   @@index([createdAt])
 }
 
+// ── Goods Management (job-scoped issue → work → return → reconcile) ─────────────────────────────
+// A scan session that moves stock between a warehouse and the assigned engineer for a Job.
+// direction: issue (WM scan-out) | return (WM scan-in) | consume (engineer declaration at Complete).
+// Draft (editable) → posted (terminal; balances + ledgers written ONCE). Code GM-####.
+model JobStockMovement {
+  id   String @id @default(auto()) @map("_id") @db.ObjectId
+  code String @unique // auto-allocated, e.g. GM-0001
+
+  jobId String @db.ObjectId
+  job   Job    @relation(fields: [jobId], references: [id])
+
+  direction String // issue | return | consume
+
+  engineerId    String @db.ObjectId
+  engineer      User   @relation("JobStockMovementEngineer", fields: [engineerId], references: [id])
+  engineerName  String // snapshot
+  engineerEmail String? // snapshot
+
+  warehouseId   String?    @db.ObjectId // null for consume (engineer-declared, no warehouse)
+  warehouse     Warehouse? @relation(fields: [warehouseId], references: [id])
+  warehouseName String? // snapshot
+  warehouseCode String? // snapshot
+
+  status      String @default("draft") // draft | posted
+  notes       String?
+  performedBy String? // actor email snapshot
+  postedAt    DateTime?
+
+  items JobStockMovementLine[]
+
+  createdBy String?
+  deletedAt DateTime? // soft delete — draft-only; history stays intact
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([jobId])
+  @@index([direction])
+  @@index([status])
+  @@index([warehouseId])
+  @@index([engineerId])
+}
+
+model JobStockMovementLine {
+  id         String           @id @default(auto()) @map("_id") @db.ObjectId
+  movementId String           @db.ObjectId
+  movement   JobStockMovement @relation(fields: [movementId], references: [id])
+
+  source    String // irm | customer
+  irmItemId String?  @db.ObjectId
+  irmItem   IrmItem? @relation(fields: [irmItemId], references: [id])
+  customerStockEntryId String? @db.ObjectId // loose socket (no relation), mirroring JobKitLine
+
+  itemName String // snapshot
+  sku      String? // snapshot
+  uom      String? // snapshot
+
+  qty       Int
+  condition String  @default("good") // good | damaged (only meaningful on returns)
+  jobKitLineId String? @db.ObjectId // loose socket: links an issue line to its planned kit line
+  scannedCode  String? // the decoded barcode (issue/return only)
+  damagePhotoUrl String? // Cloudinary URL (required when condition = damaged)
+  damageReason   String? // required when condition = damaged
+  notes     String?
+
+  createdAt DateTime @default(now())
+
+  @@index([movementId])
+  @@index([irmItemId])
+}
+
+// Engineer-held CUSTOMER consignment stock — the customer-side twin of EngineerStockBalance.
+model EngineerCustomerStockHolding {
+  id                   String @id @default(auto()) @map("_id") @db.ObjectId
+  customerStockEntryId String @db.ObjectId
+  engineerId           String @db.ObjectId
+  engineer             User   @relation("EngineerCustomerStockOwner", fields: [engineerId], references: [id])
+
+  customerId   String? @db.ObjectId // snapshot for filtering by customer
+  customerName String? // snapshot — human-readable customer label
+  itemName     String  // snapshot
+  quantityOnHand Int   @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([customerStockEntryId, engineerId])
+  @@index([engineerId])
+  @@index([customerId])
+}
+
+// Immutable, append-only engineer customer-stock ledger.
+model EngineerCustomerStockTransaction {
+  id                   String @id @default(auto()) @map("_id") @db.ObjectId
+  customerStockEntryId String @db.ObjectId
+  engineerId           String @db.ObjectId
+
+  quantityDelta Int // + issue | − return/consume/lost
+  type          String // job_issue | job_return | job_consume | job_lost
+  sourceType    String // goods_management
+  sourceId      String   @db.ObjectId
+  sourceCode    String? // snapshot, e.g. GM-0001
+  balanceAfter  Int
+  notes         String?
+  createdBy     String?
+  createdAt     DateTime @default(now())
+
+  @@index([customerStockEntryId, engineerId])
+  @@index([sourceType, sourceId])
+  @@index([createdAt])
+}
+
+// Damaged-stock pool (write-off). Both owner types; never re-enters usable stock in v1.
+model DamagedStockBalance {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  warehouseId String    @db.ObjectId
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
+
+  ownerType String // company | customer
+  irmItemId String?  @db.ObjectId
+  irmItem   IrmItem? @relation(fields: [irmItemId], references: [id])
+  customerStockEntryId String? @db.ObjectId // loose socket
+  customerId           String? @db.ObjectId // loose socket (customer-owned damage)
+
+  itemName String // snapshot
+  quantity Int    @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // One balance row per natural key (the find-or-create key in the repo). Guarantees concurrent
+  // damage reports for the same item+warehouse increment a single row instead of racing to insert
+  // duplicates. The two loose sockets are null for the other owner type, which MongoDB indexes as
+  // distinct tuples — so company (irmItemId set) and customer (customerStockEntryId set) rows never collide.
+  @@unique([warehouseId, ownerType, irmItemId, customerStockEntryId])
+  @@index([warehouseId])
+  @@index([ownerType])
+  @@index([customerId])
+}
+
+// Immutable, append-only damaged-stock ledger.
+model DamagedStockTransaction {
+  id          String @id @default(auto()) @map("_id") @db.ObjectId
+  warehouseId String @db.ObjectId
+
+  ownerType String // company | customer
+  irmItemId String? @db.ObjectId
+  customerStockEntryId String? @db.ObjectId
+  customerId           String? @db.ObjectId
+
+  quantityDelta Int // + report damaged (write-off only in v1)
+  reason        String
+  notes         String?
+  photoUrl      String?
+  sourceType    String // goods_management_return
+  sourceId      String   @db.ObjectId
+  sourceCode    String? // GM-0001
+  balanceAfter  Int
+  createdBy     String?
+  createdAt     DateTime @default(now())
+
+  @@index([warehouseId])
+  @@index([customerId])
+  @@index([sourceType, sourceId])
+}
+
+// Per-job goods status (one row per Job). Derived tallies are computed from movement lines.
+model JobStockSummary {
+  id    String @id @default(auto()) @map("_id") @db.ObjectId
+  jobId String @unique @db.ObjectId
+  job   Job    @relation(fields: [jobId], references: [id])
+
+  goodsStatus    String  @default("not_issued") // not_issued | partially_issued | issued | awaiting_return | reconciled
+  workSummary    String?
+  lastMovementAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([goodsStatus])
+}
+
 // Employee master-data: a department a staff member belongs to (e.g. "Operations").
 // Managed (create/rename/delete) from Users & Roles; the user form picks from this
 // list or creates one inline. User.department stores the chosen NAME (denormalized),
@@ -1088,6 +1275,9 @@ model User {
   engineerStockTransactions EngineerStockTransaction[] @relation("EngineerStockTxnOwner")
   // Field jobs assigned to this engineer (back-relation; no DB column).
   assignedJobs              Job[]                      @relation("JobAssignedEngineer")
+  // Goods Management (back-relations; no DB column).
+  jobStockMovements              JobStockMovement[]              @relation("JobStockMovementEngineer")
+  engineerCustomerStockHoldings  EngineerCustomerStockHolding[]  @relation("EngineerCustomerStockOwner")
 
   @@index([roleId])
   @@index([status])
@@ -1435,6 +1625,10 @@ model Job {
   // Kit lines (back-relation; no DB column).
   kitLines JobKitLine[]
 
+  // Goods Management (back-relations; no DB column).
+  stockMovements JobStockMovement[]
+  stockSummary   JobStockSummary?
+
   // Workflow snapshots (who/when). Emails are snapshots, not FKs.
   assignedAt   DateTime?
   acceptedAt   DateTime?
@@ -1442,6 +1636,8 @@ model Job {
   rejectedAt   DateTime?
   rejectedBy   String?   // engineer email that rejected
   rejectReason String?   // why the engineer declined (shown to the PM)
+  startedAt    DateTime? // when the engineer started work (accepted → in_progress)
+  completedAt  DateTime? // when the engineer completed work (in_progress → completed)
   cancelledAt  DateTime?
   cancelReason String?
 

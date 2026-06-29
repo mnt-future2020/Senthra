@@ -127,6 +127,45 @@ export function findByNumber(jobNumber: string): Promise<JobWithRelations | null
   return prisma.job.findFirst({ where: { jobNumber, deletedAt: null }, include: withRelations });
 }
 
+// --- goods-management queue read: active jobs (accepted / in_progress / completed) -----------
+// Returns jobs whose kit lines have at least one line pointing at a warehouse the actor can access.
+// Candidate jobs for ONE warehouse's Goods Management queue: any job with a kit line stocked at this
+// warehouse OR any misc line (misc is actionable from any warehouse). Optional text search narrows by
+// job number / name / customer / engineer at the DB level. goodsStatus filtering + pagination happen
+// in the service, since goodsStatus lives in a separate summary collection.
+export function findActiveForGoodsManagement(warehouseId: string, search?: string): Promise<JobWithRelations[]> {
+  const where: Prisma.JobWhereInput = {
+    deletedAt: null,
+    status: { in: ["accepted", "in_progress", "completed"] },
+    kitLines: { some: { OR: [{ warehouseId }, { lineType: "misc" }] } },
+    ...(search && {
+      OR: [
+        { jobNumber: { contains: search, mode: "insensitive" } },
+        { name: { contains: search, mode: "insensitive" } },
+        { customerName: { contains: search, mode: "insensitive" } },
+        { assignedEngineerName: { contains: search, mode: "insensitive" } },
+      ],
+    }),
+  };
+  return prisma.job.findMany({ where, include: withRelations, orderBy: { createdAt: "desc" } });
+}
+
+// --- open-demand read: every active job that may still draw warehouse stock ------------------
+// Jobs from assignment through completion (NOT draft / cancelled / rejected) — the service then keeps
+// only the ones whose goods aren't fully issued and sums their not-yet-issued kit lines into "open
+// demand" per item+warehouse. excludeJobId drops the job currently being edited from the totals.
+export function findActiveWithKitLines(excludeJobId?: string): Promise<JobWithRelations[]> {
+  return prisma.job.findMany({
+    where: {
+      deletedAt: null,
+      status: { in: ["assigned", "accepted", "in_progress", "completed"] },
+      ...(excludeJobId ? { id: { not: excludeJobId } } : {}),
+    },
+    include: withRelations,
+    orderBy: { createdAt: "desc" },
+  });
+}
+
 // --- engineer-scoped reads (engineer portal) -------------------------------------------------
 // Every job assigned to one engineer, newest first. Scoped on assignedEngineerId so an engineer can
 // only ever read their OWN jobs.
@@ -161,6 +200,26 @@ export async function acceptIfAssigned(
   return res.count;
 }
 
+// Atomic, race-safe start: flips status accepted → in_progress ONLY when the job is still owned by
+// this engineer AND still in "accepted". Returns the updated job or null on a concurrent race.
+export async function startIfAccepted(id: string, engineerId: string): Promise<JobWithRelations | null> {
+  const res = await prisma.job.updateMany({
+    where: { id, assignedEngineerId: engineerId, status: "accepted", deletedAt: null },
+    data: { status: "in_progress", startedAt: new Date() },
+  });
+  if (res.count !== 1) return null;
+  return findById(id);
+}
+
+// Atomic, race-safe complete (tx-aware): flips status in_progress → completed ONLY when the job is
+// still owned by this engineer AND still in "in_progress".
+export function completeIfInProgressTx(tx: Prisma.TransactionClient, id: string, engineerId: string): Promise<{ count: number }> {
+  return tx.job.updateMany({
+    where: { id, assignedEngineerId: engineerId, status: "in_progress", deletedAt: null },
+    data: { status: "completed", completedAt: new Date() },
+  });
+}
+
 // Atomic, race-safe reject — same guard as acceptIfAssigned (assigned + owned), flips to "rejected".
 export async function rejectIfAssigned(
   jobId: string,
@@ -174,15 +233,30 @@ export async function rejectIfAssigned(
   return res.count;
 }
 
-// Replace ALL kit lines + patch the header, atomically (full re-save edit).
-export async function replaceKitLines(
+// Apply a computed kit-line diff in ONE transaction: update matched lines IN PLACE (preserving their
+// ids, so posted stock movements keep pointing at them), create genuinely new lines, and delete the
+// ones the caller resolved as removable. This replaces the old delete-all/recreate approach, which
+// regenerated every kit-line id and orphaned the job's stock movements.
+export async function mergeKitLines(
   id: string,
-  lines: JobKitLineRow[],
+  changes: {
+    updates: { id: string; qty: number; seCode: string | null; description: string | null; notes: string | null }[];
+    creates: JobKitLineRow[];
+    deleteIds: string[];
+  },
   headerPatch: Prisma.JobUncheckedUpdateInput,
 ): Promise<JobWithRelations> {
   return withTransaction(async (tx) => {
-    await tx.jobKitLine.deleteMany({ where: { jobId: id } });
-    for (const line of lines) {
+    if (changes.deleteIds.length > 0) {
+      await tx.jobKitLine.deleteMany({ where: { id: { in: changes.deleteIds }, jobId: id } });
+    }
+    for (const u of changes.updates) {
+      await tx.jobKitLine.update({
+        where: { id: u.id },
+        data: { qty: u.qty, seCode: u.seCode, description: u.description, notes: u.notes },
+      });
+    }
+    for (const line of changes.creates) {
       await tx.jobKitLine.create({ data: { jobId: id, ...lineCreateData(line) } });
     }
     await tx.job.update({ where: { id }, data: headerPatch });

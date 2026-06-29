@@ -14,7 +14,7 @@ import type { Msg } from "@/components/ui/types";
 // Engineer Portal — My assigned jobs (read-only list). Each row links to the job detail page where
 // the engineer can review the kit list and accept the job. A live socket refetch keeps the list
 // current when a planner assigns a new job (job:new) or another action lands (job:accepted).
-const HEADERS = ["Job no.", "Name", "Customer", "Completion", "Status"];
+const HEADERS = ["Job no.", "Name", "Customer", "Due date", "Status"];
 const SKELETON_CELLS = ["h-3 w-24", "h-3 w-44", "h-3 w-36", "h-3 w-20", "h-5 w-20 rounded-full"];
 
 export function EngineerJobs() {

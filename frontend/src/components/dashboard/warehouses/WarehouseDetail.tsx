@@ -16,6 +16,9 @@ import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkele
 import { ReceiveStockModal } from "@/components/dashboard/customers/ReceiveStockModal";
 import { InventoryView } from "@/components/dashboard/inventory/InventoryView";
 import { GoodsReceiptsView } from "@/components/dashboard/goods-in/GoodsReceiptsView";
+import { GoodsManagementTab } from "@/components/dashboard/goods-management/GoodsManagementTab";
+import { DemandTab } from "@/components/dashboard/goods-management/DemandTab";
+import { DamagedStockView } from "@/components/dashboard/goods-management/DamagedStockView";
 import { ExpectedDeliveries } from "./ExpectedDeliveries";
 import type { AuditEntry } from "@/types/audit";
 import type { CustomerStockEntry, PendingStockItem, WarehouseAssignment } from "@/types/customer";
@@ -58,7 +61,7 @@ function TableSkeleton({ headers, minWidth }: { headers: string[]; minWidth: num
 // catalogue's per-warehouse balances) and customer consignment stock the customer shipped in.
 // (Incoming tab is gated by stock_requests.view; customer stock under Inventory is visible to
 // all; the IRM pool inside is gated by inventory.view.)
-type Tab = "overview" | "inventory" | "incoming" | "transactions" | "audit";
+type Tab = "overview" | "inventory" | "incoming" | "goods" | "demand" | "transactions" | "audit";
 // `perms` is an anyOf gate. "Incoming stock" hosts BOTH receiving flows behind an inner toggle —
 // company goods receipts (goods_in.view) and customer consignment intake (stock_requests.view) — so
 // it shows if the user can see EITHER pool.
@@ -66,6 +69,8 @@ const TABS: { key: Tab; label: string; perms?: string[] }[] = [
   { key: "overview", label: "Overview" },
   { key: "incoming", label: "Incoming stock", perms: ["goods_in.view", "stock_requests.view"] },
   { key: "inventory", label: "Inventory" },
+  { key: "goods", label: "Goods Management", perms: ["goods_management.view"] },
+  { key: "demand", label: "Demand", perms: ["inventory.view"] },
   { key: "transactions", label: "Transactions" },
   { key: "audit", label: "Audit trail" },
 ];
@@ -162,6 +167,8 @@ export function WarehouseDetail({ initial }: { initial: Warehouse }) {
       {tab === "overview" && <Overview w={w} />}
       {tab === "inventory" && <StockTab warehouseCode={w.code} warehouseId={w.id} router={router} />}
       {tab === "incoming" && <IncomingTab warehouseCode={w.code} warehouseId={w.id} router={router} pushToast={pushToast} />}
+      {tab === "goods" && <GoodsManagementTab warehouseId={w.id} warehouseCode={w.code} router={router} />}
+      {tab === "demand" && <DemandTab warehouseId={w.id} />}
       {tab === "transactions" && (
         <Placeholder
           icon={Activity}
@@ -529,10 +536,11 @@ function IncomingStock({
   );
 }
 
-// "Stock" tab: a pill toggle between the two stock pools held at this warehouse — company
-// IRM inventory (gated by inventory.view) and customer consignment stock. The chosen pool
-// lives in ?pool= so it survives a refresh / is shareable. A user without inventory.view
-// sees only the customer pool, with no toggle.
+// "Stock" tab: a pill toggle between three stock pools held at this warehouse —
+// company IRM inventory (gated by inventory.view), customer consignment stock, and
+// the damaged pool (also gated by inventory.view). The chosen pool lives in ?pool=
+// so it survives a refresh / is shareable. A user without inventory.view sees only
+// the customer pool, with no toggle.
 function StockTab({
   warehouseCode,
   warehouseId,
@@ -547,21 +555,30 @@ function StockTab({
   const canIrm = can("inventory.view");
 
   const requested = searchParams.get("pool");
-  const pool: "irm" | "customer" =
-    requested === "customer" || requested === "irm" ? requested : canIrm ? "irm" : "customer";
-  const active: "irm" | "customer" = canIrm ? pool : "customer";
+  const pool: "irm" | "customer" | "damaged" =
+    requested === "customer" || requested === "irm" || requested === "damaged"
+      ? requested
+      : canIrm
+        ? "irm"
+        : "customer";
+  const active: "irm" | "customer" | "damaged" = canIrm ? pool : "customer";
 
-  const setPool = (p: "irm" | "customer") =>
+  const setPool = (p: "irm" | "customer" | "damaged") =>
     router.replace(`/dashboard/warehouses/${warehouseCode}?tab=inventory&pool=${p}`, { scroll: false });
+
+  const POOL_PILLS = canIrm
+    ? ([
+        { key: "irm", label: "Company (IRM)" },
+        { key: "customer", label: "Customer" },
+        { key: "damaged", label: "Damaged" },
+      ] as const)
+    : ([] as const);
 
   return (
     <div className="space-y-4">
       {canIrm && (
         <div className="flex items-center gap-2">
-          {([
-            { key: "irm", label: "Company (IRM)" },
-            { key: "customer", label: "Customer" },
-          ] as const).map((p) => (
+          {POOL_PILLS.map((p) => (
             <button
               key={p.key}
               type="button"
@@ -579,6 +596,8 @@ function StockTab({
       )}
       {active === "irm" ? (
         <InventoryView warehouseId={warehouseId} embedded />
+      ) : active === "damaged" ? (
+        <DamagedStockView warehouseId={warehouseId} />
       ) : (
         <WarehouseStockEntries warehouseId={warehouseId} router={router} />
       )}

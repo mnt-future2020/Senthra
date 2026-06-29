@@ -1,22 +1,24 @@
 "use client";
 
 import * as React from "react";
-import { CheckCircle2, MapPin, ExternalLink, X, XCircle } from "lucide-react";
+import { ArrowLeftRight, CheckCircle2, MapPin, ExternalLink, X, XCircle, PlayCircle, ClipboardCheck } from "lucide-react";
 
 import * as engineerService from "@/services/engineer.service";
 import { Notice } from "@/components/ui/Notice";
 import { ghostBtn, primaryBtn } from "@/components/ui/styles";
-import { fmtDate, JobStatusChip, PortalHeader, TableCard } from "@/components/dashboard/portal/portalUi";
+import { fmtDate, fmtDateTime, JobStatusChip, PortalHeader, TableCard } from "@/components/dashboard/portal/portalUi";
+import { crossWarehouseReturnNote } from "@/components/dashboard/jobs/jobStatus";
 import { FormError, FormPageSkeleton } from "@/components/ui/FormScaffold";
 import type { Job, JobKitLine, JobKitWarehouse } from "@/types/job";
 import type { Msg } from "@/components/ui/types";
+import type { UsedLinePayload } from "@/types/goodsManagement";
 
 // Engineer Portal — single assigned job. Loads the engineer's own job by id, shows the
 // identification / site / schedule cards + kit list, and an Accept button (only while the job is
 // "assigned"). Accept POSTs and replaces local state with the server's returned job, so the status
 // pill and the button reflect the real transition — the backend is the authority.
 
-const KIT_HEADERS = ["Item", "SE code", "Type", "Warehouse", "Qty", "Notes"];
+const KIT_HEADERS = ["Item", "SE code", "Type", "Warehouse", "Planned", "Issued", "Used", "Returned", "Remaining", "Notes"];
 
 const LINE_TYPE_LABEL: Record<JobKitLine["lineType"], string> = {
   customer_stock: "Customer stock",
@@ -43,6 +45,18 @@ function Card({ title, children }: { title: string; children: React.ReactNode })
   );
 }
 
+// Used-qty row for a kit line in the Complete work form.
+interface UsedRow {
+  kitLineId: string;
+  source: "irm" | "customer";
+  irmItemId: string | null;
+  customerStockEntryId: string | null;
+  itemName: string;
+  warehouseName: string | null; // which warehouse this line was collected from (disambiguates same item)
+  held: number; // qty the engineer currently holds for this line (issued − returned) — the usable max
+  qty: number; // declared used quantity
+}
+
 export function EngineerJobDetail({ id }: { id: string }) {
   const [job, setJob] = React.useState<Job | null>(null);
   const [loading, setLoading] = React.useState(true);
@@ -52,7 +66,12 @@ export function EngineerJobDetail({ id }: { id: string }) {
   const [rejecting, setRejecting] = React.useState(false);
   const [rejectMode, setRejectMode] = React.useState(false);
   const [rejectReason, setRejectReason] = React.useState("");
-  const busy = accepting || rejecting;
+  const [starting, setStarting] = React.useState(false);
+  const [completing, setCompleting] = React.useState(false);
+  const [completeMode, setCompleteMode] = React.useState(false);
+  const [workSummary, setWorkSummary] = React.useState("");
+  const [usedRows, setUsedRows] = React.useState<UsedRow[]>([]);
+  const busy = accepting || rejecting || starting || completing;
   const [whModal, setWhModal] = React.useState<JobKitWarehouse | null>(null);
 
   React.useEffect(() => {
@@ -103,10 +122,77 @@ export function EngineerJobDetail({ id }: { id: string }) {
     }
   };
 
+  const onStart = async () => {
+    setStarting(true);
+    setMsg(null);
+    try {
+      const updated = await engineerService.startOwnJob(id);
+      setJob(updated); // status now "in_progress"
+      setMsg({ type: "success", text: "Job started. You are now on site." });
+    } catch (err) {
+      setMsg({ type: "error", text: err instanceof Error ? err.message : "Could not start this job." });
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  // Build the used-qty form rows from the current job's kit lines (IRM + customer_stock only).
+  const openCompleteForm = (currentJob: Job) => {
+    const rows: UsedRow[] = currentJob.kitLines
+      .filter((l) => l.lineType === "irm" || l.lineType === "customer_stock")
+      .map((l) => ({
+        kitLineId: l.id,
+        source: l.lineType === "irm" ? "irm" : "customer",
+        irmItemId: l.irmItemId,
+        customerStockEntryId: l.customerStockEntryId,
+        itemName: l.itemName,
+        warehouseName: l.warehouseName,
+        held: l.remaining, // what the engineer still holds for this line — caps "used"
+        qty: 0,
+      }));
+    setUsedRows(rows);
+    setWorkSummary("");
+    setCompleteMode(true);
+  };
+
+  const onComplete = async () => {
+    setCompleting(true);
+    setMsg(null);
+    try {
+      const usedLines: UsedLinePayload[] = usedRows
+        .map((r) => ({ ...r, qty: Math.min(r.qty, r.held) })) // never declare more than is held
+        .filter((r) => r.qty > 0)
+        .map((r) => ({
+          source: r.source,
+          irmItemId: r.source === "irm" ? (r.irmItemId ?? undefined) : undefined,
+          customerStockEntryId: r.source === "customer" ? (r.customerStockEntryId ?? undefined) : undefined,
+          jobKitLineId: r.kitLineId, // file "used" against the exact kit line (an item can be on >1 warehouse)
+          qty: r.qty,
+        }));
+      const updated = await engineerService.completeOwnJob(id, {
+        workSummary: workSummary.trim() || undefined,
+        usedLines,
+      });
+      setJob(updated); // status now "completed"
+      setCompleteMode(false);
+      setMsg({ type: "success", text: "Job marked as complete. Well done!" });
+    } catch (err) {
+      setMsg({ type: "error", text: err instanceof Error ? err.message : "Could not complete this job." });
+    } finally {
+      setCompleting(false);
+    }
+  };
+
   if (loading) return <FormPageSkeleton />;
   if (error || !job) return <FormError message={error ?? "Job not found."} />;
 
   const canAccept = job.status === "assigned";
+  const canStart = job.status === "accepted";
+  const canComplete = job.status === "in_progress";
+  // Can't start until the kit is COLLECTED: every stock-tracked line (IRM / customer stock) must be
+  // fully issued by the warehouse. Misc/free-text lines aren't warehouse stock, so they don't block.
+  const stockLines = job.kitLines.filter((l) => l.lineType === "irm" || l.lineType === "customer_stock");
+  const goodsCollected = stockLines.length === 0 || stockLines.every((l) => l.issued >= l.qty);
   const addressLines = [job.address, job.postcode].filter(Boolean).join(", ");
   const fixings = [
     job.floor ? `Floor ${job.floor}` : null,
@@ -132,6 +218,17 @@ export function EngineerJobDetail({ id }: { id: string }) {
                 <XCircle className="h-4 w-4" /> Reject
               </button>
             </div>
+          ) : canStart ? (
+            <div className="flex flex-col items-end gap-1">
+              <button type="button" onClick={onStart} disabled={busy || !goodsCollected} title={!goodsCollected ? "Collect your kit from the warehouse first" : undefined} className={primaryBtn}>
+                <PlayCircle className="h-4 w-4" /> {starting ? "Starting…" : "Start work"}
+              </button>
+              {!goodsCollected && <p className="text-[11px] font-semibold text-[var(--muted)]">Collect your kit from the warehouse first</p>}
+            </div>
+          ) : canComplete ? (
+            <button type="button" onClick={() => openCompleteForm(job)} disabled={busy} className={primaryBtn}>
+              <ClipboardCheck className="h-4 w-4" /> Complete work
+            </button>
           ) : (
             <JobStatusChip value={job.status} />
           )
@@ -163,6 +260,88 @@ export function EngineerJobDetail({ id }: { id: string }) {
       {job.status === "rejected" && (
         <Card title="Rejected">
           <Field label="Reason" value={job.rejectReason} />
+        </Card>
+      )}
+
+      {canComplete && completeMode && (
+        <Card title="Complete this job">
+          <p className="mb-4 text-xs text-[var(--muted)]">
+            Declare how many of each item you used on site. Leave at 0 if unused — the rest is treated as
+            still held (return it to the warehouse). You can&apos;t declare more than you&apos;re holding.
+          </p>
+
+          {usedRows.length > 0 && (
+            <div className="mb-4 overflow-x-auto rounded-xl border border-[var(--border)]">
+              <table className="w-full text-sm" style={{ minWidth: 560 }}>
+                <thead>
+                  <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
+                    <th className="px-4 py-2 text-left">Item</th>
+                    <th className="px-4 py-2 text-left">Type</th>
+                    <th className="px-4 py-2 text-left">Warehouse</th>
+                    <th className="w-20 px-4 py-2 text-right">Held</th>
+                    <th className="w-28 px-4 py-2 text-right">Used qty</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {usedRows.map((row, i) => (
+                    <tr key={row.kitLineId} className="border-b border-[var(--border)] last:border-0">
+                      <td className="px-4 py-2 font-semibold text-[var(--ink)]">{row.itemName}</td>
+                      <td className="px-4 py-2 text-[var(--muted)]">{row.source === "irm" ? "IRM" : "Customer stock"}</td>
+                      <td className="px-4 py-2 text-[var(--muted)]">{row.warehouseName ?? "—"}</td>
+                      <td className="px-4 py-2 text-right font-bold text-[var(--ink)]">{row.held}</td>
+                      <td className="px-4 py-2">
+                        <input
+                          type="number"
+                          min={0}
+                          max={row.held}
+                          step={1}
+                          value={row.qty}
+                          disabled={row.held === 0}
+                          title={row.held === 0 ? "Nothing issued to you for this item" : `Max ${row.held} (held)`}
+                          onChange={(e) => {
+                            // Cap at the held quantity so the engineer can never declare more than they hold.
+                            const v = Math.min(row.held, Math.max(0, Math.floor(Number(e.target.value) || 0)));
+                            setUsedRows((rows) => rows.map((r, j) => j === i ? { ...r, qty: v } : r));
+                          }}
+                          className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-2 py-1 text-right text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)] disabled:opacity-40"
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <label className="mb-1 block text-xs font-bold text-[var(--faint)]">Work summary (optional)</label>
+          <textarea
+            value={workSummary}
+            onChange={(e) => setWorkSummary(e.target.value)}
+            rows={4}
+            maxLength={4000}
+            placeholder="Describe the work completed on site…"
+            className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+          />
+
+          <div className="mt-3 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setCompleteMode(false)}
+              disabled={completing}
+              className={ghostBtn}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={onComplete}
+              disabled={completing}
+              className="flex items-center gap-1.5 rounded-xl bg-[var(--pos)] px-3.5 py-2 text-xs font-extrabold text-white hover:opacity-90 disabled:opacity-60"
+            >
+              <ClipboardCheck className="h-3.5 w-3.5" />
+              {completing ? "Completing…" : "Confirm complete"}
+            </button>
+          </div>
         </Card>
       )}
 
@@ -198,6 +377,8 @@ export function EngineerJobDetail({ id }: { id: string }) {
             <Field label="Assigned" value={fmtDate(job.assignedAt)} />
             <Field label="Accepted" value={fmtDate(job.acceptedAt)} />
             <Field label="Accepted by" value={job.acceptedBy} />
+            <Field label="Work started" value={fmtDateTime(job.startedAt)} />
+            <Field label="Work completed" value={fmtDateTime(job.completedAt)} />
           </div>
         </Card>
 
@@ -215,7 +396,7 @@ export function EngineerJobDetail({ id }: { id: string }) {
         {job.kitLines.length === 0 ? (
           <p className="text-sm text-[var(--muted)]">No kit lines on this job.</p>
         ) : (
-          <TableCard headers={KIT_HEADERS} minWidth={760}>
+          <TableCard headers={KIT_HEADERS} minWidth={1040}>
             {job.kitLines.map((line) => (
               <tr key={line.id} className="border-b border-[var(--border)] last:border-0">
                 <td className="px-4 py-3 font-semibold text-[var(--ink)]">
@@ -237,6 +418,20 @@ export function EngineerJobDetail({ id }: { id: string }) {
                   )}
                 </td>
                 <td className="px-4 py-3 font-bold text-[var(--ink)]">{line.qty}</td>
+                <td className="px-4 py-3 text-[var(--ink)]">{line.issued}</td>
+                <td className="px-4 py-3 text-[var(--ink)]">{line.used}</td>
+                <td className="px-4 py-3 text-[var(--ink)]">
+                  <div className="flex flex-col items-start gap-1">
+                    <span>{line.returned}</span>
+                    {line.returned > line.issued && (
+                      <span className="inline-flex items-center gap-1 rounded-md bg-indigo-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-600" title="Returned here but issued from another warehouse">
+                        <ArrowLeftRight className="h-2.5 w-2.5 shrink-0" />
+                        {crossWarehouseReturnNote(line, job.kitLines)}
+                      </span>
+                    )}
+                  </div>
+                </td>
+                <td className="px-4 py-3 font-bold text-[var(--ink)]">{line.remaining}</td>
                 <td className="px-4 py-3 text-[var(--muted)]">{line.notes ?? "—"}</td>
               </tr>
             ))}

@@ -3,7 +3,7 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
-import { ClipboardList, MoreHorizontal, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { ChevronRight, ClipboardList, MoreHorizontal, Pencil, Plus, Search, Trash2 } from "lucide-react";
 
 import * as jobService from "@/services/job.service";
 import { listCustomers } from "@/services/customer.service";
@@ -15,7 +15,7 @@ import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
-import { JOB_STATUS_LABELS, JobStatusChip, formatDate } from "./jobStatus";
+import { JOB_STATUS_LABELS, JOB_LINE_TYPE_LABELS, JobStatusChip, GoodsStatusChip, formatDate } from "./jobStatus";
 import type { Job, JobStatus } from "@/types/job";
 
 const PAGE_SIZE = 20;
@@ -83,17 +83,17 @@ function RowActions({ job, canEdit, canDelete, onEdit, onDelete }: { job: Job; c
 function TableSkeleton({ actions }: { actions: boolean }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[900px] text-sm">
+      <table className="w-full min-w-[1000px] text-sm">
         <thead>
           <tr className="border-b border-[var(--border)] text-left text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
             <th className="px-4 py-3">Job</th><th className="px-4 py-3">Name</th><th className="px-4 py-3">Customer</th>
-            <th className="px-4 py-3">Engineer</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Completion</th>{actions && <th className="px-4 py-3" />}
+            <th className="px-4 py-3">Engineer</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Goods</th><th className="px-4 py-3">Due date</th>{actions && <th className="px-4 py-3" />}
           </tr>
         </thead>
         <tbody>
           {Array.from({ length: 6 }).map((_, i) => (
             <tr key={i} className="border-b border-[var(--border)] last:border-0">
-              {Array.from({ length: actions ? 7 : 6 }).map((__, j) => (<td key={j} className="px-4 py-3"><Skeleton className="h-3 w-20" /></td>))}
+              {Array.from({ length: actions ? 8 : 7 }).map((__, j) => (<td key={j} className="px-4 py-3"><Skeleton className="h-3 w-20" /></td>))}
             </tr>
           ))}
         </tbody>
@@ -118,6 +118,8 @@ export function JobsView() {
   const [loading, setLoading] = React.useState(!data);
   const [error, setError] = React.useState<string | null>(null);
   const [confirm, setConfirm] = React.useState<{ open: boolean; job: Job | null }>({ open: false, job: null });
+  const [expanded, setExpanded] = React.useState<Set<string>>(new Set()); // jobs whose kit list is open
+  const toggleExpand = (id: string) => setExpanded((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const [deleting, setDeleting] = React.useState(false);
   const [customers, setCustomers] = React.useState<{ id: string; name: string }[]>([]);
   const [engineers, setEngineers] = React.useState<{ id: string; name: string }[]>([]);
@@ -125,6 +127,8 @@ export function JobsView() {
   const canEdit = can("jobs.edit");
   const canDelete = can("jobs.delete");
   const showActions = canEdit || canDelete;
+  // Completed / cancelled jobs + reconciled goods are frozen — no edit (matches the backend lock).
+  const jobEditable = (j: Job) => j.status !== "completed" && j.status !== "cancelled" && j.goodsStatus !== "reconciled";
 
   // Live-refresh the list when a job is created/assigned/accepted anywhere.
   useJobSocket(React.useCallback(() => setRefreshKey((k) => k + 1), []));
@@ -219,29 +223,72 @@ export function JobsView() {
           </div>
         ) : (
           <div className="min-h-0 flex-1 overflow-auto">
-            <table className="w-full min-w-[900px] text-left text-sm">
+            <table className="w-full min-w-[1000px] text-left text-sm">
               <thead>
                 <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
                   <th className="px-4 py-3">Job</th><th className="px-4 py-3">Name</th><th className="px-4 py-3">Customer</th>
-                  <th className="px-4 py-3">Engineer</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Completion</th>{showActions && <th className="px-4 py-3" />}
+                  <th className="px-4 py-3">Engineer</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Goods</th><th className="px-4 py-3">Due date</th>{showActions && <th className="px-4 py-3" />}
                 </tr>
               </thead>
               <tbody>
-                {rows.map((job) => (
-                  <tr key={job.id} onClick={() => router.push(`/dashboard/jobs/${job.jobNumber}`)} className="cursor-pointer border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]">
-                    <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{job.jobNumber}</td>
+                {rows.map((job) => {
+                  const hasKit = (job.kitLines?.length ?? 0) > 0;
+                  const isOpen = expanded.has(job.id);
+                  const cols = 7 + (showActions ? 1 : 0);
+                  return (
+                  <React.Fragment key={job.id}>
+                  <tr onClick={() => router.push(`/dashboard/jobs/${job.jobNumber}`)} className="cursor-pointer border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]">
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-2">
+                        {hasKit ? (
+                          <button onClick={(e) => { e.stopPropagation(); toggleExpand(job.id); }} className="shrink-0 rounded p-0.5 text-[var(--muted)] hover:bg-[var(--surface-2)] hover:text-[var(--ink)]" aria-label={isOpen ? "Hide kit list" : "Show kit list"} aria-expanded={isOpen}>
+                            <ChevronRight className={`h-4 w-4 transition-transform ${isOpen ? "rotate-90" : ""}`} />
+                          </button>
+                        ) : <span className="inline-block w-5 shrink-0" />}
+                        <span className="font-mono text-xs text-[var(--muted)]">{job.jobNumber}</span>
+                      </div>
+                    </td>
                     <td className="px-4 py-3 font-semibold text-[var(--ink)]">{job.name}</td>
                     <td className="px-4 py-3 text-[var(--muted)]">{job.customerName ?? "—"}</td>
                     <td className="px-4 py-3 text-[var(--muted)]">{job.assignedEngineerName ?? "—"}</td>
                     <td className="px-4 py-3"><JobStatusChip status={job.status} /></td>
+                    <td className="px-4 py-3">{hasKit ? <GoodsStatusChip status={job.goodsStatus} /> : <span className="text-[var(--faint)]">—</span>}</td>
                     <td className="px-4 py-3 text-[var(--muted)]">{formatDate(job.completionDate)}</td>
                     {showActions && (
                       <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
-                        <RowActions job={job} canEdit={canEdit} canDelete={canDelete} onEdit={() => router.push(`/dashboard/jobs/${job.jobNumber}/edit`)} onDelete={() => setConfirm({ open: true, job })} />
+                        <RowActions job={job} canEdit={canEdit && jobEditable(job)} canDelete={canDelete} onEdit={() => router.push(`/dashboard/jobs/${job.jobNumber}/edit`)} onDelete={() => setConfirm({ open: true, job })} />
                       </td>
                     )}
                   </tr>
-                ))}
+                  {isOpen && hasKit && (
+                    <tr className="border-b border-[var(--border)] bg-[var(--surface-2)]/40">
+                      <td colSpan={cols} className="px-4 pb-4 pt-1">
+                        {/* What this engineer will come and collect — so the warehouse can prepare. */}
+                        <div className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)]">
+                          <table className="w-full text-left text-xs">
+                            <thead>
+                              <tr className="border-b border-[var(--border)] text-[10px] font-bold uppercase tracking-wider text-[var(--faint)]">
+                                <th className="px-3 py-2">Source</th><th className="px-3 py-2">Item</th><th className="px-3 py-2">Warehouse</th><th className="px-3 py-2 text-right">Planned</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {job.kitLines.map((l) => (
+                                <tr key={l.id} className="border-b border-[var(--border)] last:border-0">
+                                  <td className="px-3 py-2 text-[var(--muted)]">{JOB_LINE_TYPE_LABELS[l.lineType]}</td>
+                                  <td className="px-3 py-2 font-semibold text-[var(--ink)]">{l.itemName}</td>
+                                  <td className="px-3 py-2 text-[var(--muted)]">{l.warehouseName ?? (l.lineType === "misc" ? "—" : "—")}</td>
+                                  <td className="px-3 py-2 text-right font-semibold tabular-nums text-[var(--ink)]">{l.qty}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  </React.Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>

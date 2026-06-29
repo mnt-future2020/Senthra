@@ -52,6 +52,7 @@ import type { UserStatus } from "@/types/user";
 import { EditApproveModal } from "./EditApproveModal";
 import { AssignWarehouseModal } from "./AssignWarehouseModal";
 import { AdminStockSubmissionModal } from "./AdminStockSubmissionModal";
+import { DamagedStockView } from "@/components/dashboard/goods-management/DamagedStockView";
 
 // The detail page is organised into tabs (URL-driven ?tab=) like the Users & Roles
 // panel: the company header stays pinned and each section becomes a tab.
@@ -729,6 +730,13 @@ function StockEntriesTab({
   stockCaps: SectionCaps;
   router: ReturnType<typeof useRouter>;
 }) {
+  const { can } = useAuth();
+  // goods_management.view gates the damaged-stock section — this is the same permission
+  // that controls the broader Goods Management feature access (warehouse damaged tab,
+  // overdue view, etc.), so it is the correct gate here. The warehouse pill on stock
+  // entries uses inventory.view, which is a separate concern.
+  const canViewDamaged = can("goods_management.view");
+
   // --- stock entries list ---
   const [entries, setEntries] = React.useState<CustomerStockEntry[] | null>(null);
   const [error, setError] = React.useState<string | null>(null);
@@ -855,6 +863,13 @@ function StockEntriesTab({
         </>
       )}
 
+      {/* Damaged stock section — gated by goods_management.view; no price/cost displayed */}
+      {canViewDamaged && (
+        <section>
+          <h2 className="mb-3 text-sm font-extrabold text-[var(--ink)]">Damaged stock</h2>
+          <DamagedStockView customerId={customer.id} />
+        </section>
+      )}
     </div>
   );
 }

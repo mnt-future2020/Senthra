@@ -152,6 +152,11 @@ export function upsertEngineerBalanceTx(tx: Prisma.TransactionClient, irmItemId:
 export function findEngineerBalanceTx(tx: Prisma.TransactionClient, irmItemId: string, engineerId: string): Promise<EngineerStockBalance | null> {
   return tx.engineerStockBalance.findUnique({ where: { irmItemId_engineerId: { irmItemId, engineerId } } });
 }
+// Non-tx read of one engineer's holding of an IRM item — used to cap returns (same source the
+// post-return guard checks), so the scan panel's "Held" matches what the server will accept.
+export function findEngineerBalance(irmItemId: string, engineerId: string): Promise<EngineerStockBalance | null> {
+  return prisma.engineerStockBalance.findUnique({ where: { irmItemId_engineerId: { irmItemId, engineerId } } });
+}
 export function insertEngineerTxnTx(tx: Prisma.TransactionClient, data: Prisma.EngineerStockTransactionUncheckedCreateInput): Promise<EngineerStockTransaction> {
   return tx.engineerStockTransaction.create({ data });
 }

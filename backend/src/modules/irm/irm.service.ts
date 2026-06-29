@@ -548,3 +548,10 @@ export async function requireActiveIrmItem(itemId: string): Promise<IrmItemWithR
   if ((i.status ?? "active") !== "active") throw conflict("Selected IRM item is inactive.");
   return i;
 }
+
+// Scan-lookup helper for the goods-management flow: find an active IRM item by its display
+// code (e.g. "IRM-0004"), free-text barcode field, or SKU (case-insensitive).
+// Returns null if nothing matches — callers then try the customer-stock path.
+export function findActiveByCodeOrBarcode(code: string): Promise<IrmItemWithRelations | null> {
+  return irmRepo.findActiveByCodeOrBarcode(code);
+}

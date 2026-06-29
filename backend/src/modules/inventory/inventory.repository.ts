@@ -85,6 +85,13 @@ export function findBalanceById(id: string): Promise<InventoryBalanceWithRelatio
 export function findBalancePair(irmItemId: string, warehouseId: string): Promise<InventoryBalance | null> {
   return prisma.inventoryBalance.findUnique({ where: { irmItemId_warehouseId: { irmItemId, warehouseId } } });
 }
+// Batch balance lookup for the goods-management queue page — ONE query for many (item, warehouse)
+// combos (the caller maps results by `${irmItemId}|${warehouseId}`). Over-fetches the cartesian
+// product of the given items × warehouses, which is negligible for a single page of kit lines.
+export function findBalancesByItemsAndWarehouses(irmItemIds: string[], warehouseIds: string[]): Promise<InventoryBalance[]> {
+  if (irmItemIds.length === 0 || warehouseIds.length === 0) return Promise.resolve([]);
+  return prisma.inventoryBalance.findMany({ where: { irmItemId: { in: irmItemIds }, warehouseId: { in: warehouseIds } } });
+}
 export function findBalancePairWithRelations(irmItemId: string, warehouseId: string): Promise<InventoryBalanceWithRelations | null> {
   return prisma.inventoryBalance.findUnique({ where: { irmItemId_warehouseId: { irmItemId, warehouseId } }, include: withBalanceRelations });
 }

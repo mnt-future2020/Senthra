@@ -127,6 +127,15 @@ export function findByCode(code: string): Promise<IrmItemWithRelations | null> {
   return prisma.irmItem.findFirst({ where: { code, deletedAt: null }, include: withRelations });
 }
 
+// Scan-lookup helper: match an active item by its display code, free-text barcode, or SKU
+// (case-insensitive on the skuLower mirror column). Used by the goods-management scan flow.
+export function findActiveByCodeOrBarcode(code: string): Promise<IrmItemWithRelations | null> {
+  return prisma.irmItem.findFirst({
+    where: { status: "active", deletedAt: null, OR: [{ code }, { barcode: code }, { skuLower: code.toLowerCase() }] },
+    include: withRelations,
+  });
+}
+
 // SKU uniqueness lookup — scans ALL rows INCLUDING soft-deleted, so a SKU that has ever
 // existed can never be reused. Returns the owning item id (to exclude self on update).
 export function findBySkuLower(skuLower: string): Promise<{ id: string } | null> {

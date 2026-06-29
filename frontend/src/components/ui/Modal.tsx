@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 
 // Focusable controls inside the dialog — used to seed initial focus and trap Tab.
@@ -85,10 +86,13 @@ export function Modal({
     };
   }, [open]);
 
-  if (!open) return null;
+  if (!open || typeof document === "undefined") return null;
   const max = size === "sm" ? "max-w-sm" : size === "md" ? "max-w-md" : "max-w-lg";
 
-  return (
+  // Render through a portal to <body>: keeps the dialog (and any <form> it contains) OUT of whatever
+  // parent it's declared in — so a modal opened from inside a page <form> can't nest forms or submit
+  // the outer form, and the fixed overlay is never clipped by an ancestor's overflow/stacking context.
+  return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4 sm:items-center"
       onClick={onClose}
@@ -129,6 +133,7 @@ export function Modal({
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

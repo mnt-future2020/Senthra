@@ -2,6 +2,8 @@ import * as goodsOutService from "#modules/goods-out/goods-out.service.js";
 import * as jobService from "#modules/job/job.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import * as engineerRepo from "./engineer.repository.js";
+import * as goodsManagementRepo from "#modules/goods-management/goods-management.repository.js";
+import type { CompleteJobInput } from "#modules/job/job.validation.js";
 
 // The Engineer Portal READ surface. Every function takes the engineer's own User.id (resolved from
 // the authenticated principal by the controller — never a route param) and reads existing primitives:
@@ -104,4 +106,55 @@ export function acceptOwnJob(engineerId: string, jobId: string, actor?: AuditAct
 
 export function rejectOwnJob(engineerId: string, jobId: string, reason: string | undefined, actor?: AuditActor) {
   return jobService.rejectJobForEngineer(engineerId, jobId, reason, actor);
+}
+
+export function startOwnJob(engineerId: string, jobId: string, actor?: AuditActor) {
+  return jobService.startJobForEngineer(jobId, engineerId, actor);
+}
+
+export function completeOwnJob(engineerId: string, jobId: string, input: CompleteJobInput, actor?: AuditActor) {
+  return jobService.completeJobForEngineer(jobId, engineerId, input, actor);
+}
+
+// --- Engineer held customer stock (no pricing exposed) ---------------------------------------
+
+export interface CustomerHoldingItem {
+  id: string;
+  customerStockEntryId: string;
+  customerId: string | null;
+  customerName: string | null;
+  itemName: string;
+  quantityOnHand: number;
+}
+
+export async function getOwnCustomerStock(engineerId: string): Promise<CustomerHoldingItem[]> {
+  const rows = await goodsManagementRepo.findCustomerHoldingsByEngineer(engineerId);
+  // Backfill the customer label for holdings whose snapshot is null (legacy rows) — resolve by id.
+  const missingIds = [...new Set(rows.filter((h) => !h.customerName && h.customerId).map((h) => h.customerId!))];
+  const nameById = new Map<string, string>();
+  if (missingIds.length) {
+    for (const c of await goodsManagementRepo.findCustomerNamesByIds(missingIds)) nameById.set(c.id, c.name);
+  }
+  return rows.map((h) => ({
+    id: h.id,
+    customerStockEntryId: h.customerStockEntryId,
+    customerId: h.customerId,
+    customerName: h.customerName ?? (h.customerId ? nameById.get(h.customerId) ?? null : null),
+    itemName: h.itemName,
+    quantityOnHand: h.quantityOnHand,
+  }));
+}
+
+export interface MiscHeldItem {
+  itemName: string;
+  quantityOnHand: number;
+}
+
+// Misc items issued to the engineer (free-text kit lines, no stock balance) — summed by item name
+// from their posted issue movements. Misc has no return flow, so held = total issued.
+export async function getOwnMiscStock(engineerId: string): Promise<MiscHeldItem[]> {
+  const lines = await goodsManagementRepo.findMiscIssueLinesByEngineer(engineerId);
+  const agg = new Map<string, number>();
+  for (const l of lines) agg.set(l.itemName, (agg.get(l.itemName) ?? 0) + l.qty);
+  return [...agg.entries()].map(([itemName, quantityOnHand]) => ({ itemName, quantityOnHand }));
 }

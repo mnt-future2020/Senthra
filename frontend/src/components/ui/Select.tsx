@@ -85,7 +85,9 @@ export function Select({
       </BaseSelect.Trigger>
 
       <BaseSelect.Portal>
-        <BaseSelect.Positioner sideOffset={6} align="start" alignItemWithTrigger={false} className="z-50 outline-none">
+        {/* z-[80] keeps the portaled menu above modal dialogs (z-[70]) so it stays clickable
+            inside a modal, while remaining below toasts (z-[99]). */}
+        <BaseSelect.Positioner sideOffset={6} align="start" alignItemWithTrigger={false} className="z-[80] outline-none">
           <BaseSelect.Popup
             // Native scrollbar hidden; Base UI shows themed up/down chevrons at the
             // edges when there's more to scroll (it positions + auto-shows them).

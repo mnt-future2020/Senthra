@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, Pencil, UserCog, XCircle } from "lucide-react";
+import { ArrowLeftRight, Loader2, Pencil, UserCog, XCircle } from "lucide-react";
 
 import * as jobService from "@/services/job.service";
 import { listEngineerOptions } from "@/services/warehouse.service";
@@ -16,7 +16,9 @@ import {
   JOB_PRIORITY_LABELS,
   JOB_TYPE_LABELS,
   JobStatusChip,
+  crossWarehouseReturnNote,
   formatDate,
+  formatDateTime,
 } from "./jobStatus";
 import type { Job, JobLineType, JobPriority, JobType } from "@/types/job";
 
@@ -61,7 +63,8 @@ function JobView({ initial }: { initial: Job }) {
     }
   };
 
-  const editable = can("jobs.edit");
+  // Completed / cancelled jobs and reconciled goods are frozen — no edits (matches the backend lock).
+  const editable = can("jobs.edit") && job.status !== "completed" && job.status !== "cancelled" && job.goodsStatus !== "reconciled";
   const cancellable = can("jobs.cancel") && job.status !== "cancelled" && job.status !== "completed";
   const reassignable = can("jobs.assign") && job.status !== "cancelled" && job.status !== "completed";
 
@@ -96,12 +99,12 @@ function JobView({ initial }: { initial: Job }) {
           <table className="w-full min-w-[720px] text-left text-sm">
             <thead>
               <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                <th className="px-4 py-3">Source</th><th className="px-4 py-3">Item</th><th className="px-4 py-3">Warehouse</th><th className="px-4 py-3 text-right">Qty</th><th className="px-4 py-3">Notes</th>
+                <th className="px-4 py-3">Source</th><th className="px-4 py-3">Item</th><th className="px-4 py-3">Warehouse</th><th className="px-4 py-3 text-right">Planned</th><th className="px-4 py-3 text-right">Issued</th><th className="px-4 py-3 text-right">Used</th><th className="px-4 py-3 text-right">Returned</th><th className="px-4 py-3 text-right">Remaining</th><th className="px-4 py-3">Notes</th>
               </tr>
             </thead>
             <tbody>
               {job.kitLines.length === 0 ? (
-                <tr><td colSpan={5} className="px-4 py-6 text-center text-[var(--muted)]">No kit lines.</td></tr>
+                <tr><td colSpan={9} className="px-4 py-6 text-center text-[var(--muted)]">No kit lines.</td></tr>
               ) : (
                 job.kitLines.map((l) => (
                   <tr key={l.id} className="border-b border-[var(--border)] last:border-0">
@@ -113,6 +116,20 @@ function JobView({ initial }: { initial: Job }) {
                     </td>
                     <td className="px-4 py-3 text-[var(--muted)]">{l.warehouseName ?? "—"}</td>
                     <td className="px-4 py-3 text-right font-semibold text-[var(--ink)]">{l.qty}</td>
+                    <td className="px-4 py-3 text-right text-[var(--ink)]">{l.issued}</td>
+                    <td className="px-4 py-3 text-right text-[var(--ink)]">{l.used}</td>
+                    <td className="px-4 py-3 text-right text-[var(--ink)]">
+                      <div className="flex flex-col items-end gap-1">
+                        <span>{l.returned}</span>
+                        {l.returned > l.issued && (
+                          <span className="inline-flex items-center gap-1 rounded-md bg-indigo-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-600" title="Returned here but issued from another warehouse">
+                            <ArrowLeftRight className="h-2.5 w-2.5 shrink-0" />
+                            {crossWarehouseReturnNote(l, job.kitLines)}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-right font-bold text-[var(--ink)]">{l.remaining}</td>
                     <td className="px-4 py-3 text-[var(--muted)]">{l.notes ?? "—"}</td>
                   </tr>
                 ))
@@ -164,6 +181,8 @@ function JobView({ initial }: { initial: Job }) {
             <Field label="Planner phone">{job.plannerPhone}</Field>
             <Field label="Assigned">{formatDate(job.assignedAt)}</Field>
             <Field label="Accepted">{formatDate(job.acceptedAt)}</Field>
+            <Field label="Work started">{formatDateTime(job.startedAt)}</Field>
+            <Field label="Work completed">{formatDateTime(job.completedAt)}</Field>
           </div>
         </Card>
 

@@ -49,6 +49,8 @@ const ENGINEER_PORTAL_PERMISSIONS = [
   "engineer.jobs.view",
   "engineer.jobs.accept",
   "engineer.jobs.reject",
+  "engineer.jobs.start",
+  "engineer.jobs.complete",
 ];
 
 // Office-side Job module permissions for roles that create/assign/track job packs (the
@@ -60,6 +62,15 @@ const JOB_OFFICE_PERMISSIONS = [
   "jobs.assign",
   "jobs.cancel",
   "jobs.delete",
+];
+
+// Goods Management permissions for warehouse-side roles (issue/receive/reconcile). Seeded on the
+// warehouse_manager + backfilled idempotently below.
+const GOODS_MANAGEMENT_PERMISSIONS = [
+  "goods_management.view",
+  "goods_management.issue",
+  "goods_management.receive_return",
+  "goods_management.reconcile",
 ];
 
 // Warehouse-scoped role keys — members may ONLY access their explicitly-assigned warehouses
@@ -107,7 +118,7 @@ const SEED_ROLES: {
   { key: "system_admin", name: "System Admin", description: "IT / HR administrator who creates and manages user accounts and customers.", sortOrder: 1, permissions: ["users.view", "users.create", "users.edit", "users.delete", "roles.view", "customers.view", "customers.create", "customers.edit", "customers.delete", "warehouse.view", "warehouse.create", "warehouse.edit", "warehouse.delete", "warehouse_types.view", "warehouse_types.create", "warehouse_types.edit", "warehouse_types.delete", "categories.view", "categories.create", "categories.edit", "categories.delete", "suppliers.view", "suppliers.create", "suppliers.edit", "suppliers.delete", "supplier_types.view", "supplier_types.create", "supplier_types.edit", "supplier_types.delete", "irm.view", "irm.create", "irm.edit", "irm.delete", "irm_types.view", "irm_types.create", "irm_types.edit", "irm_types.delete", "irm_categories.view", "irm_categories.create", "irm_categories.edit", "irm_categories.delete", "purchase_orders.view", "purchase_orders.create", "purchase_orders.edit", "purchase_orders.delete", "purchase_orders.submit", "purchase_orders.approve", "purchase_orders.send", "purchase_orders.cancel", "purchase_orders.close", "goods_in.view", "goods_in.create", "goods_in.edit", "goods_in.delete", "goods_in.complete", "goods_in.cancel", "inventory.view", "inventory.move", "inventory.history", "inventory.export", "inventory.adjust", "inventory.stock_take", "goods_out.view", "goods_out.create", "goods_out.edit", "goods_out.delete", "goods_out.dispatch", "goods_out.cancel", "jobs.view", "jobs.create", "jobs.edit", "jobs.assign", "jobs.cancel", "jobs.delete"] },
   { key: "project_manager", name: "Project Manager", description: "Creates job packs, authorises dispatch and tracks projects.", sortOrder: 2, permissions: [...JOB_OFFICE_PERMISSIONS] },
   { key: "project_coordinator", name: "Project Coordinator", description: "Supports project managers with day-to-day coordination.", sortOrder: 3, permissions: [] },
-  { key: "warehouse_manager", name: "Warehouse Manager", description: "Receives goods, scans stock in/out and manages a warehouse.", sortOrder: 4, permissions: [...WAREHOUSE_MANAGER_PERMISSIONS], isWarehouseScoped: true },
+  { key: "warehouse_manager", name: "Warehouse Manager", description: "Receives goods, scans stock in/out and manages a warehouse.", sortOrder: 4, permissions: [...WAREHOUSE_MANAGER_PERMISSIONS, ...GOODS_MANAGEMENT_PERMISSIONS], isWarehouseScoped: true },
   { key: "field_engineer", name: "Field Engineer", description: "Collects stock, installs on site and updates job status.", sortOrder: 5, permissions: [...ENGINEER_PORTAL_PERMISSIONS], canHoldStock: true },
   { key: "finance_director", name: "Finance Director", description: "Views spend, purchase orders and finance reports.", sortOrder: 6, permissions: [] },
   { key: "hr_manager", name: "HR Manager", description: "Manages people-related records and onboarding.", sortOrder: 7, permissions: [] },
@@ -213,6 +224,20 @@ export async function seedDatabase(): Promise<void> {
       }
     }
     if (granted > 0) console.log(`Granted Job module permissions to ${granted} role(s).`);
+  }
+
+  // Backfill Goods Management permissions onto warehouse-side roles idempotently. Additive; skips "*".
+  {
+    let granted = 0;
+    for (const role of await roleRepo.findMany()) {
+      if (role.key !== "warehouse_manager" || role.permissions.includes("*")) continue;
+      const missing = GOODS_MANAGEMENT_PERMISSIONS.filter((p) => !role.permissions.includes(p));
+      if (missing.length) {
+        await roleRepo.update(role.id, { permissions: [...role.permissions, ...missing] });
+        granted++;
+      }
+    }
+    if (granted > 0) console.log(`Granted Goods Management permissions to ${granted} role(s).`);
   }
 
   // Seed a starter global stock-category list ONLY on a fresh DB. These are ordinary
@@ -385,6 +410,8 @@ export async function seedDatabase(): Promise<void> {
       "inventory.view", "inventory.move", "inventory.history", "inventory.export", "inventory.adjust", "inventory.stock_take",
       "goods_out.view", "goods_out.create", "goods_out.edit", "goods_out.delete", "goods_out.dispatch", "goods_out.cancel",
       "jobs.view", "jobs.create", "jobs.edit", "jobs.assign", "jobs.cancel", "jobs.delete",
+      "goods_management.view", "goods_management.issue", "goods_management.receive_return", "goods_management.reconcile",
+      "engineer.jobs.start", "engineer.jobs.complete",
     ];
     const missing = wanted.filter((p) => !systemAdmin.permissions.includes(p));
     if (missing.length) {
