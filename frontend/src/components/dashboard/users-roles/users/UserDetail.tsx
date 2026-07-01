@@ -49,7 +49,7 @@ export function UserDetail({ user }: { user: User }) {
       <FormPageHeader
         title="User details"
         subtitle={user.email}
-        onBack={() => router.push(USERS_LIST)}
+        onBack={() => { if (window.history.length > 1) router.back(); else router.push(USERS_LIST); }}
         actions={
           can("users.edit") ? (
             <button

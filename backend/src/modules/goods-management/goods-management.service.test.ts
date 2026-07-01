@@ -13,7 +13,7 @@ vi.mock("#modules/job/job.repository.js", () => ({ findById: vi.fn(), findActive
 vi.mock("#modules/irm/irm.service.js", () => ({ requireActiveIrmItem: vi.fn(), findActiveByCodeOrBarcode: vi.fn() }));
 vi.mock("#modules/inventory/inventory.repository.js", () => ({ findBalancePair: vi.fn(), findBalancesByItemsAndWarehouses: vi.fn(), findBalancePairTx: vi.fn(), upsertBalanceTx: vi.fn(), insertTransactionTx: vi.fn() }));
 vi.mock("#modules/inventory/inventory.service.js", () => ({ applyOutbound: vi.fn(), applyInbound: vi.fn() }));
-vi.mock("#modules/goods-out/goods-out.repository.js", () => ({ upsertEngineerBalanceTx: vi.fn(), insertEngineerTxnTx: vi.fn(), findEngineerBalanceTx: vi.fn(), findEngineerBalance: vi.fn(), findEngineerBalances: vi.fn() }));
+vi.mock("#modules/engineer-stock/engineer-stock.repository.js", () => ({ upsertEngineerBalanceTx: vi.fn(), insertEngineerTxnTx: vi.fn(), findEngineerBalanceTx: vi.fn(), findEngineerBalance: vi.fn(), findEngineerBalances: vi.fn() }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 
 import * as repo from "./goods-management.repository.js";
@@ -105,7 +105,7 @@ describe("scanLookup (return cap = this warehouse's still-out qty, bounded by ho
   // The return cap = what's still out FROM THIS warehouse's kit line (issued − used − returned),
   // bounded by the engineer's REAL global holding. Per-warehouse, so an item issued from two
   // warehouses can't be fully returned at one. Global bound also covers the cross-job drained case.
-  const mockEngBal = goodsOutRepo.findEngineerBalance as ReturnType<typeof vi.fn>;
+  const mockEngBal = engineerStockRepo.findEngineerBalance as ReturnType<typeof vi.fn>;
   const issue = (klId: string, qty: number) => ({ status: "posted", direction: "issue", items: [{ jobKitLineId: klId, qty }] });
 
   it("caps at this warehouse's out qty, not the (higher) global holding", async () => {
@@ -143,12 +143,12 @@ describe("scanLookup (return cap = this warehouse's still-out qty, bounded by ho
 
 import { listQueue, postIssue } from "./goods-management.service.js";
 import * as inventoryService from "#modules/inventory/inventory.service.js";
-import * as goodsOutRepo from "#modules/goods-out/goods-out.repository.js";
+import * as engineerStockRepo from "#modules/engineer-stock/engineer-stock.repository.js";
 
 const ENG_ID = "c".repeat(24);
 const mockCreateMovement = repo.createMovementWithCode as ReturnType<typeof vi.fn>;
 const mockApplyOutbound = inventoryService.applyOutbound as ReturnType<typeof vi.fn>;
-const mockUpsertEng = goodsOutRepo.upsertEngineerBalanceTx as ReturnType<typeof vi.fn>;
+const mockUpsertEng = engineerStockRepo.upsertEngineerBalanceTx as ReturnType<typeof vi.fn>;
 const mockBalTx = inventoryRepo.findBalancePairTx as ReturnType<typeof vi.fn>;
 
 describe("postIssue", () => {
@@ -185,7 +185,7 @@ describe("listQueue", () => {
   const mockMovesBatch = repo.findMovementsByJobs as ReturnType<typeof vi.fn>;
   const mockBalances = inventoryRepo.findBalancesByItemsAndWarehouses as ReturnType<typeof vi.fn>;
   const mockCseByIds = repo.findCustomerStockEntriesByIds as ReturnType<typeof vi.fn>;
-  const mockEngBalances = goodsOutRepo.findEngineerBalances as ReturnType<typeof vi.fn>;
+  const mockEngBalances = engineerStockRepo.findEngineerBalances as ReturnType<typeof vi.fn>;
   const mockCustHoldings = repo.findCustomerHoldingsByEngineer as ReturnType<typeof vi.fn>;
 
   const A1 = "a1".padEnd(24, "0");
@@ -281,8 +281,8 @@ import { postReturn } from "./goods-management.service.js";
 const mockApplyInbound = inventoryService.applyInbound as ReturnType<typeof vi.fn>;
 const mockUpsertDamagedBalance = repo.upsertDamagedBalanceTx as ReturnType<typeof vi.fn>;
 const mockInsertDamagedTxn = repo.insertDamagedTxnTx as ReturnType<typeof vi.fn>;
-const mockFindEngBalTxForReturn = goodsOutRepo.findEngineerBalanceTx as ReturnType<typeof vi.fn>;
-const mockUpsertEngForReturn = goodsOutRepo.upsertEngineerBalanceTx as ReturnType<typeof vi.fn>;
+const mockFindEngBalTxForReturn = engineerStockRepo.findEngineerBalanceTx as ReturnType<typeof vi.fn>;
+const mockUpsertEngForReturn = engineerStockRepo.upsertEngineerBalanceTx as ReturnType<typeof vi.fn>;
 const mockAdjustCseQty = repo.adjustCustomerStockEntryQtyTx as ReturnType<typeof vi.fn>;
 
 // Base job with kit lines covering both IRM and customer scenarios.
@@ -429,12 +429,12 @@ describe("postReturn", () => {
 import { recordConsumeAndComplete } from "./goods-management.service.js";
 
 const mockCompleteIfInProgress = jobRepo.completeIfInProgressTx as ReturnType<typeof vi.fn>;
-const mockFindEngBalTx = goodsOutRepo.findEngineerBalanceTx as ReturnType<typeof vi.fn>;
-const mockUpsertEngBalTx = goodsOutRepo.upsertEngineerBalanceTx as ReturnType<typeof vi.fn>;
-const mockInsertEngTxnTx = goodsOutRepo.insertEngineerTxnTx as ReturnType<typeof vi.fn>;
+const mockFindEngBalTx = engineerStockRepo.findEngineerBalanceTx as ReturnType<typeof vi.fn>;
+const mockUpsertEngBalTx = engineerStockRepo.upsertEngineerBalanceTx as ReturnType<typeof vi.fn>;
+const mockInsertEngTxnTx = engineerStockRepo.insertEngineerTxnTx as ReturnType<typeof vi.fn>;
 // Non-tx batch holdings used by closeReconcile / getJobKitTallies to cap "unaccounted" / "remaining"
 // at the engineer's REAL held balance.
-const mockFindEngBalancesAll = goodsOutRepo.findEngineerBalances as ReturnType<typeof vi.fn>;
+const mockFindEngBalancesAll = engineerStockRepo.findEngineerBalances as ReturnType<typeof vi.fn>;
 const mockFindCustHoldingsAll = repo.findCustomerHoldingsByEngineer as ReturnType<typeof vi.fn>;
 
 // A minimal JobWithRelations shape sufficient for recordConsumeAndComplete.

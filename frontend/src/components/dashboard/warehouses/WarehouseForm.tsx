@@ -146,7 +146,11 @@ export function WarehouseForm({ mode, warehouse }: { mode: "create" | "edit"; wa
 
   useReportDirty("warehouse-form", isDirty);
 
-  const goBack = () => guard.attemptLeave(() => router.push(WAREHOUSES_LIST));
+  const goBack = () =>
+    guard.attemptLeave(() => {
+      if (window.history.length > 1) router.back();
+      else router.push(WAREHOUSES_LIST);
+    });
 
   const clearError = (field: string) =>
     setErrors((prev) => {

@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { createPortal } from "react-dom";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ChevronRight, ClipboardList, MoreHorizontal, Pencil, Plus, Search, Trash2 } from "lucide-react";
 
 import * as jobService from "@/services/job.service";
@@ -104,15 +104,27 @@ function TableSkeleton({ actions }: { actions: boolean }) {
 
 export function JobsView() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { can } = useAuth();
   const { pushToast } = useDashboard();
 
-  const [search, setSearch] = React.useState("");
-  const [debounced, setDebounced] = React.useState("");
-  const [statusFilter, setStatusFilter] = React.useState<"all" | JobStatus>("all");
-  const [customer, setCustomer] = React.useState("");
-  const [engineer, setEngineer] = React.useState("");
-  const [page, setPage] = React.useState(1);
+  // ── URL-derived filter state ────────────────────────────────────────────────
+  const search = searchParams.get("q") ?? "";
+  const statusFilter = (searchParams.get("status") ?? "all") as "all" | JobStatus;
+  const customer = searchParams.get("customer") ?? "";
+  const engineer = searchParams.get("engineer") ?? "";
+  const page = Math.max(1, Number(searchParams.get("page")) || 1);
+
+  // Local input box; debounce-writes to ?q.
+  const [searchInput, setSearchInput] = React.useState(search);
+  // Re-seed the box when ?q changes outside typing (browser back/forward). Adjusting state during
+  // render (not via an effect) is the React-recommended pattern and avoids a cascading re-render.
+  const [prevSearch, setPrevSearch] = React.useState(search);
+  if (prevSearch !== search) {
+    setPrevSearch(search);
+    setSearchInput(search);
+  }
+
   const [refreshKey, setRefreshKey] = React.useState(0);
   const [data, setData] = React.useState(() => jobService.getCachedJobs({ pageSize: PAGE_SIZE }));
   const [loading, setLoading] = React.useState(!data);
@@ -124,6 +136,21 @@ export function JobsView() {
   const [customers, setCustomers] = React.useState<{ id: string; name: string }[]>([]);
   const [engineers, setEngineers] = React.useState<{ id: string; name: string }[]>([]);
 
+  // ── URL patch helper ────────────────────────────────────────────────────────
+  // Preserves ALL existing params so hosting pages' ?tab etc. are never clobbered.
+  const patchParams = React.useCallback(
+    (updates: Record<string, string | null>, resetPage = true) => {
+      const params = new URLSearchParams(window.location.search);
+      for (const [k, v] of Object.entries(updates)) {
+        if (v) params.set(k, v);
+        else params.delete(k);
+      }
+      if (resetPage) params.delete("page");
+      router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
+    },
+    [router],
+  );
+
   const canEdit = can("jobs.edit");
   const canDelete = can("jobs.delete");
   const showActions = canEdit || canDelete;
@@ -133,10 +160,13 @@ export function JobsView() {
   // Live-refresh the list when a job is created/assigned/accepted anywhere.
   useJobSocket(React.useCallback(() => setRefreshKey((k) => k + 1), []));
 
+  // Debounce the search box into ?q (reset page on change).
   React.useEffect(() => {
-    const t = setTimeout(() => setDebounced(search.trim()), 300);
+    const t = setTimeout(() => {
+      if (searchInput.trim() !== search) patchParams({ q: searchInput.trim() || null }, true);
+    }, 300);
     return () => clearTimeout(t);
-  }, [search]);
+  }, [searchInput, search, patchParams]);
 
   React.useEffect(() => {
     let active = true;
@@ -148,7 +178,7 @@ export function JobsView() {
   React.useEffect(() => {
     let active = true;
     (async () => {
-      const params = { search: debounced || undefined, status: statusFilter === "all" ? undefined : statusFilter, customer: customer || undefined, engineer: engineer || undefined, page, pageSize: PAGE_SIZE };
+      const params = { search: search || undefined, status: statusFilter === "all" ? undefined : statusFilter, customer: customer || undefined, engineer: engineer || undefined, page, pageSize: PAGE_SIZE };
       const cached = jobService.getCachedJobs(params);
       if (active && cached) setData(cached);
       setLoading(true);
@@ -164,11 +194,16 @@ export function JobsView() {
       }
     })();
     return () => { active = false; };
-  }, [debounced, statusFilter, customer, engineer, page, refreshKey]);
+  }, [search, statusFilter, customer, engineer, page, refreshKey]);
 
-  const rows = data?.jobs ?? [];
-  const showSkeleton = loading && rows.length === 0;
-  const isFiltered = statusFilter !== "all" || Boolean(debounced) || Boolean(customer) || Boolean(engineer);
+  const { rows, showSkeleton, isFiltered } = React.useMemo(() => {
+    const r = data?.jobs ?? [];
+    return {
+      rows: r,
+      showSkeleton: loading && r.length === 0,
+      isFiltered: statusFilter !== "all" || Boolean(search) || Boolean(customer) || Boolean(engineer),
+    };
+  }, [data, loading, statusFilter, search, customer, engineer]);
 
   const onDelete = async () => {
     if (!confirm.job) return;
@@ -177,7 +212,7 @@ export function JobsView() {
       await jobService.deleteJob(confirm.job.id);
       setConfirm({ open: false, job: null });
       pushToast("Job removed.", "success");
-      if (rows.length === 1 && page > 1) setPage(page - 1);
+      if (rows.length === 1 && page > 1) patchParams({ page: String(page - 1) }, false);
       else setRefreshKey((k) => k + 1);
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Delete failed.", "alert");
@@ -196,11 +231,11 @@ export function JobsView() {
       <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:items-center">
         <div className="relative w-full lg:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
-          <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="Search job, name, customer or engineer…" className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]" />
+          <input value={searchInput} onChange={(e) => setSearchInput(e.target.value)} placeholder="Search job, name, customer or engineer…" className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]" />
         </div>
-        <Select size="sm" value={statusFilter} onChange={(v) => { setStatusFilter(v as "all" | JobStatus); setPage(1); }} options={[{ value: "all", label: "All statuses" }, ...(Object.keys(JOB_STATUS_LABELS) as JobStatus[]).map((s) => ({ value: s, label: JOB_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
-        <Select size="sm" value={customer} onChange={(v) => { setCustomer(v); setPage(1); }} options={[{ value: "", label: "All customers" }, ...customers.map((c) => ({ value: c.id, label: c.name }))]} ariaLabel="Filter by customer" />
-        <Select size="sm" value={engineer} onChange={(v) => { setEngineer(v); setPage(1); }} options={[{ value: "", label: "All engineers" }, ...engineers.map((u) => ({ value: u.id, label: u.name }))]} ariaLabel="Filter by engineer" />
+        <Select size="sm" value={statusFilter} onChange={(v) => patchParams({ status: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All statuses" }, ...(Object.keys(JOB_STATUS_LABELS) as JobStatus[]).map((s) => ({ value: s, label: JOB_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
+        <Select size="sm" value={customer} onChange={(v) => patchParams({ customer: v || null }, true)} options={[{ value: "", label: "All customers" }, ...customers.map((c) => ({ value: c.id, label: c.name }))]} ariaLabel="Filter by customer" />
+        <Select size="sm" value={engineer} onChange={(v) => patchParams({ engineer: v || null }, true)} options={[{ value: "", label: "All engineers" }, ...engineers.map((u) => ({ value: u.id, label: u.name }))]} ariaLabel="Filter by engineer" />
         {can("jobs.create") && (
           <button onClick={() => router.push("/dashboard/jobs/new")} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 lg:ml-auto">
             <Plus className="h-4 w-4" /> New job
@@ -297,7 +332,7 @@ export function JobsView() {
 
       {data && data.total > 0 && (
         <div className="shrink-0">
-          <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="jobs" onPage={setPage} />
+          <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="jobs" onPage={(p) => patchParams({ page: p > 1 ? String(p) : null }, false)} />
         </div>
       )}
 

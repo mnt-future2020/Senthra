@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// Isolate the service: mock data-access + the goods-out held-stock counter + audit, so these
+// Isolate the service: mock data-access + the engineer-stock held-stock counter + audit, so these
 // are pure unit tests of the deactivation guard (no DB).
 vi.mock("./user.repository.js", () => ({
   findById: vi.fn(),
@@ -15,14 +15,14 @@ vi.mock("./user-warehouse.repository.js", () => ({
 }));
 vi.mock("#modules/warehouse/warehouse.repository.js", () => ({ findActiveByIds: vi.fn() }));
 vi.mock("#modules/role/role.repository.js", () => ({ findById: vi.fn() }));
-vi.mock("#modules/goods-out/goods-out.repository.js", () => ({ countEngineerHeldStock: vi.fn() }));
+vi.mock("#modules/engineer-stock/engineer-stock.repository.js", () => ({ countEngineerHeldStock: vi.fn() }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 
 import * as userRepo from "./user.repository.js";
 import * as userWarehouseRepo from "./user-warehouse.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as roleRepo from "#modules/role/role.repository.js";
-import * as goodsOutRepo from "#modules/goods-out/goods-out.repository.js";
+import * as engineerStockRepo from "#modules/engineer-stock/engineer-stock.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import { setUserStatus, updateUser } from "./user.service.js";
 
@@ -61,7 +61,7 @@ function userRow(over: Record<string, unknown> = {}) {
 
 const mockFindById = userRepo.findById as ReturnType<typeof vi.fn>;
 const mockUpdate = userRepo.update as ReturnType<typeof vi.fn>;
-const mockHeld = goodsOutRepo.countEngineerHeldStock as ReturnType<typeof vi.fn>;
+const mockHeld = engineerStockRepo.countEngineerHeldStock as ReturnType<typeof vi.fn>;
 const mockAudit = audit.record as ReturnType<typeof vi.fn>;
 const mockRoleFindById = roleRepo.findById as ReturnType<typeof vi.fn>;
 const mockFindActiveByIds = warehouseRepo.findActiveByIds as ReturnType<typeof vi.fn>;

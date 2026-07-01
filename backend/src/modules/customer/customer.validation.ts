@@ -256,6 +256,21 @@ export const stockEntryUpdateSchema = z.object({
 });
 export type StockEntryUpdateInput = z.infer<typeof stockEntryUpdateSchema>;
 
+// --- customer stock transfer (warehouse → warehouse consignment move) -----------
+
+// NB: the source entry id comes from the route param (`/stock-entries/:id/transfer`), NOT the body —
+// the controller reads it via `param(req, "id")`. Requiring it here too would 400 every legitimate call.
+export const customerStockTransferSchema = z.object({
+  toWarehouseId: objectIdField,
+  quantity: z.coerce
+    .number({ error: "Quantity is required." })
+    .int("Use a whole number.")
+    .min(1, "Quantity must be at least 1.")
+    .max(1_000_000),
+  notes: z.string().trim().max(2000).optional(),
+});
+export type CustomerStockTransferInput = z.infer<typeof customerStockTransferSchema>;
+
 export const directStockEntrySchema = z.object({
   warehouseId: objectIdField,
   itemName: z

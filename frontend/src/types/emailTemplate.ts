@@ -8,6 +8,9 @@ export interface EmailTemplate {
   htmlContent: string;
   textContent: string;
   variables: string[];
+  // Subset of `variables` that must stay in the subject/message (system templates only).
+  // Optional for backward compatibility with any cached response predating this field.
+  requiredVariables?: string[];
   enabled: boolean;
   isSystem: boolean;
   version: number;

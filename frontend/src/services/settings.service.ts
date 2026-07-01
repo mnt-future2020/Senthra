@@ -45,6 +45,7 @@ export interface SettingsUpdate {
   timezone?: string;
   dateFormat?: string;
   timeFormat?: string;
+  engineerTransferRequireSignature?: boolean;
 }
 
 // Stale-while-revalidate cache (module-level, survives route navigation): switching

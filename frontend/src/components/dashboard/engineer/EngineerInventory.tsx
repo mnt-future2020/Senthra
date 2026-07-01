@@ -1,19 +1,21 @@
 "use client";
 
 import * as React from "react";
-import { Boxes, Package, Wrench } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Boxes, History, Package, Wrench } from "lucide-react";
 
 import * as engineerService from "@/services/engineer.service";
 import type { MiscHeldItem } from "@/services/engineer.service";
 import { Notice } from "@/components/ui/Notice";
 import { EmptyState, fmtDate, PortalHeader, TableCard, TableCardSkeleton } from "@/components/dashboard/portal/portalUi";
+import { MovementFeed, type MovementFetcher } from "@/components/dashboard/inventory/MovementFeed";
 import type { EngineerStockItem } from "@/types/engineer";
 import type { CustomerHolding } from "@/types/goodsManagement";
 import type { Msg } from "@/components/ui/types";
 import { useGoodsSocket } from "@/hooks/useGoodsSocket";
 
-// Engineer Portal — My Stock, split into three sub-tabs: Company (IRM) / Customer / Misc.
-type Section = "irm" | "customer" | "misc";
+// Engineer Portal — My Stock, split into sub-tabs: Company (IRM) / Customer / Misc / Movements.
+type Section = "irm" | "customer" | "misc" | "movements";
 
 const IRM_HEADERS = ["Item", "Code", "On hand", "Last updated"];
 const IRM_SKELETON = ["h-3 w-44", "h-3 w-20", "h-3 w-14", "h-3 w-20"];
@@ -24,10 +26,31 @@ const SECTIONS: { key: Section; label: string; icon: React.ElementType }[] = [
   { key: "irm", label: "Company (IRM)", icon: Boxes },
   { key: "customer", label: "Customer", icon: Package },
   { key: "misc", label: "Misc", icon: Wrench },
+  { key: "movements", label: "Movements", icon: History },
 ];
 
+// The engineer movement feed is hard-scoped to the signed-in engineer on the backend.
+const ownMovementsFetcher: MovementFetcher = (params) => engineerService.getOwnMovements(params);
+
 export function EngineerInventory() {
-  const [section, setSection] = React.useState<Section>("irm");
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  // Derive section from the URL; default to "irm".
+  const section = (searchParams.get("section") as Section | null) ?? "irm";
+
+  // Patch URL params without clobbering other query params in any host page.
+  const patch = React.useCallback(
+    (updates: Record<string, string | null>) => {
+      const params = new URLSearchParams(window.location.search);
+      for (const [k, v] of Object.entries(updates)) {
+        if (v) params.set(k, v);
+        else params.delete(k);
+      }
+      router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
+    },
+    [router],
+  );
 
   const [stock, setStock] = React.useState<EngineerStockItem[]>([]);
   // Best-effort "last updated" per IRM item, derived FRONTEND-ONLY from the engineer's recent
@@ -116,7 +139,7 @@ export function EngineerInventory() {
           <button
             key={key}
             type="button"
-            onClick={() => setSection(key)}
+            onClick={() => patch({ section: key !== "irm" ? key : null })}
             className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-bold transition-all ${
               section === key
                 ? "bg-[var(--accent)] text-white"
@@ -176,6 +199,14 @@ export function EngineerInventory() {
             </TableCard>
           )}
         </>
+      )}
+
+      {/* Movements — the engineer's own stock movement history (van company + customer consignment) */}
+      {section === "movements" && (
+        <div className="h-[60vh]">
+          <p className="mb-3 text-xs text-[var(--muted)]">Every movement of stock in and out of your van — dispatches, transfers, job issues, returns and consumption. Newest first.</p>
+          <MovementFeed fetcher={ownMovementsFetcher} scope="engineer" />
+        </div>
       )}
 
       {/* Misc */}

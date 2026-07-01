@@ -13,6 +13,7 @@ import { actionLabel, actionTone, relativeTime, TONE_CLASSES } from "@/component
 import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
 import { GRN_QUALITY_LABELS, GrnStatusBadge, formatDate } from "./grnStatus";
 import { AttachmentGrid, DocPicker, attachmentToDoc, type PickedDoc } from "./DeliveryDocuments";
+import { Pagination } from "@/components/ui/Pagination";
 import type { AuditEntry } from "@/types/audit";
 import type { GoodsReceipt } from "@/types/goods-in";
 
@@ -64,8 +65,8 @@ export function GoodsReceiptDetail({ initial }: { initial: GoodsReceipt }) {
     actions.push(<ActionBtn key="cancel" icon={XCircle} onClick={() => { setReason(""); setCancelOpen(true); }} disabled={busy}>Cancel</ActionBtn>);
 
   return (
-    <div className="space-y-5">
-      <div className="flex flex-col gap-4 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:flex-row sm:items-start sm:justify-between" style={{ borderRadius: "var(--radius)" }}>
+    <div className="flex h-full flex-col gap-5">
+      <div className="shrink-0 flex flex-col gap-4 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:flex-row sm:items-start sm:justify-between" style={{ borderRadius: "var(--radius)" }}>
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <h1 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">{grn.code}</h1>
@@ -85,7 +86,7 @@ export function GoodsReceiptDetail({ initial }: { initial: GoodsReceipt }) {
         {actions.length > 0 && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
       </div>
 
-      <div className="flex gap-1 overflow-x-auto border-b border-[var(--border)]">
+      <div className="shrink-0 flex gap-1 overflow-x-auto border-b border-[var(--border)]">
         {(["overview", "attachments", "audit"] as Tab[]).map((t) => (
           <button key={t} onClick={() => setTab(t)} className={`shrink-0 border-b-2 px-3.5 py-2.5 text-xs font-bold capitalize transition-colors ${tab === t ? "border-[var(--accent)] text-[var(--accent)]" : "border-transparent text-[var(--muted)] hover:text-[var(--ink)]"}`}>
             {t === "audit" ? "Audit trail" : t}
@@ -93,9 +94,13 @@ export function GoodsReceiptDetail({ initial }: { initial: GoodsReceipt }) {
         ))}
       </div>
 
-      {tab === "overview" && <Overview grn={grn} />}
-      {tab === "attachments" && <Attachments grn={grn} setGrn={setGrn} canEdit={can("goods_in.edit")} />}
-      {tab === "audit" && <AuditTrail grnId={grn.id} />}
+      <div className="min-h-0 flex-1 overflow-auto">
+        <div className="space-y-4 pr-1">
+          {tab === "overview" && <Overview grn={grn} />}
+          {tab === "attachments" && <Attachments grn={grn} setGrn={setGrn} canEdit={can("goods_in.edit")} />}
+          {tab === "audit" && <AuditTrail grnId={grn.id} />}
+        </div>
+      </div>
 
       <ConfirmDialog
         open={confirmComplete}
@@ -286,21 +291,33 @@ function ReasonDialog({ value, onChange, onConfirm, onClose }: { value: string; 
   );
 }
 
+const AUDIT_PAGE_SIZE = 20;
+
 function AuditTrail({ grnId }: { grnId: string }) {
   const [entries, setEntries] = React.useState<AuditEntry[] | null>(null);
+  const [total, setTotal] = React.useState(0);
+  const [totalPages, setTotalPages] = React.useState(1);
+  const [page, setPage] = React.useState(1);
   const [error, setError] = React.useState<string | null>(null);
   React.useEffect(() => {
     let active = true;
     auditService
-      .listAuditLogs({ targetType: "goods_receipt", targetId: grnId, pageSize: 100 })
-      .then((res) => active && setEntries(res.entries))
-      .catch((e) => active && setError(e instanceof Error ? e.message : "Could not load the audit trail."));
+      .listAuditLogs({ targetType: "goods_receipt", targetId: grnId, page, pageSize: AUDIT_PAGE_SIZE })
+      .then((res) => {
+        if (!active) return;
+        setEntries(res.entries);
+        setTotal(res.total);
+        setTotalPages(res.totalPages);
+      })
+      .catch((e) => {
+        if (active) setError(e instanceof Error ? e.message : "Could not load the audit trail.");
+      });
     return () => { active = false; };
-  }, [grnId]);
+  }, [grnId, page]);
 
   if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
   if (entries === null) return <AuditTrailSkeleton />;
-  if (entries.length === 0)
+  if (entries.length === 0 && page === 1)
     return (
       <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
         <ScrollText className="h-7 w-7 text-[var(--faint)]" />
@@ -308,18 +325,21 @@ function AuditTrail({ grnId }: { grnId: string }) {
       </div>
     );
   return (
-    <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
-      <ul className="divide-y divide-[var(--border)]">
-        {entries.map((e) => (
-          <li key={e.id} className="flex items-center justify-between gap-3 px-4 py-3">
-            <div className="flex items-center gap-3">
-              <span className={`inline-block shrink-0 rounded-full px-2.5 py-1 text-[11px] font-bold ${TONE_CLASSES[actionTone(e.action)]}`}>{actionLabel(e.action)}</span>
-              <span className="text-xs text-[var(--muted)]">{e.actorEmail ?? "system"}</span>
-            </div>
-            <span className="shrink-0 text-[11px] text-[var(--faint)]" title={new Date(e.createdAt).toLocaleString("en-GB")}>{relativeTime(e.createdAt)}</span>
-          </li>
-        ))}
-      </ul>
+    <div className="space-y-3">
+      <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+        <ul className="divide-y divide-[var(--border)]">
+          {entries.map((e) => (
+            <li key={e.id} className="flex items-center justify-between gap-3 px-4 py-3">
+              <div className="flex items-center gap-3">
+                <span className={`inline-block shrink-0 rounded-full px-2.5 py-1 text-[11px] font-bold ${TONE_CLASSES[actionTone(e.action)]}`}>{actionLabel(e.action)}</span>
+                <span className="text-xs text-[var(--muted)]">{e.actorEmail ?? "system"}</span>
+              </div>
+              <span className="shrink-0 text-[11px] text-[var(--faint)]" title={new Date(e.createdAt).toLocaleString("en-GB")}>{relativeTime(e.createdAt)}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+      <Pagination page={page} totalPages={totalPages} total={total} label="events" onPage={setPage} />
     </div>
   );
 }

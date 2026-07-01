@@ -9,6 +9,7 @@ import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { resolveBrandVars, sendAndLog } from "./email.service.js";
 import { findDefaultTemplate, requiredVariablesFor } from "./emailTemplate.defaults.js";
+import { getCompanyProfile } from "#modules/settings/settings.service.js";
 
 export interface PublicEmailTemplate {
   id: string;
@@ -19,6 +20,10 @@ export interface PublicEmailTemplate {
   htmlContent: string;
   textContent: string;
   variables: string[];
+  // The subset of `variables` that MUST stay in the content (derived from the built-in
+  // default). Surfaced so the editor can flag them and explain why a save was rejected.
+  // Empty for custom templates, which have no built-in default.
+  requiredVariables: string[];
   enabled: boolean;
   isSystem: boolean;
   version: number;
@@ -35,6 +40,7 @@ function publicTemplate(t: EmailTemplate): PublicEmailTemplate {
     htmlContent: t.htmlContent,
     textContent: t.textContent,
     variables: t.variables,
+    requiredVariables: requiredVariablesFor(t.key),
     enabled: t.enabled,
     isSystem: t.isSystem,
     version: t.version,
@@ -42,22 +48,54 @@ function publicTemplate(t: EmailTemplate): PublicEmailTemplate {
   };
 }
 
-// Realistic sample values for preview / test sends.
+// Realistic sample values for preview / test sends — one per variable across all
+// templates, so a preview reads like a genuine email instead of showing "[poCode]".
+// Brand tokens (brandName, loginUrl, supportEmail, currentYear…) are resolved live in
+// buildSampleVars, so they're intentionally not duplicated here.
 const SAMPLE_VALUES: Record<string, string> = {
+  // People / accounts
   firstName: "Alex",
   lastName: "Morgan",
   email: "alex.morgan@example.com",
   roleName: "Project Manager",
   temporaryPassword: "Xy7$Kp2Rq9",
   resetPasswordLink: "https://app.example.com/reset-password?token=sample-token",
+  // Fallbacks for brand tokens if Settings hasn't been configured yet
   loginUrl: "https://app.example.com/login",
   supportEmail: "support@example.com",
+  // Customers
+  customerName: "Northwind Traders",
+  contactPerson: "Jordan Blake",
+  requestName: "CAT6 patch cables (x50)",
+  status: "approved",
+  decisionDetail: "Note from our team: we'll arrange delivery shortly.",
+  // Suppliers / procurement
+  supplierName: "Acme Components Ltd",
+  companyLegalName: "Your Company Ltd",
+  poCode: "PO-2026-0042",
+  orderDate: "01 Jul 2026",
+  expectedDeliveryDate: "15 Jul 2026",
+  grandTotal: "£4,250.00",
+  submittedBy: "sam.taylor@yourcompany.com",
+  approverName: "Riley Chen",
+  // Jobs
+  jobNumber: "JOB-1042",
+  jobName: "Fibre install — Riverside Court",
+  engineerName: "Chris Adigun",
+  recipientName: "Morgan Lee",
+  rejectReason: "Parts unavailable on the scheduled date.",
 };
 
 // Build the variable map for a preview/test render: real brand vars overlaid with
-// sample values for the template's declared variables.
+// sample values for the template's declared variables. Where a template references
+// the company's legal name, the real configured value is used so the preview matches
+// what recipients actually receive; otherwise a representative sample is substituted.
 async function buildSampleVars(template: EmailTemplate): Promise<TemplateVars> {
   const vars: TemplateVars = { ...(await resolveBrandVars()) };
+  if (template.variables.includes("companyLegalName")) {
+    const company = await getCompanyProfile();
+    if (company.legalName) vars.companyLegalName = company.legalName;
+  }
   for (const name of template.variables) {
     if (vars[name] == null || vars[name] === "") {
       vars[name] = SAMPLE_VALUES[name] ?? `[${name}]`;

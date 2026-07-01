@@ -54,4 +54,6 @@ export interface Settings extends Branding {
   timezone: string;
   dateFormat: string;
   timeFormat: string;
+  // Engineer-to-engineer transfers: when true, the recipient must sign on receipt.
+  engineerTransferRequireSignature: boolean;
 }

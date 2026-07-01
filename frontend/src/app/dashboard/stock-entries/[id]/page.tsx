@@ -14,7 +14,7 @@ export default function StockEntryPage() {
   const id = String(params.id);
 
   return (
-    <PermissionGate anyOf={["stock_requests.view"]}>
+    <PermissionGate anyOf={["customer_stock.view", "stock_requests.view"]}>
       <EntryLoader key={id} id={id} />
     </PermissionGate>
   );

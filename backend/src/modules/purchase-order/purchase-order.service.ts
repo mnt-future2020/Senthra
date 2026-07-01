@@ -488,6 +488,10 @@ export async function submitPurchaseOrder(id: string, actor?: AuditActor): Promi
   if (po.items.length === 0) throw badRequest("Add at least one item before submitting.");
   const updated = await poRepo.update(id, { status: "pending_approval", submittedBy: actor?.email ?? null, submittedAt: new Date() });
   recordStatus(actor, id, updated.code, "purchase_order.submitted");
+  // Fire-and-forget: notify approvers a PO awaits their decision. NEVER blocks or rolls back.
+  void poEmail.notifyApproversPoSubmitted(updated, actor?.email ?? null).catch((e) =>
+    console.error(`PO ${updated.code} approval notification failed:`, e instanceof Error ? e.message : e),
+  );
   return toPublic(updated);
 }
 

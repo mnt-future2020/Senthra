@@ -12,6 +12,7 @@ import type { InventoryDetail as InventoryDetailType, InventoryTransaction, Purc
 
 type Tab = "overview" | "transactions" | "purchases";
 const TXN_PAGE_SIZE = 20;
+const INVENTORY_LIST = "/dashboard/inventory";
 
 export function InventoryDetail({ initial }: { initial: InventoryDetailType }) {
   const router = useRouter();
@@ -27,7 +28,7 @@ export function InventoryDetail({ initial }: { initial: InventoryDetailType }) {
     <div className="space-y-5">
       <div className="flex flex-col gap-4 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:flex-row sm:items-start sm:justify-between" style={{ borderRadius: "var(--radius)" }}>
         <div className="min-w-0">
-          <button onClick={() => router.push("/dashboard/inventory")} className="mb-2 flex items-center gap-1.5 text-[11px] font-bold text-[var(--muted)] transition-colors hover:text-[var(--ink)]">
+          <button onClick={() => { if (window.history.length > 1) router.back(); else router.push(INVENTORY_LIST); }} className="mb-2 flex items-center gap-1.5 text-[11px] font-bold text-[var(--muted)] transition-colors hover:text-[var(--ink)]">
             <ArrowLeft className="h-3.5 w-3.5" /> Back to inventory
           </button>
           <div className="flex flex-wrap items-center gap-2">
@@ -128,9 +129,18 @@ function Overview({ inv }: { inv: InventoryDetailType }) {
 }
 
 function Transactions({ balanceId, warehouseName }: { balanceId: string; warehouseName: string }) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [data, setData] = React.useState<inventoryService.PagedTransactions | null>(null);
-  const [page, setPage] = React.useState(1);
   const [error, setError] = React.useState<string | null>(null);
+
+  const page = Math.max(1, Number(searchParams.get("txPage")) || 1);
+
+  const patchPage = React.useCallback((next: number | null) => {
+    const params = new URLSearchParams(window.location.search);
+    if (next && next > 1) params.set("txPage", String(next)); else params.delete("txPage");
+    router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
+  }, [router]);
 
   React.useEffect(() => {
     let active = true;
@@ -177,7 +187,7 @@ function Transactions({ balanceId, warehouseName }: { balanceId: string; warehou
           </table>
         </div>
       </div>
-      {data.total > 0 && <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="movements" onPage={setPage} />}
+      {data.total > 0 && <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="movements" onPage={(n) => patchPage(n)} />}
     </div>
   );
 }

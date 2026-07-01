@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { createPortal } from "react-dom";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ClipboardList, MoreHorizontal, Pencil, Plus, Search, Trash2 } from "lucide-react";
 
 import * as poService from "@/services/purchase-order.service";
@@ -139,13 +139,25 @@ function PoTableSkeleton({ actions }: { actions: boolean }) {
 
 export function PurchaseOrdersView() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { can } = useAuth();
   const { pushToast } = useDashboard();
 
-  const [search, setSearch] = React.useState("");
-  const [debounced, setDebounced] = React.useState("");
-  const [statusFilter, setStatusFilter] = React.useState<"all" | PoStatus>("all");
-  const [page, setPage] = React.useState(1);
+  // Derive filter state from URL params
+  const statusFilter = (searchParams.get("status") as "all" | PoStatus) ?? "all";
+  const search = searchParams.get("q") ?? "";
+  const page = Math.max(1, Number(searchParams.get("page")) || 1);
+
+  // Local search input state seeded from URL; debounce-writes to ?q
+  const [searchInput, setSearchInput] = React.useState(search);
+  // Re-seed the box when ?q changes outside typing (browser back/forward). Adjusting state during
+  // render (not via an effect) is the React-recommended pattern and avoids a cascading re-render.
+  const [prevSearch, setPrevSearch] = React.useState(search);
+  if (prevSearch !== search) {
+    setPrevSearch(search);
+    setSearchInput(search);
+  }
+
   const [refreshKey, setRefreshKey] = React.useState(0);
   const [data, setData] = React.useState(() => poService.getCachedPurchaseOrders({ pageSize: PAGE_SIZE }));
   const [loading, setLoading] = React.useState(!data);
@@ -157,15 +169,32 @@ export function PurchaseOrdersView() {
   const canDelete = can("purchase_orders.delete");
   const showActions = canEdit || canDelete;
 
+  // Patch URL params, preserving any other params on the page; resetPage drops ?page
+  const patchParams = React.useCallback(
+    (updates: Record<string, string | null>, resetPage = true) => {
+      const params = new URLSearchParams(window.location.search);
+      for (const [k, v] of Object.entries(updates)) {
+        if (v) params.set(k, v);
+        else params.delete(k);
+      }
+      if (resetPage) params.delete("page");
+      router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
+    },
+    [router],
+  );
+
+  // Debounce the search input into ?q
   React.useEffect(() => {
-    const t = setTimeout(() => setDebounced(search.trim()), 300);
+    const t = setTimeout(() => {
+      if (searchInput.trim() !== search) patchParams({ q: searchInput.trim() || null }, true);
+    }, 300);
     return () => clearTimeout(t);
-  }, [search]);
+  }, [searchInput, search, patchParams]);
 
   React.useEffect(() => {
     let active = true;
     (async () => {
-      const params = { search: debounced || undefined, status: statusFilter === "all" ? undefined : statusFilter, page, pageSize: PAGE_SIZE };
+      const params = { search: search || undefined, status: statusFilter === "all" ? undefined : statusFilter, page, pageSize: PAGE_SIZE };
       const cached = poService.getCachedPurchaseOrders(params);
       if (active && cached) setData(cached);
       setLoading(true);
@@ -183,11 +212,11 @@ export function PurchaseOrdersView() {
     return () => {
       active = false;
     };
-  }, [debounced, statusFilter, page, refreshKey]);
+  }, [search, statusFilter, page, refreshKey]);
 
   const orders = data?.purchaseOrders ?? [];
   const showSkeleton = loading && orders.length === 0;
-  const isFiltered = statusFilter !== "all" || Boolean(debounced);
+  const isFiltered = statusFilter !== "all" || Boolean(search);
 
   const onDelete = async () => {
     if (!confirm.po) return;
@@ -196,7 +225,7 @@ export function PurchaseOrdersView() {
       await poService.deletePurchaseOrder(confirm.po.id);
       setConfirm({ open: false, po: null });
       pushToast("Draft purchase order removed.", "success");
-      if (orders.length === 1 && page > 1) setPage(page - 1);
+      if (orders.length === 1 && page > 1) patchParams({ page: String(page - 1) }, false);
       else setRefreshKey((k) => k + 1);
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Delete failed.", "alert");
@@ -216,13 +245,13 @@ export function PurchaseOrdersView() {
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input
-            value={search}
-            onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
             placeholder="Search code, supplier or reference…"
             className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
           />
         </div>
-        <Select size="sm" value={statusFilter} onChange={(v) => { setStatusFilter(v as "all" | PoStatus); setPage(1); }} options={[{ value: "all", label: "All statuses" }, ...(Object.keys(PO_STATUS_LABELS) as PoStatus[]).map((s) => ({ value: s, label: PO_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
+        <Select size="sm" value={statusFilter} onChange={(v) => patchParams({ status: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All statuses" }, ...(Object.keys(PO_STATUS_LABELS) as PoStatus[]).map((s) => ({ value: s, label: PO_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
         {can("purchase_orders.create") && (
           <button onClick={() => router.push("/dashboard/purchase-orders/new")} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 sm:ml-auto">
             <Plus className="h-4 w-4" /> New order
@@ -287,7 +316,7 @@ export function PurchaseOrdersView() {
 
       {data && data.total > 0 && (
         <div className="shrink-0">
-          <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="purchase orders" onPage={setPage} />
+          <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="purchase orders" onPage={(p) => patchParams({ page: p > 1 ? String(p) : null }, false)} />
         </div>
       )}
 

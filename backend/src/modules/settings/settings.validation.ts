@@ -102,6 +102,9 @@ export const updateSettingsSchema = z.object({
   timezone: z.enum(["Europe/London", "Europe/Dublin", "UTC", "Europe/Paris", "Europe/Berlin"]).or(z.literal("")).optional(),
   dateFormat: z.enum(["DD/MM/YYYY", "MM/DD/YYYY", "YYYY-MM-DD"]).or(z.literal("")).optional(),
   timeFormat: z.enum(["24h", "12h"]).or(z.literal("")).optional(),
+
+  // --- Engineer transfer feature flags ---
+  engineerTransferRequireSignature: z.boolean().optional(),
 });
 export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;
 

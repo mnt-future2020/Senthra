@@ -98,6 +98,11 @@ model Settings {
   dateFormat String? // "DD/MM/YYYY" (default) | "MM/DD/YYYY" | "YYYY-MM-DD"
   timeFormat String? // "24h" (default) | "12h"
 
+  // --- Engineer-to-engineer transfer ---
+  // When true, every engineer-to-engineer transfer requires the receiving engineer to capture a
+  // signature acknowledging receipt. Default (null/false) = optional.
+  engineerTransferRequireSignature Boolean @default(false)
+
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 }
@@ -225,8 +230,6 @@ model Warehouse {
   stockTransfersTo   StockTransfer[] @relation("StockTransferTo")
   // Manual stock adjustments (existing/opening stock) added at this warehouse (back-relation).
   stockAdjustments StockAdjustment[]
-  // Goods Out dispatches from this warehouse (back-relation; no DB column).
-  goodsOuts          GoodsOut[]
   // Customer stock assignments destined for this warehouse (back-relation; no DB column).
   customerStockAssignments CustomerStockWarehouseAssignment[]
   // Received customer stock physically at this warehouse (back-relation; no DB column).
@@ -446,8 +449,7 @@ model IrmItem {
   inventoryTransactions InventoryTransaction[]
   // Stock transfers of this item between warehouses (back-relation; no DB column).
   stockTransfers StockTransfer[]
-  // Goods Out lines + engineer-held stock for this item (back-relations; no DB column).
-  goodsOutItems            GoodsOutItem[]
+  // Engineer-held stock for this item (back-relation; no DB column).
   engineerStockBalances    EngineerStockBalance[]
   engineerStockTransactions EngineerStockTransaction[]
   // Job kit lines drawing this IRM item (back-relation; no DB column).
@@ -873,89 +875,9 @@ model StockAdjustment {
   @@index([createdAt])
 }
 
-// A warehouse → engineer stock dispatch (GDN-0001). Twin of GoodsReceipt: Draft (editable/deletable)
-// → Dispatched (terminal; inventory written ONCE) | Cancelled (terminal). On Dispatch ONE transaction
-// decrements the warehouse InventoryBalance (via applyOutbound + a goods_out InventoryTransaction) and
-// increments the engineer's EngineerStockBalance (+ an EngineerStockTransaction). Warehouse / engineer /
-// item names are snapshotted so history reads correctly after renames. jobId/projectId/
-// customerStockRequestId are optional FUTURE Job-Pack sockets (no relations). `deletedAt` is written
-// EXPLICITLY on create (Prisma+Mongo `{deletedAt:null}` reads don't match an absent field). Serial- and
-// batch-tracked IRM items are blocked in v1.
-model GoodsOut {
-  id   String @id @default(auto()) @map("_id") @db.ObjectId
-  code String @unique // auto-allocated, e.g. GDN-0001
-
-  warehouseId   String    @db.ObjectId
-  warehouse     Warehouse @relation(fields: [warehouseId], references: [id])
-  warehouseName String // snapshot
-  warehouseCode String? // snapshot
-
-  engineerId         String  @db.ObjectId
-  engineer           User    @relation("GoodsOutEngineer", fields: [engineerId], references: [id])
-  engineerName       String // snapshot
-  engineerEmail      String? // snapshot
-  engineerEmployeeId String? // snapshot, e.g. SNT-0007
-
-  status             String    @default("draft") // draft | dispatched | cancelled
-  dispatchDate       DateTime
-  dispatchReason     String // job_work | customer_request | installation | maintenance | replacement | warehouse_replenishment | emergency_dispatch | other
-  expectedReturnDate DateTime? // store-only seam for the future Returns module (FLOW 5)
-
-  // Who authorised the dispatch — snapshot only (no relation; NOT a hard approval gate).
-  authorizedById   String? @db.ObjectId
-  authorizedByName String?
-
-  // FUTURE Job Pack sockets — optional, no relations yet.
-  jobId                  String? @db.ObjectId
-  projectId              String? @db.ObjectId
-  customerStockRequestId String? @db.ObjectId
-
-  referenceNumber String?
-  description     String?
-  internalNotes   String?
-
-  items GoodsOutItem[]
-
-  createdBy    String?
-  dispatchedBy String?
-  dispatchedAt DateTime?
-  cancelledBy  String?
-  cancelledAt  DateTime?
-  cancelReason String?
-  updatedBy    String?
-  deletedAt    DateTime? // soft delete — draft-only delete; history stays intact
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@index([status])
-  @@index([warehouseId])
-  @@index([engineerId])
-  @@index([dispatchDate])
-}
-
-model GoodsOutItem {
-  id         String   @id @default(auto()) @map("_id") @db.ObjectId
-  goodsOutId String   @db.ObjectId
-  goodsOut   GoodsOut @relation(fields: [goodsOutId], references: [id])
-
-  irmItemId String  @db.ObjectId
-  irmItem   IrmItem @relation(fields: [irmItemId], references: [id])
-  itemName  String // snapshot
-  sku       String? // snapshot
-  baseUnit  String? // snapshot
-
-  quantity Int
-  notes    String?
-
-  createdAt DateTime @default(now())
-
-  @@index([goodsOutId])
-}
-
 // Engineer-held stock primitive — the engineer-side twin of InventoryBalance. The on-hand quantity an
-// engineer currently holds for an IRM item. Goods Out increments it; future Usage/Returns/Transfer
-// adjust it. The Engineer Van Inventory module later reads this as its surface.
+// engineer currently holds for an IRM item. Job Pack issue increments it; returns / engineer-to-engineer
+// transfers adjust it. Written via the shared engineer-stock repository.
 model EngineerStockBalance {
   id         String  @id @default(auto()) @map("_id") @db.ObjectId
   irmItemId  String  @db.ObjectId
@@ -1104,6 +1026,82 @@ model EngineerCustomerStockTransaction {
   @@index([customerStockEntryId, engineerId])
   @@index([sourceType, sourceId])
   @@index([createdAt])
+}
+
+// ── Engineer-to-engineer stock transfer (request → holder approves) ──────────────────────────
+// A van-to-van move of an engineer's on-hand holdings to another engineer, gated by the HOLDER's
+// approval. Ownership is preserved per line (company IRM vs customer consignment). Code ENG-####
+// via the shared Counter. Loose sockets (no relations) — snapshots cover all reads. Stock moves
+// only on completion; pending requests hold no balance.
+model EngineerStockTransfer {
+  id   String @id @default(auto()) @map("_id") @db.ObjectId
+  code String @unique // ENG-0001
+
+  status String @default("pending") // pending | completed | declined | cancelled
+
+  // Holder (source, the approver) and recipient (needs the stock) — snapshots, history-safe.
+  fromEngineerId    String  @db.ObjectId
+  fromEngineerName  String
+  fromEngineerEmail String?
+  toEngineerId      String  @db.ObjectId
+  toEngineerName    String
+  toEngineerEmail   String?
+
+  // Who created the request.
+  requestedById    String  @db.ObjectId // actor user id (recipient engineer, or an admin)
+  requestedByEmail String?
+  requestedByKind  String // engineer | admin
+
+  reason      String
+  notes       String?
+  jobId       String?  @db.ObjectId // optional reference
+  customerId  String?  @db.ObjectId // optional reference
+  attachments String[] // evidence image URLs (Cloudinary)
+
+  // Lifecycle / approval.
+  approvedBy      String?
+  approvedAt      DateTime?
+  overrideByAdmin Boolean   @default(false) // admin force-completed a pending request
+  declinedBy      String?
+  declinedAt      DateTime?
+  declineReason   String?
+  cancelledAt     DateTime?
+  completedAt     DateTime?
+
+  // Receiver acknowledgment (configurable via Settings; snapshot at create time).
+  requireSignature     Boolean   @default(false)
+  receiverSignatureUrl String?
+  acknowledgedAt       DateTime?
+
+  lines     EngineerStockTransferLine[]
+  createdBy String?
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([status])
+  @@index([fromEngineerId, status])
+  @@index([toEngineerId, status])
+  @@index([createdAt])
+}
+
+model EngineerStockTransferLine {
+  id         String                @id @default(auto()) @map("_id") @db.ObjectId
+  transferId String                @db.ObjectId
+  transfer   EngineerStockTransfer @relation(fields: [transferId], references: [id])
+
+  ownership            String  // company | customer
+  irmItemId            String? @db.ObjectId // when company (loose socket)
+  customerStockEntryId String? @db.ObjectId // when customer (loose socket)
+
+  itemName String // snapshot
+  sku      String? // snapshot
+  uom      String? // snapshot
+  quantity Int
+
+  createdAt DateTime @default(now())
+
+  @@index([transferId])
 }
 
 // Damaged-stock pool (write-off). Both owner types; never re-enters usable stock in v1.
@@ -1269,8 +1267,7 @@ model User {
   ownedSuppliers    Supplier[]
   // IRM items this user is the internal owner of (back-relation; no DB column).
   ownedIrmItems     IrmItem[]
-  // Goods Out dispatches received + engineer-held stock (back-relations; no DB column).
-  goodsOutsReceived         GoodsOut[]                 @relation("GoodsOutEngineer")
+  // Engineer-held stock (back-relation; no DB column).
   engineerStockBalances     EngineerStockBalance[]     @relation("EngineerStockOwner")
   engineerStockTransactions EngineerStockTransaction[] @relation("EngineerStockTxnOwner")
   // Field jobs assigned to this engineer (back-relation; no DB column).
@@ -1642,7 +1639,7 @@ model Job {
   cancelReason String?
 
   // Audit — staff that created it. createdByUserId drives realtime "job:accepted" targeting
-  // (no relation — a loose socket, like GoodsOut.jobId); createdBy is the email snapshot.
+  // (no relation — a loose socket); createdBy is the email snapshot.
   createdByUserId String?   @db.ObjectId
   createdBy       String?   // staff email that created the job (snapshot)
   updatedBy       String?
@@ -1663,7 +1660,7 @@ model Job {
 // pool: customer-owned consignment stock, the company IRM catalogue, or a free-text MISC item
 // (services / patch cords / charges). Only the matching id is set per line (app-enforced).
 // lineType is a String (NOT a Prisma enum) per the house convention. irmItemId is a real
-// relation; customerStockEntryId is a loose socket (no relation, mirroring GoodsOut's sockets).
+// relation; customerStockEntryId is a loose socket (no relation).
 model JobKitLine {
   id    String @id @default(auto()) @map("_id") @db.ObjectId
   jobId String @db.ObjectId

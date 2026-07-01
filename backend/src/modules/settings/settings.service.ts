@@ -233,6 +233,8 @@ export interface PublicSettings extends PublicBranding {
   timezone: string;
   dateFormat: string;
   timeFormat: string;
+  // Engineer-to-engineer transfer feature flags.
+  engineerTransferRequireSignature: boolean;
 }
 
 function publicSettings(s: Settings): PublicSettings {
@@ -286,6 +288,9 @@ function publicSettings(s: Settings): PublicSettings {
 
     // Branding
     ...brandingFrom(s),
+
+    // Engineer transfer feature flags
+    engineerTransferRequireSignature: s.engineerTransferRequireSignature ?? false,
   };
 }
 
@@ -335,6 +340,8 @@ export interface UpdateSettingsParams {
   timezone?: string;
   dateFormat?: string;
   timeFormat?: string;
+  // Engineer-to-engineer transfer feature flags.
+  engineerTransferRequireSignature?: boolean;
 }
 
 export async function updateSettings(input: UpdateSettingsParams): Promise<PublicSettings> {
@@ -433,6 +440,9 @@ export async function updateSettings(input: UpdateSettingsParams): Promise<Publi
   if (typeof input.timezone === "string") data.timezone = input.timezone.trim() || null;
   if (typeof input.dateFormat === "string") data.dateFormat = input.dateFormat.trim() || null;
   if (typeof input.timeFormat === "string") data.timeFormat = input.timeFormat.trim() || null;
+
+  // Engineer transfer flags
+  if (typeof input.engineerTransferRequireSignature === "boolean") data.engineerTransferRequireSignature = input.engineerTransferRequireSignature;
 
   const updated = await settingsRepo.update(s.id, data);
   return publicSettings(updated);

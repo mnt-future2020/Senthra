@@ -19,6 +19,10 @@ const CATEGORY_LABELS: Record<string, string> = {
   custom: "Custom",
 };
 
+// Section order in the list — by business priority, not alphabetical. Any category not
+// listed here falls to the end (keeps custom/unknown categories stable at the bottom).
+const CATEGORY_ORDER = ["account", "notification", "security", "custom"];
+
 // Skeleton mirrors the grouped template list.
 function TemplatesSkeleton() {
   return (
@@ -84,6 +88,22 @@ export function EmailTemplatesSection() {
     }
   };
 
+  // Group by category, then order the sections by business priority (see CATEGORY_ORDER).
+  // Templates within a group keep the backend's name-sorted order. Memoised so the grouping
+  // isn't recomputed on unrelated re-renders (e.g. an optimistic toggle). Must run before the
+  // editor early-return below to keep hook order stable across renders.
+  const orderedGroups = React.useMemo(() => {
+    const byCat = templates.reduce<Record<string, EmailTemplate[]>>((acc, t) => {
+      (acc[t.category] ??= []).push(t);
+      return acc;
+    }, {});
+    const rank = (c: string) => {
+      const i = CATEGORY_ORDER.indexOf(c);
+      return i === -1 ? CATEGORY_ORDER.length : i;
+    };
+    return Object.entries(byCat).sort(([a], [b]) => rank(a) - rank(b));
+  }, [templates]);
+
   const editing = templates.find((t) => t.id === editingId) ?? null;
   if (editing) {
     return (
@@ -95,12 +115,6 @@ export function EmailTemplatesSection() {
     );
   }
 
-  // Group templates by category, preserving a sensible order.
-  const groups = templates.reduce<Record<string, EmailTemplate[]>>((acc, t) => {
-    (acc[t.category] ??= []).push(t);
-    return acc;
-  }, {});
-
   return (
     <SettingsCard
       icon={Mail}
@@ -111,9 +125,16 @@ export function EmailTemplatesSection() {
         <TemplatesSkeleton />
       ) : error ? (
         <div className="py-10 text-center text-sm text-[var(--neg)]">{error}</div>
+      ) : templates.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-[var(--border)] py-10 text-center">
+          <p className="text-sm font-bold text-[var(--ink)]">No email templates yet</p>
+          <p className="mt-1 text-xs text-[var(--muted)]">
+            The system&apos;s default templates load automatically — try refreshing in a moment.
+          </p>
+        </div>
       ) : (
         <div className="space-y-5">
-          {Object.entries(groups).map(([category, items]) => (
+          {orderedGroups.map(([category, items]) => (
             <div key={category}>
               <h4 className="mb-2 text-[10px] font-extrabold uppercase tracking-wider text-[var(--faint)]">
                 {CATEGORY_LABELS[category] ?? category}

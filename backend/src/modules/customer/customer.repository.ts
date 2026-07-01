@@ -8,6 +8,7 @@ import {
 } from "@prisma/client";
 
 import { prisma, withTransaction } from "../../lib/prisma.js";
+import { escapeRegex } from "../../utils/search.js";
 
 // Repo functions in the customer-receive path accept an optional transaction client so the
 // caller can run the assignment update, request-status update and stock-entry write atomically
@@ -53,7 +54,7 @@ function buildWhere(filters: CustomerListFilters): Prisma.CustomerWhereInput {
   const where: Prisma.CustomerWhereInput = { deletedAt: null };
   if (filters.status) where.status = filters.status;
   if (filters.search) {
-    const q = filters.search;
+    const q = escapeRegex(filters.search);
     where.OR = [
       { name: { contains: q, mode: "insensitive" } },
       { customerCode: { contains: q, mode: "insensitive" } },
@@ -948,4 +949,122 @@ export async function nextStockEntryBarcodeSeq(): Promise<number> {
 // turns this into a friendly 409.
 export function isUniqueConflictError(e: unknown): boolean {
   return e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002";
+}
+
+// --- Inventory Hub: customer stock transfer (warehouse → warehouse) -------------------
+
+// Atomically move `quantity` units from source entry to the destination warehouse.
+// Match rule: find an active entry for the same customerId + itemName (normalised) + sku
+// at toWarehouseId; if found increment it, otherwise create a new entry copying all item
+// metadata from the source. Returns the destination entry (updated or created).
+export async function transferCustomerStockTx(
+  sourceId: string,
+  toWarehouseId: string,
+  quantity: number,
+  actorEmail: string | null,
+): Promise<{ source: Awaited<ReturnType<typeof findStockEntryById>>; destination: Awaited<ReturnType<typeof findStockEntryById>> }> {
+  return withTransaction(async (tx) => {
+    // Re-read source inside tx for concurrency safety.
+    const source = await tx.customerStockEntry.findUnique({
+      where: { id: sourceId },
+      include: {
+        customer: { select: { id: true, name: true, customerCode: true } },
+        warehouse: { select: { id: true, name: true, code: true } },
+        category: { select: { id: true, name: true } },
+      },
+    });
+    if (!source || source.status !== "active") {
+      throw new Error("Source entry not found or inactive.");
+    }
+    if (source.quantity < quantity) {
+      throw new Error(`Only ${source.quantity} available — transfer quantity exceeds source.`);
+    }
+
+    // Decrement source.
+    await tx.customerStockEntry.update({
+      where: { id: sourceId },
+      data: { quantity: { decrement: quantity } },
+    });
+
+    // Find an existing active destination entry matching same customer + itemName + sku.
+    const norm = (s: string) => s.trim().toLowerCase();
+    const candidates = await tx.customerStockEntry.findMany({
+      where: { customerId: source.customerId, warehouseId: toWarehouseId, status: "active" },
+      select: { id: true, itemName: true, sku: true },
+    });
+    const match = candidates.find(
+      (e) => norm(e.itemName) === norm(source.itemName) && e.sku === (source.sku ?? null),
+    );
+
+    let destId: string;
+    if (match) {
+      // Increment existing destination entry.
+      await tx.customerStockEntry.update({
+        where: { id: match.id },
+        data: { quantity: { increment: quantity }, receivedBy: actorEmail, receivedAt: new Date() },
+      });
+      destId = match.id;
+    } else {
+      // Create new destination entry copying item fields.
+      const newEntry = await tx.customerStockEntry.create({
+        data: {
+          customerId: source.customerId,
+          warehouseId: toWarehouseId,
+          itemName: source.itemName,
+          sku: source.sku ?? null,
+          categoryId: source.categoryId ?? null,
+          description: source.description ?? null,
+          uom: source.uom ?? null,
+          serialized: source.serialized ?? false,
+          serialNumber: source.serialNumber ?? null,
+          highValue: source.highValue ?? false,
+          thresholdQty: source.thresholdQty ?? null,
+          attributes: (source.attributes as Record<string, string> | null) ?? null,
+          quantity,
+          status: "active",
+          receivedBy: actorEmail,
+          receivedAt: new Date(),
+        },
+      });
+      destId = newEntry.id;
+    }
+
+    // Re-read both with relations for the return value.
+    const [updatedSource, updatedDest] = await Promise.all([
+      tx.customerStockEntry.findUnique({
+        where: { id: sourceId },
+        include: {
+          customer: { select: { id: true, name: true, customerCode: true } },
+          warehouse: { select: { id: true, name: true, code: true } },
+          category: { select: { id: true, name: true } },
+        },
+      }),
+      tx.customerStockEntry.findUnique({
+        where: { id: destId },
+        include: {
+          customer: { select: { id: true, name: true, customerCode: true } },
+          warehouse: { select: { id: true, name: true, code: true } },
+          category: { select: { id: true, name: true } },
+        },
+      }),
+    ]);
+    return { source: updatedSource, destination: updatedDest };
+  });
+}
+
+// --- Inventory Hub aggregation reads --------------------------------------------------
+export function findActiveStockEntries(filters: { warehouseId?: string; customerId?: string } = {}) {
+  return prisma.customerStockEntry.findMany({
+    where: {
+      status: "active",
+      quantity: { gt: 0 },
+      ...(filters.warehouseId ? { warehouseId: filters.warehouseId } : {}),
+      ...(filters.customerId ? { customerId: filters.customerId } : {}),
+    },
+    include: {
+      customer: { select: { name: true } },
+      warehouse: { select: { name: true, code: true } },
+      category: { select: { name: true } },
+    },
+  });
 }

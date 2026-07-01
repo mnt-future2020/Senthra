@@ -1,14 +1,15 @@
-import * as goodsOutService from "#modules/goods-out/goods-out.service.js";
 import * as jobService from "#modules/job/job.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import * as engineerRepo from "./engineer.repository.js";
 import * as goodsManagementRepo from "#modules/goods-management/goods-management.repository.js";
+import * as movementService from "#modules/inventory/movement.service.js";
+import { decodeCursor } from "#modules/inventory/movement.js";
 import type { CompleteJobInput } from "#modules/job/job.validation.js";
 
 // The Engineer Portal READ surface. Every function takes the engineer's own User.id (resolved from
 // the authenticated principal by the controller — never a route param) and reads existing primitives:
-// EngineerStockBalance/Transaction (own held stock + activity) and the Goods Out service (own
-// dispatches received). No writes, no new dispatch/stock logic — consumes what already exists.
+// EngineerStockBalance/Transaction (own held stock + activity). No writes, no new stock logic —
+// consumes what already exists.
 
 export interface EngineerStockItem {
   irmItemId: string;
@@ -33,7 +34,6 @@ export interface EngineerActivity {
 
 export interface EngineerOverview {
   stock: { lines: number; totalQuantity: number };
-  dispatches: { total: number };
   recentActivity: EngineerActivity[];
 }
 
@@ -74,16 +74,24 @@ export async function getOwnActivity(engineerId: string, limit = 15): Promise<En
   }));
 }
 
+// The engineer's own Stock Movement History — the unified ledger, hard-scoped by the movement service
+// to this engineer's two van ledgers (company + customer consignment). Warehouse/damaged movements are
+// never reachable here. The engineerId is the signed-in user's id (resolved in the controller), and the
+// movement service ignores any client-supplied engineer filter.
+export function getOwnMovements(engineerId: string, query: Record<string, unknown>) {
+  const filters = movementService.movementFiltersFrom(query);
+  const cursor = decodeCursor(typeof query.cursor === "string" ? query.cursor : undefined);
+  const limit = typeof query.limit === "string" ? Number(query.limit) : undefined;
+  return movementService.listEngineerMovements(engineerId, filters, cursor, limit);
+}
+
 export async function getOwnOverview(engineerId: string): Promise<EngineerOverview> {
-  const [stock, recentActivity, dispatched] = await Promise.all([
+  const [stock, recentActivity] = await Promise.all([
     getOwnStock(engineerId),
     getOwnActivity(engineerId, 8),
-    // Reuse Goods Out — the engineer's dispatched GDNs. pageSize:1 because we only need the count here.
-    goodsOutService.listGoodsOut({ engineer: engineerId, status: "dispatched", pageSize: 1 }),
   ]);
   return {
     stock: { lines: stock.length, totalQuantity: stock.reduce((sum, i) => sum + i.quantityOnHand, 0) },
-    dispatches: { total: dispatched.total },
     recentActivity,
   };
 }

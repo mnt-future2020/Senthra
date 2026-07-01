@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { createPortal } from "react-dom";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { MoreHorizontal, Pencil, Plus, Power, Search, Trash2, Warehouse as WarehouseIcon } from "lucide-react";
 
 import * as warehouseService from "@/services/warehouse.service";
@@ -189,14 +189,25 @@ function WarehousesTableSkeleton({ actions }: { actions: boolean }) {
 
 export function WarehousesView() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { can } = useAuth();
   const { pushToast } = useDashboard();
 
-  const [search, setSearch] = React.useState("");
-  const [debounced, setDebounced] = React.useState("");
-  const [statusFilter, setStatusFilter] = React.useState<"all" | WarehouseStatus>("all");
-  const [sort, setSort] = React.useState<Sort>("newest");
-  const [page, setPage] = React.useState(1);
+  // Filters derived from URL
+  const search = searchParams.get("q") ?? "";
+  const statusFilter = (searchParams.get("status") ?? "all") as "all" | WarehouseStatus;
+  const sort = (searchParams.get("sort") as Sort) ?? "newest";
+  const page = Math.max(1, Number(searchParams.get("page")) || 1);
+
+  // Local state — not user-facing filters
+  const [searchInput, setSearchInput] = React.useState(search);
+  // Re-seed the box when ?q changes outside typing (browser back/forward). Adjusting state during
+  // render (not via an effect) is the React-recommended pattern and avoids a cascading re-render.
+  const [prevSearch, setPrevSearch] = React.useState(search);
+  if (prevSearch !== search) {
+    setPrevSearch(search);
+    setSearchInput(search);
+  }
   const [refreshKey, setRefreshKey] = React.useState(0);
   const [data, setData] = React.useState(() => warehouseService.getCachedWarehouses({ pageSize: PAGE_SIZE }));
   const [loading, setLoading] = React.useState(!data);
@@ -211,16 +222,30 @@ export function WarehousesView() {
   const canDelete = can("warehouse.delete");
   const showActions = canEdit || canDelete;
 
+  // Patch URL params, preserving all existing params (incl. ?tab). Filter changes reset to page 1.
+  const patch = React.useCallback((updates: Record<string, string | null>, resetPage = true) => {
+    const params = new URLSearchParams(window.location.search);
+    for (const [k, v] of Object.entries(updates)) {
+      if (v) params.set(k, v);
+      else params.delete(k);
+    }
+    if (resetPage) params.delete("page");
+    router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
+  }, [router]);
+
+  // Debounce the search input into ?q
   React.useEffect(() => {
-    const t = setTimeout(() => setDebounced(search.trim()), 300);
+    const t = setTimeout(() => {
+      if (searchInput.trim() !== search) patch({ q: searchInput.trim() || null });
+    }, 300);
     return () => clearTimeout(t);
-  }, [search]);
+  }, [searchInput, search, patch]);
 
   React.useEffect(() => {
     let active = true;
     (async () => {
       const params = {
-        search: debounced || undefined,
+        search: search || undefined,
         status: statusFilter === "all" ? undefined : statusFilter,
         sort: sort === "newest" ? undefined : sort,
         page,
@@ -243,11 +268,11 @@ export function WarehousesView() {
     return () => {
       active = false;
     };
-  }, [debounced, statusFilter, sort, page, refreshKey]);
+  }, [search, statusFilter, sort, page, refreshKey]);
 
   const warehouses = data?.warehouses ?? [];
   const showSkeleton = loading && warehouses.length === 0;
-  const isFiltered = statusFilter !== "all" || Boolean(debounced);
+  const isFiltered = statusFilter !== "all" || Boolean(search);
 
   const toggleStatus = async (w: Warehouse) => {
     const next = w.status === "active" ? "inactive" : "active";
@@ -267,7 +292,7 @@ export function WarehousesView() {
       await warehouseService.deleteWarehouse(confirm.warehouse.id);
       setConfirm({ open: false, warehouse: null });
       pushToast("Warehouse removed.", "success");
-      if (warehouses.length === 1 && page > 1) setPage(page - 1);
+      if (warehouses.length === 1 && page > 1) patch({ page: String(page - 1) }, false);
       else setRefreshKey((k) => k + 1);
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Delete failed.", "alert");
@@ -282,11 +307,8 @@ export function WarehousesView() {
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input
-            value={search}
-            onChange={(e) => {
-              setSearch(e.target.value);
-              setPage(1);
-            }}
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
             placeholder="Search name, code, city or contact…"
             className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
           />
@@ -294,10 +316,7 @@ export function WarehousesView() {
         <Select
           size="sm"
           value={statusFilter}
-          onChange={(v) => {
-            setStatusFilter(v as "all" | WarehouseStatus);
-            setPage(1);
-          }}
+          onChange={(v) => patch({ status: v === "all" ? null : v })}
           options={[
             { value: "all", label: "All statuses" },
             { value: "active", label: "Active" },
@@ -308,10 +327,7 @@ export function WarehousesView() {
         <Select
           size="sm"
           value={sort}
-          onChange={(v) => {
-            setSort(v as Sort);
-            setPage(1);
-          }}
+          onChange={(v) => patch({ sort: v === "newest" ? null : v })}
           options={[
             { value: "newest", label: "Newest first" },
             { value: "oldest", label: "Oldest first" },
@@ -420,7 +436,7 @@ export function WarehousesView() {
             totalPages={data.totalPages}
             total={data.total}
             label="warehouses"
-            onPage={setPage}
+            onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)}
           />
         </div>
       )}

@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { createPortal } from "react-dom";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { MoreHorizontal, PackageCheck, Pencil, Search, Trash2 } from "lucide-react";
 
 import * as grnService from "@/services/goods-in.service";
@@ -103,14 +103,41 @@ function TableSkeleton({ actions }: { actions: boolean }) {
 // Company (GRN) pane. No props = the global GRN page. Mirrors InventoryView's embedded contract.
 export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { warehouseId?: string; warehouseCode?: string; embedded?: boolean } = {}) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { can } = useAuth();
   const { pushToast } = useDashboard();
 
-  const [search, setSearch] = React.useState("");
-  const [debounced, setDebounced] = React.useState("");
-  const [statusFilter, setStatusFilter] = React.useState<"all" | GrnStatus>("all");
-  const [page, setPage] = React.useState(1);
+  // Filters derived from URL — survive a browser refresh.
+  const search = searchParams.get("q") ?? "";
+  const statusFilter = (searchParams.get("status") ?? "all") as "all" | GrnStatus;
+  const page = Math.max(1, Number(searchParams.get("page")) || 1);
+
+  // Local input state for debounced search; seeded from URL.
+  const [searchInput, setSearchInput] = React.useState(search);
+  // Re-seed the box when ?q changes outside typing (browser back/forward). Adjusting state during
+  // render (not via an effect) is the React-recommended pattern and avoids a cascading re-render.
+  const [prevSearch, setPrevSearch] = React.useState(search);
+  if (prevSearch !== search) {
+    setPrevSearch(search);
+    setSearchInput(search);
+  }
+
+  const [debounced, setDebounced] = React.useState(search);
   const [refreshKey, setRefreshKey] = React.useState(0);
+
+  // Writer — preserves ALL existing params (including ?tab for panel-embedded views).
+  const patch = React.useCallback(
+    (updates: Record<string, string | null>, resetPage = true) => {
+      const params = new URLSearchParams(window.location.search);
+      for (const [k, v] of Object.entries(updates)) {
+        if (v) params.set(k, v);
+        else params.delete(k);
+      }
+      if (resetPage) params.delete("page");
+      router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
+    },
+    [router],
+  );
   const [data, setData] = React.useState(() => grnService.getCachedGoodsReceipts({ warehouse: warehouseId, pageSize: PAGE_SIZE }));
   const [loading, setLoading] = React.useState(!data);
   const [error, setError] = React.useState<string | null>(null);
@@ -128,14 +155,21 @@ export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { wa
     : "/dashboard/goods-in/new";
 
   React.useEffect(() => {
-    const t = setTimeout(() => setDebounced(search.trim()), 300);
+    const t = setTimeout(() => {
+      // Guard against firing on mount / back-forward nav: only patch when the box actually diverges
+      // from the URL, so a deep-linked ?page (patch defaults resetPage=true → deletes it) is preserved.
+      if (searchInput.trim() !== search) {
+        setDebounced(searchInput.trim());
+        patch({ q: searchInput.trim() || null });
+      }
+    }, 300);
     return () => clearTimeout(t);
-  }, [search]);
+  }, [searchInput, search, patch]);
 
   React.useEffect(() => {
     let active = true;
     (async () => {
-      const params = { search: debounced || undefined, status: statusFilter === "all" ? undefined : statusFilter, warehouse: warehouseId, page, pageSize: PAGE_SIZE };
+      const params = { search: debounced || undefined, status: statusFilter === "all" ? undefined : (statusFilter as GrnStatus), warehouse: warehouseId, page, pageSize: PAGE_SIZE };
       const cached = grnService.getCachedGoodsReceipts(params);
       if (active && cached) setData(cached);
       setLoading(true);
@@ -164,7 +198,7 @@ export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { wa
       await grnService.deleteGoodsReceipt(confirm.grn.id);
       setConfirm({ open: false, grn: null });
       pushToast("Draft goods receipt removed.", "success");
-      if (rows.length === 1 && page > 1) setPage(page - 1);
+      if (rows.length === 1 && page > 1) patch({ page: String(page - 1) }, false);
       else setRefreshKey((k) => k + 1);
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Delete failed.", "alert");
@@ -185,9 +219,9 @@ export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { wa
       <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center">
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
-          <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="Search GRN, PO or delivery note…" className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]" />
+          <input value={searchInput} onChange={(e) => setSearchInput(e.target.value)} placeholder="Search GRN, PO or delivery note…" className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]" />
         </div>
-        <Select size="sm" value={statusFilter} onChange={(v) => { setStatusFilter(v as "all" | GrnStatus); setPage(1); }} options={[{ value: "all", label: "All statuses" }, ...(Object.keys(GRN_STATUS_LABELS) as GrnStatus[]).map((s) => ({ value: s, label: GRN_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
+        <Select size="sm" value={statusFilter} onChange={(v) => patch({ status: v === "all" ? null : v })} options={[{ value: "all", label: "All statuses" }, ...(Object.keys(GRN_STATUS_LABELS) as GrnStatus[]).map((s) => ({ value: s, label: GRN_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
         {/* Embedded in a warehouse, this is the Received (history) view — receiving lives in the
             sibling "Expected deliveries" worklist, so no create action here. The Global GRN page
             (not embedded) keeps its Receive delivery button. */}
@@ -246,7 +280,7 @@ export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { wa
 
       {data && data.total > 0 && (
         <div className="shrink-0">
-          <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="goods receipts" onPage={setPage} />
+          <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="goods receipts" onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)} />
         </div>
       )}
 

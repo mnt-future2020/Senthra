@@ -36,7 +36,6 @@ export const PERMISSION_CATEGORIES: string[] = [
   "Inventory",
   "Suppliers",
   "Procurement",
-  "Goods Out",
   "Goods Management",
   "Jobs",
   "Engineer Portal",
@@ -172,7 +171,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       { key: "stock_requests.view", action: "View", description: "View customer stock requests." },
       { key: "stock_requests.approve", action: "Approve", description: "Approve a customer's stock request." },
       { key: "stock_requests.reject", action: "Reject", description: "Reject a customer's stock request." },
-      { key: "stock_requests.complete", action: "Complete", description: "Mark an approved request fulfilled (enabled once the Goods Out workflow ships)." },
+      { key: "stock_requests.complete", action: "Complete", description: "Receive an approved request into the warehouse (posts the customer's stock)." },
     ],
   },
   {
@@ -294,20 +293,6 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     ],
   },
   {
-    key: "goods_out",
-    label: "Goods Out",
-    description: "Dispatching IRM stock from a warehouse to an engineer — decreases warehouse stock and adds it to the engineer's holding.",
-    category: "Goods Out",
-    permissions: [
-      { key: "goods_out.view", action: "View", description: "View dispatches and their details." },
-      { key: "goods_out.create", action: "Create", description: "Create draft dispatches." },
-      { key: "goods_out.edit", action: "Edit", description: "Edit draft dispatches." },
-      { key: "goods_out.delete", action: "Delete", description: "Delete draft dispatches." },
-      { key: "goods_out.dispatch", action: "Dispatch", description: "Dispatch a draft — posts stock from the warehouse to the engineer's holding." },
-      { key: "goods_out.cancel", action: "Cancel", description: "Cancel a draft dispatch." },
-    ],
-  },
-  {
     key: "goods_management",
     label: "Goods Management",
     description: "Job-scoped scan flow — issue kit stock to an engineer, receive returns (good/damaged), and reconcile a job's stock.",
@@ -352,6 +337,17 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       // permission is checked. This key is registered + seeded ahead of a future engineer-only
       // settings/signature endpoint; wire it into that route's requirePermission(...) when it ships.
       { key: "engineer.settings.edit", action: "Settings", description: "Manage own profile + signature from the engineer portal. (Reserved — no endpoint enforces this yet.)" },
+      { key: "engineer.transfer", action: "Transfer", description: "Request/approve engineer-to-engineer stock transfers." },
+    ],
+  },
+  {
+    key: "engineer_stock",
+    label: "Engineer Stock Transfers",
+    description: "Admin-side oversight and management of engineer-to-engineer stock transfers.",
+    category: "Inventory",
+    permissions: [
+      { key: "engineer_stock.view", action: "View", description: "View the admin transfer board and all engineer transfer requests." },
+      { key: "engineer_stock.transfer", action: "Transfer", description: "Admin create, override-approve, decline or cancel any pending engineer transfer request." },
     ],
   },
   {
@@ -494,9 +490,9 @@ export const LEGACY_PERMISSION_EXPANSION: Record<string, string[]> = {
 // held a coarse key gains the matching child keys (it never loses `customers.*` — that
 // key now governs the company record only). Unlike LEGACY_PERMISSION_EXPANSION this is
 // purely additive (the source key is kept). Applied once at startup over every role in
-// db/seed.ts; idempotent. NOTE: stock_requests.complete is granted here for forward
-// consistency even though its route ships later — a `customers.edit` holder would have
-// had that capability under the old coarse model.
+// db/seed.ts; idempotent. NOTE: stock_requests.complete is granted here because a
+// `customers.edit` holder would have had that capability under the old coarse model
+// (its warehouse-receive route is now live).
 export const CUSTOMER_COMPAT_BACKFILL: Record<string, string[]> = {
   "customers.view": [
     "customer_projects.view",

@@ -1,6 +1,7 @@
 import { Prisma, type Role, type User } from "@prisma/client";
 
 import { prisma } from "../../lib/prisma.js";
+import { escapeRegex } from "../../utils/search.js";
 
 // Data-access layer for the User model. The ONLY place Prisma is touched for
 // users. Soft-deleted users (deletedAt set) are excluded from normal reads.
@@ -18,7 +19,7 @@ function buildWhere(filters: UserListFilters): Prisma.UserWhereInput {
   if (filters.status) where.status = filters.status;
   if (filters.roleId) where.roleId = filters.roleId;
   if (filters.search) {
-    const q = filters.search;
+    const q = escapeRegex(filters.search);
     where.OR = [
       { firstName: { contains: q, mode: "insensitive" } },
       { lastName: { contains: q, mode: "insensitive" } },
@@ -63,6 +64,17 @@ export function findMany(
 // Total matching users (for the page count), using the same filters.
 export function count(filters: UserListFilters = {}): Promise<number> {
   return prisma.user.count({ where: buildWhere(filters) });
+}
+
+// Every active (non-deleted) staff user with their role. Used to resolve
+// notification recipients by permission (e.g. PO approvers) — callers filter on
+// role.permissions in JS. The active-staff collection is small, so loading it whole
+// is cheaper and simpler than a Mongo relation-filter query.
+export function findActiveWithRole(): Promise<UserWithRole[]> {
+  return prisma.user.findMany({
+    where: { deletedAt: null, status: "active" },
+    include: { role: true },
+  });
 }
 
 export function findById(id: string): Promise<UserWithRole | null> {

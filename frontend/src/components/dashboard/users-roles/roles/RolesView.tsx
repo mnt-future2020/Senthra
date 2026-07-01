@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Eye, Lock, Pencil, Plus, Search, Shield, Trash2, Users } from "lucide-react";
 
 import { useDashboard } from "@/hooks/useDashboard";
@@ -61,6 +61,7 @@ export function RolesView() {
   const { pushToast } = useDashboard();
   const { admin, can } = useAuth();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const canCreate = can("roles.create");
   // Seed from the SWR cache so returning from a role form renders instantly.
   const cachedRoles = roleService.getCachedRoles();
@@ -71,6 +72,21 @@ export function RolesView() {
   const editable = (r: Role) => (r.isSystem ? Boolean(admin) : can("roles.edit") && manageable(r));
   const deletable = (r: Role) => !r.isSystem && (Boolean(admin) || (can("roles.delete") && manageable(r)));
 
+  // Filters derived from the URL so they survive a refresh.
+  const search = searchParams.get("q") ?? "";
+  const sort = (searchParams.get("sort") as "newest" | "oldest" | "name") ?? "name";
+  const page = Math.max(1, Number(searchParams.get("page")) || 1);
+
+  const patch = (updates: Record<string, string | null>, resetPage = true) => {
+    const params = new URLSearchParams(window.location.search);
+    for (const [k, v] of Object.entries(updates)) {
+      if (v) params.set(k, v);
+      else params.delete(k);
+    }
+    if (resetPage) params.delete("page");
+    router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
+  };
+
   const [roles, setRoles] = React.useState<Role[]>(cachedRoles ?? []);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
@@ -79,9 +95,6 @@ export function RolesView() {
     role: null,
   });
   const [deleting, setDeleting] = React.useState(false);
-  const [page, setPage] = React.useState(1);
-  const [search, setSearch] = React.useState("");
-  const [sort, setSort] = React.useState<"newest" | "oldest" | "name">("name");
 
   const load = React.useCallback(async () => {
     try {
@@ -109,7 +122,7 @@ export function RolesView() {
       // Removing a role can drop the page count — clamp the current page so the
       // pagination controls don't end up on a stale, out-of-range page.
       const newTotalPages = Math.max(1, Math.ceil((roles.length - 1) / PAGE_SIZE));
-      setPage((p) => Math.min(p, newTotalPages));
+      if (page > newTotalPages) patch({ page: newTotalPages > 1 ? String(newTotalPages) : null }, false);
       await load();
       pushToast("Role deleted.", "success");
     } catch (e) {
@@ -154,10 +167,7 @@ export function RolesView() {
             <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
             <input
               value={search}
-              onChange={(e) => {
-                setSearch(e.target.value);
-                setPage(1);
-              }}
+              onChange={(e) => patch({ q: e.target.value || null })}
               placeholder="Search roles…"
               className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
             />
@@ -165,10 +175,7 @@ export function RolesView() {
           <Select
             size="sm"
             value={sort}
-            onChange={(v) => {
-              setSort(v as "newest" | "oldest" | "name");
-              setPage(1);
-            }}
+            onChange={(v) => patch({ sort: v === "name" ? null : v })}
             ariaLabel="Sort"
             options={[
               { value: "newest", label: "Newest" },
@@ -308,7 +315,7 @@ export function RolesView() {
             totalPages={totalPages}
             total={filtered.length}
             label="roles"
-            onPage={setPage}
+            onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)}
           />
         </div>
       )}

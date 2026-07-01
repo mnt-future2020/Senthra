@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { createPortal } from "react-dom";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { MoreHorizontal, Pencil, Plus, Power, Search, Trash2, Truck } from "lucide-react";
 
 import * as supplierService from "@/services/supplier.service";
@@ -197,14 +197,26 @@ function SuppliersTableSkeleton({ actions }: { actions: boolean }) {
 
 export function SuppliersView() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { can } = useAuth();
   const { pushToast } = useDashboard();
 
-  const [search, setSearch] = React.useState("");
-  const [debounced, setDebounced] = React.useState("");
-  const [statusFilter, setStatusFilter] = React.useState<"all" | SupplierStatus>("all");
-  const [sort, setSort] = React.useState<Sort>("newest");
-  const [page, setPage] = React.useState(1);
+  // Filters derived from URL params
+  const search = searchParams.get("q") ?? "";
+  const statusFilter = (searchParams.get("status") ?? "all") as "all" | SupplierStatus;
+  const sort = (searchParams.get("sort") as Sort) ?? "newest";
+  const page = Math.max(1, Number(searchParams.get("page")) || 1);
+
+  // Local text-box value (debounced into ?q)
+  const [searchInput, setSearchInput] = React.useState(search);
+  // Re-seed the box when ?q changes outside typing (browser back/forward). Adjusting state during
+  // render (not via an effect) is the React-recommended pattern and avoids a cascading re-render.
+  const [prevSearch, setPrevSearch] = React.useState(search);
+  if (prevSearch !== search) {
+    setPrevSearch(search);
+    setSearchInput(search);
+  }
+
   const [refreshKey, setRefreshKey] = React.useState(0);
   const [data, setData] = React.useState(() => supplierService.getCachedSuppliers({ pageSize: PAGE_SIZE }));
   const [loading, setLoading] = React.useState(!data);
@@ -219,16 +231,33 @@ export function SuppliersView() {
   const canDelete = can("suppliers.delete");
   const showActions = canEdit || canDelete;
 
+  // Writer: preserves all existing params (incl. ?tab) and resets page by default
+  const patch = React.useCallback(
+    (updates: Record<string, string | null>, resetPage = true) => {
+      const params = new URLSearchParams(window.location.search);
+      for (const [k, v] of Object.entries(updates)) {
+        if (v) params.set(k, v);
+        else params.delete(k);
+      }
+      if (resetPage) params.delete("page");
+      router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
+    },
+    [router],
+  );
+
+  // Debounce the search box into ?q
   React.useEffect(() => {
-    const t = setTimeout(() => setDebounced(search.trim()), 300);
+    const t = setTimeout(() => {
+      if (searchInput.trim() !== search) patch({ q: searchInput.trim() || null });
+    }, 300);
     return () => clearTimeout(t);
-  }, [search]);
+  }, [searchInput, search, patch]);
 
   React.useEffect(() => {
     let active = true;
     (async () => {
       const params = {
-        search: debounced || undefined,
+        search: search || undefined,
         status: statusFilter === "all" ? undefined : statusFilter,
         sort: sort === "newest" ? undefined : sort,
         page,
@@ -251,11 +280,11 @@ export function SuppliersView() {
     return () => {
       active = false;
     };
-  }, [debounced, statusFilter, sort, page, refreshKey]);
+  }, [search, statusFilter, sort, page, refreshKey]);
 
   const suppliers = data?.suppliers ?? [];
   const showSkeleton = loading && suppliers.length === 0;
-  const isFiltered = statusFilter !== "all" || Boolean(debounced);
+  const isFiltered = statusFilter !== "all" || Boolean(search);
 
   const toggleStatus = async (s: Supplier) => {
     const next = s.status === "active" ? "inactive" : "active";
@@ -275,7 +304,7 @@ export function SuppliersView() {
       await supplierService.deleteSupplier(confirm.supplier.id);
       setConfirm({ open: false, supplier: null });
       pushToast("Supplier removed.", "success");
-      if (suppliers.length === 1 && page > 1) setPage(page - 1);
+      if (suppliers.length === 1 && page > 1) patch({ page: String(page - 1) }, false);
       else setRefreshKey((k) => k + 1);
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Delete failed.", "alert");
@@ -290,11 +319,8 @@ export function SuppliersView() {
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input
-            value={search}
-            onChange={(e) => {
-              setSearch(e.target.value);
-              setPage(1);
-            }}
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
             placeholder="Search name, code or contact…"
             className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
           />
@@ -302,10 +328,7 @@ export function SuppliersView() {
         <Select
           size="sm"
           value={statusFilter}
-          onChange={(v) => {
-            setStatusFilter(v as "all" | SupplierStatus);
-            setPage(1);
-          }}
+          onChange={(v) => patch({ status: v === "all" ? null : v })}
           options={[
             { value: "all", label: "All statuses" },
             { value: "active", label: "Active" },
@@ -316,10 +339,7 @@ export function SuppliersView() {
         <Select
           size="sm"
           value={sort}
-          onChange={(v) => {
-            setSort(v as Sort);
-            setPage(1);
-          }}
+          onChange={(v) => patch({ sort: v === "newest" ? null : v })}
           options={[
             { value: "newest", label: "Newest first" },
             { value: "oldest", label: "Oldest first" },
@@ -425,7 +445,7 @@ export function SuppliersView() {
             totalPages={data.totalPages}
             total={data.total}
             label="suppliers"
-            onPage={setPage}
+            onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)}
           />
         </div>
       )}

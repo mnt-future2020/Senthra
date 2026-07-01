@@ -2,6 +2,8 @@ import { api } from "@/lib/api";
 import type { EngineerOverview, EngineerStockItem } from "@/types/engineer";
 import type { Job } from "@/types/job";
 import type { CustomerHolding, CompleteJobPayload } from "@/types/goodsManagement";
+import type { MovementPage } from "@/types/stock-position";
+import type { MovementFilters } from "@/services/stockPosition.service";
 
 // Typed wrappers around the engineer portal API (/engineer/*). Every call is scoped on the backend
 // to the signed-in staff user — there is no engineer-id parameter to pass.
@@ -65,4 +67,16 @@ export interface MiscHeldItem {
 /** Misc items issued to the engineer (free-text kit lines, no barcode/stock) — summed by item name. */
 export function getOwnMiscStock(): Promise<MiscHeldItem[]> {
   return api<{ misc: MiscHeldItem[] }>("/engineer/misc-stock").then((r) => r.misc ?? []);
+}
+
+// The engineer's OWN stock movement history — the unified ledger, hard-scoped server-side to this
+// engineer's van (company + customer consignment). Cursor-paginated; same shape as the admin feed.
+export function getOwnMovements(
+  params: MovementFilters & { cursor?: string | null; limit?: number } = {},
+): Promise<MovementPage> {
+  const s = Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== "" && v !== null)
+    .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`)
+    .join("&");
+  return api<MovementPage>(`/engineer/movements${s ? `?${s}` : ""}`);
 }

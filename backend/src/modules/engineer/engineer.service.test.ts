@@ -1,22 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-// Pure unit test — the repository (engineer-stock reads) and the Goods Out service (dispatch count)
-// are mocked, so no DB. Confirms mapping, scoping (the passed engineerId is used), and the overview
-// summary math.
+// Pure unit test — the repository (engineer-stock reads) is mocked, so no DB. Confirms mapping,
+// scoping (the passed engineerId is used), and the overview summary math.
 vi.mock("./engineer.repository.js", () => ({
   findBalancesByEngineer: vi.fn(),
   findRecentTransactions: vi.fn(),
 }));
-vi.mock("#modules/goods-out/goods-out.service.js", () => ({ listGoodsOut: vi.fn() }));
 
 import * as engineerRepo from "./engineer.repository.js";
-import * as goodsOutService from "#modules/goods-out/goods-out.service.js";
 import { getOwnActivity, getOwnOverview, getOwnStock } from "./engineer.service.js";
 
 const ENG = "a".repeat(24);
 const mockBalances = engineerRepo.findBalancesByEngineer as ReturnType<typeof vi.fn>;
 const mockTxns = engineerRepo.findRecentTransactions as ReturnType<typeof vi.fn>;
-const mockListGdn = goodsOutService.listGoodsOut as ReturnType<typeof vi.fn>;
 
 const bal = (over: Record<string, unknown> = {}) => ({
   irmItemId: "i1",
@@ -38,7 +34,6 @@ const txn = (over: Record<string, unknown> = {}) => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockListGdn.mockResolvedValue({ goodsOut: [], total: 0, page: 1, pageSize: 1, totalPages: 1 });
 });
 
 describe("getOwnStock", () => {
@@ -67,22 +62,19 @@ describe("getOwnActivity", () => {
 });
 
 describe("getOwnOverview", () => {
-  it("summarises stock (lines + total qty) + dispatch count + recent activity, all scoped to the engineer", async () => {
+  it("summarises stock (lines + total qty) + recent activity, all scoped to the engineer", async () => {
     mockBalances.mockResolvedValue([bal({ quantityOnHand: 5 }), bal({ irmItemId: "i2", quantityOnHand: 3 })]);
     mockTxns.mockResolvedValue([txn()]);
-    mockListGdn.mockResolvedValue({ goodsOut: [], total: 7, page: 1, pageSize: 1, totalPages: 7 });
 
     const ov = await getOwnOverview(ENG);
     expect(ov.stock).toEqual({ lines: 2, totalQuantity: 8 });
-    expect(ov.dispatches.total).toBe(7);
     expect(ov.recentActivity).toHaveLength(1);
-    expect(mockListGdn).toHaveBeenCalledWith({ engineer: ENG, status: "dispatched", pageSize: 1 });
   });
 
-  it("returns clean zeros/empties for an engineer with no stock or dispatches", async () => {
+  it("returns clean zeros/empties for an engineer with no stock", async () => {
     mockBalances.mockResolvedValue([]);
     mockTxns.mockResolvedValue([]);
     const ov = await getOwnOverview(ENG);
-    expect(ov).toEqual({ stock: { lines: 0, totalQuantity: 0 }, dispatches: { total: 0 }, recentActivity: [] });
+    expect(ov).toEqual({ stock: { lines: 0, totalQuantity: 0 }, recentActivity: [] });
   });
 });

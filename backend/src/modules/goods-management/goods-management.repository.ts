@@ -204,6 +204,83 @@ export async function upsertDamagedBalanceTx(tx: Prisma.TransactionClient, key: 
 export function insertDamagedTxnTx(tx: Prisma.TransactionClient, data: Prisma.DamagedStockTransactionUncheckedCreateInput): Promise<DamagedStockTransaction> {
   return tx.damagedStockTransaction.create({ data });
 }
+
+// ── Stock Movement History — keyset-paginated customer-consignment + damaged ledger pages ──────────
+export interface MovementKeyset { createdAt: Date; id: string }
+
+export interface CustomerTxnFilters {
+  dateFrom?: Date;
+  dateTo?: Date;
+  engineerId?: string;
+  customerStockEntryIds?: string[]; // resolved from a customerId filter by the service
+  type?: string;
+  sourceType?: string;
+}
+export function findEngineerCustomerTxnPage(f: CustomerTxnFilters, before: MovementKeyset | null, take: number) {
+  const and: Prisma.EngineerCustomerStockTransactionWhereInput[] = [];
+  if (f.dateFrom) and.push({ createdAt: { gte: f.dateFrom } });
+  if (f.dateTo) and.push({ createdAt: { lte: f.dateTo } });
+  if (f.engineerId) and.push({ engineerId: f.engineerId });
+  if (f.customerStockEntryIds) and.push({ customerStockEntryId: { in: f.customerStockEntryIds } });
+  if (f.type) and.push({ type: f.type });
+  if (f.sourceType) and.push({ sourceType: f.sourceType });
+  if (before) and.push({ OR: [{ createdAt: { lt: before.createdAt } }, { AND: [{ createdAt: before.createdAt }, { id: { lt: before.id } }] }] });
+  return prisma.engineerCustomerStockTransaction.findMany({
+    where: and.length ? { AND: and } : {},
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take,
+  });
+}
+
+export interface DamagedTxnFilters {
+  dateFrom?: Date;
+  dateTo?: Date;
+  warehouseId?: string;
+  ownerType?: string;
+  irmItemId?: string;
+  customerId?: string;
+  customerStockEntryIds?: string[];
+  sourceType?: string;
+  sign?: "pos" | "neg"; // write_off (+) | restore (−), derived from the `type` filter
+}
+export function findDamagedTxnPage(f: DamagedTxnFilters, before: MovementKeyset | null, take: number) {
+  const and: Prisma.DamagedStockTransactionWhereInput[] = [];
+  if (f.dateFrom) and.push({ createdAt: { gte: f.dateFrom } });
+  if (f.dateTo) and.push({ createdAt: { lte: f.dateTo } });
+  if (f.warehouseId) and.push({ warehouseId: f.warehouseId });
+  if (f.ownerType) and.push({ ownerType: f.ownerType });
+  if (f.irmItemId) and.push({ irmItemId: f.irmItemId });
+  if (f.customerId) and.push({ customerId: f.customerId });
+  if (f.customerStockEntryIds) and.push({ customerStockEntryId: { in: f.customerStockEntryIds } });
+  if (f.sourceType) and.push({ sourceType: f.sourceType });
+  if (f.sign === "pos") and.push({ quantityDelta: { gt: 0 } });
+  if (f.sign === "neg") and.push({ quantityDelta: { lt: 0 } });
+  if (before) and.push({ OR: [{ createdAt: { lt: before.createdAt } }, { AND: [{ createdAt: before.createdAt }, { id: { lt: before.id } }] }] });
+  return prisma.damagedStockTransaction.findMany({
+    where: and.length ? { AND: and } : {},
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take,
+  });
+}
+
+// Resolve customer-stock-entry metadata by id — the customer ledgers carry only the entry id.
+export interface CustomerEntryMeta { itemName: string; sku: string | null; customerId: string | null; customerName: string | null }
+export async function findCustomerEntryMetaByIds(ids: string[]): Promise<Map<string, CustomerEntryMeta>> {
+  const out = new Map<string, CustomerEntryMeta>();
+  if (!ids.length) return out;
+  const rows = await prisma.customerStockEntry.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, itemName: true, sku: true, customerId: true, customer: { select: { name: true } } },
+  });
+  for (const r of rows) out.set(r.id, { itemName: r.itemName, sku: r.sku ?? null, customerId: r.customerId ?? null, customerName: r.customer?.name ?? null });
+  return out;
+}
+// Resolve customer-stock-entry ids belonging to a customer — to translate a customerId filter for the
+// consignment ledger (which stores only the entry id).
+export async function findCustomerStockEntryIdsByCustomer(customerId: string): Promise<string[]> {
+  const rows = await prisma.customerStockEntry.findMany({ where: { customerId }, select: { id: true } });
+  return rows.map((r) => r.id);
+}
 const damagedBalanceInclude = {
   warehouse: { select: { id: true, name: true } },
 } satisfies Prisma.DamagedStockBalanceInclude;
@@ -274,4 +351,71 @@ export function findRecentMovementsForOverdue(cutoff: Date) {
     include: withRelations,
     orderBy: { createdAt: "asc" },
   });
+}
+
+// --- Inventory Hub aggregation reads --------------------------------------------------
+export function findAllCustomerHoldings() {
+  return prisma.engineerCustomerStockHolding.findMany({ where: { quantityOnHand: { gt: 0 } } });
+}
+export function countOverdueIssues(beforeDate: Date): Promise<number> {
+  return prisma.jobStockMovement.count({
+    where: { direction: "issue", status: "posted", deletedAt: null, createdAt: { lt: beforeDate } },
+  });
+}
+// Gross units WRITTEN OFF as damaged since `since` — write-offs only (quantityDelta > 0). Restores
+// carry a negative delta; netting them in here would understate the "damaged this month" KPI and could
+// even render it negative when this month's restores exceed this month's write-offs.
+export async function countDamagedUnitsSince(since: Date): Promise<number> {
+  const agg = await prisma.damagedStockTransaction.aggregate({
+    _sum: { quantityDelta: true },
+    where: { createdAt: { gte: since }, quantityDelta: { gt: 0 } },
+  });
+  return Number(agg._sum.quantityDelta ?? 0);
+}
+export function findRecentJobMovementsAll(skip: number, take: number) {
+  return prisma.jobStockMovement.findMany({
+    where: { status: "posted", deletedAt: null },
+    orderBy: { createdAt: "desc" },
+    skip,
+    take,
+    include: { items: true },
+  });
+}
+
+// --- Damaged restore (reverse a write-off) -------------------------------------------
+
+// Load the DamagedStockBalance by natural key (warehouseId + ownerType + irmItemId/customerStockEntryId).
+export function findDamagedBalance(key: { warehouseId: string; ownerType: string; irmItemId: string | null; customerStockEntryId: string | null }): Promise<DamagedStockBalance | null> {
+  return prisma.damagedStockBalance.findFirst({
+    where: {
+      warehouseId: key.warehouseId,
+      ownerType: key.ownerType,
+      irmItemId: key.irmItemId,
+      customerStockEntryId: key.customerStockEntryId,
+    },
+  });
+}
+
+// Decrement a DamagedStockBalance by qty inside an existing transaction and append a reversal ledger row.
+// Returns the updated balance quantity (balanceAfter).
+export async function decrementDamagedBalanceTx(
+  tx: Prisma.TransactionClient,
+  balanceId: string,
+  qty: number,
+  txnData: Omit<Prisma.DamagedStockTransactionUncheckedCreateInput, "balanceAfter">,
+): Promise<number> {
+  // Atomic guard: decrement ONLY when enough damaged units remain (quantity >= qty). restoreDamaged
+  // validates availability before opening the tx, but that read is outside this transaction, so two
+  // concurrent (or back-to-back) restores could both pass it. The `gte` filter makes the write itself
+  // the check — the loser matches zero rows and we roll the whole restore back instead of driving the
+  // damaged balance negative and over-crediting usable stock.
+  const res = await tx.damagedStockBalance.updateMany({
+    where: { id: balanceId, quantity: { gte: qty } },
+    data: { quantity: { decrement: qty } },
+  });
+  if (res.count === 0) throw conflict("Damaged stock changed — refresh and try again.");
+  const balance = await tx.damagedStockBalance.findUniqueOrThrow({ where: { id: balanceId }, select: { quantity: true } });
+  const balanceAfter = balance.quantity;
+  await tx.damagedStockTransaction.create({ data: { ...txnData, balanceAfter } });
+  return balanceAfter;
 }

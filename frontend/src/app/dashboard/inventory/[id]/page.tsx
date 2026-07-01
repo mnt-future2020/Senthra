@@ -4,7 +4,7 @@ import * as React from "react";
 import { useParams } from "next/navigation";
 
 import { PermissionGate } from "@/components/auth/PermissionGate";
-import { InventoryDetail } from "@/components/dashboard/inventory/InventoryDetail";
+import { InventoryDetailPage } from "@/components/dashboard/inventory/detail/InventoryDetailPage";
 import { FormError, FormPageSkeleton } from "@/components/ui/FormScaffold";
 import * as inventoryService from "@/services/inventory.service";
 import type { InventoryDetail as InventoryDetailType } from "@/types/inventory";
@@ -31,13 +31,16 @@ function Loader({ id }: { id: string }) {
     inventoryService
       .getInventory(id)
       .then((i) => active && setInv(i))
-      .catch((e) => active && setError(e instanceof Error ? e.message : "Could not load this inventory record."))
+      .catch((e) =>
+        active && setError(e instanceof Error ? e.message : "Could not load this inventory record."),
+      )
       .finally(() => active && setLoading(false));
-    return () => { active = false; };
+    return () => {
+      active = false;
+    };
   }, [id]);
 
   if (loading) return <FormPageSkeleton />;
   if (error || !inv) return <FormError message={error ?? "Inventory record not found."} />;
-  // Suspense satisfies useSearchParams (the ?tab= seed) during prerender.
-  return <React.Suspense fallback={<FormPageSkeleton />}><InventoryDetail initial={inv} /></React.Suspense>;
+  return <InventoryDetailPage initial={inv} />;
 }

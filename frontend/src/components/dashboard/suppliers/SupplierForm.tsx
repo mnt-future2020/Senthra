@@ -177,7 +177,11 @@ export function SupplierForm({ mode, supplier }: { mode: "create" | "edit"; supp
 
   useReportDirty("supplier-form", isDirty);
 
-  const goBack = () => guard.attemptLeave(() => router.push(SUPPLIERS_LIST));
+  const goBack = () =>
+    guard.attemptLeave(() => {
+      if (window.history.length > 1) router.back();
+      else router.push(SUPPLIERS_LIST);
+    });
 
   const clearError = (field: string) =>
     setErrors((prev) => {

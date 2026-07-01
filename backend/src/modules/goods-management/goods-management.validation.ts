@@ -71,3 +71,28 @@ export const closeReconcileSchema = z.object({
   writeOffLost: z.boolean().optional(), // book any unaccounted units as lost on close
 });
 export type CloseReconcileInput = z.infer<typeof closeReconcileSchema>;
+
+// Restore damaged stock back to usable pool (reversal of a write-off).
+// Exactly one of irmItemId (company) or customerStockEntryId (customer) is required.
+export const restoreDamagedSchema = z
+  .object({
+    warehouseId: objectId("a warehouse"),
+    ownerType: z.enum(["company", "customer"], { error: "ownerType must be 'company' or 'customer'." }),
+    irmItemId: optionalObjectId("an IRM item"),
+    customerStockEntryId: optionalObjectId("a customer stock entry"),
+    quantity: z.coerce
+      .number({ error: "Quantity is required." })
+      .int("Use a whole number.")
+      .min(1, "Quantity must be at least 1.")
+      .max(1_000_000),
+    notes: z.string({ error: "Notes are required." }).trim().min(1, "Notes are required.").max(2000),
+  })
+  .superRefine((v, ctx) => {
+    if (v.ownerType === "company" && !v.irmItemId) {
+      ctx.addIssue({ code: "custom", path: ["irmItemId"], message: "Select an IRM item for company-owned stock." });
+    }
+    if (v.ownerType === "customer" && !v.customerStockEntryId) {
+      ctx.addIssue({ code: "custom", path: ["customerStockEntryId"], message: "Select a customer stock entry for customer-owned stock." });
+    }
+  });
+export type RestoreDamagedInput = z.infer<typeof restoreDamagedSchema>;

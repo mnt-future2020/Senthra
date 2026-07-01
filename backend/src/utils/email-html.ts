@@ -88,32 +88,33 @@ function readableTextOn(hex: string): string {
   return luminance > 0.62 ? "#1a1a2e" : "#ffffff";
 }
 
-// Build the email header row: the brand-colour bar showing the logo (if set)
-// alongside the brand name. The name's colour auto-adapts to the accent for
-// legibility. Returned as trusted HTML (dynamic parts escaped here) and injected
-// via the {{emailHeaderRow}} token at send time, so logo + colour stay dynamic.
+// Build the email header row: the brand-colour bar showing EITHER the logo (if set)
+// OR the brand name as text — never both. Most brand logos are wordmarks that already
+// contain the name, so printing {{brandName}} beside the logo duplicates it. When a
+// logo is present the brand name is carried as the image's `alt` (styled so it stays
+// legible in clients that block images); otherwise the name renders as styled text,
+// its colour auto-adapting to the accent. Returned as trusted HTML (dynamic parts
+// escaped here) and injected via the {{emailHeaderRow}} token at send time.
 export function buildEmailHeaderRow(
   brandName: string,
   logoUrl: string,
   brandColor: string = DEFAULT_BRAND_COLOR,
 ): string {
   const bg = safeBrandColor(brandColor);
-  const name = `<span style="font-size:18px;font-weight:800;color:${readableTextOn(bg)};letter-spacing:-0.2px;vertical-align:middle;">${escapeHtml(brandName)}</span>`;
+  const fg = readableTextOn(bg);
 
   if (logoUrl) {
+    // Logo only. The `alt` doubles as the fallback wordmark; the extra font/colour
+    // styles on the <img> are what many clients apply to alt text when the image is
+    // blocked, so the brand name stays readable on the accent bar either way.
     return `<tr>
-              <td style="background:${escapeHtml(bg)};padding:16px 32px;">
-                <table role="presentation" cellpadding="0" cellspacing="0" border="0">
-                  <tr>
-                    <td style="vertical-align:middle;padding-right:12px;">
-                      <img src="${escapeHtml(emailLogoSrc(logoUrl))}" alt="${escapeHtml(brandName)}" height="34" style="max-height:34px;width:auto;border:0;outline:none;text-decoration:none;display:block;" />
-                    </td>
-                    <td style="vertical-align:middle;">${name}</td>
-                  </tr>
-                </table>
+              <td style="background:${escapeHtml(bg)};padding:18px 32px;">
+                <img src="${escapeHtml(emailLogoSrc(logoUrl))}" alt="${escapeHtml(brandName)}" height="34" style="max-height:34px;width:auto;border:0;outline:none;text-decoration:none;display:block;color:${fg};font-size:16px;font-weight:800;" />
               </td>
             </tr>`;
   }
+
+  const name = `<span style="font-size:18px;font-weight:800;color:${fg};letter-spacing:-0.2px;vertical-align:middle;">${escapeHtml(brandName)}</span>`;
   return `<tr>
             <td style="background:${escapeHtml(bg)};padding:22px 32px;">
               ${name}

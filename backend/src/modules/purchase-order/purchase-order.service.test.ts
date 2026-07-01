@@ -31,6 +31,7 @@ vi.mock("../../lib/cloudinary.js", () => ({ uploadFileToCloudinary: vi.fn() }));
 vi.mock("./purchase-order.email.js", () => ({
   notifySupplierPoSent: vi.fn(() => Promise.resolve()),
   notifySupplierPoCancelled: vi.fn(() => Promise.resolve()),
+  notifyApproversPoSubmitted: vi.fn(() => Promise.resolve()),
 }));
 
 import * as poRepo from "./purchase-order.repository.js";

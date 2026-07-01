@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { createPortal } from "react-dom";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { MoreHorizontal, PackageSearch, Pencil, Plus, Power, Search, Trash2 } from "lucide-react";
 
 import * as irmService from "@/services/irm.service";
@@ -184,14 +184,26 @@ function IrmTableSkeleton({ actions }: { actions: boolean }) {
 
 export function IrmItemsView() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { can } = useAuth();
   const { pushToast } = useDashboard();
 
-  const [search, setSearch] = React.useState("");
-  const [debounced, setDebounced] = React.useState("");
-  const [statusFilter, setStatusFilter] = React.useState<"all" | IrmStatus>("all");
-  const [sort, setSort] = React.useState<Sort>("newest");
-  const [page, setPage] = React.useState(1);
+  // Filters derived from the URL — survive a browser refresh.
+  const search = searchParams.get("q") ?? "";
+  const statusFilter = (searchParams.get("status") ?? "all") as "all" | IrmStatus;
+  const sort = (searchParams.get("sort") as Sort) ?? "newest";
+  const page = Math.max(1, Number(searchParams.get("page")) || 1);
+
+  // Local input state for debouncing — seeded from URL q.
+  const [searchInput, setSearchInput] = React.useState(search);
+  // Re-seed the box when ?q changes outside typing (browser back/forward). Adjusting state during
+  // render (not via an effect) is the React-recommended pattern and avoids a cascading re-render.
+  const [prevSearch, setPrevSearch] = React.useState(search);
+  if (prevSearch !== search) {
+    setPrevSearch(search);
+    setSearchInput(search);
+  }
+
   const [refreshKey, setRefreshKey] = React.useState(0);
   const [data, setData] = React.useState(() => irmService.getCachedIrmItems({ pageSize: PAGE_SIZE }));
   const [loading, setLoading] = React.useState(!data);
@@ -203,16 +215,31 @@ export function IrmItemsView() {
   const canDelete = can("irm.delete");
   const showActions = canEdit || canDelete;
 
+  // Preserve all existing params (incl. ?tab) and reset page on filter changes.
+  const patch = (updates: Record<string, string | null>, resetPage = true) => {
+    const params = new URLSearchParams(window.location.search);
+    for (const [k, v] of Object.entries(updates)) {
+      if (v) params.set(k, v);
+      else params.delete(k);
+    }
+    if (resetPage) params.delete("page");
+    router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
+  };
+
+  // Debounce the search box into ?q.
   React.useEffect(() => {
-    const t = setTimeout(() => setDebounced(search.trim()), 300);
+    const t = setTimeout(() => {
+      if (searchInput.trim() !== search) patch({ q: searchInput.trim() || null });
+    }, 300);
     return () => clearTimeout(t);
-  }, [search]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchInput, search]);
 
   React.useEffect(() => {
     let active = true;
     (async () => {
       const params = {
-        search: debounced || undefined,
+        search: search || undefined,
         status: statusFilter === "all" ? undefined : statusFilter,
         sort: sort === "newest" ? undefined : sort,
         page,
@@ -235,11 +262,11 @@ export function IrmItemsView() {
     return () => {
       active = false;
     };
-  }, [debounced, statusFilter, sort, page, refreshKey]);
+  }, [search, statusFilter, sort, page, refreshKey]);
 
   const items = data?.items ?? [];
   const showSkeleton = loading && items.length === 0;
-  const isFiltered = statusFilter !== "all" || Boolean(debounced);
+  const isFiltered = statusFilter !== "all" || Boolean(search);
 
   const toggleStatus = async (i: IrmItem) => {
     const next = i.status === "active" ? "inactive" : "active";
@@ -259,7 +286,7 @@ export function IrmItemsView() {
       await irmService.deleteIrmItem(confirm.item.id);
       setConfirm({ open: false, item: null });
       pushToast("Item removed.", "success");
-      if (items.length === 1 && page > 1) setPage(page - 1);
+      if (items.length === 1 && page > 1) patch({ page: String(page - 1) }, false);
       else setRefreshKey((k) => k + 1);
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Delete failed.", "alert");
@@ -274,11 +301,8 @@ export function IrmItemsView() {
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input
-            value={search}
-            onChange={(e) => {
-              setSearch(e.target.value);
-              setPage(1);
-            }}
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
             placeholder="Search name, code, SKU, brand or MPN…"
             className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
           />
@@ -286,10 +310,7 @@ export function IrmItemsView() {
         <Select
           size="sm"
           value={statusFilter}
-          onChange={(v) => {
-            setStatusFilter(v as "all" | IrmStatus);
-            setPage(1);
-          }}
+          onChange={(v) => patch({ status: v === "all" ? null : v })}
           options={[
             { value: "all", label: "All statuses" },
             { value: "active", label: "Active" },
@@ -300,10 +321,7 @@ export function IrmItemsView() {
         <Select
           size="sm"
           value={sort}
-          onChange={(v) => {
-            setSort(v as Sort);
-            setPage(1);
-          }}
+          onChange={(v) => patch({ sort: v === "newest" ? null : v })}
           options={[
             { value: "newest", label: "Newest first" },
             { value: "oldest", label: "Oldest first" },
@@ -402,7 +420,7 @@ export function IrmItemsView() {
 
       {data && data.total > 0 && (
         <div className="shrink-0">
-          <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="items" onPage={setPage} />
+          <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="items" onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)} />
         </div>
       )}
 

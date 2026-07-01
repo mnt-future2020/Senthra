@@ -1150,6 +1150,40 @@ export async function listStockRequests(
 // reviewer + an optional admin response note for the customer, and deliberately
 // never creates an inventory record. Turning an approved request into real stock
 // is a separate internal step (the inventory module, later).
+// Fire-and-forget: tell the customer their stock request was reviewed (approved/rejected).
+// One template covers both outcomes — the engine has no conditionals, so we pass the {{status}}
+// word plus a matching {{decisionDetail}} line. Sent to the company's primary portal login.
+// NEVER blocks or rolls back the review.
+function notifyStockRequestReviewed(
+  company: Customer,
+  requestName: string,
+  status: "approved" | "rejected",
+  note: string | null,
+): void {
+  void (async () => {
+    const primary = await findPrimaryUser(company);
+    const to = primary?.email ?? company.email;
+    if (!to) return;
+    const decisionDetail =
+      status === "approved"
+        ? note
+          ? `Note from our team: ${note}`
+          : "Our team will be in touch about the next steps."
+        : note
+          ? `Reason: ${note}`
+          : "Please contact us if you'd like more detail.";
+    await sendTemplatedEmail("customer.stock_request.reviewed", to, {
+      customerName: company.name,
+      contactPerson: primary?.fullName ?? company.name,
+      requestName,
+      status,
+      decisionDetail,
+    });
+  })().catch((e) =>
+    console.error("stock request decision email failed:", e instanceof Error ? e.message : e),
+  );
+}
+
 export async function approveStockRequest(
   customerId: string,
   requestId: string,
@@ -1167,6 +1201,7 @@ export async function approveStockRequest(
     reviewedAt: new Date(),
   });
   auditNested(actor, "customer.stock_request.approved", customer, request.name);
+  notifyStockRequestReviewed(customer, request.name, "approved", trimToNull(note));
   return { request: toStockRequest(reviewed) };
 }
 
@@ -1188,6 +1223,7 @@ export async function rejectStockRequest(
     reviewedAt: new Date(),
   });
   auditNested(actor, "customer.stock_request.rejected", customer, request.name);
+  notifyStockRequestReviewed(customer, request.name, "rejected", trimToNull(note));
   return toStockRequest(reviewed);
 }
 
@@ -1218,6 +1254,7 @@ export async function editAndApproveStockRequest(
     reviewedAt: new Date(),
   });
   auditNested(actor, "customer.stock_request.edited_approved", customer, `${request.name} → ${input.editedName}`);
+  notifyStockRequestReviewed(customer, input.editedName.trim(), "approved", trimToNull(input.note));
   return { request: toStockRequest(reviewed) };
 }
 
@@ -1818,6 +1855,59 @@ export async function createDirectStockEntry(
   });
 
   return toStockEntry(entry as StockEntryRow);
+}
+
+// ── Customer stock transfer (warehouse → warehouse consignment move) ──────────────────────────
+
+export interface CustomerStockTransferResult {
+  source: PublicStockEntry;
+  destination: PublicStockEntry;
+}
+
+export async function transferCustomerStock(
+  entryId: string,
+  input: { toWarehouseId: string; quantity: number; notes?: string },
+  actor?: AuditActor,
+): Promise<CustomerStockTransferResult> {
+  // Load source entry to validate it.
+  const source = await customerRepo.findStockEntryById(entryId);
+  if (!source || source.status !== "active") throw notFound("Customer stock entry not found or inactive.");
+
+  // Guard: destination warehouse must be active.
+  const toWarehouse = await warehouseRepo.findById(input.toWarehouseId);
+  if (!toWarehouse || toWarehouse.status !== "active") throw badRequest("Destination warehouse not found or inactive.");
+  if (toWarehouse.id === source.warehouseId) throw badRequest("Destination warehouse must differ from the source warehouse.");
+
+  // Guard quantity.
+  if (input.quantity > source.quantity) throw conflict(`Only ${source.quantity} available — transfer quantity exceeds source.`);
+
+  const { source: updatedSource, destination: updatedDest } = await customerRepo.transferCustomerStockTx(
+    entryId,
+    input.toWarehouseId,
+    input.quantity,
+    actor?.email ?? null,
+  );
+
+  if (!updatedSource || !updatedDest) throw conflict("Transfer failed — stock changed concurrently. Refresh and try again.");
+
+  audit.record({
+    actor,
+    action: "customer_stock.transferred",
+    targetType: "customer_stock_entry",
+    targetId: entryId,
+    targetLabel: `${source.itemName} (${input.quantity})`,
+    metadata: {
+      fromWarehouseId: source.warehouseId,
+      toWarehouseId: input.toWarehouseId,
+      quantity: input.quantity,
+      notes: input.notes ?? null,
+    },
+  });
+
+  return {
+    source: toStockEntry(updatedSource as StockEntryRow),
+    destination: toStockEntry(updatedDest as StockEntryRow),
+  };
 }
 
 export async function listCustomerStockEntries(

@@ -1,10 +1,15 @@
+import { Suspense } from "react";
+
 import { PermissionGate } from "@/components/auth/PermissionGate";
-import { InventoryView } from "@/components/dashboard/inventory/InventoryView";
+import { InventoryHub } from "@/components/dashboard/inventory/InventoryHub";
 
 export default function InventoryPage() {
   return (
     <PermissionGate anyOf={["inventory.view"]}>
-      <InventoryView />
+      {/* Suspense satisfies useSearchParams (the ?tab= lens seed) during prerender. */}
+      <Suspense>
+        <InventoryHub />
+      </Suspense>
     </PermissionGate>
   );
 }

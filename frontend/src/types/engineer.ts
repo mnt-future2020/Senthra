@@ -23,6 +23,5 @@ export interface EngineerActivity {
 
 export interface EngineerOverview {
   stock: { lines: number; totalQuantity: number };
-  dispatches: { total: number };
   recentActivity: EngineerActivity[];
 }

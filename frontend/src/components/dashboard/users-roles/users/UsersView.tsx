@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { createPortal } from "react-dom";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   Ban,
   CheckCircle2,
@@ -220,9 +220,42 @@ export function UsersView() {
   const { pushToast } = useDashboard();
   const { can } = useAuth();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const canCreate = can("users.create");
   const canEdit = can("users.edit");
   const canDelete = can("users.delete");
+
+  // Filters derived from the URL — survive a browser refresh.
+  const search = searchParams.get("q") ?? "";
+  const statusFilter = (searchParams.get("status") ?? "all") as "all" | UserStatus;
+  const roleFilter = searchParams.get("role") ?? "all";
+  const sort = (searchParams.get("sort") ?? "newest") as "newest" | "oldest" | "name";
+  const page = Math.max(1, Number(searchParams.get("page")) || 1);
+
+  // Local state for the search text box so it stays responsive while debouncing.
+  const [searchInput, setSearchInput] = React.useState(search);
+  // Re-seed the box when ?q changes outside typing (browser back/forward). Adjusting state during
+  // render (not via an effect) is the React-recommended pattern and avoids a cascading re-render.
+  const [prevSearch, setPrevSearch] = React.useState(search);
+  if (prevSearch !== search) {
+    setPrevSearch(search);
+    setSearchInput(search);
+  }
+
+  // Patch URL params, preserving ?tab and any other existing params.
+  // Filter changes reset to page 1 by default.
+  const patch = React.useCallback(
+    (updates: Record<string, string | null>, resetPage = true) => {
+      const params = new URLSearchParams(window.location.search);
+      for (const [k, v] of Object.entries(updates)) {
+        if (v) params.set(k, v);
+        else params.delete(k);
+      }
+      if (resetPage) params.delete("page");
+      router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
+    },
+    [router],
+  );
 
   // Seed from the SWR caches so a remount (e.g. returning right after creating a
   // user) renders the previous data instantly; the effects below revalidate.
@@ -231,15 +264,8 @@ export function UsersView() {
   const [roles, setRoles] = React.useState<Role[]>(() => roleService.getCachedRoles() ?? []);
   const [total, setTotal] = React.useState(cachedInitial?.total ?? 0);
   const [totalPages, setTotalPages] = React.useState(cachedInitial?.totalPages ?? 1);
-  const [page, setPage] = React.useState(1);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
-
-  const [search, setSearch] = React.useState("");
-  const [debouncedSearch, setDebouncedSearch] = React.useState("");
-  const [statusFilter, setStatusFilter] = React.useState<"all" | UserStatus>("all");
-  const [roleFilter, setRoleFilter] = React.useState<string>("all");
-  const [sort, setSort] = React.useState<"newest" | "oldest" | "name">("newest");
   const [refreshKey, setRefreshKey] = React.useState(0);
 
   const [confirm, setConfirm] = React.useState<{ open: boolean; user: User | null }>({
@@ -270,11 +296,13 @@ export function UsersView() {
     };
   }, []);
 
-  // Debounce the search box so typing doesn't fire a request per keystroke.
+  // Debounce the search box into ?q so typing doesn't fire a request per keystroke.
   React.useEffect(() => {
-    const t = setTimeout(() => setDebouncedSearch(search.trim()), 350);
+    const t = setTimeout(() => {
+      if (searchInput.trim() !== search) patch({ q: searchInput.trim() || null });
+    }, 350);
     return () => clearTimeout(t);
-  }, [search]);
+  }, [searchInput, search, patch]);
 
   // Fetch the current page from the server whenever the page, a filter or a
   // refresh trigger changes. setState lives inside the async IIFE (not the
@@ -285,7 +313,7 @@ export function UsersView() {
       const params = {
         page,
         pageSize: PAGE_SIZE,
-        search: debouncedSearch || undefined,
+        search: search || undefined,
         status: statusFilter === "all" ? undefined : statusFilter,
         roleId: roleFilter === "all" ? undefined : roleFilter,
         // "newest" is the server default → omit it so the cache key matches the seed.
@@ -315,27 +343,9 @@ export function UsersView() {
     return () => {
       active = false;
     };
-  }, [page, debouncedSearch, statusFilter, roleFilter, sort, refreshKey]);
+  }, [page, search, statusFilter, roleFilter, sort, refreshKey]);
 
   const refresh = () => setRefreshKey((k) => k + 1);
-
-  // Filter/search changes reset to page 1 (in handlers, not an effect).
-  const onSearchChange = (v: string) => {
-    setSearch(v);
-    setPage(1);
-  };
-  const onStatusChange = (v: "all" | UserStatus) => {
-    setStatusFilter(v);
-    setPage(1);
-  };
-  const onRoleChange = (v: string) => {
-    setRoleFilter(v);
-    setPage(1);
-  };
-  const onSortChange = (v: "newest" | "oldest" | "name") => {
-    setSort(v);
-    setPage(1);
-  };
 
   const toggleStatus = async (user: User) => {
     const next: UserStatus = user.status === "active" ? "suspended" : "active";
@@ -364,7 +374,7 @@ export function UsersView() {
       await userService.deleteUser(confirm.user.id);
       setConfirm({ open: false, user: null });
       // Step back a page if we just removed the only row on a later page.
-      if (users.length === 1 && page > 1) setPage(page - 1);
+      if (users.length === 1 && page > 1) patch({ page: String(page - 1) }, false);
       else refresh();
       pushToast("User removed.", "success");
     } catch (e) {
@@ -376,7 +386,7 @@ export function UsersView() {
 
   const showSkeleton = loading && users.length === 0;
   const hasFilters =
-    Boolean(debouncedSearch) || statusFilter !== "all" || roleFilter !== "all";
+    Boolean(search) || statusFilter !== "all" || roleFilter !== "all";
 
   return (
     <div className="flex h-full flex-col gap-5">
@@ -385,8 +395,8 @@ export function UsersView() {
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input
-            value={search}
-            onChange={(e) => onSearchChange(e.target.value)}
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
             placeholder="Search name, email, role…"
             className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
           />
@@ -394,7 +404,7 @@ export function UsersView() {
         <Select
           size="sm"
           value={statusFilter}
-          onChange={(v) => onStatusChange(v as "all" | UserStatus)}
+          onChange={(v) => patch({ status: v === "all" ? null : v })}
           ariaLabel="Status filter"
           options={[
             { value: "all", label: "All statuses" },
@@ -406,7 +416,7 @@ export function UsersView() {
         <Select
           size="sm"
           value={roleFilter}
-          onChange={(v) => onRoleChange(v)}
+          onChange={(v) => patch({ role: v === "all" ? null : v })}
           ariaLabel="Role filter"
           options={[
             { value: "all", label: "All roles" },
@@ -416,7 +426,7 @@ export function UsersView() {
         <Select
           size="sm"
           value={sort}
-          onChange={(v) => onSortChange(v as "newest" | "oldest" | "name")}
+          onChange={(v) => patch({ sort: v === "newest" ? null : v })}
           ariaLabel="Sort"
           options={[
             { value: "newest", label: "Newest first" },
@@ -534,7 +544,7 @@ export function UsersView() {
             totalPages={totalPages}
             total={total}
             label="users"
-            onPage={setPage}
+            onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)}
           />
         </div>
       )}

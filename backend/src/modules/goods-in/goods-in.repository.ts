@@ -2,6 +2,7 @@ import { Prisma, type GoodsReceipt, type GoodsReceiptAttachment } from "@prisma/
 
 import { prisma, withTransaction } from "../../lib/prisma.js";
 import { conflict } from "../../utils/http-error.js";
+import { escapeRegex } from "../../utils/search.js";
 
 // Friendly message when the DB serial-uniqueness backstop fires (a concurrent receipt grabbed the
 // same serial between our app-level check and our write).
@@ -134,7 +135,7 @@ function buildWhere(filters: GoodsReceiptListFilters): Prisma.GoodsReceiptWhereI
   if (filters.warehouseIds !== undefined) where.warehouseId = { ...(where.warehouseId ? { equals: where.warehouseId as string } : {}), in: filters.warehouseIds };
   if (filters.purchaseOrderId) where.purchaseOrderId = filters.purchaseOrderId;
   if (filters.search) {
-    const q = filters.search;
+    const q = escapeRegex(filters.search);
     where.OR = [
       { code: { contains: q, mode: "insensitive" } },
       { poCode: { contains: q, mode: "insensitive" } },

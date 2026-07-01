@@ -1,6 +1,7 @@
 import { Prisma, type Warehouse } from "@prisma/client";
 
 import { prisma } from "../../lib/prisma.js";
+import { escapeRegex } from "../../utils/search.js";
 
 // Data-access layer for the Warehouse master. The ONLY place Prisma is touched for
 // warehouses. Soft-deleted warehouses (deletedAt set) are excluded from normal reads.
@@ -52,7 +53,7 @@ function buildWhere(filters: WarehouseListFilters): Prisma.WarehouseWhereInput {
   if (filters.typeId) where.typeId = filters.typeId;
   if (filters.ids !== undefined) where.id = { in: filters.ids };
   if (filters.search) {
-    const q = filters.search;
+    const q = escapeRegex(filters.search);
     where.OR = [
       { name: { contains: q, mode: "insensitive" } },
       { code: { contains: q, mode: "insensitive" } },
@@ -184,7 +185,7 @@ export function findManagerOptions(): Promise<
 // Active, non-deleted FIELD ENGINEERS for the job/dispatch engineer picker — only users whose role
 // grants the field-operations stock-holding capability (canHoldStock). Same minimal slice/sort as
 // findManagerOptions; the role filter is what keeps admins / finance / warehouse managers out of the
-// "assign an engineer" dropdowns. Mirrors the canHoldStock gate the goods-out + job services enforce.
+// "assign an engineer" dropdowns. Mirrors the canHoldStock gate the job services enforce.
 export function findEngineerOptions(): Promise<
   {
     id: string;

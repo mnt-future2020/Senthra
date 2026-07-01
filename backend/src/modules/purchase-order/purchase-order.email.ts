@@ -7,6 +7,7 @@ import { getCompanyProfile, getRegionalSettings } from "#modules/settings/settin
 import { sendTemplatedEmail } from "#modules/email/email.service.js";
 import { generatePurchaseOrderPdf } from "#modules/document/document.service.js";
 import { formatDate, formatMoney } from "#modules/document/document.formatter.js";
+import * as userRepo from "#modules/user/user.repository.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import type { PurchaseOrderWithRelations } from "./purchase-order.repository.js";
 
@@ -36,6 +37,41 @@ export async function notifySupplierPoSent(
       companyLegalName: company.legalName,
     },
     { attachments: [{ filename: pdf.filename, content: pdf.buffer, contentType: pdf.mimeType }] },
+  );
+}
+
+// Notify the staff who can approve a PO that one has been submitted for their decision.
+// FIRE-AND-FORGET from the PO service. Recipients are active staff whose role grants
+// `purchase_orders.approve` (or full access "*"); the submitter is excluded (no self-nudge).
+// Each approver is emailed individually so one bad address never blocks the rest.
+export async function notifyApproversPoSubmitted(
+  po: PurchaseOrderWithRelations,
+  submittedByEmail: string | null,
+): Promise<void> {
+  const approvers = (await userRepo.findActiveWithRole()).filter((u) => {
+    const perms = u.role?.permissions ?? [];
+    const canApprove = perms.includes("purchase_orders.approve") || perms.includes("*");
+    return canApprove && u.email !== submittedByEmail;
+  });
+  if (approvers.length === 0) {
+    console.info(`PO ${po.code}: no approvers to notify.`);
+    return;
+  }
+  const vars = {
+    poCode: po.code,
+    supplierName: po.supplier?.name ?? po.supplierName ?? "",
+    grandTotal: formatMoney(po.grandTotalPence, po.currency || "GBP"),
+    submittedBy: submittedByEmail ?? "",
+  };
+  await Promise.all(
+    approvers.map((a) =>
+      sendTemplatedEmail("po.submitted", a.email, { ...vars, approverName: a.firstName }).catch((e) =>
+        console.error(
+          `PO ${po.code} approval email to ${a.email} failed:`,
+          e instanceof Error ? e.message : e,
+        ),
+      ),
+    ),
   );
 }
 

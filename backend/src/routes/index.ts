@@ -2,6 +2,7 @@ import { Router } from "express";
 
 import auditRoutes from "#modules/audit/audit.routes.js";
 import authRoutes from "#modules/auth/auth.routes.js";
+import engineerTransferRoutes from "#modules/engineer-transfer/engineer-transfer.routes.js";
 import categoryRoutes from "#modules/category/category.routes.js";
 import { adminRouter as customerRoutes, portalRouter as customerPortalRoutes, stockAssignmentRouter, warehousePendingRouter, stockEntryRouter } from "#modules/customer/customer.routes.js";
 import departmentRoutes from "#modules/department/department.routes.js";
@@ -10,7 +11,6 @@ import engineerRoutes from "#modules/engineer/engineer.routes.js";
 import geoRoutes from "#modules/geo/geo.routes.js";
 import goodsInRoutes from "#modules/goods-in/goods-in.routes.js";
 import goodsManagementRoutes from "#modules/goods-management/goods-management.routes.js";
-import goodsOutRoutes from "#modules/goods-out/goods-out.routes.js";
 import inventoryRoutes from "#modules/inventory/inventory.routes.js";
 import irmRoutes from "#modules/irm/irm.routes.js";
 import irmCategoryRoutes from "#modules/irm-category/irm-category.routes.js";
@@ -49,7 +49,6 @@ router.use("/irm-types", irmTypeRoutes);
 router.use("/irm-categories", irmCategoryRoutes);
 router.use("/purchase-orders", purchaseOrderRoutes);
 router.use("/goods-in", goodsInRoutes);
-router.use("/goods-out", goodsOutRoutes);
 router.use("/goods-management", goodsManagementRoutes);
 router.use("/inventory", inventoryRoutes);
 router.use("/jobs", jobRoutes);
@@ -66,5 +65,7 @@ router.use("/engineer", engineerRoutes);
 router.use("/stock-assignments", stockAssignmentRouter);
 router.use("/stock-entries", stockEntryRouter);
 router.use("/warehouses", warehousePendingRouter);
+// Engineer-to-engineer stock transfers.
+router.use("/engineer-transfers", engineerTransferRoutes);
 
 export default router;

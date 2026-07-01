@@ -7,6 +7,7 @@ import { principalGrants } from "../../types/principal.js";
 import type {
   AdminStockRequestInput,
   CreateCustomerInput,
+  CustomerStockTransferInput,
   CustomerUserInput,
   ProjectInput,
   SiteInput,
@@ -317,6 +318,17 @@ export const listWarehouseStockEntries = asyncHandler(async (req, res) => {
     actorFrom(req),
   );
   res.json({ entries });
+});
+
+// POST /stock-entries/:id/transfer — move quantity to a different warehouse.
+export const transferCustomerStock = asyncHandler(async (req, res) => {
+  const body = req.body as CustomerStockTransferInput;
+  const result = await customerService.transferCustomerStock(
+    param(req, "id"),
+    { toWarehouseId: body.toWarehouseId, quantity: body.quantity, notes: body.notes },
+    actorFrom(req),
+  );
+  res.status(201).json(result);
 });
 
 // ============================================================================

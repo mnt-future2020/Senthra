@@ -8,10 +8,10 @@ import type { JobWithRelations } from "#modules/job/job.repository.js";
 import * as irmService from "#modules/irm/irm.service.js";
 import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
 import * as inventoryService from "#modules/inventory/inventory.service.js";
-import * as goodsOutRepo from "#modules/goods-out/goods-out.repository.js";
+import * as engineerStockRepo from "#modules/engineer-stock/engineer-stock.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import * as goodsManagementRepo from "./goods-management.repository.js";
-import type { CloseReconcileInput, PostMovementInput, ScanLookupInput } from "./goods-management.validation.js";
+import type { CloseReconcileInput, PostMovementInput, RestoreDamagedInput, ScanLookupInput } from "./goods-management.validation.js";
 import { withTransaction } from "../../lib/prisma.js";
 import { emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
 
@@ -93,7 +93,7 @@ export async function getJobKitTallies(jobId: string): Promise<Record<string, Ki
   const irmHeld = new Map<string, number>();
   const cseHeld = new Map<string, number>();
   if (engId) {
-    for (const b of await goodsOutRepo.findEngineerBalances(engId)) irmHeld.set(b.irmItemId, b.quantityOnHand);
+    for (const b of await engineerStockRepo.findEngineerBalances(engId)) irmHeld.set(b.irmItemId, b.quantityOnHand);
     for (const h of await goodsManagementRepo.findCustomerHoldingsByEngineer(engId)) cseHeld.set(h.customerStockEntryId, h.quantityOnHand);
   }
 
@@ -265,7 +265,7 @@ export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Pr
     const split = kitLineSplit(movements, kit.id);
     const lineOutstanding = Math.max(0, split.issued - split.used - split.returned);
     const globalHeld = job.assignedEngineerId
-      ? (await goodsOutRepo.findEngineerBalance(irmItem.id, job.assignedEngineerId))?.quantityOnHand ?? 0
+      ? (await engineerStockRepo.findEngineerBalance(irmItem.id, job.assignedEngineerId))?.quantityOnHand ?? 0
       : 0;
     const held = Math.min(lineOutstanding, globalHeld);
     return {
@@ -480,8 +480,8 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
             sourceCode: code,
             createdBy: actorEmail,
           });
-          const eng = await goodsOutRepo.upsertEngineerBalanceTx(tx, r.line.irmItemId!, job.assignedEngineerId!, r.line.qty);
-          await goodsOutRepo.insertEngineerTxnTx(tx, {
+          const eng = await engineerStockRepo.upsertEngineerBalanceTx(tx, r.line.irmItemId!, job.assignedEngineerId!, r.line.qty);
+          await engineerStockRepo.insertEngineerTxnTx(tx, {
             irmItemId: r.line.irmItemId!,
             engineerId: job.assignedEngineerId!,
             quantityDelta: r.line.qty,
@@ -720,7 +720,7 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
   // Batched per engineer (the page has only a handful), not per line.
   const engHeld = new Map<string, number>();
   for (const engId of [...new Set(pageJobs.map((j) => j.assignedEngineerId).filter((id): id is string => !!id))]) {
-    for (const b of await goodsOutRepo.findEngineerBalances(engId)) engHeld.set(`${engId}|${b.irmItemId}`, b.quantityOnHand);
+    for (const b of await engineerStockRepo.findEngineerBalances(engId)) engHeld.set(`${engId}|${b.irmItemId}`, b.quantityOnHand);
     for (const h of await goodsManagementRepo.findCustomerHoldingsByEngineer(engId)) engHeld.set(`${engId}|${h.customerStockEntryId}`, h.quantityOnHand);
   }
 
@@ -784,7 +784,7 @@ export async function getJobGoods(jobId: string, actor?: AuditActor): Promise<Jo
   // Engineer's REAL holding per item (global per item) — batched once for the job's single engineer.
   const engHeld = new Map<string, number>();
   if (job.assignedEngineerId) {
-    for (const b of await goodsOutRepo.findEngineerBalances(job.assignedEngineerId)) engHeld.set(b.irmItemId, b.quantityOnHand);
+    for (const b of await engineerStockRepo.findEngineerBalances(job.assignedEngineerId)) engHeld.set(b.irmItemId, b.quantityOnHand);
     for (const h of await goodsManagementRepo.findCustomerHoldingsByEngineer(job.assignedEngineerId)) engHeld.set(h.customerStockEntryId, h.quantityOnHand);
   }
 
@@ -955,14 +955,14 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
         if (line.source === "irm") {
           const irmItemId = line.irmItemId!;
           // Pre-check: engineer must hold at least qty.
-          const held = await goodsOutRepo.findEngineerBalanceTx(tx, irmItemId, job.assignedEngineerId!);
+          const held = await engineerStockRepo.findEngineerBalanceTx(tx, irmItemId, job.assignedEngineerId!);
           if (!held || held.quantityOnHand < qty) {
             throw conflict(`Engineer doesn't hold ${qty} of this IRM item. Held: ${held?.quantityOnHand ?? 0}.`);
           }
           // Drain the engineer holding.
-          const eng = await goodsOutRepo.upsertEngineerBalanceTx(tx, irmItemId, job.assignedEngineerId!, -qty);
+          const eng = await engineerStockRepo.upsertEngineerBalanceTx(tx, irmItemId, job.assignedEngineerId!, -qty);
           // Ledger row with type "job_return".
-          await goodsOutRepo.insertEngineerTxnTx(tx, {
+          await engineerStockRepo.insertEngineerTxnTx(tx, {
             irmItemId,
             engineerId: job.assignedEngineerId!,
             quantityDelta: -qty,
@@ -1091,7 +1091,7 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
 // Called from job.service.completeJobForEngineer. Takes the already-loaded job to avoid a circular
 // import (goods-management.service → job.repository; job.service → goods-management.service).
 // Opens a single transaction that:
-//   1. For each used line, drains the engineer holding (IRM via goodsOutRepo, customer via gmRepo).
+//   1. For each used line, drains the engineer holding (IRM via engineerStockRepo, customer via gmRepo).
 //   2. Appends ledger rows with type "job_consume".
 //   3. Creates a "consume" JobStockMovement (warehouseId null).
 //   4. Stamps the job "completed" via jobRepository.completeIfInProgressTx.
@@ -1192,14 +1192,14 @@ export async function recordConsumeAndComplete(
         if (used.source === "irm") {
           if (!used.irmItemId) throw badRequest("IRM used line missing irmItemId.");
           // Pre-check: engineer must hold at least this qty.
-          const held = await goodsOutRepo.findEngineerBalanceTx(tx, used.irmItemId, engineerId);
+          const held = await engineerStockRepo.findEngineerBalanceTx(tx, used.irmItemId, engineerId);
           if (!held || held.quantityOnHand < used.qty) {
             throw conflict(`Engineer doesn't hold ${used.qty} of this IRM item. Held: ${held?.quantityOnHand ?? 0}.`);
           }
           // Drain the engineer holding.
-          const eng = await goodsOutRepo.upsertEngineerBalanceTx(tx, used.irmItemId, engineerId, -used.qty);
+          const eng = await engineerStockRepo.upsertEngineerBalanceTx(tx, used.irmItemId, engineerId, -used.qty);
           // Append ledger row.
-          await goodsOutRepo.insertEngineerTxnTx(tx, {
+          await engineerStockRepo.insertEngineerTxnTx(tx, {
             irmItemId: used.irmItemId,
             engineerId,
             quantityDelta: -used.qty,
@@ -1482,7 +1482,7 @@ export async function closeReconcile(
   const irmHeld = new Map<string, number>();
   const cseHeld = new Map<string, number>();
   if (engId) {
-    for (const b of await goodsOutRepo.findEngineerBalances(engId)) irmHeld.set(b.irmItemId, b.quantityOnHand);
+    for (const b of await engineerStockRepo.findEngineerBalances(engId)) irmHeld.set(b.irmItemId, b.quantityOnHand);
     for (const h of await goodsManagementRepo.findCustomerHoldingsByEngineer(engId)) cseHeld.set(h.customerStockEntryId, h.quantityOnHand);
   }
 
@@ -1569,13 +1569,13 @@ export async function closeReconcile(
       async (tx, movementId, code) => {
         for (const u of unaccountedItems) {
           if (u.source === "irm") {
-            const held = await goodsOutRepo.findEngineerBalanceTx(tx, u.irmItemId!, job.assignedEngineerId!);
+            const held = await engineerStockRepo.findEngineerBalanceTx(tx, u.irmItemId!, job.assignedEngineerId!);
             const heldQty = held?.quantityOnHand ?? 0;
             // Drain however much is actually held (may be less than unaccounted if already written off).
             if (heldQty > 0) {
               const drainQty = Math.min(u.qty, heldQty);
-              const eng = await goodsOutRepo.upsertEngineerBalanceTx(tx, u.irmItemId!, job.assignedEngineerId!, -drainQty);
-              await goodsOutRepo.insertEngineerTxnTx(tx, {
+              const eng = await engineerStockRepo.upsertEngineerBalanceTx(tx, u.irmItemId!, job.assignedEngineerId!, -drainQty);
+              await engineerStockRepo.insertEngineerTxnTx(tx, {
                 irmItemId: u.irmItemId!,
                 engineerId: job.assignedEngineerId!,
                 quantityDelta: -drainQty,
@@ -1636,5 +1636,109 @@ export async function closeReconcile(
       ? { goodsStatus: updatedSummary.goodsStatus, workSummary: updatedSummary.workSummary, lastMovementAt: updatedSummary.lastMovementAt }
       : { goodsStatus: "reconciled", workSummary: null, lastMovementAt: null },
     unaccounted: [],
+  };
+}
+
+// ── Damaged Restore (reverse a write-off) ────────────────────────────────────────────────────
+// Decrements the DamagedStockBalance, appends a reversal DamagedStockTransaction, and credits
+// the units back to usable stock — company → InventoryBalance + InventoryTransaction;
+// customer → CustomerStockEntry.quantity. All in one atomic transaction.
+export interface RestoreDamagedResult {
+  warehouseId: string;
+  ownerType: string;
+  irmItemId: string | null;
+  customerStockEntryId: string | null;
+  quantityRestored: number;
+  damagedBalanceAfter: number;
+  usableBalanceAfter: number;
+}
+
+export async function restoreDamaged(input: RestoreDamagedInput, actor?: AuditActor): Promise<RestoreDamagedResult> {
+  const actorEmail = actor?.email ?? null;
+  const irmItemId = input.irmItemId ?? null;
+  const customerStockEntryId = input.customerStockEntryId ?? null;
+
+  // Load the damaged balance by natural key.
+  const balance = await goodsManagementRepo.findDamagedBalance({
+    warehouseId: input.warehouseId,
+    ownerType: input.ownerType,
+    irmItemId,
+    customerStockEntryId,
+  });
+  if (!balance) throw notFound("Damaged stock balance not found for the given item and warehouse.");
+  if (balance.quantity <= 0) throw conflict("No damaged units remain to restore.");
+  if (input.quantity > balance.quantity) {
+    throw conflict(`Only ${balance.quantity} damaged unit(s) available — cannot restore ${input.quantity}.`);
+  }
+
+  let damagedBalanceAfter = 0;
+  let usableBalanceAfter = 0;
+
+  await withTransaction(async (tx) => {
+    // 1. Decrement damaged balance + append reversal ledger row.
+    damagedBalanceAfter = await goodsManagementRepo.decrementDamagedBalanceTx(tx, balance.id, input.quantity, {
+      warehouseId: input.warehouseId,
+      ownerType: input.ownerType,
+      irmItemId,
+      customerStockEntryId,
+      customerId: balance.customerId,
+      quantityDelta: -input.quantity,
+      reason: "restore",
+      notes: input.notes,
+      photoUrl: null,
+      sourceType: "damaged_restore",
+      sourceId: balance.id,
+      sourceCode: null,
+      createdBy: actorEmail,
+    });
+
+    // 2. Return units to usable stock.
+    if (input.ownerType === "company" && irmItemId) {
+      // Company stock: upsert InventoryBalance and append an InventoryTransaction.
+      const updatedBal = await inventoryRepo.upsertBalanceTx(tx, irmItemId, input.warehouseId, input.quantity);
+      usableBalanceAfter = updatedBal.quantityOnHand;
+      await inventoryRepo.insertTransactionTx(tx, {
+        irmItemId,
+        warehouseId: input.warehouseId,
+        quantityDelta: input.quantity,
+        type: "restore",
+        sourceType: "damaged_restore",
+        sourceId: balance.id,
+        sourceCode: null,
+        balanceAfter: usableBalanceAfter,
+        notes: input.notes,
+        createdBy: actorEmail,
+      });
+    } else if (customerStockEntryId) {
+      // Customer stock: credit the CustomerStockEntry via the shared, negative-guarded qty-adjust helper.
+      const updated = await goodsManagementRepo.adjustCustomerStockEntryQtyTx(tx, customerStockEntryId, input.quantity);
+      usableBalanceAfter = updated.quantity;
+    }
+  });
+
+  audit.record({
+    actor,
+    action: "goods_management.damaged_restored",
+    targetType: "damaged_stock_balance",
+    targetId: balance.id,
+    targetLabel: balance.itemName,
+    metadata: {
+      warehouseId: input.warehouseId,
+      ownerType: input.ownerType,
+      irmItemId,
+      customerStockEntryId,
+      quantity: input.quantity,
+      notes: input.notes,
+    },
+  });
+
+  return {
+    warehouseId: input.warehouseId,
+    ownerType: input.ownerType,
+    irmItemId,
+    customerStockEntryId,
+    quantityRestored: input.quantity,
+    damagedBalanceAfter,
+    usableBalanceAfter,
   };
 }
