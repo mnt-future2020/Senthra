@@ -27,14 +27,16 @@ export function BrandingProvider({
   React.useEffect(() => {
     document.title = brandTitle(branding.brandName);
 
-    const href = branding.faviconUrl || "/favicon.ico";
-    let link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
-    if (!link) {
-      link = document.createElement("link");
-      link.rel = "icon";
-      document.head.appendChild(link);
+    // Point the tab icon at the configured favicon only. With no favicon set we
+    // remove any icon link so the browser shows its own neutral default — never a
+    // hardcoded fallback that could misrepresent the brand.
+    const existing = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+    if (branding.faviconUrl) {
+      const link = existing ?? document.head.appendChild(Object.assign(document.createElement("link"), { rel: "icon" }));
+      link.href = branding.faviconUrl;
+    } else if (existing) {
+      existing.remove();
     }
-    link.href = href;
   }, [branding.brandName, branding.faviconUrl]);
 
   const value = React.useMemo<BrandingState>(

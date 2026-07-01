@@ -15,6 +15,10 @@ export async function generateMetadata(): Promise<Metadata> {
   return {
     title: brandTitle(branding.brandName),
     description: `${branding.brandName} admin & analytics dashboard`,
+    // Emit the configured favicon ONLY. No fallback icon: when branding has no
+    // favicon (or is unreachable) we intentionally emit nothing so the browser
+    // shows its own neutral default — never a hardcoded mark that could misrepresent
+    // the brand (there is no stock favicon.ico in public/ either).
     ...(branding.faviconUrl ? { icons: { icon: branding.faviconUrl } } : {}),
   };
 }
