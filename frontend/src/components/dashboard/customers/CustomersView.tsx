@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { createPortal } from "react-dom";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { MoreHorizontal, Pencil, Plus, Search, Send, Trash2, Users2 } from "lucide-react";
 
 import * as customerService from "@/services/customer.service";
@@ -189,20 +189,46 @@ function CustomersTableSkeleton({ actions }: { actions: boolean }) {
 
 export function CustomersView() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { can } = useAuth();
   const { pushToast } = useDashboard();
 
-  const [search, setSearch] = React.useState("");
-  const [debounced, setDebounced] = React.useState("");
-  const [statusFilter, setStatusFilter] = React.useState<"all" | CustomerStatus>("all");
-  const [sort, setSort] = React.useState<Sort>("newest");
-  const [page, setPage] = React.useState(1);
+  // Filters derived from URL — survive refresh and back-navigation.
+  const search = searchParams.get("q") ?? "";
+  const statusFilter = (searchParams.get("status") ?? "all") as "all" | CustomerStatus;
+  const sort = (searchParams.get("sort") as Sort) ?? "newest";
+  const page = Math.max(1, Number(searchParams.get("page")) || 1);
+
+  // Local input state for the debounced search box.
+  const [searchInput, setSearchInput] = React.useState(search);
+  // Re-seed the box when ?q changes outside typing (browser back/forward). Adjusting state during
+  // render (not via an effect) is the React-recommended pattern and avoids a cascading re-render.
+  const [prevSearch, setPrevSearch] = React.useState(search);
+  if (prevSearch !== search) {
+    setPrevSearch(search);
+    setSearchInput(search);
+  }
+
   const [refreshKey, setRefreshKey] = React.useState(0);
   const [data, setData] = React.useState(() =>
     customerService.getCachedCustomers({ pageSize: PAGE_SIZE }),
   );
   const [loading, setLoading] = React.useState(!data);
   const [error, setError] = React.useState<string | null>(null);
+
+  // Patch URL params, preserving any existing params (e.g. ?tab for panel-embedded views).
+  const patch = React.useCallback(
+    (updates: Record<string, string | null>, resetPage = true) => {
+      const params = new URLSearchParams(window.location.search);
+      for (const [k, v] of Object.entries(updates)) {
+        if (v) params.set(k, v);
+        else params.delete(k);
+      }
+      if (resetPage) params.delete("page");
+      router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
+    },
+    [router],
+  );
   const [confirm, setConfirm] = React.useState<{ open: boolean; customer: CustomerSummary | null }>({
     open: false,
     customer: null,
@@ -218,18 +244,20 @@ export function CustomersView() {
   const canDelete = can("customers.delete");
   const showActions = canEdit || canDelete;
 
-  // Debounce the search box so each keystroke doesn't fire a request.
+  // Debounce the search input into ?q in the URL.
   React.useEffect(() => {
-    const t = setTimeout(() => setDebounced(search.trim()), 300);
+    const t = setTimeout(() => {
+      if (searchInput.trim() !== search) patch({ q: searchInput.trim() || null }, true);
+    }, 300);
     return () => clearTimeout(t);
-  }, [search]);
+  }, [searchInput, search, patch]);
 
   // Re-fetch on any query change. Cache-first (instant) then revalidate.
   React.useEffect(() => {
     let active = true;
     (async () => {
       const params = {
-        search: debounced || undefined,
+        search: search || undefined,
         status: statusFilter === "all" ? undefined : statusFilter,
         // "newest" is the server default → omit it so the cache key matches the
         // initial seed (getCachedCustomers({ pageSize })), which has no sort.
@@ -254,25 +282,13 @@ export function CustomersView() {
     return () => {
       active = false;
     };
-  }, [debounced, statusFilter, sort, page, refreshKey]);
+  }, [search, statusFilter, sort, page, refreshKey]);
 
-  const onSearchChange = (v: string) => {
-    setSearch(v);
-    setPage(1);
-  };
-  const onStatusChange = (v: "all" | CustomerStatus) => {
-    setStatusFilter(v);
-    setPage(1);
-  };
-  const onSortChange = (v: Sort) => {
-    setSort(v);
-    setPage(1);
-  };
   const goToNew = () => router.push("/dashboard/customers/new");
 
   const customers = data?.customers ?? [];
   const showSkeleton = loading && customers.length === 0;
-  const isFiltered = statusFilter !== "all" || Boolean(debounced);
+  const isFiltered = statusFilter !== "all" || Boolean(search);
 
   const doResend = async () => {
     if (!resendTarget) return;
@@ -296,7 +312,7 @@ export function CustomersView() {
       setConfirm({ open: false, customer: null });
       pushToast("Customer removed.", "success");
       // Drop back a page if we just removed the last row on a later page.
-      if (customers.length === 1 && page > 1) setPage(page - 1);
+      if (customers.length === 1 && page > 1) patch({ page: String(page - 1) }, false);
       else setRefreshKey((k) => k + 1);
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Delete failed.", "alert");
@@ -322,8 +338,8 @@ export function CustomersView() {
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input
-            value={search}
-            onChange={(e) => onSearchChange(e.target.value)}
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
             placeholder="Search name, code, email or contact…"
             className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
           />
@@ -331,7 +347,7 @@ export function CustomersView() {
         <Select
           size="sm"
           value={statusFilter}
-          onChange={(v) => onStatusChange(v as "all" | CustomerStatus)}
+          onChange={(v) => patch({ status: v === "all" ? null : v })}
           options={[
             { value: "all", label: "All statuses" },
             { value: "active", label: "Active" },
@@ -342,7 +358,7 @@ export function CustomersView() {
         <Select
           size="sm"
           value={sort}
-          onChange={(v) => onSortChange(v as Sort)}
+          onChange={(v) => patch({ sort: v === "newest" ? null : v })}
           options={[
             { value: "newest", label: "Newest first" },
             { value: "oldest", label: "Oldest first" },
@@ -433,7 +449,7 @@ export function CustomersView() {
             totalPages={data.totalPages}
             total={data.total}
             label="customers"
-            onPage={setPage}
+            onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)}
           />
         </div>
       )}

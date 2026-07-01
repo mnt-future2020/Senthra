@@ -1,6 +1,7 @@
 import { Prisma, type Job } from "@prisma/client";
 
 import { prisma, withTransaction } from "../../lib/prisma.js";
+import { escapeRegex } from "../../utils/search.js";
 
 // Data-access layer for Jobs (field-work job header + kit lines). The ONLY place Prisma is touched
 // for job records. Soft-deleted jobs (deletedAt set) are excluded from normal reads. Header + kit
@@ -87,7 +88,7 @@ function buildWhere(filters: JobListFilters): Prisma.JobWhereInput {
   if (filters.assignedEngineerId) where.assignedEngineerId = filters.assignedEngineerId;
   if (filters.projectId) where.projectId = filters.projectId;
   if (filters.search) {
-    const q = filters.search;
+    const q = escapeRegex(filters.search);
     where.OR = [
       { jobNumber: { contains: q, mode: "insensitive" } },
       { name: { contains: q, mode: "insensitive" } },
@@ -140,10 +141,10 @@ export function findActiveForGoodsManagement(warehouseId: string, search?: strin
     kitLines: { some: { OR: [{ warehouseId }, { lineType: "misc" }] } },
     ...(search && {
       OR: [
-        { jobNumber: { contains: search, mode: "insensitive" } },
-        { name: { contains: search, mode: "insensitive" } },
-        { customerName: { contains: search, mode: "insensitive" } },
-        { assignedEngineerName: { contains: search, mode: "insensitive" } },
+        { jobNumber: { contains: escapeRegex(search), mode: "insensitive" } },
+        { name: { contains: escapeRegex(search), mode: "insensitive" } },
+        { customerName: { contains: escapeRegex(search), mode: "insensitive" } },
+        { assignedEngineerName: { contains: escapeRegex(search), mode: "insensitive" } },
       ],
     }),
   };
@@ -343,4 +344,27 @@ export async function createWithCode(
     }
   }
   throw new Error("Could not allocate a unique job number.");
+}
+
+// --- Inventory Hub: item-scoped job lookup ---------------------------------------------------
+// Returns all non-deleted jobs that have at least one kit line referencing the given IRM item.
+// Used by GET /inventory/items/:irmItemId/jobs in the aggregation service.
+export function findJobsByIrmItem(irmItemId: string): Promise<JobWithRelations[]> {
+  return prisma.job.findMany({
+    where: { deletedAt: null, kitLines: { some: { irmItemId } } },
+    include: withRelations,
+    orderBy: { createdAt: "desc" },
+  });
+}
+
+// Count of ACTIVE jobs (assigned / accepted / in_progress) per engineer — Inventory Hub engineer lens.
+export async function countActiveJobsByEngineer(): Promise<Map<string, number>> {
+  const rows = await prisma.job.groupBy({
+    by: ["assignedEngineerId"],
+    where: { deletedAt: null, assignedEngineerId: { not: null }, status: { in: ["assigned", "accepted", "in_progress"] } },
+    _count: { _all: true },
+  });
+  const m = new Map<string, number>();
+  for (const r of rows) if (r.assignedEngineerId) m.set(r.assignedEngineerId, r._count._all);
+  return m;
 }

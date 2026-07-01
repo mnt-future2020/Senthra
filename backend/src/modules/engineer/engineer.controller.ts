@@ -64,3 +64,9 @@ export const getOwnCustomerStock = asyncHandler(async (req, res) => {
 export const getOwnMiscStock = asyncHandler(async (req, res) => {
   res.json({ misc: await engineerService.getOwnMiscStock(ownId(req)) });
 });
+
+// GET /engineer/movements — the engineer's own stock movement history (van company + customer ledgers,
+// cursor-paginated). Scoped to the signed-in engineer; ?cursor&limit&dateFrom&dateTo&ownership&type.
+export const getOwnMovements = asyncHandler(async (req, res) => {
+  res.json(await engineerService.getOwnMovements(ownId(req), req.query as Record<string, unknown>));
+});

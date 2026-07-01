@@ -1,6 +1,7 @@
 import { Prisma, type IrmItem } from "@prisma/client";
 
 import { prisma, withTransaction } from "../../lib/prisma.js";
+import { escapeRegex } from "../../utils/search.js";
 
 // Data-access layer for the IRM Catalogue. The ONLY place Prisma is touched for IRM items.
 // Soft-deleted items (deletedAt set) are excluded from normal reads — BUT the SKU
@@ -73,7 +74,7 @@ function buildWhere(filters: IrmListFilters): Prisma.IrmItemWhereInput {
   if (filters.categoryId) where.irmCategoryId = filters.categoryId;
   if (filters.supplierId) where.suppliers = { some: { supplierId: filters.supplierId } };
   if (filters.search) {
-    const q = filters.search;
+    const q = escapeRegex(filters.search);
     where.OR = [
       { name: { contains: q, mode: "insensitive" } },
       { code: { contains: q, mode: "insensitive" } },

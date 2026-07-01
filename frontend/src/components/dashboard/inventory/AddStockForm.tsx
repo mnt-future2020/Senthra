@@ -152,7 +152,11 @@ export function AddStockForm() {
   const dateValid = Boolean(movementDate) && movementDate <= today();
   const isFormValid = Boolean(irmItemId) && Boolean(warehouseId) && quantityValid && Boolean(reason) && dateValid;
 
-  const goBack = () => guard.attemptLeave(() => router.push(INVENTORY_LIST));
+  const goBack = () =>
+    guard.attemptLeave(() => {
+      if (window.history.length > 1) router.back();
+      else router.push(INVENTORY_LIST);
+    });
 
   // Reset to a blank form for a second add (keeps the warehouse prefill when launched from one).
   const resetForm = () => {

@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowLeft,
   Copy,
@@ -27,6 +28,44 @@ type EditorTab = "message" | "preview";
 const monoCls =
   "w-full rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3.5 font-mono text-xs leading-relaxed text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-60";
 
+// Friendly labels for the variable chips (tooltip + screen-reader name). Any variable
+// without an entry falls back to a humanised version of its name, so the map never has
+// to be exhaustive to stay correct.
+const VARIABLE_LABELS: Record<string, string> = {
+  firstName: "Recipient's first name",
+  lastName: "Recipient's last name",
+  recipientName: "Recipient's name",
+  email: "Recipient's email address",
+  roleName: "Assigned role",
+  temporaryPassword: "Temporary password",
+  resetPasswordLink: "Password reset link",
+  loginUrl: "Sign-in link",
+  supportEmail: "Support email address",
+  brandName: "Your brand name",
+  currentYear: "Current year",
+  customerName: "Customer company name",
+  contactPerson: "Customer contact name",
+  requestName: "Stock request item",
+  status: "Decision (approved / rejected)",
+  decisionDetail: "Decision note or reason",
+  supplierName: "Supplier name",
+  companyLegalName: "Your company's legal name",
+  poCode: "Purchase order number",
+  orderDate: "Order date",
+  expectedDeliveryDate: "Expected delivery date",
+  grandTotal: "Order total",
+  submittedBy: "Person who submitted it",
+  approverName: "Approver's name",
+  jobNumber: "Job number",
+  jobName: "Job name",
+  engineerName: "Engineer's name",
+  rejectReason: "Reason for rejection",
+};
+
+const humanizeVariable = (v: string): string =>
+  VARIABLE_LABELS[v] ??
+  v.replace(/([A-Z])/g, " $1").replace(/[._]/g, " ").replace(/^./, (c) => c.toUpperCase());
+
 export function EmailTemplateEditor({
   template,
   onBack,
@@ -38,6 +77,8 @@ export function EmailTemplateEditor({
 }) {
   const { can } = useAuth();
   const canManage = can("email_templates.manage");
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [name, setName] = React.useState(template.name);
   const [subject, setSubject] = React.useState(template.subject);
   // The admin edits one plain-text "message"; the branded HTML is generated from
@@ -57,7 +98,22 @@ export function EmailTemplateEditor({
     setMessage(template.textContent);
   }, [template.id, template.name, template.subject, template.textContent]);
 
-  const [tab, setTab] = React.useState<EditorTab>("message");
+  // Tab is persisted in ?etab= so a browser refresh keeps it.
+  // We use a namespaced param to avoid colliding with the host ?section= param.
+  const tab = (searchParams.get("etab") as EditorTab | null) ?? "message";
+
+  const patchParams = React.useCallback(
+    (updates: Record<string, string | null>) => {
+      const params = new URLSearchParams(window.location.search);
+      for (const [k, v] of Object.entries(updates)) {
+        if (v) params.set(k, v);
+        else params.delete(k);
+      }
+      router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
+    },
+    [router],
+  );
+
   const [preview, setPreview] = React.useState<EmailPreview | null>(null);
   const [previewLoading, setPreviewLoading] = React.useState(false);
 
@@ -66,6 +122,21 @@ export function EmailTemplateEditor({
   const [testTo, setTestTo] = React.useState("");
   const [confirmAction, setConfirmAction] = React.useState<null | "restore" | "delete">(null);
   const [msg, setMsg] = React.useState<Msg>(null);
+
+  // Required variables (system templates only) can't be removed without a save failing,
+  // so surface them first and flag them. Falls back to an empty set for custom templates
+  // or any cached response predating the `requiredVariables` field.
+  const requiredSet = React.useMemo(
+    () => new Set(template.requiredVariables ?? []),
+    [template.requiredVariables],
+  );
+  const orderedVariables = React.useMemo(
+    () => [
+      ...template.variables.filter((v) => requiredSet.has(v)),
+      ...template.variables.filter((v) => !requiredSet.has(v)),
+    ],
+    [template.variables, requiredSet],
+  );
 
   const subjectRef = React.useRef<HTMLInputElement>(null);
   const messageRef = React.useRef<HTMLTextAreaElement>(null);
@@ -92,7 +163,7 @@ export function EmailTemplateEditor({
   }, [template.id, subject, message]);
 
   const openTab = (next: EditorTab) => {
-    setTab(next);
+    patchParams({ etab: next === "message" ? null : next });
     if (next === "preview") refreshPreview();
   };
 
@@ -253,23 +324,37 @@ export function EmailTemplateEditor({
           </Field>
         </div>
 
-        {/* Variable chips */}
+        {/* Variable chips — required ones first, flagged so they're not accidentally removed. */}
         {template.variables.length > 0 && (
           <div>
-            <label className={labelCls}>Variables — click to insert</label>
+            <label className={labelCls}>Variables — click to add one to the subject or message</label>
             <div className="flex flex-wrap gap-1.5">
-              {template.variables.map((v) => (
-                <button
-                  key={v}
-                  type="button"
-                  onClick={() => insertVariable(v)}
-                  disabled={!canManage}
-                  className="rounded-md border border-[var(--accent)]/30 bg-[var(--accent-10)] px-2 py-1 font-mono text-[11px] font-bold text-[var(--accent)] transition-all hover:bg-[var(--accent)] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {`{{${v}}}`}
-                </button>
-              ))}
+              {orderedVariables.map((v) => {
+                const required = requiredSet.has(v);
+                const label = humanizeVariable(v);
+                return (
+                  <button
+                    key={v}
+                    type="button"
+                    onClick={() => insertVariable(v)}
+                    disabled={!canManage}
+                    title={required ? `${label} · required` : label}
+                    aria-label={`Insert ${label}${required ? ", required" : ""}`}
+                    className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 font-mono text-[11px] font-bold text-[var(--accent)] transition-all hover:bg-[var(--accent)] hover:text-white disabled:cursor-not-allowed disabled:opacity-50 ${
+                      required ? "border-[var(--accent)] bg-[var(--accent-10)]" : "border-[var(--accent)]/30 bg-[var(--accent-10)]"
+                    }`}
+                  >
+                    {`{{${v}}}`}
+                    {required && <span aria-hidden>*</span>}
+                  </button>
+                );
+              })}
             </div>
+            {requiredSet.size > 0 && (
+              <p className="mt-1.5 text-[11px] leading-relaxed text-[var(--faint)]">
+                <span aria-hidden>* </span>Required — these must stay in the subject or message, or the template can&apos;t be saved.
+              </p>
+            )}
           </div>
         )}
 

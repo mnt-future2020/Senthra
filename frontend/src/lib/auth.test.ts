@@ -47,6 +47,27 @@ describe("firstDashboardPath", () => {
   it("a settings-only user lands on Settings", () => {
     expect(firstDashboardPath(makeUser(["settings.view"]))).toBe("/dashboard/settings");
   });
+  it("a categories-only user lands on Settings (Categories is a Settings section)", () => {
+    expect(firstDashboardPath(makeUser(["categories.view"]))).toBe("/dashboard/settings");
+  });
+  it("a jobs-only user lands on Jobs (e.g. the Project Manager role)", () => {
+    expect(firstDashboardPath(makeUser(["jobs.view"]))).toBe("/dashboard/jobs");
+  });
+  it("an engineer-only user lands on the engineer portal", () => {
+    expect(firstDashboardPath(makeUser(["engineer.dashboard.view"]))).toBe("/dashboard/engineer");
+  });
+  it("an audit-only user lands on the Audit log", () => {
+    expect(firstDashboardPath(makeUser(["audit.view"]))).toBe("/dashboard/audit");
+  });
+  it("lands on the higher-priority section when a user holds several", () => {
+    // Engineer is intentionally ranked below real modules; audit below the engineer portal.
+    expect(firstDashboardPath(makeUser(["engineer.dashboard.view", "jobs.view"]))).toBe(
+      "/dashboard/jobs",
+    );
+    expect(firstDashboardPath(makeUser(["audit.view", "engineer.dashboard.view"]))).toBe(
+      "/dashboard/engineer",
+    );
+  });
   it("a no-permission user has no section", () => {
     expect(firstDashboardPath(makeUser([]))).toBeNull();
   });

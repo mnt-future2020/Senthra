@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Briefcase, Check, Loader2, Pencil, Plus, Search, Trash2, X } from "lucide-react";
 
 import { useDashboard } from "@/hooks/useDashboard";
@@ -23,16 +24,31 @@ export function JobTitlesView() {
   const canEdit = can("users.edit");
   const canDelete = can("users.delete");
 
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  // Filters derived from the URL so they survive a browser refresh.
+  const search = searchParams.get("q") ?? "";
+  const sort = (searchParams.get("sort") as "newest" | "oldest" | "name") ?? "name";
+  const page = Math.max(1, Number(searchParams.get("page")) || 1);
+
+  // Preserves all existing params (incl. ?tab) and resets to page 1 on filter changes.
+  const patch = (updates: Record<string, string | null>, resetPage = true) => {
+    const params = new URLSearchParams(window.location.search);
+    for (const [k, v] of Object.entries(updates)) {
+      if (v) params.set(k, v);
+      else params.delete(k);
+    }
+    if (resetPage) params.delete("page");
+    router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
+  };
+
   // Seed from the SWR cache so returning to this tab renders instantly.
   const [jobTitles, setJobTitles] = React.useState<JobTitle[]>(
     () => jobTitleService.getCachedJobTitles() ?? [],
   );
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
-
-  const [search, setSearch] = React.useState("");
-  const [page, setPage] = React.useState(1);
-  const [sort, setSort] = React.useState<"newest" | "oldest" | "name">("name");
 
   const [newName, setNewName] = React.useState("");
   const [adding, setAdding] = React.useState(false);
@@ -48,18 +64,21 @@ export function JobTitlesView() {
   const [deleting, setDeleting] = React.useState(false);
 
   // Bounded master-data — load all once, then filter + sort + paginate on the client.
-  const q = search.trim().toLowerCase();
-  const filtered = q ? jobTitles.filter((d) => d.name.toLowerCase().includes(q)) : jobTitles;
-  const sorted = [...filtered].sort((a, b) =>
-    sort === "name"
-      ? a.name.localeCompare(b.name)
-      : sort === "oldest"
-        ? a.createdAt.localeCompare(b.createdAt)
-        : b.createdAt.localeCompare(a.createdAt),
-  );
-  const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
-  const safePage = Math.min(page, totalPages);
-  const pageItems = sorted.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+  const { filtered, totalPages, safePage, pageItems } = React.useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const filtered = q ? jobTitles.filter((d) => d.name.toLowerCase().includes(q)) : jobTitles;
+    const sorted = [...filtered].sort((a, b) =>
+      sort === "name"
+        ? a.name.localeCompare(b.name)
+        : sort === "oldest"
+          ? a.createdAt.localeCompare(b.createdAt)
+          : b.createdAt.localeCompare(a.createdAt),
+    );
+    const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+    const safePage = Math.min(page, totalPages);
+    const pageItems = sorted.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+    return { filtered, totalPages, safePage, pageItems };
+  }, [jobTitles, search, sort, page]);
 
   const load = React.useCallback(async () => {
     try {
@@ -125,7 +144,8 @@ export function JobTitlesView() {
       await jobTitleService.deleteJobTitle(confirm.jt.id);
       setConfirm({ open: false, jt: null });
       const newTotalPages = Math.max(1, Math.ceil((filtered.length - 1) / PAGE_SIZE));
-      setPage((p) => Math.min(p, newTotalPages));
+      const clampedPage = Math.min(page, newTotalPages);
+      if (clampedPage !== page) patch({ page: clampedPage > 1 ? String(clampedPage) : null }, false);
       await load();
       pushToast("Job title deleted.", "success");
     } catch (e) {
@@ -151,10 +171,7 @@ export function JobTitlesView() {
               <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
               <input
                 value={search}
-                onChange={(e) => {
-                  setSearch(e.target.value);
-                  setPage(1);
-                }}
+                onChange={(e) => patch({ q: e.target.value || null })}
                 placeholder="Search job titles…"
                 className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
               />
@@ -162,10 +179,7 @@ export function JobTitlesView() {
             <Select
               size="sm"
               value={sort}
-              onChange={(v) => {
-                setSort(v as "newest" | "oldest" | "name");
-                setPage(1);
-              }}
+              onChange={(v) => patch({ sort: v === "name" ? null : v })}
               ariaLabel="Sort"
               options={[
                 { value: "newest", label: "Newest" },
@@ -328,7 +342,7 @@ export function JobTitlesView() {
             totalPages={totalPages}
             total={filtered.length}
             label="job titles"
-            onPage={setPage}
+            onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)}
           />
         </div>
       )}

@@ -11,7 +11,7 @@ import type { UserWithRole } from "./user.repository.js";
 import * as userWarehouseRepo from "./user-warehouse.repository.js";
 import type { AssignedWarehouse } from "./user-warehouse.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
-import * as goodsOutRepo from "#modules/goods-out/goods-out.repository.js";
+import * as engineerStockRepo from "#modules/engineer-stock/engineer-stock.repository.js";
 import { generateTempPassword } from "../../utils/generate-password.js";
 import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
 import { hashPassword } from "../../utils/password.js";
@@ -483,7 +483,7 @@ export interface UpdateUserInput extends ProfileFieldsInput {
 // BLOCKS; it never auto-transfers, deletes or silently moves stock. Applied to every path that
 // can deactivate / suspend a user.
 async function assertNotHoldingStock(userId: string): Promise<void> {
-  const held = await goodsOutRepo.countEngineerHeldStock(userId);
+  const held = await engineerStockRepo.countEngineerHeldStock(userId);
   if (held > 0) {
     throw conflict("This staff member still holds stock. Return or transfer their stock before deactivating.");
   }

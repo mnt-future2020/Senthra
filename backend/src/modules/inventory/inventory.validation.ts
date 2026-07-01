@@ -62,3 +62,22 @@ export const addStockSchema = z.object({
   notes: z.string().trim().max(2000).optional(),
 });
 export type AddStockInput = z.infer<typeof addStockSchema>;
+
+// Manual DOWNWARD correction (damage / shrinkage / miscount) — removes a positive magnitude of
+// EXISTING stock. Guarded server-side so it can never take available below zero. SYSTEM-owned codes.
+export const STOCK_ADJUST_DOWN_REASONS = ["damage_correction", "shrinkage", "miscount", "other"] as const;
+
+export const adjustStockSchema = z.object({
+  irmItemId: z.string({ error: "Select an item." }).regex(OBJECT_ID_RE, "Select an item."),
+  warehouseId: z.string({ error: "Select a warehouse." }).regex(OBJECT_ID_RE, "Select a warehouse."),
+  quantity: z.coerce.number({ error: "Quantity is required." }).int("Use a whole number.").min(1, "Quantity must be at least 1.").max(10_000_000),
+  movementDate: requiredPastOrTodayDate("Movement date"),
+  reason: z.enum(STOCK_ADJUST_DOWN_REASONS, { error: "Select a reason." }),
+  referenceNumber: z.string().trim().max(60).optional(),
+  notes: z.string().trim().max(2000).optional(),
+});
+export type AdjustStockInput = z.infer<typeof adjustStockSchema>;
+
+// Inventory Hub — query shape constants (used in controller type assertions).
+export const OWNERSHIPS = ["company", "customer"] as const;
+export const LOCATION_TYPES = ["warehouse", "engineer", "customer_site", "damaged", "transit"] as const;

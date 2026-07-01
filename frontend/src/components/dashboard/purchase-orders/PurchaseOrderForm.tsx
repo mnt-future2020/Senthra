@@ -138,7 +138,11 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
     return { map, list: items };
   }, [items]);
 
-  const goBack = () => guard.attemptLeave(() => router.push(PO_LIST));
+  const goBack = () =>
+    guard.attemptLeave(() => {
+      if (window.history.length > 1) router.back();
+      else router.push(PO_LIST);
+    });
   const clearError = (f: string) => setErrors((p) => { if (!p[f]) return p; const n = { ...p }; delete n[f]; return n; });
 
   const updateLine = (idx: number, patch: Partial<LineRow>) => {

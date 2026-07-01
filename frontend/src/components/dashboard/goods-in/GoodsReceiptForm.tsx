@@ -218,7 +218,12 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
   };
 
   const clearError = (f: string) => setErrors((p) => { if (!p[f]) return p; const n = { ...p }; delete n[f]; return n; });
-  const goBack = () => guard.attemptLeave(() => router.push(returnTo ?? GRN_LIST));
+  const goBack = () =>
+    guard.attemptLeave(() => {
+      if (returnTo) { router.push(returnTo); return; }
+      if (window.history.length > 1) router.back();
+      else router.push(GRN_LIST);
+    });
   const updateLine = (idx: number, patch: Partial<LineState>) => {
     setLines((rows) => rows.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
     touch();

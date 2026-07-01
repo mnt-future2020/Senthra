@@ -1,15 +1,8 @@
-import { Suspense } from "react";
+import { redirect } from "next/navigation";
 
-import { PermissionGate } from "@/components/auth/PermissionGate";
-import { IrmPanel } from "@/components/dashboard/irm/IrmPanel";
-
+// The IRM Catalogue is now part of the Inventory Hub (Inventory → IRM tab → Catalogue), so the
+// standalone page is retired. The route is kept as a redirect so old links/bookmarks land in the
+// Hub. The item sub-routes (/new, /[id], /[id]/edit) remain — they're used by the embedded catalogue.
 export default function IrmPage() {
-  return (
-    <PermissionGate anyOf={["irm.view", "irm_types.view", "irm_categories.view"]}>
-      {/* Suspense satisfies useSearchParams (the ?tab= seed) during prerender. */}
-      <Suspense>
-        <IrmPanel />
-      </Suspense>
-    </PermissionGate>
-  );
+  redirect("/dashboard/inventory?tab=company&irm=catalogue");
 }

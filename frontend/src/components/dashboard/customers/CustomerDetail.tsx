@@ -17,12 +17,10 @@ import {
   Loader2,
   Mail,
   MapPin,
-  Package,
   PackagePlus,
   Pencil,
   Phone,
   Plus,
-  Search,
   Trash2,
   User as UserIcon,
 } from "lucide-react";
@@ -30,11 +28,13 @@ import {
 import * as customerService from "@/services/customer.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
+import { Select } from "@/components/ui/Select";
 import { FormPageHeader, FormSection } from "@/components/ui/FormScaffold";
 import { Avatar } from "@/components/ui/Avatar";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { primaryBtn } from "@/components/ui/styles";
+import { Pagination } from "@/components/ui/Pagination";
 import { TempPasswordModal } from "@/components/ui/TempPasswordModal";
 import { ProjectModal } from "./ProjectModal";
 import { SiteModal } from "./SiteModal";
@@ -46,13 +46,15 @@ import type {
   CustomerStockEntry,
   CustomerUser,
   StockRequest,
-  WarehouseAssignment,
 } from "@/types/customer";
 import type { UserStatus } from "@/types/user";
 import { EditApproveModal } from "./EditApproveModal";
 import { AssignWarehouseModal } from "./AssignWarehouseModal";
 import { AdminStockSubmissionModal } from "./AdminStockSubmissionModal";
 import { DamagedStockView } from "@/components/dashboard/goods-management/DamagedStockView";
+
+// Fallback destination for the back button when there is no in-app history to return to.
+const CUSTOMERS_LIST = "/dashboard/customers";
 
 // The detail page is organised into tabs (URL-driven ?tab=) like the Users & Roles
 // panel: the company header stays pinned and each section becomes a tab.
@@ -208,50 +210,52 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
     router.replace(`/dashboard/customers/${customer.customerCode}?tab=${t}`, { scroll: false });
 
   return (
-    <div className="space-y-6">
-      <FormPageHeader
-        title="Customer details"
-        subtitle={customer.email}
-        onBack={() => router.push("/dashboard/customers")}
-        actions={
-          <>
-            {canResendPrimary && (
-              <button
-                onClick={() => setConfirmResend(true)}
-                disabled={resending}
-                className="flex items-center gap-1.5 rounded-xl border border-[var(--border)] px-3 py-2 text-xs font-bold text-[var(--ink)] transition-all hover:bg-[var(--surface-2)] disabled:opacity-60"
-              >
-                {resending ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <KeyRound className="h-3.5 w-3.5" />
-                )}
-                Resend invite
-              </button>
-            )}
-            {canEditCompany && (
-              <button
-                onClick={() => router.push(`/dashboard/customers/${customer.customerCode}/edit`)}
-                className={primaryBtn}
-              >
-                Edit
-              </button>
-            )}
-            {canDelete && (
-              <button
-                onClick={() => setConfirmDelete(true)}
-                aria-label="Delete customer"
-                className="flex h-9 w-9 items-center justify-center rounded-xl border border-[var(--border)] text-[var(--neg)] transition-all hover:bg-[var(--neg)]/10"
-              >
-                <Trash2 className="h-4 w-4" />
-              </button>
-            )}
-          </>
-        }
-      />
+    <div className="flex h-full flex-col gap-6">
+      <div className="shrink-0">
+        <FormPageHeader
+          title="Customer details"
+          subtitle={customer.email}
+          onBack={() => { if (window.history.length > 1) router.back(); else router.push(CUSTOMERS_LIST); }}
+          actions={
+            <>
+              {canResendPrimary && (
+                <button
+                  onClick={() => setConfirmResend(true)}
+                  disabled={resending}
+                  className="flex items-center gap-1.5 rounded-xl border border-[var(--border)] px-3 py-2 text-xs font-bold text-[var(--ink)] transition-all hover:bg-[var(--surface-2)] disabled:opacity-60"
+                >
+                  {resending ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <KeyRound className="h-3.5 w-3.5" />
+                  )}
+                  Resend invite
+                </button>
+              )}
+              {canEditCompany && (
+                <button
+                  onClick={() => router.push(`/dashboard/customers/${customer.customerCode}/edit`)}
+                  className={primaryBtn}
+                >
+                  Edit
+                </button>
+              )}
+              {canDelete && (
+                <button
+                  onClick={() => setConfirmDelete(true)}
+                  aria-label="Delete customer"
+                  className="flex h-9 w-9 items-center justify-center rounded-xl border border-[var(--border)] text-[var(--neg)] transition-all hover:bg-[var(--neg)]/10"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              )}
+            </>
+          }
+        />
+      </div>
 
       {/* Company card */}
-      <div className="flex flex-wrap items-center gap-4 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs">
+      <div className="flex shrink-0 flex-wrap items-center gap-4 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs">
         <Avatar url={customer.logoUrl} firstName={customer.name || "?"} lastName="" size={56} />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
@@ -279,7 +283,7 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
       </div>
 
       {/* Tabs — URL-driven (?tab=), like the Users & Roles panel. */}
-      <div className="flex gap-1 overflow-x-auto rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-1">
+      <div className="flex shrink-0 gap-1 overflow-x-auto rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-1">
         {visibleTabs.map((t) => (
           <button
             key={t.id}
@@ -296,31 +300,33 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
         ))}
       </div>
 
-      {activeTab === "overview" && <OverviewTab customer={customer} />}
-      {activeTab === "projects" && (
-        <ProjectsSection customer={customer} caps={projectCaps} onChange={setCustomer} pushToast={pushToast} />
-      )}
-      {activeTab === "catalogue" && (
-        <StockEntriesTab
-          customer={customer}
-          stockCaps={stockCaps}
-          router={router}
-        />
-      )}
-      {activeTab === "submissions" && (
-        <StockSubmissionsTab
-          customer={customer}
-          stockReq={stockReqCaps}
-          onChange={setCustomer}
-          pushToast={pushToast}
-        />
-      )}
-      {activeTab === "sites" && (
-        <SitesSection customer={customer} caps={siteCaps} onChange={setCustomer} pushToast={pushToast} />
-      )}
-      {activeTab === "users" && (
-        <PortalLoginSection customer={customer} caps={portalCaps} onChange={setCustomer} pushToast={pushToast} />
-      )}
+      <div className="min-h-0 flex-1 overflow-auto">
+        {activeTab === "overview" && <OverviewTab customer={customer} />}
+        {activeTab === "projects" && (
+          <ProjectsSection customer={customer} caps={projectCaps} onChange={setCustomer} pushToast={pushToast} />
+        )}
+        {activeTab === "catalogue" && (
+          <StockEntriesTab
+            customer={customer}
+            stockCaps={stockCaps}
+            router={router}
+          />
+        )}
+        {activeTab === "submissions" && (
+          <StockSubmissionsTab
+            customer={customer}
+            stockReq={stockReqCaps}
+            onChange={setCustomer}
+            pushToast={pushToast}
+          />
+        )}
+        {activeTab === "sites" && (
+          <SitesSection customer={customer} caps={siteCaps} onChange={setCustomer} pushToast={pushToast} />
+        )}
+        {activeTab === "users" && (
+          <PortalLoginSection customer={customer} caps={portalCaps} onChange={setCustomer} pushToast={pushToast} />
+        )}
+      </div>
 
       <ConfirmDialog
         open={confirmResend}
@@ -721,6 +727,8 @@ function ProjectsSection({ customer, caps, onChange, pushToast }: SectionProps) 
 }
 
 // --- Inventory tab (received stock entries) ----------------------------------
+const STOCK_PAGE_SIZE = 20;
+
 function StockEntriesTab({
   customer,
   stockCaps,
@@ -737,19 +745,61 @@ function StockEntriesTab({
   // entries uses inventory.view, which is a separate concern.
   const canViewDamaged = can("goods_management.view");
 
-  // --- stock entries list ---
+  // --- URL-persisted status filter ("stock_filter") --------------------------
+  const searchParams = useSearchParams();
+  const stockFilter = (searchParams.get("stock_filter") ?? "") as "" | "active" | "draft";
+
+  const patch = React.useCallback(
+    (updates: Record<string, string>) => {
+      const params = new URLSearchParams(window.location.search);
+      for (const [k, v] of Object.entries(updates)) {
+        if (v) params.set(k, v);
+        else params.delete(k);
+      }
+      router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
+    },
+    [router],
+  );
+
+  // --- URL-persisted stock page ("stockPage") ----------------------------
+  const page = Math.max(1, Number(searchParams.get("stockPage")) || 1);
+  const patchPage = React.useCallback(
+    (next: number | null) => {
+      const params = new URLSearchParams(window.location.search);
+      if (next && next > 1) params.set("stockPage", String(next)); else params.delete("stockPage");
+      router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
+    },
+    [router],
+  );
+
+  // --- stock entries list (service returns a plain array — paginate client-side) ---
   const [entries, setEntries] = React.useState<CustomerStockEntry[] | null>(null);
   const [error, setError] = React.useState<string | null>(null);
-  const [filter, setFilter] = React.useState<"" | "draft" | "active">("");
 
   const load = React.useCallback(() => {
     customerService
-      .listCustomerStockEntries(customer.id, filter || undefined)
-      .then(setEntries)
+      .listCustomerStockEntries(customer.id, stockFilter || undefined)
+      .then((rows) => { setEntries(rows); })
       .catch((e) => setError(e instanceof Error ? e.message : "Could not load stock entries."));
-  }, [customer.id, filter]);
+  }, [customer.id, stockFilter]);
 
   React.useEffect(() => { load(); }, [load]);
+
+  // Memoised derived values — client-side slice for the current page + totals.
+  // Wrapping in useMemo prevents React Compiler from bailing on
+  // "Existing memoization could not be preserved".
+  const { pageEntries, entryCount, totalPages } = React.useMemo(() => {
+    const all = entries ?? [];
+    const count = all.length;
+    const pages = Math.max(1, Math.ceil(count / STOCK_PAGE_SIZE));
+    const safePage = Math.min(page, pages);
+    const start = (safePage - 1) * STOCK_PAGE_SIZE;
+    return {
+      pageEntries: all.slice(start, start + STOCK_PAGE_SIZE),
+      entryCount: count,
+      totalPages: pages,
+    };
+  }, [entries, page]);
 
   return (
     <div className="space-y-6">
@@ -757,27 +807,41 @@ function StockEntriesTab({
       {error ? (
         <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>
       ) : entries === null ? (
-        <div className="flex items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--surface)] py-16">
-          <Loader2 className="h-6 w-6 animate-spin text-[var(--muted)]" />
+        /* Skeleton — mirrors the loaded table layout */
+        <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+          <div className="border-b border-[var(--border)] px-4 py-3">
+            <div className="h-4 w-32 animate-pulse rounded bg-[var(--surface-2)]" />
+          </div>
+          <div className="divide-y divide-[var(--border)]">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <div key={i} className="flex items-center gap-4 px-4 py-3">
+                <div className="h-4 w-40 animate-pulse rounded bg-[var(--surface-2)]" />
+                <div className="h-4 w-28 animate-pulse rounded bg-[var(--surface-2)]" />
+                <div className="h-4 w-20 animate-pulse rounded bg-[var(--surface-2)]" />
+                <div className="h-4 w-10 animate-pulse rounded bg-[var(--surface-2)]" />
+                <div className="h-4 w-24 animate-pulse rounded bg-[var(--surface-2)]" />
+                <div className="ml-auto h-6 w-16 animate-pulse rounded-full bg-[var(--surface-2)]" />
+              </div>
+            ))}
+          </div>
         </div>
       ) : (
         <>
           <div className="flex flex-wrap items-center gap-2">
-            {(["", "active", "draft"] as const).map((f) => (
-              <button
-                key={f}
-                type="button"
-                onClick={() => setFilter(f)}
-                className={`rounded-full px-3 py-1.5 text-[11px] font-bold transition-all ${
-                  filter === f
-                    ? "bg-[var(--accent)] text-white"
-                    : "border border-[var(--border)] bg-[var(--surface-2)] text-[var(--muted)] hover:text-[var(--ink)]"
-                }`}
-              >
-                {f === "" ? "All" : f === "active" ? "Active" : "Draft"}
-              </button>
-            ))}
-            <span className="ml-1 text-xs text-[var(--muted)]">{entries.length} entr{entries.length === 1 ? "y" : "ies"}</span>
+            <Select
+              size="sm"
+              value={stockFilter}
+              onChange={(v) => patch({ stock_filter: v, stockPage: "" })}
+              options={[
+                { value: "", label: "All" },
+                { value: "active", label: "Active" },
+                { value: "draft", label: "Draft" },
+              ]}
+              ariaLabel="Filter by status"
+            />
+            <span className="ml-1 text-xs text-[var(--muted)]">
+              {entryCount} {entryCount === 1 ? "entry" : "entries"}
+            </span>
             {stockCaps.create && (
               <button
                 type="button"
@@ -794,71 +858,80 @@ function StockEntriesTab({
               <Boxes className="h-7 w-7 text-[var(--faint)]" />
               <p className="text-sm font-semibold text-[var(--ink)]">No stock entries</p>
               <p className="text-xs text-[var(--muted)]">
-                {filter ? `No ${filter} entries found.` : "Received stock for this customer will appear here."}
+                {stockFilter ? `No ${stockFilter} entries found.` : "Received stock for this customer will appear here."}
               </p>
             </div>
           ) : (
-            <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
-              <table className="w-full text-left text-sm" style={{ minWidth: 750 }}>
-                <thead>
-                  <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                    <th className="px-4 py-3">Item</th>
-                    <th className="px-4 py-3">Warehouse</th>
-                    <th className="px-4 py-3">SKU</th>
-                    <th className="px-4 py-3">Qty</th>
-                    <th className="px-4 py-3">Barcode</th>
-                    <th className="px-4 py-3">Status</th>
-                    <th className="px-4 py-3">Received</th>
-                    <th className="px-4 py-3" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {entries.map((e) => (
-                    <tr
-                      key={e.id}
-                      className="cursor-pointer border-b border-[var(--border)] align-top transition-colors last:border-0 hover:bg-[var(--surface-2)]"
-                      onClick={() => router.push(`/dashboard/stock-entries/${e.id}?from=customer`)}
-                    >
-                      <td className="px-4 py-3 font-semibold text-[var(--ink)]">{e.itemName}</td>
-                      <td className="px-4 py-3">
-                        <div className="text-[var(--ink)]">{e.warehouseName}</div>
-                        <div className="font-mono text-[11px] text-[var(--faint)]">{e.warehouseCode}</div>
-                      </td>
-                      <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.sku ?? "—"}</td>
-                      <td className="px-4 py-3 font-bold text-[var(--ink)]">{e.quantity}</td>
-                      <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.barcode ?? "—"}</td>
-                      <td className="px-4 py-3">
-                        <span
-                          className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${
-                            e.status === "active"
-                              ? "bg-[var(--pos)]/12 text-[var(--pos)]"
-                              : "bg-amber-500/15 text-amber-600"
-                          }`}
-                        >
-                          {e.status}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-xs text-[var(--muted)]">{fmtDate(e.receivedAt ?? e.createdAt)}</td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            title="View"
-                            onClick={(ev) => { ev.stopPropagation(); router.push(`/dashboard/stock-entries/${e.id}?from=customer`); }}
-                            className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface-2)] text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)]"
-                          >
-                            <Eye className="h-4 w-4" />
-                          </button>
-                          {/* View only. Managing a customer's stock (edit / activate / barcode / delete)
-                              is a warehouse-manager action done from the warehouse's Customer-pool
-                              inventory — in the customer module a PM only VIEWS. */}
-                        </div>
-                      </td>
+            <>
+              <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+                <table className="w-full text-left text-sm" style={{ minWidth: 750 }}>
+                  <thead>
+                    <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
+                      <th className="px-4 py-3">Item</th>
+                      <th className="px-4 py-3">Warehouse</th>
+                      <th className="px-4 py-3">SKU</th>
+                      <th className="px-4 py-3">Qty</th>
+                      <th className="px-4 py-3">Barcode</th>
+                      <th className="px-4 py-3">Status</th>
+                      <th className="px-4 py-3">Received</th>
+                      <th className="px-4 py-3" />
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {pageEntries.map((e) => (
+                      <tr
+                        key={e.id}
+                        className="cursor-pointer border-b border-[var(--border)] align-top transition-colors last:border-0 hover:bg-[var(--surface-2)]"
+                        onClick={() => router.push(`/dashboard/stock-entries/${e.id}?from=customer`)}
+                      >
+                        <td className="px-4 py-3 font-semibold text-[var(--ink)]">{e.itemName}</td>
+                        <td className="px-4 py-3">
+                          <div className="text-[var(--ink)]">{e.warehouseName}</div>
+                          <div className="font-mono text-[11px] text-[var(--faint)]">{e.warehouseCode}</div>
+                        </td>
+                        <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.sku ?? "—"}</td>
+                        <td className="px-4 py-3 font-bold text-[var(--ink)]">{e.quantity}</td>
+                        <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.barcode ?? "—"}</td>
+                        <td className="px-4 py-3">
+                          <span
+                            className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                              e.status === "active"
+                                ? "bg-[var(--pos)]/12 text-[var(--pos)]"
+                                : "bg-amber-500/15 text-amber-600"
+                            }`}
+                          >
+                            {e.status}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-xs text-[var(--muted)]">{fmtDate(e.receivedAt ?? e.createdAt)}</td>
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              title="View"
+                              onClick={(ev) => { ev.stopPropagation(); router.push(`/dashboard/stock-entries/${e.id}?from=customer`); }}
+                              className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface-2)] text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)]"
+                            >
+                              <Eye className="h-4 w-4" />
+                            </button>
+                            {/* View only. Managing a customer's stock (edit / activate / barcode / delete)
+                                is a warehouse-manager action done from the warehouse's Customer-pool
+                                inventory — in the customer module a PM only VIEWS. */}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <Pagination
+                page={Math.min(page, totalPages)}
+                totalPages={totalPages}
+                total={entryCount}
+                label="entries"
+                onPage={(n) => patchPage(n)}
+              />
+            </>
           )}
         </>
       )}
@@ -1466,20 +1539,6 @@ function TableShell({
 
 function Empty({ children }: { children: React.ReactNode }) {
   return <p className="text-sm text-[var(--muted)]">{children}</p>;
-}
-
-function Flag({ children, tone }: { children: React.ReactNode; tone?: "warn" }) {
-  return (
-    <span
-      className={`inline-flex rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
-        tone === "warn"
-          ? "bg-amber-500/15 text-amber-600"
-          : "bg-[var(--surface-2)] text-[var(--muted)]"
-      }`}
-    >
-      {children}
-    </span>
-  );
 }
 
 function RowActions({

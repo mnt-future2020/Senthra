@@ -10,7 +10,7 @@ import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
-import type { AddStockInput, CreateTransferInput } from "./inventory.validation.js";
+import type { AddStockInput, AdjustStockInput, CreateTransferInput } from "./inventory.validation.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 const EXPORT_MAX = 50_000;
@@ -432,6 +432,59 @@ export async function addStock(input: AddStockInput, actor?: AuditActor): Promis
     targetType: "stock_adjustment",
     targetId: adjustment.id,
     targetLabel: `${adjustment.code} · +${input.quantity} ${item.name} @ ${wh.name}`,
+  });
+
+  return {
+    id: adjustment.id,
+    code: adjustment.code,
+    warehouseId: input.warehouseId,
+    warehouseName: wh.name,
+    irmItemId: input.irmItemId,
+    itemName: item.name,
+    quantity: input.quantity,
+    balanceAfter,
+    reason: adjustment.reason,
+    movementDate: adjustment.movementDate.toISOString(),
+    referenceNumber: adjustment.referenceNumber,
+    notes: adjustment.notes,
+    createdBy: adjustment.createdBy,
+    createdAt: adjustment.createdAt.toISOString(),
+  };
+}
+
+// Downward correction (damage / shrinkage / miscount). Validates the item is active and not serial/
+// batch-tracked, then atomically creates an ADJ-#### header, decrements the (item, warehouse) balance
+// (−qty) and writes ONE "manual_adjust" ledger row. The repo guards available ≥ qty inside the tx.
+export async function adjustStock(input: AdjustStockInput, actor?: AuditActor): Promise<PublicStockAdjustment> {
+  if (input.quantity <= 0) throw badRequest("Quantity must be greater than zero.");
+
+  const item = await irmService.requireActiveIrmItem(input.irmItemId);
+  if (item.trackSerialNumbers || item.trackBatchNumbers) {
+    throw conflict("Serial- and batch-tracked items can't be adjusted this way.");
+  }
+  const wh = await warehouseService.requireActiveWarehouse(input.warehouseId);
+  assertWarehouseAccess(actor, wh.id);
+  const actorEmail = actor?.email ?? null;
+  const notes = trimToNull(input.notes);
+
+  const { adjustment, balanceAfter } = await inventoryRepo.createNegativeAdjustmentWithCode(
+    {
+      warehouseId: input.warehouseId,
+      reason: input.reason,
+      movementDate: new Date(input.movementDate),
+      referenceNumber: trimToNull(input.referenceNumber),
+      notes,
+      createdBy: actorEmail,
+    },
+    { irmItemId: input.irmItemId, warehouseId: input.warehouseId, quantity: input.quantity, notes, createdBy: actorEmail },
+  );
+
+  audit.record({
+    actor,
+    action: "inventory.stock_adjusted",
+    targetType: "stock_adjustment",
+    targetId: adjustment.id,
+    targetLabel: `${adjustment.code} · −${input.quantity} ${item.name} @ ${wh.name}`,
   });
 
   return {

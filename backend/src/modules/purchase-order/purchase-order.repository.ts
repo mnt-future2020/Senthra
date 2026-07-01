@@ -1,6 +1,7 @@
 import { Prisma, type PurchaseOrder, type PurchaseOrderAttachment } from "@prisma/client";
 
 import { prisma, withTransaction } from "../../lib/prisma.js";
+import { escapeRegex } from "../../utils/search.js";
 
 // Data-access layer for Purchase Orders. The ONLY place Prisma is touched for POs. Soft-deleted
 // POs (deletedAt set) are excluded from normal reads. Header + lines + totals are written
@@ -102,7 +103,7 @@ export function buildWhere(filters: PurchaseOrderListFilters): Prisma.PurchaseOr
     where.AND = [...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []), { warehouseId: { in: filters.warehouseIds } }];
   }
   if (filters.search) {
-    const q = filters.search;
+    const q = escapeRegex(filters.search);
     where.OR = [
       { code: { contains: q, mode: "insensitive" } },
       { supplierName: { contains: q, mode: "insensitive" } },

@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Building2, Check, Loader2, Pencil, Plus, Search, Trash2, X } from "lucide-react";
 
 import { useDashboard } from "@/hooks/useDashboard";
@@ -23,16 +24,32 @@ export function DepartmentsView() {
   const canEdit = can("users.edit");
   const canDelete = can("users.delete");
 
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  // Filters derived from the URL so they survive a browser refresh.
+  const search = searchParams.get("q") ?? "";
+  const sort = (searchParams.get("sort") as "newest" | "oldest" | "name") ?? "name";
+  const page = Math.max(1, Number(searchParams.get("page")) || 1);
+
+  // Preserves all existing params (incl. ?tab) and uses the current pathname.
+  // Filter changes reset to page 1 by default.
+  const patch = (updates: Record<string, string | null>, resetPage = true) => {
+    const params = new URLSearchParams(window.location.search);
+    for (const [k, v] of Object.entries(updates)) {
+      if (v) params.set(k, v);
+      else params.delete(k);
+    }
+    if (resetPage) params.delete("page");
+    router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
+  };
+
   // Seed from the SWR cache so returning to this tab renders instantly.
   const [departments, setDepartments] = React.useState<Department[]>(
     () => departmentService.getCachedDepartments() ?? [],
   );
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
-
-  const [search, setSearch] = React.useState("");
-  const [page, setPage] = React.useState(1);
-  const [sort, setSort] = React.useState<"newest" | "oldest" | "name">("name");
 
   const [newName, setNewName] = React.useState("");
   const [adding, setAdding] = React.useState(false);
@@ -49,21 +66,24 @@ export function DepartmentsView() {
 
   // Departments are bounded master-data — load all once, then filter + paginate on
   // the client (alphabetical from the API) to keep the list compact as it grows.
-  const q = search.trim().toLowerCase();
-  const filtered = q
-    ? departments.filter((d) => d.name.toLowerCase().includes(q))
-    : departments;
-  // Sort client-side (ISO createdAt strings compare chronologically).
-  const sorted = [...filtered].sort((a, b) =>
-    sort === "name"
-      ? a.name.localeCompare(b.name)
-      : sort === "oldest"
-        ? a.createdAt.localeCompare(b.createdAt)
-        : b.createdAt.localeCompare(a.createdAt),
-  );
-  const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
-  const safePage = Math.min(page, totalPages);
-  const pageDepts = sorted.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+  const { filtered, totalPages, safePage, pageDepts } = React.useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const filtered = q
+      ? departments.filter((d) => d.name.toLowerCase().includes(q))
+      : departments;
+    // Sort client-side (ISO createdAt strings compare chronologically).
+    const sorted = [...filtered].sort((a, b) =>
+      sort === "name"
+        ? a.name.localeCompare(b.name)
+        : sort === "oldest"
+          ? a.createdAt.localeCompare(b.createdAt)
+          : b.createdAt.localeCompare(a.createdAt),
+    );
+    const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+    const safePage = Math.min(page, totalPages);
+    const pageDepts = sorted.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+    return { filtered, totalPages, safePage, pageDepts };
+  }, [departments, search, sort, page]);
 
   const load = React.useCallback(async () => {
     try {
@@ -128,9 +148,10 @@ export function DepartmentsView() {
     try {
       await departmentService.deleteDepartment(confirm.dept.id);
       setConfirm({ open: false, dept: null });
-      // Stepping back a page if we removed the last row on a later page.
+      // Step back a page if we removed the last row on a later page.
       const newTotalPages = Math.max(1, Math.ceil((filtered.length - 1) / PAGE_SIZE));
-      setPage((p) => Math.min(p, newTotalPages));
+      const safePage = Math.min(page, newTotalPages);
+      if (safePage !== page) patch({ page: safePage > 1 ? String(safePage) : null }, false);
       await load();
       pushToast("Department deleted.", "success");
     } catch (e) {
@@ -156,10 +177,7 @@ export function DepartmentsView() {
               <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
               <input
                 value={search}
-                onChange={(e) => {
-                  setSearch(e.target.value);
-                  setPage(1);
-                }}
+                onChange={(e) => patch({ q: e.target.value || null })}
                 placeholder="Search departments…"
                 className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
               />
@@ -167,10 +185,7 @@ export function DepartmentsView() {
             <Select
               size="sm"
               value={sort}
-              onChange={(v) => {
-                setSort(v as "newest" | "oldest" | "name");
-                setPage(1);
-              }}
+              onChange={(v) => patch({ sort: v === "name" ? null : v })}
               ariaLabel="Sort"
               options={[
                 { value: "newest", label: "Newest" },
@@ -333,7 +348,7 @@ export function DepartmentsView() {
             totalPages={totalPages}
             total={filtered.length}
             label="departments"
-            onPage={setPage}
+            onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)}
           />
         </div>
       )}

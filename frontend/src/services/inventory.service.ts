@@ -177,6 +177,26 @@ export function addStock(payload: AddStockPayload): Promise<StockAdjustment> {
   });
 }
 
+// Downward stock correction (damage / shrinkage / miscount). Mirrors addStock pattern.
+export type AdjustStockReason = "damage_correction" | "shrinkage" | "miscount" | "other";
+
+export interface AdjustStockPayload {
+  irmItemId: string;
+  warehouseId: string;
+  quantity: number; // units to REMOVE (must be > 0)
+  movementDate: string;
+  reason: AdjustStockReason;
+  referenceNumber?: string;
+  notes?: string;
+}
+
+export function adjustStock(payload: AdjustStockPayload): Promise<StockAdjustment> {
+  return api<{ adjustment: StockAdjustment }>("/inventory/adjust", { method: "POST", body: payload }).then((r) => {
+    listCache.clear(); // adjustment changes the on-hand balance
+    return r.adjustment;
+  });
+}
+
 // The CSV endpoint returns a file, not JSON, so it bypasses api() and makes a direct authenticated
 // blob request (mirrors the audit export). Returns whether the export was capped by the server.
 export async function exportInventoryCsv(params: InventoryListParams = {}): Promise<{ capped: boolean }> {

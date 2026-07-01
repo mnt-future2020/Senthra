@@ -140,7 +140,11 @@ export function CustomerForm({ mode, customer }: { mode: "create" | "edit"; cust
 
   useReportDirty("customer-form", isDirty);
 
-  const goBack = () => guard.attemptLeave(() => router.push(CUSTOMERS_LIST));
+  const goBack = () =>
+    guard.attemptLeave(() => {
+      if (window.history.length > 1) router.back();
+      else router.push(CUSTOMERS_LIST);
+    });
 
   const showError = (msg: string) => {
     setError(msg);

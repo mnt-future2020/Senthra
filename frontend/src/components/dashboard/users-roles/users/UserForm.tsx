@@ -186,7 +186,7 @@ export function UserForm({
 
   useReportDirty("user-form", isDirty);
 
-  const goBack = () => guard.attemptLeave(() => router.push(USERS_LIST));
+  const goBack = () => guard.attemptLeave(() => { if (window.history.length > 1) router.back(); else router.push(USERS_LIST); });
 
   // Surface errors as a toast (instant, scroll-independent) as well as inline — the
   // Save button is in the sticky header, far from the inline message at the bottom.

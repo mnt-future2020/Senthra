@@ -2,11 +2,12 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { AlertCircle, Loader2, ShieldCheck } from "lucide-react";
+import { AlertCircle, AlertTriangle, Loader2, ShieldCheck } from "lucide-react";
 
 import * as roleService from "@/services/role.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
+import { reachabilityWarnings } from "@/lib/roleReachability";
 import type { PermissionGroup, Role } from "@/types/role";
 import { inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
@@ -100,7 +101,11 @@ export function RoleForm({ mode, role }: { mode: "create" | "edit"; role?: Role 
 
   useReportDirty("role-form", isDirty);
 
-  const goBack = () => guard.attemptLeave(() => router.push(ROLES_LIST));
+  const goBack = () =>
+    guard.attemptLeave(() => {
+      if (window.history.length > 1) router.back();
+      else router.push(ROLES_LIST);
+    });
 
   // Surface errors as a toast (instant, scroll-independent) as well as inline — the
   // Save button is in the sticky header, far from the inline message at the bottom.
@@ -144,6 +149,10 @@ export function RoleForm({ mode, role }: { mode: "create" | "edit"; role?: Role 
   const grantedByGroup = groups
     .map((g) => ({ label: g.label, actions: g.permissions.filter((p) => permissions.includes(p.key)) }))
     .filter((g) => g.actions.length > 0);
+
+  // Advisory: groups granted but unreachable in the UI without a host module's View (e.g. Goods
+  // Management needs Warehouses view). Non-blocking — the role still saves. Skipped for full access.
+  const reachability = isFullAccess ? [] : reachabilityWarnings(permissions);
 
   const actions = (
     <>
@@ -287,6 +296,23 @@ export function RoleForm({ mode, role }: { mode: "create" | "edit"; role?: Role 
                     No permissions yet — a user with this role can sign in but won&apos;t see any
                     modules.
                   </p>
+                )}
+                {reachability.length > 0 && (
+                  <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2.5">
+                    <div className="flex items-center gap-1.5 text-[11px] font-bold text-amber-600">
+                      <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                      Won&apos;t be reachable
+                    </div>
+                    <ul className="mt-1.5 space-y-1 text-[11px] leading-relaxed text-[var(--muted)]">
+                      {reachability.map((w) => (
+                        <li key={w.label}>
+                          <span className="font-semibold text-[var(--ink)]">{w.label}</span> lives
+                          inside {w.hostLabel} — also grant {w.hostLabel} “View” so this role can
+                          open it.
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
                 )}
               </>
             )}

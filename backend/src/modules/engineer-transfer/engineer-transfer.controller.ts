@@ -1,0 +1,130 @@
+import * as transferService from "./engineer-transfer.service.js";
+import { actorFrom } from "../../utils/actor.js";
+import { asyncHandler } from "../../utils/async-handler.js";
+import { param, queryInt } from "../../utils/request.js";
+import type { CreateTransferInput, DeclineInput, AcknowledgeInput, UploadAttachmentInput } from "./engineer-transfer.validation.js";
+
+// Collapse a possibly-array query value (e.g. `?search=a&search=b`) to its first string, matching the
+// `param()` convention — otherwise a duplicated param silently coerces to undefined → empty results.
+const str = (v: unknown): string | undefined => {
+  const s = Array.isArray(v) ? v[0] : v;
+  return typeof s === "string" ? s : undefined;
+};
+
+// POST /engineer-transfers
+export const createTransfer = asyncHandler(async (req, res) => {
+  const transfer = await transferService.createTransfer(req.body as CreateTransferInput, actorFrom(req));
+  res.status(201).json({ transfer });
+});
+
+// GET /engineer-transfers  (admin oversight — all transfers)
+export const listAll = asyncHandler(async (req, res) => {
+  const { status, engineerId, ownership, sort, search, page, pageSize } = req.query;
+  const result = await transferService.listAll(
+    {
+      status: str(status),
+      engineerId: str(engineerId),
+      ownership: str(ownership),
+      sort: str(sort),
+      search: str(search),
+      page: queryInt(page),
+      pageSize: queryInt(pageSize),
+    },
+    actorFrom(req),
+  );
+  res.json(result);
+});
+
+// GET /engineer-transfers/mine  (engineer self-service — own transfers)
+export const listMine = asyncHandler(async (req, res) => {
+  const actor = actorFrom(req);
+  const engineerId = actor.id ?? "";
+  if (!engineerId) {
+    res.status(400).json({ error: "Could not determine engineer identity." });
+    return;
+  }
+  const { role, status, sort, search, page, pageSize } = req.query;
+  const roleVal = str(role) as "incoming" | "outgoing" | "all" | undefined;
+  const result = await transferService.listMine(engineerId, {
+    role: roleVal,
+    status: str(status),
+    sort: str(sort),
+    search: str(search),
+    page: queryInt(page),
+    pageSize: queryInt(pageSize),
+  });
+  res.json(result);
+});
+
+// GET /engineer-transfers/holders
+export const getHolders = asyncHandler(async (req, res) => {
+  const actor = actorFrom(req);
+  const requesterId = actor.id ?? "";
+  const { ownership, irmItemId, customerStockEntryId } = req.query;
+  const holders = await transferService.getHolders(
+    {
+      ownership: str(ownership) ?? "",
+      irmItemId: str(irmItemId),
+      customerStockEntryId: str(customerStockEntryId),
+    },
+    requesterId,
+  );
+  res.json({ holders });
+});
+
+// GET /engineer-transfers/holdings/:engineerId  (a source engineer's transferable holdings)
+export const getEngineerHoldings = asyncHandler(async (req, res) => {
+  res.json({ holdings: await transferService.getEngineerHoldings(param(req, "engineerId")) });
+});
+
+// GET /engineer-transfers/company-search?search=  (engineer company/IRM discovery)
+export const companyCandidates = asyncHandler(async (req, res) => {
+  const actor = actorFrom(req);
+  const candidates = await transferService.getCompanyCandidates(str(req.query.search) ?? "", actor.id ?? "");
+  res.json({ candidates });
+});
+
+// GET /engineer-transfers/customer-search?search=  (engineer customer-consignment discovery)
+export const customerCandidates = asyncHandler(async (req, res) => {
+  const actor = actorFrom(req);
+  const candidates = await transferService.getCustomerCandidates(str(req.query.search) ?? "", actor.id ?? "");
+  res.json({ candidates });
+});
+
+// GET /engineer-transfers/:id
+export const getOne = asyncHandler(async (req, res) => {
+  res.json({ transfer: await transferService.getOne(param(req, "id"), actorFrom(req)) });
+});
+
+// POST /engineer-transfers/:id/approve
+export const approve = asyncHandler(async (req, res) => {
+  res.json({ transfer: await transferService.approve(param(req, "id"), actorFrom(req)) });
+});
+
+// POST /engineer-transfers/:id/decline
+export const decline = asyncHandler(async (req, res) => {
+  const { reason } = (req.body as DeclineInput) ?? {};
+  res.json({ transfer: await transferService.decline(param(req, "id"), reason, actorFrom(req)) });
+});
+
+// POST /engineer-transfers/:id/cancel
+export const cancel = asyncHandler(async (req, res) => {
+  res.json({ transfer: await transferService.cancel(param(req, "id"), actorFrom(req)) });
+});
+
+// POST /engineer-transfers/:id/override
+export const override = asyncHandler(async (req, res) => {
+  res.json({ transfer: await transferService.override(param(req, "id"), actorFrom(req)) });
+});
+
+// POST /engineer-transfers/:id/acknowledge
+export const acknowledge = asyncHandler(async (req, res) => {
+  const { signature } = req.body as AcknowledgeInput;
+  res.json({ transfer: await transferService.acknowledge(param(req, "id"), signature, actorFrom(req)) });
+});
+
+// POST /engineer-transfers/attachments
+export const uploadAttachment = asyncHandler(async (req, res) => {
+  const { image } = req.body as UploadAttachmentInput;
+  res.json(await transferService.uploadAttachment(image));
+});

@@ -183,6 +183,7 @@ export async function changeCredentials(
   if (passwordChanged) {
     await sessionService.endOthers(admin.id, "admin", currentSid);
     tokens = issueTokens(admin.id, "admin", currentSid);
+    notifyPasswordChanged(updated.email, updated.name ?? "");
   }
   return { principal: adminPrincipal(updated), tokens };
 }
@@ -232,7 +233,16 @@ async function changeOwnPassword<
     mustResetPassword: false,
   });
   await sessionService.endOthers(account.id, actor, currentSid);
-  return { tokens: issueTokens(account.id, actor, currentSid), principal: toPrincipal(updated) };
+  const principal = toPrincipal(updated);
+  // Confirm a VOLUNTARY change only — the forced first-login change is part of
+  // onboarding (temp password → own password), so a confirmation there is noise.
+  if (!mustReset) {
+    notifyPasswordChanged(
+      principal.email,
+      principal.type === "user" ? principal.firstName : principal.type === "customer" ? principal.userName : "",
+    );
+  }
+  return { tokens: issueTokens(account.id, actor, currentSid), principal };
 }
 
 // Staff user: change own password (first-login forced change + voluntary changes).
@@ -322,6 +332,15 @@ export async function refreshSession(refreshToken: string): Promise<AuthResult> 
 export async function logout(principal: Principal, sid: string): Promise<void> {
   await sessionService.endSession(sid);
   recordAuth("auth.logout", principal);
+}
+
+// Fire-and-forget the security confirmation after a successful password change.
+// Forced so a disabled template never suppresses a security-critical alert (matching
+// the reset email). Never blocks or throws into the password flow.
+function notifyPasswordChanged(to: string, firstName: string): void {
+  void sendTemplatedEmail("auth.password_changed", to, { firstName }, { force: true }).catch((e) =>
+    console.error("password changed email failed:", e instanceof Error ? e.message : e),
+  );
 }
 
 // Persist a reset token + email the link, for either account type. The raw token
@@ -415,6 +434,7 @@ export async function resetPassword(token: string, newPassword: string): Promise
       resetTokenExpiresAt: null,
     });
     await sessionService.endAll(admin.id, "admin");
+    notifyPasswordChanged(admin.email, admin.name ?? "");
     return;
   }
 
@@ -431,6 +451,7 @@ export async function resetPassword(token: string, newPassword: string): Promise
       resetTokenExpiresAt: null,
     });
     await sessionService.endAll(user.id, "user");
+    notifyPasswordChanged(user.email, user.firstName);
     return;
   }
 
@@ -443,6 +464,7 @@ export async function resetPassword(token: string, newPassword: string): Promise
       resetTokenExpiresAt: null,
     });
     await sessionService.endAll(cu.id, "customer");
+    notifyPasswordChanged(cu.email, cu.fullName ?? "");
     return;
   }
 

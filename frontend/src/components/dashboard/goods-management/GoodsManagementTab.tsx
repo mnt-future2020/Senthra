@@ -9,8 +9,11 @@
 // The STATUS column is PER ITEM (per kit line) — each line shows its own issuance (Not issued /
 // Partial / Issued), since one job's lines can sit in different warehouses. Search + pagination
 // are server-side (goodsManagement.service).
+// Tab/filter state is persisted in the URL using namespaced params (?gmSection, ?gmq, ?gmPage)
+// so that a browser refresh restores the view without clobbering the host page's ?tab param.
 
 import * as React from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ClipboardList, Clock, PackageCheck, Search } from "lucide-react";
 
 import * as gmService from "@/services/goodsManagement.service";
@@ -172,10 +175,16 @@ export function GoodsManagementTab({
   warehouseCode: string;
   router?: unknown; // kept for forward-compat signature
 }) {
-  const [section, setSection] = React.useState<GmSection>("queue");
-  const [search, setSearch] = React.useState("");
-  const [debouncedSearch, setDebouncedSearch] = React.useState("");
-  const [page, setPage] = React.useState(1);
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  // URL-derived state (namespaced so they never clobber the host page's ?tab).
+  const section = (searchParams.get("gmSection") as GmSection | null) ?? "queue";
+  const urlSearch = searchParams.get("gmq") ?? "";
+  const page = Math.max(1, Number(searchParams.get("gmPage")) || 1);
+
+  // Local search input — seeded from URL, debounce-writes back to ?gmq.
+  const [searchInput, setSearchInput] = React.useState(urlSearch);
 
   const [data, setData] = React.useState<QueuePage | null>(null);
   const [error, setError] = React.useState<string | null>(null);
@@ -185,22 +194,40 @@ export function GoodsManagementTab({
   const isClosed = section === "closed";
   const showsTable = section === "queue" || section === "closed";
 
+  // Writer: preserves ALL existing params (so the host's ?tab is never lost).
+  const patch = React.useCallback(
+    (updates: Record<string, string | null>, resetPage = true) => {
+      const params = new URLSearchParams(window.location.search);
+      for (const [k, v] of Object.entries(updates)) {
+        if (v) params.set(k, v);
+        else params.delete(k);
+      }
+      if (resetPage) params.delete("gmPage");
+      router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
+    },
+    [router],
+  );
+
   const load = React.useCallback(() => setLoadTick((t) => t + 1), []);
   // Live-refresh whenever any goods event fires on the socket (issue / return / reconcile).
   useGoodsSocket(load);
 
-  // Debounce the search box.
+  // Debounce the search box into ?gmq.
   React.useEffect(() => {
-    const t = setTimeout(() => setDebouncedSearch(search), 300);
+    const t = setTimeout(() => {
+      if (searchInput.trim() !== urlSearch) {
+        patch({ gmq: searchInput.trim() || null }, true);
+      }
+    }, 300);
     return () => clearTimeout(t);
-  }, [search]);
+  }, [searchInput, urlSearch, patch]);
 
   // Fetch the current page whenever the view, search or page changes.
   React.useEffect(() => {
     if (!showsTable) return;
     let active = true;
     gmService
-      .getQueue({ warehouseId, status: isClosed ? "reconciled" : "active", search: debouncedSearch || undefined, page, pageSize: PAGE_SIZE })
+      .getQueue({ warehouseId, status: isClosed ? "reconciled" : "active", search: urlSearch || undefined, page, pageSize: PAGE_SIZE })
       .then((res) => {
         if (!active) return;
         setError(null);
@@ -213,17 +240,18 @@ export function GoodsManagementTab({
     return () => {
       active = false;
     };
-  }, [warehouseId, section, isClosed, showsTable, debouncedSearch, page, loadTick]);
+  }, [warehouseId, section, isClosed, showsTable, urlSearch, page, loadTick]);
 
   const goToSection = (key: GmSection) => {
-    setSection(key);
-    setPage(1);
-    setSearch("");
-    setDebouncedSearch("");
-    setData(null); // show the skeleton while the new section loads (event handler — safe to setState)
+    setSearchInput("");
+    setData(null); // clear immediately so the skeleton shows while the new section loads
+    patch({ gmSection: key !== "queue" ? key : null, gmq: null, gmPage: null }, false);
   };
 
-  const selectedRow = data?.rows.find((r) => r.jobId === selectedJobId) ?? null;
+  const selectedRow = React.useMemo(
+    () => data?.rows.find((r) => r.jobId === selectedJobId) ?? null,
+    [data, selectedJobId],
+  );
 
   // When a job row is selected (active queue only), show the full-screen scan panel.
   if (selectedJobId && selectedRow) {
@@ -276,11 +304,8 @@ export function GoodsManagementTab({
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--faint)]" />
             <input
               type="search"
-              value={search}
-              onChange={(e) => {
-                setSearch(e.target.value);
-                setPage(1);
-              }}
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
               placeholder="Search job no., name, customer or engineer…"
               className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] py-2.5 pl-9 pr-3 text-sm text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
             />
@@ -294,7 +319,7 @@ export function GoodsManagementTab({
             <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
               {isClosed ? <PackageCheck className="h-7 w-7 text-[var(--faint)]" /> : <ClipboardList className="h-7 w-7 text-[var(--faint)]" />}
               <p className="text-sm font-semibold text-[var(--ink)]">
-                {debouncedSearch ? "No jobs match your search" : isClosed ? "No closed jobs yet" : "No active jobs"}
+                {urlSearch ? "No jobs match your search" : isClosed ? "No closed jobs yet" : "No active jobs"}
               </p>
               <p className="text-xs text-[var(--muted)]">
                 {isClosed
@@ -412,7 +437,7 @@ export function GoodsManagementTab({
                 </table>
               </div>
 
-              <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="jobs" onPage={setPage} />
+              <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="jobs" onPage={(p) => patch({ gmPage: p > 1 ? String(p) : null }, false)} />
             </>
           )}
         </>

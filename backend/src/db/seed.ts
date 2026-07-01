@@ -11,7 +11,7 @@ import * as userRepo from "#modules/user/user.repository.js";
 import * as warehouseTypeRepo from "#modules/warehouse-type/warehouse-type.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as settingsRepo from "#modules/settings/settings.repository.js";
-import { LEGACY_PERMISSION_EXPANSION, customerCompatAdditions } from "#modules/role/permissions.js";
+import { LEGACY_PERMISSION_EXPANSION, PERMISSION_KEYS, customerCompatAdditions } from "#modules/role/permissions.js";
 import { DEFAULT_EMAIL_TEMPLATES } from "#modules/email/emailTemplate.defaults.js";
 import { renderBodyToHtml } from "../utils/email-html.js";
 import { hashPassword } from "../utils/password.js";
@@ -27,9 +27,9 @@ import { slugify } from "../utils/slugify.js";
 // (IT/HR onboarding + customer & stock master-data setup); the rest start empty and
 // gain permissions as feature modules ship. NOTE: external customers are NOT a role — they're a separate read-only
 // `customer` principal type (see types/principal.ts), so there is no customer role.
-// Field-operations role keys — members may HOLD field stock (Goods Out dispatch
-// recipient + future Van Inventory / Engineer Usage / Returns). Used both to seed
-// `canHoldStock` on a fresh DB and to backfill it idempotently on every startup.
+// Field-operations role keys — members may HOLD field stock (Job Pack issue recipient +
+// engineer-to-engineer transfers). Used both to seed `canHoldStock` on a fresh DB and to
+// backfill it idempotently on every startup.
 const FIELD_OPS_ROLE_KEYS = [
   "field_engineer",
   "senior_engineer",
@@ -51,6 +51,14 @@ const ENGINEER_PORTAL_PERMISSIONS = [
   "engineer.jobs.reject",
   "engineer.jobs.start",
   "engineer.jobs.complete",
+  // Engineer-to-engineer stock transfer (self-service).
+  "engineer.transfer",
+];
+
+// Admin-side engineer stock transfer permissions granted to super_admin and operations roles.
+const ENGINEER_STOCK_ADMIN_PERMISSIONS = [
+  "engineer_stock.view",
+  "engineer_stock.transfer",
 ];
 
 // Office-side Job module permissions for roles that create/assign/track job packs (the
@@ -99,7 +107,6 @@ const WAREHOUSE_MANAGER_PERMISSIONS = [
   "goods_in.edit",
   "goods_in.complete",
   "goods_in.cancel",
-  "goods_out.view",
   "purchase_orders.view",
   "purchase_orders.create",
   "purchase_orders.edit",
@@ -115,10 +122,10 @@ const SEED_ROLES: {
   isWarehouseScoped?: boolean;
 }[] = [
   { key: "super_admin", name: "Super Admin", description: "Full system owner. Manages users, roles and all settings.", sortOrder: 0, permissions: ["*"] },
-  { key: "system_admin", name: "System Admin", description: "IT / HR administrator who creates and manages user accounts and customers.", sortOrder: 1, permissions: ["users.view", "users.create", "users.edit", "users.delete", "roles.view", "customers.view", "customers.create", "customers.edit", "customers.delete", "warehouse.view", "warehouse.create", "warehouse.edit", "warehouse.delete", "warehouse_types.view", "warehouse_types.create", "warehouse_types.edit", "warehouse_types.delete", "categories.view", "categories.create", "categories.edit", "categories.delete", "suppliers.view", "suppliers.create", "suppliers.edit", "suppliers.delete", "supplier_types.view", "supplier_types.create", "supplier_types.edit", "supplier_types.delete", "irm.view", "irm.create", "irm.edit", "irm.delete", "irm_types.view", "irm_types.create", "irm_types.edit", "irm_types.delete", "irm_categories.view", "irm_categories.create", "irm_categories.edit", "irm_categories.delete", "purchase_orders.view", "purchase_orders.create", "purchase_orders.edit", "purchase_orders.delete", "purchase_orders.submit", "purchase_orders.approve", "purchase_orders.send", "purchase_orders.cancel", "purchase_orders.close", "goods_in.view", "goods_in.create", "goods_in.edit", "goods_in.delete", "goods_in.complete", "goods_in.cancel", "inventory.view", "inventory.move", "inventory.history", "inventory.export", "inventory.adjust", "inventory.stock_take", "goods_out.view", "goods_out.create", "goods_out.edit", "goods_out.delete", "goods_out.dispatch", "goods_out.cancel", "jobs.view", "jobs.create", "jobs.edit", "jobs.assign", "jobs.cancel", "jobs.delete"] },
+  { key: "system_admin", name: "System Admin", description: "IT / HR administrator who creates and manages user accounts and customers.", sortOrder: 1, permissions: ["users.view", "users.create", "users.edit", "users.delete", "roles.view", "customers.view", "customers.create", "customers.edit", "customers.delete", "warehouse.view", "warehouse.create", "warehouse.edit", "warehouse.delete", "warehouse_types.view", "warehouse_types.create", "warehouse_types.edit", "warehouse_types.delete", "categories.view", "categories.create", "categories.edit", "categories.delete", "suppliers.view", "suppliers.create", "suppliers.edit", "suppliers.delete", "supplier_types.view", "supplier_types.create", "supplier_types.edit", "supplier_types.delete", "irm.view", "irm.create", "irm.edit", "irm.delete", "irm_types.view", "irm_types.create", "irm_types.edit", "irm_types.delete", "irm_categories.view", "irm_categories.create", "irm_categories.edit", "irm_categories.delete", "purchase_orders.view", "purchase_orders.create", "purchase_orders.edit", "purchase_orders.delete", "purchase_orders.submit", "purchase_orders.approve", "purchase_orders.send", "purchase_orders.cancel", "purchase_orders.close", "goods_in.view", "goods_in.create", "goods_in.edit", "goods_in.delete", "goods_in.complete", "goods_in.cancel", "inventory.view", "inventory.move", "inventory.history", "inventory.export", "inventory.adjust", "inventory.stock_take", "jobs.view", "jobs.create", "jobs.edit", "jobs.assign", "jobs.cancel", "jobs.delete", ...ENGINEER_STOCK_ADMIN_PERMISSIONS] },
   { key: "project_manager", name: "Project Manager", description: "Creates job packs, authorises dispatch and tracks projects.", sortOrder: 2, permissions: [...JOB_OFFICE_PERMISSIONS] },
   { key: "project_coordinator", name: "Project Coordinator", description: "Supports project managers with day-to-day coordination.", sortOrder: 3, permissions: [] },
-  { key: "warehouse_manager", name: "Warehouse Manager", description: "Receives goods, scans stock in/out and manages a warehouse.", sortOrder: 4, permissions: [...WAREHOUSE_MANAGER_PERMISSIONS, ...GOODS_MANAGEMENT_PERMISSIONS], isWarehouseScoped: true },
+  { key: "warehouse_manager", name: "Warehouse Manager", description: "Receives goods, scans stock in/out and manages a warehouse.", sortOrder: 4, permissions: [...WAREHOUSE_MANAGER_PERMISSIONS, ...GOODS_MANAGEMENT_PERMISSIONS, ...ENGINEER_STOCK_ADMIN_PERMISSIONS], isWarehouseScoped: true },
   { key: "field_engineer", name: "Field Engineer", description: "Collects stock, installs on site and updates job status.", sortOrder: 5, permissions: [...ENGINEER_PORTAL_PERMISSIONS], canHoldStock: true },
   { key: "finance_director", name: "Finance Director", description: "Views spend, purchase orders and finance reports.", sortOrder: 6, permissions: [] },
   { key: "hr_manager", name: "HR Manager", description: "Manages people-related records and onboarding.", sortOrder: 7, permissions: [] },
@@ -238,6 +245,24 @@ export async function seedDatabase(): Promise<void> {
       }
     }
     if (granted > 0) console.log(`Granted Goods Management permissions to ${granted} role(s).`);
+  }
+
+  // Backfill admin-side engineer stock transfer permissions onto system_admin and warehouse_manager
+  // idempotently (covers DBs seeded before the engineer-transfer module shipped). super_admin already
+  // holds "*" and is skipped. Also seeded directly into the base role literals above for fresh DBs.
+  {
+    const adminRoleKeys = ["system_admin", "warehouse_manager"];
+    let granted = 0;
+    for (const role of await roleRepo.findMany()) {
+      if (role.permissions.includes("*")) continue; // super_admin already covers everything
+      if (!adminRoleKeys.includes(role.key)) continue;
+      const missing = ENGINEER_STOCK_ADMIN_PERMISSIONS.filter((p) => !role.permissions.includes(p));
+      if (missing.length) {
+        await roleRepo.update(role.id, { permissions: [...role.permissions, ...missing] });
+        granted++;
+      }
+    }
+    if (granted > 0) console.log(`Granted engineer stock transfer admin permissions to ${granted} role(s).`);
   }
 
   // Seed a starter global stock-category list ONLY on a fresh DB. These are ordinary
@@ -363,6 +388,25 @@ export async function seedDatabase(): Promise<void> {
     console.log(`Migrated ${migratedRoles} role(s) to granular permissions.`);
   }
 
+  // Prune any permission a role still holds that no longer exists in the catalog (e.g. a module whose
+  // permissions were removed, like the retired Goods Out). Without this, an orphaned key sits harmlessly
+  // on the role but the role editor re-submits it and the strict `sanitizePermissions` check then rejects
+  // the save. Idempotent: "*" (super-admin) is skipped and a role is only rewritten when a stale key is
+  // actually present, so this is a no-op on every boot after the one-time cleanup.
+  const catalogKeys = new Set(PERMISSION_KEYS);
+  let prunedRoles = 0;
+  for (const role of await roleRepo.findMany()) {
+    if (role.permissions.includes("*")) continue;
+    const kept = role.permissions.filter((p) => catalogKeys.has(p));
+    if (kept.length !== role.permissions.length) {
+      await roleRepo.update(role.id, { permissions: { set: kept } });
+      prunedRoles++;
+    }
+  }
+  if (prunedRoles > 0) {
+    console.log(`Pruned stale permissions from ${prunedRoles} role(s).`);
+  }
+
   // Customer RBAC split backward-compat. The customer module's projects, stock,
   // sites, portal login and stock requests used to be gated by the coarse
   // customers.view / customers.edit keys; they now have their own granular groups.
@@ -408,7 +452,6 @@ export async function seedDatabase(): Promise<void> {
       "purchase_orders.submit", "purchase_orders.approve", "purchase_orders.send", "purchase_orders.cancel", "purchase_orders.close",
       "goods_in.view", "goods_in.create", "goods_in.edit", "goods_in.delete", "goods_in.complete", "goods_in.cancel",
       "inventory.view", "inventory.move", "inventory.history", "inventory.export", "inventory.adjust", "inventory.stock_take",
-      "goods_out.view", "goods_out.create", "goods_out.edit", "goods_out.delete", "goods_out.dispatch", "goods_out.cancel",
       "jobs.view", "jobs.create", "jobs.edit", "jobs.assign", "jobs.cancel", "jobs.delete",
       "goods_management.view", "goods_management.issue", "goods_management.receive_return", "goods_management.reconcile",
       "engineer.jobs.start", "engineer.jobs.complete",

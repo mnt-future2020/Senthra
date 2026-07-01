@@ -9,11 +9,14 @@ import * as auditService from "@/services/audit.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { Pagination } from "@/components/ui/Pagination";
 import { actionLabel, actionTone, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
 import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
-import type { AuditEntry } from "@/types/audit";
+import type { AuditEntry, PagedAuditLogs } from "@/types/audit";
 import type { Supplier } from "@/types/supplier";
 import type { UserStatus } from "@/types/user";
+
+const AUDIT_PAGE_SIZE = 20;
 
 function fmtDate(iso: string | null): string {
   if (!iso) return "—";
@@ -67,10 +70,10 @@ export function SupplierDetail({ initial }: { initial: Supplier }) {
   };
 
   return (
-    <div className="space-y-5">
+    <div className="flex h-full flex-col gap-5">
       {/* Header card */}
       <div
-        className="flex flex-col gap-4 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:flex-row sm:items-start sm:justify-between"
+        className="flex shrink-0 flex-col gap-4 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:flex-row sm:items-start sm:justify-between"
         style={{ borderRadius: "var(--radius)" }}
       >
         <div className="min-w-0">
@@ -107,7 +110,7 @@ export function SupplierDetail({ initial }: { initial: Supplier }) {
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-1 overflow-x-auto border-b border-[var(--border)]">
+      <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-[var(--border)]">
         {TABS.map((t) => (
           <button
             key={t.key}
@@ -123,29 +126,31 @@ export function SupplierDetail({ initial }: { initial: Supplier }) {
         ))}
       </div>
 
-      {tab === "overview" && <Overview s={s} />}
-      {tab === "items" && (
-        <Placeholder
-          icon={Boxes}
-          title="Items"
-          body="Catalogue items supplied by this supplier will appear here once the IRM catalogue module is connected."
-        />
-      )}
-      {tab === "purchase-orders" && (
-        <Placeholder
-          icon={ClipboardList}
-          title="Purchase Orders"
-          body="Purchase orders raised against this supplier will be listed here once the procurement module is live."
-        />
-      )}
-      {tab === "goods-in" && (
-        <Placeholder
-          icon={PackageCheck}
-          title="Goods In"
-          body="Deliveries received from this supplier will be listed here once the goods-in module is live."
-        />
-      )}
-      {tab === "audit" && <AuditTrail supplierId={s.id} />}
+      <div className="min-h-0 flex-1 overflow-auto">
+        {tab === "overview" && <Overview s={s} />}
+        {tab === "items" && (
+          <Placeholder
+            icon={Boxes}
+            title="Items"
+            body="Catalogue items supplied by this supplier will appear here once the IRM catalogue module is connected."
+          />
+        )}
+        {tab === "purchase-orders" && (
+          <Placeholder
+            icon={ClipboardList}
+            title="Purchase Orders"
+            body="Purchase orders raised against this supplier will be listed here once the procurement module is live."
+          />
+        )}
+        {tab === "goods-in" && (
+          <Placeholder
+            icon={PackageCheck}
+            title="Goods In"
+            body="Deliveries received from this supplier will be listed here once the goods-in module is live."
+          />
+        )}
+        {tab === "audit" && <AuditTrail supplierId={s.id} />}
+      </div>
     </div>
   );
 }
@@ -310,30 +315,45 @@ function Placeholder({ icon: Icon, title, body }: { icon: React.ElementType; tit
   );
 }
 
-// Supplier-specific audit history. The API filters by targetType; we narrow to this
-// supplier's id client-side (a single supplier's history is small).
+// Supplier-specific audit history. The API supports server-side pagination;
+// we pass targetId + targetType so the server filters to this supplier's rows.
 function AuditTrail({ supplierId }: { supplierId: string }) {
-  const [entries, setEntries] = React.useState<AuditEntry[] | null>(null);
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const page = Math.max(1, Number(searchParams.get("auditPage")) || 1);
+  const patchPage = React.useCallback(
+    (next: number | null) => {
+      const params = new URLSearchParams(window.location.search);
+      if (next && next > 1) params.set("auditPage", String(next)); else params.delete("auditPage");
+      router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
+    },
+    [router],
+  );
+  const [result, setResult] = React.useState<PagedAuditLogs | null>(null);
   const [error, setError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
-    let active = true;
+    const controller = new AbortController();
     auditService
-      .listAuditLogs({ targetType: "supplier", pageSize: 100 })
+      .listAuditLogs({ targetType: "supplier", targetId: supplierId, page, pageSize: AUDIT_PAGE_SIZE })
       .then((res) => {
-        if (active) setEntries(res.entries.filter((e) => e.targetId === supplierId));
+        if (!controller.signal.aborted) setResult(res);
       })
       .catch((e) => {
-        if (active) setError(e instanceof Error ? e.message : "Could not load the audit trail.");
+        if (!controller.signal.aborted) setError(e instanceof Error ? e.message : "Could not load the audit trail.");
       });
     return () => {
-      active = false;
+      controller.abort();
+      setResult(null);
     };
-  }, [supplierId]);
+  }, [supplierId, page]);
 
   if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
-  if (entries === null) return <AuditTrailSkeleton />;
-  if (entries.length === 0) {
+  if (result === null) return <AuditTrailSkeleton />;
+
+  const entries: AuditEntry[] = result.entries;
+
+  if (result.total === 0) {
     return (
       <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
         <ScrollText className="h-7 w-7 text-[var(--faint)]" />
@@ -344,24 +364,33 @@ function AuditTrail({ supplierId }: { supplierId: string }) {
   }
 
   return (
-    <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
-      <ul className="divide-y divide-[var(--border)]">
-        {entries.map((e) => (
-          <li key={e.id} className="flex items-center justify-between gap-3 px-4 py-3">
-            <div className="flex items-center gap-3">
-              <span
-                className={`inline-block shrink-0 rounded-full px-2.5 py-1 text-[11px] font-bold ${TONE_CLASSES[actionTone(e.action)]}`}
-              >
-                {actionLabel(e.action)}
+    <div className="flex flex-col gap-3">
+      <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+        <ul className="divide-y divide-[var(--border)]">
+          {entries.map((e) => (
+            <li key={e.id} className="flex items-center justify-between gap-3 px-4 py-3">
+              <div className="flex items-center gap-3">
+                <span
+                  className={`inline-block shrink-0 rounded-full px-2.5 py-1 text-[11px] font-bold ${TONE_CLASSES[actionTone(e.action)]}`}
+                >
+                  {actionLabel(e.action)}
+                </span>
+                <span className="text-xs text-[var(--muted)]">{e.actorEmail ?? "system"}</span>
+              </div>
+              <span className="shrink-0 text-[11px] text-[var(--faint)]" title={new Date(e.createdAt).toLocaleString("en-GB")}>
+                {relativeTime(e.createdAt)}
               </span>
-              <span className="text-xs text-[var(--muted)]">{e.actorEmail ?? "system"}</span>
-            </div>
-            <span className="shrink-0 text-[11px] text-[var(--faint)]" title={new Date(e.createdAt).toLocaleString("en-GB")}>
-              {relativeTime(e.createdAt)}
-            </span>
-          </li>
-        ))}
-      </ul>
+            </li>
+          ))}
+        </ul>
+      </div>
+      <Pagination
+        page={Math.min(result.page, result.totalPages)}
+        totalPages={result.totalPages}
+        total={result.total}
+        label="entries"
+        onPage={(n) => patchPage(n)}
+      />
     </div>
   );
 }

@@ -159,6 +159,105 @@ Sign in to view the details and accept it: {{loginUrl}}
 
 — {{brandName}}`,
   },
+  {
+    key: "po.submitted",
+    name: "Purchase Order Submitted for Approval",
+    category: "notification",
+    subject: "Purchase Order {{poCode}} awaiting your approval",
+    variables: [
+      "approverName",
+      "poCode",
+      "supplierName",
+      "grandTotal",
+      "submittedBy",
+      "brandName",
+      "loginUrl",
+      "currentYear",
+    ],
+    // The PO number identifies which order needs approval; it must stay in the message.
+    requiredVariables: ["poCode"],
+    body: `Hello {{approverName}},
+
+Purchase Order {{poCode}} for {{supplierName}} ({{grandTotal}}) has been submitted for approval by {{submittedBy}} and is awaiting your decision.
+
+Review and approve or reject it here: {{loginUrl}}
+
+— {{brandName}}`,
+  },
+  {
+    key: "customer.stock_request.reviewed",
+    name: "Customer Stock Request Decision",
+    category: "notification",
+    // {{status}} is "approved" or "rejected" — the sender supplies the outcome and a
+    // matching {{decisionDetail}} line (approval note or rejection reason), since the
+    // template engine has no conditionals.
+    subject: "Your stock request has been {{status}}",
+    variables: [
+      "customerName",
+      "contactPerson",
+      "requestName",
+      "status",
+      "decisionDetail",
+      "brandName",
+      "loginUrl",
+      "currentYear",
+    ],
+    // The outcome is the whole point of the email; it must stay in the message.
+    requiredVariables: ["status"],
+    body: `Hello {{contactPerson}},
+
+Your stock request "{{requestName}}" has been {{status}}.
+
+{{decisionDetail}}
+
+You can view the latest status in your portal: {{loginUrl}}
+
+— {{brandName}}`,
+  },
+  {
+    key: "job.rejected",
+    name: "Job Rejected by Engineer",
+    category: "notification",
+    subject: "Job {{jobNumber}} was declined by {{engineerName}}",
+    variables: [
+      "recipientName",
+      "jobNumber",
+      "jobName",
+      "engineerName",
+      "rejectReason",
+      "brandName",
+      "loginUrl",
+      "currentYear",
+    ],
+    // The job number ties the email to the work that now needs reassigning.
+    requiredVariables: ["jobNumber"],
+    body: `Hello {{recipientName}},
+
+Job {{jobNumber}} — {{jobName}} — has been declined by {{engineerName}} and needs to be reassigned.
+
+Reason: {{rejectReason}}
+
+Reassign or review it here: {{loginUrl}}
+
+— {{brandName}}`,
+  },
+  {
+    key: "auth.password_changed",
+    name: "Password Changed Confirmation",
+    category: "security",
+    subject: "Your {{brandName}} password was changed",
+    variables: ["firstName", "brandName", "supportEmail", "currentYear"],
+    // A security confirmation carries no action link; nothing is strictly required
+    // beyond the brand tokens, which are always injected.
+    requiredVariables: [],
+    body: `Hi {{firstName}},
+
+This is a confirmation that your {{brandName}} password was just changed.
+
+If you made this change, no action is needed. If you did NOT change your password, contact us immediately at {{supportEmail}}.
+
+— {{brandName}}`,
+  },
 ];
 
 export function findDefaultTemplate(key: string): EmailTemplateDefault | undefined {

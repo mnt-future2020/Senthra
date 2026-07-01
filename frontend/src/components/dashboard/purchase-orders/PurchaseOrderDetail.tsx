@@ -14,6 +14,7 @@ import { actionLabel, actionTone, relativeTime, TONE_CLASSES } from "@/component
 import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
 import { GrnStatusBadge, formatDate as grnDate } from "@/components/dashboard/goods-in/grnStatus";
 import { PO_PRIORITY_LABELS, PoStatusBadge, formatDate, formatMoney } from "./poStatus";
+import { Pagination } from "@/components/ui/Pagination";
 import type { AuditEntry } from "@/types/audit";
 import type { GoodsReceipt } from "@/types/goods-in";
 import type { PurchaseOrder } from "@/types/purchase-order";
@@ -41,18 +42,16 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   const [downloading, setDownloading] = React.useState(false);
   const [confirmSend, setConfirmSend] = React.useState(false);
 
-  // Eagerly load this PO's receipts so the tab label can always show the count
-  // ("Receipts (n)") and the tab body reuses the same fetch — one request, shared.
-  const [receipts, setReceipts] = React.useState<GoodsReceipt[] | null>(null);
+  // Eagerly fetch total count only so the tab label can show "Receipts (n)".
+  // The Receipts sub-component manages its own paginated fetch independently.
   const [receiptsTotal, setReceiptsTotal] = React.useState(0);
-  const [receiptsError, setReceiptsError] = React.useState<string | null>(null);
   React.useEffect(() => {
     if (!canViewReceipts) return;
     let active = true;
     grnService
-      .listGoodsReceipts({ purchaseOrder: po.id, pageSize: 100 })
-      .then((res) => { if (active) { setReceipts(res.goodsReceipts); setReceiptsTotal(res.total); } })
-      .catch((e) => active && setReceiptsError(e instanceof Error ? e.message : "Could not load receipts."));
+      .listGoodsReceipts({ purchaseOrder: po.id, pageSize: 1, page: 1 })
+      .then((res) => { if (active) setReceiptsTotal(res.total); })
+      .catch(() => { /* count is best-effort; tab still renders */ });
     return () => { active = false; };
   }, [canViewReceipts, po.id]);
 
@@ -121,8 +120,8 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
     actions.push(<ActionBtn key="cancel" icon={XCircle} onClick={() => { setReason(""); setReasonFor("cancel"); }} disabled={busy}>Cancel</ActionBtn>);
 
   return (
-    <div className="space-y-5">
-      <div className="flex flex-col gap-4 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:flex-row sm:items-start sm:justify-between" style={{ borderRadius: "var(--radius)" }}>
+    <div className="flex h-full flex-col gap-5">
+      <div className="shrink-0 flex flex-col gap-4 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:flex-row sm:items-start sm:justify-between" style={{ borderRadius: "var(--radius)" }}>
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <h1 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">{po.code}</h1>
@@ -140,7 +139,7 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
         {actions.length > 0 && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
       </div>
 
-      <div className="flex gap-1 overflow-x-auto border-b border-[var(--border)]">
+      <div className="shrink-0 flex gap-1 overflow-x-auto border-b border-[var(--border)]">
         {TABS.map((t) => (
           <button key={t} onClick={() => setTab(t)} className={`shrink-0 border-b-2 px-3.5 py-2.5 text-xs font-bold capitalize transition-colors ${tab === t ? "border-[var(--accent)] text-[var(--accent)]" : "border-transparent text-[var(--muted)] hover:text-[var(--ink)]"}`}>
             {t === "audit" ? "Audit trail" : t === "receipts" ? `Receipts (${receiptsTotal})` : t}
@@ -148,10 +147,12 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
         ))}
       </div>
 
-      {tab === "overview" && <Overview po={po} />}
-      {tab === "receipts" && <Receipts receipts={receipts} error={receiptsError} />}
-      {tab === "attachments" && <Attachments po={po} setPo={setPo} canEdit={can("purchase_orders.edit")} />}
-      {tab === "audit" && <AuditTrail poId={po.id} />}
+      <div className="min-h-0 flex-1 overflow-auto">
+        {tab === "overview" && <Overview po={po} />}
+        {tab === "receipts" && <Receipts poId={po.id} />}
+        {tab === "attachments" && <Attachments po={po} setPo={setPo} canEdit={can("purchase_orders.edit")} />}
+        {tab === "audit" && <AuditTrail poId={po.id} />}
+      </div>
 
       {reasonFor && (
         <ReasonDialog
@@ -418,19 +419,58 @@ function ReasonDialog({ title, required, value, onChange, onConfirm, onClose }: 
   );
 }
 
-// Read-only list of the goods receipts raised against this PO (traceability). Data is
-// fetched once by the parent and passed down, so this is the count's single source too.
-// Rows deep-link to the authoritative GRN document; nothing here writes stock.
-function Receipts({ receipts, error }: { receipts: GoodsReceipt[] | null; error: string | null }) {
+const RECEIPTS_PAGE_SIZE = 20;
+
+// Read-only list of the goods receipts raised against this PO (traceability). Owns its
+// own paginated fetch; rows deep-link to the authoritative GRN document; nothing here
+// writes stock.
+function Receipts({ poId }: { poId: string }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const page = Math.max(1, Number(searchParams.get("receiptsPage")) || 1);
+  const patchPage = React.useCallback((next: number | null) => {
+    const params = new URLSearchParams(window.location.search);
+    if (next && next > 1) params.set("receiptsPage", String(next)); else params.delete("receiptsPage");
+    router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
+  }, [router]);
+  const [rows, setRows] = React.useState<GoodsReceipt[] | null>(null);
+  const [total, setTotal] = React.useState(0);
+  const [totalPages, setTotalPages] = React.useState(1);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    let active = true;
+    grnService
+      .listGoodsReceipts({ purchaseOrder: poId, page, pageSize: RECEIPTS_PAGE_SIZE })
+      .then((res) => {
+        if (!active) return;
+        setRows(res.goodsReceipts);
+        setTotal(res.total);
+        setTotalPages(res.totalPages);
+        setError(null);
+        setLoading(false);
+      })
+      .catch((e) => {
+        if (!active) return;
+        setError(e instanceof Error ? e.message : "Could not load receipts.");
+        setLoading(false);
+      });
+    return () => { active = false; setLoading(true); };
+  }, [poId, page]);
+
   if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
-  if (receipts === null)
+
+  if (loading)
     return (
-      <div className="flex items-center justify-center rounded-2xl border border-[var(--border)] bg-[var(--surface)] py-16">
-        <Loader2 className="h-6 w-6 animate-spin text-[var(--muted)]" />
+      <div className="space-y-2 overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
+        {Array.from({ length: 5 }).map((_, i) => (
+          <div key={i} className="h-10 animate-pulse rounded bg-[var(--surface-2)]" />
+        ))}
       </div>
     );
-  if (receipts.length === 0)
+
+  if (!rows || rows.length === 0)
     return (
       <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
         <Package className="h-7 w-7 text-[var(--faint)]" />
@@ -438,28 +478,32 @@ function Receipts({ receipts, error }: { receipts: GoodsReceipt[] | null; error:
         <p className="text-xs text-[var(--muted)]">Goods received against this order will appear here.</p>
       </div>
     );
+
   return (
-    <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
-      <ul className="divide-y divide-[var(--border)]">
-        {receipts.map((g) => (
-          <li key={g.id}>
-            <button
-              type="button"
-              onClick={() => router.push(`/dashboard/goods-in/${g.code}`)}
-              className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-[var(--surface-2)]"
-            >
-              <div className="flex min-w-0 items-center gap-3">
-                <span className="font-mono text-xs text-[var(--muted)]">{g.code}</span>
-                <GrnStatusBadge status={g.status} />
-              </div>
-              <div className="flex shrink-0 items-center gap-3 text-[11px] text-[var(--muted)]">
-                <span>{g.items.length} line{g.items.length === 1 ? "" : "s"} · {g.totalAccepted} accepted</span>
-                <span className="text-[var(--faint)]">{grnDate(g.receivedDate)}</span>
-              </div>
-            </button>
-          </li>
-        ))}
-      </ul>
+    <div className="space-y-3">
+      <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+        <ul className="divide-y divide-[var(--border)]">
+          {rows.map((g) => (
+            <li key={g.id}>
+              <button
+                type="button"
+                onClick={() => router.push(`/dashboard/goods-in/${g.code}`)}
+                className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-[var(--surface-2)]"
+              >
+                <div className="flex min-w-0 items-center gap-3">
+                  <span className="font-mono text-xs text-[var(--muted)]">{g.code}</span>
+                  <GrnStatusBadge status={g.status} />
+                </div>
+                <div className="flex shrink-0 items-center gap-3 text-[11px] text-[var(--muted)]">
+                  <span>{g.items.length} line{g.items.length === 1 ? "" : "s"} · {g.totalAccepted} accepted</span>
+                  <span className="text-[var(--faint)]">{grnDate(g.receivedDate)}</span>
+                </div>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+      <Pagination page={page} totalPages={totalPages} total={total} label="receipts" onPage={(n) => patchPage(n)} />
     </div>
   );
 }

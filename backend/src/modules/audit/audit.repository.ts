@@ -1,6 +1,7 @@
 import type { AuditLog, Prisma } from "@prisma/client";
 
 import { prisma } from "../../lib/prisma.js";
+import { escapeRegex } from "../../utils/search.js";
 
 // Data-access layer for the AuditLog model (immutable audit trail). The ONLY
 // place Prisma is touched for audit entries.
@@ -27,7 +28,7 @@ function buildWhere(filters: AuditListFilters): Prisma.AuditLogWhereInput {
     if (filters.to) where.createdAt.lte = filters.to;
   }
   if (filters.search) {
-    const q = filters.search;
+    const q = escapeRegex(filters.search);
     where.OR = [
       { actorEmail: { contains: q, mode: "insensitive" } },
       { targetLabel: { contains: q, mode: "insensitive" } },

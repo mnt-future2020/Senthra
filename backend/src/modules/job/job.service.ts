@@ -236,7 +236,7 @@ async function requireCustomer(customerId: string) {
 }
 
 // The assigned engineer must be an ACTIVE staff member whose role grants the field-operations
-// capability (canHoldStock) — the same gate goods-out enforces for dispatch recipients. This keeps
+// capability (canHoldStock) — the same gate the Job Pack issue flow enforces for stock recipients. This keeps
 // admins / finance / warehouse managers off jobs even if a client bypasses the filtered dropdown.
 async function requireEngineer(engineerId: string) {
   if (!OBJECT_ID_RE.test(engineerId)) throw badRequest("Select an engineer.");
@@ -348,6 +348,32 @@ function notifyAssignedEngineer(job: PublicJob): void {
     jobNumber: job.jobNumber,
     jobName: job.name,
   }).catch((e) => console.error(`Job ${job.jobNumber} assignment email failed:`, e instanceof Error ? e.message : e));
+}
+
+// ── Notify the job's creator (PM/admin) that the engineer declined it (fire-and-forget) ────────
+// The rejection is an exception that leaves the job unassigned and needs human action, so the
+// creator is emailed. Prefers the creator's CURRENT email/name (via createdByUserId) and falls
+// back to the email captured at creation time (e.g. admin-created jobs).
+function notifyJobCreatorOfRejection(job: PublicJob, createdByUserId: string | null): void {
+  void (async () => {
+    let toEmail = job.createdBy;
+    let recipientName = "";
+    if (createdByUserId) {
+      const creator = await userRepo.findById(createdByUserId);
+      if (creator) {
+        toEmail = creator.email;
+        recipientName = creator.firstName;
+      }
+    }
+    if (!toEmail) return;
+    await sendTemplatedEmail("job.rejected", toEmail, {
+      recipientName,
+      jobNumber: job.jobNumber,
+      jobName: job.name,
+      engineerName: job.assignedEngineerName ?? "the engineer",
+      rejectReason: job.rejectReason || "No reason provided.",
+    });
+  })().catch((e) => console.error(`Job ${job.jobNumber} rejection email failed:`, e instanceof Error ? e.message : e));
 }
 
 // ── Reads ─────────────────────────────────────────────────────────────────────────────────────
@@ -850,6 +876,8 @@ export async function rejectJobForEngineer(
   const job = toPublic(updated);
   // Notify every office Jobs-list watcher (incl. the creator), so they can reassign or cancel.
   emitToRoom(OFFICE_JOBS_ROOM, "job:rejected", job);
+  // Email the creator too — a rejection needs prompt reassignment and they may not be watching.
+  notifyJobCreatorOfRejection(job, updated.createdByUserId ?? null);
   audit.record({
     actor,
     action: "job.rejected",

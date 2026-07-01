@@ -2,6 +2,7 @@ import { Prisma, type InventoryBalance, type InventoryTransaction, type StockTra
 
 import { prisma, withTransaction } from "../../lib/prisma.js";
 import { conflict } from "../../utils/http-error.js";
+import { escapeRegex } from "../../utils/search.js";
 
 // Data-access for the Warehouse Inventory module: the inventory PRIMITIVES (on-hand balance +
 // immutable ledger) plus the StockTransfer movement records. The ONLY place Prisma is touched for
@@ -49,9 +50,10 @@ function buildBalanceWhere(filters: InventoryListFilters): Prisma.InventoryBalan
   const irmItemFilter: Prisma.IrmItemWhereInput = { deletedAt: null };
   if (filters.irmCategoryId) irmItemFilter.irmCategoryId = filters.irmCategoryId;
   if (filters.search) {
+    const term = escapeRegex(filters.search);
     irmItemFilter.OR = [
-      { name: { contains: filters.search, mode: "insensitive" } },
-      { sku: { contains: filters.search, mode: "insensitive" } },
+      { name: { contains: term, mode: "insensitive" } },
+      { sku: { contains: term, mode: "insensitive" } },
     ];
   }
   const warehouseFilter: Prisma.WarehouseWhereInput = { deletedAt: null };
@@ -154,6 +156,69 @@ export function listBalances(filters: { warehouseId?: string; irmItemId?: string
   return prisma.inventoryBalance.findMany({ where: { warehouseId: filters.warehouseId, irmItemId: filters.irmItemId }, orderBy: { updatedAt: "desc" } });
 }
 
+// --- aggregation helpers (Inventory Hub) ---------------------------------------------
+export function findAllBalancesForAggregation(filters: { warehouseId?: string } = {}): Promise<InventoryBalanceWithRelations[]> {
+  return findAllBalances({ warehouseId: filters.warehouseId });
+}
+export function findRecentInventoryTransactions(skip: number, take: number) {
+  return prisma.inventoryTransaction.findMany({
+    orderBy: { createdAt: "desc" }, skip, take,
+    include: { irmItem: { select: { code: true, name: true } }, warehouse: { select: { name: true } } },
+  });
+}
+
+// ── Stock Movement History — keyset-paginated InventoryTransaction page (the warehouse/company leg) ──
+// Part of the unified Stock Ledger. The (createdAt DESC, id DESC) keyset gives a stable total order the
+// movement service merges across all four delta ledgers; the boundary is the previous page's last row.
+export interface MovementLedgerFilters {
+  dateFrom?: Date;
+  dateTo?: Date;
+  irmItemId?: string;
+  warehouseId?: string;
+  type?: string;
+  sourceType?: string;
+}
+export interface MovementKeyset { createdAt: Date; id: string }
+
+function keysetClause<T extends { OR?: unknown }>(before: MovementKeyset | null): T[] {
+  if (!before) return [];
+  return [{ OR: [{ createdAt: { lt: before.createdAt } }, { AND: [{ createdAt: before.createdAt }, { id: { lt: before.id } }] }] }] as unknown as T[];
+}
+
+export function findInventoryTxnPage(f: MovementLedgerFilters, before: MovementKeyset | null, take: number) {
+  const and: Prisma.InventoryTransactionWhereInput[] = [];
+  if (f.dateFrom) and.push({ createdAt: { gte: f.dateFrom } });
+  if (f.dateTo) and.push({ createdAt: { lte: f.dateTo } });
+  if (f.irmItemId) and.push({ irmItemId: f.irmItemId });
+  if (f.warehouseId) and.push({ warehouseId: f.warehouseId });
+  if (f.type) and.push({ type: f.type });
+  if (f.sourceType) and.push({ sourceType: f.sourceType });
+  and.push(...keysetClause<Prisma.InventoryTransactionWhereInput>(before));
+  return prisma.inventoryTransaction.findMany({
+    where: and.length ? { AND: and } : {},
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take,
+    include: { irmItem: { select: { code: true, name: true, sku: true } }, warehouse: { select: { name: true } } },
+  });
+}
+
+// Batch metadata resolvers used by the movement service to enrich ledger rows that carry only ids
+// (the customer/damaged ledgers have no item/warehouse relation). One query each, per page.
+export async function findIrmMetaByIds(ids: string[]): Promise<Map<string, { code: string; name: string; sku: string | null }>> {
+  const out = new Map<string, { code: string; name: string; sku: string | null }>();
+  if (!ids.length) return out;
+  const rows = await prisma.irmItem.findMany({ where: { id: { in: ids } }, select: { id: true, code: true, name: true, sku: true } });
+  for (const r of rows) out.set(r.id, { code: r.code, name: r.name, sku: r.sku ?? null });
+  return out;
+}
+export async function findWarehouseNamesByIds(ids: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!ids.length) return out;
+  const rows = await prisma.warehouse.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } });
+  for (const r of rows) out.set(r.id, r.name);
+  return out;
+}
+
 // --- stock transfers (movement records) ------------------------------------------------------
 export interface StockTransferListFilters {
   search?: string;
@@ -170,7 +235,7 @@ function buildTransferWhere(filters: StockTransferListFilters): Prisma.StockTran
   if (filters.warehouseId) and.push({ OR: [{ fromWarehouseId: filters.warehouseId }, { toWarehouseId: filters.warehouseId }] });
   if (filters.warehouseIds !== undefined) and.push({ OR: [{ fromWarehouseId: { in: filters.warehouseIds } }, { toWarehouseId: { in: filters.warehouseIds } }] });
   if (filters.search) {
-    const s = filters.search;
+    const s = escapeRegex(filters.search);
     and.push({
       OR: [
         { code: { contains: s, mode: "insensitive" } },
@@ -376,6 +441,42 @@ export async function createStockAdjustmentWithCode(
           balanceAfter: bal.quantityOnHand, notes: ledger.notes, createdBy: ledger.createdBy,
         });
         return { adjustment, balanceAfter: bal.quantityOnHand };
+      });
+    } catch (e) {
+      if (!isCodeConflict(e)) throw e;
+      await fastForwardAdjustmentCounter();
+    }
+  }
+  throw new Error("Could not allocate a unique stock-adjustment code.");
+}
+
+// The ATOMIC downward correction (damage / shrinkage / miscount): re-read the balance INSIDE the tx,
+// guard available (on-hand − reserved) ≥ qty, create the ADJ-#### header, decrement the balance (−qty)
+// and append ONE "manual_adjust" ledger row. `ledger.quantity` is the POSITIVE magnitude to REMOVE.
+// Any failure rolls back EVERYTHING; the upsertBalanceTx zero-floor backstop is the final guard.
+export async function createNegativeAdjustmentWithCode(
+  header: StockAdjustmentHeaderInput,
+  ledger: StockAdjustmentLedgerInput,
+): Promise<{ adjustment: StockAdjustment; balanceAfter: number }> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const seq = await nextAdjustmentSequence();
+    const code = `${ADJ_CODE_PREFIX}-${String(seq).padStart(4, "0")}`;
+    try {
+      return await withTransaction(async (tx) => {
+        const bal = await findBalancePairTx(tx, ledger.irmItemId, ledger.warehouseId);
+        const onHand = bal?.quantityOnHand ?? 0;
+        const reserved = bal?.quantityReserved ?? 0;
+        if (onHand - reserved < ledger.quantity) {
+          throw conflict("Not enough available stock to adjust down. Refresh and try again.");
+        }
+        const adjustment = await tx.stockAdjustment.create({ data: { ...header, code } });
+        const updated = await upsertBalanceTx(tx, ledger.irmItemId, ledger.warehouseId, -ledger.quantity);
+        await insertTransactionTx(tx, {
+          irmItemId: ledger.irmItemId, warehouseId: ledger.warehouseId, quantityDelta: -ledger.quantity,
+          type: "manual_adjust", sourceType: "stock_adjustment", sourceId: adjustment.id, sourceCode: code,
+          balanceAfter: updated.quantityOnHand, notes: ledger.notes, createdBy: ledger.createdBy,
+        });
+        return { adjustment, balanceAfter: updated.quantityOnHand };
       });
     } catch (e) {
       if (!isCodeConflict(e)) throw e;

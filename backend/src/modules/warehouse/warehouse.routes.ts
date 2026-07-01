@@ -22,8 +22,8 @@ router.get(
   warehouseController.listManagerOptions,
 );
 
-// Field-engineer picker (canHoldStock roles only) for the job + dispatch "assign an engineer"
-// dropdowns. Available to whoever can create/edit/assign a job or create/edit a dispatch.
+// Field-engineer picker (canHoldStock roles only) for the job "assign an engineer" dropdowns.
+// Available to whoever can create/edit/assign a job.
 router.get(
   "/engineer-options",
   requireAnyPermission(
@@ -31,8 +31,6 @@ router.get(
     "jobs.create",
     "jobs.edit",
     "jobs.assign",
-    "goods_out.create",
-    "goods_out.edit",
   ),
   warehouseController.listEngineerOptions,
 );

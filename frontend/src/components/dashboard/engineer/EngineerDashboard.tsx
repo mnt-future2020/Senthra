@@ -2,18 +2,23 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { Activity, Boxes, ClipboardList, PackageMinus } from "lucide-react";
+import { Activity, ArrowRightLeft, Boxes, ClipboardList } from "lucide-react";
 
 import * as engineerService from "@/services/engineer.service";
+import { useAuth } from "@/hooks/useAuth";
 import { Notice } from "@/components/ui/Notice";
 import { EmptyState, fmtDate, PortalHeader, StatCardSkeleton } from "@/components/dashboard/portal/portalUi";
 import type { EngineerOverview } from "@/types/engineer";
+import type { Movement } from "@/types/stock-position";
 import type { Msg } from "@/components/ui/types";
 
-// Engineer Portal dashboard — three read-only cards (Stock, Dispatches, Recent Activity) over
-// the engineer's own data. No low-stock alerts, no job cards in Phase 1.
+// Engineer Portal dashboard — read-only cards (Stock, Dispatches, Recent Activity) over the engineer's
+// own data. The Recent Activity feed is the unified stock ledger scoped to this engineer (company van +
+// customer consignment), so transfers, job issues/returns and consumption all surface here.
 export function EngineerDashboard() {
+  const { can } = useAuth();
   const [overview, setOverview] = React.useState<EngineerOverview | null>(null);
+  const [recent, setRecent] = React.useState<Movement[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [msg, setMsg] = React.useState<Msg>(null);
 
@@ -21,8 +26,11 @@ export function EngineerDashboard() {
     let active = true;
     (async () => {
       try {
-        const ov = await engineerService.getOwnOverview();
-        if (active) setOverview(ov);
+        const [ov, mv] = await Promise.all([
+          engineerService.getOwnOverview(),
+          engineerService.getOwnMovements({ limit: 6 }).catch(() => ({ movements: [], nextCursor: null, hasMore: false })),
+        ]);
+        if (active) { setOverview(ov); setRecent(mv.movements); }
       } catch (err) {
         if (active) setMsg({ type: "error", text: err instanceof Error ? err.message : "Could not load your dashboard." });
       } finally {
@@ -61,8 +69,7 @@ export function EngineerDashboard() {
               label="Stock"
               hint={`${overview.stock.lines} item${overview.stock.lines === 1 ? "" : "s"} on hand`}
             />
-            <StatCard icon={PackageMinus} value={`${overview.dispatches.total}`} label="Dispatches" hint="Goods Out received" />
-            <StatCard icon={Activity} value={`${overview.recentActivity.length}`} label="Recent Activity" hint="latest stock movements" />
+            <StatCard icon={Activity} value={`${recent.length}`} label="Recent Activity" hint="latest stock movements" />
           </div>
 
           <section className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
@@ -70,24 +77,32 @@ export function EngineerDashboard() {
             <div className="grid gap-2 sm:grid-cols-2">
               <QuickAction href="/dashboard/engineer/inventory" icon={Boxes} label="View Stock" />
               <QuickAction href="/dashboard/engineer/jobs" icon={ClipboardList} label="Open Jobs" />
+              {can("engineer.transfer") && (
+                <QuickAction href="/dashboard/engineer/transfers" icon={ArrowRightLeft} label="Transfers" />
+              )}
             </div>
           </section>
 
           <section className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
-            <h2 className="mb-4 text-sm font-extrabold text-[var(--ink)]">Recent activity</h2>
-            {overview.recentActivity.length === 0 ? (
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <h2 className="text-sm font-extrabold text-[var(--ink)]">Recent activity</h2>
+              <Link href="/dashboard/engineer/inventory" className="text-[11px] font-bold text-[var(--muted)] transition-colors hover:text-[var(--accent)]">
+                View all →
+              </Link>
+            </div>
+            {recent.length === 0 ? (
               <EmptyState icon={Activity} title="No activity yet" hint="When you collect, use or transfer stock, it'll show here." />
             ) : (
               <ul className="divide-y divide-[var(--border-2)]">
-                {overview.recentActivity.map((a) => (
+                {recent.map((a) => (
                   <li key={a.id} className="flex items-center justify-between gap-3 py-2.5">
                     <div className="min-w-0">
                       <p className="truncate text-sm font-semibold text-[var(--ink)]">
                         {a.label} · {a.itemName}
                       </p>
                       <p className="text-[11px] text-[var(--faint)]">
-                        {a.itemCode}
-                        {a.sourceCode ? ` · ${a.sourceCode}` : ""}
+                        {a.itemCode || (a.ownership === "customer" ? "Customer" : "")}
+                        {a.reference ? ` · ${a.reference}` : ""}
                       </p>
                     </div>
                     <div className="shrink-0 text-right">
@@ -95,7 +110,7 @@ export function EngineerDashboard() {
                         {a.quantityDelta >= 0 ? "+" : ""}
                         {a.quantityDelta}
                       </p>
-                      <p className="text-[11px] text-[var(--faint)]">{fmtDate(a.createdAt)}</p>
+                      <p className="text-[11px] text-[var(--faint)]">{fmtDate(a.date)}</p>
                     </div>
                   </li>
                 ))}
@@ -108,8 +123,7 @@ export function EngineerDashboard() {
   );
 }
 
-// Dashboard quick-link tile. UI-only navigation — no actions/backend (Transfer Stock is intentionally
-// NOT offered yet; it arrives with the engineer transfers module).
+// Dashboard quick-link tile.
 function QuickAction({ href, icon: Icon, label }: { href: string; icon: React.ElementType; label: string }) {
   return (
     <Link

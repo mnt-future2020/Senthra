@@ -2,7 +2,7 @@ import * as service from "./goods-management.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
 import { param, queryInt } from "../../utils/request.js";
-import type { CloseReconcileInput, PostMovementInput, ScanLookupInput, UploadDamagePhotoInput } from "./goods-management.validation.js";
+import type { CloseReconcileInput, PostMovementInput, RestoreDamagedInput, ScanLookupInput, UploadDamagePhotoInput } from "./goods-management.validation.js";
 import { badRequest } from "../../utils/http-error.js";
 
 export const scanLookup = asyncHandler(async (req, res) => {
@@ -72,4 +72,10 @@ export const uploadDamagePhoto = asyncHandler(async (req, res) => {
   const { image } = req.body as UploadDamagePhotoInput;
   const result = await service.uploadDamagePhoto(image);
   res.json(result);
+});
+
+// POST /goods-management/damaged/restore — restore damaged units back to usable stock.
+export const restoreDamaged = asyncHandler(async (req, res) => {
+  const result = await service.restoreDamaged(req.body as RestoreDamagedInput, actorFrom(req));
+  res.status(201).json(result);
 });

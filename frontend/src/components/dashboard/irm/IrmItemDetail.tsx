@@ -12,6 +12,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 
 type PushToast = (msg: string, type?: "success" | "info" | "alert") => void;
+import { Pagination } from "@/components/ui/Pagination";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { actionLabel, actionTone, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
 import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
@@ -74,9 +75,9 @@ export function IrmItemDetail({ initial }: { initial: IrmItem }) {
   };
 
   return (
-    <div className="space-y-5">
+    <div className="flex h-full flex-col gap-5">
       <div
-        className="flex flex-col gap-4 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:flex-row sm:items-start sm:justify-between"
+        className="flex shrink-0 flex-col gap-4 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:flex-row sm:items-start sm:justify-between"
         style={{ borderRadius: "var(--radius)" }}
       >
         <div className="min-w-0">
@@ -114,7 +115,7 @@ export function IrmItemDetail({ initial }: { initial: IrmItem }) {
         )}
       </div>
 
-      <div className="flex gap-1 overflow-x-auto border-b border-[var(--border)]">
+      <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-[var(--border)]">
         {TABS.map((t) => (
           <button
             key={t.key}
@@ -128,19 +129,21 @@ export function IrmItemDetail({ initial }: { initial: IrmItem }) {
         ))}
       </div>
 
-      {tab === "overview" && (
-        <Overview i={i} costLabel={fmtCost(i)} canManageBarcode={canManageBarcode} onChange={setI} pushToast={pushToast} />
-      )}
-      {tab === "stock" && (
-        <Placeholder icon={Boxes} title="Stock Levels" body="On-hand and available quantities per warehouse will appear here once the inventory module is connected." />
-      )}
-      {tab === "purchase-orders" && (
-        <Placeholder icon={ClipboardList} title="Purchase Orders" body="Purchase orders for this item will be listed here once the procurement module is live." />
-      )}
-      {tab === "movements" && (
-        <Placeholder icon={Activity} title="Movements" body="Goods in/out, transfers and adjustments for this item will be listed here once inventory movements are live." />
-      )}
-      {tab === "audit" && <AuditTrail itemId={i.id} />}
+      <div className="min-h-0 flex-1 overflow-auto">
+        {tab === "overview" && (
+          <Overview i={i} costLabel={fmtCost(i)} canManageBarcode={canManageBarcode} onChange={setI} pushToast={pushToast} />
+        )}
+        {tab === "stock" && (
+          <Placeholder icon={Boxes} title="Stock Levels" body="On-hand and available quantities per warehouse will appear here once the inventory module is connected." />
+        )}
+        {tab === "purchase-orders" && (
+          <Placeholder icon={ClipboardList} title="Purchase Orders" body="Purchase orders for this item will be listed here once the procurement module is live." />
+        )}
+        {tab === "movements" && (
+          <Placeholder icon={Activity} title="Movements" body="Goods in/out, transfers and adjustments for this item will be listed here once inventory movements are live." />
+        )}
+        {tab === "audit" && <AuditTrail itemId={i.id} />}
+      </div>
     </div>
   );
 }
@@ -334,16 +337,36 @@ function Placeholder({ icon: Icon, title, body }: { icon: React.ElementType; tit
   );
 }
 
+const AUDIT_PAGE_SIZE = 20;
+
 function AuditTrail({ itemId }: { itemId: string }) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const page = Math.max(1, Number(searchParams.get("auditPage")) || 1);
+  const patchPage = React.useCallback(
+    (next: number | null) => {
+      const params = new URLSearchParams(window.location.search);
+      if (next && next > 1) params.set("auditPage", String(next));
+      else params.delete("auditPage");
+      router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
+    },
+    [router],
+  );
   const [entries, setEntries] = React.useState<AuditEntry[] | null>(null);
+  const [total, setTotal] = React.useState(0);
+  const [totalPages, setTotalPages] = React.useState(1);
   const [error, setError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     let active = true;
     auditService
-      .listAuditLogs({ targetType: "irm_item", targetId: itemId, pageSize: 100 })
+      .listAuditLogs({ targetType: "irm_item", targetId: itemId, page, pageSize: AUDIT_PAGE_SIZE })
       .then((res) => {
-        if (active) setEntries(res.entries);
+        if (active) {
+          setEntries(res.entries);
+          setTotal(res.total);
+          setTotalPages(res.totalPages);
+        }
       })
       .catch((e) => {
         if (active) setError(e instanceof Error ? e.message : "Could not load the audit trail.");
@@ -351,11 +374,11 @@ function AuditTrail({ itemId }: { itemId: string }) {
     return () => {
       active = false;
     };
-  }, [itemId]);
+  }, [itemId, page]);
 
   if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
   if (entries === null) return <AuditTrailSkeleton />;
-  if (entries.length === 0) {
+  if (entries.length === 0 && page === 1) {
     return (
       <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
         <ScrollText className="h-7 w-7 text-[var(--faint)]" />
@@ -366,22 +389,25 @@ function AuditTrail({ itemId }: { itemId: string }) {
   }
 
   return (
-    <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
-      <ul className="divide-y divide-[var(--border)]">
-        {entries.map((e) => (
-          <li key={e.id} className="flex items-center justify-between gap-3 px-4 py-3">
-            <div className="flex items-center gap-3">
-              <span className={`inline-block shrink-0 rounded-full px-2.5 py-1 text-[11px] font-bold ${TONE_CLASSES[actionTone(e.action)]}`}>
-                {actionLabel(e.action)}
+    <div className="flex flex-col gap-3">
+      <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+        <ul className="divide-y divide-[var(--border)]">
+          {entries.map((e) => (
+            <li key={e.id} className="flex items-center justify-between gap-3 px-4 py-3">
+              <div className="flex items-center gap-3">
+                <span className={`inline-block shrink-0 rounded-full px-2.5 py-1 text-[11px] font-bold ${TONE_CLASSES[actionTone(e.action)]}`}>
+                  {actionLabel(e.action)}
+                </span>
+                <span className="text-xs text-[var(--muted)]">{e.actorEmail ?? "system"}</span>
+              </div>
+              <span className="shrink-0 text-[11px] text-[var(--faint)]" title={new Date(e.createdAt).toLocaleString("en-GB")}>
+                {relativeTime(e.createdAt)}
               </span>
-              <span className="text-xs text-[var(--muted)]">{e.actorEmail ?? "system"}</span>
-            </div>
-            <span className="shrink-0 text-[11px] text-[var(--faint)]" title={new Date(e.createdAt).toLocaleString("en-GB")}>
-              {relativeTime(e.createdAt)}
-            </span>
-          </li>
-        ))}
-      </ul>
+            </li>
+          ))}
+        </ul>
+      </div>
+      <Pagination page={page} totalPages={totalPages} total={total} label="entries" onPage={(n) => patchPage(n)} />
     </div>
   );
 }

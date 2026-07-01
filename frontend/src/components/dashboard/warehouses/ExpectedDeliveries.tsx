@@ -5,10 +5,13 @@ import { useRouter } from "next/navigation";
 import { AlertTriangle, Calendar, CalendarClock, CalendarDays, CalendarRange, PackageCheck, Truck } from "lucide-react";
 
 import { Skeleton } from "@/components/ui/Skeleton";
+import { Pagination } from "@/components/ui/Pagination";
 import { listPurchaseOrders } from "@/services/purchase-order.service";
 import { useAuth } from "@/hooks/useAuth";
 import { PO_PRIORITY_LABELS, PoStatusBadge, formatDate } from "@/components/dashboard/purchase-orders/poStatus";
 import type { PurchaseOrder } from "@/types/purchase-order";
+
+const PAGE_SIZE = 20;
 
 // Warehouse Manager worklist: "what's arriving here that I still need to receive?".
 // A READ over existing PO data — Sent / Partially-received POs delivering to THIS warehouse with
@@ -78,33 +81,35 @@ function relTag(row: Row): { text: string; tone: Tone } | null {
 // and the loading style matches the sibling Received/GRN list (skeleton rows, not a spinner).
 function WorklistSkeleton() {
   return (
-    <div className="space-y-3">
-      <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
+    <div className="flex h-full flex-col gap-3">
+      <div className="shrink-0 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
         <Skeleton className="h-2.5 w-28" />
         <Skeleton className="mt-2 h-4 w-48" />
       </div>
-      <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
-        <table className="w-full text-left text-sm" style={{ minWidth: 760 }}>
-          <thead>
-            <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-              <th className="px-4 py-3">Purchase order</th>
-              <th className="px-4 py-3">Supplier</th>
-              <th className="px-4 py-3">Expected</th>
-              <th className="px-4 py-3">Priority</th>
-              <th className="px-4 py-3">Remaining</th>
-              <th className="px-4 py-3" />
-            </tr>
-          </thead>
-          <tbody>
-            {Array.from({ length: 6 }).map((_, i) => (
-              <tr key={i} className="border-b border-[var(--border)] last:border-0">
-                {Array.from({ length: 6 }).map((__, j) => (
-                  <td key={j} className="px-4 py-3"><Skeleton className="h-3 w-20" /></td>
-                ))}
+      <div className="min-h-0 flex-1 overflow-auto">
+        <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+          <table className="w-full text-left text-sm" style={{ minWidth: 760 }}>
+            <thead>
+              <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
+                <th className="px-4 py-3">Purchase order</th>
+                <th className="px-4 py-3">Supplier</th>
+                <th className="px-4 py-3">Expected</th>
+                <th className="px-4 py-3">Priority</th>
+                <th className="px-4 py-3">Remaining</th>
+                <th className="px-4 py-3" />
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {Array.from({ length: 6 }).map((_, i) => (
+                <tr key={i} className="border-b border-[var(--border)] last:border-0">
+                  {Array.from({ length: 6 }).map((__, j) => (
+                    <td key={j} className="px-4 py-3"><Skeleton className="h-3 w-20" /></td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
@@ -121,6 +126,7 @@ export function ExpectedDeliveries({ warehouseId, warehouseCode }: { warehouseId
   const canReceive = can("goods_in.create");
   const [rows, setRows] = React.useState<Row[] | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  const [page, setPage] = React.useState(1);
 
   React.useEffect(() => {
     let active = true;
@@ -173,6 +179,19 @@ export function ExpectedDeliveries({ warehouseId, warehouseCode }: { warehouseId
     [rows],
   );
 
+  // Client-side pagination: slice the flat rows array for the current page, then re-group the
+  // slice so bucket headers only appear for buckets present on that page.
+  const { pagedGroups, totalPages } = React.useMemo(() => {
+    const allRows = rows ?? [];
+    const total = allRows.length;
+    const tp = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    const safePage = Math.min(page, tp);
+    const start = (safePage - 1) * PAGE_SIZE;
+    const slice = allRows.slice(start, start + PAGE_SIZE);
+    const pg = BUCKETS.map((b) => ({ ...b, rows: slice.filter((r) => r.bucket === b.key) })).filter((g) => g.rows.length > 0);
+    return { pagedGroups: pg, totalPages: tp };
+  }, [rows, page]);
+
   if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
   if (rows === null) return <WorklistSkeleton />;
   if (rows.length === 0) {
@@ -186,9 +205,9 @@ export function ExpectedDeliveries({ warehouseId, warehouseCode }: { warehouseId
   }
 
   return (
-    <div className="space-y-3">
+    <div className="flex h-full flex-col gap-3">
       {/* Delivery Summary — instant situational awareness in plain operational language. */}
-      <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
+      <div className="shrink-0 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
         <h3 className="text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">Delivery Summary</h3>
         <p className="mt-1 text-sm">
           {groups.map((b, i) => (
@@ -202,70 +221,82 @@ export function ExpectedDeliveries({ warehouseId, warehouseCode }: { warehouseId
         </p>
       </div>
 
-      <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
-        <table className="w-full text-left text-sm" style={{ minWidth: 760 }}>
-          <thead>
-            <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-              <th className="px-4 py-3">Purchase order</th>
-              <th className="px-4 py-3">Supplier</th>
-              <th className="px-4 py-3">Expected</th>
-              <th className="px-4 py-3">Priority</th>
-              <th className="px-4 py-3">Remaining</th>
-              <th className="px-4 py-3" />
-            </tr>
-          </thead>
-          <tbody>
-            {groups.map((b) => {
-              const groupRows = b.rows;
-              const Icon = b.icon;
-              return (
-                <React.Fragment key={b.key}>
-                  <tr className={GROUP_BG[b.tone]}>
-                    <td colSpan={6} className={`px-4 py-2 ${TONE_TEXT[b.tone]}`}>
-                      <span className="inline-flex items-center gap-1.5 text-[11px] font-extrabold uppercase tracking-wider">
-                        <Icon className="h-3.5 w-3.5 shrink-0" />
-                        {b.label} <span className="opacity-70">({groupRows.length})</span>
-                      </span>
-                    </td>
-                  </tr>
-                  {groupRows.map((row) => {
-                    const { po, ordered, remaining } = row;
-                    const tag = relTag(row);
-                    return (
-                      <tr key={po.id} className="border-b border-[var(--border)] align-top last:border-0">
-                        <td className="px-4 py-3">
-                          <a href={`/dashboard/purchase-orders/${po.code}`} className="font-mono text-xs font-bold text-[var(--accent)] hover:underline">{po.code}</a>
-                          <div className="mt-1"><PoStatusBadge status={po.status} /></div>
-                        </td>
-                        <td className="px-4 py-3 font-semibold text-[var(--ink)]">{po.supplierName ?? po.supplier?.name ?? "—"}</td>
-                        <td className="px-4 py-3">
-                          <span className={row.bucket === "overdue" ? "font-semibold text-[var(--neg)]" : "text-[var(--muted)]"}>{formatDate(po.expectedDeliveryDate)}</span>
-                          {tag && <span className={`ml-1.5 rounded-full px-1.5 py-0.5 text-[10px] font-bold ${GROUP_BG[tag.tone]} ${TONE_TEXT[tag.tone]}`}>{tag.text}</span>}
-                        </td>
-                        <td className="px-4 py-3 text-xs text-[var(--muted)]">{PO_PRIORITY_LABELS[po.priority]}</td>
-                        <td className="px-4 py-3">
-                          <span className="font-bold text-[var(--ink)]">{remaining}</span>
-                          <span className="text-[var(--muted)]"> / {ordered} remaining</span>
-                        </td>
-                        <td className="px-4 py-3">
-                          {canReceive && (
-                            <button
-                              type="button"
-                              onClick={() => router.push(receiveHref(po.id))}
-                              className="flex items-center gap-1.5 rounded-lg bg-[var(--pos)] px-2.5 py-1.5 text-[11px] font-bold text-white transition-all hover:opacity-90"
-                            >
-                              <PackageCheck className="h-3.5 w-3.5" /> Receive
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </React.Fragment>
-              );
-            })}
-          </tbody>
-        </table>
+      <div className="min-h-0 flex-1 overflow-auto">
+        <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+          <table className="w-full text-left text-sm" style={{ minWidth: 760 }}>
+            <thead>
+              <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
+                <th className="px-4 py-3">Purchase order</th>
+                <th className="px-4 py-3">Supplier</th>
+                <th className="px-4 py-3">Expected</th>
+                <th className="px-4 py-3">Priority</th>
+                <th className="px-4 py-3">Remaining</th>
+                <th className="px-4 py-3" />
+              </tr>
+            </thead>
+            <tbody>
+              {pagedGroups.map((b) => {
+                const groupRows = b.rows;
+                const Icon = b.icon;
+                return (
+                  <React.Fragment key={b.key}>
+                    <tr className={GROUP_BG[b.tone]}>
+                      <td colSpan={6} className={`px-4 py-2 ${TONE_TEXT[b.tone]}`}>
+                        <span className="inline-flex items-center gap-1.5 text-[11px] font-extrabold uppercase tracking-wider">
+                          <Icon className="h-3.5 w-3.5 shrink-0" />
+                          {b.label} <span className="opacity-70">({groupRows.length})</span>
+                        </span>
+                      </td>
+                    </tr>
+                    {groupRows.map((row) => {
+                      const { po, ordered, remaining } = row;
+                      const tag = relTag(row);
+                      return (
+                        <tr key={po.id} className="border-b border-[var(--border)] align-top last:border-0">
+                          <td className="px-4 py-3">
+                            <a href={`/dashboard/purchase-orders/${po.code}`} className="font-mono text-xs font-bold text-[var(--accent)] hover:underline">{po.code}</a>
+                            <div className="mt-1"><PoStatusBadge status={po.status} /></div>
+                          </td>
+                          <td className="px-4 py-3 font-semibold text-[var(--ink)]">{po.supplierName ?? po.supplier?.name ?? "—"}</td>
+                          <td className="px-4 py-3">
+                            <span className={row.bucket === "overdue" ? "font-semibold text-[var(--neg)]" : "text-[var(--muted)]"}>{formatDate(po.expectedDeliveryDate)}</span>
+                            {tag && <span className={`ml-1.5 rounded-full px-1.5 py-0.5 text-[10px] font-bold ${GROUP_BG[tag.tone]} ${TONE_TEXT[tag.tone]}`}>{tag.text}</span>}
+                          </td>
+                          <td className="px-4 py-3 text-xs text-[var(--muted)]">{PO_PRIORITY_LABELS[po.priority]}</td>
+                          <td className="px-4 py-3">
+                            <span className="font-bold text-[var(--ink)]">{remaining}</span>
+                            <span className="text-[var(--muted)]"> / {ordered} remaining</span>
+                          </td>
+                          <td className="px-4 py-3">
+                            {canReceive && (
+                              <button
+                                type="button"
+                                onClick={() => router.push(receiveHref(po.id))}
+                                className="flex items-center gap-1.5 rounded-lg bg-[var(--pos)] px-2.5 py-1.5 text-[11px] font-bold text-white transition-all hover:opacity-90"
+                              >
+                                <PackageCheck className="h-3.5 w-3.5" /> Receive
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="shrink-0">
+        <Pagination
+          page={Math.min(page, totalPages)}
+          totalPages={totalPages}
+          total={rows.length}
+          label="deliveries"
+          onPage={setPage}
+        />
       </div>
     </div>
   );

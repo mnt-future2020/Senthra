@@ -20,10 +20,9 @@ import {
   BarChart3,
   Warehouse,
   Truck,
-  PackageSearch,
   PackageCheck,
   Boxes,
-  PackageMinus,
+  ArrowRightLeft,
 } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
@@ -46,11 +45,10 @@ const NAV: NavItem[] = [
   { href: "/dashboard/jobs", label: "Jobs", icon: ClipboardList, perms: ["jobs.view"] },
   { href: "/dashboard/warehouses", label: "Warehouses", icon: Warehouse, perms: ["warehouse.view"] },
   { href: "/dashboard/suppliers", label: "Suppliers", icon: Truck, perms: ["suppliers.view"] },
-  { href: "/dashboard/irm", label: "IRM Catalogue", icon: PackageSearch, perms: ["irm.view"] },
+  // IRM Catalogue now lives inside Inventory (IRM tab → Catalogue); standalone nav removed.
   { href: "/dashboard/purchase-orders", label: "Purchase Orders", icon: ClipboardList, perms: ["purchase_orders.view"] },
   { href: "/dashboard/goods-in", label: "GRN", icon: PackageCheck, perms: ["goods_in.view"] },
   { href: "/dashboard/inventory", label: "Inventory", icon: Boxes, perms: ["inventory.view"] },
-  // { href: "/dashboard/goods-out", label: "Goods Out", icon: PackageMinus, perms: ["goods_out.view"] },
   {
     // Only the perms that map to a real Settings section (see SettingsPanel). Master-data view perms
     // (warehouse/supplier/IRM types + IRM categories) belong to their own modules' tabs, so they must
@@ -88,6 +86,7 @@ const ENGINEER_NAV: NavItem[] = [
   { href: "/dashboard/engineer", label: "Dashboard", icon: LayoutDashboard, perms: ["engineer.dashboard.view"] },
   { href: "/dashboard/engineer/jobs", label: "Jobs", icon: ClipboardList, perms: ["engineer.jobs.view"] },
   { href: "/dashboard/engineer/inventory", label: "Stock", icon: Boxes, perms: ["engineer.inventory.view"] },
+  { href: "/dashboard/engineer/transfers", label: "Transfers", icon: ArrowRightLeft, perms: ["engineer.transfer"] },
   { href: "/dashboard/account", label: "Settings", icon: Settings, perms: [] },
 ];
 

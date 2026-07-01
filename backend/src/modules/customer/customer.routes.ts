@@ -12,6 +12,7 @@ import { validateBody } from "../../middleware/validate.middleware.js";
 import {
   adminStockRequestSchema,
   createCustomerSchema,
+  customerStockTransferSchema,
   customerUserSchema,
   directStockEntrySchema,
   projectSchema,
@@ -138,8 +139,8 @@ adminRouter.post(
 
 // Stock requests — the review queue for customer-submitted stock asks. Viewing needs
 // stock_requests.view; approving / rejecting need the matching key. Approval is a
-// status move only — it never writes inventory. (Completion is a future status,
-// introduced with the Goods Out workflow.)
+// status move only — it never writes inventory. Completion (stock_requests.complete)
+// is the warehouse-receive step below, which posts the customer's stock.
 adminRouter.get(
   "/:id/stock-requests",
   requirePermission("stock_requests.view"),
@@ -192,10 +193,12 @@ adminRouter.get(
   customerController.listStockRequestAssignments,
 );
 
-// List stock entries (received stock) for a customer.
+// List stock entries (received stock) for a customer — the customer's Inventory tab.
+// Readable by Customer Inventory viewers (customer_stock.view) OR stock-submission
+// reviewers (stock_requests.view), matching the CustomerDetail "Inventory" tab gate.
 adminRouter.get(
   "/:id/stock-entries",
-  requirePermission("stock_requests.view"),
+  requireAnyPermission("customer_stock.view", "stock_requests.view"),
   customerController.listCustomerStockEntries,
 );
 
@@ -275,7 +278,8 @@ stockEntryRouter.use(requireAuth);
 
 stockEntryRouter.get(
   "/:id",
-  requirePermission("stock_requests.view"),
+  // A single customer stock entry — visible to Customer Inventory viewers and stock-submission reviewers.
+  requireAnyPermission("customer_stock.view", "stock_requests.view"),
   customerController.getStockEntry,
 );
 
@@ -301,6 +305,15 @@ stockEntryRouter.post(
   requirePermission("stock_requests.complete"),
   writeLimiter,
   customerController.generateStockEntryBarcode,
+);
+
+// Transfer quantity to another warehouse (hub action — same permission as creating a direct entry).
+stockEntryRouter.post(
+  "/:id/transfer",
+  requirePermission("customer_stock.create"),
+  writeLimiter,
+  validateBody(customerStockTransferSchema),
+  customerController.transferCustomerStock,
 );
 
 export { adminRouter, portalRouter, stockAssignmentRouter, warehousePendingRouter, stockEntryRouter };

@@ -7,6 +7,8 @@ import { Activity, Boxes, Eye, Loader2, MapPin, Pencil, Power, ScrollText } from
 import * as warehouseService from "@/services/warehouse.service";
 import * as customerService from "@/services/customer.service";
 import * as auditService from "@/services/audit.service";
+import { Select } from "@/components/ui/Select";
+import { Pagination } from "@/components/ui/Pagination";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { StatusBadge } from "@/components/ui/StatusBadge";
@@ -103,10 +105,10 @@ export function WarehouseDetail({ initial }: { initial: Warehouse }) {
   };
 
   return (
-    <div className="space-y-5">
+    <div className="flex h-full flex-col gap-5">
       {/* Header card */}
       <div
-        className="flex flex-col gap-4 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:flex-row sm:items-start sm:justify-between"
+        className="flex shrink-0 flex-col gap-4 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:flex-row sm:items-start sm:justify-between"
         style={{ borderRadius: "var(--radius)" }}
       >
         <div className="min-w-0">
@@ -148,7 +150,7 @@ export function WarehouseDetail({ initial }: { initial: Warehouse }) {
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-1 overflow-x-auto border-b border-[var(--border)]">
+      <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-[var(--border)]">
         {visibleTabs.map((t) => (
           <button
             key={t.key}
@@ -164,19 +166,21 @@ export function WarehouseDetail({ initial }: { initial: Warehouse }) {
         ))}
       </div>
 
-      {tab === "overview" && <Overview w={w} />}
-      {tab === "inventory" && <StockTab warehouseCode={w.code} warehouseId={w.id} router={router} />}
-      {tab === "incoming" && <IncomingTab warehouseCode={w.code} warehouseId={w.id} router={router} pushToast={pushToast} />}
-      {tab === "goods" && <GoodsManagementTab warehouseId={w.id} warehouseCode={w.code} router={router} />}
-      {tab === "demand" && <DemandTab warehouseId={w.id} />}
-      {tab === "transactions" && (
-        <Placeholder
-          icon={Activity}
-          title="Transactions"
-          body="Goods in, goods out, transfers and adjustments for this warehouse will be listed here once inventory movements are live."
-        />
-      )}
-      {tab === "audit" && <AuditTrail warehouseId={w.id} />}
+      <div className="min-h-0 flex-1 overflow-auto">
+        {tab === "overview" && <Overview w={w} />}
+        {tab === "inventory" && <StockTab warehouseCode={w.code} warehouseId={w.id} router={router} />}
+        {tab === "incoming" && <IncomingTab warehouseCode={w.code} warehouseId={w.id} router={router} pushToast={pushToast} />}
+        {tab === "goods" && <GoodsManagementTab warehouseId={w.id} warehouseCode={w.code} router={router} />}
+        {tab === "demand" && <DemandTab warehouseId={w.id} />}
+        {tab === "transactions" && (
+          <Placeholder
+            icon={Activity}
+            title="Transactions"
+            body="Goods in, goods out, transfers and adjustments for this warehouse will be listed here once inventory movements are live."
+          />
+        )}
+        {tab === "audit" && <AuditTrail warehouseId={w.id} />}
+      </div>
     </div>
   );
 }
@@ -605,6 +609,14 @@ function StockTab({
   );
 }
 
+const STOCK_FILTER_OPTIONS = [
+  { value: "", label: "All" },
+  { value: "active", label: "Active" },
+  { value: "draft", label: "Draft" },
+];
+
+const PAGE_SIZE = 20;
+
 function WarehouseStockEntries({
   warehouseId,
   router,
@@ -612,18 +624,56 @@ function WarehouseStockEntries({
   warehouseId: string;
   router: ReturnType<typeof useRouter>;
 }) {
+  const searchParams = useSearchParams();
+  const stockFilter = (searchParams.get("stockFilter") ?? "") as "" | "draft" | "active";
+  const page = Math.max(1, Number(searchParams.get("stockPage")) || 1);
+
+  const patch = React.useCallback(
+    (updates: Record<string, string | null>) => {
+      const params = new URLSearchParams(window.location.search);
+      for (const [k, v] of Object.entries(updates)) {
+        if (v) params.set(k, v);
+        else params.delete(k);
+      }
+      params.delete("stockPage");
+      router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
+    },
+    [router],
+  );
+
+  const patchPage = React.useCallback(
+    (next: number | null) => {
+      const params = new URLSearchParams(window.location.search);
+      if (next && next > 1) params.set("stockPage", String(next)); else params.delete("stockPage");
+      router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
+    },
+    [router],
+  );
+
   const [entries, setEntries] = React.useState<CustomerStockEntry[] | null>(null);
   const [error, setError] = React.useState<string | null>(null);
-  const [filter, setFilter] = React.useState<"" | "draft" | "active">("");
 
   const load = React.useCallback(() => {
     customerService
-      .listWarehouseStockEntries(warehouseId, filter || undefined)
+      .listWarehouseStockEntries(warehouseId, stockFilter || undefined)
       .then(setEntries)
       .catch((e) => setError(e instanceof Error ? e.message : "Could not load stock entries."));
-  }, [warehouseId, filter]);
+  }, [warehouseId, stockFilter]);
 
   React.useEffect(() => { load(); }, [load]);
+
+  const { visibleEntries, pageSlice, totalPages } = React.useMemo(() => {
+    const all = entries ?? [];
+    const total = all.length;
+    const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    const safePage = Math.min(page, pages);
+    const start = (safePage - 1) * PAGE_SIZE;
+    return {
+      visibleEntries: all,
+      pageSlice: all.slice(start, start + PAGE_SIZE),
+      totalPages: pages,
+    };
+  }, [entries, page]);
 
   if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
   if (entries === null) {
@@ -632,99 +682,101 @@ function WarehouseStockEntries({
 
   return (
     <div className="space-y-3">
-      {/* Filter chips */}
+      {/* Status filter */}
       <div className="flex items-center gap-2">
-        {(["", "active", "draft"] as const).map((f) => (
-          <button
-            key={f}
-            type="button"
-            onClick={() => setFilter(f)}
-            className={`rounded-full px-3 py-1.5 text-[11px] font-bold transition-all ${
-              filter === f
-                ? "bg-[var(--accent)] text-white"
-                : "border border-[var(--border)] bg-[var(--surface-2)] text-[var(--muted)] hover:text-[var(--ink)]"
-            }`}
-          >
-            {f === "" ? "All" : f === "active" ? "Active" : "Draft"}
-          </button>
-        ))}
+        <Select
+          size="sm"
+          value={stockFilter}
+          onChange={(v) => { patch({ stockFilter: v || null }); }}
+          options={STOCK_FILTER_OPTIONS}
+          ariaLabel="Filter by status"
+        />
       </div>
 
-      {entries.length === 0 ? (
+      {visibleEntries.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
           <Boxes className="h-7 w-7 text-[var(--faint)]" />
           <p className="text-sm font-semibold text-[var(--ink)]">No stock entries</p>
           <p className="text-xs text-[var(--muted)]">
-            {filter ? `No ${filter} entries found.` : "Customer stock received at this warehouse will appear here."}
+            {stockFilter ? `No ${stockFilter} entries found.` : "Customer stock received at this warehouse will appear here."}
           </p>
         </div>
       ) : (
-        <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
-          <table className="w-full text-left text-sm" style={{ minWidth: 750 }}>
-            <thead>
-              <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                <th className="px-4 py-3">Item</th>
-                <th className="px-4 py-3">Customer</th>
-                <th className="px-4 py-3">SKU</th>
-                <th className="px-4 py-3">Qty</th>
-                <th className="px-4 py-3">Barcode</th>
-                <th className="px-4 py-3">Status</th>
-                <th className="px-4 py-3">Received</th>
-                <th className="px-4 py-3" />
-              </tr>
-            </thead>
-            <tbody>
-              {entries.map((e) => (
-                <tr
-                  key={e.id}
-                  className="cursor-pointer border-b border-[var(--border)] align-top transition-colors last:border-0 hover:bg-[var(--surface-2)]"
-                  onClick={() => router.push(`/dashboard/stock-entries/${e.id}?from=warehouse`)}
-                >
-                  <td className="px-4 py-3 font-semibold text-[var(--ink)]">{e.itemName}</td>
-                  <td className="px-4 py-3">
-                    <div className="text-[var(--ink)]">{e.customerName}</div>
-                    <div className="font-mono text-[11px] text-[var(--faint)]">{e.customerCode}</div>
-                  </td>
-                  <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.sku ?? "—"}</td>
-                  <td className="px-4 py-3 font-bold text-[var(--ink)]">{e.quantity}</td>
-                  <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.barcode ?? "—"}</td>
-                  <td className="px-4 py-3">
-                    <span
-                      className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${
-                        e.status === "active"
-                          ? "bg-[var(--pos)]/12 text-[var(--pos)]"
-                          : "bg-amber-500/15 text-amber-600"
-                      }`}
-                    >
-                      {e.status}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-xs text-[var(--muted)]">{fmtDate(e.receivedAt ?? e.createdAt)}</td>
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        title="View"
-                        onClick={(ev) => { ev.stopPropagation(); router.push(`/dashboard/stock-entries/${e.id}?from=warehouse`); }}
-                        className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface-2)] text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)]"
-                      >
-                        <Eye className="h-4 w-4" />
-                      </button>
-                      <button
-                        type="button"
-                        title="Edit"
-                        onClick={(ev) => { ev.stopPropagation(); router.push(`/dashboard/stock-entries/${e.id}?from=warehouse`); }}
-                        className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--accent)] text-white transition-all hover:opacity-90"
-                      >
-                        <Pencil className="h-4 w-4" />
-                      </button>
-                    </div>
-                  </td>
+        <>
+          <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+            <table className="w-full text-left text-sm" style={{ minWidth: 750 }}>
+              <thead>
+                <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
+                  <th className="px-4 py-3">Item</th>
+                  <th className="px-4 py-3">Customer</th>
+                  <th className="px-4 py-3">SKU</th>
+                  <th className="px-4 py-3">Qty</th>
+                  <th className="px-4 py-3">Barcode</th>
+                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">Received</th>
+                  <th className="px-4 py-3" />
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {pageSlice.map((e) => (
+                  <tr
+                    key={e.id}
+                    className="cursor-pointer border-b border-[var(--border)] align-top transition-colors last:border-0 hover:bg-[var(--surface-2)]"
+                    onClick={() => router.push(`/dashboard/stock-entries/${e.id}?from=warehouse`)}
+                  >
+                    <td className="px-4 py-3 font-semibold text-[var(--ink)]">{e.itemName}</td>
+                    <td className="px-4 py-3">
+                      <div className="text-[var(--ink)]">{e.customerName}</div>
+                      <div className="font-mono text-[11px] text-[var(--faint)]">{e.customerCode}</div>
+                    </td>
+                    <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.sku ?? "—"}</td>
+                    <td className="px-4 py-3 font-bold text-[var(--ink)]">{e.quantity}</td>
+                    <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.barcode ?? "—"}</td>
+                    <td className="px-4 py-3">
+                      <span
+                        className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                          e.status === "active"
+                            ? "bg-[var(--pos)]/12 text-[var(--pos)]"
+                            : "bg-amber-500/15 text-amber-600"
+                        }`}
+                      >
+                        {e.status}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-xs text-[var(--muted)]">{fmtDate(e.receivedAt ?? e.createdAt)}</td>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          title="View"
+                          onClick={(ev) => { ev.stopPropagation(); router.push(`/dashboard/stock-entries/${e.id}?from=warehouse`); }}
+                          className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface-2)] text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)]"
+                        >
+                          <Eye className="h-4 w-4" />
+                        </button>
+                        <button
+                          type="button"
+                          title="Edit"
+                          onClick={(ev) => { ev.stopPropagation(); router.push(`/dashboard/stock-entries/${e.id}?from=warehouse`); }}
+                          className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--accent)] text-white transition-all hover:opacity-90"
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <Pagination
+            page={Math.min(page, totalPages)}
+            totalPages={totalPages}
+            total={visibleEntries.length}
+            label="entries"
+            onPage={(n) => patchPage(n)}
+          />
+        </>
       )}
     </div>
   );

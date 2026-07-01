@@ -1,6 +1,7 @@
 import { Prisma, type Supplier } from "@prisma/client";
 
 import { prisma } from "../../lib/prisma.js";
+import { escapeRegex } from "../../utils/search.js";
 
 // Data-access layer for the Supplier master. The ONLY place Prisma is touched for
 // suppliers. Soft-deleted suppliers (deletedAt set) are excluded from normal reads.
@@ -48,7 +49,7 @@ function buildWhere(filters: SupplierListFilters): Prisma.SupplierWhereInput {
   if (filters.status) where.status = filters.status;
   if (filters.typeId) where.typeId = filters.typeId;
   if (filters.search) {
-    const q = filters.search;
+    const q = escapeRegex(filters.search);
     where.OR = [
       { name: { contains: q, mode: "insensitive" } },
       { code: { contains: q, mode: "insensitive" } },

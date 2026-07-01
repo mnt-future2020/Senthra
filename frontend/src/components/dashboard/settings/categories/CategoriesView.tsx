@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { Check, Loader2, Pencil, Plus, Search, Tag, Trash2, X } from "lucide-react";
 
 import { useDashboard } from "@/hooks/useDashboard";
@@ -24,16 +25,32 @@ export function CategoriesView() {
   const canEdit = can("categories.edit");
   const canDelete = can("categories.delete");
 
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  // Filters derived from URL — survive refresh and back/forward navigation.
+  const search = searchParams.get("q") ?? "";
+  const sort = (searchParams.get("sort") as "newest" | "oldest" | "name") ?? "name";
+  const page = Math.max(1, Number(searchParams.get("page")) || 1);
+
+  // Preserves all existing params (incl. ?section for the panel) and uses the
+  // current pathname. Filter changes reset to page 1 unless resetPage=false.
+  const patch = (updates: Record<string, string | null>, resetPage = true) => {
+    const params = new URLSearchParams(window.location.search);
+    for (const [k, v] of Object.entries(updates)) {
+      if (v) params.set(k, v);
+      else params.delete(k);
+    }
+    if (resetPage) params.delete("page");
+    router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
+  };
+
   // Seed from the SWR cache so returning to this section renders instantly.
   const [categories, setCategories] = React.useState<Category[]>(
     () => categoryService.getCachedCategories() ?? [],
   );
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
-
-  const [search, setSearch] = React.useState("");
-  const [page, setPage] = React.useState(1);
-  const [sort, setSort] = React.useState<"newest" | "oldest" | "name">("name");
 
   const [newName, setNewName] = React.useState("");
   const [newDescription, setNewDescription] = React.useState("");
@@ -53,24 +70,27 @@ export function CategoriesView() {
   const [deleting, setDeleting] = React.useState(false);
 
   // Bounded master-data — load all once, then filter + paginate on the client.
-  const q = search.trim().toLowerCase();
-  const filtered = q
-    ? categories.filter(
-        (c) =>
-          c.name.toLowerCase().includes(q) ||
-          (c.description ?? "").toLowerCase().includes(q),
-      )
-    : categories;
-  const sorted = [...filtered].sort((a, b) =>
-    sort === "name"
-      ? a.name.localeCompare(b.name)
-      : sort === "oldest"
-        ? a.createdAt.localeCompare(b.createdAt)
-        : b.createdAt.localeCompare(a.createdAt),
-  );
-  const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
-  const safePage = Math.min(page, totalPages);
-  const pageCategories = sorted.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+  const { filtered, totalPages, safePage, pageCategories } = React.useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const filtered = q
+      ? categories.filter(
+          (c) =>
+            c.name.toLowerCase().includes(q) ||
+            (c.description ?? "").toLowerCase().includes(q),
+        )
+      : categories;
+    const sorted = [...filtered].sort((a, b) =>
+      sort === "name"
+        ? a.name.localeCompare(b.name)
+        : sort === "oldest"
+          ? a.createdAt.localeCompare(b.createdAt)
+          : b.createdAt.localeCompare(a.createdAt),
+    );
+    const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+    const safePage = Math.min(page, totalPages);
+    const pageCategories = sorted.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+    return { filtered, totalPages, safePage, pageCategories };
+  }, [categories, search, sort, page]);
 
   const load = React.useCallback(async () => {
     try {
@@ -163,7 +183,8 @@ export function CategoriesView() {
       await categoryService.deleteCategory(confirm.category.id);
       setConfirm({ open: false, category: null });
       const newTotalPages = Math.max(1, Math.ceil((filtered.length - 1) / PAGE_SIZE));
-      setPage((p) => Math.min(p, newTotalPages));
+      const clampedPage = Math.min(page, newTotalPages);
+      if (clampedPage !== page) patch({ page: clampedPage > 1 ? String(clampedPage) : null }, false);
       await load();
       pushToast("Category deleted.", "success");
     } catch (e) {
@@ -190,10 +211,7 @@ export function CategoriesView() {
               <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
               <input
                 value={search}
-                onChange={(e) => {
-                  setSearch(e.target.value);
-                  setPage(1);
-                }}
+                onChange={(e) => patch({ q: e.target.value || null })}
                 placeholder="Search categories…"
                 className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
               />
@@ -201,10 +219,7 @@ export function CategoriesView() {
             <Select
               size="sm"
               value={sort}
-              onChange={(v) => {
-                setSort(v as "newest" | "oldest" | "name");
-                setPage(1);
-              }}
+              onChange={(v) => patch({ sort: v === "name" ? null : v })}
               options={[
                 { value: "newest", label: "Newest" },
                 { value: "oldest", label: "Oldest" },
@@ -414,7 +429,7 @@ export function CategoriesView() {
             totalPages={totalPages}
             total={filtered.length}
             label="categories"
-            onPage={setPage}
+            onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)}
           />
         </div>
       )}

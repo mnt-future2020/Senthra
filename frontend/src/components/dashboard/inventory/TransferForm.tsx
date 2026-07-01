@@ -96,7 +96,11 @@ export function TransferForm() {
   const available = availability?.available ?? null;
   const qtyNum = Number(quantity);
 
-  const goBack = () => guard.attemptLeave(() => router.push(INVENTORY_LIST));
+  const goBack = () =>
+    guard.attemptLeave(() => {
+      if (window.history.length > 1) router.back();
+      else router.push(INVENTORY_LIST);
+    });
 
   const validate = (): Record<string, string> => {
     const errs: Record<string, string> = {};

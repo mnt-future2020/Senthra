@@ -14,21 +14,30 @@ export function principalCan(principal: Principal | null, permission: string): b
 // The dashboard sections, in landing-priority order, each with the permission(s)
 // that reveal it. Every authenticated user enters the same shell; the first section
 // they're allowed to see becomes their landing, and a user with none gets the
-// no-access home. (audit.view has no screen yet, so it isn't a section.)
+// no-access home. Kept in lockstep with the Sidebar nav (and each page's own
+// PermissionGate) so every section a user can navigate to is also a valid landing —
+// otherwise a role that only has, say, Jobs would land on the no-access home despite
+// seeing Jobs in the nav. (IRM is intentionally absent: the standalone /dashboard/irm
+// now redirects into the inventory.view-gated Inventory Hub, so it isn't an
+// independent landing.)
 export const DASHBOARD_SECTIONS: { path: string; anyOf: string[] }[] = [
-  { path: "/dashboard/settings", anyOf: ["settings.view", "email_templates.view"] },
+  // Settings admits categories.view too — the Categories master lives as a Settings section (see the
+  // Sidebar + settings page gate), so a categories-only role must land somewhere real.
+  { path: "/dashboard/settings", anyOf: ["settings.view", "email_templates.view", "categories.view"] },
   { path: "/dashboard/users", anyOf: ["users.view", "roles.view"] },
   { path: "/dashboard/customers", anyOf: ["customers.view"] },
+  { path: "/dashboard/jobs", anyOf: ["jobs.view"] },
   { path: "/dashboard/warehouses", anyOf: ["warehouse.view"] },
   { path: "/dashboard/suppliers", anyOf: ["suppliers.view"] },
-  { path: "/dashboard/irm", anyOf: ["irm.view"] },
   { path: "/dashboard/purchase-orders", anyOf: ["purchase_orders.view"] },
   { path: "/dashboard/goods-in", anyOf: ["goods_in.view"] },
   { path: "/dashboard/inventory", anyOf: ["inventory.view"] },
-  { path: "/dashboard/goods-out", anyOf: ["goods_out.view"] },
-  // Engineer Portal — kept LAST so a staff user with real module access lands on that first; an
-  // engineer-only user (no other sections) falls through here to their own portal dashboard.
+  // Engineer Portal — kept after the admin modules so a staff user with real module access lands there
+  // first; an engineer-only user (no other sections) falls through to their own portal dashboard.
   { path: "/dashboard/engineer", anyOf: ["engineer.dashboard.view"] },
+  // Audit log — a trailing utility section (e.g. a compliance/auditor role); a user lands here only
+  // when it's their sole section, never ahead of a real operational module or the engineer portal.
+  { path: "/dashboard/audit", anyOf: ["audit.view"] },
 ];
 
 // The customer portal's landing inside the shared dashboard shell — the portal

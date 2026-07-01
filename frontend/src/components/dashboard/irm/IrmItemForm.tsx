@@ -24,7 +24,9 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import type { UserStatus } from "@/types/user";
 
-const IRM_LIST = "/dashboard/irm";
+// The IRM catalogue now lives in the Inventory Hub (Inventory → IRM → Catalogue), so that's the
+// fallback "list" destination when there's no in-app history to go back to.
+const IRM_LIST = "/dashboard/inventory?tab=company&irm=catalogue";
 const UOM_OPTIONS = ["Each", "Metre", "Roll", "Pack", "Box", "Set", "Pair", "Reel"];
 const CURRENCY_OPTIONS = ["GBP", "EUR"];
 const CURRENCY_LABELS: Record<string, string> = { GBP: "GBP (£)", EUR: "EUR (€)" };
@@ -218,7 +220,13 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
   const isDirty = !saved && liveKey !== initialKey;
   useReportDirty("irm-form", isDirty);
 
-  const goBack = () => guard.attemptLeave(() => router.push(IRM_LIST));
+  const goBack = () =>
+    guard.attemptLeave(() => {
+      // Return to wherever the user came from (the Inventory Hub IRM tab with its filters intact, or
+      // the item detail when editing). Fall back to the IRM catalogue if opened by a direct link.
+      if (window.history.length > 1) router.back();
+      else router.push(IRM_LIST);
+    });
   const clearError = (field: string) =>
     setErrors((prev) => {
       if (!prev[field]) return prev;
@@ -393,7 +401,7 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
                   }}
                   canCreate={can("irm_types.create") || can("irm.create") || can("irm.edit")}
                   canManage={can("irm_types.edit") || can("irm_types.delete")}
-                  manageHref="/dashboard/irm?tab=types"
+                  manageHref="/dashboard/inventory?tab=company&irm=catalogue&cat=types"
                   noun="type"
                   required
                   invalid={Boolean(errors.typeId)}
@@ -417,7 +425,7 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
                   }}
                   canCreate={can("irm_categories.create") || can("irm.create") || can("irm.edit")}
                   canManage={can("irm_categories.edit") || can("irm_categories.delete")}
-                  manageHref="/dashboard/irm?tab=categories"
+                  manageHref="/dashboard/inventory?tab=company&irm=catalogue&cat=categories"
                   noun="category"
                   required
                   invalid={Boolean(errors.irmCategoryId)}
