@@ -5,6 +5,24 @@ import type { PoPriority, PurchaseOrder } from "@/types/purchase-order";
 
 // Typed wrappers around the backend /purchase-orders endpoints (CRUD + workflow + attachments).
 
+// One PO row on the IRM item detail "Purchase Orders" tab (compact, read-only).
+export interface ItemPurchaseRow {
+  id: string;
+  code: string;
+  status: string;
+  priority: PoPriority;
+  supplierName: string | null;
+  warehouseName: string | null;
+  orderedQty: number;
+  receivedQty: number;
+  createdAt: string;
+}
+
+// POs that reference a given IRM item (newest first). Used by the IRM item detail PO tab.
+export function listPurchaseOrdersForItem(irmItemId: string): Promise<ItemPurchaseRow[]> {
+  return api<{ purchases: ItemPurchaseRow[] }>(`/purchase-orders/items/${irmItemId}`).then((r) => r.purchases);
+}
+
 export interface PoListParams {
   search?: string;
   status?: string;

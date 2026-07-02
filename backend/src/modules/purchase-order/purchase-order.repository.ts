@@ -184,6 +184,31 @@ export function countByIrmItem(irmItemId: string): Promise<number> {
   return prisma.purchaseOrderItem.count({ where: { irmItemId, purchaseOrder: { is: { deletedAt: null } } } });
 }
 
+// --- item-scoped read: every (non-deleted) PO line for an IRM item, with its parent PO header ------
+// Feeds the IRM item detail "Purchase Orders" tab. Returns per-line rows (a PO with two lines of the
+// same item yields two rows). Sorting is done by the service in JS — the Mongo connector can't orderBy
+// a to-one relation field.
+export function findLinesByIrmItem(irmItemId: string) {
+  return prisma.purchaseOrderItem.findMany({
+    where: { irmItemId, purchaseOrder: { is: { deletedAt: null } } },
+    select: {
+      quantity: true,
+      receivedQuantity: true,
+      purchaseOrder: {
+        select: {
+          id: true,
+          code: true,
+          status: true,
+          priority: true,
+          supplierName: true,
+          createdAt: true,
+          warehouse: { select: { name: true, code: true } },
+        },
+      },
+    },
+  });
+}
+
 // --- Goods In seam (tx-aware writers; called only from the GRN completion transaction) -------
 // Goods In owns the receipt amounts; the PO just records them. Additive — no existing behaviour.
 export function incrementLineReceivedTx(tx: Prisma.TransactionClient, purchaseOrderItemId: string, delta: number) {

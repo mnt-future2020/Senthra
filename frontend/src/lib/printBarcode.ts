@@ -53,10 +53,3 @@ export function printSingleLabel(label: BarcodeLabel): void {
     run();
   }
 }
-
-// FUTURE: bulk barcode printing (one print job, many labels per sheet/roll). Intentionally a
-// placeholder for now — the single-label path above is the only wired action. When implemented,
-// this will lay the labels out in a grid sized to the chosen stock and print them in one pass.
-export function printBulkLabels(labels: BarcodeLabel[]): void {
-  throw new Error(`Bulk barcode printing isn't available yet (${labels.length} label(s) requested).`);
-}

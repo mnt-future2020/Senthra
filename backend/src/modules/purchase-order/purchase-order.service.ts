@@ -309,6 +309,36 @@ export async function getPurchaseOrder(idOrCode: string, actor?: AuditActor): Pr
   return toPublic(po);
 }
 
+// Item-scoped PO history for the IRM item detail "Purchase Orders" tab. Read-only, compact rows
+// (one per matching line). Sorted newest-first here since the Mongo connector can't orderBy a relation.
+export interface ItemPurchaseRow {
+  id: string;
+  code: string;
+  status: string;
+  priority: string;
+  supplierName: string | null;
+  warehouseName: string | null;
+  orderedQty: number;
+  receivedQty: number;
+  createdAt: string;
+}
+export async function listPurchaseOrdersForItem(irmItemId: string): Promise<ItemPurchaseRow[]> {
+  const lines = await poRepo.findLinesByIrmItem(irmItemId);
+  return lines
+    .map((l) => ({
+      id: l.purchaseOrder.id,
+      code: l.purchaseOrder.code,
+      status: l.purchaseOrder.status,
+      priority: l.purchaseOrder.priority,
+      supplierName: l.purchaseOrder.supplierName ?? null,
+      warehouseName: l.purchaseOrder.warehouse?.name ?? null,
+      orderedQty: l.quantity,
+      receivedQty: l.receivedQuantity,
+      createdAt: l.purchaseOrder.createdAt.toISOString(),
+    }))
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0));
+}
+
 // Load the raw PO (with relations) for the Document Platform — the PO PDF (supplier email +
 // staff download) builds from this. Throws 404 when missing/soft-deleted.
 export async function loadPurchaseOrderEntity(idOrCode: string, actor?: AuditActor): Promise<PurchaseOrderWithRelations> {

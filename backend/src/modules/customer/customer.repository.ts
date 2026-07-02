@@ -854,6 +854,12 @@ export function findStockEntriesByCustomer(customerId: string, status?: string) 
   });
 }
 
+// Count a customer's stock entries (optionally by status) — used for the portal dashboard "Stock
+// entries" stat without loading the (heavy, barcode-image-bearing) rows.
+export function countStockEntriesByCustomer(customerId: string, status?: string): Promise<number> {
+  return prisma.customerStockEntry.count({ where: { customerId, ...(status ? { status } : {}) } });
+}
+
 export function findStockEntriesByWarehouse(warehouseId: string, status?: string) {
   return prisma.customerStockEntry.findMany({
     where: { warehouseId, ...(status ? { status } : {}) },

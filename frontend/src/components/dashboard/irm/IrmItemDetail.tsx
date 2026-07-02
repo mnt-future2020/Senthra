@@ -6,10 +6,17 @@ import { Activity, Boxes, ClipboardList, Loader2, Pencil, Power, ScrollText } fr
 
 import * as irmService from "@/services/irm.service";
 import * as auditService from "@/services/audit.service";
+import * as stockPositionService from "@/services/stockPosition.service";
+import * as poService from "@/services/purchase-order.service";
 import { printSingleLabel } from "@/lib/printBarcode";
 import { BarcodePanel } from "@/components/dashboard/irm/BarcodePanel";
+import { MovementFeed, type MovementFetcher } from "@/components/dashboard/inventory/MovementFeed";
+import { PoStatusBadge, formatDate as poFormatDate } from "@/components/dashboard/purchase-orders/poStatus";
+import { OwnerTag, PositionStatusBadge } from "@/components/dashboard/inventory/hubUi";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
+import type { PoStatus } from "@/types/purchase-order";
+import type { StockPosition } from "@/types/stock-position";
 
 type PushToast = (msg: string, type?: "success" | "info" | "alert") => void;
 import { Pagination } from "@/components/ui/Pagination";
@@ -54,6 +61,9 @@ export function IrmItemDetail({ initial }: { initial: IrmItem }) {
   const [busy, setBusy] = React.useState(false);
   const canEdit = can("irm.edit");
   const canManageBarcode = can("irm.barcode.manage");
+  const canViewInventory = can("inventory.view");
+  const canViewHistory = can("inventory.history");
+  const canViewPurchases = can("purchase_orders.view");
 
   const requestedTab = searchParams.get("tab");
   const tab: Tab = TABS.find((t) => t.key === requestedTab)?.key ?? "overview";
@@ -134,13 +144,19 @@ export function IrmItemDetail({ initial }: { initial: IrmItem }) {
           <Overview i={i} costLabel={fmtCost(i)} canManageBarcode={canManageBarcode} onChange={setI} pushToast={pushToast} />
         )}
         {tab === "stock" && (
-          <Placeholder icon={Boxes} title="Stock Levels" body="On-hand and available quantities per warehouse will appear here once the inventory module is connected." />
+          canViewInventory
+            ? <StockLevels irmItemId={i.id} />
+            : <TabNotice icon={Boxes} title="Stock Levels" body="You don't have permission to view inventory stock levels." />
         )}
         {tab === "purchase-orders" && (
-          <Placeholder icon={ClipboardList} title="Purchase Orders" body="Purchase orders for this item will be listed here once the procurement module is live." />
+          canViewPurchases
+            ? <ItemPurchaseOrders irmItemId={i.id} />
+            : <TabNotice icon={ClipboardList} title="Purchase Orders" body="You don't have permission to view purchase orders." />
         )}
         {tab === "movements" && (
-          <Placeholder icon={Activity} title="Movements" body="Goods in/out, transfers and adjustments for this item will be listed here once inventory movements are live." />
+          canViewHistory
+            ? <ItemMovements irmItemId={i.id} />
+            : <TabNotice icon={Activity} title="Movements" body="You don't have permission to view stock movement history." />
         )}
         {tab === "audit" && <AuditTrail itemId={i.id} />}
       </div>
@@ -278,7 +294,7 @@ function Overview({
 
 // Barcode card: render the item's Code128 image (permanently encodes the item code, e.g. IRM-0004).
 // Generate is a ONE-TIME action; once a barcode exists only "Reprint Label" is offered (reuses the
-// stored barcode + image — never a new value/number). Bulk printing is a future seam (printBulkLabels).
+// stored barcode + image — never a new value/number).
 function BarcodeCard({
   i,
   canManage,
@@ -324,7 +340,8 @@ function BarcodeCard({
   );
 }
 
-function Placeholder({ icon: Icon, title, body }: { icon: React.ElementType; title: string; body: string }) {
+// Neutral empty / no-access notice for a tab (no "coming soon" — these tabs are live now).
+function TabNotice({ icon: Icon, title, body }: { icon: React.ElementType; title: string; body: string }) {
   return (
     <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] px-6 py-16 text-center">
       <span className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--accent-10)] text-[var(--accent)]">
@@ -332,7 +349,154 @@ function Placeholder({ icon: Icon, title, body }: { icon: React.ElementType; tit
       </span>
       <p className="text-sm font-bold text-[var(--ink)]">{title}</p>
       <p className="max-w-md text-xs text-[var(--muted)]">{body}</p>
-      <span className="mt-1 rounded-full bg-[var(--surface-2)] px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-[var(--faint)]">Coming soon</span>
+    </div>
+  );
+}
+
+const TH_CLS = "px-4 py-2.5 text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]";
+const TD_CLS = "px-4 py-3 text-sm";
+
+function TabSkeleton() {
+  return (
+    <div className="space-y-2">
+      {Array.from({ length: 4 }).map((_, i) => (
+        <div key={i} className="h-11 animate-pulse rounded-xl bg-[var(--surface-2)]" />
+      ))}
+    </div>
+  );
+}
+
+// ── Stock Levels tab — this item's live positions across every pool (warehouse / van / damaged). ──
+function StockLevels({ irmItemId }: { irmItemId: string }) {
+  const [rows, setRows] = React.useState<StockPosition[] | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    let active = true;
+    void (async () => {
+      setRows(null);
+      setError(null);
+      try {
+        const r = await stockPositionService.getItemDistribution(irmItemId);
+        if (active) setRows(r);
+      } catch (e) {
+        if (active) setError(e instanceof Error ? e.message : "Could not load stock levels.");
+      }
+    })();
+    return () => { active = false; };
+  }, [irmItemId]);
+
+  if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
+  if (rows === null) return <TabSkeleton />;
+  if (rows.length === 0) return <TabNotice icon={Boxes} title="No stock" body="This item isn't held in any warehouse, van or the damaged pool right now." />;
+
+  const totalOnHand = rows.reduce((n, r) => n + r.quantity, 0);
+  const totalAvailable = rows.reduce((n, r) => n + r.available, 0);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap gap-2 text-xs">
+        <span className="rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-3 py-1 font-semibold text-[var(--ink)]">On hand: <span className="tabular-nums">{totalOnHand}</span></span>
+        <span className="rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-3 py-1 font-semibold text-[var(--ink)]">Available: <span className="tabular-nums">{totalAvailable}</span></span>
+      </div>
+      <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+        <table className="w-full min-w-[560px] text-left">
+          <thead>
+            <tr className="border-b border-[var(--border)]">
+              <th className={TH_CLS}>Location</th>
+              <th className={TH_CLS}>Owner</th>
+              <th className={TH_CLS}>Status</th>
+              <th className={`${TH_CLS} text-right`}>On hand</th>
+              <th className={`${TH_CLS} text-right`}>Available</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.id} className="border-b border-[var(--border)] last:border-0">
+                <td className={`${TD_CLS} text-[var(--ink)]`}>{r.locationLabel || "—"}</td>
+                <td className={TD_CLS}><OwnerTag ownership={r.ownership} /></td>
+                <td className={TD_CLS}><PositionStatusBadge status={r.status} /></td>
+                <td className={`${TD_CLS} text-right font-semibold text-[var(--ink)] tabular-nums`}>{r.quantity}</td>
+                <td className={`${TD_CLS} text-right text-[var(--muted)] tabular-nums`}>{r.available}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── Purchase Orders tab — POs that reference this item (newest first). ──
+function ItemPurchaseOrders({ irmItemId }: { irmItemId: string }) {
+  const router = useRouter();
+  const [rows, setRows] = React.useState<poService.ItemPurchaseRow[] | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    let active = true;
+    void (async () => {
+      setRows(null);
+      setError(null);
+      try {
+        const r = await poService.listPurchaseOrdersForItem(irmItemId);
+        if (active) setRows(r);
+      } catch (e) {
+        if (active) setError(e instanceof Error ? e.message : "Could not load purchase orders.");
+      }
+    })();
+    return () => { active = false; };
+  }, [irmItemId]);
+
+  if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
+  if (rows === null) return <TabSkeleton />;
+  if (rows.length === 0) return <TabNotice icon={ClipboardList} title="No purchase orders" body="This item hasn't been ordered on any purchase order yet." />;
+
+  return (
+    <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+      <table className="w-full min-w-[640px] text-left">
+        <thead>
+          <tr className="border-b border-[var(--border)]">
+            <th className={TH_CLS}>PO</th>
+            <th className={TH_CLS}>Status</th>
+            <th className={TH_CLS}>Supplier</th>
+            <th className={TH_CLS}>Warehouse</th>
+            <th className={`${TH_CLS} text-right`}>Ordered</th>
+            <th className={`${TH_CLS} text-right`}>Received</th>
+            <th className={TH_CLS}>Date</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, idx) => (
+            <tr
+              key={`${r.id}-${idx}`}
+              onClick={() => router.push(`/dashboard/purchase-orders/${r.id}`)}
+              className="cursor-pointer border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]"
+            >
+              <td className={`${TD_CLS} font-mono text-xs font-bold text-[var(--ink)]`}>{r.code}</td>
+              <td className={TD_CLS}><PoStatusBadge status={r.status as PoStatus} /></td>
+              <td className={`${TD_CLS} text-[var(--ink)]`}>{r.supplierName ?? "—"}</td>
+              <td className={`${TD_CLS} text-[var(--muted)]`}>{r.warehouseName ?? "—"}</td>
+              <td className={`${TD_CLS} text-right font-semibold text-[var(--ink)] tabular-nums`}>{r.orderedQty}</td>
+              <td className={`${TD_CLS} text-right text-[var(--muted)] tabular-nums`}>{r.receivedQty}</td>
+              <td className={`${TD_CLS} text-[var(--muted)]`}>{poFormatDate(r.createdAt)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ── Movements tab — this item's unified stock ledger, reusing the hub's movement feed scoped by item. ──
+function ItemMovements({ irmItemId }: { irmItemId: string }) {
+  const fetcher = React.useCallback<MovementFetcher>(
+    (params) => stockPositionService.listMovements({ ...params, irmItem: irmItemId }),
+    [irmItemId],
+  );
+  return (
+    <div className="h-full">
+      <MovementFeed fetcher={fetcher} scope="engineer" />
     </div>
   );
 }

@@ -34,7 +34,9 @@ export function findRecentTransactions(engineerId: string, take = 15): Promise<E
   });
 }
 
-// All engineer balances (Inventory Hub aggregation) — across all engineers, non-zero only.
+// All engineer balances (Inventory Hub aggregation) — across all engineers, non-zero only. Ordered
+// newest-first so the item-detail path (which returns raw pool order) is deterministic; the Hub/CSV
+// re-sort downstream, so this orderBy is invisible to them.
 export function findAllBalances() {
   return prisma.engineerStockBalance.findMany({
     where: { quantityOnHand: { gt: 0 } },
@@ -42,6 +44,21 @@ export function findAllBalances() {
       irmItem: { select: { id: true, code: true, name: true, baseUnit: true } },
       engineer: { select: { id: true, firstName: true, lastName: true, email: true } },
     },
+    orderBy: { updatedAt: "desc" },
+  });
+}
+
+// Engineer van balances for ONE IRM item — the item-scoped slice of findAllBalances above (identical
+// where/include/order, plus the irmItemId equality). Index-backed by @@unique([irmItemId, engineerId])
+// whose leading key is irmItemId, so the item-detail path reads only this item's rows, not every engineer's.
+export function findBalancesByIrmItem(irmItemId: string) {
+  return prisma.engineerStockBalance.findMany({
+    where: { irmItemId, quantityOnHand: { gt: 0 } },
+    include: {
+      irmItem: { select: { id: true, code: true, name: true, baseUnit: true } },
+      engineer: { select: { id: true, firstName: true, lastName: true, email: true } },
+    },
+    orderBy: { updatedAt: "desc" },
   });
 }
 
