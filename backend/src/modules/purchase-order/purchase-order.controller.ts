@@ -31,6 +31,11 @@ export const listPurchaseOrders = asyncHandler(async (req, res) => {
   res.json(result);
 });
 
+// GET /purchase-orders/items/:irmItemId — POs referencing an IRM item (item detail "Purchase Orders" tab)
+export const listPurchaseOrdersForItem = asyncHandler(async (req, res) => {
+  res.json({ purchases: await poService.listPurchaseOrdersForItem(param(req, "irmItemId")) });
+});
+
 // GET /purchase-orders/:id  (id or code)
 export const getPurchaseOrder = asyncHandler(async (req, res) => {
   res.json({ purchaseOrder: await poService.getPurchaseOrder(param(req, "id"), actorFrom(req)) });

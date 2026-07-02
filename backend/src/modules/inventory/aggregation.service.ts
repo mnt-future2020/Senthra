@@ -15,6 +15,17 @@ import {
   type StockPosition,
   type PositionFilters,
 } from "./stock-position.js";
+
+// Engineer display name from a balance's included `engineer` relation (falls back to email, then a
+// generic label). Single source of truth for the assemblers and the engineer-lens roll-up below.
+const engineerName = (e: { firstName?: string | null; lastName?: string | null; email?: string | null }): string =>
+  [e.firstName, e.lastName].filter(Boolean).join(" ") || e.email || "Engineer";
+
+// Map an engineer van balance → StockPosition. Shared so the whole-inventory and item-scoped assemblers
+// don't copy-paste the name derivation.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const mapEngineerBalance = (b: any): StockPosition => fromEngineerBalance(b, engineerName(b.engineer ?? {}));
+
 async function assembleAll(filters: PositionFilters): Promise<StockPosition[]> {
   const repoFilters = { warehouseId: filters.warehouseId, customerId: filters.customerId };
 
@@ -28,12 +39,7 @@ async function assembleAll(filters: PositionFilters): Promise<StockPosition[]> {
 
   const positions: StockPosition[] = [
     ...companyWh.map(fromInventoryBalance),
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    ...engBalances.map((b: any) => {
-      const eng = b.engineer;
-      const name = [eng?.firstName, eng?.lastName].filter(Boolean).join(" ") || eng?.email || "Engineer";
-      return fromEngineerBalance(b, name);
-    }),
+    ...engBalances.map(mapEngineerBalance),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ...custEntries.map((e: any) => fromCustomerStockEntry(e)),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -93,10 +99,32 @@ export async function getInventorySummary(): Promise<InventorySummary> {
 
 // ── Task 16: Item-scoped detail endpoints ────────────────────────────────────────────────────────
 
+// Item-scoped assembly — the company pools that can hold an IRM item: warehouse (InventoryBalance),
+// engineer van (EngineerStockBalance) and company damaged (DamagedStockBalance, ownerType=company).
+// The customer pools are intentionally omitted: they only ever produce `customer_stock` positions,
+// which the item-detail endpoints below already discard for an IRM item. This returns the SAME
+// StockPosition rows, in the SAME order (warehouse → engineer → damaged) as
+// `assembleAll({}).filter(p => p.itemKind === "irm" && p.itemId === irmItemId)`, but reads only this
+// item's rows (leading-`irmItemId` indexes) instead of scanning the entire inventory. Mappers are
+// reused verbatim, so there is no duplicated business logic. `assembleAll` is unchanged and remains the
+// implementation for the whole-inventory consumers (list / summary / CSV).
+async function assembleForIrmItem(irmItemId: string): Promise<StockPosition[]> {
+  const [companyWh, engBalances, damaged] = await Promise.all([
+    inventoryRepo.findAllBalances({ irmItemId }),
+    engineerRepo.findBalancesByIrmItem(irmItemId),
+    gmRepo.findCompanyDamagedByIrmItem(irmItemId),
+  ]);
+
+  return [
+    ...companyWh.map(fromInventoryBalance),
+    ...engBalances.map(mapEngineerBalance),
+    ...damaged.map((d) => fromDamagedBalance(d)),
+  ];
+}
+
 /** All StockPosition rows for a given IRM item across every pool and location. */
 export async function getItemDistribution(irmItemId: string): Promise<StockPosition[]> {
-  const all = await assembleAll({});
-  return all.filter((p) => p.itemKind === "irm" && p.itemId === irmItemId);
+  return assembleForIrmItem(irmItemId);
 }
 
 export interface ItemHolders {
@@ -106,8 +134,7 @@ export interface ItemHolders {
 
 /** Who currently holds stock of this IRM item — engineers (on-van) and customer consignment rows. */
 export async function getItemHolders(irmItemId: string): Promise<ItemHolders> {
-  const all = await assembleAll({});
-  const forItem = all.filter((p) => p.itemKind === "irm" && p.itemId === irmItemId);
+  const forItem = await assembleForIrmItem(irmItemId);
 
   const engineers = forItem
     .filter((p) => p.locationType === "engineer")
@@ -206,9 +233,6 @@ export interface EngineerOverviewRow {
   totalQty: number;
   activeJobs: number;
 }
-
-const engineerName = (e: { firstName?: string | null; lastName?: string | null; email?: string | null }): string =>
-  [e.firstName, e.lastName].filter(Boolean).join(" ") || e.email || "Engineer";
 
 // Every active field engineer with a roll-up of what they're holding + how many active jobs they have.
 export async function listEngineerInventory(): Promise<EngineerOverviewRow[]> {

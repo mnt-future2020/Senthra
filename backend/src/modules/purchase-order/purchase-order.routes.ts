@@ -18,6 +18,8 @@ const router = Router();
 router.use(requireAuth);
 
 router.get("/", requirePermission("purchase_orders.view"), poController.listPurchaseOrders);
+// Static path before "/:id" so it isn't captured as an id.
+router.get("/items/:irmItemId", requirePermission("purchase_orders.view"), poController.listPurchaseOrdersForItem);
 router.get("/:id", requirePermission("purchase_orders.view"), poController.getPurchaseOrder);
 // Preview / download the generated PO document (PDF). PDF render is heavy (synchronous
 // pdfkit render + remote logo fetch), so throttle it like the CSV export — otherwise an

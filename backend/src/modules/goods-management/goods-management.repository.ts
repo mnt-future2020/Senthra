@@ -298,6 +298,19 @@ export function findDamagedByCustomer(customerId: string): Promise<DamagedBalanc
 export function findAllDamaged(): Promise<DamagedBalanceWithWarehouse[]> {
   return prisma.damagedStockBalance.findMany({ where: { quantity: { gt: 0 } }, include: damagedBalanceInclude, orderBy: { updatedAt: "desc" } });
 }
+// Company-owned damaged balances for ONE IRM item — the item-scoped slice of findAllDamaged (identical
+// include/order, narrowed to ownerType="company" + this irmItemId). Company damaged is the only damaged
+// flavour an IRM item has (customer-owned damaged rows map to customer_stock, never to this item).
+// No dedicated irmItemId index on DamagedStockBalance: the damaged pool is small and this already reads a
+// strict subset of the old whole-pool assembleAll scan, so an index isn't warranted yet. If that pool ever
+// grows large, add @@index([ownerType, irmItemId]) and revisit.
+export function findCompanyDamagedByIrmItem(irmItemId: string): Promise<DamagedBalanceWithWarehouse[]> {
+  return prisma.damagedStockBalance.findMany({
+    where: { quantity: { gt: 0 }, ownerType: "company", irmItemId },
+    include: damagedBalanceInclude,
+    orderBy: { updatedAt: "desc" },
+  });
+}
 
 /** Returns the most-recent DamagedStockTransaction for each balance row, keyed by balanceId.
  *  We match on warehouseId + ownerType + irmItemId + customerStockEntryId (the natural key).

@@ -1573,6 +1573,7 @@ export interface CustomerOverview {
     totalProjects: number;
     totalSites: number;
     pendingRequests: number;
+    stockEntries: number;
   };
   recentRequests: PublicStockRequest[];
 }
@@ -1582,7 +1583,12 @@ export async function getOwnOverview(customerId: string): Promise<CustomerOvervi
   if (!c) throw notFound("Customer not found.");
   // All requests (any status), newest first — for the "recent activity" card and an
   // accurate pending count (the included children are pre-filtered to pending only).
-  const allRequests = await customerRepo.findStockRequestsByCustomer(customerId);
+  const [allRequests, stockEntries] = await Promise.all([
+    customerRepo.findStockRequestsByCustomer(customerId),
+    // Count ALL statuses (draft + active). This card links straight to "My Stock", which lists every
+    // entry regardless of status, so the number must match what the customer sees when they click through.
+    customerRepo.countStockEntriesByCustomer(customerId),
+  ]);
   return {
     customer: {
       id: c.id,
@@ -1596,6 +1602,7 @@ export async function getOwnOverview(customerId: string): Promise<CustomerOvervi
       totalProjects: c.projects.length,
       totalSites: c.sites.length,
       pendingRequests: allRequests.filter((r) => r.status === "pending").length,
+      stockEntries,
     },
     recentRequests: allRequests.slice(0, 5).map(toStockRequest),
   };

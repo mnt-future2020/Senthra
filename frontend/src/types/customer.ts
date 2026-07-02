@@ -200,6 +200,7 @@ export interface CustomerOverview {
     totalProjects: number;
     totalSites: number;
     pendingRequests: number;
+    stockEntries: number;
   };
   recentRequests: StockRequest[];
 }

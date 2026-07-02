@@ -87,8 +87,8 @@ export function PortalDashboard() {
         <StatCard
           icon={Boxes}
           label="Stock entries"
-          value={0}
-          href="/dashboard/portal/stock"
+          value={counts.stockEntries}
+          href="/dashboard/stock"
         />
       </div>
 
