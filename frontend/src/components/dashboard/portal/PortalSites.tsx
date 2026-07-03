@@ -76,7 +76,7 @@ export function PortalSites() {
             <tr key={s.id} className="border-b border-[var(--border)] align-top last:border-0">
               <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{s.code ?? "—"}</td>
               <td className="px-4 py-3 font-semibold text-[var(--ink)]">{s.name}</td>
-              <td className="px-4 py-3 text-[var(--muted)]">{s.addressLine ?? "—"}</td>
+              <td className="px-4 py-3 text-[var(--muted)]">{[s.addressLine1, s.addressLine2, s.city, s.county].filter(Boolean).join(", ") || "—"}</td>
               <td className="px-4 py-3 text-[var(--muted)]">{s.postcode ?? "—"}</td>
               <td className="px-4 py-3 text-[var(--muted)]">
                 {s.contactPerson ? (

@@ -48,8 +48,12 @@ export interface JobPayload {
   siteId?: string;
   siteName?: string;
   trsArea?: string;
-  address?: string;
+  addressLine1?: string;
+  addressLine2?: string;
+  city?: string;
+  county?: string;
   postcode?: string;
+  country?: string;
   floor?: string;
   suite?: string;
   rack?: string;

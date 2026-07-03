@@ -23,6 +23,10 @@ interface PostcodeFieldProps {
   label?: string;
   required?: boolean;
   errorId?: string;
+  // The host form has no City/County fields to populate — the lookup becomes a confirm-only check that
+  // reports the resolved place (e.g. "Found: Leeds, West Yorkshire") rather than claiming it filled any
+  // fields. Used by address-lite forms (customer sites, job Site & location).
+  confirmOnly?: boolean;
 }
 
 // Postcode input + "Find address" button that fills City/County (and confirms Country)
@@ -40,6 +44,7 @@ export function PostcodeField({
   label = "Postcode",
   required = true,
   errorId = "err-postcode",
+  confirmOnly = false,
 }: PostcodeFieldProps) {
   const [lookingUp, setLookingUp] = React.useState(false);
   const [lookupMsg, setLookupMsg] = React.useState<string | null>(null);
@@ -80,7 +85,13 @@ export function PostcodeField({
       setCountry?.("United Kingdom");
       autofilledRef.current = { city: filledCity, county: filledCounty };
       onResolved?.();
-      setLookupMsg("Filled from postcode — check and adjust if needed.");
+      if (confirmOnly) {
+        // No City/County fields to fill — confirm the resolved place instead of claiming a fill.
+        const place = [result.city, result.county].filter(Boolean).join(", ");
+        setLookupMsg(place ? `Found: ${place}.` : "Postcode recognised.");
+      } else {
+        setLookupMsg("Filled from postcode — check and adjust if needed.");
+      }
     } catch {
       setLookupMsg("Couldn't look up that postcode right now.");
     } finally {

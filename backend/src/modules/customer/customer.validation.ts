@@ -110,8 +110,12 @@ export const siteSchema = z.object({
     .trim()
     .min(1, "Site name is required.")
     .max(120),
-  addressLine: z.string().trim().max(200).optional(),
+  addressLine1: z.string().trim().max(200).optional(),
+  addressLine2: z.string().trim().max(200).optional(),
+  city: z.string().trim().max(120).optional(),
+  county: z.string().trim().max(120).optional(),
   postcode: postcodeField,
+  country: z.string().trim().max(120).optional(),
   contactPerson: z.string().trim().max(120).optional(),
   contactNumber: phoneField,
   // No latitude/longitude here — the service geocodes them from the postcode
@@ -119,6 +123,20 @@ export const siteSchema = z.object({
   status: statusEnum.optional(),
 });
 export type SiteInput = z.infer<typeof siteSchema>;
+
+// Bulk site import. Route-level guard only: an array of RAW row objects, size-bounded.
+// Per-row validation is intentionally deferred to the service (siteSchema.safeParse per
+// row) so one bad row reports as `failed` instead of rejecting the whole batch.
+export const bulkSiteSchema = z.object({
+  fileName: z.string().trim().max(260).optional(),
+  // Raw, per-row-unvalidated: even a non-object element is accepted here so the service can
+  // report it as a `failed` row (via siteSchema.safeParse) instead of 400-ing the whole batch.
+  sites: z
+    .array(z.unknown())
+    .min(1, "Add at least one site.")
+    .max(500, "Import up to 500 sites per batch."),
+});
+export type BulkSiteInput = z.infer<typeof bulkSiteSchema>;
 
 // --- nested: customer users -------------------------------------------------
 

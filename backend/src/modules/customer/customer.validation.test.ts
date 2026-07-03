@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   adminStockRequestSchema,
+  bulkSiteSchema,
   createCustomerSchema,
   customerUserSchema,
   projectSchema,
@@ -48,8 +49,11 @@ describe("siteSchema", () => {
   it("accepts a full site", () => {
     const r = siteSchema.safeParse({
       name: "Leeds Basinghall",
-      addressLine: "1 Basinghall St",
+      addressLine1: "1 Basinghall St",
+      city: "Leeds",
+      county: "West Yorkshire",
       postcode: "LS1 5AA",
+      country: "United Kingdom",
       contactPerson: "Sam",
       contactNumber: "07700 900111",
       status: "active",
@@ -69,6 +73,20 @@ describe("siteSchema", () => {
       expect("latitude" in r.data).toBe(false);
       expect("longitude" in r.data).toBe(false);
     }
+  });
+});
+
+describe("bulkSiteSchema", () => {
+  it("accepts an array of raw row objects", () => {
+    const r = bulkSiteSchema.safeParse({ fileName: "sites.xlsx", sites: [{ name: "A" }, { anything: 1 }] });
+    expect(r.success).toBe(true);
+  });
+  it("rejects an empty array", () => {
+    expect(bulkSiteSchema.safeParse({ sites: [] }).success).toBe(false);
+  });
+  it("rejects more than 500 rows", () => {
+    const sites = Array.from({ length: 501 }, () => ({ name: "A" }));
+    expect(bulkSiteSchema.safeParse({ sites }).success).toBe(false);
   });
 });
 

@@ -6,6 +6,7 @@ import { unauthorized } from "../../utils/http-error.js";
 import { principalGrants } from "../../types/principal.js";
 import type {
   AdminStockRequestInput,
+  BulkSiteInput,
   CreateCustomerInput,
   CustomerStockTransferInput,
   CustomerUserInput,
@@ -104,6 +105,12 @@ export const deleteProject = asyncHandler(async (req, res) => {
 export const addSite = asyncHandler(async (req, res) => {
   const site = await customerService.addSite(param(req, "id"), req.body as SiteInput, actorFrom(req));
   res.status(201).json({ site });
+});
+
+export const bulkAddSites = asyncHandler(async (req, res) => {
+  const { sites, fileName } = req.body as BulkSiteInput;
+  const result = await customerService.bulkAddSites(param(req, "id"), sites, fileName, actorFrom(req));
+  res.status(201).json(result);
 });
 
 export const updateSite = asyncHandler(async (req, res) => {

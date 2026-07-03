@@ -72,3 +72,50 @@ export async function geocodePostcode(
   if (!d || typeof d.latitude !== "number" || typeof d.longitude !== "number") return null;
   return { latitude: d.latitude, longitude: d.longitude };
 }
+
+// Canonical postcode key: uppercase, all whitespace removed. postcodes.io accepts a
+// postcode with or without the internal space, so this collapses "LS1 4DY"/"ls14dy"
+// to one key for de-duping lookups and indexing the result map.
+export function canonicalPostcode(postcode: string): string {
+  return postcode.trim().toUpperCase().replace(/\s+/g, "");
+}
+
+// Bulk postcode → coordinates via postcodes.io POST /postcodes (max 100 per call).
+// Best-effort, like the single lookup: any failed chunk contributes nothing. The
+// returned Map is keyed by canonicalPostcode; unknown postcodes are simply absent.
+export async function geocodePostcodesBulk(
+  codes: (string | null | undefined)[],
+): Promise<Map<string, Coordinates>> {
+  const out = new Map<string, Coordinates>();
+  const unique = [...new Set(codes.map((c) => c?.trim()).filter((c): c is string => !!c))];
+  if (unique.length === 0) return out;
+
+  for (let i = 0; i < unique.length; i += 100) {
+    const chunk = unique.slice(i, i + 100);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+    try {
+      const res = await fetch(POSTCODES_IO, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ postcodes: chunk }),
+        signal: controller.signal,
+      });
+      if (!res.ok) continue;
+      const body = (await res.json()) as {
+        result?: { query: string; result: { latitude?: number | null; longitude?: number | null } | null }[];
+      };
+      for (const row of body.result ?? []) {
+        const r = row.result;
+        if (r && typeof r.latitude === "number" && typeof r.longitude === "number") {
+          out.set(canonicalPostcode(row.query), { latitude: r.latitude, longitude: r.longitude });
+        }
+      }
+    } catch {
+      // best-effort: skip this chunk
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return out;
+}

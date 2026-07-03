@@ -325,6 +325,45 @@ async function allocateNestedCode(
   return fmt(c.seq);
 }
 
+// Reset a per-customer nested counter to the highest suffix currently in use — the
+// recovery step after a code collision (the counter drifted behind out-of-band inserts).
+async function fastForwardNestedCounter(
+  prefix: string,
+  customerId: string,
+  listExistingCodes: () => Promise<(string | null)[]>,
+): Promise<void> {
+  const max = highestNestedSuffix(prefix, await listExistingCodes());
+  const key = `${prefix}:${customerId}`;
+  await prisma.counter.upsert({ where: { key }, create: { key, seq: max }, update: { seq: max } });
+}
+
+// Atomically reserve a contiguous block of N codes; returns the FIRST sequence number.
+// Standalone $inc (NEVER inside a transaction — a $inc in a Mongo tx can hit un-retried
+// write-conflict aborts), with the same cold-start seed as allocateNestedCode, so
+// single-add and bulk-add share one gap-free sequence.
+async function reserveNestedCodeBlock(
+  prefix: string,
+  customerId: string,
+  listExistingCodes: () => Promise<(string | null)[]>,
+  n: number,
+): Promise<number> {
+  const key = `${prefix}:${customerId}`;
+  try {
+    const c = await prisma.counter.update({ where: { key }, data: { seq: { increment: n } }, select: { seq: true } });
+    return c.seq - n + 1;
+  } catch (e) {
+    if (!isRecordNotFound(e)) throw e;
+    const start = highestNestedSuffix(prefix, await listExistingCodes());
+    try {
+      await prisma.counter.create({ data: { key, seq: start } });
+    } catch (e2) {
+      if (!isUniqueConflict(e2)) throw e2; // concurrent seed — fine
+    }
+    const c = await prisma.counter.update({ where: { key }, data: { seq: { increment: n } }, select: { seq: true } });
+    return c.seq - n + 1;
+  }
+}
+
 // --- nested: projects -------------------------------------------------------
 
 export interface ProjectData {
@@ -396,8 +435,12 @@ export function deleteProject(id: string): Promise<CustomerProject> {
 
 export interface SiteData {
   name: string;
-  addressLine?: string | null;
+  addressLine1?: string | null;
+  addressLine2?: string | null;
+  city?: string | null;
+  county?: string | null;
   postcode?: string | null;
+  country?: string | null;
   contactPerson?: string | null;
   contactNumber?: string | null;
   latitude?: number | null;
@@ -409,26 +452,50 @@ export function findSiteById(id: string): Promise<CustomerSite | null> {
   return prisma.customerSite.findUnique({ where: { id } });
 }
 
+// Field mapping shared by single + bulk create so the two never drift.
+function siteRow(customerId: string, code: string, d: SiteData) {
+  return {
+    customerId,
+    code,
+    name: d.name,
+    addressLine1: d.addressLine1 ?? null,
+    addressLine2: d.addressLine2 ?? null,
+    city: d.city ?? null,
+    county: d.county ?? null,
+    postcode: d.postcode ?? null,
+    country: d.country ?? null,
+    contactPerson: d.contactPerson ?? null,
+    contactNumber: d.contactNumber ?? null,
+    latitude: d.latitude ?? null,
+    longitude: d.longitude ?? null,
+    status: d.status ?? "active",
+  };
+}
+
+// A customer's current site codes — the seed source for counter bootstrap / fast-forward.
+const siteCodes = (customerId: string) => () =>
+  prisma.customerSite
+    .findMany({ where: { customerId }, select: { code: true } })
+    .then((rows) => rows.map((s) => s.code));
+
+// Numeric suffix of a nested code (e.g. "STE-0007" → 7). Sorting on this is order-correct
+// past the 4-digit padding boundary, where lexicographic "STE-10000" < "STE-9999" breaks.
+const nestedSuffixOf = (code: string): number => Number(code.slice(code.indexOf("-") + 1)) || 0;
+
 export async function createSite(customerId: string, data: SiteData): Promise<CustomerSite> {
-  const code = await allocateNestedCode("STE", customerId, () =>
-    prisma.customerSite
-      .findMany({ where: { customerId }, select: { code: true } })
-      .then((rows) => rows.map((s) => s.code)),
-  );
-  return prisma.customerSite.create({
-    data: {
-      customerId,
-      code,
-      name: data.name,
-      addressLine: data.addressLine ?? null,
-      postcode: data.postcode ?? null,
-      contactPerson: data.contactPerson ?? null,
-      contactNumber: data.contactNumber ?? null,
-      latitude: data.latitude ?? null,
-      longitude: data.longitude ?? null,
-      status: data.status ?? "active",
-    },
-  });
+  // Retry on a code collision: fast-forward the counter to the true max and re-allocate.
+  // The @@unique([customerId, code]) index makes a drifted counter fail loudly here rather
+  // than silently duplicate; this recovers instead of 500ing (mirrors createWithCode).
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const code = await allocateNestedCode("STE", customerId, siteCodes(customerId));
+    try {
+      return await prisma.customerSite.create({ data: siteRow(customerId, code, data) });
+    } catch (e) {
+      if (!isUniqueConflict(e)) throw e;
+      await fastForwardNestedCounter("STE", customerId, siteCodes(customerId));
+    }
+  }
+  throw new Error("Could not allocate a unique site code.");
 }
 
 export function updateSite(id: string, data: SiteData): Promise<CustomerSite> {
@@ -436,8 +503,12 @@ export function updateSite(id: string, data: SiteData): Promise<CustomerSite> {
     where: { id },
     data: {
       name: data.name,
-      addressLine: data.addressLine ?? null,
+      addressLine1: data.addressLine1 ?? null,
+      addressLine2: data.addressLine2 ?? null,
+      city: data.city ?? null,
+      county: data.county ?? null,
       postcode: data.postcode ?? null,
+      country: data.country ?? null,
       contactPerson: data.contactPerson ?? null,
       contactNumber: data.contactNumber ?? null,
       latitude: data.latitude ?? null,
@@ -449,6 +520,49 @@ export function updateSite(id: string, data: SiteData): Promise<CustomerSite> {
 
 export function deleteSite(id: string): Promise<CustomerSite> {
   return prisma.customerSite.delete({ where: { id } });
+}
+
+// Dedupe-key source: the customer's existing sites, name + postcode only (avoids
+// pulling the whole customer graph just to build the skip set).
+export function findSitesByCustomer(
+  customerId: string,
+): Promise<{ name: string; postcode: string | null }[]> {
+  return prisma.customerSite.findMany({
+    where: { customerId },
+    select: { name: true, postcode: true },
+  });
+}
+
+// Bulk-create sites with a RACE-SAFE contiguous STE-#### block.
+// Allocation mirrors allocateNestedCode: reserve the whole block with ONE atomic $inc (by
+// N) on the per-customer counter — NEVER inside a transaction (a $inc in a Mongo tx can hit
+// un-retried write-conflict aborts). The insert itself runs in a transaction so a mid-batch
+// unique conflict rolls the WHOLE batch back (no partial insert), making the fast-forward +
+// retry safe. On the rare drifted-counter collision we recover instead of 500ing.
+export async function createSitesBulk(
+  customerId: string,
+  data: SiteData[],
+): Promise<CustomerSite[]> {
+  if (data.length === 0) return [];
+  const N = data.length;
+  const fmt = (seq: number) => `STE-${String(seq).padStart(4, "0")}`;
+
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const startSeq = await reserveNestedCodeBlock("STE", customerId, siteCodes(customerId), N);
+    const rows = data.map((d, i) => siteRow(customerId, fmt(startSeq + i), d));
+    try {
+      await withTransaction((tx) => tx.customerSite.createMany({ data: rows }));
+      const created = await prisma.customerSite.findMany({
+        where: { customerId, code: { in: rows.map((r) => r.code) } },
+      });
+      // Numeric-suffix order — lexicographic ("STE-10000" < "STE-9999") breaks past 9999.
+      return created.sort((a, b) => nestedSuffixOf(a.code) - nestedSuffixOf(b.code));
+    } catch (e) {
+      if (!isUniqueConflict(e)) throw e;
+      await fastForwardNestedCounter("STE", customerId, siteCodes(customerId));
+    }
+  }
+  throw new Error("Could not allocate unique site codes for the bulk import.");
 }
 
 // --- nested: customer users (also the customer LOGIN accounts) --------------

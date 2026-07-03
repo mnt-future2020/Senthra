@@ -113,15 +113,18 @@ function effectiveReturns(lines: QueueKitLine[]): Map<string, number> {
 }
 
 // "To return" per line, from the engineer's REAL holding (engineerHeld is the global per-item balance
-// the return scan checks). Distributed across the item's lines (capped at issued − used per line) so
-// the queue never asks for a return the scan would refuse — even when the holding is shared across
-// jobs/warehouses. Keyed by kit-line id.
+// the return scan checks). Distributed across the item's lines, each line capped at its OWN still-out
+// quantity — issued − used − returned, matching the backend's `lineOutstanding`
+// (goods-management.service.ts). Capping at issued − used alone would leave an already-returned line
+// still advertising capacity, so the engineer's global holding from ANOTHER job/warehouse would bleed
+// into it and show a phantom "To return" (and wrongly keep the line "Awaiting return"). Keyed by
+// kit-line id.
 function distributeToReturn(lines: QueueKitLine[]): Map<string, number> {
   const out = new Map<string, number>();
   for (const group of groupByItem(lines)) {
     let remaining = group[0]?.engineerHeld ?? 0; // global held for this item (same on every line)
     for (const l of group) {
-      const assigned = Math.min(remaining, Math.max(0, l.issuedQty - l.usedQty));
+      const assigned = Math.min(remaining, Math.max(0, l.issuedQty - l.usedQty - l.returnedQty));
       out.set(l.id, assigned);
       remaining -= assigned;
     }
