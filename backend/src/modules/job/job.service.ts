@@ -86,8 +86,12 @@ export interface PublicJob {
   siteId: string | null;
   siteName: string | null;
   trsArea: string | null;
-  address: string | null;
+  addressLine1: string | null;
+  addressLine2: string | null;
+  city: string | null;
+  county: string | null;
   postcode: string | null;
+  country: string | null;
   latitude: number | null;
   longitude: number | null;
   floor: string | null;
@@ -157,8 +161,12 @@ function toPublic(j: JobWithRelations): PublicJob {
     siteId: j.siteId,
     siteName: j.site?.name ?? j.siteName ?? null,
     trsArea: j.trsArea,
-    address: j.address,
+    addressLine1: j.addressLine1,
+    addressLine2: j.addressLine2,
+    city: j.city,
+    county: j.county,
     postcode: j.postcode,
+    country: j.country,
     latitude: j.latitude,
     longitude: j.longitude,
     floor: j.floor,
@@ -462,8 +470,12 @@ export async function createJob(input: CreateJobInput, actor?: AuditActor): Prom
       siteId: site?.id ?? null,
       siteName: site ? site.name : trimToNull(input.siteName),
       trsArea: trimToNull(input.trsArea),
-      address: trimToNull(input.address),
+      addressLine1: trimToNull(input.addressLine1),
+      addressLine2: trimToNull(input.addressLine2),
+      city: trimToNull(input.city),
+      county: trimToNull(input.county),
       postcode: trimToNull(input.postcode),
+      country: trimToNull(input.country),
       latitude: null,
       longitude: null,
       floor: trimToNull(input.floor),
@@ -657,8 +669,12 @@ export async function updateJob(id: string, input: UpdateJobInput, actor?: Audit
   if (input.schemeNo !== undefined) headerPatch.schemeNo = trimToNull(input.schemeNo);
   if (input.siteName !== undefined && input.siteId === undefined) headerPatch.siteName = trimToNull(input.siteName);
   if (input.trsArea !== undefined) headerPatch.trsArea = trimToNull(input.trsArea);
-  if (input.address !== undefined) headerPatch.address = trimToNull(input.address);
+  if (input.addressLine1 !== undefined) headerPatch.addressLine1 = trimToNull(input.addressLine1);
+  if (input.addressLine2 !== undefined) headerPatch.addressLine2 = trimToNull(input.addressLine2);
+  if (input.city !== undefined) headerPatch.city = trimToNull(input.city);
+  if (input.county !== undefined) headerPatch.county = trimToNull(input.county);
   if (input.postcode !== undefined) headerPatch.postcode = trimToNull(input.postcode);
+  if (input.country !== undefined) headerPatch.country = trimToNull(input.country);
   if (input.floor !== undefined) headerPatch.floor = trimToNull(input.floor);
   if (input.suite !== undefined) headerPatch.suite = trimToNull(input.suite);
   if (input.rack !== undefined) headerPatch.rack = trimToNull(input.rack);

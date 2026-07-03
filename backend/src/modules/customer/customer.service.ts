@@ -18,7 +18,8 @@ import { getCustomerStock, type CustomerStock } from "./customer.stock.service.j
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import { withTransaction } from "../../lib/prisma.js";
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
-import { geocodePostcode } from "../../lib/geocode.js";
+import { geocodePostcode, geocodePostcodesBulk, canonicalPostcode } from "../../lib/geocode.js";
+import { siteSchema } from "./customer.validation.js";
 import { getCloudinaryCreds, getStockCodePrefix } from "#modules/settings/settings.service.js";
 import { assertWarehouseAccess } from "../../lib/warehouse-access.js";
 import { generateTempPassword } from "../../utils/generate-password.js";
@@ -84,8 +85,12 @@ export interface PublicCustomerSite {
   id: string;
   code: string | null;
   name: string;
-  addressLine: string | null;
+  addressLine1: string | null;
+  addressLine2: string | null;
+  city: string | null;
+  county: string | null;
   postcode: string | null;
+  country: string | null;
   contactPerson: string | null;
   contactNumber: string | null;
   latitude: number | null;
@@ -243,8 +248,12 @@ function toSite(s: CustomerSite): PublicCustomerSite {
     id: s.id,
     code: s.code,
     name: s.name,
-    addressLine: s.addressLine,
+    addressLine1: s.addressLine1,
+    addressLine2: s.addressLine2,
+    city: s.city,
+    county: s.county,
     postcode: s.postcode,
+    country: s.country,
     contactPerson: s.contactPerson,
     contactNumber: s.contactNumber,
     latitude: s.latitude,
@@ -826,8 +835,12 @@ export async function removeProject(
 
 export interface SiteInput {
   name: string;
-  addressLine?: string;
+  addressLine1?: string;
+  addressLine2?: string;
+  city?: string;
+  county?: string;
   postcode?: string;
+  country?: string;
   contactPerson?: string;
   contactNumber?: string;
   status?: string;
@@ -838,8 +851,12 @@ function toSiteData(input: SiteInput): customerRepo.SiteData {
   if (!name) throw badRequest("Site name is required.");
   return {
     name,
-    addressLine: trimToNull(input.addressLine),
+    addressLine1: trimToNull(input.addressLine1),
+    addressLine2: trimToNull(input.addressLine2),
+    city: trimToNull(input.city),
+    county: trimToNull(input.county),
     postcode: trimToNull(input.postcode),
+    country: trimToNull(input.country),
     contactPerson: trimToNull(input.contactPerson),
     contactNumber: trimToNull(input.contactNumber),
     status: normalizeStatus(input.status),
@@ -879,6 +896,98 @@ export async function updateSite(
   const updated = await customerRepo.updateSite(siteId, data);
   auditNested(actor, "customer.site.updated", customer, data.name);
   return toSite(updated);
+}
+
+// --- nested: sites — bulk import ---
+
+// Dedupe identity for a site within a customer: name + postcode, case- and space-insensitive.
+// MUST match the frontend's dedupeKey in lib/siteImport.ts exactly.
+export function siteDedupeKey(name: string, postcode: string | null | undefined): string {
+  return `${name.trim().toLowerCase()}|${(postcode ?? "").toLowerCase().replace(/\s+/g, "")}`;
+}
+
+export interface RowNote {
+  row: number; // 1-based sheet row number (from the client)
+  name: string;
+  reason: string;
+}
+export interface BulkSiteResult {
+  createdSites: PublicCustomerSite[];
+  skipped: RowNote[];
+  failed: RowNote[];
+}
+
+// Bulk-import sites for one customer. Partial success: each row is validated with the
+// SAME siteSchema as single-add (client is never trusted); invalid rows → `failed`,
+// duplicates (existing or in-batch) → `skipped`, the rest are geocoded and created.
+export async function bulkAddSites(
+  customerId: string,
+  rows: unknown[],
+  fileName: string | undefined,
+  actor?: AuditActor,
+): Promise<BulkSiteResult> {
+  const startedAt = Date.now();
+  const customer = await requireCustomer(customerId);
+
+  const existing = await customerRepo.findSitesByCustomer(customerId);
+  const seen = new Set(existing.map((s) => siteDedupeKey(s.name, s.postcode)));
+
+  const skipped: RowNote[] = [];
+  const failed: RowNote[] = [];
+  const staged: customerRepo.SiteData[] = [];
+
+  rows.forEach((raw, i) => {
+    // The client sends each row's original 1-based SHEET row number so `failed`/`skipped`
+    // notes point at the user's file (rows are pre-filtered + batched client-side, so the
+    // array index is meaningless). siteSchema strips `rowNumber`, so it is never persisted.
+    const rawRow = (raw as { rowNumber?: unknown })?.rowNumber;
+    const row = typeof rawRow === "number" && Number.isFinite(rawRow) ? rawRow : i + 1;
+    const parsed = siteSchema.safeParse(raw);
+    if (!parsed.success) {
+      const rawName = (raw as { name?: unknown })?.name;
+      failed.push({
+        row,
+        name: typeof rawName === "string" ? rawName : "",
+        reason: parsed.error.issues[0]?.message ?? "Invalid row.",
+      });
+      return;
+    }
+    const input = parsed.data;
+    const key = siteDedupeKey(input.name, input.postcode);
+    if (seen.has(key)) {
+      skipped.push({ row, name: input.name, reason: "Already exists (name + postcode)." });
+      return;
+    }
+    seen.add(key);
+    staged.push(toSiteData(input));
+  });
+
+  // Batch-geocode the staged postcodes, attach coords (best-effort; unknown → null).
+  const coords = await geocodePostcodesBulk(staged.map((d) => d.postcode));
+  for (const d of staged) {
+    const c = d.postcode ? coords.get(canonicalPostcode(d.postcode)) : undefined;
+    d.latitude = c?.latitude ?? null;
+    d.longitude = c?.longitude ?? null;
+  }
+
+  const created = await customerRepo.createSitesBulk(customerId, staged);
+
+  audit.record({
+    actor,
+    action: "customer.sites.bulk_imported",
+    targetType: "customer",
+    targetId: customer.id,
+    targetLabel: `${customer.name} — imported ${created.length} site(s)`,
+    metadata: {
+      fileName: fileName ?? null,
+      created: created.length,
+      skipped: skipped.length,
+      failed: failed.length,
+      durationMs: Date.now() - startedAt,
+    },
+  });
+
+  return { createdSites: created.map(toSite), skipped, failed };
 }
 
 export async function removeSite(

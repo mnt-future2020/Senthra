@@ -161,8 +161,12 @@ function JobView({ initial }: { initial: Job }) {
 
         <Card title="Location">
           <div className="grid grid-cols-2 gap-3">
-            <div className="col-span-2"><Field label="Address">{job.address}</Field></div>
+            <div className="col-span-2"><Field label="Address line 1">{job.addressLine1}</Field></div>
+            <div className="col-span-2"><Field label="Address line 2">{job.addressLine2}</Field></div>
+            <Field label="City / town">{job.city}</Field>
+            <Field label="County">{job.county}</Field>
             <Field label="Postcode">{job.postcode}</Field>
+            <Field label="Country">{job.country}</Field>
             <Field label="Floor">{job.floor}</Field>
             <Field label="Suite">{job.suite}</Field>
             <Field label="Rack">{job.rack}</Field>

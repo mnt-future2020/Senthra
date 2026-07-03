@@ -193,7 +193,13 @@ export function EngineerJobDetail({ id }: { id: string }) {
   // fully issued by the warehouse. Misc/free-text lines aren't warehouse stock, so they don't block.
   const stockLines = job.kitLines.filter((l) => l.lineType === "irm" || l.lineType === "customer_stock");
   const goodsCollected = stockLines.length === 0 || stockLines.every((l) => l.issued >= l.qty);
-  const addressLines = [job.address, job.postcode].filter(Boolean).join(", ");
+  // Site address for display + a text-based Google Maps directions link (same approach as the pickup
+  // warehouse below — the app stores no map coordinates, so the postcode + street text drives the search).
+  const siteAddressParts = [job.addressLine1, job.addressLine2, job.city, job.county, job.postcode, job.country].filter(Boolean) as string[];
+  const addressLines = [job.addressLine1, job.addressLine2, job.city, job.county, job.postcode].filter(Boolean).join(", ");
+  const siteMapsUrl = siteAddressParts.length > 0
+    ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(siteAddressParts.join(", "))}`
+    : null;
   const fixings = [
     job.floor ? `Floor ${job.floor}` : null,
     job.suite ? `Suite ${job.suite}` : null,
@@ -366,7 +372,20 @@ export function EngineerJobDetail({ id }: { id: string }) {
         <Card title="Site & address">
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Site" value={job.siteName} />
-            <Field label="Address" value={addressLines} />
+            <div className="min-w-0">
+              <p className="text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">Address</p>
+              <p className="mt-0.5 text-sm font-semibold text-[var(--ink)]">{addressLines || "—"}</p>
+              {siteMapsUrl && (
+                <a
+                  href={siteMapsUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-1 inline-flex items-center gap-1 text-[11px] font-bold text-[var(--accent)] hover:underline"
+                >
+                  <MapPin className="h-3 w-3 shrink-0" /> Directions
+                </a>
+              )}
+            </div>
             <Field label="Location" value={fixings} />
           </div>
         </Card>

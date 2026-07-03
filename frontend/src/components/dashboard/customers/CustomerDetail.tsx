@@ -22,6 +22,7 @@ import {
   Phone,
   Plus,
   Trash2,
+  Upload,
   User as UserIcon,
 } from "lucide-react";
 
@@ -33,11 +34,12 @@ import { FormPageHeader, FormSection } from "@/components/ui/FormScaffold";
 import { Avatar } from "@/components/ui/Avatar";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
-import { primaryBtn } from "@/components/ui/styles";
+import { ghostBtn, primaryBtn } from "@/components/ui/styles";
 import { Pagination } from "@/components/ui/Pagination";
 import { TempPasswordModal } from "@/components/ui/TempPasswordModal";
 import { ProjectModal } from "./ProjectModal";
 import { SiteModal } from "./SiteModal";
+import { SiteImportModal } from "./SiteImportModal";
 import { CustomerUserModal } from "./CustomerUserModal";
 import type {
   Customer,
@@ -1211,6 +1213,7 @@ function StockSubmissionsTab({
 function SitesSection({ customer, caps, onChange, pushToast }: SectionProps) {
   const canWrite = caps.edit || caps.delete;
   const [open, setOpen] = React.useState(false);
+  const [importing, setImporting] = React.useState(false);
   const [editing, setEditing] = React.useState<CustomerSite | null>(null);
 
   const onSaved = (site: CustomerSite) => {
@@ -1225,6 +1228,12 @@ function SitesSection({ customer, caps, onChange, pushToast }: SectionProps) {
     setEditing(null);
   };
 
+  // Append the newly-created sites to the list, but keep the modal open on its result step
+  // (the modal's own "Done" button closes it). Closing here would unmount the result screen.
+  const onImported = (created: CustomerSite[]) => {
+    if (created.length) onChange((p) => ({ ...p, sites: [...p.sites, ...created] }));
+  };
+
   const remove = async (site: CustomerSite) => {
     try {
       await customerService.deleteSite(customer.id, site.id);
@@ -1236,14 +1245,23 @@ function SitesSection({ customer, caps, onChange, pushToast }: SectionProps) {
 
   return (
     <FormSection title="Sites" description="Delivery / installation locations.">
-      <SectionToolbar
-        canEdit={caps.create}
-        addLabel="Add site"
-        onAdd={() => {
-          setEditing(null);
-          setOpen(true);
-        }}
-      />
+      {caps.create && (
+        <div className="mb-3 flex justify-end gap-2">
+          <button type="button" onClick={() => setImporting(true)} className={ghostBtn}>
+            <Upload className="h-4 w-4" /> Import sites
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setEditing(null);
+              setOpen(true);
+            }}
+            className={primaryBtn}
+          >
+            <Plus className="h-4 w-4" /> Add site
+          </button>
+        </div>
+      )}
 
       {customer.sites.length === 0 ? (
         <Empty>No sites yet.</Empty>
@@ -1254,9 +1272,10 @@ function SitesSection({ customer, caps, onChange, pushToast }: SectionProps) {
               <td className="px-3 py-2 font-mono text-xs text-[var(--muted)]">{site.code ?? "—"}</td>
               <td className="px-3 py-2">
                 <div className="font-semibold text-[var(--ink)]">{site.name}</div>
-                {site.addressLine && (
-                  <div className="text-[11px] text-[var(--muted)]">{site.addressLine}</div>
-                )}
+                {(() => {
+                  const line = [site.addressLine1, site.addressLine2, site.city, site.county].filter(Boolean).join(", ");
+                  return line ? <div className="text-[11px] text-[var(--muted)]">{line}</div> : null;
+                })()}
               </td>
               <td className="px-3 py-2 text-[var(--muted)]">{site.postcode ?? "—"}</td>
               <td className="px-3 py-2 text-[var(--muted)]">
@@ -1300,6 +1319,15 @@ function SitesSection({ customer, caps, onChange, pushToast }: SectionProps) {
             setEditing(null);
           }}
           onSaved={onSaved}
+        />
+      )}
+
+      {importing && (
+        <SiteImportModal
+          customerId={customer.id}
+          existingSites={customer.sites}
+          onClose={() => setImporting(false)}
+          onImported={onImported}
         />
       )}
     </FormSection>

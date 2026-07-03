@@ -1397,8 +1397,14 @@ model CustomerSite {
   // Required: the service always allocates one on create (DB is clean of legacy rows).
   code          String
   name          String
-  addressLine   String?  // street address (postcode kept separate)
+  // Address (UK) — structured, matching Warehouse/Supplier/Customer. `addressLine1` keeps the
+  // legacy `addressLine` DB key (@map) so existing single-line site addresses survive as line 1.
+  addressLine1  String?  @map("addressLine")
+  addressLine2  String?
+  city          String?
+  county        String?
   postcode      String?
+  country       String? // defaults to "United Kingdom" in the UI
   contactPerson String?
   contactNumber String?
   latitude      Float?
@@ -1409,7 +1415,10 @@ model CustomerSite {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  @@index([customerId])
+  // Unique per customer + code: defense-in-depth so a code-allocation bug fails loudly
+  // instead of silently duplicating. Also serves the customerId lookups. Codes are
+  // counter-allocated, so existing data already satisfies this.
+  @@unique([customerId, code])
 }
 
 // A customer's portal user (e.g. their PM) — and the customer's LOGIN identity.
@@ -1583,14 +1592,20 @@ model Job {
   siteId String?       @db.ObjectId
   site   CustomerSite? @relation(fields: [siteId], references: [id])
 
-  // Free-text site (used when no siteId). All optional.
-  siteName  String?
-  trsArea   String?
-  address   String?
-  postcode  String?
-  latitude  Float?  // derived server-side from postcode (never hand-entered)
-  longitude Float?
-  floor     String?
+  // Free-text site (used when no siteId). All optional. Structured UK address, matching
+  // Warehouse/Customer. `addressLine1` keeps the legacy `address` DB key (@map) so existing
+  // single-line job addresses survive as line 1.
+  siteName     String?
+  trsArea      String?
+  addressLine1 String? @map("address")
+  addressLine2 String?
+  city         String?
+  county       String?
+  postcode     String?
+  country      String? // defaults to "United Kingdom" in the UI
+  latitude     Float? // derived server-side from postcode (never hand-entered)
+  longitude    Float?
+  floor        String?
   suite     String?
   rack      String?
   shelf     String?

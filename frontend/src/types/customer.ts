@@ -20,14 +20,30 @@ export interface CustomerSite {
   id: string;
   code: string | null; // auto-allocated per customer, e.g. STE-0001
   name: string;
-  addressLine: string | null;
+  addressLine1: string | null;
+  addressLine2: string | null;
+  city: string | null;
+  county: string | null;
   postcode: string | null;
+  country: string | null;
   contactPerson: string | null;
   contactNumber: string | null;
   latitude: number | null;
   longitude: number | null;
   status: CustomerStatus;
   createdAt: string;
+}
+
+// Bulk site import result (mirror of the backend BulkSiteResult).
+export interface SiteImportRowNote {
+  row: number;
+  name: string;
+  reason: string;
+}
+export interface BulkSiteResult {
+  createdSites: CustomerSite[];
+  skipped: SiteImportRowNote[];
+  failed: SiteImportRowNote[];
 }
 
 // A customer's portal user (their PM etc.) — also the customer's login identity.

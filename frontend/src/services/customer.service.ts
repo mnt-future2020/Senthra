@@ -1,6 +1,7 @@
 import { api } from "@/lib/api";
 import { registerClientCache } from "@/lib/clientCache";
 import type {
+  BulkSiteResult,
   Customer,
   CustomerOverview,
   CustomerProject,
@@ -90,8 +91,12 @@ export interface ProjectPayload {
 
 export interface SitePayload {
   name: string;
-  addressLine?: string;
+  addressLine1?: string;
+  addressLine2?: string;
+  city?: string;
+  county?: string;
   postcode?: string;
+  country?: string;
   contactPerson?: string;
   contactNumber?: string;
   status?: CustomerStatus;
@@ -225,6 +230,23 @@ export function deleteSite(customerId: string, siteId: string): Promise<void> {
   return api(`/customers/${customerId}/sites/${siteId}`, { method: "DELETE" }).then(
     () => undefined,
   );
+}
+
+// One row in a bulk import: the site payload plus its original 1-based sheet row number,
+// which the server echoes back in `failed`/`skipped` notes so they point at the user's file.
+export type SiteImportRow = SitePayload & { rowNumber: number };
+
+// Bulk-import sites for a customer. Sends ONE batch (≤500 rows); the caller chunks larger
+// sheets and aggregates. `fileName` is metadata for the server audit trail.
+export function bulkAddSites(
+  customerId: string,
+  sites: SiteImportRow[],
+  fileName?: string,
+): Promise<BulkSiteResult> {
+  return api<BulkSiteResult>(`/customers/${customerId}/sites/bulk`, {
+    method: "POST",
+    body: { sites, fileName },
+  });
 }
 
 // --- nested: customer users ---

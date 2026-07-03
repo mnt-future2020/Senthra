@@ -7,10 +7,11 @@ import {
   requireCustomer,
   requirePermission,
 } from "../../middleware/auth.middleware.js";
-import { writeLimiter } from "../../middleware/rateLimit.middleware.js";
+import { writeLimiter, bulkWriteLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import {
   adminStockRequestSchema,
+  bulkSiteSchema,
   createCustomerSchema,
   customerStockTransferSchema,
   customerUserSchema,
@@ -93,6 +94,13 @@ adminRouter.post(
   writeLimiter,
   validateBody(siteSchema),
   customerController.addSite,
+);
+adminRouter.post(
+  "/:id/sites/bulk",
+  requirePermission("customer_sites.create"),
+  bulkWriteLimiter,
+  validateBody(bulkSiteSchema),
+  customerController.bulkAddSites,
 );
 adminRouter.put(
   "/:id/sites/:siteId",

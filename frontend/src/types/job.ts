@@ -74,8 +74,12 @@ export interface Job {
   siteId: string | null;
   siteName: string | null;
   trsArea: string | null;
-  address: string | null;
+  addressLine1: string | null;
+  addressLine2: string | null;
+  city: string | null;
+  county: string | null;
   postcode: string | null;
+  country: string | null;
   latitude: number | null;
   longitude: number | null;
   floor: string | null;

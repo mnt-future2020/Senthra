@@ -6,6 +6,7 @@ import { Loader2 } from "lucide-react";
 import * as customerService from "@/services/customer.service";
 import { Modal } from "@/components/ui/Modal";
 import { Select } from "@/components/ui/Select";
+import { PostcodeField } from "@/components/ui/PostcodeField";
 import { RequiredMark } from "@/components/ui/FormScaffold";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import { UK_POSTCODE_RE } from "@/lib/validation";
@@ -27,8 +28,12 @@ export function SiteModal({
 }) {
   const isEdit = Boolean(site);
   const [name, setName] = React.useState(site?.name ?? "");
-  const [addressLine, setAddressLine] = React.useState(site?.addressLine ?? "");
+  const [addressLine1, setAddressLine1] = React.useState(site?.addressLine1 ?? "");
+  const [addressLine2, setAddressLine2] = React.useState(site?.addressLine2 ?? "");
+  const [city, setCity] = React.useState(site?.city ?? "");
+  const [county, setCounty] = React.useState(site?.county ?? "");
   const [postcode, setPostcode] = React.useState(site?.postcode ?? "");
+  const [country, setCountry] = React.useState(site?.country ?? (site ? "" : "United Kingdom"));
   const [contactPerson, setContactPerson] = React.useState(site?.contactPerson ?? "");
   const [contactNumber, setContactNumber] = React.useState(site?.contactNumber ?? "");
   const [status, setStatus] = React.useState<"active" | "inactive">(site?.status ?? "active");
@@ -51,8 +56,12 @@ export function SiteModal({
     try {
       const payload = {
         name: name.trim(),
-        addressLine: addressLine.trim() || undefined,
+        addressLine1: addressLine1.trim() || undefined,
+        addressLine2: addressLine2.trim() || undefined,
+        city: city.trim() || undefined,
+        county: county.trim() || undefined,
         postcode: postcode.trim() || undefined,
+        country: country.trim() || undefined,
         contactPerson: contactPerson.trim() || undefined,
         contactNumber: contactNumber.trim() || undefined,
         status,
@@ -105,35 +114,65 @@ export function SiteModal({
             {errs.name && <p className="mt-1 text-[11px] font-semibold text-[var(--neg)]">{errs.name}</p>}
           </div>
           <div className="sm:col-span-2">
-            <label className={labelCls}>Address</label>
+            <label className={labelCls}>Address line 1</label>
             <input
               className={inputCls}
-              value={addressLine}
-              onChange={(e) => setAddressLine(e.target.value)}
+              value={addressLine1}
+              onChange={(e) => setAddressLine1(e.target.value)}
               placeholder="e.g. 1 Basinghall Street"
               maxLength={200}
             />
           </div>
-          <div>
-            <label className={labelCls}>Postcode</label>
+          <div className="sm:col-span-2">
+            <label className={labelCls}>Address line 2</label>
             <input
               className={inputCls}
+              value={addressLine2}
+              onChange={(e) => setAddressLine2(e.target.value)}
+              placeholder="Optional"
+              maxLength={200}
+            />
+          </div>
+          <div>
+            <label className={labelCls}>City / town</label>
+            <input className={inputCls} value={city} onChange={(e) => setCity(e.target.value)} placeholder="e.g. Leeds" maxLength={120} />
+          </div>
+          <div>
+            <label className={labelCls}>County</label>
+            <input className={inputCls} value={county} onChange={(e) => setCounty(e.target.value)} placeholder="Optional" maxLength={120} />
+          </div>
+          <div>
+            <PostcodeField
               value={postcode}
-              onChange={(e) => {
-                setPostcode(e.target.value);
+              onChange={(v) => {
+                setPostcode(v);
                 setErrs((p) => ({ ...p, postcode: undefined }));
               }}
-              placeholder="EC1A 1BB"
-              maxLength={12}
-              aria-invalid={Boolean(errs.postcode)}
+              setCity={setCity}
+              setCounty={setCounty}
+              setCountry={setCountry}
+              required={false}
+              error={errs.postcode}
             />
-            {errs.postcode ? (
-              <p className="mt-1 text-[11px] font-semibold text-[var(--neg)]">{errs.postcode}</p>
-            ) : (
-              <p className="mt-1 text-[11px] text-[var(--faint)]">
-                Location coordinates are found automatically from the postcode.
+            {!errs.postcode && (
+              <p className="mt-1.5 text-[11px] text-[var(--faint)]">
+                Use Find to fill City &amp; County. Map coordinates are set automatically from the postcode on save.
               </p>
             )}
+          </div>
+          <div>
+            <label className={labelCls}>Country</label>
+            <input
+              className={inputCls}
+              value={country}
+              onChange={(e) => setCountry(e.target.value)}
+              placeholder="United Kingdom"
+              list="site-country-options"
+              maxLength={120}
+            />
+            <datalist id="site-country-options">
+              <option value="United Kingdom" />
+            </datalist>
           </div>
           <div>
             <label className={labelCls}>Status</label>

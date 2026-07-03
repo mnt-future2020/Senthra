@@ -67,6 +67,16 @@ export const writeLimiter = rateLimit({
   message: json("Too many changes in a short time. Please slow down."),
 });
 
+// Bulk site import: the client sends sites in sequential batches (≤500 each). A handful
+// of batches per import is normal; this caps a runaway loop / abusive client.
+export const bulkWriteLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: json("Too many import batches in a short time. Please slow down."),
+});
+
 // CSV export does heavier work than a normal read (scans up to the export cap),
 // so throttle it even though a session is required.
 export const exportLimiter = rateLimit({
