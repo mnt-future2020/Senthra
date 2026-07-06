@@ -3,7 +3,7 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ChevronRight, ClipboardList, MoreHorizontal, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { ChevronRight, ClipboardList, MoreHorizontal, PackagePlus, Pencil, Plus, Search, Trash2 } from "lucide-react";
 
 import * as jobService from "@/services/job.service";
 import { listCustomers } from "@/services/customer.service";
@@ -11,6 +11,7 @@ import { listEngineerOptions } from "@/services/warehouse.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useJobSocket } from "@/hooks/useJobSocket";
+import { subscribe } from "@/lib/socket";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -159,6 +160,9 @@ export function JobsView() {
 
   // Live-refresh the list when a job is created/assigned/accepted anywhere.
   useJobSocket(React.useCallback(() => setRefreshKey((k) => k + 1), []));
+  // …and when a kit request is raised/approved/declined, so the per-row "N kit req" pending badge
+  // updates live (the badge count comes from listJobs). Also fires on reconnect to recover missed events.
+  React.useEffect(() => subscribe(["kit_request:updated"], () => setRefreshKey((k) => k + 1)), []);
 
   // Debounce the search box into ?q (reset page on change).
   React.useEffect(() => {
@@ -283,7 +287,19 @@ export function JobsView() {
                         <span className="font-mono text-xs text-[var(--muted)]">{job.jobNumber}</span>
                       </div>
                     </td>
-                    <td className="px-4 py-3 font-semibold text-[var(--ink)]">{job.name}</td>
+                    <td className="px-4 py-3 font-semibold text-[var(--ink)]">
+                      <div className="flex items-center gap-2">
+                        <span className="min-w-0 truncate">{job.name}</span>
+                        {(job.pendingKitRequestCount ?? 0) > 0 && (
+                          <span
+                            title={`${job.pendingKitRequestCount} pending kit request${job.pendingKitRequestCount > 1 ? "s" : ""} — open the job to review`}
+                            className="inline-flex shrink-0 items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-amber-600"
+                          >
+                            <PackagePlus className="h-3 w-3" /> {job.pendingKitRequestCount} kit req
+                          </span>
+                        )}
+                      </div>
+                    </td>
                     <td className="px-4 py-3 text-[var(--muted)]">{job.customerName ?? "—"}</td>
                     <td className="px-4 py-3 text-[var(--muted)]">{job.assignedEngineerName ?? "—"}</td>
                     <td className="px-4 py-3"><JobStatusChip status={job.status} /></td>

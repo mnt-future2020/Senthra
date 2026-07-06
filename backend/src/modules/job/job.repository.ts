@@ -238,31 +238,39 @@ export async function rejectIfAssigned(
 // ids, so posted stock movements keep pointing at them), create genuinely new lines, and delete the
 // ones the caller resolved as removable. This replaces the old delete-all/recreate approach, which
 // regenerated every kit-line id and orphaned the job's stock movements.
-export async function mergeKitLines(
+export interface KitLineChanges {
+  updates: { id: string; qty: number; seCode: string | null; description: string | null; notes: string | null }[];
+  creates: JobKitLineRow[];
+  deleteIds: string[];
+}
+
+// The tx-aware core: apply the kit-line diff + header patch within a PROVIDED transaction. Exposed so a
+// caller (the kit-request approve) can run the grow ATOMICALLY with its own follow-up writes — stamping
+// the request lines — in a single transaction, so a failure can't leave the kit grown-but-unrecorded.
+export async function mergeKitLinesTx(
+  tx: Prisma.TransactionClient,
   id: string,
-  changes: {
-    updates: { id: string; qty: number; seCode: string | null; description: string | null; notes: string | null }[];
-    creates: JobKitLineRow[];
-    deleteIds: string[];
-  },
+  changes: KitLineChanges,
   headerPatch: Prisma.JobUncheckedUpdateInput,
 ): Promise<JobWithRelations> {
-  return withTransaction(async (tx) => {
-    if (changes.deleteIds.length > 0) {
-      await tx.jobKitLine.deleteMany({ where: { id: { in: changes.deleteIds }, jobId: id } });
-    }
-    for (const u of changes.updates) {
-      await tx.jobKitLine.update({
-        where: { id: u.id },
-        data: { qty: u.qty, seCode: u.seCode, description: u.description, notes: u.notes },
-      });
-    }
-    for (const line of changes.creates) {
-      await tx.jobKitLine.create({ data: { jobId: id, ...lineCreateData(line) } });
-    }
-    await tx.job.update({ where: { id }, data: headerPatch });
-    return tx.job.findUniqueOrThrow({ where: { id }, include: withRelations });
-  });
+  if (changes.deleteIds.length > 0) {
+    await tx.jobKitLine.deleteMany({ where: { id: { in: changes.deleteIds }, jobId: id } });
+  }
+  for (const u of changes.updates) {
+    await tx.jobKitLine.update({
+      where: { id: u.id },
+      data: { qty: u.qty, seCode: u.seCode, description: u.description, notes: u.notes },
+    });
+  }
+  for (const line of changes.creates) {
+    await tx.jobKitLine.create({ data: { jobId: id, ...lineCreateData(line) } });
+  }
+  await tx.job.update({ where: { id }, data: headerPatch });
+  return tx.job.findUniqueOrThrow({ where: { id }, include: withRelations });
+}
+
+export function mergeKitLines(id: string, changes: KitLineChanges, headerPatch: Prisma.JobUncheckedUpdateInput): Promise<JobWithRelations> {
+  return withTransaction((tx) => mergeKitLinesTx(tx, id, changes, headerPatch));
 }
 
 // --- code allocation (atomic Counter, per-year key "JOB:<year>") -----------------------------

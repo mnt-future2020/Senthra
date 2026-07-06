@@ -4,6 +4,8 @@ import * as React from "react";
 import { ArrowLeftRight, CheckCircle2, MapPin, ExternalLink, X, XCircle, PlayCircle, ClipboardCheck } from "lucide-react";
 
 import * as engineerService from "@/services/engineer.service";
+import { useAuth } from "@/hooks/useAuth";
+import { EngineerKitRequests } from "./EngineerKitRequests";
 import { Notice } from "@/components/ui/Notice";
 import { ghostBtn, primaryBtn } from "@/components/ui/styles";
 import { fmtDate, fmtDateTime, JobStatusChip, PortalHeader, TableCard } from "@/components/dashboard/portal/portalUi";
@@ -58,6 +60,7 @@ interface UsedRow {
 }
 
 export function EngineerJobDetail({ id }: { id: string }) {
+  const { can } = useAuth();
   const [job, setJob] = React.useState<Job | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
@@ -457,6 +460,10 @@ export function EngineerJobDetail({ id }: { id: string }) {
           </TableCard>
         )}
       </Card>
+
+      {(job.status === "accepted" || job.status === "in_progress") && can("engineer.jobs.request_kit") && (
+        <EngineerKitRequests job={job} />
+      )}
 
       {job.notes ? (
         <Card title="Notes">

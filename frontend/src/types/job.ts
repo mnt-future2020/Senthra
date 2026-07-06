@@ -96,6 +96,7 @@ export interface Job {
   installerType: string;
   status: string;
   goodsStatus: string; // goods-lifecycle: not_issued | partially_issued | issued | awaiting_return | reconciled
+  pendingKitRequestCount: number; // pending field-engineer kit requests on this job (jobs-list badge)
   plannerName: string | null;
   plannerPhone: string | null;
   notes: string | null;

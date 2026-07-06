@@ -20,6 +20,7 @@ export function Modal({
   children,
   footer,
   size = "lg",
+  scrollBody = false,
 }: {
   open: boolean;
   title: string;
@@ -28,6 +29,11 @@ export function Modal({
   children: React.ReactNode;
   footer?: React.ReactNode;
   size?: "sm" | "md" | "lg";
+  // Opt-in: cap the panel to the viewport with a FIXED header/footer and an internally-scrolling body
+  // (for tall content). OFF by default because an internally-scrolling body CLIPS any in-flow (non-
+  // portaled) dropdown rendered inside it — so only pass this on modals whose controls portal their
+  // menus (the shared Select) or use inline lists, never ones containing e.g. StockItemPicker.
+  scrollBody?: boolean;
 }) {
   const panelRef = React.useRef<HTMLDivElement>(null);
   // Route onClose through a ref so the focus effect depends only on `open` — callers
@@ -104,10 +110,10 @@ export function Modal({
         aria-labelledby={titleId}
         aria-describedby={subtitle ? subtitleId : undefined}
         tabIndex={-1}
-        className={`my-8 w-full ${max} anim-fade-in rounded-2xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl outline-none`}
+        className={`my-8 w-full ${max} anim-fade-in rounded-2xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl outline-none ${scrollBody ? "flex max-h-[calc(100dvh-4rem)] flex-col overflow-hidden" : ""}`}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-start justify-between gap-4 border-b border-[var(--border-2)] p-5">
+        <div className={`flex items-start justify-between gap-4 border-b border-[var(--border-2)] p-5 ${scrollBody ? "shrink-0" : ""}`}>
           <div className="min-w-0">
             <h3 id={titleId} className="text-base font-extrabold tracking-tight text-[var(--ink)]">
               {title}
@@ -126,9 +132,12 @@ export function Modal({
             <X className="h-4.5 w-4.5" />
           </button>
         </div>
-        <div className="p-5">{children}</div>
+        {/* With scrollBody, the body scrolls INTERNALLY so the header + footer stay fixed on tall content
+            (min-h-0 lets a flex child shrink below its content height so overflow-y-auto engages).
+            Without it, the body is a plain block and the whole modal scrolls via the overlay (default). */}
+        <div className={scrollBody ? "min-h-0 flex-1 overflow-y-auto p-5" : "p-5"}>{children}</div>
         {footer && (
-          <div className="flex justify-end gap-2 border-t border-[var(--border-2)] p-5">
+          <div className={`flex justify-end gap-2 border-t border-[var(--border-2)] p-5 ${scrollBody ? "shrink-0" : ""}`}>
             {footer}
           </div>
         )}

@@ -316,6 +316,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       { key: "jobs.assign", action: "Assign", description: "Assign or reassign a job to an engineer." },
       { key: "jobs.cancel", action: "Cancel", description: "Cancel a job." },
       { key: "jobs.delete", action: "Delete", description: "Delete a draft job." },
+      { key: "jobs.kit_request.review", action: "Review kit requests", description: "Review a field engineer's additional-kit requests — approve (growing the kit + opening fulfilment) or decline." },
     ],
   },
   {
@@ -332,6 +333,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       { key: "engineer.jobs.reject", action: "Reject job", description: "Decline a job assigned to them (with a reason)." },
       { key: "engineer.jobs.start", action: "Start job", description: "Mark an accepted job in-progress (start work on site)." },
       { key: "engineer.jobs.complete", action: "Complete job", description: "Mark a job completed, declaring used quantities + a work summary." },
+      { key: "engineer.jobs.request_kit", action: "Request kit", description: "Request additional kit for an assigned job (extra or new items) for the planner to review." },
       // RESERVED (not yet enforced by any route): self-profile editing currently flows through the
       // shared `/users/me` endpoints, which only require authentication — no engineer-specific
       // permission is checked. This key is registered + seeded ahead of a future engineer-only

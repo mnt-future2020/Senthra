@@ -1,0 +1,397 @@
+"use client";
+
+import * as React from "react";
+import { Check, Loader2, PackagePlus, Plus, Search, Trash2 } from "lucide-react";
+
+import * as kitRequestService from "@/services/jobKitRequest.service";
+import type { KitItemOption, KitRequest, KitRequestLinePayload } from "@/services/jobKitRequest.service";
+import { subscribe } from "@/lib/socket";
+import { Modal } from "@/components/ui/Modal";
+import { Notice } from "@/components/ui/Notice";
+import { inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
+import { fmtDate } from "@/components/dashboard/portal/portalUi";
+import type { Job } from "@/types/job";
+import type { Msg } from "@/components/ui/types";
+
+// Engineer-portal panel on a job: raise a request for MORE kit (extra units of a planned item, or a
+// new item picked from the catalogue) for the planner to review, and track the status of the
+// engineer's own requests. The request form lives in a focused modal opened from the top-right, so the
+// "Send request" action is prominent rather than buried at the foot of an inline form.
+
+const KIT_STATUS: Record<KitRequest["status"], { cls: string; label: string }> = {
+  pending: { cls: "border-amber-500/30 bg-amber-500/10 text-amber-600", label: "Pending" },
+  approved: { cls: "border-[var(--pos)]/30 bg-[var(--pos)]/10 text-[var(--pos)]", label: "Approved" },
+  declined: { cls: "border-[var(--neg)]/30 bg-[var(--neg)]/10 text-[var(--neg)]", label: "Declined" },
+  cancelled: { cls: "border-[var(--border)] bg-[var(--surface-2)] text-[var(--muted)]", label: "Cancelled" },
+};
+
+export function KitRequestStatusChip({ value }: { value: KitRequest["status"] }) {
+  const s = KIT_STATUS[value] ?? KIT_STATUS.pending;
+  return <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider ${s.cls}`}>{s.label}</span>;
+}
+
+// ── Card ───────────────────────────────────────────────────────────────────────────────────────
+
+export function EngineerKitRequests({ job }: { job: Job }) {
+  const [requests, setRequests] = React.useState<KitRequest[] | null>(null);
+  const [open, setOpen] = React.useState(false);
+  const [msg, setMsg] = React.useState<Msg>(null);
+  const [cancellingId, setCancellingId] = React.useState<string | null>(null);
+
+  const load = React.useCallback(() => {
+    kitRequestService
+      .listMyKitRequests({ jobId: job.id, pageSize: 50 })
+      .then((r) => setRequests(r.requests))
+      .catch(() => setRequests([]));
+  }, [job.id]);
+
+  React.useEffect(() => load(), [load]);
+  // Live-refresh when a request this engineer raised is reviewed by the planner.
+  React.useEffect(() => subscribe(["kit_request:updated"], load), [load]);
+
+  const onCancel = async (id: string) => {
+    setCancellingId(id);
+    setMsg(null);
+    try {
+      await kitRequestService.cancelKitRequest(id);
+      load();
+    } catch (err) {
+      setMsg({ type: "error", text: err instanceof Error ? err.message : "Could not cancel the request." });
+    } finally {
+      setCancellingId(null);
+    }
+  };
+
+  return (
+    <section className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs">
+      <div className="mb-4 flex items-start justify-between gap-3">
+        <div>
+          <p className="text-[11px] font-extrabold uppercase tracking-wider text-[var(--faint)]">Additional kit</p>
+          <p className="mt-0.5 text-xs text-[var(--muted)]">Need more? Request extra units of a planned item or a new item — the planner reviews and issues it.</p>
+        </div>
+        <button type="button" onClick={() => { setMsg(null); setOpen(true); }} className={`${primaryBtn} shrink-0`}>
+          <PackagePlus className="h-4 w-4" /> Request items
+        </button>
+      </div>
+
+      {msg && <div className="mb-3"><Notice msg={msg} /></div>}
+
+      {requests === null ? (
+        <p className="text-sm text-[var(--muted)]">Loading requests…</p>
+      ) : requests.length === 0 ? (
+        <p className="text-sm text-[var(--muted)]">No kit requests on this job yet.</p>
+      ) : (
+        <ul className="space-y-2">
+          {requests.map((r) => (
+            <li key={r.id} className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono text-xs font-bold text-[var(--ink)]">{r.code}</span>
+                    <KitRequestStatusChip value={r.status} />
+                    <span className="text-[11px] text-[var(--faint)]">{fmtDate(r.createdAt)}</span>
+                  </div>
+                  <p className="mt-1 truncate text-xs text-[var(--muted)]">{r.lines.map((l) => `${l.itemName} ×${l.qty}`).join(", ")}</p>
+                  {r.reason && <p className="mt-0.5 text-[11px] italic text-[var(--faint)]">“{r.reason}”</p>}
+                  {r.status === "declined" && r.decisionNote && <p className="mt-0.5 text-[11px] text-[var(--neg)]">Planner: {r.decisionNote}</p>}
+                  {r.status === "approved" && r.fulfillmentMode && (
+                    <p className="mt-0.5 text-[11px] text-[var(--pos)]">{r.fulfillmentMode === "engineer_transfer" ? "Approved — coming via an engineer transfer." : "Approved — collect from the warehouse."}</p>
+                  )}
+                </div>
+                {r.status === "pending" && (
+                  <button type="button" onClick={() => onCancel(r.id)} disabled={cancellingId === r.id} className="shrink-0 rounded-lg border border-[var(--border)] px-2.5 py-1 text-[11px] font-bold text-[var(--ink)] hover:bg-[var(--surface)] disabled:opacity-60">
+                    {cancellingId === r.id ? "…" : "Cancel"}
+                  </button>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {open && (
+        <RequestModal
+          job={job}
+          onClose={() => setOpen(false)}
+          onSent={() => { setOpen(false); setMsg({ type: "success", text: "Request sent to the planner." }); load(); }}
+        />
+      )}
+    </section>
+  );
+}
+
+// ── Request modal ────────────────────────────────────────────────────────────────────────────
+
+interface PlannedOption {
+  key: string;
+  source: "irm" | "customer_stock" | "misc";
+  irmItemId: string | null;
+  customerStockEntryId: string | null;
+  itemName: string;
+  qty: number;
+}
+interface CartItem {
+  key: string; // dedup key: `irm:<id>` for a catalogue item, `misc:<name>` for a typed custom item
+  source: "irm" | "misc";
+  irmItemId: string | null;
+  name: string;
+  code: string | null;
+  qty: number;
+}
+
+function plannedOptionsFrom(job: Job): PlannedOption[] {
+  const seen = new Set<string>();
+  const out: PlannedOption[] = [];
+  for (const l of job.kitLines) {
+    const key = l.lineType === "irm" ? `irm:${l.irmItemId}` : l.lineType === "customer_stock" ? `cse:${l.customerStockEntryId}` : `misc:${l.itemName.trim().toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ key, source: l.lineType, irmItemId: l.irmItemId, customerStockEntryId: l.customerStockEntryId, itemName: l.itemName, qty: 0 });
+  }
+  return out;
+}
+
+// Mounted only while open (conditional render in the parent), so each open starts from fresh state.
+function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void; onSent: () => void }) {
+  const [planned, setPlanned] = React.useState<PlannedOption[]>(() => plannedOptionsFrom(job));
+  const [cart, setCart] = React.useState<CartItem[]>([]);
+  const [reason, setReason] = React.useState("");
+  const [submitting, setSubmitting] = React.useState(false);
+  const [msg, setMsg] = React.useState<Msg>(null);
+
+  // Keys already on the request (planned IRM lines + everything in the cart) — so the search can grey
+  // out an item that's already added and the cart can't hold duplicates.
+  const excludeKeys = React.useMemo(
+    () => new Set<string>([...planned.filter((p) => p.source === "irm" && p.irmItemId).map((p) => `irm:${p.irmItemId}`), ...cart.map((c) => c.key)]),
+    [planned, cart],
+  );
+
+  const setPlannedQty = (key: string, qty: number) => setPlanned((rows) => rows.map((r) => (r.key === key ? { ...r, qty } : r)));
+  const addIrm = (it: KitItemOption) =>
+    setCart((c) => { const key = `irm:${it.irmItemId}`; return c.some((x) => x.key === key) ? c : [...c, { key, source: "irm" as const, irmItemId: it.irmItemId, name: it.name, code: it.code, qty: 1 }]; });
+  const addCustom = (name: string) => {
+    const n = name.trim();
+    if (!n) return;
+    const key = `misc:${n.toLowerCase()}`;
+    // If this item is already in the planned table above, steer the engineer there instead of adding a
+    // second line whose quantity would be silently merged with the planned row on submit.
+    if (planned.some((p) => p.key === key)) {
+      setMsg({ type: "error", text: `“${n}” is already listed above under “More of a planned item” — set its extra quantity there.` });
+      return;
+    }
+    setCart((c) => (c.some((x) => x.key === key) ? c : [...c, { key, source: "misc" as const, irmItemId: null, name: n, code: null, qty: 1 }]));
+  };
+  const setCartQty = (key: string, qty: number) => setCart((c) => c.map((x) => (x.key === key ? { ...x, qty } : x)));
+  const removeCart = (key: string) => setCart((c) => c.filter((x) => x.key !== key));
+
+  // Merge planned + cart into request lines, deduped/summed by identity (backend rejects dup items).
+  const buildLines = (): KitRequestLinePayload[] => {
+    const byKey = new Map<string, KitRequestLinePayload>();
+    const push = (key: string, line: KitRequestLinePayload) => {
+      const existing = byKey.get(key);
+      if (existing) existing.qty += line.qty;
+      else byKey.set(key, line);
+    };
+    for (const p of planned) {
+      if (p.qty <= 0) continue;
+      if (p.source === "irm" && p.irmItemId) push(`irm:${p.irmItemId}`, { source: "irm", irmItemId: p.irmItemId, itemName: p.itemName, qty: p.qty });
+      else if (p.source === "customer_stock" && p.customerStockEntryId) push(`cse:${p.customerStockEntryId}`, { source: "customer_stock", customerStockEntryId: p.customerStockEntryId, itemName: p.itemName, qty: p.qty });
+      else if (p.source === "misc") push(`misc:${p.itemName.trim().toLowerCase()}`, { source: "misc", itemName: p.itemName, qty: p.qty });
+    }
+    for (const c of cart) {
+      if (c.qty <= 0) continue;
+      if (c.source === "irm" && c.irmItemId) push(c.key, { source: "irm", irmItemId: c.irmItemId, itemName: c.name, qty: c.qty });
+      else push(c.key, { source: "misc", itemName: c.name, qty: c.qty });
+    }
+    return [...byKey.values()];
+  };
+
+  const onSubmit = async () => {
+    const lines = buildLines();
+    if (lines.length === 0) { setMsg({ type: "error", text: "Add at least one item with a quantity." }); return; }
+    if (!reason.trim()) { setMsg({ type: "error", text: "Tell the planner why you need these items." }); return; }
+    setSubmitting(true);
+    setMsg(null);
+    try {
+      await kitRequestService.createKitRequest({ jobId: job.id, reason: reason.trim(), lines });
+      onSent();
+    } catch (err) {
+      setMsg({ type: "error", text: err instanceof Error ? err.message : "Could not send the request." });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const footer = (
+    <>
+      <button type="button" onClick={onClose} disabled={submitting} className="rounded-xl border border-[var(--border)] px-3.5 py-2 text-xs font-bold text-[var(--ink)] hover:bg-[var(--surface-2)] disabled:opacity-60">Cancel</button>
+      <button type="button" onClick={onSubmit} disabled={submitting} className={primaryBtn}>
+        {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <PackagePlus className="h-4 w-4" />} {submitting ? "Sending…" : "Send request"}
+      </button>
+    </>
+  );
+
+  return (
+    <Modal open onClose={submitting ? () => {} : onClose} title="Request additional kit" subtitle={`${job.jobNumber} · the planner reviews and issues it`} footer={footer} size="lg" scrollBody>
+      <div className="space-y-5">
+        {planned.length > 0 && (
+          <div>
+            <p className="mb-2 text-xs font-bold text-[var(--faint)]">More of a planned item</p>
+            <div className="overflow-x-auto rounded-xl border border-[var(--border)]">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-[var(--border)] text-[10px] font-bold uppercase tracking-wider text-[var(--faint)]">
+                    <th className="px-3 py-2 text-left">Item</th>
+                    <th className="w-28 px-3 py-2 text-right">Extra qty</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {planned.map((p) => (
+                    <tr key={p.key} className="border-b border-[var(--border)] last:border-0">
+                      <td className="px-3 py-2 font-semibold text-[var(--ink)]">{p.itemName}</td>
+                      <td className="px-3 py-2">
+                        <input type="number" min={0} step={1} value={p.qty} aria-label={`Extra quantity for ${p.itemName}`} onChange={(e) => setPlannedQty(p.key, Math.max(0, Math.floor(Number(e.target.value) || 0)))} className={`${inputCls} py-1.5 text-right`} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        <div>
+          <p className="mb-2 text-xs font-bold text-[var(--faint)]">Add another item</p>
+          <KitItemSearch excludeKeys={excludeKeys} onAddItem={addIrm} onAddCustom={addCustom} />
+          {cart.length > 0 && (
+            <div className="mt-3 overflow-hidden rounded-xl border border-[var(--border)]">
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="border-b border-[var(--border)] text-[10px] font-bold uppercase tracking-wider text-[var(--faint)]">
+                    <th className="px-3 py-2">Item</th>
+                    <th className="w-24 px-3 py-2">Qty</th>
+                    <th className="w-10 px-3 py-2"><span className="sr-only">Remove</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cart.map((c) => (
+                    <tr key={c.key} className="border-b border-[var(--border)] last:border-0">
+                      <td className="px-3 py-2">
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-[var(--ink)]">{c.name}</span>
+                          {c.source === "misc" && <span className="rounded border border-[var(--border)] bg-[var(--surface)] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-[var(--faint)]">Misc</span>}
+                        </div>
+                        {c.code && <div className="font-mono text-[10px] text-[var(--muted)]">{c.code}</div>}
+                      </td>
+                      <td className="px-3 py-2">
+                        <input type="number" min={1} step={1} value={c.qty} aria-label={`Quantity for ${c.name}`} onChange={(e) => setCartQty(c.key, Math.max(1, Math.floor(Number(e.target.value) || 1)))} className={`${inputCls} py-1.5`} />
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        <button type="button" onClick={() => removeCart(c.key)} aria-label="Remove item" className="rounded-lg border border-[var(--border)] p-1.5 text-[var(--muted)] transition-all hover:border-[var(--neg)] hover:text-[var(--neg)]">
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        <div>
+          <label className={labelCls}>Why do you need these? <span className="text-[var(--neg)]">*</span></label>
+          <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={2} maxLength={2000} placeholder="e.g. Two cables damaged during install; need extras to finish." className={`${inputCls} resize-none`} />
+        </div>
+
+        {msg && <Notice msg={msg} />}
+      </div>
+    </Modal>
+  );
+}
+
+// ── Item search-select (debounced IRM catalogue search) ────────────────────────────────────────
+
+function KitItemSearch({ excludeKeys, onAddItem, onAddCustom }: { excludeKeys: Set<string>; onAddItem: (it: KitItemOption) => void; onAddCustom: (name: string) => void }) {
+  const [search, setSearch] = React.useState("");
+  const [results, setResults] = React.useState<KitItemOption[]>([]);
+  const [loading, setLoading] = React.useState(false);
+  const [touched, setTouched] = React.useState(false);
+  const [failed, setFailed] = React.useState(false);
+  const timer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Monotonic token so a slow earlier response can't clobber a newer search's results.
+  const reqId = React.useRef(0);
+
+  React.useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+
+  const reset = () => {
+    if (timer.current) clearTimeout(timer.current);
+    reqId.current++;
+    setSearch(""); setResults([]); setTouched(false); setFailed(false); setLoading(false);
+  };
+
+  const run = (v: string) => {
+    setSearch(v);
+    if (timer.current) clearTimeout(timer.current);
+    const q = v.trim();
+    reqId.current++;
+    if (!q) { setResults([]); setTouched(false); setFailed(false); return; }
+    timer.current = setTimeout(async () => {
+      const myId = ++reqId.current;
+      setLoading(true);
+      setTouched(true);
+      setFailed(false);
+      try {
+        const items = await kitRequestService.searchKitItems(q);
+        if (myId !== reqId.current) return; // superseded
+        setResults(items);
+      } catch (e) {
+        if (myId !== reqId.current) return;
+        console.error("Kit item search failed:", e);
+        setResults([]);
+        setFailed(true);
+      } finally {
+        if (myId === reqId.current) setLoading(false);
+      }
+    }, 300);
+  };
+
+  const term = search.trim();
+
+  return (
+    <div className="space-y-2">
+      <div className="relative">
+        <Search aria-hidden className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--faint)]" />
+        <input type="search" value={search} onChange={(e) => run(e.target.value)} aria-label="Search items" placeholder="Search the item you need…" className={`${inputCls} pl-9`} />
+        {loading && <Loader2 aria-hidden className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-[var(--faint)]" />}
+      </div>
+
+      {touched && !loading && failed && <p className="text-xs font-semibold text-[var(--neg)]">Couldn’t run the search just now. Check your connection and try again.</p>}
+      {touched && !loading && !failed && results.length === 0 && <p className="text-xs text-[var(--muted)]">No matching item in the catalogue.</p>}
+
+      {results.length > 0 && (
+        <div className="max-h-56 space-y-1.5 overflow-auto">
+          {results.map((it) => {
+            const added = excludeKeys.has(`irm:${it.irmItemId}`);
+            return (
+              <button key={it.irmItemId} type="button" disabled={added} onClick={() => onAddItem(it)} className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left transition-all ${added ? "cursor-default border-[var(--border)] bg-[var(--surface-2)] opacity-60" : "border-[var(--border)] bg-[var(--surface-2)] hover:border-[var(--accent)]"}`}>
+                <span className="min-w-0">
+                  <span className="block truncate text-sm font-semibold text-[var(--ink)]">{it.name}</span>
+                  {it.code && <span className="block truncate font-mono text-[11px] text-[var(--muted)]">{it.code}</span>}
+                </span>
+                {added ? <Check className="h-4 w-4 shrink-0 text-[var(--pos)]" /> : <Plus className="h-4 w-4 shrink-0 text-[var(--accent)]" />}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Escape hatch — request an item that isn't in the catalogue by name (saved as a misc line). */}
+      {term.length > 0 && !loading && (
+        <button type="button" onClick={() => { onAddCustom(term); reset(); }} className="flex w-full items-center gap-2 rounded-xl border border-dashed border-[var(--border)] px-3 py-2 text-left text-xs font-semibold text-[var(--muted)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)]">
+          <Plus className="h-3.5 w-3.5 shrink-0" /> Can’t find it? Add “{term}” as a misc item
+        </button>
+      )}
+    </div>
+  );
+}

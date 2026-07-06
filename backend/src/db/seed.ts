@@ -51,6 +51,8 @@ const ENGINEER_PORTAL_PERMISSIONS = [
   "engineer.jobs.reject",
   "engineer.jobs.start",
   "engineer.jobs.complete",
+  // Request additional kit for an assigned job (planner reviews).
+  "engineer.jobs.request_kit",
   // Engineer-to-engineer stock transfer (self-service).
   "engineer.transfer",
 ];
@@ -70,6 +72,8 @@ const JOB_OFFICE_PERMISSIONS = [
   "jobs.assign",
   "jobs.cancel",
   "jobs.delete",
+  // Review field-engineer additional-kit requests (approve → grow kit + open fulfilment; or decline).
+  "jobs.kit_request.review",
 ];
 
 // Goods Management permissions for warehouse-side roles (issue/receive/reconcile). Seeded on the

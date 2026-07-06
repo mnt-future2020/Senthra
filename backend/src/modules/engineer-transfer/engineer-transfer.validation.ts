@@ -9,6 +9,9 @@ const lineSchema = z
     ownership: z.enum(["company", "customer"]),
     irmItemId: objectId.optional(),
     customerStockEntryId: objectId.optional(),
+    // Set only when this transfer fulfils a job kit request (created via the kit-request approve flow,
+    // not the ordinary composer) — attributes the received qty to that kit line on completion.
+    jobKitLineId: objectId.optional(),
     quantity: z
       .number()
       .int("Quantity must be a whole number.")

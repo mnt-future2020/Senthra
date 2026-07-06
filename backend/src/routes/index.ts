@@ -16,6 +16,7 @@ import irmRoutes from "#modules/irm/irm.routes.js";
 import irmCategoryRoutes from "#modules/irm-category/irm-category.routes.js";
 import irmTypeRoutes from "#modules/irm-type/irm-type.routes.js";
 import jobRoutes from "#modules/job/job.routes.js";
+import jobKitRequestRoutes from "#modules/job-kit-request/job-kit-request.routes.js";
 import jobTitleRoutes from "#modules/jobTitle/jobTitle.routes.js";
 import purchaseOrderRoutes from "#modules/purchase-order/purchase-order.routes.js";
 import roleRoutes from "#modules/role/role.routes.js";
@@ -67,5 +68,7 @@ router.use("/stock-entries", stockEntryRouter);
 router.use("/warehouses", warehousePendingRouter);
 // Engineer-to-engineer stock transfers.
 router.use("/engineer-transfers", engineerTransferRoutes);
+// Field-Engineer → PM additional-kit requests (raise / review / approve / decline).
+router.use("/job-kit-requests", jobKitRequestRoutes);
 
 export default router;

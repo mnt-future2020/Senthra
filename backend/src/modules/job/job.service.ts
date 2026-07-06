@@ -1,5 +1,8 @@
+import { Prisma } from "@prisma/client";
+
 import * as jobRepo from "./job.repository.js";
 import type { JobWithRelations, JobKitLineRow } from "./job.repository.js";
+import { withTransaction } from "../../lib/prisma.js";
 import * as customerRepo from "#modules/customer/customer.repository.js";
 import * as supplierRepo from "#modules/supplier/supplier.repository.js";
 import * as irmRepo from "#modules/irm/irm.repository.js";
@@ -14,6 +17,7 @@ import { emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js"
 import { conflict, forbidden, notFound, badRequest } from "../../utils/http-error.js";
 import type { CreateJobInput, JobKitLineInput, UpdateJobInput, CompleteJobInput } from "./job.validation.js";
 import * as goodsManagementService from "#modules/goods-management/goods-management.service.js";
+import * as kitRequestRepo from "#modules/job-kit-request/job-kit-request.repository.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 
@@ -110,6 +114,8 @@ export interface PublicJob {
   // Goods-lifecycle status from JobStockSummary ("not_issued" until stock moves). Populated on the
   // jobs list + single-job detail so the PM can see issuance at a glance. Not part of the raw record.
   goodsStatus: string;
+  // Count of PENDING field-engineer kit requests on this job (jobs-list badge). 0 unless enriched.
+  pendingKitRequestCount: number;
   plannerName: string | null;
   plannerPhone: string | null;
   notes: string | null;
@@ -183,6 +189,7 @@ function toPublic(j: JobWithRelations): PublicJob {
     installerType: j.installerType ?? "internal",
     status: j.status ?? "assigned",
     goodsStatus: "not_issued", // overwritten by listJobs / withGoodsTallies from the stock summary
+    pendingKitRequestCount: 0, // overwritten by listJobs from a batched count
     plannerName: j.plannerName,
     plannerPhone: j.plannerPhone,
     notes: j.notes,
@@ -403,11 +410,16 @@ export async function listJobs(params: ListJobsParams = {}, _actor?: AuditActor)
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const page = Math.min(Math.max(Math.trunc(params.page ?? 1), 1), totalPages);
   const rows = await jobRepo.findMany(filters, (page - 1) * pageSize, pageSize, params.sort);
-  // Merge each job's goods-lifecycle status in ONE batched query (so the PM sees issuance per row).
-  const goodsStatusByJob = await goodsManagementService.getGoodsStatusByJobs(rows.map((r) => r.id));
+  const ids = rows.map((r) => r.id);
+  // Merge each job's goods-lifecycle status + pending kit-request count in batched queries (no N+1).
+  const [goodsStatusByJob, pendingByJob] = await Promise.all([
+    goodsManagementService.getGoodsStatusByJobs(ids),
+    kitRequestRepo.countPendingByJobs(ids),
+  ]);
   const jobs = rows.map((r) => {
     const pub = toPublic(r);
     pub.goodsStatus = goodsStatusByJob.get(r.id) ?? "not_issued";
+    pub.pendingKitRequestCount = pendingByJob.get(r.id) ?? 0;
     return pub;
   });
   return { jobs, total, page, pageSize, totalPages };
@@ -760,6 +772,129 @@ export async function updateJob(id: string, input: UpdateJobInput, actor?: Audit
     notifyAssignedEngineer(job);
   }
   return job;
+}
+
+// ── Grow the kit from an approved Field-Engineer kit request ──────────────────────────────────
+// The bottom-up counterpart to updateJob's top-down edit: an approved JobKitRequest either INCREASES
+// a matching existing kit line or ADDS a new one, reusing the same resolve + merge path (so ids are
+// preserved and posted movements keep pointing at their lines). It only ever adds/increases, so the
+// issued-line locks can't be violated. Unlike edit-job it does NOT cap against warehouse stock: a
+// request may be fulfilled from another engineer's van (a job-scoped transfer), where warehouse
+// availability is irrelevant — the real stock check happens at fulfilment (postIssue / transfer
+// completion). Returns the updated job + the resulting jobKitLineId per input line (in order), which
+// the caller threads into the transfer lines so completion can attribute the qty to the right line.
+export interface KitAppendLine {
+  source: "irm" | "customer_stock" | "misc";
+  irmItemId: string | null;
+  customerStockEntryId: string | null;
+  itemName: string;
+  qty: number;
+  warehouseId: string | null; // required for irm lines (the PM-chosen pickup/home warehouse)
+}
+export interface KitAppendResult {
+  job: PublicJob;
+  jobKitLineIds: (string | null)[];
+}
+
+type MatchableKitLine = { id: string; lineType: string; itemName: string; irmItemId: string | null; customerStockEntryId: string | null; warehouseId: string | null; qty: number; seCode: string | null; description: string | null; notes: string | null };
+
+// Find the existing kit line a resolved row would MERGE INTO: same IRM item + warehouse, same
+// customer-stock entry, or a misc line with the same name. Undefined ⇒ it becomes a new line.
+function findMatchingKitLine(lines: MatchableKitLine[], row: JobKitLineRow): MatchableKitLine | undefined {
+  if (row.irmItemId) return lines.find((k) => k.irmItemId === row.irmItemId && k.warehouseId === row.warehouseId);
+  if (row.customerStockEntryId) return lines.find((k) => k.customerStockEntryId === row.customerStockEntryId);
+  return lines.find((k) => k.lineType === "misc" && k.itemName.trim().toLowerCase() === row.itemName.trim().toLowerCase());
+}
+
+export async function appendKitFromRequest(
+  jobId: string,
+  lines: KitAppendLine[],
+  actor?: AuditActor,
+  // Optional: runs INSIDE the same transaction as the kit-grow, receiving the resulting jobKitLineIds.
+  // The kit-request approve uses it to stamp its request lines atomically with the grow, so a crash
+  // can't leave the kit grown-but-unstamped (which would let a retry re-grow it).
+  stampTx?: (tx: Prisma.TransactionClient, jobKitLineIds: (string | null)[]) => Promise<void>,
+): Promise<KitAppendResult> {
+  const existing = await jobRepo.findById(jobId);
+  if (!existing) throw notFound("Job not found.");
+  if (existing.status === "completed" || existing.status === "cancelled") {
+    throw conflict(`A ${existing.status} job can't take on more kit.`);
+  }
+  if ((await goodsManagementService.getGoodsStatus(jobId)) === "reconciled") {
+    throw conflict("This job's goods have been reconciled and locked — it can no longer be edited.");
+  }
+
+  // Reuse the kit-line resolver (warehouse snapshots + source validation) via the JobKitLineInput shape.
+  const asInputs: JobKitLineInput[] = lines.map((l) => ({
+    lineType: l.source,
+    itemName: l.itemName,
+    qty: l.qty,
+    seCode: undefined,
+    description: undefined,
+    customerStockEntryId: l.customerStockEntryId ?? undefined,
+    irmItemId: l.irmItemId ?? undefined,
+    warehouseId: l.warehouseId ?? undefined,
+    notes: undefined,
+  }));
+  const rows = await resolveKitLineRows(asInputs, existing.customerId);
+  // Defence-in-depth (we bypass the zod kit-line refinement): an IRM line must have a pickup warehouse.
+  for (const row of rows) {
+    if (row.lineType === "irm" && !row.warehouseId) throw badRequest(`Choose a pickup warehouse for "${row.itemName}".`);
+  }
+
+  const existingLines = (existing.kitLines ?? []) as MatchableKitLine[];
+  const updates: { id: string; qty: number; seCode: string | null; description: string | null; notes: string | null }[] = [];
+  const creates: JobKitLineRow[] = [];
+  const rowTargets: (string | null)[] = []; // existing line id per row, or null when it becomes a create
+
+  for (const row of rows) {
+    const match = findMatchingKitLine(existingLines, row);
+    if (match) {
+      const pending = updates.find((u) => u.id === match.id);
+      if (pending) pending.qty += row.qty;
+      else updates.push({ id: match.id, qty: match.qty + row.qty, seCode: match.seCode, description: match.description, notes: match.notes });
+      rowTargets.push(match.id);
+    } else {
+      creates.push(row);
+      rowTargets.push(null);
+    }
+  }
+
+  const headerPatch: Record<string, unknown> = { updatedBy: actor?.email ?? null };
+  let result: JobWithRelations;
+  let jobKitLineIds: (string | null)[];
+  if (updates.length || creates.length) {
+    // Grow the kit, resolve the resulting jobKitLineId per input row, and run the caller's stamp — ALL
+    // in one transaction. If any part fails the whole thing rolls back, so the kit is never left grown
+    // with the request lines unstamped (the state that would let a retry re-grow the kit).
+    const out = await withTransaction(async (tx) => {
+      const merged = await jobRepo.mergeKitLinesTx(tx, jobId, { updates, creates, deleteIds: [] }, headerPatch);
+      const mergedLines = (merged.kitLines ?? []) as MatchableKitLine[];
+      const ids = rows.map((row, i) => rowTargets[i] ?? findMatchingKitLine(mergedLines, row)?.id ?? null);
+      if (stampTx) await stampTx(tx, ids);
+      return { merged, ids };
+    });
+    result = out.merged;
+    jobKitLineIds = out.ids;
+  } else {
+    // No structural change (unreachable for a non-empty request — every line is an update or a create —
+    // but handled defensively): reuse the existing lines and stamp in a standalone transaction.
+    result = existing;
+    jobKitLineIds = rows.map((row, i) => rowTargets[i] ?? findMatchingKitLine(existingLines, row)?.id ?? null);
+    if (stampTx) await withTransaction((tx) => stampTx(tx, jobKitLineIds));
+  }
+
+  audit.record({
+    actor,
+    action: "job.kit_line_added",
+    targetType: "job",
+    targetId: jobId,
+    targetLabel: result.jobNumber,
+    metadata: { added: creates.length, increased: updates.length, lines: rows.map((r) => ({ itemName: r.itemName, qty: r.qty })) },
+  });
+
+  const pub = await withGoodsTallies(toPublic(result));
+  return { job: pub, jobKitLineIds };
 }
 
 // ── Assign (re-snapshot engineer; back to "assigned"; re-notify) ──────────────────────────────
