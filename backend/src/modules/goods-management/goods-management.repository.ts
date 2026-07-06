@@ -97,6 +97,106 @@ export async function createMovementWithCode(
   throw new Error("Could not allocate a unique goods-management code.");
 }
 
+// Tx-aware GM-#### allocator — used by the engineer-transfer attribution path, which must write its
+// JobStockMovement inside the transfer's OWN completion transaction (so the van-to-van stock move and
+// the job attribution commit atomically). The counter row exists in any system that has ever issued
+// goods; the upsert covers the near-impossible first-ever-GM-code path. A concurrent increment surfaces
+// as a Mongo write-conflict (P2034) which the transfer's completeTransferTx retry wrapper already handles.
+async function nextGmSequenceTx(tx: Prisma.TransactionClient): Promise<number> {
+  try {
+    const c = await tx.counter.update({ where: { key: GM_CODE_PREFIX }, data: { seq: { increment: 1 } }, select: { seq: true } });
+    return c.seq;
+  } catch (e) {
+    if (!isRecordNotFound(e)) throw e;
+  }
+  const start = await highestGmNumber();
+  const c = await tx.counter.upsert({ where: { key: GM_CODE_PREFIX }, create: { key: GM_CODE_PREFIX, seq: start + 1 }, update: { seq: { increment: 1 } }, select: { seq: true } });
+  return c.seq;
+}
+
+export interface AttributionHeader {
+  jobId: string;
+  engineerId: string;
+  engineerName: string;
+  engineerEmail: string | null;
+  notes: string | null;
+  performedBy: string | null;
+  createdBy: string | null;
+}
+
+// Attribution-only issue movement: records that `lines` were issued to a job's engineer sourced from
+// ANOTHER engineer's van (a job-scoped engineer→engineer transfer fulfilling a kit request), NOT a
+// warehouse. It writes ONLY the JobStockMovement (direction "issue", no warehouse) + its lines — it does
+// NOT touch any stock balance, because the transfer's own `transfer_in` already credited the recipient's
+// van. This is precisely what makes the job's Issued tally rise: getJobKitTallies / kitLineSplit /
+// getOpenDemand all sum posted issue lines by jobKitLineId. Runs inside the caller's transaction.
+export async function createJobIssueAttributionTx(tx: Prisma.TransactionClient, header: AttributionHeader, lines: MovementLineRow[]): Promise<void> {
+  const seq = await nextGmSequenceTx(tx);
+  const code = `${GM_CODE_PREFIX}-${String(seq).padStart(4, "0")}`;
+  // Create only — the caller ignores the returned row, so we skip the extra include-read (it was adding
+  // a round-trip to the latency-sensitive transfer-completion transaction).
+  await tx.jobStockMovement.create({
+    data: {
+      deletedAt: null,
+      code,
+      jobId: header.jobId,
+      direction: "issue",
+      engineerId: header.engineerId,
+      engineerName: header.engineerName,
+      engineerEmail: header.engineerEmail,
+      warehouseId: null,
+      warehouseName: null,
+      warehouseCode: null,
+      status: "posted",
+      postedAt: new Date(),
+      notes: header.notes,
+      performedBy: header.performedBy,
+      createdBy: header.createdBy,
+      items: { create: lines.map((l) => ({ ...l })) },
+    },
+  });
+}
+
+// Recompute + persist a job's coarse goodsStatus from its posted movements. Runs OUTSIDE any transaction
+// (non-tx `prisma`) — the engineer-transfer path calls this AFTER its completion transaction commits, so
+// the derived-summary reads/write don't count against Mongo's 5s interactive-transaction limit. Best-
+// effort: the per-line tallies are always correct from the movements; this coarse summary self-heals on
+// the next movement if it's ever missed. "issued" only when EVERY kit line is fully issued (gross issue −
+// return ≥ planned), else "partially_issued" — matching postIssue's semantics.
+export async function recomputeGoodsStatus(jobId: string): Promise<void> {
+  const kitLines = await prisma.jobKitLine.findMany({ where: { jobId }, select: { id: true, qty: true } });
+  if (kitLines.length === 0) return;
+  const movements = await prisma.jobStockMovement.findMany({
+    where: { jobId, status: "posted", deletedAt: null },
+    select: { direction: true, items: { select: { jobKitLineId: true, qty: true } } },
+  });
+  const issued = new Map<string, number>();
+  for (const m of movements) {
+    for (const l of m.items) {
+      if (!l.jobKitLineId) continue;
+      if (m.direction === "issue") issued.set(l.jobKitLineId, (issued.get(l.jobKitLineId) ?? 0) + l.qty);
+      else if (m.direction === "return") issued.set(l.jobKitLineId, (issued.get(l.jobKitLineId) ?? 0) - l.qty);
+    }
+  }
+  const status = kitLines.every((kl) => (issued.get(kl.id) ?? 0) >= kl.qty) ? "issued" : "partially_issued";
+
+  // ATOMIC guard (no read-then-write TOCTOU): only move the summary when it ISN'T already in a
+  // return/reconcile state. This refresh owns ONLY the early issued/partially_issued transition;
+  // awaiting_return and reconciled are owned by the return/reconcile flows and must never be regressed
+  // by a late-completing job-scoped transfer. The conditional filter is evaluated atomically by Mongo.
+  const res = await prisma.jobStockSummary.updateMany({
+    where: { jobId, goodsStatus: { notIn: ["awaiting_return", "reconciled"] } },
+    data: { goodsStatus: status, lastMovementAt: new Date() },
+  });
+  // count 0 ⇒ the summary is either in a guarded state (correctly skipped) or doesn't exist yet. A
+  // summary is absent ONLY before any issuance, when there's no later state to clobber — create it then.
+  // A concurrent create races on the unique jobId and is harmlessly swallowed.
+  if (res.count === 0) {
+    const exists = await prisma.jobStockSummary.findUnique({ where: { jobId }, select: { jobId: true } });
+    if (!exists) await prisma.jobStockSummary.create({ data: { jobId, goodsStatus: status, lastMovementAt: new Date() } }).catch(() => {});
+  }
+}
+
 export function findMovementsByJob(jobId: string): Promise<JobStockMovementWithRelations[]> {
   return prisma.jobStockMovement.findMany({ where: { jobId, deletedAt: null }, include: withRelations, orderBy: { createdAt: "asc" } });
 }

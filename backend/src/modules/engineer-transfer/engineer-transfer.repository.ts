@@ -4,7 +4,8 @@ import { prisma, withTransaction } from "../../lib/prisma.js";
 import { conflict } from "../../utils/http-error.js";
 import { escapeRegex } from "../../utils/search.js";
 import { upsertEngineerBalanceTx, findEngineerBalanceTx, insertEngineerTxnTx } from "#modules/engineer-stock/engineer-stock.repository.js";
-import { upsertCustomerHoldingTx, findCustomerHoldingTx, insertCustomerHoldingTxnTx } from "#modules/goods-management/goods-management.repository.js";
+import { upsertCustomerHoldingTx, findCustomerHoldingTx, insertCustomerHoldingTxnTx, createJobIssueAttributionTx, recomputeGoodsStatus } from "#modules/goods-management/goods-management.repository.js";
+import type { MovementLineRow } from "#modules/goods-management/goods-management.repository.js";
 
 // ---- Types -----------------------------------------------------------------------------------
 
@@ -41,6 +42,8 @@ export interface CreateTransferLineData {
   sku?: string | null;
   uom?: string | null;
   quantity: number;
+  // Set when this transfer fulfils a job kit request — the kit line to attribute the received qty to.
+  jobKitLineId?: string | null;
 }
 
 // ---- Code allocation (ENG-####, atomic Counter + retry) -------------------------------------
@@ -95,8 +98,15 @@ async function fastForwardEngCounter(): Promise<void> {
   } catch { /* best-effort */ }
 }
 
-// Allocate a unique ENG-#### code and create the transfer + its lines atomically.
-export async function createTransfer(data: CreateTransferData, lines: CreateTransferLineData[]): Promise<TransferWithLines> {
+// Allocate a unique ENG-#### code and create the transfer + its lines atomically. An optional
+// `afterCreate` runs INSIDE the same transaction with the new transfer id — used by the kit-request
+// approve to stamp the originating request's transferId atomically with the transfer, so a retry can
+// never create a duplicate transfer (the request's checkpoint and the transfer commit together).
+export async function createTransfer(
+  data: CreateTransferData,
+  lines: CreateTransferLineData[],
+  afterCreate?: (tx: Prisma.TransactionClient, transferId: string) => Promise<void>,
+): Promise<TransferWithLines> {
   for (let attempt = 0; attempt < 5; attempt++) {
     const seq = await nextEngSequence();
     const code = `${ENG_CODE_PREFIX}-${String(seq).padStart(4, "0")}`;
@@ -110,6 +120,7 @@ export async function createTransfer(data: CreateTransferData, lines: CreateTran
             lines: { create: lines },
           },
         });
+        if (afterCreate) await afterCreate(tx, transfer.id);
         return tx.engineerStockTransfer.findUniqueOrThrow({ where: { id: transfer.id }, include: { lines: true } });
       });
     } catch (e) {
@@ -423,7 +434,14 @@ function isTxWriteConflict(e: unknown): boolean {
 export async function completeTransferTx(transferId: string, opts: CompleteOptions): Promise<TransferWithLines> {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      return await completeTransferOnce(transferId, opts);
+      const completed = await completeTransferOnce(transferId, opts);
+      // Job attribution wrote an issue movement inside the tx above; refresh the job's coarse goodsStatus
+      // OUTSIDE the tx to keep the completion transaction under Mongo's 5s limit. Best-effort: the per-line
+      // tallies are already correct from the movement, and the summary self-heals on the next movement.
+      if (completed.jobId && completed.lines.some((l) => l.jobKitLineId)) {
+        await recomputeGoodsStatus(completed.jobId).catch((e) => console.error(`goodsStatus refresh after transfer ${completed.code} failed:`, e instanceof Error ? e.message : e));
+      }
+      return completed;
     } catch (e) {
       if (isTxWriteConflict(e) && attempt < 2) continue;
       if (isTxWriteConflict(e)) throw conflict("This transfer is being processed concurrently. Refresh and try again.");
@@ -532,6 +550,45 @@ async function completeTransferOnce(transferId: string, opts: CompleteOptions): 
           notes: null,
         });
       }
+    }
+
+    // Job attribution: when this transfer FULFILS a job kit request (jobId set + lines carry a
+    // jobKitLineId), record the received qty as ISSUED against the job — sourced from a van, not a
+    // warehouse. This writes an attribution-only JobStockMovement (NO balance change; the transfer_in
+    // above already credited the recipient's van) so the job's Issued tally rises, then refreshes the
+    // job's coarse goodsStatus. All inside this same transaction, so the move + attribution are atomic.
+    const jobLines = transfer.lines.filter((l) => l.jobKitLineId);
+    if (transfer.jobId && jobLines.length > 0) {
+      const attributionLines: MovementLineRow[] = jobLines.map((l) => ({
+        source: l.ownership === "company" ? "irm" : "customer",
+        irmItemId: l.ownership === "company" ? l.irmItemId : null,
+        customerStockEntryId: l.ownership === "customer" ? l.customerStockEntryId : null,
+        itemName: l.itemName,
+        sku: l.sku,
+        uom: l.uom,
+        qty: l.quantity,
+        condition: "good",
+        jobKitLineId: l.jobKitLineId,
+        scannedCode: null,
+        damagePhotoUrl: null,
+        damageReason: null,
+        notes: null,
+      }));
+      await createJobIssueAttributionTx(
+        tx,
+        {
+          jobId: transfer.jobId,
+          engineerId: to,
+          engineerName: transfer.toEngineerName,
+          engineerEmail: transfer.toEngineerEmail,
+          notes: `Issued via engineer transfer ${code}`,
+          performedBy: opts.approverEmail,
+          createdBy: opts.approverEmail,
+        },
+        attributionLines,
+      );
+      // NOTE: the job's coarse goodsStatus is refreshed AFTER this transaction commits (see
+      // completeTransferTx) — kept out of the tx so its reads/write don't blow Mongo's 5s limit.
     }
 
     // Mark completed

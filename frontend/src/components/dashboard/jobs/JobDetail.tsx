@@ -9,6 +9,7 @@ import { listEngineerOptions } from "@/services/warehouse.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { Select } from "@/components/ui/Select";
+import { JobKitRequestsReview } from "./JobKitRequestsReview";
 import { FormError, FormPageSkeleton } from "@/components/ui/FormScaffold";
 import {
   INSTALLER_TYPE_LABELS,
@@ -62,6 +63,11 @@ function JobView({ initial }: { initial: Job }) {
       setBusy(false);
     }
   };
+
+  // Refetch the job after a kit request is approved so the grown kit list shows immediately.
+  const reloadJob = React.useCallback(() => {
+    jobService.getJob(job.id).then(setJob).catch(() => {});
+  }, [job.id]);
 
   // Completed / cancelled jobs and reconciled goods are frozen — no edits (matches the backend lock).
   const editable = can("jobs.edit") && job.status !== "completed" && job.status !== "cancelled" && job.goodsStatus !== "reconciled";
@@ -138,6 +144,10 @@ function JobView({ initial }: { initial: Job }) {
           </table>
         </div>
       </div>
+
+      {can("jobs.kit_request.review") && (
+        <JobKitRequestsReview jobId={job.id} assignedEngineerId={job.assignedEngineerId} onJobChanged={reloadJob} />
+      )}
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Card title="Identification">

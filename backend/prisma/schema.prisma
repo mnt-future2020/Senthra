@@ -1099,9 +1099,83 @@ model EngineerStockTransferLine {
   uom      String? // snapshot
   quantity Int
 
+  // Set when this transfer FULFILS a job kit request — attributes the received qty to that job kit
+  // line on completion (writes an attribution JobStockMovement so the job's Issued tally rises).
+  // Loose socket, mirrors JobStockMovementLine.jobKitLineId. Null for ordinary van-to-van transfers.
+  jobKitLineId String? @db.ObjectId
+
   createdAt DateTime @default(now())
 
   @@index([transferId])
+}
+
+// ── Additional-kit request (Field Engineer → Project Manager) ───────────────────────────────────
+// A field engineer's in-app request for MORE kit on a job whose plan has already been issued (extra
+// units of an item, or a brand-new item). The PM reviews and approves; approval GROWS the job's
+// JobKitLine (reusing the edit-job merge + issued-line locks) and opens fulfilment — a warehouse
+// issue (Goods Management) or a job-scoped engineer→engineer transfer. Captures who asked + why,
+// closing the traceability gap plain edit-job leaves.
+// See docs/superpowers/specs/2026-07-06-job-additional-kit-request-design.md
+model JobKitRequest {
+  id   String @id @default(auto()) @map("_id") @db.ObjectId
+  code String @unique // JKR-#### (atomic Counter, like GM/ENG/JOB)
+
+  status String @default("pending") // pending | approved | declined | cancelled
+
+  // The job this request grows. Loose socket (no relation) — mirrors EngineerStockTransfer.jobId.
+  jobId     String @db.ObjectId
+  jobNumber String // snapshot (JOB-YYYY-####)
+
+  // Requester — the field engineer (snapshots, history-safe).
+  requestedByEngineerId    String  @db.ObjectId
+  requestedByEngineerName  String
+  requestedByEngineerEmail String?
+
+  reason      String
+  notes       String?
+  attachments String[] // optional evidence image URLs (Cloudinary)
+
+  // Review (the PM / planner).
+  reviewedByUserId String?   @db.ObjectId
+  reviewedByEmail  String?
+  reviewedAt       DateTime?
+  decisionNote     String?
+  fulfillmentMode  String? // warehouse_issue | engineer_transfer (set on approve)
+  transferId       String?  @db.ObjectId // the EngineerStockTransfer opened on approve (transfer mode)
+
+  lines     JobKitRequestLine[]
+  createdBy String?
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([jobId, status])
+  @@index([requestedByEngineerId, status])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model JobKitRequestLine {
+  id        String        @id @default(auto()) @map("_id") @db.ObjectId
+  requestId String        @db.ObjectId
+  request   JobKitRequest @relation(fields: [requestId], references: [id])
+
+  source               String  // irm | customer_stock | misc
+  irmItemId            String? @db.ObjectId // when irm (loose socket)
+  customerStockEntryId String? @db.ObjectId // when customer_stock (loose socket)
+
+  itemName String  // snapshot
+  sku      String? // snapshot
+  uom      String? // snapshot
+  qty      Int
+
+  // Set on approve → the JobKitLine this request line grew (loose socket, mirrors
+  // JobStockMovementLine.jobKitLineId). Lets a transfer fulfilment attribute its qty to the kit line.
+  jobKitLineId String? @db.ObjectId
+
+  createdAt DateTime @default(now())
+
+  @@index([requestId])
 }
 
 // Damaged-stock pool (write-off). Both owner types; never re-enters usable stock in v1.

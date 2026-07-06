@@ -1,3 +1,5 @@
+import type { Prisma } from "@prisma/client";
+
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
 import { emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
 import * as audit from "#modules/audit/audit.service.js";
@@ -8,7 +10,7 @@ import * as irmRepo from "#modules/irm/irm.repository.js";
 import * as customerStockRepo from "#modules/goods-management/goods-management.repository.js";
 import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
 import * as transferRepo from "./engineer-transfer.repository.js";
-import type { CreateTransferInput } from "./engineer-transfer.validation.js";
+import type { CreateTransferInput, TransferLineInput } from "./engineer-transfer.validation.js";
 import type { CreateTransferData, CreateTransferLineData, TransferWithLines } from "./engineer-transfer.repository.js";
 
 // ---- DTO types -------------------------------------------------------------------------------
@@ -159,6 +161,116 @@ function hasStockOversight(actor: AuditActor): boolean {
   return perms.includes("*") || perms.includes("engineer_stock.transfer");
 }
 
+// Resolve each input line to a persisted line with fresh item snapshots, carrying the optional
+// jobKitLineId through (set only for job-kit-request fulfilment). Shared by the ordinary composer
+// (createTransfer) and the PM-initiated job-scoped path (createJobTransfer).
+async function resolveTransferLines(inputLines: TransferLineInput[]): Promise<CreateTransferLineData[]> {
+  const lines: CreateTransferLineData[] = [];
+  for (const l of inputLines) {
+    if (l.ownership === "company") {
+      const item = await irmRepo.findById(l.irmItemId!);
+      if (!item) throw notFound(`IRM item ${l.irmItemId} not found.`);
+      if (item.status !== "active") throw badRequest(`IRM item "${item.name}" is not active.`);
+      lines.push({
+        ownership: "company",
+        irmItemId: item.id,
+        itemName: item.name,
+        sku: item.sku ?? null,
+        uom: item.baseUnit ?? null,
+        quantity: l.quantity,
+        jobKitLineId: l.jobKitLineId ?? null,
+      });
+    } else {
+      const entry = await customerStockRepo.findCustomerStockEntryById(l.customerStockEntryId!);
+      if (!entry) throw notFound(`Customer stock entry ${l.customerStockEntryId} not found.`);
+      lines.push({
+        ownership: "customer",
+        customerStockEntryId: entry.id,
+        itemName: entry.itemName,
+        sku: entry.sku ?? entry.barcode ?? null,
+        uom: entry.uom ?? null,
+        quantity: l.quantity,
+        jobKitLineId: l.jobKitLineId ?? null,
+      });
+    }
+  }
+  return lines;
+}
+
+// Validate that a job-scoped transfer's source + recipient are both active stock-holding engineers and
+// distinct — used by the kit-request approval to fail fast BEFORE it grows the kit (createJobTransfer
+// re-checks, but that runs after the grow).
+export async function assertTransferEngineers(fromEngineerId: string, toEngineerId: string): Promise<void> {
+  const from = await assertEngineer(fromEngineerId, "Source");
+  const to = await assertEngineer(toEngineerId, "Destination");
+  if (from.id === to.id) throw badRequest("The source engineer can't be the same as the job's engineer — pick a different holder.");
+}
+
+// ---- createJobTransfer (job-scoped, PM-initiated from a kit-request approval) -----------------
+// Unlike createTransfer, the recipient is set EXPLICITLY (the job's assigned engineer), not derived
+// from the caller — the JobKitRequest service has already authorised the PM (jobs.kit_request.review).
+// Every line MUST carry a jobKitLineId so completion attributes the received qty to the job (see
+// repository.completeTransferOnce). Returns the pending transfer; the holder still approves it.
+export interface CreateJobTransferParams {
+  fromEngineerId: string;
+  toEngineerId: string;
+  jobId: string;
+  customerId?: string | null;
+  reason: string;
+  notes?: string | null;
+  lines: TransferLineInput[];
+}
+
+export async function createJobTransfer(
+  params: CreateJobTransferParams,
+  actor: AuditActor,
+  // Runs inside the transfer-creation transaction with the new transfer id — the kit-request approve
+  // uses it to stamp its request.transferId atomically, so a retry can't open a duplicate transfer.
+  afterCreate?: (tx: Prisma.TransactionClient, transferId: string) => Promise<void>,
+): Promise<PublicTransfer> {
+  const fromEng = await assertEngineer(params.fromEngineerId, "Source");
+  const toEng = await assertEngineer(params.toEngineerId, "Destination");
+  if (fromEng.id === toEng.id) throw badRequest("The source engineer can't be the same as the job's engineer — pick a different holder.");
+
+  const requireSignature = await getEngineerTransferRequireSignature();
+  const lines = await resolveTransferLines(params.lines);
+
+  const data: CreateTransferData = {
+    code: "",
+    status: "pending",
+    fromEngineerId: fromEng.id,
+    fromEngineerName: fromEng.name,
+    fromEngineerEmail: fromEng.email,
+    toEngineerId: toEng.id,
+    toEngineerName: toEng.name,
+    toEngineerEmail: toEng.email,
+    requestedById: actor.id ?? "",
+    requestedByEmail: actor.email ?? "",
+    requestedByKind: "admin",
+    reason: params.reason,
+    notes: params.notes ?? null,
+    jobId: params.jobId,
+    customerId: params.customerId ?? null,
+    attachments: [],
+    requireSignature,
+    createdBy: actor.email ?? null,
+  };
+
+  const transfer = await transferRepo.createTransfer(data, lines, afterCreate);
+
+  audit.record({
+    actor,
+    action: "engineer_transfer.created",
+    targetType: "engineer_transfer",
+    targetId: transfer.id,
+    targetLabel: transfer.code,
+    metadata: { fromEngineerId: fromEng.id, toEngineerId: toEng.id, jobId: params.jobId, lineCount: lines.length },
+  });
+  emitBoth(fromEng.id, toEng.id, { id: transfer.id, code: transfer.code, status: transfer.status });
+
+  return toPublic(transfer);
+}
+
 // ---- createTransfer ---------------------------------------------------------------------------
 
 export async function createTransfer(input: CreateTransferInput, actor: AuditActor): Promise<PublicTransfer> {
@@ -188,33 +300,7 @@ export async function createTransfer(input: CreateTransferInput, actor: AuditAct
   const requireSignature = await getEngineerTransferRequireSignature();
 
   // Resolve item snapshots for lines
-  const lines: CreateTransferLineData[] = [];
-  for (const l of input.lines) {
-    if (l.ownership === "company") {
-      const item = await irmRepo.findById(l.irmItemId!);
-      if (!item) throw notFound(`IRM item ${l.irmItemId} not found.`);
-      if (item.status !== "active") throw badRequest(`IRM item "${item.name}" is not active.`);
-      lines.push({
-        ownership: "company",
-        irmItemId: item.id,
-        itemName: item.name,
-        sku: item.sku ?? null,
-        uom: item.baseUnit ?? null,
-        quantity: l.quantity,
-      });
-    } else {
-      const entry = await customerStockRepo.findCustomerStockEntryById(l.customerStockEntryId!);
-      if (!entry) throw notFound(`Customer stock entry ${l.customerStockEntryId} not found.`);
-      lines.push({
-        ownership: "customer",
-        customerStockEntryId: entry.id,
-        itemName: entry.itemName,
-        sku: entry.sku ?? entry.barcode ?? null,
-        uom: entry.uom ?? null,
-        quantity: l.quantity,
-      });
-    }
-  }
+  const lines = await resolveTransferLines(input.lines);
 
   const data: CreateTransferData = {
     code: "", // allocated inside createTransfer
