@@ -6,8 +6,10 @@ import { ArrowLeftRight, Loader2, Pencil, UserCog, XCircle } from "lucide-react"
 
 import * as jobService from "@/services/job.service";
 import { listEngineerOptions } from "@/services/warehouse.service";
+import type { WarehouseManager } from "@/types/warehouse";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
+import { useReferenceData } from "@/hooks/useReferenceData";
 import { Select } from "@/components/ui/Select";
 import { JobKitRequestsReview } from "./JobKitRequestsReview";
 import { FormError, FormPageSkeleton } from "@/components/ui/FormScaffold";
@@ -272,11 +274,9 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 function ReassignDialog({ current, busy, onConfirm, onClose }: { current: string | null; busy: boolean; onConfirm: (engineerId: string) => void; onClose: () => void }) {
   const [engineers, setEngineers] = React.useState<{ id: string; name: string; jobTitle: string | null }[]>([]);
   const [engineerId, setEngineerId] = React.useState(current ?? "");
-  React.useEffect(() => {
-    let active = true;
-    listEngineerOptions().then((us) => active && setEngineers(us.map((u) => ({ id: u.id, name: u.name, jobTitle: u.jobTitle }))), () => {});
-    return () => { active = false; };
-  }, []);
+  useReferenceData([
+    { label: "engineers", load: () => listEngineerOptions(), onData: (us: WarehouseManager[]) => setEngineers(us.map((u) => ({ id: u.id, name: u.name, jobTitle: u.jobTitle }))) },
+  ]);
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
       <div className="w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>

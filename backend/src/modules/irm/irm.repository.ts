@@ -124,6 +124,13 @@ export function findById(id: string): Promise<IrmItemWithRelations | null> {
   return prisma.irmItem.findFirst({ where: { id, deletedAt: null }, include: withRelations });
 }
 
+// Batch counterpart to findById — one query for many ids (excludes soft-deleted). Order is not
+// guaranteed and missing/soft-deleted ids are simply absent; callers key the result by id.
+export function findByIds(ids: string[]): Promise<IrmItemWithRelations[]> {
+  if (!ids.length) return Promise.resolve([]);
+  return prisma.irmItem.findMany({ where: { id: { in: ids }, deletedAt: null }, include: withRelations });
+}
+
 export function findByCode(code: string): Promise<IrmItemWithRelations | null> {
   return prisma.irmItem.findFirst({ where: { code, deletedAt: null }, include: withRelations });
 }

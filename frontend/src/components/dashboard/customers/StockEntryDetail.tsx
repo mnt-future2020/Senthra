@@ -8,10 +8,12 @@ import * as customerService from "@/services/customer.service";
 import { listCategories, getCachedCategories } from "@/services/category.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
+import { useReferenceData } from "@/hooks/useReferenceData";
 import { FormSection, FormAsideCard, RequiredMark } from "@/components/ui/FormScaffold";
 import { Select } from "@/components/ui/Select";
 import { inputCls, labelCls, primaryBtn, secondaryBtn, hintCls } from "@/components/ui/styles";
 import type { CustomerStockEntry, StockEntryStatus } from "@/types/customer";
+import type { Category } from "@/types/category";
 
 // Standard units of measure — mirrors the IRM item form + backend UOM_OPTIONS.
 const UOM_OPTIONS = ["Each", "Metre", "Roll", "Pack", "Box", "Set", "Pair", "Reel"];
@@ -54,15 +56,13 @@ export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
       .map((c) => ({ id: c.id, name: c.name })),
   );
 
-  React.useEffect(() => {
-    listCategories()
-      .then((cats) =>
-        setCategories(
-          cats.filter((c) => c.status === "active").map((c) => ({ id: c.id, name: c.name })),
-        ),
-      )
-      .catch(() => {});
-  }, []);
+  useReferenceData([
+    {
+      label: "categories",
+      load: () => listCategories(),
+      onData: (cats: Category[]) => setCategories(cats.filter((c) => c.status === "active").map((c) => ({ id: c.id, name: c.name }))),
+    },
+  ]);
 
   // Form state — seeded from the entry.
   const [itemName, setItemName] = React.useState(entry.itemName);

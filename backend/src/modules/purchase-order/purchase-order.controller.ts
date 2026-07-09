@@ -6,9 +6,12 @@ import { param, queryInt } from "../../utils/request.js";
 import type {
   CreatePurchaseOrderInput,
   CreatePurchaseOrdersSplitInput,
+  PoAssignPmInput,
   PoAttachmentInput,
   PoCancelInput,
+  PoDeliveryDateInput,
   PoRejectInput,
+  PoSupplierAcceptInput,
   UpdatePurchaseOrderInput,
 } from "./purchase-order.validation.js";
 
@@ -16,7 +19,10 @@ import type {
 // `statuses` is a comma-separated list (e.g. statuses=sent,partially_received) for callers that
 // need several statuses in one query (the warehouse "Expected deliveries" worklist).
 export const listPurchaseOrders = asyncHandler(async (req, res) => {
-  const { search, status, statuses, priority, supplier, warehouse, sort, page, pageSize } = req.query;
+  const { search, status, statuses, priority, supplier, warehouse, pm, job, sort, page, pageSize } = req.query;
+  const actor = actorFrom(req);
+  // pm=me resolves to the signed-in user — the PM's "Awaiting my action" worklist.
+  const pmParam = typeof pm === "string" ? (pm === "me" ? actor.id ?? undefined : pm) : undefined;
   const result = await poService.listPurchaseOrders({
     search: typeof search === "string" ? search : undefined,
     status: typeof status === "string" ? status : undefined,
@@ -24,11 +30,25 @@ export const listPurchaseOrders = asyncHandler(async (req, res) => {
     priority: typeof priority === "string" ? priority : undefined,
     supplier: typeof supplier === "string" ? supplier : undefined,
     warehouse: typeof warehouse === "string" ? warehouse : undefined,
+    pm: pmParam,
+    job: typeof job === "string" ? job : undefined,
     sort: typeof sort === "string" ? sort : undefined,
     page: queryInt(page),
     pageSize: queryInt(pageSize),
-  }, actorFrom(req));
+  }, actor);
   res.json(result);
+});
+
+// GET /purchase-orders/pm-candidates?jobId= — eligible PMs for the Route-to-PM picker plus the
+// suggested default (the linked job's creator, when they qualify).
+export const listPmCandidates = asyncHandler(async (req, res) => {
+  const { jobId } = req.query;
+  res.json(await poService.resolvePmCandidates(typeof jobId === "string" ? jobId : undefined));
+});
+
+// GET /purchase-orders/suppliers/:supplierId/summary — the supplier detail "Procurement" tab.
+export const getSupplierProcurementSummary = asyncHandler(async (req, res) => {
+  res.json({ summary: await poService.getSupplierProcurementSummary(param(req, "supplierId")) });
 });
 
 // GET /purchase-orders/items/:irmItemId — POs referencing an IRM item (item detail "Purchase Orders" tab)
@@ -84,7 +104,9 @@ export const submitPurchaseOrder = asyncHandler(async (req, res) => {
   res.json({ purchaseOrder: await poService.submitPurchaseOrder(param(req, "id"), actorFrom(req)) });
 });
 export const approvePurchaseOrder = asyncHandler(async (req, res) => {
-  res.json({ purchaseOrder: await poService.approvePurchaseOrder(param(req, "id"), actorFrom(req)) });
+  // Returns { purchaseOrder, divertedToReview } — divertedToReview=true when a diverged PRF-born
+  // draft was routed to review instead of approved, so the client can message it correctly.
+  res.json(await poService.approvePurchaseOrder(param(req, "id"), actorFrom(req)));
 });
 export const rejectPurchaseOrder = asyncHandler(async (req, res) => {
   const { reason } = req.body as PoRejectInput;
@@ -99,6 +121,20 @@ export const cancelPurchaseOrder = asyncHandler(async (req, res) => {
 });
 export const closePurchaseOrder = asyncHandler(async (req, res) => {
   res.json({ purchaseOrder: await poService.closePurchaseOrder(param(req, "id"), actorFrom(req)) });
+});
+// POST /purchase-orders/:id/assign-pm — route an approved PO to a PM (or re-assign in pm_review).
+export const assignPmPurchaseOrder = asyncHandler(async (req, res) => {
+  const { pmUserId } = req.body as PoAssignPmInput;
+  res.json({ purchaseOrder: await poService.assignPmPurchaseOrder(param(req, "id"), pmUserId, actorFrom(req)) });
+});
+// POST /purchase-orders/:id/accept — record the supplier's acceptance (sent → supplier_accepted).
+export const recordSupplierAcceptance = asyncHandler(async (req, res) => {
+  res.json({ purchaseOrder: await poService.recordSupplierAcceptance(param(req, "id"), req.body as PoSupplierAcceptInput, actorFrom(req)) });
+});
+// PATCH /purchase-orders/:id/delivery-date — revise the confirmed delivery date (audited).
+export const updateConfirmedDeliveryDate = asyncHandler(async (req, res) => {
+  const { confirmedDeliveryDate, reason } = req.body as PoDeliveryDateInput;
+  res.json({ purchaseOrder: await poService.updateConfirmedDeliveryDate(param(req, "id"), confirmedDeliveryDate, reason, actorFrom(req)) });
 });
 
 // --- attachments ------------------------------------------------------------

@@ -5,6 +5,7 @@ import {
   poAttachmentSchema,
   poCancelSchema,
   poRejectSchema,
+  poSupplierAcceptSchema,
   updatePurchaseOrderSchema,
 } from "./purchase-order.validation.js";
 
@@ -93,6 +94,45 @@ describe("updatePurchaseOrderSchema", () => {
   it("rejects an empty items array when provided", () => {
     expect(updatePurchaseOrderSchema.safeParse({ items: [] }).success).toBe(false);
   });
+
+  // An EDIT must be able to CLEAR jobId / deliveryTerms via an explicit null (not omission).
+  it("accepts null to clear jobId / deliveryTerms / paymentTerms", () => {
+    expect(updatePurchaseOrderSchema.safeParse({ jobId: null, deliveryTerms: null, paymentTerms: null }).success).toBe(true);
+  });
+
+  it("accepts a valid Incoterm code and rejects an unknown one", () => {
+    expect(updatePurchaseOrderSchema.safeParse({ deliveryTerms: "DDP" }).success).toBe(true);
+    expect(updatePurchaseOrderSchema.safeParse({ deliveryTerms: "XYZ" }).success).toBe(false);
+  });
+
+  // paymentTerms max was raised to 100 to match the supplier's customPaymentTerms cap.
+  it("accepts a 100-char payment term but rejects 101", () => {
+    expect(updatePurchaseOrderSchema.safeParse({ paymentTerms: "x".repeat(100) }).success).toBe(true);
+    expect(updatePurchaseOrderSchema.safeParse({ paymentTerms: "x".repeat(101) }).success).toBe(false);
+  });
+});
+
+describe("poSupplierAcceptSchema — confirmed delivery can't precede acceptance", () => {
+  it("accepts a confirmed date on/after the accepted date", () => {
+    expect(poSupplierAcceptSchema.safeParse({ acceptedDate: "2026-07-20", confirmedDeliveryDate: "2026-07-25" }).success).toBe(true);
+    expect(poSupplierAcceptSchema.safeParse({ acceptedDate: "2026-07-20", confirmedDeliveryDate: "2026-07-20" }).success).toBe(true);
+  });
+
+  it("rejects a confirmed date before the accepted date", () => {
+    expect(poSupplierAcceptSchema.safeParse({ acceptedDate: "2026-07-20", confirmedDeliveryDate: "2026-07-10" }).success).toBe(false);
+  });
+
+  it("allows omitting the confirmed date entirely (accept first, schedule later)", () => {
+    expect(poSupplierAcceptSchema.safeParse({ acceptedDate: "2026-07-20" }).success).toBe(true);
+    expect(poSupplierAcceptSchema.safeParse({}).success).toBe(true);
+  });
+
+  it("allows a SAME-DAY confirmed delivery when acceptedDate is omitted (date-only compare, not now)", () => {
+    // Regression: comparing the date-only confirmed date (UTC midnight) against Date.now()
+    // (mid-day) wrongly rejected 'accept today, deliver today'. Both sides are normalised to the day.
+    const today = new Date().toISOString().slice(0, 10);
+    expect(poSupplierAcceptSchema.safeParse({ confirmedDeliveryDate: today }).success).toBe(true);
+  });
 });
 
 describe("workflow + attachment bodies", () => {
@@ -101,8 +141,10 @@ describe("workflow + attachment bodies", () => {
     expect(poRejectSchema.safeParse({ reason: "Wrong supplier" }).success).toBe(true);
   });
 
-  it("cancel reason is optional", () => {
-    expect(poCancelSchema.safeParse({}).success).toBe(true);
+  it("cancel requires a reason (explicit cancellation matrix)", () => {
+    expect(poCancelSchema.safeParse({}).success).toBe(false);
+    expect(poCancelSchema.safeParse({ reason: "   " }).success).toBe(false);
+    expect(poCancelSchema.safeParse({ reason: "No longer needed" }).success).toBe(true);
   });
 
   it("attachment rejects an unsupported file type", () => {

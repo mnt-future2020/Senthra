@@ -5,10 +5,12 @@ import { useRouter } from "next/navigation";
 import { ArrowLeftRight, Boxes, Download, Loader2, PackagePlus, Search } from "lucide-react";
 
 import * as inventoryService from "@/services/inventory.service";
-import { listWarehouses } from "@/services/warehouse.service";
+import { listWarehouses, type PagedWarehouses } from "@/services/warehouse.service";
 import { listIrmCategories } from "@/services/irm-category.service";
+import type { IrmCategory } from "@/types/irm-category";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
+import { useReferenceData } from "@/hooks/useReferenceData";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -80,13 +82,16 @@ export function InventoryView({ warehouseId, embedded }: { warehouseId?: string;
   }, [search]);
 
   // Filter option lists (active warehouses + IRM categories), loaded once.
-  React.useEffect(() => {
-    let active = true;
-    // Warehouse filter is hidden when locked to one warehouse, so skip that fetch.
-    if (!warehouseId) listWarehouses({ status: "active", pageSize: 100 }).then((r) => active && setWarehouses(r.warehouses.map((w) => ({ id: w.id, name: w.name, code: w.code }))), () => {});
-    listIrmCategories().then((cs) => active && setCategories(cs.map((c) => ({ id: c.id, name: c.name }))), () => {});
-    return () => { active = false; };
-  }, [warehouseId]);
+  useReferenceData(
+    [
+      // Warehouse filter is hidden when locked to one warehouse, so skip that fetch.
+      ...(warehouseId
+        ? []
+        : [{ label: "warehouses", load: () => listWarehouses({ status: "active", pageSize: 100 }), onData: (r: PagedWarehouses) => setWarehouses(r.warehouses.map((w) => ({ id: w.id, name: w.name, code: w.code }))) }]),
+      { label: "categories", load: () => listIrmCategories(), onData: (cs: IrmCategory[]) => setCategories(cs.map((c) => ({ id: c.id, name: c.name }))) },
+    ],
+    [warehouseId],
+  );
 
   React.useEffect(() => {
     let active = true;

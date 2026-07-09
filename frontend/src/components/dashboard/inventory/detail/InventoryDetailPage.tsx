@@ -7,6 +7,7 @@ import { ArrowLeft, ArrowLeftRight, MapPin, ScrollText } from "lucide-react";
 import * as inventoryService from "@/services/inventory.service";
 import * as stockPositionService from "@/services/stockPosition.service";
 import { useAuth } from "@/hooks/useAuth";
+import { useReferenceData } from "@/hooks/useReferenceData";
 import { Pagination } from "@/components/ui/Pagination";
 import { Skeleton } from "@/components/ui/Skeleton";
 import {
@@ -238,14 +239,13 @@ function ActivityBlocks({ irmItemId }: { irmItemId: string }) {
   const [holders, setHolders] = React.useState<ItemHolders | null>(null);
   const [jobs, setJobs] = React.useState<ItemJob[] | null>(null);
 
-  React.useEffect(() => {
-    let active = true;
-    stockPositionService.getItemHolders(irmItemId).then((r) => active && setHolders(r), () => {});
-    stockPositionService.getItemJobs(irmItemId).then((r) => active && setJobs(r), () => {});
-    return () => {
-      active = false;
-    };
-  }, [irmItemId]);
+  useReferenceData(
+    [
+      { label: "stock holders", load: () => stockPositionService.getItemHolders(irmItemId), onData: (r) => setHolders(r) },
+      { label: "jobs", load: () => stockPositionService.getItemJobs(irmItemId), onData: (r) => setJobs(r) },
+    ],
+    [irmItemId],
+  );
 
   const engineers = holders?.engineers ?? [];
   const customers = holders?.customers ?? [];

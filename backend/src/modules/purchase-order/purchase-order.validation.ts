@@ -10,6 +10,24 @@ const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 export const PO_PRIORITIES = ["low", "normal", "high", "urgent"] as const;
 export const PO_ATTACHMENT_TYPES = ["pdf", "docx", "png", "jpg"] as const;
 
+// Delivery Terms — the practical UK subset of Incoterms 2020 (the terms actually used in UK
+// material procurement; the maritime-only terms FAS/FOB/CFR/CIF are intentionally excluded).
+// `code` is stored on the PO/PRF; `label` is the human name shown in the UI + printed on the PO.
+// Ordered most-common-first for UK-domestic buying (DDP = supplier delivers all-in to our door).
+export const INCOTERMS = [
+  { code: "DDP", label: "DDP — Delivered Duty Paid" },
+  { code: "DAP", label: "DAP — Delivered at Place" },
+  { code: "DPU", label: "DPU — Delivered at Place Unloaded" },
+  { code: "FCA", label: "FCA — Free Carrier" },
+  { code: "CPT", label: "CPT — Carriage Paid To" },
+  { code: "CIP", label: "CIP — Carriage and Insurance Paid To" },
+  { code: "EXW", label: "EXW — Ex Works" },
+] as const;
+export const INCOTERM_CODES = INCOTERMS.map((t) => t.code) as unknown as [string, ...string[]];
+// Resolve a stored code to its printable label (falls back to the raw code if unknown).
+export const incotermLabel = (code: string | null | undefined): string =>
+  INCOTERMS.find((t) => t.code === code)?.label ?? (code ?? "");
+
 const emptyToUndef = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
 
 const requiredDate = (label: string) =>
@@ -43,7 +61,12 @@ const lineSchema = z.object({
     z.coerce.number().min(0, "VAT can't be negative.").max(100, "VAT must be 0–100%.").optional(),
   ),
   notes: z.string().trim().max(2000).optional(),
-});
+}).refine(
+  // Keep quantity × unit price within JS's safe-integer range so the line total (and the totals
+  // summed from it) stay EXACT — the per-field maxes alone (1e7 × 1e9 = 1e16) can exceed it.
+  (l) => l.quantity * l.unitPricePence <= Number.MAX_SAFE_INTEGER,
+  { message: "This line total is too large. Reduce the quantity or unit price.", path: ["unitPricePence"] },
+);
 export type POLineInput = z.infer<typeof lineSchema>;
 
 const noDupItems = (lines: { irmItemId: string }[]) => {
@@ -60,8 +83,17 @@ const sharedHeader = {
   referenceNumber: z.string().trim().max(60).optional(),
   description: z.string().trim().max(2000).optional(),
   priority: z.preprocess(emptyToUndef, z.enum(PO_PRIORITIES).optional()),
+  // Project reference — an optional Job link plus a free-text fallback. `.nullable()` so an EDIT
+  // can explicitly CLEAR the link: the form sends `null` (not omitted), which reaches the service
+  // and unsets the field. `emptyToUndef` only strips empty strings, so `null` passes through.
+  jobId: z.preprocess(emptyToUndef, z.string().regex(OBJECT_ID_RE, "Select a job.").nullable().optional()),
+  projectRef: z.string().trim().max(120).optional(),
   deliveryAddress: z.string().trim().max(300).optional(),
   deliveryInstructions: z.string().trim().max(500).optional(),
+  // Commercial terms — Incoterm code (validated against the UK subset) + agreed payment term text.
+  // `.nullable()` on both for the same clear-on-edit reason as jobId above.
+  deliveryTerms: z.preprocess(emptyToUndef, z.enum(INCOTERM_CODES).nullable().optional()),
+  paymentTerms: z.string().trim().max(100).nullable().optional(),
   internalNotes: z.string().trim().max(2000).optional(),
   supplierNotes: z.string().trim().max(2000).optional(),
 };
@@ -148,8 +180,57 @@ export const poRejectSchema = z.object({
 });
 export type PoRejectInput = z.infer<typeof poRejectSchema>;
 
-export const poCancelSchema = z.object({ reason: z.string().trim().max(500).optional() });
+// Cancellation reason is MANDATORY (explicit cancellation matrix — the reason is audited and,
+// on an already-issued order, referenced by the supplier cancellation email).
+export const poCancelSchema = z.object({
+  reason: z.string({ error: "A reason is required." }).trim().min(1, "A reason is required.").max(500),
+});
 export type PoCancelInput = z.infer<typeof poCancelSchema>;
+
+// --- PM routing (approved → pm_review; re-assign while in pm_review) ---------
+export const poAssignPmSchema = z.object({
+  pmUserId: z.string({ error: "Select a project manager." }).regex(OBJECT_ID_RE, "Select a project manager."),
+});
+export type PoAssignPmInput = z.infer<typeof poAssignPmSchema>;
+
+// --- supplier acceptance (sent → supplier_accepted) --------------------------
+const optionalDateField = z.preprocess(
+  emptyToUndef,
+  z
+    .string()
+    .refine((v) => !Number.isNaN(Date.parse(v)), "Enter a valid date.")
+    .optional(),
+);
+export const poSupplierAcceptSchema = z
+  .object({
+    acceptedDate: optionalDateField, // defaults to "now" server-side
+    confirmedDeliveryDate: optionalDateField,
+    supplierAckReference: z.string().trim().max(120).optional(),
+    notes: z.string().trim().max(2000).optional(),
+  })
+  // A confirmed delivery date can't precede the acceptance date (a supplier can't promise to
+  // deliver BEFORE they accepted). This is a DATE-ONLY comparison: both sides are compared at the
+  // day level so "accept today, deliver today" is allowed. When acceptedDate is omitted the server
+  // stamps "now" — but we must compare against TODAY'S DATE, not the current instant, or a same-day
+  // confirmed delivery (parsed to 00:00 UTC) would be wrongly rejected as "before" a mid-day now.
+  .refine(
+    (d) => {
+      if (!d.confirmedDeliveryDate) return true;
+      const dayStart = (v: string) => Date.parse(v.slice(0, 10)); // normalise to the date's 00:00 UTC
+      const confirmed = dayStart(d.confirmedDeliveryDate);
+      const accepted = d.acceptedDate ? dayStart(d.acceptedDate) : dayStart(new Date().toISOString());
+      return Number.isNaN(confirmed) || Number.isNaN(accepted) || confirmed >= accepted;
+    },
+    { message: "Confirmed delivery date can't be before the acceptance date.", path: ["confirmedDeliveryDate"] },
+  );
+export type PoSupplierAcceptInput = z.infer<typeof poSupplierAcceptSchema>;
+
+// --- confirmed-delivery-date revision (supplier_accepted only; audited with prev/new/reason) --
+export const poDeliveryDateSchema = z.object({
+  confirmedDeliveryDate: requiredDate("Confirmed delivery date"),
+  reason: z.string().trim().max(500).optional(),
+});
+export type PoDeliveryDateInput = z.infer<typeof poDeliveryDateSchema>;
 
 // --- attachment upload (data URI from the form) -----------------------------
 const TEN_MB = 10 * 1024 * 1024;

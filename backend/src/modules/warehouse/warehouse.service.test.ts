@@ -14,6 +14,12 @@ vi.mock("#modules/warehouse-type/warehouse-type.service.js", () => ({
 }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 vi.mock("../../lib/geocode.js", () => ({ geocodePostcode: vi.fn().mockResolvedValue(null) }));
+// Delete-dependency checkers — isolate them (no real Prisma). Each defaults to 0 (deletable);
+// a test that needs an in-use warehouse overrides the relevant mock.
+vi.mock("#modules/purchase-request/purchase-request.repository.js", () => ({ countByWarehouse: vi.fn().mockResolvedValue(0) }));
+vi.mock("#modules/purchase-order/purchase-order.repository.js", () => ({ countByWarehouse: vi.fn().mockResolvedValue(0) }));
+vi.mock("#modules/goods-in/goods-in.repository.js", () => ({ countByWarehouse: vi.fn().mockResolvedValue(0) }));
+vi.mock("#modules/inventory/inventory.repository.js", () => ({ countBalancesWithStockByWarehouse: vi.fn().mockResolvedValue(0) }));
 
 import * as warehouseRepo from "./warehouse.repository.js";
 import * as userRepo from "#modules/user/user.repository.js";

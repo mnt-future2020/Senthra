@@ -82,6 +82,18 @@ export interface PurchaseOrderDocumentData {
     reference: string;
     currency: string;
     priority: string;
+    // Project reference — the linked job (e.g. "JOB-2026-0001 — Fibre rollout") or the free-text
+    // projectRef. Empty when the PO has neither. Printed in the order-meta block.
+    project: string;
+  };
+  // Commercial terms + accountability the client's official PO must carry. Each is an empty string
+  // when unset; the renderer omits a blank row so the PO never shows an empty label.
+  terms: {
+    delivery: string; // Incoterm label (e.g. "DDP — Delivered Duty Paid")
+    deliveryInstructions: string; // practical delivery note (access hours, contact, loading bay)
+    payment: string; // agreed payment term for this order
+    preparedBy: string; // po.createdBy (who raised it)
+    approvedBy: string; // po.approvedBy (who approved it)
   };
   lines: PoDocLine[];
   totals: { subtotal: string; vat: string; grandTotal: string };

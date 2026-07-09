@@ -120,4 +120,22 @@ describe("generatePurchaseOrderPdf", () => {
     expect(isPdf(out.buffer)).toBe(true);
     expect(countPdfPages(out.buffer)).toBe(1);
   });
+
+  // Renders end-to-end through pdfkit WITH the Terms & Authorisation section populated (project,
+  // delivery/payment terms, prepared-by, approved-by) — proves drawTerms doesn't throw at runtime.
+  it("renders a valid PDF with the terms & authorisation section populated", async () => {
+    const out = await generatePurchaseOrderPdf(
+      po({
+        deliveryInstructions: "Call ahead; forklift required.",
+        createdBy: "finance@x.co",
+        approvedBy: "director@x.co",
+        projectRef: "PROJ-77",
+        job: null,
+        supplier: { ...po().supplier, paymentTerms: "30 Days", customPaymentTerms: null },
+      }),
+      "viewer@x.co",
+    );
+    expect(isPdf(out.buffer)).toBe(true);
+    expect(countPdfPages(out.buffer)).toBe(1);
+  });
 });

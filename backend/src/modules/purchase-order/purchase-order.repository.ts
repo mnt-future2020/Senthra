@@ -48,6 +48,11 @@ const withRelations = {
     include: { irmItem: { select: { id: true, code: true, name: true, status: true } } },
   },
   attachments: { orderBy: { createdAt: "asc" } },
+  // Procurement-chain slices: the source PRF, the optional job, and the GRNs received against
+  // this PO — compact selects only (the detail chain strip + linked badges render from these).
+  purchaseRequest: { select: { id: true, code: true, status: true } },
+  job: { select: { id: true, jobNumber: true, name: true, status: true } },
+  goodsReceipts: { select: { id: true, code: true, status: true, receivedDate: true }, orderBy: { createdAt: "asc" } },
 } satisfies Prisma.PurchaseOrderInclude;
 
 export type PurchaseOrderWithRelations = Prisma.PurchaseOrderGetPayload<{ include: typeof withRelations }>;
@@ -81,6 +86,9 @@ export interface PurchaseOrderListFilters {
   priority?: string;
   supplierId?: string;
   warehouseId?: string;
+  // The assigned PM — feeds the "Awaiting my action" worklist (pm_review + pmUserId = me).
+  pmUserId?: string;
+  jobId?: string;
   // Warehouse-access scope (from warehouseScopeFilter): `undefined` = unrestricted (no filter);
   // an array constrains the list to POs delivering to those warehouses. NOTE: a scoped actor only
   // ever sees POs WITH a warehouseId in their set — POs whose warehouseId is still null (header not
@@ -97,6 +105,8 @@ export function buildWhere(filters: PurchaseOrderListFilters): Prisma.PurchaseOr
   if (filters.priority) where.priority = filters.priority;
   if (filters.supplierId) where.supplierId = filters.supplierId;
   if (filters.warehouseId) where.warehouseId = filters.warehouseId;
+  if (filters.pmUserId) where.pmUserId = filters.pmUserId;
+  if (filters.jobId) where.jobId = filters.jobId;
   // Warehouse-access scoping — AND with any explicit warehouse filter above. When a scoped actor
   // also filters by a specific warehouse, both must hold (an out-of-scope pick correctly matches none).
   if (filters.warehouseIds !== undefined) {
@@ -225,12 +235,33 @@ export function setStatusTx(tx: Prisma.TransactionClient, purchaseOrderId: strin
 }
 
 // Warehouse Inventory READ seam: outstanding (ordered − received) lines on open POs (sent /
-// partially_received) delivering an item to a warehouse — feeds the inventory detail "Incoming".
+// supplier_accepted / partially_received) delivering an item to a warehouse — feeds the
+// inventory detail "Incoming".
 export function incomingLinesForItemWarehouse(irmItemId: string, warehouseId: string) {
   return prisma.purchaseOrderItem.findMany({
-    where: { irmItemId, purchaseOrder: { is: { warehouseId, status: { in: ["sent", "partially_received"] }, deletedAt: null } } },
+    where: { irmItemId, purchaseOrder: { is: { warehouseId, status: { in: ["sent", "supplier_accepted", "partially_received"] }, deletedAt: null } } },
     select: { quantity: true, receivedQuantity: true },
   });
+}
+
+// --- supplier procurement summary (the supplier detail "Procurement" tab) --------------------
+// Status → count map plus total spend (received/closed orders only). Deliberately no
+// lead-time / on-time metrics yet — computable later from sentAt/confirmedDeliveryDate/GRN
+// dates without any schema change.
+export async function statusCountsForSupplier(supplierId: string): Promise<Record<string, number>> {
+  const rows = await prisma.purchaseOrder.groupBy({
+    by: ["status"],
+    where: { supplierId, deletedAt: null },
+    _count: { _all: true },
+  });
+  return Object.fromEntries(rows.map((r) => [r.status, r._count._all]));
+}
+export async function spendPenceForSupplier(supplierId: string): Promise<number> {
+  const agg = await prisma.purchaseOrder.aggregate({
+    where: { supplierId, deletedAt: null, status: { in: ["fully_received", "closed"] } },
+    _sum: { grandTotalPence: true },
+  });
+  return agg._sum.grandTotalPence ?? 0;
 }
 
 // --- attachments ----------------------------------------------------------------------------
@@ -358,6 +389,35 @@ export async function createManyWithCodes(
     }
   }
   throw new Error("Could not allocate unique purchase-order codes.");
+}
+
+// --- PRF-conversion seam (tx-aware; called only from the purchase-request convert transaction) --
+// The conversion transaction lives in purchase-request.service (mirroring how Goods In owns its
+// completion transaction and calls PO tx-helpers). These expose exactly what it needs: gap-safe
+// in-tx code allocation, in-tx PO creation, and the retry predicates.
+export { ensurePoCounter, fastForwardCounter as fastForwardPoCounter, isCodeConflict as isPoCodeConflict, isWriteConflict as isPoWriteConflict };
+
+// Allocate the next PO code INSIDE an existing transaction — a rollback reclaims the number.
+export async function allocatePoCodeTx(tx: Prisma.TransactionClient): Promise<string> {
+  const c = await tx.counter.update({ where: { key: PO_CODE_PREFIX }, data: { seq: { increment: 1 } }, select: { seq: true } });
+  return `${PO_CODE_PREFIX}-${String(c.seq).padStart(4, "0")}`;
+}
+
+// Create a PO (header + lines + attachment rows) INSIDE an existing transaction. `deletedAt`
+// persisted as an explicit null for the Prisma+Mongo read-filter reason documented below.
+export async function createPoTx(
+  tx: Prisma.TransactionClient,
+  header: Omit<Prisma.PurchaseOrderUncheckedCreateInput, "code">,
+  code: string,
+  lines: PoLineRow[],
+  attachments: Omit<Prisma.PurchaseOrderAttachmentUncheckedCreateInput, "purchaseOrderId">[] = [],
+): Promise<string> {
+  const po = await tx.purchaseOrder.create({ data: { deletedAt: null, ...header, code } });
+  if (lines.length) await tx.purchaseOrderItem.createMany({ data: lines.map((l) => ({ purchaseOrderId: po.id, ...l })) });
+  if (attachments.length) {
+    await tx.purchaseOrderAttachment.createMany({ data: attachments.map((a) => ({ ...a, purchaseOrderId: po.id })) });
+  }
+  return po.id;
 }
 
 // Create a PO (header + lines + totals) atomically with a freshly-allocated, collision-safe code.

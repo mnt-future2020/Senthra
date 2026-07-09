@@ -9,6 +9,7 @@ import { listIrmTypes, createIrmType } from "@/services/irm-type.service";
 import { listIrmCategories, createIrmCategory } from "@/services/irm-category.service";
 import { listSuppliers } from "@/services/supplier.service";
 import { useDashboard } from "@/hooks/useDashboard";
+import { useReferenceData } from "@/hooks/useReferenceData";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import type { IrmItem, IrmOwner } from "@/types/irm";
 import type { IrmType } from "@/types/irm-type";
@@ -101,30 +102,29 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
   const [error, setError] = React.useState<string | null>(null);
   const [errors, setErrors] = React.useState<Record<string, string>>({});
 
-  React.useEffect(() => {
-    let active = true;
-    listIrmTypes().then(
-      (t) => {
-        if (!active) return;
-        setTypes(t);
-        if (mode === "create") setTypeId((cur) => cur || firstActiveId(t));
+  useReferenceData(
+    [
+      {
+        label: "types",
+        load: () => listIrmTypes(),
+        onData: (t) => {
+          setTypes(t);
+          if (mode === "create") setTypeId((cur) => cur || firstActiveId(t));
+        },
       },
-      () => {},
-    );
-    listIrmCategories().then(
-      (c) => {
-        if (!active) return;
-        setCategories(c);
-        if (mode === "create") setIrmCategoryId((cur) => cur || firstActiveId(c));
+      {
+        label: "categories",
+        load: () => listIrmCategories(),
+        onData: (c) => {
+          setCategories(c);
+          if (mode === "create") setIrmCategoryId((cur) => cur || firstActiveId(c));
+        },
       },
-      () => {},
-    );
-    irmService.listOwnerOptions().then((m) => active && setOwners(m), () => {});
-    listSuppliers({ status: "active", pageSize: 100 }).then((r) => active && setSuppliers(r.suppliers), () => {});
-    return () => {
-      active = false;
-    };
-  }, [mode]);
+      { label: "owners", load: () => irmService.listOwnerOptions(), onData: (m) => setOwners(m) },
+      { label: "suppliers", load: () => listSuppliers({ status: "active", pageSize: 100 }), onData: (r) => setSuppliers(r.suppliers) },
+    ],
+    [mode],
+  );
 
   const typeOptions = React.useMemo(() => {
     const act = types.filter((t) => t.status === "active");

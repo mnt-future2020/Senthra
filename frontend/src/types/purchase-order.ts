@@ -5,7 +5,9 @@ export type PoStatus =
   | "draft"
   | "pending_approval"
   | "approved"
+  | "pm_review"
   | "sent"
+  | "supplier_accepted"
   | "partially_received"
   | "fully_received"
   | "closed"
@@ -68,8 +70,27 @@ export interface PurchaseOrder {
   supplier: PoSupplierRef | null;
   warehouseId: string;
   warehouse: PoWarehouseRef | null;
+  // Procurement chain: the source PRF (when generated from one), the optional job link, and
+  // the GRNs received against this PO.
+  purchaseRequestId: string | null;
+  purchaseRequest: { id: string; code: string; status: string } | null;
+  jobId: string | null;
+  job: { id: string; jobNumber: string; name: string; status: string } | null;
+  projectRef: string | null;
+  goodsReceipts: { id: string; code: string; status: string; receivedDate: string | null }[];
   status: PoStatus;
   priority: PoPriority;
+  // PM routing (approved → pm_review → sent).
+  pmUserId: string | null;
+  pmName: string | null;
+  pmEmail: string | null;
+  pmAssignedAt: string | null;
+  // Supplier acceptance (sent → supplier_accepted).
+  supplierAcceptedAt: string | null;
+  supplierAcceptedBy: string | null;
+  supplierAckReference: string | null;
+  confirmedDeliveryDate: string | null;
+  supplierAcceptNotes: string | null;
   referenceNumber: string | null;
   description: string | null;
   orderDate: string;
@@ -83,6 +104,12 @@ export interface PurchaseOrder {
   grandTotal: number;
   deliveryAddress: string | null;
   deliveryInstructions: string | null;
+  // Commercial terms: `deliveryTerms` is the Incoterm code (e.g. "DDP"), `deliveryTermsLabel`
+  // its resolved label; `paymentTerms` is the agreed term for THIS order (pre-filled from the
+  // supplier default but editable per-order).
+  deliveryTerms: string | null;
+  deliveryTermsLabel: string | null;
+  paymentTerms: string | null;
   internalNotes: string | null;
   supplierNotes: string | null;
   items: PoItem[];

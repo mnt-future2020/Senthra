@@ -145,6 +145,9 @@ export function PurchaseOrdersView() {
 
   // Derive filter state from URL params
   const statusFilter = (searchParams.get("status") as "all" | PoStatus) ?? "all";
+  // "Awaiting my action" — the PM worklist (orders in pm_review assigned to me). Overrides the
+  // status filter while active; only offered to users who can actually send (i.e. act as a PM).
+  const awaitingMine = searchParams.get("awaiting") === "1";
   const search = searchParams.get("q") ?? "";
   const page = Math.max(1, Number(searchParams.get("page")) || 1);
 
@@ -194,7 +197,9 @@ export function PurchaseOrdersView() {
   React.useEffect(() => {
     let active = true;
     (async () => {
-      const params = { search: search || undefined, status: statusFilter === "all" ? undefined : statusFilter, page, pageSize: PAGE_SIZE };
+      const params = awaitingMine
+        ? { search: search || undefined, status: "pm_review", pm: "me", page, pageSize: PAGE_SIZE }
+        : { search: search || undefined, status: statusFilter === "all" ? undefined : statusFilter, page, pageSize: PAGE_SIZE };
       const cached = poService.getCachedPurchaseOrders(params);
       if (active && cached) setData(cached);
       setLoading(true);
@@ -212,11 +217,11 @@ export function PurchaseOrdersView() {
     return () => {
       active = false;
     };
-  }, [search, statusFilter, page, refreshKey]);
+  }, [search, statusFilter, awaitingMine, page, refreshKey]);
 
   const orders = data?.purchaseOrders ?? [];
   const showSkeleton = loading && orders.length === 0;
-  const isFiltered = statusFilter !== "all" || Boolean(search);
+  const isFiltered = statusFilter !== "all" || Boolean(search) || awaitingMine;
 
   const onDelete = async () => {
     if (!confirm.po) return;
@@ -251,7 +256,18 @@ export function PurchaseOrdersView() {
             className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
           />
         </div>
-        <Select size="sm" value={statusFilter} onChange={(v) => patchParams({ status: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All statuses" }, ...(Object.keys(PO_STATUS_LABELS) as PoStatus[]).map((s) => ({ value: s, label: PO_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
+        <Select size="sm" value={statusFilter} onChange={(v) => patchParams({ status: v === "all" ? null : v, awaiting: null }, true)} options={[{ value: "all", label: "All statuses" }, ...(Object.keys(PO_STATUS_LABELS) as PoStatus[]).map((s) => ({ value: s, label: PO_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" disabled={awaitingMine} />
+        {/* PM worklist quick filter — orders routed to ME for review + send. */}
+        {can("purchase_orders.send") && (
+          <button
+            type="button"
+            onClick={() => patchParams({ awaiting: awaitingMine ? null : "1", status: null }, true)}
+            aria-pressed={awaitingMine}
+            className={`shrink-0 rounded-lg border px-3 py-2.5 text-xs font-bold transition-all ${awaitingMine ? "border-[var(--accent)] bg-[var(--accent-10)] text-[var(--accent)]" : "border-[var(--border)] bg-[var(--surface-2)] text-[var(--ink)] hover:border-[var(--accent)]"}`}
+          >
+            Awaiting my action
+          </button>
+        )}
         {can("purchase_orders.create") && (
           <button onClick={() => router.push("/dashboard/purchase-orders/new")} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 sm:ml-auto">
             <Plus className="h-4 w-4" /> New order

@@ -549,6 +549,25 @@ export async function requireActiveIrmItem(itemId: string): Promise<IrmItemWithR
   return i;
 }
 
+// Batch counterpart to requireActiveIrmItem — validates many ids in ONE query instead of N, for
+// the procurement write paths (a PRF/PO with many lines). Same guards and error messages as the
+// singular form: every id must be a valid ObjectId, still exist, and be active. Returns a Map keyed
+// by id so callers can look each line's item up in O(1).
+export async function requireActiveIrmItems(itemIds: string[]): Promise<Map<string, IrmItemWithRelations>> {
+  const uniqueIds = [...new Set(itemIds)];
+  for (const id of uniqueIds) {
+    if (!id || !OBJECT_ID_RE.test(id)) throw badRequest("Select an IRM item.");
+  }
+  const rows = await irmRepo.findByIds(uniqueIds);
+  const byId = new Map(rows.map((i) => [i.id, i]));
+  for (const id of uniqueIds) {
+    const i = byId.get(id);
+    if (!i) throw badRequest("Selected IRM item no longer exists.");
+    if ((i.status ?? "active") !== "active") throw conflict("Selected IRM item is inactive.");
+  }
+  return byId;
+}
+
 // Scan-lookup helper for the goods-management flow: find an active IRM item by its display
 // code (e.g. "IRM-0004"), free-text barcode field, or SKU (case-insensitive).
 // Returns null if nothing matches — callers then try the customer-stock path.

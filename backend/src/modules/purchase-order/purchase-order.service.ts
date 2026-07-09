@@ -4,6 +4,10 @@ import { randomUUID } from "node:crypto";
 import * as poRepo from "./purchase-order.repository.js";
 import type { PoLineRow, PurchaseOrderWithRelations } from "./purchase-order.repository.js";
 import * as poEmail from "./purchase-order.email.js";
+import * as prfRepo from "#modules/purchase-request/purchase-request.repository.js";
+import * as jobRepo from "#modules/job/job.repository.js";
+import * as userRepo from "#modules/user/user.repository.js";
+import * as documentService from "#modules/document/document.service.js";
 import * as supplierService from "#modules/supplier/supplier.service.js";
 import * as warehouseService from "#modules/warehouse/warehouse.service.js";
 import * as irmService from "#modules/irm/irm.service.js";
@@ -12,25 +16,34 @@ import type { AuditActor } from "#modules/audit/audit.service.js";
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
-import { badRequest, conflict, notFound } from "../../utils/http-error.js";
+import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
 import type {
   CreatePurchaseOrderInput,
   CreatePurchaseOrdersSplitInput,
   POLineInput,
   PoAttachmentInput,
+  PoSupplierAcceptInput,
   UpdatePurchaseOrderInput,
 } from "./purchase-order.validation.js";
+import { incotermLabel } from "./purchase-order.validation.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 
+// The archived document-of-record attachment written at send time (system-owned, undeletable).
+export const ISSUED_PO_ATTACHMENT_LABEL = "Issued PO — as sent";
+
 // ── Status state machine (forward-only; backend-enforced). The one sanctioned reverse edge is
-// pending_approval → draft (Reject for rework). The received states are reachable only via the
-// Goods In seam, never a PO endpoint. ────────────────────────────────────────────────────────
+// pending_approval → draft (Reject for rework). draft → approved is a guarded FAST PATH for
+// PRF-born POs only (commercial-equality check in approvePurchaseOrder — finance already
+// reviewed those numbers on the PRF). The received states are reachable only via the Goods In
+// seam, never a PO endpoint. ────────────────────────────────────────────────────────────────
 const ALLOWED_TRANSITIONS: Record<string, string[]> = {
   draft: ["pending_approval", "cancelled"],
   pending_approval: ["approved", "draft", "cancelled"], // → draft = Reject (rework)
-  approved: ["sent", "cancelled"],
-  sent: ["partially_received", "fully_received", "cancelled"], // received = Goods In
+  approved: ["pm_review", "sent", "cancelled"], // pm_review = Route to PM; sent = direct issue
+  pm_review: ["sent", "cancelled"], // sent = the assigned PM issues it (guarded)
+  sent: ["supplier_accepted", "partially_received", "fully_received", "cancelled"],
+  supplier_accepted: ["partially_received", "fully_received", "cancelled"],
   partially_received: ["fully_received", "closed"],
   fully_received: ["closed"],
   closed: [],
@@ -95,8 +108,27 @@ export interface PublicPurchaseOrder {
   supplier: PublicPoSupplier | null;
   warehouseId: string;
   warehouse: PublicPoWarehouse | null;
+  // Procurement chain: the source PRF (when generated from one), the optional job, and the
+  // GRNs received against this PO.
+  purchaseRequestId: string | null;
+  purchaseRequest: { id: string; code: string; status: string } | null;
+  jobId: string | null;
+  job: { id: string; jobNumber: string; name: string; status: string } | null;
+  projectRef: string | null;
+  goodsReceipts: { id: string; code: string; status: string; receivedDate: string | null }[];
   status: string;
   priority: string;
+  // PM routing.
+  pmUserId: string | null;
+  pmName: string | null;
+  pmEmail: string | null;
+  pmAssignedAt: string | null;
+  // Supplier acceptance.
+  supplierAcceptedAt: string | null;
+  supplierAcceptedBy: string | null;
+  supplierAckReference: string | null;
+  confirmedDeliveryDate: string | null;
+  supplierAcceptNotes: string | null;
   referenceNumber: string | null;
   description: string | null;
   orderDate: string;
@@ -110,6 +142,9 @@ export interface PublicPurchaseOrder {
   grandTotal: number;
   deliveryAddress: string | null;
   deliveryInstructions: string | null;
+  deliveryTerms: string | null; // Incoterm code
+  deliveryTermsLabel: string | null; // resolved human label
+  paymentTerms: string | null;
   internalNotes: string | null;
   supplierNotes: string | null;
   items: PublicPoItem[];
@@ -175,8 +210,25 @@ function toPublic(po: PurchaseOrderWithRelations): PublicPurchaseOrder {
     warehouse: po.warehouse
       ? { id: po.warehouse.id, code: po.warehouse.code, name: po.warehouse.name, address: warehouseAddress(po.warehouse) }
       : null,
+    purchaseRequestId: po.purchaseRequestId,
+    purchaseRequest: po.purchaseRequest
+      ? { id: po.purchaseRequest.id, code: po.purchaseRequest.code, status: po.purchaseRequest.status }
+      : null,
+    jobId: po.jobId,
+    job: po.job ? { id: po.job.id, jobNumber: po.job.jobNumber, name: po.job.name, status: po.job.status } : null,
+    projectRef: po.projectRef,
+    goodsReceipts: po.goodsReceipts.map((g) => ({ id: g.id, code: g.code, status: g.status, receivedDate: iso(g.receivedDate) })),
     status: po.status ?? "draft",
     priority: po.priority ?? "normal",
+    pmUserId: po.pmUserId,
+    pmName: po.pmName,
+    pmEmail: po.pmEmail,
+    pmAssignedAt: iso(po.pmAssignedAt),
+    supplierAcceptedAt: iso(po.supplierAcceptedAt),
+    supplierAcceptedBy: po.supplierAcceptedBy,
+    supplierAckReference: po.supplierAckReference,
+    confirmedDeliveryDate: iso(po.confirmedDeliveryDate),
+    supplierAcceptNotes: po.supplierAcceptNotes,
     referenceNumber: po.referenceNumber,
     description: po.description,
     orderDate: po.orderDate.toISOString(),
@@ -190,6 +242,9 @@ function toPublic(po: PurchaseOrderWithRelations): PublicPurchaseOrder {
     grandTotal: pounds(po.grandTotalPence),
     deliveryAddress: po.deliveryAddress,
     deliveryInstructions: po.deliveryInstructions,
+    deliveryTerms: po.deliveryTerms,
+    deliveryTermsLabel: po.deliveryTerms ? incotermLabel(po.deliveryTerms) : null,
+    paymentTerms: po.paymentTerms,
     internalNotes: po.internalNotes,
     supplierNotes: po.supplierNotes,
     items: po.items.map((i) => ({
@@ -248,10 +303,12 @@ function computeTotals(lines: { quantity: number; unitPricePence: number; vatRat
 
 // Validate each line's IRM item is ACTIVE, snapshot its name/sku/unit, and compute the line total.
 async function buildLineRows(items: POLineInput[]): Promise<PoLineRow[]> {
+  // One batched active-item validation for the whole set (not N sequential lookups).
+  const itemsById = await irmService.requireActiveIrmItems(items.map((l) => l.irmItemId));
   const rows: PoLineRow[] = [];
   for (let i = 0; i < items.length; i++) {
     const line = items[i];
-    const item = await irmService.requireActiveIrmItem(line.irmItemId);
+    const item = itemsById.get(line.irmItemId)!; // guaranteed present + active by requireActiveIrmItems
     const vatRate = line.vatRate ?? item.vatRatePercent ?? 0;
     rows.push({
       irmItemId: line.irmItemId,
@@ -269,6 +326,22 @@ async function buildLineRows(items: POLineInput[]): Promise<PoLineRow[]> {
   return rows;
 }
 
+// Validate an optional job link (must exist and not be soft-deleted). Returns the id or null.
+// null/undefined/"" all resolve to null (no link / cleared).
+async function resolveJobId(jobId: string | null | undefined): Promise<string | null> {
+  if (!jobId) return null;
+  const job = await jobRepo.findById(jobId);
+  if (!job) throw badRequest("Selected job no longer exists.");
+  return jobId;
+}
+
+// The supplier's default payment-term TEXT ("Custom" → its free-text customPaymentTerms). Used to
+// pre-fill a PO's editable paymentTerms when the caller doesn't supply one.
+function supplierDefaultPaymentTerms(s: { paymentTerms: string | null; customPaymentTerms?: string | null }): string | null {
+  if (!s.paymentTerms) return null;
+  return s.paymentTerms === "Custom" ? (s.customPaymentTerms ?? null) : s.paymentTerms;
+}
+
 export interface ListPurchaseOrdersParams {
   search?: string;
   status?: string;
@@ -276,6 +349,8 @@ export interface ListPurchaseOrdersParams {
   priority?: string;
   supplier?: string;
   warehouse?: string;
+  pm?: string; // assigned PM user id — the "Awaiting my action" worklist
+  job?: string;
   page?: number;
   pageSize?: number;
   sort?: string;
@@ -290,6 +365,8 @@ export async function listPurchaseOrders(params: ListPurchaseOrdersParams = {}, 
     priority: params.priority,
     supplierId: params.supplier,
     warehouseId: params.warehouse,
+    pmUserId: params.pm,
+    jobId: params.job,
     // Unrestricted actor → undefined → no filter (unchanged). Scoped actor → their warehouse ids.
     warehouseIds: warehouseScopeFilter(actor),
   };
@@ -354,6 +431,7 @@ export async function createPurchaseOrder(input: CreatePurchaseOrderInput, actor
   if (input.warehouseId) assertWarehouseAccess(actor, input.warehouseId);
   const supplier = await supplierService.requireActiveSupplier(input.supplierId);
   await warehouseService.requireActiveWarehouse(input.warehouseId);
+  const jobId = await resolveJobId(input.jobId);
   const lineRows = await buildLineRows(input.items);
   const totals = computeTotals(lineRows);
   const actorLabel = actor?.email ?? null;
@@ -363,6 +441,8 @@ export async function createPurchaseOrder(input: CreatePurchaseOrderInput, actor
       supplierId: input.supplierId,
       supplierName: supplier.name,
       warehouseId: input.warehouseId,
+      jobId,
+      projectRef: trimToNull(input.projectRef),
       status: "draft",
       priority: input.priority ?? "normal",
       referenceNumber: trimToNull(input.referenceNumber),
@@ -373,6 +453,9 @@ export async function createPurchaseOrder(input: CreatePurchaseOrderInput, actor
       ...totals,
       deliveryAddress: trimToNull(input.deliveryAddress),
       deliveryInstructions: trimToNull(input.deliveryInstructions),
+      deliveryTerms: input.deliveryTerms ?? null,
+      // Default the agreed payment term to the supplier's standing default when none supplied.
+      paymentTerms: trimToNull(input.paymentTerms) ?? supplierDefaultPaymentTerms(supplier),
       internalNotes: trimToNull(input.internalNotes),
       supplierNotes: trimToNull(input.supplierNotes),
       createdBy: actorLabel,
@@ -396,6 +479,7 @@ export async function createPurchaseOrdersBySplit(
   actor?: AuditActor,
 ): Promise<PublicPurchaseOrder[]> {
   const supplier = await supplierService.requireActiveSupplier(input.supplierId);
+  const splitJobId = await resolveJobId(input.jobId);
   const actorLabel = actor?.email ?? null;
 
   // Group lines by destination warehouse, preserving first-appearance order (predictable PO sequence).
@@ -424,6 +508,8 @@ export async function createPurchaseOrdersBySplit(
         supplierId: input.supplierId,
         supplierName: supplier.name,
         warehouseId,
+        jobId: splitJobId,
+        projectRef: trimToNull(input.projectRef),
         status: "draft",
         priority: input.priority ?? "normal",
         referenceNumber: trimToNull(input.referenceNumber),
@@ -434,6 +520,8 @@ export async function createPurchaseOrdersBySplit(
         ...totals,
         deliveryAddress: trimToNull(input.deliveryAddress),
         deliveryInstructions: trimToNull(input.deliveryInstructions),
+        deliveryTerms: input.deliveryTerms ?? null,
+        paymentTerms: trimToNull(input.paymentTerms) ?? supplierDefaultPaymentTerms(supplier),
         internalNotes: trimToNull(input.internalNotes),
         supplierNotes: trimToNull(input.supplierNotes),
         createdBy: actorLabel,
@@ -476,6 +564,8 @@ export async function updatePurchaseOrder(id: string, input: UpdatePurchaseOrder
     await warehouseService.requireActiveWarehouse(input.warehouseId);
     headerPatch.warehouseId = input.warehouseId;
   }
+  if (input.jobId !== undefined) headerPatch.jobId = await resolveJobId(input.jobId);
+  if (input.projectRef !== undefined) headerPatch.projectRef = trimToNull(input.projectRef);
   if (input.priority !== undefined) headerPatch.priority = input.priority;
   if (input.referenceNumber !== undefined) headerPatch.referenceNumber = trimToNull(input.referenceNumber);
   if (input.description !== undefined) headerPatch.description = trimToNull(input.description);
@@ -483,6 +573,8 @@ export async function updatePurchaseOrder(id: string, input: UpdatePurchaseOrder
   if (input.expectedDeliveryDate !== undefined) headerPatch.expectedDeliveryDate = new Date(input.expectedDeliveryDate);
   if (input.deliveryAddress !== undefined) headerPatch.deliveryAddress = trimToNull(input.deliveryAddress);
   if (input.deliveryInstructions !== undefined) headerPatch.deliveryInstructions = trimToNull(input.deliveryInstructions);
+  if (input.deliveryTerms !== undefined) headerPatch.deliveryTerms = input.deliveryTerms ?? null;
+  if (input.paymentTerms !== undefined) headerPatch.paymentTerms = trimToNull(input.paymentTerms);
   if (input.internalNotes !== undefined) headerPatch.internalNotes = trimToNull(input.internalNotes);
   if (input.supplierNotes !== undefined) headerPatch.supplierNotes = trimToNull(input.supplierNotes);
 
@@ -525,11 +617,134 @@ export async function submitPurchaseOrder(id: string, actor?: AuditActor): Promi
   return toPublic(updated);
 }
 
-export async function approvePurchaseOrder(id: string, actor?: AuditActor): Promise<PublicPurchaseOrder> {
+// ── PRF fast-path: commercial equality ────────────────────────────────────────────────────────
+// A PRF-born PO may go draft → approved WITHOUT a second finance review ONLY while it still
+// commercially matches the approved PRF. INVARIANT: this comparison must cover EVERY input that
+// feeds computeTotals — today supplier, warehouse, currency and the line multiset
+// {irmItemId, quantity, unitPricePence, vatRate}. If a commercial field is ever added (discount,
+// delivery charge, …) it MUST be added here in the same change, or it becomes a silent bypass.
+// Exported (pure) for unit testing.
+export function commerciallyMatchesPrf(
+  po: { supplierId: string; warehouseId: string; currency: string | null; items: { irmItemId: string; quantity: number; unitPricePence: number; vatRate: number }[] },
+  prf: { supplierId: string; warehouseId: string; currency: string | null; items: { irmItemId: string; quantity: number; unitPricePence: number; vatRate: number }[] },
+): boolean {
+  if (po.supplierId !== prf.supplierId) return false;
+  if (po.warehouseId !== prf.warehouseId) return false;
+  if ((po.currency ?? "GBP") !== (prf.currency ?? "GBP")) return false;
+  if (po.items.length !== prf.items.length) return false;
+  // Items are unique per irmItemId on both documents (DB-enforced), so a keyed map is a
+  // faithful multiset comparison.
+  const prfByItem = new Map(prf.items.map((l) => [l.irmItemId, l]));
+  for (const line of po.items) {
+    const ref = prfByItem.get(line.irmItemId);
+    if (!ref) return false;
+    if (line.quantity !== ref.quantity || line.unitPricePence !== ref.unitPricePence || line.vatRate !== ref.vatRate) return false;
+  }
+  return true;
+}
+
+// Result of an approve on a PRF-born draft: either it was approved via the fast path, or it had
+// commercially diverged from its PRF and was instead routed into the normal review queue (so the
+// user is never stuck on a draft with no forward action).
+export interface ApproveResult {
+  purchaseOrder: PublicPurchaseOrder;
+  divertedToReview: boolean; // true = diverged → moved to pending_approval instead of approved
+}
+
+export async function approvePurchaseOrder(id: string, actor?: AuditActor): Promise<ApproveResult> {
   const po = await loadOrThrow(id, actor);
+  if (po.status === "draft" && po.purchaseRequestId) {
+    // FAST PATH — finance already approved these numbers on the PRF; skip pending_approval as long
+    // as the PO still commercially matches it. If it has DIVERGED (a draft edit changed supplier /
+    // warehouse / items / quantities / prices), the numbers finance signed off no longer hold — so
+    // it must be re-reviewed. Rather than dead-end the draft (the actor may hold `approve` but not
+    // `submit`, leaving no forward button), route it into the normal review queue automatically.
+    const prf = await prfRepo.findById(po.purchaseRequestId);
+    if (!prf) throw conflict("The source purchase request no longer exists — submit this order for approval instead.");
+    if (!commerciallyMatchesPrf(po, prf)) {
+      const submitted = await poRepo.update(id, { status: "pending_approval", submittedBy: actor?.email ?? null, submittedAt: new Date() });
+      recordStatus(actor, id, submitted.code, "purchase_order.submitted");
+      // Fire-and-forget: notify approvers, same as a normal submit.
+      void poEmail.notifyApproversPoSubmitted(submitted, actor?.email ?? null).catch((e) =>
+        console.error(`PO ${submitted.code} approval notification failed:`, e instanceof Error ? e.message : e),
+      );
+      return { purchaseOrder: toPublic(submitted), divertedToReview: true };
+    }
+    const updated = await poRepo.update(id, { status: "approved", approvedBy: actor?.email ?? null, approvedAt: new Date() });
+    audit.record({
+      actor,
+      action: "purchase_order.approved",
+      targetType: "purchase_order",
+      targetId: id,
+      targetLabel: updated.code,
+      metadata: { fastPath: true, purchaseRequestId: po.purchaseRequestId },
+    });
+    return { purchaseOrder: toPublic(updated), divertedToReview: false };
+  }
   assertTransition(po.status, "approved");
   const updated = await poRepo.update(id, { status: "approved", approvedBy: actor?.email ?? null, approvedAt: new Date() });
   recordStatus(actor, id, updated.code, "purchase_order.approved");
+  return { purchaseOrder: toPublic(updated), divertedToReview: false };
+}
+
+// ── PM routing (approved → pm_review; re-assign while in pm_review) ──────────────────────────
+// The PM must be an active staff user whose role can actually send a PO. `resolvePmCandidates`
+// is the single seam encapsulating the suggestion priority — today the linked job's creator;
+// when Job later gains planner/PM user fields they slot in HERE, nothing else changes.
+export interface PmCandidate {
+  id: string;
+  name: string;
+  email: string;
+}
+export async function resolvePmCandidates(jobId?: string): Promise<{ candidates: PmCandidate[]; suggestedUserId: string | null }> {
+  const users = await userRepo.findActiveWithRole();
+  const candidates = users
+    .filter((u) => {
+      const perms = u.role?.permissions ?? [];
+      return perms.includes("purchase_orders.send") || perms.includes("*");
+    })
+    .map((u) => ({ id: u.id, name: [u.firstName, u.lastName].filter(Boolean).join(" "), email: u.email }));
+  let suggestedUserId: string | null = null;
+  if (jobId && OBJECT_ID_RE.test(jobId)) {
+    const job = await jobRepo.findById(jobId);
+    const creatorId = job?.createdByUserId ?? null;
+    if (creatorId && candidates.some((c) => c.id === creatorId)) suggestedUserId = creatorId;
+  }
+  return { candidates, suggestedUserId };
+}
+
+export async function assignPmPurchaseOrder(id: string, pmUserId: string, actor?: AuditActor): Promise<PublicPurchaseOrder> {
+  const po = await loadOrThrow(id, actor);
+  const reassign = po.status === "pm_review";
+  if (!reassign) assertTransition(po.status, "pm_review");
+
+  const pm = (await userRepo.findActiveWithRole()).find((u) => u.id === pmUserId);
+  if (!pm) throw badRequest("Selected project manager is not an active staff user.");
+  const pmPerms = pm.role?.permissions ?? [];
+  if (!pmPerms.includes("purchase_orders.send") && !pmPerms.includes("*")) {
+    throw badRequest("Selected user can't send purchase orders — pick a user whose role has the Send permission.");
+  }
+
+  const updated = await poRepo.update(id, {
+    status: "pm_review",
+    pmUserId: pm.id,
+    pmName: [pm.firstName, pm.lastName].filter(Boolean).join(" "),
+    pmEmail: pm.email,
+    pmAssignedAt: new Date(),
+    pmAssignedBy: actor?.email ?? null,
+  });
+  audit.record({
+    actor,
+    action: reassign ? "purchase_order.pm_reassigned" : "purchase_order.pm_assigned",
+    targetType: "purchase_order",
+    targetId: id,
+    targetLabel: updated.code,
+    metadata: { pmEmail: pm.email, previousPmEmail: reassign ? po.pmEmail : undefined },
+  });
+  // Fire-and-forget: tell the PM a PO awaits their review + send. NEVER blocks or rolls back.
+  void poEmail.notifyPmAssigned(updated).catch((e) =>
+    console.error(`PO ${updated.code} PM notification failed:`, e instanceof Error ? e.message : e),
+  );
   return toPublic(updated);
 }
 
@@ -541,9 +756,51 @@ export async function rejectPurchaseOrder(id: string, reason: string, actor?: Au
   return toPublic(updated);
 }
 
+// Archive the exact issued document at send time as a system attachment — the document of
+// record. The on-demand PDF endpoint keeps reflecting live data; THIS copy is what the supplier
+// received, immune to later supplier-detail/branding changes. Fire-and-forget from send: an
+// archive failure must never fail or roll back the send (matches the email convention).
+async function archiveIssuedPdf(po: PurchaseOrderWithRelations, actor?: AuditActor): Promise<void> {
+  const creds = await getCloudinaryCreds();
+  if (!creds) {
+    console.info(`PO ${po.code}: Cloudinary not configured — issued-PDF archive skipped.`);
+    return;
+  }
+  const pdf = await documentService.generatePurchaseOrderPdf(po, actor?.email ?? po.sentBy);
+  const dataUri = `data:application/pdf;base64,${pdf.buffer.toString("base64")}`;
+  const url = await uploadFileToCloudinary(dataUri, randomUUID(), creds);
+  await poRepo.addAttachment({
+    purchaseOrderId: po.id,
+    label: ISSUED_PO_ATTACHMENT_LABEL,
+    fileName: pdf.filename,
+    fileType: "pdf",
+    fileSizeBytes: pdf.buffer.length,
+    url,
+    uploadedBy: "system",
+  });
+  audit.record({
+    actor,
+    action: "purchase_order.attachment_added",
+    targetType: "purchase_order",
+    targetId: po.id,
+    targetLabel: po.code,
+    metadata: { issuedPdfArchive: true },
+  });
+}
+
 export async function sendPurchaseOrder(id: string, actor?: AuditActor): Promise<PublicPurchaseOrder> {
   const po = await loadOrThrow(id, actor);
   assertTransition(po.status, "sent");
+  // In pm_review only the ASSIGNED PM may send (that's the whole point of the stage). A holder
+  // of assign_pm may override — e.g. the PM is away — and the override is visible in the audit
+  // trail because sentBy won't match pmEmail.
+  if (po.status === "pm_review") {
+    const isAssignedPm = Boolean(actor?.id && po.pmUserId && actor.id === po.pmUserId);
+    const canOverride = Boolean(actor?.permissions?.includes("*") || actor?.permissions?.includes("purchase_orders.assign_pm"));
+    if (!isAssignedPm && !canOverride) {
+      throw forbidden(`Only the assigned project manager (${po.pmName ?? po.pmEmail ?? "unassigned"}) can send this purchase order.`);
+    }
+  }
   // sentBy is the issuer — the signer printed on the PO document (deterministic for email + download).
   const updated = await poRepo.update(id, { status: "sent", sentAt: new Date(), sentBy: actor?.email ?? null });
   recordStatus(actor, id, updated.code, "purchase_order.sent");
@@ -551,6 +808,74 @@ export async function sendPurchaseOrder(id: string, actor?: AuditActor): Promise
   void poEmail.notifySupplierPoSent(updated, actor).catch((e) =>
     console.error(`PO ${updated.code} supplier email failed:`, e instanceof Error ? e.message : e),
   );
+  // Fire-and-forget: archive the exact issued PDF (document of record). NEVER blocks or rolls back.
+  void archiveIssuedPdf(updated, actor).catch((e) =>
+    console.error(`PO ${updated.code} issued-PDF archive failed:`, e instanceof Error ? e.message : e),
+  );
+  return toPublic(updated);
+}
+
+// ── Supplier acceptance (sent → supplier_accepted) ────────────────────────────────────────────
+// Recorded manually by staff when the supplier confirms by email/phone. The confirmed delivery
+// date is OPTIONAL here (suppliers often accept first and schedule later) and is revisable via
+// updateConfirmedDeliveryDate — never a status of its own, so receiving is never blocked on it.
+export async function recordSupplierAcceptance(
+  id: string,
+  input: PoSupplierAcceptInput,
+  actor?: AuditActor,
+): Promise<PublicPurchaseOrder> {
+  const po = await loadOrThrow(id, actor);
+  assertTransition(po.status, "supplier_accepted");
+  const confirmed = input.confirmedDeliveryDate ? new Date(input.confirmedDeliveryDate) : null;
+  const updated = await poRepo.update(id, {
+    status: "supplier_accepted",
+    supplierAcceptedAt: input.acceptedDate ? new Date(input.acceptedDate) : new Date(),
+    supplierAcceptedBy: actor?.email ?? null,
+    supplierAckReference: trimToNull(input.supplierAckReference),
+    confirmedDeliveryDate: confirmed,
+    supplierAcceptNotes: trimToNull(input.notes),
+  });
+  audit.record({
+    actor,
+    action: "purchase_order.supplier_accepted",
+    targetType: "purchase_order",
+    targetId: id,
+    targetLabel: updated.code,
+    metadata: {
+      supplierAckReference: trimToNull(input.supplierAckReference) ?? undefined,
+      confirmedDeliveryDate: confirmed ? confirmed.toISOString() : undefined,
+    },
+  });
+  return toPublic(updated);
+}
+
+// Revise the confirmed delivery date on an accepted order. The audit metadata carries
+// {previousDate, newDate, reason} — the audit ledger IS the revision history (Friday → Monday
+// → Wednesday stays fully traceable for disputes); no separate history table.
+export async function updateConfirmedDeliveryDate(
+  id: string,
+  confirmedDeliveryDate: string,
+  reason: string | undefined,
+  actor?: AuditActor,
+): Promise<PublicPurchaseOrder> {
+  const po = await loadOrThrow(id, actor);
+  if (po.status !== "supplier_accepted") {
+    throw conflict("The confirmed delivery date can only be updated after the supplier has accepted the order.");
+  }
+  const next = new Date(confirmedDeliveryDate);
+  const updated = await poRepo.update(id, { confirmedDeliveryDate: next });
+  audit.record({
+    actor,
+    action: "purchase_order.delivery_date_updated",
+    targetType: "purchase_order",
+    targetId: id,
+    targetLabel: updated.code,
+    metadata: {
+      previousDate: po.confirmedDeliveryDate ? po.confirmedDeliveryDate.toISOString() : null,
+      newDate: next.toISOString(),
+      reason: reason?.trim() || undefined,
+    },
+  });
   return toPublic(updated);
 }
 
@@ -593,6 +918,11 @@ function assertAttachmentsEditable(status: string): void {
 export async function addAttachment(poId: string, input: PoAttachmentInput, actor?: AuditActor): Promise<PublicPurchaseOrder> {
   const po = await loadOrThrow(poId, actor);
   assertAttachmentsEditable(po.status);
+  // The archive label is system-owned — a user attachment must never masquerade as the
+  // document of record.
+  if (input.label?.trim() === ISSUED_PO_ATTACHMENT_LABEL) {
+    throw badRequest(`"${ISSUED_PO_ATTACHMENT_LABEL}" is a reserved label.`);
+  }
   const creds = await getCloudinaryCreds();
   if (!creds) throw badRequest("File uploads aren't configured. Add Cloudinary credentials in Settings first.");
   const url = await uploadFileToCloudinary(input.data, randomUUID(), creds);
@@ -614,6 +944,10 @@ export async function removeAttachment(poId: string, attachmentId: string, actor
   assertAttachmentsEditable(po.status);
   const att = await poRepo.findAttachment(attachmentId);
   if (!att || att.purchaseOrderId !== poId) throw notFound("Attachment not found.");
+  // The archived issued document is immutable — it IS the record of what the supplier received.
+  if (att.label === ISSUED_PO_ATTACHMENT_LABEL && att.uploadedBy === "system") {
+    throw conflict("The archived issued PO document can't be removed.");
+  }
   await poRepo.removeAttachment(attachmentId);
   audit.record({ actor, action: "purchase_order.attachment_removed", targetType: "purchase_order", targetId: poId, targetLabel: po.code });
   return getPurchaseOrder(poId, actor);
@@ -625,7 +959,9 @@ export async function requireReceivablePurchaseOrder(id: string): Promise<Purcha
   if (!id || !OBJECT_ID_RE.test(id)) throw badRequest("Select a purchase order.");
   const po = await poRepo.findById(id);
   if (!po) throw badRequest("Selected purchase order no longer exists.");
-  if (po.status !== "sent" && po.status !== "partially_received") {
+  // Goods can arrive whether or not the supplier's acceptance was recorded — a missing
+  // acknowledgement must never block the warehouse.
+  if (po.status !== "sent" && po.status !== "supplier_accepted" && po.status !== "partially_received") {
     throw conflict("This purchase order can't receive stock in its current status.");
   }
   return po;
@@ -685,6 +1021,44 @@ export async function applyGoodsReceipt(
     await poRepo.setStatusTx(tx, purchaseOrderId, next);
     recordStatus(actor, purchaseOrderId, header.code, `purchase_order.${next}`);
   }
+}
+
+// ── Supplier procurement summary (the supplier detail "Procurement" tab) ─────────────────────
+// Counts + spend only. Deliberately NO placeholder metrics: average lead time / on-time % /
+// late deliveries are fully computable later from timestamps that already exist
+// (sentAt, confirmedDeliveryDate, GRN received dates) — a pure read-side follow-up.
+export interface SupplierProcurementSummary {
+  purchaseOrders: {
+    total: number;
+    byStatus: Record<string, number>;
+    outstanding: number; // issued, not yet fully received
+    open: number; // any non-terminal, not-yet-fully-received order
+    cancelled: number;
+    spendPence: number; // fully_received + closed orders only
+    spend: number;
+  };
+  purchaseRequests: { total: number };
+}
+export async function getSupplierProcurementSummary(supplierId: string): Promise<SupplierProcurementSummary> {
+  if (!supplierId || !OBJECT_ID_RE.test(supplierId)) throw badRequest("Select a supplier.");
+  const [byStatus, spendPence, prfTotal] = await Promise.all([
+    poRepo.statusCountsForSupplier(supplierId),
+    poRepo.spendPenceForSupplier(supplierId),
+    prfRepo.countBySupplier(supplierId),
+  ]);
+  const sum = (keys: string[]) => keys.reduce((n, k) => n + (byStatus[k] ?? 0), 0);
+  return {
+    purchaseOrders: {
+      total: Object.values(byStatus).reduce((a, b) => a + b, 0),
+      byStatus,
+      outstanding: sum(["sent", "supplier_accepted", "partially_received"]),
+      open: sum(["draft", "pending_approval", "approved", "pm_review", "sent", "supplier_accepted", "partially_received"]),
+      cancelled: byStatus["cancelled"] ?? 0,
+      spendPence,
+      spend: spendPence / 100,
+    },
+    purchaseRequests: { total: prfTotal },
+  };
 }
 
 // READ seam for Warehouse Inventory: total still-to-arrive quantity for an item at a warehouse,

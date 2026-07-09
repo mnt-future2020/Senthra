@@ -43,15 +43,25 @@ function po(over: Record<string, unknown> = {}): PurchaseOrderWithRelations {
     orderDate: new Date("2026-06-01T00:00:00Z"),
     expectedDeliveryDate: new Date("2026-06-10T00:00:00Z"),
     deliveryAddress: null,
+    deliveryInstructions: "Call ahead; forklift required.",
+    deliveryTerms: "DDP",
+    paymentTerms: "30 Days",
     subtotalPence: 7000,
     vatPence: 1400,
     grandTotalPence: 8400,
     supplierNotes: "Deliver to the rear gate.",
+    createdBy: "finance@electra.co",
+    approvedBy: "director@electra.co",
+    projectRef: "PROJ-77",
+    jobId: null,
+    job: null,
     supplier: {
       name: "Acme Ltd",
       contactPerson: "Dana",
       contactEmail: "sales@acme.co",
       contactPhone: "0800 000",
+      paymentTerms: "30 Days",
+      customPaymentTerms: null,
       addressLine1: "5 Trade Park",
       addressLine2: null,
       city: "Leeds",
@@ -133,5 +143,61 @@ describe("buildPurchaseOrderDocument", () => {
     expect(d.signature?.signerName).toBe("Ava Stone");
     expect(d.meta.documentCode).toBe("PO-0001");
     expect(d.meta.documentType).toBe("purchase_order");
+  });
+
+  // Client's official PO must carry: Project, Delivery Terms (Incoterm), Payment Terms,
+  // Prepared By, Approved By — plus the practical delivery instructions.
+  it("maps terms + accountability + project reference", () => {
+    const d = buildPurchaseOrderDocument(po(), ctx());
+    expect(d.order.project).toBe("PROJ-77"); // free-text projectRef when no job linked
+    expect(d.terms).toEqual({
+      delivery: "DDP — Delivered Duty Paid", // Incoterm code resolved to its label
+      deliveryInstructions: "Call ahead; forklift required.",
+      payment: "30 Days", // the PO's own paymentTerms
+      preparedBy: "finance@electra.co",
+      approvedBy: "director@electra.co",
+    });
+  });
+
+  it("prefers the PO's own paymentTerms over the supplier default", () => {
+    const d = buildPurchaseOrderDocument(
+      po({ paymentTerms: "60 Days", supplier: { ...po().supplier, paymentTerms: "30 Days" } }),
+      ctx(),
+    );
+    expect(d.terms.payment).toBe("60 Days");
+  });
+
+  it("prefers the linked job (code — name) over free-text projectRef", () => {
+    const d = buildPurchaseOrderDocument(
+      po({ job: { jobNumber: "JOB-2026-0001", name: "Fibre rollout" }, projectRef: "IGNORED" }),
+      ctx(),
+    );
+    expect(d.order.project).toBe("JOB-2026-0001 — Fibre rollout");
+  });
+
+  it("falls back to the supplier's Custom payment terms when the PO has none", () => {
+    const d = buildPurchaseOrderDocument(
+      po({ paymentTerms: null, supplier: { ...po().supplier, paymentTerms: "Custom", customPaymentTerms: "50% up front, 50% on delivery" } }),
+      ctx(),
+    );
+    expect(d.terms.payment).toBe("50% up front, 50% on delivery");
+  });
+
+  it("leaves terms/project empty (not undefined) when unset — renderer omits blank rows", () => {
+    const d = buildPurchaseOrderDocument(
+      po({
+        deliveryInstructions: null,
+        deliveryTerms: null,
+        paymentTerms: null,
+        createdBy: null,
+        approvedBy: null,
+        projectRef: null,
+        job: null,
+        supplier: { ...po().supplier, paymentTerms: null, customPaymentTerms: null },
+      }),
+      ctx(),
+    );
+    expect(d.order.project).toBe("");
+    expect(d.terms).toEqual({ delivery: "", deliveryInstructions: "", payment: "", preparedBy: "", approvedBy: "" });
   });
 });

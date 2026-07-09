@@ -5,6 +5,7 @@ import type { WarehouseWithRelations } from "./warehouse.repository.js";
 import * as warehouseTypeService from "#modules/warehouse-type/warehouse-type.service.js";
 import * as userRepo from "#modules/user/user.repository.js";
 import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
+import * as prfRepo from "#modules/purchase-request/purchase-request.repository.js";
 import * as grnRepo from "#modules/goods-in/goods-in.repository.js";
 import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
@@ -354,6 +355,7 @@ export async function updateWarehouse(
 // warehouse. Each inventory-era module registers one here; all are no-ops today.
 type DependencyChecker = { label: string; count: (warehouseId: string) => Promise<number> };
 const DELETE_DEPENDENCY_CHECKERS: DependencyChecker[] = [
+  { label: "purchase requests", count: (id) => prfRepo.countByWarehouse(id) },
   { label: "purchase orders", count: (id) => poRepo.countByWarehouse(id) },
   { label: "goods receipts", count: (id) => grnRepo.countByWarehouse(id) },
   { label: "inventory", count: (id) => inventoryRepo.countBalancesWithStockByWarehouse(id) },

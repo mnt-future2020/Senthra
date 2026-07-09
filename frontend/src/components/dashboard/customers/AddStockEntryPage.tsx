@@ -9,11 +9,14 @@ import * as warehouseService from "@/services/warehouse.service";
 import { listCategories, getCachedCategories } from "@/services/category.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
+import { useReferenceData } from "@/hooks/useReferenceData";
 import { FormSection, FormAsideCard, RequiredMark } from "@/components/ui/FormScaffold";
 import { inputCls, labelCls, primaryBtn, hintCls } from "@/components/ui/styles";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { Select } from "@/components/ui/Select";
 import type { CustomerStockEntry } from "@/types/customer";
+import type { Category } from "@/types/category";
+import type { PagedWarehouses } from "@/services/warehouse.service";
 
 // Standard units of measure — mirrors the IRM item form + backend UOM_OPTIONS.
 const UOM_OPTIONS = ["Each", "Metre", "Roll", "Pack", "Box", "Set", "Pair", "Reel"];
@@ -41,25 +44,18 @@ export function AddStockEntryPage({ customer }: { customer: CustomerInfo }) {
   );
   const [warehouses, setWarehouses] = React.useState<{ id: string; name: string; code: string }[]>([]);
 
-  React.useEffect(() => {
-    listCategories()
-      .then((cats) =>
-        setCategories(
-          cats.filter((c) => c.status === "active").map((c) => ({ id: c.id, name: c.name })),
-        ),
-      )
-      .catch(() => {});
-    warehouseService
-      .listWarehouses({ pageSize: 200 })
-      .then((r) =>
-        setWarehouses(
-          r.warehouses
-            .filter((w) => w.status === "active")
-            .map((w) => ({ id: w.id, name: w.name, code: w.code })),
-        ),
-      )
-      .catch(() => {});
-  }, []);
+  useReferenceData([
+    {
+      label: "categories",
+      load: () => listCategories(),
+      onData: (cats: Category[]) => setCategories(cats.filter((c) => c.status === "active").map((c) => ({ id: c.id, name: c.name }))),
+    },
+    {
+      label: "warehouses",
+      load: () => warehouseService.listWarehouses({ pageSize: 200 }),
+      onData: (r: PagedWarehouses) => setWarehouses(r.warehouses.filter((w) => w.status === "active").map((w) => ({ id: w.id, name: w.name, code: w.code }))),
+    },
+  ]);
 
   const [itemName, setItemName] = React.useState("");
   const [sku, setSku] = React.useState("");

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./irm.repository.js", () => ({
   findById: vi.fn(),
+  findByIds: vi.fn(),
   update: vi.fn(),
   softDelete: vi.fn(),
   replaceSuppliers: vi.fn(),
@@ -21,7 +22,7 @@ import * as irmCategoryService from "#modules/irm-category/irm-category.service.
 import * as supplierService from "#modules/supplier/supplier.service.js";
 import * as userRepo from "#modules/user/user.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
-import { deleteIrmItem, updateIrmItem } from "./irm.service.js";
+import { deleteIrmItem, requireActiveIrmItems, updateIrmItem } from "./irm.service.js";
 
 const IRM_ID = "f".repeat(24);
 const TYPE_ID = "a".repeat(24);
@@ -91,6 +92,7 @@ const mockReqCat = irmCategoryService.requireActiveIrmCategory as ReturnType<typ
 const mockReqSupplier = supplierService.requireActiveSupplier as ReturnType<typeof vi.fn>;
 const mockIsSkuConflict = irmRepo.isSkuConflict as ReturnType<typeof vi.fn>;
 const mockUserFindById = userRepo.findById as ReturnType<typeof vi.fn>;
+const mockFindByIds = irmRepo.findByIds as ReturnType<typeof vi.fn>;
 const mockAudit = audit.record as ReturnType<typeof vi.fn>;
 
 // Build an existing supplier-junction link (the shape findById returns on existing.suppliers).
@@ -298,5 +300,47 @@ describe("deleteIrmItem", () => {
   it("throws not found when the item does not exist", async () => {
     mockFindById.mockResolvedValue(null);
     await expect(deleteIrmItem(IRM_ID)).rejects.toThrow(/not found/i);
+  });
+});
+
+describe("requireActiveIrmItems — batched active-item validation", () => {
+  const ID_A = "a".repeat(24);
+  const ID_B = "b".repeat(24);
+  const active = (id: string) => ({ id, name: `Item ${id[0]}`, status: "active" });
+
+  it("fetches every id in ONE query and returns a Map keyed by id", async () => {
+    mockFindByIds.mockResolvedValue([active(ID_A), active(ID_B)]);
+    const byId = await requireActiveIrmItems([ID_A, ID_B]);
+    expect(mockFindByIds).toHaveBeenCalledTimes(1);
+    expect(mockFindByIds).toHaveBeenCalledWith([ID_A, ID_B]);
+    expect(byId.get(ID_A)?.name).toBe("Item a");
+    expect(byId.get(ID_B)?.name).toBe("Item b");
+  });
+
+  it("de-duplicates repeated ids before the query", async () => {
+    mockFindByIds.mockResolvedValue([active(ID_A)]);
+    await requireActiveIrmItems([ID_A, ID_A]);
+    expect(mockFindByIds).toHaveBeenCalledWith([ID_A]);
+  });
+
+  it("rejects a malformed (non-ObjectId) id up front, before any query", async () => {
+    await expect(requireActiveIrmItems([ID_A, "not-an-id"])).rejects.toThrow(/select an irm item/i);
+    expect(mockFindByIds).not.toHaveBeenCalled();
+  });
+
+  it("throws 'no longer exists' when an id is missing from the result (soft-deleted / gone)", async () => {
+    mockFindByIds.mockResolvedValue([active(ID_A)]); // ID_B absent
+    await expect(requireActiveIrmItems([ID_A, ID_B])).rejects.toThrow(/no longer exists/i);
+  });
+
+  it("throws 'inactive' when any returned item is not active", async () => {
+    mockFindByIds.mockResolvedValue([active(ID_A), { id: ID_B, name: "Retired", status: "inactive" }]);
+    await expect(requireActiveIrmItems([ID_A, ID_B])).rejects.toThrow(/inactive/i);
+  });
+
+  it("returns an empty Map for an empty input", async () => {
+    mockFindByIds.mockResolvedValue([]);
+    const byId = await requireActiveIrmItems([]);
+    expect(byId.size).toBe(0);
   });
 });

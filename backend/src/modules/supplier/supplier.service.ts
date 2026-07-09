@@ -5,6 +5,7 @@ import type { SupplierWithRelations } from "./supplier.repository.js";
 import * as supplierTypeService from "#modules/supplier-type/supplier-type.service.js";
 import * as userRepo from "#modules/user/user.repository.js";
 import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
+import * as prfRepo from "#modules/purchase-request/purchase-request.repository.js";
 import * as irmRepo from "#modules/irm/irm.repository.js";
 import * as grnRepo from "#modules/goods-in/goods-in.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
@@ -348,6 +349,7 @@ export async function updateSupplier(
 type DependencyChecker = { label: string; count: (supplierId: string) => Promise<number> };
 const DELETE_DEPENDENCY_CHECKERS: DependencyChecker[] = [
   { label: "catalogue items", count: (id) => irmRepo.countBySupplier(id) },
+  { label: "purchase requests", count: (id) => prfRepo.countBySupplier(id) },
   { label: "purchase orders", count: (id) => poRepo.countBySupplier(id) },
   { label: "goods in", count: (id) => grnRepo.countBySupplier(id) },
   // Inventory is intentionally NOT checked here: InventoryBalance has no supplierId

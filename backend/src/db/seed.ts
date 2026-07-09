@@ -1,4 +1,5 @@
 import { env } from "../config/env.js";
+import { prisma } from "../lib/prisma.js";
 import * as adminRepo from "#modules/auth/admin.repository.js";
 import * as categoryRepo from "#modules/category/category.repository.js";
 import * as emailTemplateRepo from "#modules/email/emailTemplate.repository.js";
@@ -85,6 +86,57 @@ const GOODS_MANAGEMENT_PERMISSIONS = [
   "goods_management.reconcile",
 ];
 
+// Finance-side procurement permissions (the PRF → PO flow). Per the client requirement the PRF
+// is "prepared by ... typically Finance or an authorized business user" — so Finance OWNS the
+// PRF end-to-end here: raise it, submit it, review/approve it, then generate + approve the PO,
+// route it to a PM, and cancel/close orders. Seeded on finance_director + backfilled idempotently
+// below. The three read keys (suppliers/warehouse/irm .view) are REQUIRED for the PRF *and* PO
+// form pickers; audit.view drives the "Audit trail" tab.
+const FINANCE_PROCUREMENT_PERMISSIONS = [
+  "purchase_requests.view",
+  "purchase_requests.create",
+  "purchase_requests.edit",
+  "purchase_requests.submit",
+  "purchase_requests.approve",
+  "purchase_requests.convert",
+  "purchase_requests.cancel",
+  "purchase_orders.view",
+  "purchase_orders.create",
+  "purchase_orders.edit",
+  "purchase_orders.approve",
+  "purchase_orders.assign_pm",
+  "purchase_orders.cancel",
+  "purchase_orders.close",
+  // Read-only master data needed to fill the PRF + PO form pickers.
+  "suppliers.view",
+  "warehouse.view",
+  "irm.view",
+  // Read-only jobs — the PRF/PO form's OPTIONAL "link to a job" picker (Finance raises the PRF).
+  "jobs.view",
+  // Read the audit trail — the PRF/PO detail's "Audit trail" tab (who submitted/approved/sent,
+  // delivery-date revisions). Read-only; the tab is hidden without it.
+  "audit.view",
+];
+
+// PM-side procurement permissions. Per the client flow the Project Manager enters the process
+// AFTER the PO exists: Finance routes the finalised PO to them, they REVIEW it, EMAIL it to the
+// supplier, and record the supplier's acknowledgement. The PM does NOT raise purchase requests
+// (that's Finance / an authorized business user) — so no purchase_requests.create/edit/submit
+// here; just read access to see the source PRF behind a routed PO. Seeded on project_manager +
+// backfilled idempotently below. The read keys populate the PO form pickers + audit tab.
+const PM_PROCUREMENT_PERMISSIONS = [
+  "purchase_requests.view",
+  "purchase_orders.view",
+  "purchase_orders.send",
+  "purchase_orders.acknowledge",
+  // Read-only master data needed to fill the PO form's pickers.
+  "suppliers.view",
+  "warehouse.view",
+  "irm.view",
+  // Read the audit trail — the PRF/PO detail's "Audit trail" tab.
+  "audit.view",
+];
+
 // Warehouse-scoped role keys — members may ONLY access their explicitly-assigned warehouses
 // (UserWarehouseAssignment). Used to seed Role.isWarehouseScoped on a fresh DB and backfill it
 // idempotently on every startup. The warehouse-access layer turns the flag into real enforcement.
@@ -126,12 +178,12 @@ const SEED_ROLES: {
   isWarehouseScoped?: boolean;
 }[] = [
   { key: "super_admin", name: "Super Admin", description: "Full system owner. Manages users, roles and all settings.", sortOrder: 0, permissions: ["*"] },
-  { key: "system_admin", name: "System Admin", description: "IT / HR administrator who creates and manages user accounts and customers.", sortOrder: 1, permissions: ["users.view", "users.create", "users.edit", "users.delete", "roles.view", "customers.view", "customers.create", "customers.edit", "customers.delete", "warehouse.view", "warehouse.create", "warehouse.edit", "warehouse.delete", "warehouse_types.view", "warehouse_types.create", "warehouse_types.edit", "warehouse_types.delete", "categories.view", "categories.create", "categories.edit", "categories.delete", "suppliers.view", "suppliers.create", "suppliers.edit", "suppliers.delete", "supplier_types.view", "supplier_types.create", "supplier_types.edit", "supplier_types.delete", "irm.view", "irm.create", "irm.edit", "irm.delete", "irm_types.view", "irm_types.create", "irm_types.edit", "irm_types.delete", "irm_categories.view", "irm_categories.create", "irm_categories.edit", "irm_categories.delete", "purchase_orders.view", "purchase_orders.create", "purchase_orders.edit", "purchase_orders.delete", "purchase_orders.submit", "purchase_orders.approve", "purchase_orders.send", "purchase_orders.cancel", "purchase_orders.close", "goods_in.view", "goods_in.create", "goods_in.edit", "goods_in.delete", "goods_in.complete", "goods_in.cancel", "inventory.view", "inventory.move", "inventory.history", "inventory.export", "inventory.adjust", "inventory.stock_take", "jobs.view", "jobs.create", "jobs.edit", "jobs.assign", "jobs.cancel", "jobs.delete", ...ENGINEER_STOCK_ADMIN_PERMISSIONS] },
-  { key: "project_manager", name: "Project Manager", description: "Creates job packs, authorises dispatch and tracks projects.", sortOrder: 2, permissions: [...JOB_OFFICE_PERMISSIONS] },
+  { key: "system_admin", name: "System Admin", description: "IT / HR administrator who creates and manages user accounts and customers.", sortOrder: 1, permissions: ["users.view", "users.create", "users.edit", "users.delete", "roles.view", "customers.view", "customers.create", "customers.edit", "customers.delete", "warehouse.view", "warehouse.create", "warehouse.edit", "warehouse.delete", "warehouse_types.view", "warehouse_types.create", "warehouse_types.edit", "warehouse_types.delete", "categories.view", "categories.create", "categories.edit", "categories.delete", "suppliers.view", "suppliers.create", "suppliers.edit", "suppliers.delete", "supplier_types.view", "supplier_types.create", "supplier_types.edit", "supplier_types.delete", "irm.view", "irm.create", "irm.edit", "irm.delete", "irm_types.view", "irm_types.create", "irm_types.edit", "irm_types.delete", "irm_categories.view", "irm_categories.create", "irm_categories.edit", "irm_categories.delete", "purchase_requests.view", "purchase_requests.create", "purchase_requests.edit", "purchase_requests.delete", "purchase_requests.submit", "purchase_requests.approve", "purchase_requests.convert", "purchase_requests.cancel", "purchase_orders.view", "purchase_orders.create", "purchase_orders.edit", "purchase_orders.delete", "purchase_orders.submit", "purchase_orders.approve", "purchase_orders.assign_pm", "purchase_orders.send", "purchase_orders.acknowledge", "purchase_orders.cancel", "purchase_orders.close", "goods_in.view", "goods_in.create", "goods_in.edit", "goods_in.delete", "goods_in.complete", "goods_in.cancel", "inventory.view", "inventory.move", "inventory.history", "inventory.export", "inventory.adjust", "inventory.stock_take", "jobs.view", "jobs.create", "jobs.edit", "jobs.assign", "jobs.cancel", "jobs.delete", ...ENGINEER_STOCK_ADMIN_PERMISSIONS] },
+  { key: "project_manager", name: "Project Manager", description: "Creates job packs, authorises dispatch and tracks projects.", sortOrder: 2, permissions: [...JOB_OFFICE_PERMISSIONS, ...PM_PROCUREMENT_PERMISSIONS] },
   { key: "project_coordinator", name: "Project Coordinator", description: "Supports project managers with day-to-day coordination.", sortOrder: 3, permissions: [] },
   { key: "warehouse_manager", name: "Warehouse Manager", description: "Receives goods, scans stock in/out and manages a warehouse.", sortOrder: 4, permissions: [...WAREHOUSE_MANAGER_PERMISSIONS, ...GOODS_MANAGEMENT_PERMISSIONS, ...ENGINEER_STOCK_ADMIN_PERMISSIONS], isWarehouseScoped: true },
   { key: "field_engineer", name: "Field Engineer", description: "Collects stock, installs on site and updates job status.", sortOrder: 5, permissions: [...ENGINEER_PORTAL_PERMISSIONS], canHoldStock: true },
-  { key: "finance_director", name: "Finance Director", description: "Views spend, purchase orders and finance reports.", sortOrder: 6, permissions: [] },
+  { key: "finance_director", name: "Finance Director", description: "Reviews purchase requests, generates purchase orders and tracks spend.", sortOrder: 6, permissions: [...FINANCE_PROCUREMENT_PERMISSIONS] },
   { key: "hr_manager", name: "HR Manager", description: "Manages people-related records and onboarding.", sortOrder: 7, permissions: [] },
 ];
 
@@ -249,6 +301,58 @@ export async function seedDatabase(): Promise<void> {
       }
     }
     if (granted > 0) console.log(`Granted Goods Management permissions to ${granted} role(s).`);
+  }
+
+  // Backfill the procurement (PRF → PO) permissions onto finance_director and project_manager
+  // idempotently (covers DBs seeded before the Purchase Request module shipped — the
+  // finance_director previously seeded EMPTY). Additive + never revokes; skips "*" roles.
+  {
+    const grants: Record<string, string[]> = {
+      finance_director: FINANCE_PROCUREMENT_PERMISSIONS,
+      project_manager: PM_PROCUREMENT_PERMISSIONS,
+    };
+    let granted = 0;
+    for (const role of await roleRepo.findMany()) {
+      const wanted = grants[role.key];
+      if (!wanted || role.permissions.includes("*")) continue;
+      const missing = wanted.filter((p) => !role.permissions.includes(p));
+      if (missing.length) {
+        await roleRepo.update(role.id, { permissions: [...role.permissions, ...missing] });
+        granted++;
+      }
+    }
+    if (granted > 0) console.log(`Granted procurement (PRF/PO) permissions to ${granted} role(s).`);
+  }
+
+  // One-time REVOKE (runs EXACTLY once, ever): an earlier build wrongly granted the
+  // project_manager PRF-authoring keys (create/edit/submit). The client flow puts PRF creation
+  // with Finance / an authorized business user — the PM only enters AFTER the PO exists. This
+  // strips those three keys from the project_manager role. It is gated behind a persisted Counter
+  // flag so it fires once and then NEVER runs again: an admin who later deliberately re-grants
+  // those keys via the role editor keeps them (a boot-time re-strip would silently undo their
+  // intent). Idempotent by construction — the flag makes re-runs a no-op.
+  {
+    const FLAG = "migration:pm-prf-revoke";
+    const already = await prisma.counter.findUnique({ where: { key: FLAG } });
+    if (!already) {
+      const REVOKE_FROM_PM = ["purchase_requests.create", "purchase_requests.edit", "purchase_requests.submit"];
+      const pm = (await roleRepo.findMany()).find((r) => r.key === "project_manager");
+      if (pm && !pm.permissions.includes("*")) {
+        const kept = pm.permissions.filter((p) => !REVOKE_FROM_PM.includes(p));
+        if (kept.length !== pm.permissions.length) {
+          await roleRepo.update(pm.id, { permissions: { set: kept } });
+          console.log(`Revoked PRF-authoring permissions from project_manager (now Finance-owned).`);
+        }
+      }
+      // Mark the migration done regardless of whether a role needed changing, so it never re-runs.
+      // Guard the unique key against a concurrent boot (two replicas seeding one DB): the loser's
+      // create hits P2002 — swallow it (the flag exists either way). Mirrors ensurePoCounter.
+      try {
+        await prisma.counter.create({ data: { key: FLAG, seq: 1 } });
+      } catch (e) {
+        if (!(e && typeof e === "object" && "code" in e && (e as { code?: string }).code === "P2002")) throw e;
+      }
+    }
   }
 
   // Backfill admin-side engineer stock transfer permissions onto system_admin and warehouse_manager
@@ -452,8 +556,11 @@ export async function seedDatabase(): Promise<void> {
       "irm.view", "irm.create", "irm.edit", "irm.delete", "irm.barcode.manage",
       "irm_types.view", "irm_types.create", "irm_types.edit", "irm_types.delete",
       "irm_categories.view", "irm_categories.create", "irm_categories.edit", "irm_categories.delete",
+      "purchase_requests.view", "purchase_requests.create", "purchase_requests.edit", "purchase_requests.delete",
+      "purchase_requests.submit", "purchase_requests.approve", "purchase_requests.convert", "purchase_requests.cancel",
       "purchase_orders.view", "purchase_orders.create", "purchase_orders.edit", "purchase_orders.delete",
-      "purchase_orders.submit", "purchase_orders.approve", "purchase_orders.send", "purchase_orders.cancel", "purchase_orders.close",
+      "purchase_orders.submit", "purchase_orders.approve", "purchase_orders.assign_pm", "purchase_orders.send",
+      "purchase_orders.acknowledge", "purchase_orders.cancel", "purchase_orders.close",
       "goods_in.view", "goods_in.create", "goods_in.edit", "goods_in.delete", "goods_in.complete", "goods_in.cancel",
       "inventory.view", "inventory.move", "inventory.history", "inventory.export", "inventory.adjust", "inventory.stock_take",
       "jobs.view", "jobs.create", "jobs.edit", "jobs.assign", "jobs.cancel", "jobs.delete",

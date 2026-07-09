@@ -7,9 +7,12 @@ import { validateBody } from "../../middleware/validate.middleware.js";
 import {
   createPurchaseOrderSchema,
   createPurchaseOrdersSplitSchema,
+  poAssignPmSchema,
   poAttachmentSchema,
   poCancelSchema,
+  poDeliveryDateSchema,
   poRejectSchema,
+  poSupplierAcceptSchema,
   updatePurchaseOrderSchema,
 } from "./purchase-order.validation.js";
 
@@ -18,8 +21,12 @@ const router = Router();
 router.use(requireAuth);
 
 router.get("/", requirePermission("purchase_orders.view"), poController.listPurchaseOrders);
-// Static path before "/:id" so it isn't captured as an id.
+// Static paths before "/:id" so they aren't captured as an id.
 router.get("/items/:irmItemId", requirePermission("purchase_orders.view"), poController.listPurchaseOrdersForItem);
+// Eligible PMs for the Route-to-PM picker (+ the suggested default from the linked job).
+router.get("/pm-candidates", requirePermission("purchase_orders.assign_pm"), poController.listPmCandidates);
+// Supplier procurement summary — counts + spend for the supplier detail "Procurement" tab.
+router.get("/suppliers/:supplierId/summary", requirePermission("purchase_orders.view"), poController.getSupplierProcurementSummary);
 router.get("/:id", requirePermission("purchase_orders.view"), poController.getPurchaseOrder);
 // Preview / download the generated PO document (PDF). PDF render is heavy (synchronous
 // pdfkit render + remote logo fetch), so throttle it like the CSV export — otherwise an
@@ -69,6 +76,30 @@ router.post(
   poController.cancelPurchaseOrder,
 );
 router.post("/:id/close", requirePermission("purchase_orders.close"), writeLimiter, poController.closePurchaseOrder);
+// Route an approved PO to a Project Manager for review + send (or re-assign while in pm_review).
+router.post(
+  "/:id/assign-pm",
+  requirePermission("purchase_orders.assign_pm"),
+  writeLimiter,
+  validateBody(poAssignPmSchema),
+  poController.assignPmPurchaseOrder,
+);
+// Record the supplier's acceptance of an issued order (sent → supplier_accepted).
+router.post(
+  "/:id/accept",
+  requirePermission("purchase_orders.acknowledge"),
+  writeLimiter,
+  validateBody(poSupplierAcceptSchema),
+  poController.recordSupplierAcceptance,
+);
+// Revise the confirmed delivery date on an accepted order (audited with prev/new/reason).
+router.patch(
+  "/:id/delivery-date",
+  requirePermission("purchase_orders.acknowledge"),
+  writeLimiter,
+  validateBody(poDeliveryDateSchema),
+  poController.updateConfirmedDeliveryDate,
+);
 
 // --- attachments ------------------------------------------------------------
 router.post(
