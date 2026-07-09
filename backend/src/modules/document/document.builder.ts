@@ -4,6 +4,7 @@
 // build*Document here and reuse the same context + formatters.
 
 import type { PurchaseOrderWithRelations } from "#modules/purchase-order/purchase-order.repository.js";
+import { incotermLabel } from "#modules/purchase-order/purchase-order.validation.js";
 import { formatDate, formatMoney } from "./document.formatter.js";
 import { joinAddressLines } from "./document.utils.js";
 import type { DocumentContext, PurchaseOrderDocumentData } from "./document.types.js";
@@ -19,6 +20,19 @@ export function buildPurchaseOrderDocument(
   const currency = po.currency || "GBP";
   const s = po.supplier;
   const wh = po.warehouse;
+
+  // Project reference: prefer the linked job (code + name), else the free-text projectRef.
+  const project = po.job
+    ? [po.job.jobNumber, po.job.name].filter(Boolean).join(" — ")
+    : (po.projectRef?.trim() ?? "");
+
+  // Commercial terms come from the PO itself (agreed for THIS order). Payment term falls back to
+  // the supplier's default for older POs saved before the field existed; delivery term resolves
+  // its Incoterm code to the full human label (e.g. "DDP" → "DDP — Delivered Duty Paid").
+  const payment =
+    po.paymentTerms?.trim() ||
+    (s ? (s.paymentTerms === "Custom" ? (s.customPaymentTerms ?? "") : (s.paymentTerms ?? "")) : "");
+  const deliveryTerms = po.deliveryTerms ? incotermLabel(po.deliveryTerms) : "";
 
   return {
     meta: ctx.meta,
@@ -63,6 +77,16 @@ export function buildPurchaseOrderDocument(
       reference: po.referenceNumber ?? "",
       currency,
       priority: titleCase(po.priority ?? "normal"),
+      project,
+    },
+    terms: {
+      // "Delivery Terms" = the Incoterm (commercial). The practical delivery note
+      // (deliveryInstructions) is printed separately under Notes-style content, not as a term.
+      delivery: deliveryTerms,
+      deliveryInstructions: po.deliveryInstructions?.trim() ?? "",
+      payment: payment.trim(),
+      preparedBy: po.createdBy?.trim() ?? "",
+      approvedBy: po.approvedBy?.trim() ?? "",
     },
     lines: po.items.map((i) => ({
       name: i.itemName,

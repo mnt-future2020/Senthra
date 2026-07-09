@@ -23,6 +23,7 @@ import {
   PackageCheck,
   Boxes,
   ArrowRightLeft,
+  FileText,
 } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
@@ -46,6 +47,9 @@ const NAV: NavItem[] = [
   { href: "/dashboard/warehouses", label: "Warehouses", icon: Warehouse, perms: ["warehouse.view"] },
   { href: "/dashboard/suppliers", label: "Suppliers", icon: Truck, perms: ["suppliers.view"] },
   // IRM Catalogue now lives inside Inventory (IRM tab → Catalogue); standalone nav removed.
+  // Purchase Requests (quotation capture + finance approval) sit directly before the orders
+  // they generate.
+  { href: "/dashboard/purchase-requests", label: "Purchase Requests", icon: FileText, perms: ["purchase_requests.view"] },
   { href: "/dashboard/purchase-orders", label: "Purchase Orders", icon: ClipboardList, perms: ["purchase_orders.view"] },
   { href: "/dashboard/goods-in", label: "GRN", icon: PackageCheck, perms: ["goods_in.view"] },
   { href: "/dashboard/inventory", label: "Inventory", icon: Boxes, perms: ["inventory.view"] },

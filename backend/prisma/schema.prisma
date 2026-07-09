@@ -219,8 +219,9 @@ model Warehouse {
 
   status String @default("active") // active | inactive
 
-  // Purchase orders delivering to this warehouse (back-relation; no DB column).
-  purchaseOrders PurchaseOrder[]
+  // Purchase requests + orders delivering to this warehouse (back-relations; no DB column).
+  purchaseRequests PurchaseRequest[]
+  purchaseOrders   PurchaseOrder[]
   // Goods In + inventory at this warehouse (back-relations; no DB column).
   goodsReceipts         GoodsReceipt[]
   inventoryBalances     InventoryBalance[]
@@ -323,8 +324,9 @@ model Supplier {
 
   // IRM items this supplier can supply (junction back-relation; no DB column).
   irmLinks IrmItemSupplier[]
-  // Purchase orders raised against this supplier (back-relation; no DB column).
-  purchaseOrders PurchaseOrder[]
+  // Purchase requests + orders raised against this supplier (back-relations; no DB column).
+  purchaseRequests PurchaseRequest[]
+  purchaseOrders   PurchaseOrder[]
   // Field jobs using this supplier as external installer (back-relation; no DB column).
   jobs           Job[]
 
@@ -441,8 +443,9 @@ model IrmItem {
   owner       User?   @relation(fields: [ownerUserId], references: [id])
   notes       String?
 
-  // Purchase-order lines referencing this item (back-relation; no DB column).
-  purchaseOrderLines PurchaseOrderItem[]
+  // Purchase-request + purchase-order lines referencing this item (back-relations; no DB column).
+  purchaseRequestLines PurchaseRequestItem[]
+  purchaseOrderLines   PurchaseOrderItem[]
   // Goods In lines + inventory for this item (back-relations; no DB column).
   goodsReceiptItems     GoodsReceiptItem[]
   inventoryBalances     InventoryBalance[]
@@ -491,6 +494,138 @@ model IrmItemSupplier {
   @@index([supplierId])
 }
 
+// ── Purchase Requests (PRF) — the pre-PO procurement document ────────────────────────
+// Captures the supplier quotation (structured fields + file attachments) and the internal
+// Purchase Request Form, routes it through Finance review, and converts — exactly once —
+// into a Purchase Order. Codes are Counter-allocated (PRF-0001). Money is integer GBP
+// pence. Status is a forward-only machine enforced in the service: draft → submitted →
+// approved → converted, with reject/reopen back to draft and cancel from any pre-converted
+// state. EDITABLE ONLY IN `draft`; a `converted` PRF is READ-ONLY FOREVER.
+model PurchaseRequest {
+  id   String @id @default(auto()) @map("_id") @db.ObjectId
+  code String @unique // auto-allocated, e.g. PRF-0001 — never freed
+
+  // Supplier (resolved live; name snapshotted for list/history).
+  supplierId   String   @db.ObjectId
+  supplier     Supplier @relation(fields: [supplierId], references: [id])
+  supplierName String? // snapshot at create
+
+  // Delivery destination warehouse — one warehouse per PRF (matches the one-per-PO rule).
+  warehouseId String    @db.ObjectId
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
+
+  // Project reference — an optional Job link plus a free-text fallback.
+  jobId      String? @db.ObjectId
+  job        Job?    @relation(fields: [jobId], references: [id])
+  projectRef String?
+
+  // Provenance — set by future request modules (e.g. a job-kit request raising a PRF).
+  // System-owned; never accepted from the client API.
+  sourceType String?
+  sourceId   String? @db.ObjectId
+
+  status String @default("draft") // draft|submitted|approved|converted|cancelled
+
+  // Supplier quotation (structured) — the quote file(s) go in attachments.
+  quoteReference  String?
+  quoteDate       DateTime?
+  quoteValidUntil DateTime?
+
+  justification String? // business justification (the client's PRF field)
+  notes         String?
+
+  // Commercial terms captured from the quote — carried onto the generated PO at conversion.
+  deliveryTerms String? // Incoterm code, e.g. "DDP" | "EXW"
+  paymentTerms  String? // agreed payment term (free text, e.g. "30 Days")
+
+  currency String @default("GBP") // GBP only for now
+
+  // Financial roll-ups — SYSTEM-CALCULATED from the lines (integer pence). The "Estimated Cost".
+  subtotalPence   Int @default(0)
+  vatPence        Int @default(0)
+  grandTotalPence Int @default(0)
+
+  // Workflow — actor email snapshots + timestamps.
+  createdBy       String? // "Requested By"
+  submittedBy     String?
+  submittedAt     DateTime?
+  approvedBy      String? // the Finance reviewer
+  approvedAt      DateTime?
+  rejectionReason String? // last reject (submitted → draft)
+  reopenReason    String? // last revision reopen (approved → draft)
+  cancelledAt     DateTime?
+  cancelReason    String?
+  convertedAt     DateTime?
+  updatedBy       String?
+
+  // Set when this PRF was duplicated from a converted one (price-revision chain).
+  revisionOfId String? @db.ObjectId
+
+  deletedAt DateTime? // soft delete — DRAFT only; PRF numbers are never freed
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  items       PurchaseRequestItem[]
+  attachments PurchaseRequestAttachment[]
+  // The PO generated from this PRF (back-relation; AT MOST ONE — enforced by the convert
+  // transaction + status machine, not @unique: Prisma+Mongo would build a NON-SPARSE unique
+  // index on the PO side that rejects a second null purchaseRequestId (prisma#23870)).
+  purchaseOrders PurchaseOrder[]
+
+  @@index([status])
+  @@index([supplierId])
+  @@index([warehouseId])
+  @@index([jobId])
+}
+
+// A line on a purchase request. Snapshots the IRM item's name/sku/unit at add-time (exact
+// parity with PurchaseOrderItem) so a later IRM rename never rewrites a reviewed request.
+// Prices come from the supplier quotation.
+model PurchaseRequestItem {
+  id                String          @id @default(auto()) @map("_id") @db.ObjectId
+  purchaseRequestId String          @db.ObjectId
+  purchaseRequest   PurchaseRequest @relation(fields: [purchaseRequestId], references: [id])
+  irmItemId         String          @db.ObjectId
+  irmItem           IrmItem         @relation(fields: [irmItemId], references: [id])
+
+  // Snapshots (denormalised for self-contained, historically-accurate lines).
+  itemName String
+  sku      String?
+  baseUnit String?
+
+  quantity       Int
+  unitPricePence Int // the quoted unit price
+  vatRate        Float   @default(0)
+  lineTotalPence Int     @default(0) // system-calculated: quantity * unitPricePence (ex-VAT)
+  notes          String?
+  sortOrder      Int     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([purchaseRequestId, irmItemId])
+  @@index([purchaseRequestId])
+  @@index([irmItemId])
+}
+
+// A file attached to a purchase request — the supplier quotation / supporting docs.
+// Uploaded to Cloudinary (raw for PDF/DOCX, image for PNG/JPG); rows are copied onto the
+// generated PO at conversion (same URLs) so the PO carries its supporting evidence.
+model PurchaseRequestAttachment {
+  id                String          @id @default(auto()) @map("_id") @db.ObjectId
+  purchaseRequestId String          @db.ObjectId
+  purchaseRequest   PurchaseRequest @relation(fields: [purchaseRequestId], references: [id])
+  label             String?
+  fileName          String
+  fileType          String // pdf | docx | png | jpg
+  fileSizeBytes     Int
+  url               String
+  uploadedBy        String?
+  createdAt         DateTime @default(now())
+
+  @@index([purchaseRequestId])
+}
+
 // ── Purchase Orders — PROCUREMENT WORKFLOW ONLY ──────────────────────────────────────
 // Raise an order against a Supplier for IRM Catalogue items, route it through approval,
 // issue it to the supplier, track status until it is READY FOR GOODS IN. No stock movement,
@@ -512,8 +647,37 @@ model PurchaseOrder {
   warehouseId String    @db.ObjectId
   warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
 
-  status   String @default("draft") // draft|pending_approval|approved|sent|partially_received|fully_received|closed|cancelled
+  // Source PRF when this PO was generated from an approved Purchase Request. At most one PO
+  // per PRF — enforced by the convert transaction + PRF status machine (NOT @unique here:
+  // Prisma+Mongo builds a non-sparse unique index that would reject a second null, prisma#23870).
+  purchaseRequestId String?          @db.ObjectId
+  purchaseRequest   PurchaseRequest? @relation(fields: [purchaseRequestId], references: [id])
+
+  // Project reference — an optional Job link plus a free-text fallback (carried from the PRF,
+  // or set directly on a standalone PO).
+  jobId      String? @db.ObjectId
+  job        Job?    @relation(fields: [jobId], references: [id])
+  projectRef String?
+
+  status   String @default("draft") // draft|pending_approval|approved|pm_review|sent|supplier_accepted|partially_received|fully_received|closed|cancelled
   priority String @default("normal") // low | normal | high | urgent
+
+  // PM routing (approved → pm_review → sent). pmUserId is a loose socket (no relation —
+  // mirrors Job.createdByUserId); name/email are snapshots so the record survives renames.
+  pmUserId     String?   @db.ObjectId
+  pmName       String?
+  pmEmail      String?
+  pmAssignedAt DateTime?
+  pmAssignedBy String?
+
+  // Supplier acceptance (sent → supplier_accepted) — recorded manually by staff when the
+  // supplier confirms. confirmedDeliveryDate is updatable later; EVERY change is audited
+  // with {previousDate, newDate, reason} metadata (the audit ledger IS the revision history).
+  supplierAcceptedAt    DateTime? // when acceptance was recorded
+  supplierAcceptedBy    String?   // staff email snapshot — who recorded it
+  supplierAckReference  String?   // the supplier's own order/confirmation reference
+  confirmedDeliveryDate DateTime?
+  supplierAcceptNotes   String?
 
   referenceNumber      String?
   description          String?
@@ -529,7 +693,13 @@ model PurchaseOrder {
 
   // Delivery.
   deliveryAddress      String? // optional override; defaults to the warehouse address in the UI
-  deliveryInstructions String?
+  deliveryInstructions String? // practical note (access hours, contact, loading bay) — NOT a term
+  deliveryTerms        String? // Incoterm code, e.g. "DDP" | "EXW" (UK Incoterms 2020 subset)
+
+  // Commercial terms — the AGREED payment term for THIS order (free text, e.g. "30 Days").
+  // Pre-fills from the supplier's default in the UI but is editable per PO, since a quote can
+  // agree a different term than the supplier's standing default.
+  paymentTerms String?
 
   // Notes.
   internalNotes String? // never leaves the company
@@ -561,6 +731,9 @@ model PurchaseOrder {
   @@index([status])
   @@index([supplierId])
   @@index([warehouseId])
+  @@index([purchaseRequestId])
+  @@index([jobId])
+  @@index([pmUserId])
 }
 
 // A line on a purchase order. Snapshots the IRM item's name/sku/unit at add-time so a later
@@ -1710,6 +1883,10 @@ model Job {
 
   // Kit lines (back-relation; no DB column).
   kitLines JobKitLine[]
+
+  // Procurement raised against this job (back-relations; no DB column).
+  purchaseRequests PurchaseRequest[]
+  purchaseOrders   PurchaseOrder[]
 
   // Goods Management (back-relations; no DB column).
   stockMovements JobStockMovement[]

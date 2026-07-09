@@ -75,6 +75,25 @@ export async function notifyApproversPoSubmitted(
   );
 }
 
+// Notify the assigned Project Manager a PO has been routed to them for review + send.
+// FIRE-AND-FORGET from the PO service. Skips cleanly when no PM email is on the order.
+export async function notifyPmAssigned(po: PurchaseOrderWithRelations): Promise<void> {
+  const to = po.pmEmail?.trim();
+  if (!to) {
+    console.info(`PO ${po.code}: no PM email — assignment notification skipped.`);
+    return;
+  }
+  const regional = await getRegionalSettings();
+  await sendTemplatedEmail("po.pm_assigned", to, {
+    pmName: po.pmName ?? "",
+    poCode: po.code,
+    supplierName: po.supplier?.name ?? po.supplierName ?? "",
+    grandTotal: formatMoney(po.grandTotalPence, po.currency || "GBP"),
+    expectedDeliveryDate: formatDate(po.expectedDeliveryDate, regional.dateFormat, regional.timezone),
+    assignedBy: po.pmAssignedBy ?? "",
+  });
+}
+
 // Notify the supplier a PO was cancelled — ONLY when it had already been issued to them (`sentAt`
 // set), so a draft/approved PO the supplier never received is never emailed. No attachment.
 export async function notifySupplierPoCancelled(po: PurchaseOrderWithRelations): Promise<void> {

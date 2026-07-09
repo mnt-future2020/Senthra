@@ -6,10 +6,12 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { ChevronRight, ClipboardList, MoreHorizontal, PackagePlus, Pencil, Plus, Search, Trash2 } from "lucide-react";
 
 import * as jobService from "@/services/job.service";
-import { listCustomers } from "@/services/customer.service";
+import { listCustomers, type PagedCustomers } from "@/services/customer.service";
 import { listEngineerOptions } from "@/services/warehouse.service";
+import type { WarehouseManager } from "@/types/warehouse";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
+import { useReferenceData } from "@/hooks/useReferenceData";
 import { useJobSocket } from "@/hooks/useJobSocket";
 import { subscribe } from "@/lib/socket";
 import { Pagination } from "@/components/ui/Pagination";
@@ -172,12 +174,10 @@ export function JobsView() {
     return () => clearTimeout(t);
   }, [searchInput, search, patchParams]);
 
-  React.useEffect(() => {
-    let active = true;
-    listCustomers({ status: "active", pageSize: 200 }).then((r) => active && setCustomers(r.customers.map((c) => ({ id: c.id, name: c.name }))), () => {});
-    listEngineerOptions().then((us) => active && setEngineers(us.map((u) => ({ id: u.id, name: u.name }))), () => {});
-    return () => { active = false; };
-  }, []);
+  useReferenceData([
+    { label: "customers", load: () => listCustomers({ status: "active", pageSize: 200 }), onData: (r: PagedCustomers) => setCustomers(r.customers.map((c) => ({ id: c.id, name: c.name }))) },
+    { label: "engineers", load: () => listEngineerOptions(), onData: (us: WarehouseManager[]) => setEngineers(us.map((u) => ({ id: u.id, name: u.name }))) },
+  ]);
 
   React.useEffect(() => {
     let active = true;

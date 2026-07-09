@@ -2,17 +2,24 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Boxes, ClipboardList, Loader2, PackageCheck, Pencil, Power, ScrollText } from "lucide-react";
+import { Boxes, Loader2, PackageCheck, Pencil, Power, ScrollText } from "lucide-react";
 
 import * as supplierService from "@/services/supplier.service";
 import * as auditService from "@/services/audit.service";
+import * as poService from "@/services/purchase-order.service";
+import * as prfService from "@/services/purchase-request.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { Pagination } from "@/components/ui/Pagination";
+import { Skeleton } from "@/components/ui/Skeleton";
 import { actionLabel, actionTone, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
 import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
+import { PoStatusBadge, formatMoney, formatDate as poDate } from "@/components/dashboard/purchase-orders/poStatus";
+import { PrfStatusBadge } from "@/components/dashboard/purchase-requests/prfStatus";
 import type { AuditEntry, PagedAuditLogs } from "@/types/audit";
+import type { PurchaseOrder } from "@/types/purchase-order";
+import type { PurchaseRequest } from "@/types/purchase-request";
 import type { Supplier } from "@/types/supplier";
 import type { UserStatus } from "@/types/user";
 
@@ -32,14 +39,7 @@ function paymentTermsLabel(s: Supplier): string {
   return s.paymentTerms;
 }
 
-type Tab = "overview" | "items" | "purchase-orders" | "goods-in" | "audit";
-const TABS: { key: Tab; label: string }[] = [
-  { key: "overview", label: "Overview" },
-  { key: "items", label: "Items" },
-  { key: "purchase-orders", label: "Purchase Orders" },
-  { key: "goods-in", label: "Goods In" },
-  { key: "audit", label: "Audit trail" },
-];
+type Tab = "overview" | "items" | "procurement" | "goods-in" | "audit";
 
 export function SupplierDetail({ initial }: { initial: Supplier }) {
   const router = useRouter();
@@ -48,6 +48,15 @@ export function SupplierDetail({ initial }: { initial: Supplier }) {
   const { pushToast } = useDashboard();
   const [s, setS] = React.useState<Supplier>(initial);
   const [busy, setBusy] = React.useState(false);
+
+  // The Procurement tab reads the PO summary endpoint, so it only shows to users who can view POs.
+  const TABS: { key: Tab; label: string }[] = [
+    { key: "overview", label: "Overview" },
+    { key: "items", label: "Items" },
+    ...(can("purchase_orders.view") ? ([{ key: "procurement", label: "Procurement" }] as { key: Tab; label: string }[]) : []),
+    { key: "goods-in", label: "Goods In" },
+    { key: "audit", label: "Audit trail" },
+  ];
 
   const requestedTab = searchParams.get("tab");
   const tab: Tab = TABS.find((t) => t.key === requestedTab)?.key ?? "overview";
@@ -135,13 +144,7 @@ export function SupplierDetail({ initial }: { initial: Supplier }) {
             body="Catalogue items supplied by this supplier will appear here once the IRM catalogue module is connected."
           />
         )}
-        {tab === "purchase-orders" && (
-          <Placeholder
-            icon={ClipboardList}
-            title="Purchase Orders"
-            body="Purchase orders raised against this supplier will be listed here once the procurement module is live."
-          />
-        )}
+        {tab === "procurement" && <Procurement supplier={s} />}
         {tab === "goods-in" && (
           <Placeholder
             icon={PackageCheck}
@@ -296,6 +299,143 @@ function Overview({ s }: { s: Supplier }) {
           <Field label="Updated by">{s.updatedBy}</Field>
         </div>
       </Card>
+    </div>
+  );
+}
+
+// Procurement summary tiles + recent POs / PRFs for this supplier. Counts and spend come from
+// the dedicated summary endpoint; the two lists reuse the standard list endpoints filtered by
+// supplier. Everything deep-links into the owning module — nothing procurement-shaped is
+// duplicated here.
+function Procurement({ supplier }: { supplier: Supplier }) {
+  const router = useRouter();
+  const { can } = useAuth();
+  const canViewPrfs = can("purchase_requests.view");
+  const [summary, setSummary] = React.useState<poService.SupplierProcurementSummary | null>(null);
+  const [orders, setOrders] = React.useState<PurchaseOrder[] | null>(null);
+  const [requests, setRequests] = React.useState<PurchaseRequest[] | null>(canViewPrfs ? null : []);
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    let active = true;
+    poService
+      .getSupplierProcurementSummary(supplier.id)
+      .then((res) => active && setSummary(res))
+      .catch((e) => active && setError(e instanceof Error ? e.message : "Could not load the procurement summary."));
+    poService
+      .listPurchaseOrders({ supplier: supplier.id, pageSize: 5 })
+      .then((res) => active && setOrders(res.purchaseOrders))
+      .catch(() => active && setOrders([]));
+    if (canViewPrfs) {
+      prfService
+        .listPurchaseRequests({ supplier: supplier.id, pageSize: 5 })
+        .then((res) => active && setRequests(res.purchaseRequests))
+        .catch(() => active && setRequests([]));
+    }
+    return () => {
+      active = false;
+    };
+  }, [supplier.id, canViewPrfs]);
+
+  if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
+
+  const tiles = summary
+    ? [
+        { label: "Total POs", value: String(summary.purchaseOrders.total) },
+        { label: "Outstanding", value: String(summary.purchaseOrders.outstanding) },
+        { label: "Open", value: String(summary.purchaseOrders.open) },
+        { label: "Cancelled", value: String(summary.purchaseOrders.cancelled) },
+        { label: "Total spend", value: formatMoney(summary.purchaseOrders.spend) },
+        { label: "PRFs", value: String(summary.purchaseRequests.total) },
+      ]
+    : null;
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+        {tiles
+          ? tiles.map((t) => (
+              <div key={t.label} className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
+                <p className="text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">{t.label}</p>
+                <p className="mt-1 text-lg font-extrabold tracking-tight text-[var(--ink)]">{t.value}</p>
+              </div>
+            ))
+          : Array.from({ length: 6 }).map((_, i) => (
+              <div key={i} className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
+                <Skeleton className="h-2.5 w-16" />
+                <Skeleton className="mt-2 h-5 w-12" />
+              </div>
+            ))}
+      </div>
+
+      <div className={`grid gap-4 ${canViewPrfs ? "lg:grid-cols-2" : ""}`}>
+        <Card title="Recent purchase orders">
+          {orders === null ? (
+            <div className="space-y-2">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <Skeleton key={i} className="h-10 w-full rounded-xl" />
+              ))}
+            </div>
+          ) : orders.length === 0 ? (
+            <p className="py-6 text-center text-xs text-[var(--muted)]">No purchase orders raised against this supplier yet.</p>
+          ) : (
+            <ul className="divide-y divide-[var(--border-2)]">
+              {orders.map((po) => (
+                <li key={po.id}>
+                  <button
+                    type="button"
+                    onClick={() => router.push(`/dashboard/purchase-orders/${po.code}`)}
+                    className="flex w-full items-center justify-between gap-3 py-2.5 text-left transition-colors hover:bg-[var(--surface-2)]"
+                  >
+                    <span className="flex min-w-0 items-center gap-2.5">
+                      <span className="font-mono text-xs text-[var(--muted)]">{po.code}</span>
+                      <PoStatusBadge status={po.status} />
+                    </span>
+                    <span className="flex shrink-0 items-center gap-3 text-[11px] text-[var(--muted)]">
+                      <span className="font-semibold text-[var(--ink)]">{formatMoney(po.grandTotal, po.currency)}</span>
+                      <span className="text-[var(--faint)]">{poDate(po.orderDate)}</span>
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
+        {canViewPrfs && (
+          <Card title="Recent purchase requests">
+            {requests === null ? (
+              <div className="space-y-2">
+                {Array.from({ length: 3 }).map((_, i) => (
+                  <Skeleton key={i} className="h-10 w-full rounded-xl" />
+                ))}
+              </div>
+            ) : requests.length === 0 ? (
+              <p className="py-6 text-center text-xs text-[var(--muted)]">No purchase requests for this supplier yet.</p>
+            ) : (
+              <ul className="divide-y divide-[var(--border-2)]">
+                {requests.map((prf) => (
+                  <li key={prf.id}>
+                    <button
+                      type="button"
+                      onClick={() => router.push(`/dashboard/purchase-requests/${prf.code}`)}
+                      className="flex w-full items-center justify-between gap-3 py-2.5 text-left transition-colors hover:bg-[var(--surface-2)]"
+                    >
+                      <span className="flex min-w-0 items-center gap-2.5">
+                        <span className="font-mono text-xs text-[var(--muted)]">{prf.code}</span>
+                        <PrfStatusBadge status={prf.status} />
+                      </span>
+                      <span className="flex shrink-0 items-center gap-3 text-[11px] text-[var(--muted)]">
+                        <span className="font-semibold text-[var(--ink)]">{formatMoney(prf.grandTotal, prf.currency)}</span>
+                        <span className="text-[var(--faint)]">{poDate(prf.createdAt)}</span>
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Card>
+        )}
+      </div>
     </div>
   );
 }

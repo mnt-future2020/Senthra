@@ -11,6 +11,7 @@ vi.mock("#modules/user/user.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/supplier-type/supplier-type.service.js", () => ({
   requireActiveSupplierType: vi.fn(),
 }));
+vi.mock("#modules/purchase-request/purchase-request.repository.js", () => ({ countBySupplier: vi.fn().mockResolvedValue(0) }));
 vi.mock("#modules/purchase-order/purchase-order.repository.js", () => ({ countBySupplier: vi.fn() }));
 vi.mock("#modules/irm/irm.repository.js", () => ({ countBySupplier: vi.fn() }));
 vi.mock("#modules/goods-in/goods-in.repository.js", () => ({ countBySupplier: vi.fn() }));

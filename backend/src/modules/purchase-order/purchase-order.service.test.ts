@@ -19,22 +19,34 @@ vi.mock("./purchase-order.repository.js", () => ({
   addAttachment: vi.fn(),
   findAttachment: vi.fn(),
   removeAttachment: vi.fn(),
+  // Supplier procurement summary.
+  statusCountsForSupplier: vi.fn(),
+  spendPenceForSupplier: vi.fn(),
 }));
 vi.mock("#modules/supplier/supplier.service.js", () => ({ requireActiveSupplier: vi.fn() }));
 vi.mock("#modules/warehouse/warehouse.service.js", () => ({ requireActiveWarehouse: vi.fn() }));
-vi.mock("#modules/irm/irm.service.js", () => ({ requireActiveIrmItem: vi.fn() }));
+vi.mock("#modules/irm/irm.service.js", () => ({ requireActiveIrmItem: vi.fn(), requireActiveIrmItems: vi.fn() }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn() }));
 vi.mock("../../lib/cloudinary.js", () => ({ uploadFileToCloudinary: vi.fn() }));
+// PRF fast-path + PM routing collaborators.
+vi.mock("#modules/purchase-request/purchase-request.repository.js", () => ({ findById: vi.fn(), countBySupplier: vi.fn() }));
+vi.mock("#modules/job/job.repository.js", () => ({ findById: vi.fn() }));
+vi.mock("#modules/user/user.repository.js", () => ({ findActiveWithRole: vi.fn() }));
+vi.mock("#modules/document/document.service.js", () => ({ generatePurchaseOrderPdf: vi.fn() }));
 // The supplier email is fire-and-forget; mock it so the transition tests stay pure and we can
 // assert it's triggered + that a failure can't roll back the PO.
 vi.mock("./purchase-order.email.js", () => ({
   notifySupplierPoSent: vi.fn(() => Promise.resolve()),
   notifySupplierPoCancelled: vi.fn(() => Promise.resolve()),
   notifyApproversPoSubmitted: vi.fn(() => Promise.resolve()),
+  notifyPmAssigned: vi.fn(() => Promise.resolve()),
 }));
 
 import * as poRepo from "./purchase-order.repository.js";
+import * as prfRepo from "#modules/purchase-request/purchase-request.repository.js";
+import * as userRepo from "#modules/user/user.repository.js";
+import * as documentService from "#modules/document/document.service.js";
 import * as supplierService from "#modules/supplier/supplier.service.js";
 import * as warehouseService from "#modules/warehouse/warehouse.service.js";
 import * as irmService from "#modules/irm/irm.service.js";
@@ -42,19 +54,25 @@ import * as audit from "#modules/audit/audit.service.js";
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
 import {
+  ISSUED_PO_ATTACHMENT_LABEL,
   addAttachment,
   applyGoodsReceipt,
   approvePurchaseOrder,
+  assignPmPurchaseOrder,
   cancelPurchaseOrder,
   closePurchaseOrder,
+  commerciallyMatchesPrf,
   createPurchaseOrder,
   createPurchaseOrdersBySplit,
   deletePurchaseOrder,
   listPurchaseOrders,
+  recordSupplierAcceptance,
   rejectPurchaseOrder,
   removeAttachment,
+  requireReceivablePurchaseOrder,
   sendPurchaseOrder,
   submitPurchaseOrder,
+  updateConfirmedDeliveryDate,
   updatePurchaseOrder,
 } from "./purchase-order.service.js";
 import * as poEmail from "./purchase-order.email.js";
@@ -65,6 +83,11 @@ const WH_ID = "b".repeat(24);
 const WH_ID_2 = "e".repeat(24);
 const IRM_ID = "c".repeat(24);
 const IRM_ID_2 = "d".repeat(24);
+const PRF_ID = "9".repeat(24);
+const PM_ID = "8".repeat(24);
+
+// Flush the fire-and-forget promise chains (all mocks resolve in microtasks).
+const flushAsync = () => new Promise((r) => setImmediate(r));
 
 function poRow(over: Record<string, unknown> = {}) {
   return {
@@ -91,12 +114,30 @@ function poRow(over: Record<string, unknown> = {}) {
     supplierNotes: null,
     items: [],
     attachments: [],
+    // Procurement chain + PM routing + supplier acceptance (all null/empty by default).
+    purchaseRequestId: null,
+    purchaseRequest: null,
+    jobId: null,
+    job: null,
+    projectRef: null,
+    goodsReceipts: [],
+    pmUserId: null,
+    pmName: null,
+    pmEmail: null,
+    pmAssignedAt: null,
+    pmAssignedBy: null,
+    supplierAcceptedAt: null,
+    supplierAcceptedBy: null,
+    supplierAckReference: null,
+    confirmedDeliveryDate: null,
+    supplierAcceptNotes: null,
     createdBy: null,
     submittedBy: null,
     submittedAt: null,
     approvedBy: null,
     approvedAt: null,
     sentAt: null,
+    sentBy: null,
     closedAt: null,
     cancelledAt: null,
     cancelReason: null,
@@ -119,6 +160,8 @@ const mockCreateMany = poRepo.createManyWithCodes as ReturnType<typeof vi.fn>;
 const mockReqSupplier = supplierService.requireActiveSupplier as ReturnType<typeof vi.fn>;
 const mockReqWarehouse = warehouseService.requireActiveWarehouse as ReturnType<typeof vi.fn>;
 const mockReqIrm = irmService.requireActiveIrmItem as ReturnType<typeof vi.fn>;
+const mockReqIrms = irmService.requireActiveIrmItems as ReturnType<typeof vi.fn>;
+const irmRow = (id: string) => ({ id, name: "CAT6", sku: "C6", baseUnit: "Each", vatRatePercent: 20 });
 const mockAudit = audit.record as ReturnType<typeof vi.fn>;
 const auditActions = () => mockAudit.mock.calls.map((c) => c[0].action);
 
@@ -127,7 +170,8 @@ beforeEach(() => {
   mockUpdate.mockImplementation((_id: string, data: Record<string, unknown>) => Promise.resolve(poRow(data)));
   mockReqSupplier.mockResolvedValue({ name: "Acme" });
   mockReqWarehouse.mockResolvedValue({ id: WH_ID });
-  mockReqIrm.mockImplementation((id: string) => Promise.resolve({ id, name: "CAT6", sku: "C6", baseUnit: "Each", vatRatePercent: 20 }));
+  mockReqIrm.mockImplementation((id: string) => Promise.resolve(irmRow(id)));
+  mockReqIrms.mockImplementation((ids: string[]) => Promise.resolve(new Map(ids.map((id) => [id, irmRow(id)]))));
 });
 
 describe("createPurchaseOrder — financials (server-calculated pence)", () => {
@@ -282,7 +326,9 @@ describe("status state machine (forward-only, enforced)", () => {
 
   it("approve: pending_approval → approved", async () => {
     mockFindById.mockResolvedValue(poRow({ status: "pending_approval" }));
-    expect((await approvePurchaseOrder(PO_ID)).status).toBe("approved");
+    const r = await approvePurchaseOrder(PO_ID);
+    expect(r.purchaseOrder.status).toBe("approved");
+    expect(r.divertedToReview).toBe(false);
   });
 
   it("reject: pending_approval → draft (rework)", async () => {
@@ -447,5 +493,292 @@ describe("supplier email hooks (fire-and-forget)", () => {
     mockFindById.mockResolvedValue(poRow({ status: "sent", sentAt: new Date() }));
     await cancelPurchaseOrder(PO_ID, "No longer needed");
     expect(mockCancelled).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── PRF fast-path: draft → approved without a second finance review, ONLY while the PO still
+// commercially matches the approved purchase request it was generated from. ──────────────────
+describe("commerciallyMatchesPrf (pure)", () => {
+  const doc = (over: Record<string, unknown> = {}) => ({
+    supplierId: SUP_ID,
+    warehouseId: WH_ID,
+    currency: "GBP",
+    items: [
+      { irmItemId: IRM_ID, quantity: 10, unitPricePence: 500, vatRate: 20 },
+      { irmItemId: IRM_ID_2, quantity: 2, unitPricePence: 1000, vatRate: 20 },
+    ],
+    ...over,
+  });
+
+  it("matches an identical document (line order irrelevant)", () => {
+    const reversed = doc({ items: [...doc().items].reverse() });
+    expect(commerciallyMatchesPrf(doc(), reversed)).toBe(true);
+  });
+
+  it.each([
+    ["price change", { items: [{ irmItemId: IRM_ID, quantity: 10, unitPricePence: 501, vatRate: 20 }, { irmItemId: IRM_ID_2, quantity: 2, unitPricePence: 1000, vatRate: 20 }] }],
+    ["quantity change", { items: [{ irmItemId: IRM_ID, quantity: 11, unitPricePence: 500, vatRate: 20 }, { irmItemId: IRM_ID_2, quantity: 2, unitPricePence: 1000, vatRate: 20 }] }],
+    ["VAT change", { items: [{ irmItemId: IRM_ID, quantity: 10, unitPricePence: 500, vatRate: 0 }, { irmItemId: IRM_ID_2, quantity: 2, unitPricePence: 1000, vatRate: 20 }] }],
+    ["line removed", { items: [{ irmItemId: IRM_ID, quantity: 10, unitPricePence: 500, vatRate: 20 }] }],
+    ["line swapped for another item", { items: [{ irmItemId: IRM_ID, quantity: 10, unitPricePence: 500, vatRate: 20 }, { irmItemId: PRF_ID, quantity: 2, unitPricePence: 1000, vatRate: 20 }] }],
+    ["supplier change", { supplierId: PRF_ID }],
+    ["warehouse change", { warehouseId: WH_ID_2 }],
+    ["currency change", { currency: "EUR" }],
+  ])("refuses on %s", (_label, over) => {
+    expect(commerciallyMatchesPrf(doc(over as Record<string, unknown>) as Parameters<typeof commerciallyMatchesPrf>[0], doc())).toBe(false);
+  });
+});
+
+describe("approvePurchaseOrder — PRF fast-path (draft → approved)", () => {
+  const mockPrfFind = prfRepo.findById as ReturnType<typeof vi.fn>;
+  const matchingPrf = () => ({
+    id: PRF_ID,
+    code: "PRF-0001",
+    supplierId: SUP_ID,
+    warehouseId: WH_ID,
+    currency: "GBP",
+    items: [{ irmItemId: IRM_ID, quantity: 10, unitPricePence: 500, vatRate: 20 }],
+  });
+  const prfBornDraft = (over: Record<string, unknown> = {}) =>
+    poRow({
+      status: "draft",
+      purchaseRequestId: PRF_ID,
+      items: [{ id: "l1", irmItemId: IRM_ID, itemName: "CAT6", sku: null, baseUnit: null, quantity: 10, unitPricePence: 500, vatRate: 20, lineTotalPence: 5000, receivedQuantity: 0, notes: null, irmItem: null }],
+      ...over,
+    });
+
+  it("approves a PRF-born draft directly when it still matches the PRF (audited as fastPath)", async () => {
+    mockFindById.mockResolvedValue(prfBornDraft());
+    mockPrfFind.mockResolvedValue(matchingPrf());
+    const r = await approvePurchaseOrder(PO_ID);
+    expect(r.purchaseOrder.status).toBe("approved");
+    expect(r.divertedToReview).toBe(false);
+    const call = mockAudit.mock.calls.find((c) => c[0].action === "purchase_order.approved");
+    expect(call?.[0].metadata).toMatchObject({ fastPath: true });
+  });
+
+  // A diverged PRF-born draft must NOT dead-end: instead of throwing, it's routed into the normal
+  // review queue (pending_approval) so there's always a forward path.
+  it("diverts a commercially-diverged PRF-born draft to review instead of dead-ending", async () => {
+    mockFindById.mockResolvedValue(prfBornDraft());
+    mockPrfFind.mockResolvedValue({ ...matchingPrf(), items: [{ irmItemId: IRM_ID, quantity: 10, unitPricePence: 400, vatRate: 20 }] });
+    const r = await approvePurchaseOrder(PO_ID);
+    expect(r.divertedToReview).toBe(true);
+    expect(r.purchaseOrder.status).toBe("pending_approval");
+    expect(mockUpdate.mock.calls[0][1]).toMatchObject({ status: "pending_approval" });
+    expect(auditActions()).toContain("purchase_order.submitted");
+    expect(auditActions()).not.toContain("purchase_order.approved");
+  });
+
+  it("refuses the fast path when the source PRF no longer exists", async () => {
+    mockFindById.mockResolvedValue(prfBornDraft());
+    mockPrfFind.mockResolvedValue(null);
+    await expect(approvePurchaseOrder(PO_ID)).rejects.toThrow(/no longer exists/i);
+  });
+
+  it("a plain draft (no PRF) still can't skip pending_approval", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "draft" }));
+    await expect(approvePurchaseOrder(PO_ID)).rejects.toThrow(/can't move/i);
+  });
+});
+
+// ── PM routing: approved → pm_review → sent, with the assigned-PM send guard. ────────────────
+describe("PM routing (approved → pm_review → sent)", () => {
+  const mockUsers = userRepo.findActiveWithRole as ReturnType<typeof vi.fn>;
+  const mockNotifyPm = poEmail.notifyPmAssigned as ReturnType<typeof vi.fn>;
+  const pmUser = (permissions: string[] = ["purchase_orders.send"]) => ({
+    id: PM_ID,
+    firstName: "Priya",
+    lastName: "M",
+    email: "pm@x.co",
+    role: { permissions },
+  });
+
+  it("routes an approved PO to a qualified PM (snapshots + notification + audit)", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    mockUsers.mockResolvedValue([pmUser()]);
+    const r = await assignPmPurchaseOrder(PO_ID, PM_ID, { type: "user", id: "u1", email: "fin@x.co", permissions: [] });
+    expect(r.status).toBe("pm_review");
+    expect(mockUpdate.mock.calls[0][1]).toMatchObject({ pmUserId: PM_ID, pmName: "Priya M", pmEmail: "pm@x.co" });
+    expect(auditActions()).toContain("purchase_order.pm_assigned");
+    expect(mockNotifyPm).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a PM whose role can't send purchase orders", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    mockUsers.mockResolvedValue([pmUser(["jobs.view"])]);
+    await expect(assignPmPurchaseOrder(PO_ID, PM_ID)).rejects.toThrow(/send permission/i);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it("re-assigns while in pm_review (audited as pm_reassigned, still pm_review)", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "pm_review", pmUserId: "7".repeat(24), pmEmail: "old@x.co" }));
+    mockUsers.mockResolvedValue([pmUser()]);
+    const r = await assignPmPurchaseOrder(PO_ID, PM_ID);
+    expect(r.status).toBe("pm_review");
+    expect(auditActions()).toContain("purchase_order.pm_reassigned");
+  });
+
+  it("can't route a draft or sent PO to a PM", async () => {
+    mockUsers.mockResolvedValue([pmUser()]);
+    mockFindById.mockResolvedValue(poRow({ status: "sent" }));
+    await expect(assignPmPurchaseOrder(PO_ID, PM_ID)).rejects.toThrow(/can't move/i);
+  });
+
+  it("in pm_review, the ASSIGNED PM can send", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "pm_review", pmUserId: PM_ID, pmName: "Priya M" }));
+    const r = await sendPurchaseOrder(PO_ID, { type: "user", id: PM_ID, email: "pm@x.co", permissions: ["purchase_orders.send"] });
+    expect(r.status).toBe("sent");
+  });
+
+  it("in pm_review, ANOTHER user without the override is refused (403)", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "pm_review", pmUserId: PM_ID, pmName: "Priya M" }));
+    await expect(
+      sendPurchaseOrder(PO_ID, { type: "user", id: "7".repeat(24), email: "other@x.co", permissions: ["purchase_orders.send"] }),
+    ).rejects.toThrow(/assigned project manager/i);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it("in pm_review, an assign_pm holder may send on the PM's behalf (override)", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "pm_review", pmUserId: PM_ID }));
+    const r = await sendPurchaseOrder(PO_ID, {
+      type: "user",
+      id: "7".repeat(24),
+      email: "fin@x.co",
+      permissions: ["purchase_orders.send", "purchase_orders.assign_pm"],
+    });
+    expect(r.status).toBe("sent");
+  });
+
+  it("the direct approved → sent path still works (non-PM orders)", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    expect((await sendPurchaseOrder(PO_ID)).status).toBe("sent");
+  });
+});
+
+// ── Supplier acceptance + delivery-date revisions (audit ledger IS the history). ─────────────
+describe("supplier acceptance (sent → supplier_accepted)", () => {
+  it("records acceptance with reference + confirmed date", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "sent" }));
+    const r = await recordSupplierAcceptance(
+      PO_ID,
+      { confirmedDeliveryDate: "2026-07-20", supplierAckReference: "ACK-77", notes: "Friday slot" },
+      { type: "user", id: "u1", email: "pm@x.co", permissions: [] },
+    );
+    expect(r.status).toBe("supplier_accepted");
+    expect(mockUpdate.mock.calls[0][1]).toMatchObject({ supplierAckReference: "ACK-77", supplierAcceptedBy: "pm@x.co" });
+    expect(auditActions()).toContain("purchase_order.supplier_accepted");
+  });
+
+  it("acceptance is only recordable on a SENT order", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    await expect(recordSupplierAcceptance(PO_ID, {})).rejects.toThrow(/can't move/i);
+  });
+
+  it("delivery-date revision audits {previousDate, newDate, reason}", async () => {
+    mockFindById.mockResolvedValue(
+      poRow({ status: "supplier_accepted", confirmedDeliveryDate: new Date("2026-07-20T00:00:00Z") }),
+    );
+    await updateConfirmedDeliveryDate(PO_ID, "2026-07-22", "Supplier slipped two days");
+    const call = mockAudit.mock.calls.find((c) => c[0].action === "purchase_order.delivery_date_updated");
+    expect(call?.[0].metadata).toMatchObject({
+      previousDate: "2026-07-20T00:00:00.000Z",
+      reason: "Supplier slipped two days",
+    });
+    expect(String(call?.[0].metadata.newDate)).toContain("2026-07-22");
+  });
+
+  it("delivery-date revision is blocked before acceptance", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "sent" }));
+    await expect(updateConfirmedDeliveryDate(PO_ID, "2026-07-22", undefined)).rejects.toThrow(/after the supplier has accepted/i);
+  });
+
+  it("a supplier_accepted order is receivable; an approved one is not", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "supplier_accepted" }));
+    await expect(requireReceivablePurchaseOrder(PO_ID)).resolves.toMatchObject({ status: "supplier_accepted" });
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    await expect(requireReceivablePurchaseOrder(PO_ID)).rejects.toThrow(/can't receive stock/i);
+  });
+});
+
+// ── Explicit cancellation matrix (reason mandatory at the route; matrix enforced here). ──────
+describe("cancellation matrix", () => {
+  it.each(["draft", "pending_approval", "approved", "pm_review", "sent", "supplier_accepted"])(
+    "allows cancelling a %s order",
+    async (status) => {
+      mockFindById.mockResolvedValue(poRow({ status }));
+      expect((await cancelPurchaseOrder(PO_ID, "No longer needed")).status).toBe("cancelled");
+    },
+  );
+
+  it.each(["partially_received", "fully_received", "closed", "cancelled"])(
+    "refuses cancelling a %s order",
+    async (status) => {
+      mockFindById.mockResolvedValue(poRow({ status }));
+      await expect(cancelPurchaseOrder(PO_ID, "reason")).rejects.toThrow(/can't move/i);
+      expect(mockUpdate).not.toHaveBeenCalled();
+    },
+  );
+});
+
+// ── Document of record: the issued PDF archived at send, undeletable, never blocking the send. ─
+describe("issued-PDF archive (document of record)", () => {
+  const mockCreds = getCloudinaryCreds as ReturnType<typeof vi.fn>;
+  const mockUpload = uploadFileToCloudinary as ReturnType<typeof vi.fn>;
+  const mockPdf = documentService.generatePurchaseOrderPdf as ReturnType<typeof vi.fn>;
+  const mockAddAtt = poRepo.addAttachment as ReturnType<typeof vi.fn>;
+  const mockFindAtt = poRepo.findAttachment as ReturnType<typeof vi.fn>;
+  const mockRemoveAtt = poRepo.removeAttachment as ReturnType<typeof vi.fn>;
+
+  it("send archives the generated PDF as the system attachment", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    mockCreds.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
+    mockPdf.mockResolvedValue({ filename: "PO-0001.pdf", buffer: Buffer.from("pdf"), mimeType: "application/pdf" });
+    mockUpload.mockResolvedValue("https://cdn/po-0001.pdf");
+    await sendPurchaseOrder(PO_ID, { type: "user", id: "u1", email: "pm@x.co", permissions: [] });
+    await flushAsync();
+    expect(mockAddAtt).toHaveBeenCalledTimes(1);
+    expect(mockAddAtt.mock.calls[0][0]).toMatchObject({
+      label: ISSUED_PO_ATTACHMENT_LABEL,
+      fileType: "pdf",
+      uploadedBy: "system",
+    });
+  });
+
+  it("an archive failure never rolls back the send", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    mockCreds.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
+    mockPdf.mockRejectedValue(new Error("pdfkit exploded"));
+    expect((await sendPurchaseOrder(PO_ID)).status).toBe("sent");
+    await flushAsync();
+    expect(mockAddAtt).not.toHaveBeenCalled();
+  });
+
+  it("send still works with Cloudinary unconfigured (archive skipped)", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    mockCreds.mockResolvedValue(null);
+    expect((await sendPurchaseOrder(PO_ID)).status).toBe("sent");
+    await flushAsync();
+    expect(mockAddAtt).not.toHaveBeenCalled();
+  });
+
+  it("the archived attachment can't be removed", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "sent" }));
+    mockFindAtt.mockResolvedValue({ id: "att1", purchaseOrderId: PO_ID, label: ISSUED_PO_ATTACHMENT_LABEL, uploadedBy: "system" });
+    await expect(removeAttachment(PO_ID, "att1")).rejects.toThrow(/can't be removed/i);
+    expect(mockRemoveAtt).not.toHaveBeenCalled();
+  });
+
+  it("a user attachment can't claim the reserved label", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "sent" }));
+    await expect(
+      addAttachment(PO_ID, {
+        label: ISSUED_PO_ATTACHMENT_LABEL,
+        fileName: "fake.pdf",
+        fileType: "pdf",
+        fileSizeBytes: 10,
+        data: "data:application/pdf;base64,AAAA",
+      } as Parameters<typeof addAttachment>[1]),
+    ).rejects.toThrow(/reserved label/i);
   });
 });

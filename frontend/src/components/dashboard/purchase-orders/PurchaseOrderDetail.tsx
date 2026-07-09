@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { CheckCircle2, Download, Loader2, Package, Paperclip, Pencil, ScrollText, Send, Trash2, Upload, XCircle } from "lucide-react";
+import { CalendarClock, CheckCircle2, ChevronRight, ClipboardCheck, Download, FileText, Loader2, Package, Paperclip, Pencil, ScrollText, Send, Trash2, Upload, UserRound, XCircle } from "lucide-react";
 
 import * as poService from "@/services/purchase-order.service";
 import * as auditService from "@/services/audit.service";
@@ -10,6 +10,8 @@ import * as grnService from "@/services/goods-in.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { Select } from "@/components/ui/Select";
+import { inputCls, labelCls } from "@/components/ui/styles";
 import { actionLabel, actionTone, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
 import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
 import { GrnStatusBadge, formatDate as grnDate } from "@/components/dashboard/goods-in/grnStatus";
@@ -32,7 +34,14 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   // Read-only traceability: this PO's goods receipts. The GRN stays the single
   // stock-affecting document — here we only LIST it, never write stock from the PO side.
   const canViewReceipts = can("goods_in.view");
-  const TABS: Tab[] = ["overview", ...(canViewReceipts ? (["receipts"] as Tab[]) : []), "attachments", "audit"];
+  // The Audit trail tab hits GET /audit (needs audit.view) — only show it to holders of that
+  // permission, so a role without it never lands on a tab that 403s.
+  const TABS: Tab[] = [
+    "overview",
+    ...(canViewReceipts ? (["receipts"] as Tab[]) : []),
+    "attachments",
+    ...(can("audit.view") ? (["audit"] as Tab[]) : []),
+  ];
   const requestedTab = searchParams.get("tab");
   const tab: Tab = TABS.includes(requestedTab as Tab) ? (requestedTab as Tab) : "overview";
   const setTab = (t: Tab) => router.replace(`/dashboard/purchase-orders/${po.code}?tab=${t}`, { scroll: false });
@@ -41,6 +50,9 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   const [reason, setReason] = React.useState("");
   const [downloading, setDownloading] = React.useState(false);
   const [confirmSend, setConfirmSend] = React.useState(false);
+  const [assignPmOpen, setAssignPmOpen] = React.useState(false);
+  const [acceptOpen, setAcceptOpen] = React.useState(false);
+  const [deliveryDateOpen, setDeliveryDateOpen] = React.useState(false);
 
   // Eagerly fetch total count only so the tab label can show "Receipts (n)".
   // The Receipts sub-component manages its own paginated fetch independently.
@@ -78,9 +90,32 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
     }
   };
 
+  // Approve is special: for a PRF-born draft the server either approves it (fast path) or, if it
+  // has diverged from its PRF, routes it into the review queue instead — so there's never a
+  // dead-end. Message the two outcomes distinctly.
+  const onApprove = async () => {
+    setBusy(true);
+    try {
+      const { purchaseOrder, divertedToReview } = await poService.approvePurchaseOrder(po.id);
+      setPo(purchaseOrder);
+      pushToast(
+        divertedToReview
+          ? "This order no longer matched its purchase request, so it's been submitted for finance review."
+          : "Approved.",
+        divertedToReview ? "info" : "success",
+      );
+    } catch (e) {
+      pushToast(e instanceof Error ? e.message : "Action failed.", "alert");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const confirmReason = async () => {
-    if (reasonFor === "reject" && !reason.trim()) {
-      pushToast("A reason is required to reject.", "alert");
+    // A reason is mandatory for BOTH reject and cancel (the cancellation reason is audited
+    // and, on an already-issued order, referenced by the supplier cancellation email).
+    if (!reason.trim()) {
+      pushToast(`A reason is required to ${reasonFor}.`, "alert");
       return;
     }
     const which = reasonFor;
@@ -88,7 +123,7 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
     const r = reason.trim();
     setReason("");
     if (which === "reject") await run(() => poService.rejectPurchaseOrder(po.id, r), "Sent back to draft.");
-    else if (which === "cancel") await run(() => poService.cancelPurchaseOrder(po.id, r || undefined), "Purchase order cancelled.");
+    else if (which === "cancel") await run(() => poService.cancelPurchaseOrder(po.id, r), "Purchase order cancelled.");
   };
 
   // Workflow buttons available for the current status × permissions. The PDF download is always
@@ -101,22 +136,40 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   ];
   if (s === "draft" && can("purchase_orders.edit"))
     actions.push(<ActionBtn key="edit" icon={Pencil} onClick={() => router.push(`/dashboard/purchase-orders/${po.code}/edit`)} disabled={busy}>Edit</ActionBtn>);
-  if (s === "draft" && can("purchase_orders.submit"))
+  // A PRF-born draft takes the FAST PATH: Finance already reviewed these numbers on the PRF, so it
+  // goes draft → approved directly (no re-submission). A standalone draft uses the normal
+  // draft → pending_approval → approved path via Submit. The backend enforces the same split (and
+  // re-checks commercial equality on the fast path), so this only mirrors what the server allows.
+  if (s === "draft" && po.purchaseRequestId && can("purchase_orders.approve"))
+    actions.push(<ActionBtn key="approve-fast" icon={CheckCircle2} primary onClick={onApprove} disabled={busy}>Approve</ActionBtn>);
+  if (s === "draft" && !po.purchaseRequestId && can("purchase_orders.submit"))
     actions.push(<ActionBtn key="submit" icon={Send} primary onClick={() => run(() => poService.submitPurchaseOrder(po.id), "Submitted for approval.")} disabled={busy}>Submit</ActionBtn>);
   if (s === "pending_approval" && can("purchase_orders.approve")) {
-    actions.push(<ActionBtn key="approve" icon={CheckCircle2} primary onClick={() => run(() => poService.approvePurchaseOrder(po.id), "Approved.")} disabled={busy}>Approve</ActionBtn>);
+    actions.push(<ActionBtn key="approve" icon={CheckCircle2} primary onClick={onApprove} disabled={busy}>Approve</ActionBtn>);
     actions.push(<ActionBtn key="reject" icon={XCircle} onClick={() => { setReason(""); setReasonFor("reject"); }} disabled={busy}>Reject</ActionBtn>);
   }
-  if (s === "approved" && can("purchase_orders.send"))
+  // Route an approved PO to a Project Manager for review + send (or re-assign while in
+  // pm_review). Sending stays available in BOTH states for anyone with the send permission —
+  // the backend enforces the assigned-PM rule in pm_review, and a 403 surfaces as a toast.
+  if ((s === "approved" || s === "pm_review") && can("purchase_orders.assign_pm"))
+    actions.push(<ActionBtn key="assign-pm" icon={UserRound} onClick={() => setAssignPmOpen(true)} disabled={busy}>{s === "pm_review" ? "Re-assign PM" : "Route to PM"}</ActionBtn>);
+  if ((s === "approved" || s === "pm_review") && can("purchase_orders.send"))
     actions.push(<ActionBtn key="send" icon={Send} primary onClick={() => setConfirmSend(true)} disabled={busy}>Send to supplier</ActionBtn>);
+  // Record the supplier's acceptance of an issued order (sent → supplier_accepted).
+  if (s === "sent" && can("purchase_orders.acknowledge"))
+    actions.push(<ActionBtn key="accept" icon={ClipboardCheck} onClick={() => setAcceptOpen(true)} disabled={busy}>Record supplier acceptance</ActionBtn>);
+  // Revise the confirmed delivery date while the order sits accepted-but-not-yet-delivered.
+  if (s === "supplier_accepted" && can("purchase_orders.acknowledge"))
+    actions.push(<ActionBtn key="delivery-date" icon={CalendarClock} onClick={() => setDeliveryDateOpen(true)} disabled={busy}>Update delivery date</ActionBtn>);
   // Receive: launch the existing Goods In form with this PO preselected. Only for
-  // receivable statuses (sent / partially_received) — never draft/approved (not sent yet)
-  // or fully_received/cancelled/completed (terminal). The form + backend stay authoritative.
-  if ((s === "sent" || s === "partially_received") && can("goods_in.create"))
+  // receivable statuses (sent / supplier_accepted / partially_received) — never draft/approved
+  // (not sent yet) or fully_received/cancelled/completed (terminal). The form + backend stay
+  // authoritative.
+  if ((s === "sent" || s === "supplier_accepted" || s === "partially_received") && can("goods_in.create"))
     actions.push(<ActionBtn key="receive" icon={Package} primary onClick={() => router.push(`/dashboard/goods-in/new?po=${po.id}`)} disabled={busy}>Receive</ActionBtn>);
   if ((s === "partially_received" || s === "fully_received") && can("purchase_orders.close"))
     actions.push(<ActionBtn key="close" icon={CheckCircle2} primary onClick={() => run(() => poService.closePurchaseOrder(po.id), "Purchase order closed.")} disabled={busy}>Close</ActionBtn>);
-  if (["draft", "pending_approval", "approved", "sent"].includes(s) && can("purchase_orders.cancel"))
+  if (["draft", "pending_approval", "approved", "pm_review", "sent", "supplier_accepted"].includes(s) && can("purchase_orders.cancel"))
     actions.push(<ActionBtn key="cancel" icon={XCircle} onClick={() => { setReason(""); setReasonFor("cancel"); }} disabled={busy}>Cancel</ActionBtn>);
 
   return (
@@ -126,6 +179,12 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
           <div className="flex flex-wrap items-center gap-2">
             <h1 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">{po.code}</h1>
             <PoStatusBadge status={po.status} />
+            {/* Delivery is "scheduled" once the supplier has confirmed a date. */}
+            {po.confirmedDeliveryDate && !["cancelled", "closed"].includes(po.status) && (
+              <span className="inline-block whitespace-nowrap rounded-full bg-teal-500/12 px-2.5 py-0.5 text-[11px] font-bold text-teal-600">
+                Delivery scheduled · {formatDate(po.confirmedDeliveryDate)}
+              </span>
+            )}
             {busy && <Loader2 className="h-4 w-4 animate-spin text-[var(--muted)]" />}
           </div>
           <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
@@ -138,6 +197,9 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
         </div>
         {actions.length > 0 && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
       </div>
+
+      <ProcurementChain po={po} />
+
 
       <div className="shrink-0 flex gap-1 overflow-x-auto border-b border-[var(--border)]">
         {TABS.map((t) => (
@@ -157,11 +219,47 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
       {reasonFor && (
         <ReasonDialog
           title={reasonFor === "reject" ? "Reject purchase order" : "Cancel purchase order"}
-          required={reasonFor === "reject"}
+          required
           value={reason}
           onChange={setReason}
           onConfirm={confirmReason}
           onClose={() => { setReasonFor(null); setReason(""); }}
+        />
+      )}
+
+      {assignPmOpen && (
+        <AssignPmDialog
+          po={po}
+          busy={busy}
+          onAssign={async (pmUserId) => {
+            setAssignPmOpen(false);
+            await run(() => poService.assignPmPurchaseOrder(po.id, pmUserId), po.status === "pm_review" ? "PM re-assigned." : "Routed to the PM for review.");
+          }}
+          onClose={() => setAssignPmOpen(false)}
+        />
+      )}
+
+      {acceptOpen && (
+        <SupplierAcceptanceDialog
+          po={po}
+          busy={busy}
+          onConfirm={async (payload) => {
+            setAcceptOpen(false);
+            await run(() => poService.recordSupplierAcceptance(po.id, payload), "Supplier acceptance recorded.");
+          }}
+          onClose={() => setAcceptOpen(false)}
+        />
+      )}
+
+      {deliveryDateOpen && (
+        <DeliveryDateDialog
+          po={po}
+          busy={busy}
+          onConfirm={async (confirmedDeliveryDate, deliveryReason) => {
+            setDeliveryDateOpen(false);
+            await run(() => poService.updateConfirmedDeliveryDate(po.id, confirmedDeliveryDate, deliveryReason), "Confirmed delivery date updated.");
+          }}
+          onClose={() => setDeliveryDateOpen(false)}
         />
       )}
 
@@ -213,7 +311,209 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
+// The procurement chain: Quote/PRF → PO → GRNs. A compact linked breadcrumb so the whole
+// document trail is one click away from any node. Hidden when this PO stands alone (no source
+// PRF and nothing received yet). The current PO renders as the non-link anchor node.
+function ProcurementChain({ po }: { po: PurchaseOrder }) {
+  const router = useRouter();
+  if (!po.purchaseRequest && po.goodsReceipts.length === 0) return null;
+
+  const nodeCls = "inline-flex max-w-full items-center gap-1.5 rounded-full border border-[var(--border)] bg-[var(--surface)] px-3 py-1 text-xs font-bold";
+  return (
+    <div className="shrink-0 flex flex-wrap items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/40 px-3.5 py-2.5">
+      <span className="mr-1 text-[10px] font-extrabold uppercase tracking-wider text-[var(--faint)]">Chain</span>
+      {po.purchaseRequest && (
+        <>
+          <button
+            type="button"
+            onClick={() => router.push(`/dashboard/purchase-requests/${po.purchaseRequest!.code}`)}
+            className={`${nodeCls} text-[var(--accent)] transition-colors hover:bg-[var(--surface-2)]`}
+            title="View the source purchase request"
+          >
+            <FileText className="h-3.5 w-3.5 shrink-0" /> {po.purchaseRequest.code}
+          </button>
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--faint)]" aria-hidden />
+        </>
+      )}
+      <span className={`${nodeCls} text-[var(--ink)]`} aria-current="page">
+        <Package className="h-3.5 w-3.5 shrink-0" /> {po.code}
+      </span>
+      {po.goodsReceipts.map((g) => (
+        <React.Fragment key={g.id}>
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--faint)]" aria-hidden />
+          <button
+            type="button"
+            onClick={() => router.push(`/dashboard/goods-in/${g.code}`)}
+            className={`${nodeCls} text-[var(--accent)] transition-colors hover:bg-[var(--surface-2)]`}
+            title={`View goods receipt${g.receivedDate ? ` — received ${formatDate(g.receivedDate)}` : ""}`}
+          >
+            <ClipboardCheck className="h-3.5 w-3.5 shrink-0" /> {g.code}
+          </button>
+        </React.Fragment>
+      ))}
+    </div>
+  );
+}
+
+// Route-to-PM picker. Candidates + the suggested default (the linked job's creator, when
+// they qualify) come from the backend; the picker pre-selects the suggestion.
+function AssignPmDialog({ po, busy, onAssign, onClose }: { po: PurchaseOrder; busy: boolean; onAssign: (pmUserId: string) => void; onClose: () => void }) {
+  const { pushToast } = useDashboard();
+  const [candidates, setCandidates] = React.useState<poService.PmCandidate[] | null>(null);
+  const [pmUserId, setPmUserId] = React.useState(po.pmUserId ?? "");
+
+  React.useEffect(() => {
+    let active = true;
+    poService
+      .listPmCandidates(po.jobId ?? undefined)
+      .then((res) => {
+        if (!active) return;
+        setCandidates(res.candidates);
+        setPmUserId((prev) => prev || res.suggestedUserId || "");
+      })
+      .catch((e) => {
+        if (!active) return;
+        setCandidates([]);
+        pushToast(e instanceof Error ? e.message : "Could not load project managers.", "alert");
+      });
+    return () => { active = false; };
+  }, [po.jobId, pushToast]);
+
+  const confirm = () => {
+    if (!pmUserId) {
+      pushToast("Select a project manager.", "alert");
+      return;
+    }
+    onAssign(pmUserId);
+  };
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-sm font-extrabold text-[var(--ink)]">{po.status === "pm_review" ? "Re-assign project manager" : "Route to project manager"}</h3>
+        <p className="mt-1 text-xs text-[var(--muted)]">The assigned PM reviews {po.code} and issues it to the supplier.</p>
+        <div className="mt-4">
+          <label className={labelCls}>Project manager</label>
+          {candidates === null ? (
+            <div className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3.5 py-2.5 text-xs text-[var(--muted)]">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading…
+            </div>
+          ) : (
+            <Select
+              value={pmUserId}
+              onChange={setPmUserId}
+              options={candidates.map((c) => ({ value: c.id, label: `${c.name} (${c.email})` }))}
+              placeholder="— Select a project manager —"
+              ariaLabel="Project manager"
+            />
+          )}
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="rounded-xl border border-[var(--border)] px-3.5 py-2 text-xs font-bold text-[var(--ink)] hover:bg-[var(--surface-2)]">Cancel</button>
+          <button type="button" onClick={confirm} disabled={busy || candidates === null} className="rounded-xl bg-[var(--accent)] px-3.5 py-2 text-xs font-extrabold text-white hover:opacity-90 disabled:opacity-60">Assign</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// "Record supplier acceptance" — the supplier confirmed the issued order (sent →
+// supplier_accepted), optionally with their acknowledgement reference + confirmed delivery date.
+function SupplierAcceptanceDialog({ po, busy, onConfirm, onClose }: { po: PurchaseOrder; busy: boolean; onConfirm: (payload: poService.SupplierAcceptancePayload) => void; onClose: () => void }) {
+  const [acceptedDate, setAcceptedDate] = React.useState(new Date().toISOString().slice(0, 10));
+  const [confirmedDeliveryDate, setConfirmedDeliveryDate] = React.useState("");
+  const [supplierAckReference, setSupplierAckReference] = React.useState("");
+  const [notes, setNotes] = React.useState("");
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-sm font-extrabold text-[var(--ink)]">Record supplier acceptance</h3>
+        <p className="mt-1 text-xs text-[var(--muted)]">{po.supplierName ?? po.supplier?.name ?? "The supplier"} has confirmed {po.code}.</p>
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          <div>
+            <label className={labelCls}>Accepted on</label>
+            <input type="date" className={inputCls} value={acceptedDate} onChange={(e) => setAcceptedDate(e.target.value)} />
+          </div>
+          <div>
+            <label className={labelCls}>Confirmed delivery date</label>
+            <input type="date" className={inputCls} value={confirmedDeliveryDate} onChange={(e) => setConfirmedDeliveryDate(e.target.value)} />
+          </div>
+          <div className="sm:col-span-2">
+            <label className={labelCls}>Supplier reference</label>
+            <input className={inputCls} value={supplierAckReference} onChange={(e) => setSupplierAckReference(e.target.value)} maxLength={120} placeholder="Order confirmation / acknowledgement number (optional)" />
+          </div>
+          <div className="sm:col-span-2">
+            <label className={labelCls}>Notes</label>
+            <textarea className={inputCls} rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} maxLength={2000} placeholder="Anything the supplier flagged (optional)" />
+          </div>
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="rounded-xl border border-[var(--border)] px-3.5 py-2 text-xs font-bold text-[var(--ink)] hover:bg-[var(--surface-2)]">Cancel</button>
+          <button
+            type="button"
+            onClick={() =>
+              onConfirm({
+                acceptedDate: acceptedDate || undefined,
+                confirmedDeliveryDate: confirmedDeliveryDate || undefined,
+                supplierAckReference: supplierAckReference.trim() || undefined,
+                notes: notes.trim() || undefined,
+              })
+            }
+            disabled={busy}
+            className="rounded-xl bg-[var(--accent)] px-3.5 py-2 text-xs font-extrabold text-white hover:opacity-90 disabled:opacity-60"
+          >
+            Record acceptance
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Revise the confirmed delivery date on an accepted order — shows the current date so the
+// change is deliberate; the optional reason is audited alongside prev/new.
+function DeliveryDateDialog({ po, busy, onConfirm, onClose }: { po: PurchaseOrder; busy: boolean; onConfirm: (confirmedDeliveryDate: string, reason?: string) => void; onClose: () => void }) {
+  const { pushToast } = useDashboard();
+  const [date, setDate] = React.useState(po.confirmedDeliveryDate ? po.confirmedDeliveryDate.slice(0, 10) : "");
+  const [reason, setReason] = React.useState("");
+
+  const confirm = () => {
+    if (!date) {
+      pushToast("Enter the new confirmed delivery date.", "alert");
+      return;
+    }
+    onConfirm(date, reason.trim() || undefined);
+  };
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div className="w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-sm font-extrabold text-[var(--ink)]">Update delivery date</h3>
+        <p className="mt-1 text-xs text-[var(--muted)]">
+          Currently confirmed for <span className="font-bold text-[var(--ink)]">{formatDate(po.confirmedDeliveryDate)}</span>.
+        </p>
+        <div className="mt-4 space-y-3">
+          <div>
+            <label className={labelCls}>New confirmed delivery date</label>
+            <input type="date" className={inputCls} value={date} onChange={(e) => setDate(e.target.value)} />
+          </div>
+          <div>
+            <label className={labelCls}>Reason</label>
+            <textarea className={inputCls} rows={2} value={reason} onChange={(e) => setReason(e.target.value)} maxLength={500} placeholder="Why the date changed (optional)" />
+          </div>
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="rounded-xl border border-[var(--border)] px-3.5 py-2 text-xs font-bold text-[var(--ink)] hover:bg-[var(--surface-2)]">Cancel</button>
+          <button type="button" onClick={confirm} disabled={busy} className="rounded-xl bg-[var(--accent)] px-3.5 py-2 text-xs font-extrabold text-white hover:opacity-90 disabled:opacity-60">Update date</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Overview({ po }: { po: PurchaseOrder }) {
+  const router = useRouter();
   return (
     <div className="space-y-4">
       <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
@@ -270,20 +570,91 @@ function Overview({ po }: { po: PurchaseOrder }) {
             <Field label="Expected delivery">{formatDate(po.expectedDeliveryDate)}</Field>
             <Field label="Reference">{po.referenceNumber}</Field>
             <Field label="Priority">{PO_PRIORITY_LABELS[po.priority]}</Field>
+            <Field label="Job">
+              {po.job ? (
+                <button type="button" onClick={() => router.push(`/dashboard/jobs/${po.job!.jobNumber}`)} className="text-left font-semibold text-[var(--accent)] hover:underline">
+                  {po.job.jobNumber} — {po.job.name}
+                </button>
+              ) : (
+                ""
+              )}
+            </Field>
+            <Field label="Project reference">{po.projectRef}</Field>
+            {po.purchaseRequest && (
+              <div className="col-span-2">
+                <Field label="Source purchase request">
+                  <button type="button" onClick={() => router.push(`/dashboard/purchase-requests/${po.purchaseRequest!.code}`)} className="font-mono text-sm font-bold text-[var(--accent)] hover:underline">
+                    {po.purchaseRequest.code}
+                  </button>
+                </Field>
+              </div>
+            )}
             {po.description && <div className="col-span-2"><Field label="Description">{po.description}</Field></div>}
           </div>
         </Card>
+        {po.pmUserId && (
+          <Card title="Project manager">
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Assigned PM">{po.pmName}</Field>
+              <Field label="Assigned">{formatDate(po.pmAssignedAt)}</Field>
+              <div className="col-span-2">
+                <Field label="Email">
+                  {po.pmEmail ? (
+                    <a className="text-[var(--accent)] hover:underline" href={`mailto:${po.pmEmail}`}>{po.pmEmail}</a>
+                  ) : (
+                    ""
+                  )}
+                </Field>
+              </div>
+            </div>
+          </Card>
+        )}
+        {po.supplierAcceptedAt && (
+          <Card title="Supplier acceptance">
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Accepted">{formatDate(po.supplierAcceptedAt)}</Field>
+              <Field label="Recorded by">{po.supplierAcceptedBy}</Field>
+              <Field label="Supplier reference">{po.supplierAckReference}</Field>
+              <Field label="Confirmed delivery">{formatDate(po.confirmedDeliveryDate)}</Field>
+              {po.supplierAcceptNotes && <div className="col-span-2"><Field label="Notes">{po.supplierAcceptNotes}</Field></div>}
+            </div>
+          </Card>
+        )}
         <Card title="Delivery">
           <div className="space-y-3">
             <Field label="Warehouse">{po.warehouse?.name}</Field>
             <Field label="Address">{po.deliveryAddress || po.warehouse?.address}</Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Delivery terms">{po.deliveryTermsLabel}</Field>
+              <Field label="Payment terms">{po.paymentTerms}</Field>
+            </div>
             <Field label="Instructions">{po.deliveryInstructions}</Field>
           </div>
         </Card>
         <Card title="Approval">
           <div className="grid grid-cols-2 gap-3">
             <Field label="Created by">{po.createdBy}</Field>
-            <Field label="Submitted by">{po.submittedBy}</Field>
+            {/* A PRF-born PO that skipped the submit step (fast-tracked: Finance already reviewed the
+                numbers on the PRF) has no "submitted by" — showing a blank row reads as "why wasn't
+                this submitted?". Show the fast-track provenance instead. A standalone PO that went
+                through submit → pending_approval keeps the normal "Submitted by". */}
+            {po.purchaseRequestId && !po.submittedBy ? (
+              <Field label="Approval route">
+                {po.purchaseRequest ? (
+                  <button
+                    type="button"
+                    onClick={() => router.push(`/dashboard/purchase-requests/${po.purchaseRequest!.code}`)}
+                    className="font-semibold text-[var(--accent)] hover:underline"
+                  >
+                    Fast-tracked from {po.purchaseRequest.code}
+                  </button>
+                ) : (
+                  "Fast-tracked from purchase request"
+                )}
+              </Field>
+            ) : (
+              <Field label="Submitted by">{po.submittedBy}</Field>
+            )}
             <Field label="Approved by">{po.approvedBy}</Field>
             <Field label="Approved">{formatDate(po.approvedAt)}</Field>
             <Field label="Sent">{formatDate(po.sentAt)}</Field>
@@ -373,22 +744,34 @@ function Attachments({ po, setPo, canEdit }: { po: PurchaseOrder; setPo: (p: Pur
         </div>
       ) : (
         <ul className="divide-y divide-[var(--border-2)]">
-          {po.attachments.map((a) => (
-            <li key={a.id} className="flex items-center justify-between gap-3 py-3">
-              <a href={a.url} target="_blank" rel="noopener noreferrer" className="flex min-w-0 items-center gap-2.5">
-                <Paperclip className="h-4 w-4 shrink-0 text-[var(--accent)]" />
-                <span className="min-w-0">
-                  <span className="block truncate text-sm font-bold text-[var(--accent)] hover:underline">{a.fileName}</span>
-                  <span className="text-[11px] text-[var(--faint)]">{a.fileType.toUpperCase()} · {(a.fileSizeBytes / 1024).toFixed(0)} KB</span>
-                </span>
-              </a>
-              {canEdit && (
-                <button type="button" onClick={() => setConfirm({ open: true, id: a.id })} className="rounded-lg p-1.5 text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--neg)]" title="Remove" aria-label="Remove attachment">
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
-              )}
-            </li>
-          ))}
+          {po.attachments.map((a) => {
+            // The system-archived copy of the PO exactly as it was issued to the supplier —
+            // the document of record. Rendered distinctly and NEVER deletable.
+            const isRecord = a.uploadedBy === "system" && a.label === "Issued PO — as sent";
+            return (
+              <li key={a.id} className="flex items-center justify-between gap-3 py-3">
+                <a href={a.url} target="_blank" rel="noopener noreferrer" className="flex min-w-0 items-center gap-2.5">
+                  {isRecord ? <FileText className="h-4 w-4 shrink-0 text-[var(--accent)]" /> : <Paperclip className="h-4 w-4 shrink-0 text-[var(--accent)]" />}
+                  <span className="min-w-0">
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span className="block truncate text-sm font-bold text-[var(--accent)] hover:underline">{a.label || a.fileName}</span>
+                      {isRecord && (
+                        <span className="inline-block shrink-0 whitespace-nowrap rounded-full bg-sky-500/12 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-sky-600">
+                          Document of record
+                        </span>
+                      )}
+                    </span>
+                    <span className="text-[11px] text-[var(--faint)]">{a.fileType.toUpperCase()} · {(a.fileSizeBytes / 1024).toFixed(0)} KB{isRecord ? ` · archived ${formatDate(a.createdAt)}` : ""}</span>
+                  </span>
+                </a>
+                {canEdit && !isRecord && (
+                  <button type="button" onClick={() => setConfirm({ open: true, id: a.id })} className="rounded-lg p-1.5 text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--neg)]" title="Remove" aria-label="Remove attachment">
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </li>
+            );
+          })}
         </ul>
       )}
       <ConfirmDialog open={confirm.open} danger busy={deleting} title="Remove attachment" message="Remove this attachment from the order?" confirmLabel="Remove" onConfirm={onDelete} onClose={() => { if (!deleting) setConfirm({ open: false, id: null }); }} />

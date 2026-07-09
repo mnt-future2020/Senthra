@@ -130,7 +130,7 @@ export function ExpectedDeliveries({ warehouseId, warehouseCode }: { warehouseId
 
   React.useEffect(() => {
     let active = true;
-    const statuses = ["sent", "partially_received"];
+    const statuses = ["sent", "supplier_accepted", "partially_received"];
     (async () => {
       try {
         // Load EVERY open PO for this warehouse — not just the first page. The backend caps pageSize

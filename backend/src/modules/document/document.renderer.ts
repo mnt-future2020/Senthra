@@ -127,11 +127,49 @@ function drawBody(doc: Doc, data: PurchaseOrderDocumentData): void {
   );
   y = Math.max(supBottom, delBottom) + 18;
 
-  // ── Items / totals / notes / signature ──
+  // ── Items / totals / terms / notes / signature ──
   y = drawItemsTable(doc, data.lines, M, y, W, accent) + 14;
   y = drawTotals(doc, data, M, y, W) + 14;
+  y = drawTerms(doc, data, M, y, W, accent) + 14;
   if (data.notes) y = drawNotes(doc, data.notes, M, y, W) + 14;
   if (data.signature) drawSignature(doc, data, M, y, W);
+}
+
+// Commercial terms + accountability the client's official PO must carry: Delivery Terms, Payment
+// Terms, Prepared By, Approved By. Each row is omitted when its value is empty, so the section
+// never shows a dangling label — and the whole section is skipped if nothing is set. Two columns
+// (label + wrapping value) so long delivery/payment terms wrap instead of truncating.
+function drawTerms(doc: Doc, data: PurchaseOrderDocumentData, x: number, y: number, W: number, accent: string): number {
+  const t = data.terms;
+  const rows: [string, string][] = [];
+  if (t.payment) rows.push(["Payment Terms", t.payment]);
+  if (t.delivery) rows.push(["Delivery Terms", t.delivery]);
+  if (t.deliveryInstructions) rows.push(["Delivery Instructions", t.deliveryInstructions]);
+  if (t.preparedBy) rows.push(["Prepared By", t.preparedBy]);
+  if (t.approvedBy) rows.push(["Approved By", t.approvedBy]);
+  if (rows.length === 0) return y;
+
+  // Keep the whole block on one page — push it to the next page if it wouldn't fit.
+  const pageBottom = doc.page.height - PAGE.margin - 30;
+  const estH = 16 + rows.length * 14;
+  let yy = y;
+  if (yy + estH > pageBottom) {
+    doc.addPage();
+    yy = PAGE.margin;
+  }
+
+  doc.font("Helvetica-Bold").fontSize(FONT.label).fillColor(accent).text("TERMS & AUTHORISATION", x, yy, { width: W });
+  yy = doc.y + 4;
+  const labelW = W * 0.22;
+  const valueW = W * 0.78;
+  for (const [label, value] of rows) {
+    const startY = yy;
+    doc.font("Helvetica").fontSize(FONT.label).fillColor(COLORS.faint).text(label.toUpperCase(), x, startY + 1, { width: labelW });
+    doc.font("Helvetica-Bold").fontSize(FONT.small).fillColor(COLORS.ink).text(value, x + labelW, startY, { width: valueW });
+    // A wrapped value can push past one line; advance to whichever column ended lower.
+    yy = Math.max(doc.y, startY + 14);
+  }
+  return yy;
 }
 
 function drawCompany(doc: Doc, data: PurchaseOrderDocumentData, x: number, y: number, w: number): number {
@@ -168,6 +206,7 @@ function drawMeta(doc: Doc, data: PurchaseOrderDocumentData, x: number, y: numbe
     ["Order Date", data.order.orderDate || "—"],
     ["Expected Delivery", data.order.expectedDeliveryDate || "—"],
   ];
+  if (data.order.project) rows.push(["Project", data.order.project]);
   if (data.order.reference) rows.push(["Supplier Reference", data.order.reference]);
   rows.push(["Currency", data.order.currency]);
   rows.push(["Priority", data.order.priority]);

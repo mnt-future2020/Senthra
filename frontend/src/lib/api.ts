@@ -14,6 +14,27 @@ type ApiOptions = {
   timeout?: number;
 };
 
+/**
+ * Error thrown by `api()` / `apiBlob()` for a failed request. Extends `Error` (so every existing
+ * `instanceof Error` / `err.message` caller keeps working unchanged) and additionally carries the
+ * HTTP `status` when the server responded — `null` for network/timeout failures with no response.
+ * Lets callers distinguish a permission wall (403) from a genuine server error without string-matching.
+ */
+export class ApiError extends Error {
+  readonly status: number | null;
+  constructor(message: string, status: number | null) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+// True when an error is a permission/auth wall (403 Forbidden). 401 is excluded — the interceptor
+// silently refreshes and retries those, so a surfaced 401 is rare and not a "you lack permission" case.
+export function isPermissionError(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 403;
+}
+
 // Fail fast on a hung backend instead of spinning forever. SMTP-heavy calls
 // (e.g. sending a test email) can override this with a longer value.
 const DEFAULT_TIMEOUT = 20_000;
@@ -86,14 +107,15 @@ export async function api<T = unknown>(
     return res.data;
   } catch (err) {
     if (axios.isAxiosError(err)) {
+      const status = err.response?.status ?? null;
       const data = err.response?.data as { error?: string } | undefined;
-      if (data?.error) throw new Error(data.error);
-      if (err.response) throw new Error(`Request failed (${err.response.status})`);
+      if (data?.error) throw new ApiError(data.error, status);
+      if (err.response) throw new ApiError(`Request failed (${err.response.status})`, status);
       if (err.code === "ECONNABORTED")
-        throw new Error("The request timed out. Please try again.");
+        throw new ApiError("The request timed out. Please try again.", null);
       if (err.code === "ERR_NETWORK")
-        throw new Error("Could not reach the server. Check your connection.");
-      throw new Error(err.message);
+        throw new ApiError("Could not reach the server. Check your connection.", null);
+      throw new ApiError(err.message, status);
     }
     throw err;
   }
@@ -116,10 +138,10 @@ export async function apiBlob(path: string, timeout = 60_000): Promise<Blob> {
   } catch (err) {
     if (axios.isAxiosError(err)) {
       if (err.code === "ECONNABORTED")
-        throw new Error("The request timed out. Please try again.");
+        throw new ApiError("The request timed out. Please try again.", null);
       if (err.code === "ERR_NETWORK")
-        throw new Error("Could not reach the server. Check your connection.");
-      throw new Error(`Request failed${err.response ? ` (${err.response.status})` : ""}.`);
+        throw new ApiError("Could not reach the server. Check your connection.", null);
+      throw new ApiError(`Request failed${err.response ? ` (${err.response.status})` : ""}.`, err.response?.status ?? null);
     }
     throw err;
   }

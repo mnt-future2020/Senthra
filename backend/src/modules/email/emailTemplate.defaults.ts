@@ -185,6 +185,88 @@ Review and approve or reject it here: {{loginUrl}}
 — {{brandName}}`,
   },
   {
+    key: "prf.submitted",
+    name: "Purchase Request Submitted for Finance Review",
+    category: "notification",
+    subject: "Purchase Request {{prfCode}} awaiting your review",
+    variables: [
+      "reviewerName",
+      "prfCode",
+      "supplierName",
+      "estimatedCost",
+      "requestedBy",
+      "brandName",
+      "loginUrl",
+      "currentYear",
+    ],
+    // The PRF number identifies which request needs review; it must stay in the message.
+    requiredVariables: ["prfCode"],
+    body: `Hello {{reviewerName}},
+
+Purchase Request {{prfCode}} for {{supplierName}} ({{estimatedCost}}) has been submitted by {{requestedBy}} and is awaiting your finance review.
+
+Review and approve or reject it here: {{loginUrl}}
+
+— {{brandName}}`,
+  },
+  {
+    key: "prf.approved",
+    name: "Purchase Request Approved",
+    category: "notification",
+    subject: "Purchase Request {{prfCode}} has been approved",
+    variables: ["prfCode", "supplierName", "estimatedCost", "brandName", "loginUrl", "currentYear"],
+    requiredVariables: ["prfCode"],
+    body: `Hello,
+
+Your Purchase Request {{prfCode}} for {{supplierName}} ({{estimatedCost}}) has been approved by Finance. A purchase order will be generated from it.
+
+View it here: {{loginUrl}}
+
+— {{brandName}}`,
+  },
+  {
+    key: "prf.rejected",
+    name: "Purchase Request Rejected",
+    category: "notification",
+    subject: "Purchase Request {{prfCode}} needs rework",
+    variables: ["prfCode", "supplierName", "estimatedCost", "reason", "brandName", "loginUrl", "currentYear"],
+    requiredVariables: ["prfCode"],
+    body: `Hello,
+
+Your Purchase Request {{prfCode}} for {{supplierName}} was not approved and has been returned to draft.
+
+Reason: {{reason}}
+
+Update and resubmit it here: {{loginUrl}}
+
+— {{brandName}}`,
+  },
+  {
+    key: "po.pm_assigned",
+    name: "Purchase Order Routed to Project Manager",
+    category: "notification",
+    subject: "Purchase Order {{poCode}} awaiting your review and send",
+    variables: [
+      "pmName",
+      "poCode",
+      "supplierName",
+      "grandTotal",
+      "expectedDeliveryDate",
+      "assignedBy",
+      "brandName",
+      "loginUrl",
+      "currentYear",
+    ],
+    requiredVariables: ["poCode"],
+    body: `Hello {{pmName}},
+
+Purchase Order {{poCode}} for {{supplierName}} ({{grandTotal}}) has been routed to you by {{assignedBy}}. Please review it and send it to the supplier.
+
+Review and send it here: {{loginUrl}}
+
+— {{brandName}}`,
+  },
+  {
     key: "customer.stock_request.reviewed",
     name: "Customer Stock Request Decision",
     category: "notification",

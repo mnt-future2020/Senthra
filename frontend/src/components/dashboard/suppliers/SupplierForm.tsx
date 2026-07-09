@@ -13,6 +13,7 @@ import type { Supplier, SupplierOwner } from "@/types/supplier";
 import type { SupplierType } from "@/types/supplier-type";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import { firstActiveId } from "@/lib/utils";
+import { STANDARD_PAYMENT_TERMS, CUSTOM_PAYMENT_TERM } from "@/lib/paymentTerms";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { PostcodeField } from "@/components/ui/PostcodeField";
 import { CreatableSelect } from "@/components/ui/CreatableSelect";
@@ -30,16 +31,9 @@ const COUNTRY_OPTIONS = ["United Kingdom"];
 const CURRENCY_OPTIONS = ["GBP", "EUR"];
 // Display labels show the symbol; the stored value stays the ISO code (GBP / EUR).
 const CURRENCY_LABELS: Record<string, string> = { GBP: "GBP (£)", EUR: "EUR (€)" };
-const PAYMENT_TERMS_OPTIONS = [
-  "Prepaid",
-  "7 Days",
-  "14 Days",
-  "30 Days",
-  "45 Days",
-  "60 Days",
-  "90 Days",
-  "Custom",
-];
+// Standard terms come from the shared source of truth (also used by the PO/PRF forms) so the list
+// never drifts between Suppliers and procurement; "Custom" is the supplier-only bespoke escape hatch.
+const PAYMENT_TERMS_OPTIONS = [...STANDARD_PAYMENT_TERMS, CUSTOM_PAYMENT_TERM];
 // Lenient website check — empty, a bare domain, or a full URL (mirrors the backend).
 const WEBSITE_RE = /^(https?:\/\/)?[\w-]+(\.[\w-]+)+([/?#].*)?$/i;
 

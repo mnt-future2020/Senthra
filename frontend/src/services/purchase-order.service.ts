@@ -26,12 +26,17 @@ export function listPurchaseOrdersForItem(irmItemId: string): Promise<ItemPurcha
 export interface PoListParams {
   search?: string;
   status?: string;
-  // Several statuses in one query (sent + partially_received for the Expected-deliveries
-  // worklist). Serialized comma-separated; takes precedence over `status` on the backend.
+  // Several statuses in one query (e.g. sent + supplier_accepted + partially_received for the
+  // Expected-deliveries worklist). Serialized comma-separated; takes precedence over `status`
+  // on the backend.
   statuses?: string[];
   priority?: string;
   supplier?: string;
   warehouse?: string;
+  // Assigned PM filter — "me" resolves to the signed-in user server-side (the PM's
+  // "Awaiting my action" worklist, combined with status=pm_review).
+  pm?: string;
+  job?: string;
   page?: number;
   pageSize?: number;
   sort?: string;
@@ -62,8 +67,13 @@ export interface PurchaseOrderPayload {
   referenceNumber?: string;
   description?: string;
   priority?: PoPriority;
+  // null = explicitly clear on edit (an omitted key is "leave unchanged").
+  jobId?: string | null;
+  projectRef?: string;
   deliveryAddress?: string;
   deliveryInstructions?: string;
+  deliveryTerms?: string | null;
+  paymentTerms?: string | null;
   internalNotes?: string;
   supplierNotes?: string;
   items?: PoLinePayload[];
@@ -85,8 +95,13 @@ export interface PurchaseOrderSplitPayload {
   referenceNumber?: string;
   description?: string;
   priority?: PoPriority;
+  // null = explicitly clear on edit (an omitted key is "leave unchanged").
+  jobId?: string | null;
+  projectRef?: string;
   deliveryAddress?: string;
   deliveryInstructions?: string;
+  deliveryTerms?: string | null;
+  paymentTerms?: string | null;
   internalNotes?: string;
   supplierNotes?: string;
   items: SplitPoLinePayload[];
@@ -108,6 +123,8 @@ function qs(params: PoListParams): string {
   if (params.priority) sp.set("priority", params.priority);
   if (params.supplier) sp.set("supplier", params.supplier);
   if (params.warehouse) sp.set("warehouse", params.warehouse);
+  if (params.pm) sp.set("pm", params.pm);
+  if (params.job) sp.set("job", params.job);
   if (params.sort) sp.set("sort", params.sort);
   if (params.page) sp.set("page", String(params.page));
   if (params.pageSize) sp.set("pageSize", String(params.pageSize));
@@ -118,7 +135,7 @@ function qs(params: PoListParams): string {
 const listCache = new Map<string, PagedPurchaseOrders>();
 registerClientCache(() => listCache.clear());
 const listCacheKey = (p: PoListParams): string =>
-  `${p.page ?? 1}|${p.pageSize ?? ""}|${p.search ?? ""}|${p.status ?? ""}|${(p.statuses ?? []).join(",")}|${p.priority ?? ""}|${p.supplier ?? ""}|${p.warehouse ?? ""}|${p.sort ?? ""}`;
+  `${p.page ?? 1}|${p.pageSize ?? ""}|${p.search ?? ""}|${p.status ?? ""}|${(p.statuses ?? []).join(",")}|${p.priority ?? ""}|${p.supplier ?? ""}|${p.warehouse ?? ""}|${p.pm ?? ""}|${p.job ?? ""}|${p.sort ?? ""}`;
 
 export const getCachedPurchaseOrders = (params: PoListParams = {}): PagedPurchaseOrders | undefined =>
   listCache.get(listCacheKey(params));
@@ -172,11 +189,74 @@ const action = (id: string, name: string, body?: unknown): Promise<PurchaseOrder
   mutate(api<{ purchaseOrder: PurchaseOrder }>(`/purchase-orders/${id}/${name}`, { method: "POST", body: body ?? {} }));
 
 export const submitPurchaseOrder = (id: string) => action(id, "submit");
-export const approvePurchaseOrder = (id: string) => action(id, "approve");
+// Approve returns { purchaseOrder, divertedToReview }: divertedToReview=true means a PRF-born draft
+// had diverged from its PRF and was routed into the review queue (pending_approval) instead of being
+// approved outright — the caller messages that case differently.
+export interface ApproveResult {
+  purchaseOrder: PurchaseOrder;
+  divertedToReview: boolean;
+}
+export function approvePurchaseOrder(id: string): Promise<ApproveResult> {
+  return api<ApproveResult>(`/purchase-orders/${id}/approve`, { method: "POST", body: {} }).then((r) => {
+    listCache.clear();
+    return r;
+  });
+}
 export const rejectPurchaseOrder = (id: string, reason: string) => action(id, "reject", { reason });
 export const sendPurchaseOrder = (id: string) => action(id, "send");
-export const cancelPurchaseOrder = (id: string, reason?: string) => action(id, "cancel", { reason: reason ?? "" });
+// Cancellation reason is MANDATORY (audited; referenced by the supplier cancellation email).
+export const cancelPurchaseOrder = (id: string, reason: string) => action(id, "cancel", { reason });
 export const closePurchaseOrder = (id: string) => action(id, "close");
+
+// --- PM routing (approved → pm_review; re-assign while in pm_review) ---------
+export const assignPmPurchaseOrder = (id: string, pmUserId: string) => action(id, "assign-pm", { pmUserId });
+
+// Eligible PMs for the Route-to-PM picker (+ the suggested default from the linked job).
+export interface PmCandidate {
+  id: string;
+  name: string;
+  email: string;
+}
+export function listPmCandidates(jobId?: string): Promise<{ candidates: PmCandidate[]; suggestedUserId: string | null }> {
+  const q = jobId ? `?jobId=${encodeURIComponent(jobId)}` : "";
+  return api<{ candidates: PmCandidate[]; suggestedUserId: string | null }>(`/purchase-orders/pm-candidates${q}`);
+}
+
+// --- supplier acceptance (sent → supplier_accepted) ---------------------------
+export interface SupplierAcceptancePayload {
+  acceptedDate?: string;
+  confirmedDeliveryDate?: string;
+  supplierAckReference?: string;
+  notes?: string;
+}
+export const recordSupplierAcceptance = (id: string, payload: SupplierAcceptancePayload) => action(id, "accept", payload);
+
+// Revise the confirmed delivery date on an accepted order (audited with prev/new/reason).
+export function updateConfirmedDeliveryDate(id: string, confirmedDeliveryDate: string, reason?: string): Promise<PurchaseOrder> {
+  return mutate(
+    api<{ purchaseOrder: PurchaseOrder }>(`/purchase-orders/${id}/delivery-date`, {
+      method: "PATCH",
+      body: { confirmedDeliveryDate, reason: reason || undefined },
+    }),
+  );
+}
+
+// --- supplier procurement summary (the supplier detail "Procurement" tab) ----
+export interface SupplierProcurementSummary {
+  purchaseOrders: {
+    total: number;
+    byStatus: Record<string, number>;
+    outstanding: number; // issued, not yet fully received
+    open: number; // any non-terminal, not-yet-fully-received order
+    cancelled: number;
+    spendPence: number; // fully_received + closed orders only
+    spend: number;
+  };
+  purchaseRequests: { total: number };
+}
+export function getSupplierProcurementSummary(supplierId: string): Promise<SupplierProcurementSummary> {
+  return api<{ summary: SupplierProcurementSummary }>(`/purchase-orders/suppliers/${supplierId}/summary`).then((r) => r.summary);
+}
 
 // --- attachments ------------------------------------------------------------
 export function addAttachment(id: string, payload: PoAttachmentPayload): Promise<PurchaseOrder> {

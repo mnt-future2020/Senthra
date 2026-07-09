@@ -4,7 +4,8 @@ import * as React from "react";
 import { Loader2, Plus, Trash2 } from "lucide-react";
 
 import * as customerService from "@/services/customer.service";
-import { listWarehouses } from "@/services/warehouse.service";
+import { listWarehouses, type PagedWarehouses } from "@/services/warehouse.service";
+import { useReferenceData } from "@/hooks/useReferenceData";
 import { Modal } from "@/components/ui/Modal";
 import { Select } from "@/components/ui/Select";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
@@ -33,11 +34,9 @@ export function AssignWarehouseModal({
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
-  React.useEffect(() => {
-    listWarehouses({ status: "active", pageSize: 200 })
-      .then((r) => setWarehouses(r.warehouses.map((w) => ({ id: w.id, name: w.name, code: w.code }))))
-      .catch(() => {});
-  }, []);
+  useReferenceData([
+    { label: "warehouses", load: () => listWarehouses({ status: "active", pageSize: 200 }), onData: (r: PagedWarehouses) => setWarehouses(r.warehouses.map((w) => ({ id: w.id, name: w.name, code: w.code }))) },
+  ]);
 
   const addRow = () => setRows((p) => [...p, { warehouseId: "", quantity: "" }]);
   const removeRow = (i: number) => setRows((p) => p.filter((_, idx) => idx !== i));

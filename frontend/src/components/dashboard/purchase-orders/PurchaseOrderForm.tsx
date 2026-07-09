@@ -8,17 +8,23 @@ import * as poService from "@/services/purchase-order.service";
 import { listSuppliers } from "@/services/supplier.service";
 import { listWarehouses, listWarehouseOptions, type WarehouseOption } from "@/services/warehouse.service";
 import { listIrmItems } from "@/services/irm.service";
+import { listJobs } from "@/services/job.service";
 import { useDashboard } from "@/hooks/useDashboard";
+import { useReferenceData } from "@/hooks/useReferenceData";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { Select } from "@/components/ui/Select";
+import { PaymentTermsField } from "@/components/ui/PaymentTermsField";
+import { INCOTERM_OPTIONS } from "@/lib/incoterms";
+import { resolveSupplierPaymentTerms } from "@/lib/paymentTerms";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { formatDate, formatMoney, PoStatusBadge } from "./poStatus";
 import type { PoPriority, PurchaseOrder } from "@/types/purchase-order";
 import type { Supplier } from "@/types/supplier";
 import type { Warehouse } from "@/types/warehouse";
 import type { IrmItem } from "@/types/irm";
+import type { JobSummary } from "@/types/job";
 
 const PO_LIST = "/dashboard/purchase-orders";
 const PRIORITIES = ["low", "normal", "high", "urgent"] as const;
@@ -61,9 +67,16 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
   const [expectedDeliveryDate, setExpectedDeliveryDate] = React.useState(dateInput(o?.expectedDeliveryDate));
   const [referenceNumber, setReferenceNumber] = React.useState(o?.referenceNumber ?? "");
   const [priority, setPriority] = React.useState<PoPriority>(o?.priority ?? "normal");
+  const [jobId, setJobId] = React.useState(o?.jobId ?? "");
+  const [projectRef, setProjectRef] = React.useState(o?.projectRef ?? "");
   const [description, setDescription] = React.useState(o?.description ?? "");
   const [deliveryAddress, setDeliveryAddress] = React.useState(o?.deliveryAddress ?? "");
   const [deliveryInstructions, setDeliveryInstructions] = React.useState(o?.deliveryInstructions ?? "");
+  const [deliveryTerms, setDeliveryTerms] = React.useState(o?.deliveryTerms ?? "");
+  // Payment terms for THIS order — pre-fills from the selected supplier's default when the field
+  // is still empty (see the Supplier onChange) but is editable per-order and never clobbers a
+  // value the user has typed. Blank stays fine on create: the backend defaults it server-side.
+  const [paymentTerms, setPaymentTerms] = React.useState(o?.paymentTerms ?? "");
   // Off-site delivery is the exception: hide the address override by default and only
   // reveal it when the user opts in. Pre-open on edit if the order already carries one.
   const [overrideAddress, setOverrideAddress] = React.useState(Boolean(o?.deliveryAddress));
@@ -77,6 +90,7 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
 
   const [suppliers, setSuppliers] = React.useState<Supplier[]>([]);
   const [warehouses, setWarehouses] = React.useState<Warehouse[]>([]);
+  const [jobs, setJobs] = React.useState<JobSummary[]>([]);
   // Active-warehouse OPTIONS for the per-row picker (create flow). Server-scoped: a Warehouse Manager
   // receives only their assigned warehouses, so the picker can never offer one they aren't allowed.
   const [warehouseOptions, setWarehouseOptions] = React.useState<WarehouseOption[]>([]);
@@ -90,22 +104,19 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
   const [errors, setErrors] = React.useState<Record<string, string>>({});
   const touch = () => setDirty(true);
 
-  React.useEffect(() => {
-    let active = true;
-    listSuppliers({ status: "active", pageSize: 100 }).then((r) => active && setSuppliers(r.suppliers), () => {});
-    if (mode === "create") {
-      // Create: per-row warehouse picker sources from the SCOPED options endpoint (manager → only
-      // their warehouses). No header default-warehouse anymore — warehouse is chosen per item row.
-      listWarehouseOptions().then((opts) => active && setWarehouseOptions(opts), () => {});
-    } else {
-      // Edit: keep the single-warehouse model — load full warehouses for the header + address panel.
-      listWarehouses({ status: "active", pageSize: 100 }).then((r) => active && setWarehouses(r.warehouses), () => {});
-    }
-    listIrmItems({ status: "active", pageSize: 100 }).then((r) => active && setItems(r.items), () => {});
-    return () => {
-      active = false;
-    };
-  }, [mode]);
+  useReferenceData(
+    [
+      { label: "suppliers", load: () => listSuppliers({ status: "active", pageSize: 100 }), onData: (r) => setSuppliers(r.suppliers) },
+      // Create: per-row warehouse picker from the SCOPED options endpoint (manager → only their
+      // warehouses). Edit: full warehouses for the header + address panel (single-warehouse model).
+      mode === "create"
+        ? { label: "warehouses", load: () => listWarehouseOptions(), onData: (opts) => setWarehouseOptions(opts) }
+        : { label: "warehouses", load: () => listWarehouses({ status: "active", pageSize: 100 }), onData: (r) => setWarehouses(r.warehouses) },
+      { label: "the item catalogue", load: () => listIrmItems({ status: "active", pageSize: 100 }), onData: (r) => setItems(r.items) },
+      { label: "jobs", load: () => listJobs({ pageSize: 100 }), onData: (r) => setJobs(r.jobs) },
+    ],
+    [mode],
+  );
 
   // Warehouse-scoped manager with exactly ONE warehouse → auto-select + lock every row's warehouse.
   const lockedWarehouseId = mode === "create" && warehouseOptions.length === 1 ? warehouseOptions[0].id : null;
@@ -114,6 +125,20 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
   useReportDirty("po-form", dirty && !saved);
 
   const supplierPanel = suppliers.find((s) => s.id === supplierId) ?? o?.supplier ?? null;
+
+  // Picking a supplier pre-fills the (still-empty) payment-terms field from that supplier's
+  // default, mirroring the backend's create-time default. Done in the event handler rather than
+  // an effect so a user's own edit is never clobbered and we avoid a cascading render.
+  const onPickSupplier = (id: string) => {
+    setSupplierId(id);
+    if (!paymentTerms.trim()) {
+      const picked = suppliers.find((s) => s.id === id) ?? (id === o?.supplierId ? o?.supplier : null);
+      const resolved = resolveSupplierPaymentTerms(picked);
+      if (resolved) setPaymentTerms(resolved);
+    }
+    touch();
+    clearError("supplierId");
+  };
 
   // Selected warehouse + its composed address, shown read-only so the user can see
   // where goods will be delivered. Blank delivery address = this address is used
@@ -210,8 +235,15 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
     referenceNumber: referenceNumber.trim(),
     description: description.trim(),
     priority,
+    // Send an explicit `null` (not `undefined`) when cleared so an EDIT actually UNSETS the field
+    // — an omitted key is treated as "leave unchanged" by the backend. On create, null is
+    // equivalent to unset.
+    jobId: jobId || null,
+    projectRef: projectRef.trim(),
     deliveryAddress: deliveryAddress.trim(),
     deliveryInstructions: deliveryInstructions.trim(),
+    deliveryTerms: deliveryTerms || null,
+    paymentTerms: paymentTerms.trim() || null,
     internalNotes: internalNotes.trim(),
     supplierNotes: supplierNotes.trim(),
   });
@@ -395,7 +427,7 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className={labelCls}>Supplier<RequiredMark /></label>
-                <Select value={supplierId} onChange={(v) => { setSupplierId(v); touch(); clearError("supplierId"); }} options={suppliers.map((s) => ({ value: s.id, label: `${s.name} (${s.code})` }))} placeholder="— Select a supplier —" ariaLabel="Supplier" invalid={Boolean(errors.supplierId)} />
+                <Select value={supplierId} onChange={onPickSupplier} options={suppliers.map((s) => ({ value: s.id, label: `${s.name} (${s.code})` }))} placeholder="— Select a supplier —" ariaLabel="Supplier" invalid={Boolean(errors.supplierId)} />
                 <FieldError id="err-supplierId" message={errors.supplierId} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Choose who this order is being placed with.</p>
               </div>
@@ -430,6 +462,16 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
                 <label className={labelCls}>Priority</label>
                 <Select value={priority} onChange={(v) => { setPriority(v as typeof priority); touch(); }} options={PRIORITIES.map((p) => ({ value: p, label: PRIORITY_LABELS[p] }))} ariaLabel="Priority" />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Use Urgent only for exceptional cases.</p>
+              </div>
+              <div>
+                <label className={labelCls}>Job</label>
+                <Select value={jobId} onChange={(v) => { setJobId(v); touch(); }} options={jobs.map((j) => ({ value: j.id, label: `${j.jobNumber} — ${j.name}` }))} placeholder="— No job link —" ariaLabel="Job" />
+                <p className="mt-1.5 text-[11px] text-[var(--faint)]">Optional — link this order to a job.</p>
+              </div>
+              <div>
+                <label className={labelCls}>Project reference</label>
+                <input className={inputCls} value={projectRef} onChange={(e) => { setProjectRef(e.target.value); touch(); }} maxLength={120} placeholder="e.g. PROJ-001" />
+                <p className="mt-1.5 text-[11px] text-[var(--faint)]">Optional free-text project reference.</p>
               </div>
               <div className="sm:col-span-2">
                 <label className={labelCls}>Description</label>
@@ -570,6 +612,18 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
                   <p className="mt-1.5 text-[11px] text-[var(--faint)]">This replaces the warehouse address for this order only.</p>
                 </div>
               )}
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className={labelCls}>Delivery terms</label>
+                  <Select value={deliveryTerms} onChange={(v) => { setDeliveryTerms(v); touch(); }} options={INCOTERM_OPTIONS} placeholder="— Select delivery terms —" ariaLabel="Delivery terms" />
+                  <p className="mt-1.5 text-[11px] text-[var(--faint)]">Optional — the agreed Incoterm for this order.</p>
+                </div>
+                <div>
+                  <label className={labelCls}>Payment terms</label>
+                  <PaymentTermsField value={paymentTerms} onChange={(v) => { setPaymentTerms(v); touch(); }} />
+                  <p className="mt-1.5 text-[11px] text-[var(--faint)]">Pre-filled from the supplier default — overrides it for this order only.</p>
+                </div>
+              </div>
               <div>
                 <label className={labelCls}>Delivery instructions</label>
                 <input className={inputCls} value={deliveryInstructions} onChange={(e) => { setDeliveryInstructions(e.target.value); touch(); }} maxLength={500} placeholder="Access hours, contact person, loading bay instructions (optional)." />

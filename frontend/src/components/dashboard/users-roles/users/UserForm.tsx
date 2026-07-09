@@ -7,6 +7,7 @@ import { AlertCircle, Loader2, Trash2, Upload } from "lucide-react";
 import * as userService from "@/services/user.service";
 import { listWarehouseOptions, type WarehouseOption } from "@/services/warehouse.service";
 import { useDashboard } from "@/hooks/useDashboard";
+import { useReferenceData } from "@/hooks/useReferenceData";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import type { Role } from "@/types/role";
 import type { User, UserStatus } from "@/types/user";
@@ -153,14 +154,13 @@ export function UserForm({
 
   // Load active-warehouse options the first time a warehouse-scoped role is selected (lean endpoint;
   // only fetched when the field actually becomes relevant).
-  React.useEffect(() => {
-    if (!isWarehouseScoped || warehouseOptions.length > 0) return;
-    let active = true;
-    listWarehouseOptions().then((opts) => active && setWarehouseOptions(opts), () => {});
-    return () => {
-      active = false;
-    };
-  }, [isWarehouseScoped, warehouseOptions.length]);
+  const needWarehouseOptions = isWarehouseScoped && warehouseOptions.length === 0;
+  useReferenceData(
+    needWarehouseOptions
+      ? [{ label: "warehouses", load: () => listWarehouseOptions(), onData: (opts) => setWarehouseOptions(opts) }]
+      : [],
+    [isWarehouseScoped, warehouseOptions.length],
+  );
 
   const isDirty =
     !saved &&

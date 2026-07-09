@@ -13,6 +13,7 @@ import { inputCls, ghostBtn, labelCls, primaryBtn } from "@/components/ui/styles
 import { NumberInput } from "@/components/ui/NumberInput";
 import { Select } from "@/components/ui/Select";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
+import { PO_STATUS_LABELS } from "@/components/dashboard/purchase-orders/poStatus";
 import { AttachmentGrid, DocPicker, attachmentToDoc, type DocItem, type PickedDoc } from "./DeliveryDocuments";
 import type { GoodsReceipt, GrnAttachment } from "@/types/goods-in";
 import type { PurchaseOrder } from "@/types/purchase-order";
@@ -168,17 +169,14 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
     // IRM tracking flags resolved (otherwise a preselected line could miss serial/batch
     // capture). allSettled keeps the two independent — one failing never blocks the other.
     Promise.allSettled([
-      // receivable = sent + partially_received. `warehouse` scopes the list when opened from a
-      // warehouse's Incoming-stock tab (undefined on the global GRN page → all warehouses).
-      listPurchaseOrders({ status: "sent", warehouse: presetWarehouseId ?? undefined, pageSize: 100 }),
-      listPurchaseOrders({ status: "partially_received", warehouse: presetWarehouseId ?? undefined, pageSize: 100 }),
+      // receivable = sent + supplier_accepted + partially_received. `warehouse` scopes the list
+      // when opened from a warehouse's Incoming-stock tab (undefined on the global GRN page →
+      // all warehouses).
+      listPurchaseOrders({ statuses: ["sent", "supplier_accepted", "partially_received"], warehouse: presetWarehouseId ?? undefined, pageSize: 100 }),
       listIrmItems({ status: "active", pageSize: 200 }), // which lines capture serials / batches
-    ]).then(([sent, partial, irm]) => {
+    ]).then(([receivable, irm]) => {
       if (!active) return;
-      const pos = [
-        ...(sent.status === "fulfilled" ? sent.value.purchaseOrders : []),
-        ...(partial.status === "fulfilled" ? partial.value.purchaseOrders : []),
-      ];
+      const pos = receivable.status === "fulfilled" ? receivable.value.purchaseOrders : [];
       const flagMap = new Map(
         (irm.status === "fulfilled" ? irm.value.items : []).map(
           (i) => [i.id, { serials: i.trackSerialNumbers, batches: i.trackBatchNumbers }] as const,
@@ -399,7 +397,7 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
                 <label className={labelCls}>Purchase order<RequiredMark /></label>
                 {mode === "create" ? (
                   <>
-                    <Select value={poId} onChange={(v) => onPickPo(v)} options={receivablePos.map((p) => ({ value: p.id, label: `${p.code} — ${p.supplierName ?? p.supplier?.name ?? ""} (${p.status === "sent" ? "Sent" : "Partially received"})` }))} placeholder="— Select a purchase order —" ariaLabel="Purchase order" invalid={Boolean(errors.purchaseOrderId)} />
+                    <Select value={poId} onChange={(v) => onPickPo(v)} options={receivablePos.map((p) => ({ value: p.id, label: `${p.code} — ${p.supplierName ?? p.supplier?.name ?? ""} (${PO_STATUS_LABELS[p.status] ?? p.status})` }))} placeholder="— Select a purchase order —" ariaLabel="Purchase order" invalid={Boolean(errors.purchaseOrderId)} />
                     <FieldError message={errors.purchaseOrderId} />
                     {posLoaded && receivablePos.length === 0 ? (
                       <p className="mt-1.5 text-[11px] font-semibold text-[var(--muted)]">
