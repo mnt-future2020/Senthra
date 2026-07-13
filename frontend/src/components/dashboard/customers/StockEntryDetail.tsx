@@ -56,7 +56,7 @@ export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
       .map((c) => ({ id: c.id, name: c.name })),
   );
 
-  useReferenceData([
+  const { isLoading: refLoading } = useReferenceData([
     {
       label: "categories",
       load: () => listCategories(),
@@ -255,10 +255,10 @@ export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
                     value={categoryId}
                     onChange={(v) => { setCategoryId(v); clearError("categoryId"); }}
                     options={categories.map((c) => ({ value: c.id, label: c.name }))}
-                    placeholder="— Select category —"
+                    placeholder={refLoading && !categoryId ? "Loading categories…" : "— Select category —"}
                     ariaLabel="Category"
                     invalid={Boolean(errors.categoryId)}
-                    disabled={!canEdit}
+                    disabled={!canEdit || (refLoading && !categoryId)}
                   />
                   <FieldError message={errors.categoryId} />
                 </div>

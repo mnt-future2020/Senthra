@@ -73,6 +73,7 @@ export function StockItemPicker({
   disabled,
   describedBy,
   autoFocus,
+  onQueryChange,
 }: {
   items: StockItemOption[];
   value: StockItemValue;
@@ -82,11 +83,16 @@ export function StockItemPicker({
   disabled?: boolean;
   describedBy?: string;
   autoFocus?: boolean;
+  // When set, search is server-driven: the picker reports its (debounced) query up so the caller
+  // can refetch a fresh page, and it stops filtering `items` locally (the server already did).
+  // Omit it for small, fully-loaded lists (client-side filtering over `items`).
+  onQueryChange?: (q: string) => void;
 }) {
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const wrapRef = React.useRef<HTMLDivElement>(null);
   const listboxId = React.useId();
+  const serverFiltered = onQueryChange !== undefined;
 
   React.useEffect(() => {
     if (!open) return;
@@ -100,8 +106,16 @@ export function StockItemPicker({
     return () => window.removeEventListener("mousedown", onDown);
   }, [open]);
 
+  // Server-driven search: debounce the raw input up to the caller (which refetches). Reset to the
+  // full list when the field is cleared or the picker closes (query resets on close/pick).
+  React.useEffect(() => {
+    if (!serverFiltered) return;
+    const t = setTimeout(() => onQueryChange(query.trim()), 300);
+    return () => clearTimeout(t);
+  }, [query, serverFiltered, onQueryChange]);
+
   const q = query.trim();
-  const filtered = q
+  const filtered = q && !serverFiltered
     ? items.filter((o) => o.name.toLowerCase().includes(q.toLowerCase()))
     : items;
   const exact = items.find((o) => o.name.toLowerCase() === q.toLowerCase());

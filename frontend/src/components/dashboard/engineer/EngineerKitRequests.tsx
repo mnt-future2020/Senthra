@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { Check, Loader2, PackagePlus, Plus, Search, Trash2 } from "lucide-react";
 
 import * as kitRequestService from "@/services/jobKitRequest.service";
@@ -32,9 +33,13 @@ export function KitRequestStatusChip({ value }: { value: KitRequest["status"] })
 
 // ── Card ───────────────────────────────────────────────────────────────────────────────────────
 
-export function EngineerKitRequests({ job }: { job: Job }) {
+// The "Request items" trigger lives in the page header (see EngineerJobDetail), so the modal is
+// CONTROLLED from the parent via `open` / `onOpenChange` — this card owns only the request list and
+// the modal body. A success message is surfaced here since it belongs with the list it refreshes.
+// `locked` = the job's goods are reconciled: the request history stays visible but no new request
+// can be raised — the button is replaced with a note saying why.
+export function EngineerKitRequests({ job, locked, open, onOpenChange }: { job: Job; locked: boolean; open: boolean; onOpenChange: (open: boolean) => void }) {
   const [requests, setRequests] = React.useState<KitRequest[] | null>(null);
-  const [open, setOpen] = React.useState(false);
   const [msg, setMsg] = React.useState<Msg>(null);
   const [cancellingId, setCancellingId] = React.useState<string | null>(null);
 
@@ -69,9 +74,19 @@ export function EngineerKitRequests({ job }: { job: Job }) {
           <p className="text-[11px] font-extrabold uppercase tracking-wider text-[var(--faint)]">Additional kit</p>
           <p className="mt-0.5 text-xs text-[var(--muted)]">Need more? Request extra units of a planned item or a new item — the planner reviews and issues it.</p>
         </div>
-        <button type="button" onClick={() => { setMsg(null); setOpen(true); }} className={`${primaryBtn} shrink-0`}>
-          <PackagePlus className="h-4 w-4" /> Request items
-        </button>
+        {/* Same trigger as the page header — both open the one (parent-controlled) modal. Convenient
+            on this long page: request from the header, or from here beside the request list. Once the
+            job's goods are reconciled the button is REPLACED by a lock note (never silently removed —
+            the engineer must see why requesting is gone; their history below stays visible). */}
+        {locked ? (
+          <p className="shrink-0 rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-[11px] font-semibold text-[var(--muted)]">
+            Goods reconciled — kit locked, no more requests.
+          </p>
+        ) : (
+          <button type="button" onClick={() => onOpenChange(true)} className={`${primaryBtn} shrink-0`}>
+            <PackagePlus className="h-4 w-4" /> Request items
+          </button>
+        )}
       </div>
 
       {msg && <div className="mb-3"><Notice msg={msg} /></div>}
@@ -94,8 +109,19 @@ export function EngineerKitRequests({ job }: { job: Job }) {
                   <p className="mt-1 truncate text-xs text-[var(--muted)]">{r.lines.map((l) => `${l.itemName} ×${l.qty}`).join(", ")}</p>
                   {r.reason && <p className="mt-0.5 text-[11px] italic text-[var(--faint)]">“{r.reason}”</p>}
                   {r.status === "declined" && r.decisionNote && <p className="mt-0.5 text-[11px] text-[var(--neg)]">Planner: {r.decisionNote}</p>}
-                  {r.status === "approved" && r.fulfillmentMode && (
-                    <p className="mt-0.5 text-[11px] text-[var(--pos)]">{r.fulfillmentMode === "engineer_transfer" ? "Approved — coming via an engineer transfer." : "Approved — collect from the warehouse."}</p>
+                  {r.status === "approved" && r.fulfillmentMode === "engineer_transfer" && (
+                    <p className="mt-0.5 text-[11px] text-[var(--pos)]">
+                      Approved — coming via an engineer transfer.{" "}
+                      {/* The holder's name + phone (to coordinate the handover) live on the Transfers page. */}
+                      {/* The engineer viewing this card is the RECIPIENT of the transfer, so it lives on
+                          their "My requests" (outgoing) tab — that's where the holder's name + phone show. */}
+                      <Link href="/dashboard/engineer/transfers?view=outgoing" className="font-semibold text-[var(--accent)] hover:underline">
+                        View transfer &amp; contact
+                      </Link>
+                    </p>
+                  )}
+                  {r.status === "approved" && r.fulfillmentMode === "warehouse_issue" && (
+                    <p className="mt-0.5 text-[11px] text-[var(--pos)]">Approved — collect from the warehouse.</p>
                   )}
                 </div>
                 {r.status === "pending" && (
@@ -109,11 +135,11 @@ export function EngineerKitRequests({ job }: { job: Job }) {
         </ul>
       )}
 
-      {open && (
+      {open && !locked && (
         <RequestModal
           job={job}
-          onClose={() => setOpen(false)}
-          onSent={() => { setOpen(false); setMsg({ type: "success", text: "Request sent to the planner." }); load(); }}
+          onClose={() => onOpenChange(false)}
+          onSent={() => { onOpenChange(false); setMsg({ type: "success", text: "Request sent to the planner." }); load(); }}
         />
       )}
     </section>

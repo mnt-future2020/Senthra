@@ -199,29 +199,44 @@ export function ComingSoon({
 
 // A read-only data table inside a surface card — the shared shell for the portal's
 // Projects / Sites / Stock Requests tables (header row + horizontal scroll).
+// `fill` switches the card to the dashboard's inline-scroll contract: the card takes the
+// remaining height of a `flex h-full flex-col` page, only the table body scrolls, and the
+// header row stays pinned (sticky) — matching the admin list views (e.g. UsersView).
 export function TableCard({
   headers,
   minWidth = 640,
+  fill = false,
   children,
 }: {
   headers: React.ReactNode[];
   minWidth?: number;
+  fill?: boolean;
   children: React.ReactNode;
 }) {
+  const table = (
+    <table className="w-full text-left text-sm" style={{ minWidth }}>
+      <thead className={fill ? "sticky top-0 z-10 bg-[var(--surface)]" : undefined}>
+        <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
+          {headers.map((h, i) => (
+            <th key={i} className={`px-4 py-3 ${h === "" ? "" : "font-bold"}`}>
+              {h}
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>{children}</tbody>
+    </table>
+  );
+  if (!fill) {
+    return (
+      <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+        {table}
+      </div>
+    );
+  }
   return (
-    <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
-      <table className="w-full text-left text-sm" style={{ minWidth }}>
-        <thead>
-          <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-            {headers.map((h, i) => (
-              <th key={i} className={`px-4 py-3 ${h === "" ? "" : "font-bold"}`}>
-                {h}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>{children}</tbody>
-      </table>
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+      <div className="min-h-0 flex-1 overflow-auto">{table}</div>
     </div>
   );
 }
@@ -235,14 +250,16 @@ export function TableCardSkeleton({
   cells,
   rows = 6,
   minWidth = 640,
+  fill = false,
 }: {
   headers: React.ReactNode[];
   cells: string[];
   rows?: number;
   minWidth?: number;
+  fill?: boolean;
 }) {
   return (
-    <TableCard headers={headers} minWidth={minWidth}>
+    <TableCard headers={headers} minWidth={minWidth} fill={fill}>
       {Array.from({ length: rows }).map((_, r) => (
         <tr key={r} className="border-b border-[var(--border)] last:border-0">
           {cells.map((cls, c) => (

@@ -2,6 +2,9 @@
 
 // DamagedStockView — renders damaged-stock rows for either a warehouse or a customer.
 // Pass exactly one of warehouseId or customerId. No price/cost fields are displayed.
+// `fill` switches to the dashboard's inline-scroll contract (bounded parent → the card takes
+// the remaining height, only the table body scrolls, sticky header row); without it the view
+// keeps its natural height and scrolls with the host page (e.g. the customer detail page).
 
 import * as React from "react";
 import { AlertTriangle } from "lucide-react";
@@ -29,9 +32,11 @@ function fmtDate(iso: string | null | undefined): string {
 export function DamagedStockView({
   warehouseId,
   customerId,
+  fill = false,
 }: {
   warehouseId?: string;
   customerId?: string;
+  fill?: boolean;
 }) {
   const [rows, setRows] = React.useState<DamagedRow[] | null>(null);
   const [error, setError] = React.useState<string | null>(null);
@@ -66,12 +71,10 @@ export function DamagedStockView({
   // Only the current page is rendered, so the table stays fast even with a large damaged-stock list.
   const pageRows = rows ? rows.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE) : [];
 
-  return (
-    <div className="space-y-4">
-      <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
-        <table className="w-full text-left text-sm" style={{ minWidth: 700 }}>
-          <thead>
-            <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
+  const table = (
+    <table className="w-full text-left text-sm" style={{ minWidth: 700 }}>
+      <thead className={fill ? "sticky top-0 z-10 bg-[var(--surface)]" : undefined}>
+        <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
               <th className="px-4 py-3">Photo</th>
               <th className="px-4 py-3">Item</th>
               <th className="px-4 py-3">Owner</th>
@@ -137,10 +140,22 @@ export function DamagedStockView({
             )}
           </tbody>
         </table>
-      </div>
+  );
 
-      {rows && total > PAGE_SIZE && (
-        <Pagination page={safePage} totalPages={totalPages} total={total} label="damaged items" onPage={setPage} />
+  return (
+    <div className={fill ? "flex h-full flex-col gap-4" : "space-y-4"}>
+      {fill ? (
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+          <div className="min-h-0 flex-1 overflow-auto">{table}</div>
+        </div>
+      ) : (
+        <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">{table}</div>
+      )}
+
+      {rows && total > 0 && (
+        <div className="shrink-0">
+          <Pagination page={safePage} totalPages={totalPages} total={total} label="damaged items" onPage={setPage} />
+        </div>
       )}
 
       {preview?.photoUrl && (

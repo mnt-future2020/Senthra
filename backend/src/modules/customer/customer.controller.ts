@@ -1,7 +1,9 @@
+import type { Request } from "express";
+
 import * as customerService from "./customer.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
-import { param, queryInt } from "../../utils/request.js";
+import { param, queryInt, queryStr } from "../../utils/request.js";
 import { unauthorized } from "../../utils/http-error.js";
 import { principalGrants } from "../../types/principal.js";
 import type {
@@ -29,9 +31,9 @@ import type {
 export const listCustomers = asyncHandler(async (req, res) => {
   const { search, status, sort, page, pageSize } = req.query;
   const result = await customerService.listCustomers({
-    search: typeof search === "string" ? search : undefined,
-    status: typeof status === "string" ? status : undefined,
-    sort: typeof sort === "string" ? sort : undefined,
+    search: queryStr(search),
+    status: queryStr(status),
+    sort: queryStr(sort),
     page: queryInt(page),
     pageSize: queryInt(pageSize),
   });
@@ -178,7 +180,7 @@ export const listStockRequests = asyncHandler(async (req, res) => {
   const { status } = req.query;
   const requests = await customerService.listStockRequests(
     param(req, "id"),
-    typeof status === "string" ? status : undefined,
+    queryStr(status),
   );
   res.json({ requests });
 });
@@ -311,7 +313,7 @@ export const listCustomerStockEntries = asyncHandler(async (req, res) => {
   const { status } = req.query;
   const entries = await customerService.listCustomerStockEntries(
     param(req, "id"),
-    typeof status === "string" ? status : undefined,
+    queryStr(status),
   );
   res.json({ entries });
 });
@@ -321,7 +323,7 @@ export const listWarehouseStockEntries = asyncHandler(async (req, res) => {
   const { status } = req.query;
   const entries = await customerService.listWarehouseStockEntries(
     param(req, "id"),
-    typeof status === "string" ? status : undefined,
+    queryStr(status),
     actorFrom(req),
   );
   res.json({ entries });
@@ -364,22 +366,44 @@ export const getOwnStock = asyncHandler(async (req, res) => {
   res.json({ stock });
 });
 
-// GET /customer/stock-entries — the signed-in customer's received stock entries.
+// The portal's paged-list params, parsed uniformly from the query string.
+const portalListParams = (req: Request) => ({
+  search: queryStr(req.query.q),
+  status: queryStr(req.query.status),
+  sort: queryStr(req.query.sort),
+  page: queryInt(req.query.page),
+  pageSize: queryInt(req.query.pageSize),
+});
+
+// GET /customer/stock-entries — the signed-in customer's received stock entries (paged).
 export const getOwnStockEntries = asyncHandler(async (req, res) => {
-  const entries = await customerService.listCustomerStockEntries(customerId(req));
-  res.json({ entries });
+  res.json(await customerService.listCustomerStockEntriesPaged(customerId(req), portalListParams(req)));
 });
 
-// GET /customer/projects — the signed-in customer's projects (read-only).
+// GET /customers/:id/sites — ADMIN: paged sites for the detail tab.
+export const listCustomerSites = asyncHandler(async (req, res) => {
+  res.json(await customerService.listCustomerSites(param(req, "id"), portalListParams(req)));
+});
+
+// GET /customers/:id/projects — ADMIN: paged projects for the detail tab.
+export const listCustomerProjects = asyncHandler(async (req, res) => {
+  res.json(await customerService.listCustomerProjects(param(req, "id"), portalListParams(req)));
+});
+
+// GET /customers/:id/site-keys — ADMIN: lean name+postcode pairs for the import-preview dedupe.
+export const listCustomerSiteKeys = asyncHandler(async (req, res) => {
+  res.json({ keys: await customerService.listCustomerSiteKeys(param(req, "id")) });
+});
+
+// GET /customer/projects — the signed-in customer's projects (read-only, paged).
 export const getOwnProjects = asyncHandler(async (req, res) => {
-  const projects = await customerService.getOwnProjects(customerId(req));
-  res.json({ projects });
+  res.json(await customerService.getOwnProjects(customerId(req), portalListParams(req)));
 });
 
-// GET /customer/sites — the signed-in customer's sites (read-only).
+// GET /customer/sites — the signed-in customer's sites (read-only, paged — sites can be
+// bulk-imported in the thousands).
 export const getOwnSites = asyncHandler(async (req, res) => {
-  const sites = await customerService.getOwnSites(customerId(req));
-  res.json({ sites });
+  res.json(await customerService.getOwnSites(customerId(req), portalListParams(req)));
 });
 
 // GET /customer/overview — portal dashboard summary (company header + counts +
@@ -389,10 +413,9 @@ export const getOwnOverview = asyncHandler(async (req, res) => {
   res.json({ overview });
 });
 
-// GET /customer/stock-requests — the signed-in customer's own stock requests.
+// GET /customer/stock-requests — the signed-in customer's own stock requests (paged).
 export const getOwnStockRequests = asyncHandler(async (req, res) => {
-  const requests = await customerService.getOwnStockRequests(customerId(req));
-  res.json({ requests });
+  res.json(await customerService.getOwnStockRequests(customerId(req), portalListParams(req)));
 });
 
 // POST /customer/stock-requests — request to add a stock item (queued for an

@@ -57,11 +57,19 @@ export const TONE_CLASSES: Record<ActionTone, string> = {
   neutral: "bg-[var(--surface-2)] text-[var(--muted)]",
 };
 
-// "customer.project.created" → "Customer · Project · Created"
+// "customer.stock_request.submitted" → "Customer · Stock Request · Submitted".
+// Each dotted segment is a domain/entity/verb; underscores within a segment are word breaks, so
+// they become spaced, Title-Cased words (a multi-word entity like `stock_request` reads naturally
+// instead of "Stock_request").
 export function actionLabel(action: string): string {
   return action
     .split(".")
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .map((part) =>
+      part
+        .split("_")
+        .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(" "),
+    )
     .join(" · ");
 }
 
@@ -91,4 +99,17 @@ export function relativeTime(iso: string): string {
 
 export function absoluteTime(iso: string): string {
   return new Date(iso).toLocaleString();
+}
+
+// Extract the human-readable change labels from an audit entry's metadata, when the action recorded
+// a field-level diff (procurement edits write `{ changes: [{ label, … }] }`). Returns [] for any
+// other shape so callers can render "· N changes" only when there's something to show. Safe against
+// the metadata's `unknown` type — every access is guarded.
+export function changeLabels(metadata: unknown): string[] {
+  if (!metadata || typeof metadata !== "object") return [];
+  const changes = (metadata as { changes?: unknown }).changes;
+  if (!Array.isArray(changes)) return [];
+  return changes
+    .map((c) => (c && typeof c === "object" ? (c as { label?: unknown }).label : null))
+    .filter((l): l is string => typeof l === "string" && l.length > 0);
 }

@@ -23,6 +23,7 @@ export interface EngineerTransfer {
   fromEngineerId: string;
   fromEngineerName: string;
   fromEngineerEmail: string | null;
+  fromEngineerPhone: string | null;
   toEngineerId: string;
   toEngineerName: string;
   toEngineerEmail: string | null;

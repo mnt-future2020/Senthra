@@ -130,11 +130,11 @@ export function EngineerInventory() {
   }, [reloadTick]);
 
   return (
-    <div className="space-y-5">
+    <div className="flex h-full flex-col gap-5">
       <PortalHeader title="Stock" subtitle="Company (IRM), customer consignment and misc items currently assigned to you." />
 
       {/* Sub-tabs */}
-      <div className="flex items-center gap-2">
+      <div className="flex shrink-0 items-center gap-2">
         {SECTIONS.map(({ key, label, icon: Icon }) => (
           <button
             key={key}
@@ -154,14 +154,14 @@ export function EngineerInventory() {
 
       {/* Company (IRM) */}
       {section === "irm" && (
-        <>
+        <div className="flex min-h-0 flex-1 flex-col gap-3">
           {msg && <Notice msg={msg} />}
           {loading ? (
-            <TableCardSkeleton headers={IRM_HEADERS} cells={IRM_SKELETON} minWidth={520} />
+            <TableCardSkeleton headers={IRM_HEADERS} cells={IRM_SKELETON} minWidth={520} fill />
           ) : msg?.type === "error" ? null : stock.length === 0 ? (
             <EmptyState icon={Boxes} title="No IRM stock on hand" hint="Stock dispatched to you from a warehouse will appear here." />
           ) : (
-            <TableCard headers={IRM_HEADERS} minWidth={520}>
+            <TableCard headers={IRM_HEADERS} minWidth={520} fill>
               {stock.map((s) => (
                 <tr key={s.irmItemId} className="border-b border-[var(--border)] last:border-0">
                   <td className="px-4 py-3 font-semibold text-[var(--ink)]">{s.itemName}</td>
@@ -175,20 +175,20 @@ export function EngineerInventory() {
               ))}
             </TableCard>
           )}
-        </>
+        </div>
       )}
 
       {/* Customer consignment */}
       {section === "customer" && (
-        <>
-          <p className="text-xs text-[var(--muted)]">Consignment items issued from a job — return these when the job is complete.</p>
+        <div className="flex min-h-0 flex-1 flex-col gap-3">
+          <p className="shrink-0 text-xs text-[var(--muted)]">Consignment items issued from a job — return these when the job is complete.</p>
           {customerMsg && <Notice msg={customerMsg} />}
           {customerLoading ? (
-            <TableCardSkeleton headers={CUSTOMER_HEADERS} cells={["h-3 w-44", "h-3 w-28", "h-3 w-12"]} minWidth={400} />
+            <TableCardSkeleton headers={CUSTOMER_HEADERS} cells={["h-3 w-44", "h-3 w-28", "h-3 w-12"]} minWidth={400} fill />
           ) : customerMsg?.type === "error" ? null : customerStock.length === 0 ? (
             <EmptyState icon={Package} title="No customer stock held" hint="Customer consignment items issued to you for a job will appear here." />
           ) : (
-            <TableCard headers={CUSTOMER_HEADERS} minWidth={400}>
+            <TableCard headers={CUSTOMER_HEADERS} minWidth={400} fill>
               {customerStock.map((h) => (
                 <tr key={h.id} className="border-b border-[var(--border)] last:border-0">
                   <td className="px-4 py-3 font-semibold text-[var(--ink)]">{h.itemName}</td>
@@ -198,28 +198,30 @@ export function EngineerInventory() {
               ))}
             </TableCard>
           )}
-        </>
+        </div>
       )}
 
       {/* Movements — the engineer's own stock movement history (van company + customer consignment) */}
       {section === "movements" && (
-        <div className="h-[60vh]">
-          <p className="mb-3 text-xs text-[var(--muted)]">Every movement of stock in and out of your van — dispatches, transfers, job issues, returns and consumption. Newest first.</p>
-          <MovementFeed fetcher={ownMovementsFetcher} scope="engineer" />
+        <div className="flex min-h-0 flex-1 flex-col gap-3">
+          <p className="shrink-0 text-xs text-[var(--muted)]">Every movement of stock in and out of your van — dispatches, transfers, job issues, returns and consumption. Newest first.</p>
+          <div className="min-h-0 flex-1">
+            <MovementFeed fetcher={ownMovementsFetcher} scope="engineer" />
+          </div>
         </div>
       )}
 
       {/* Misc */}
       {section === "misc" && (
-        <>
-          <p className="text-xs text-[var(--muted)]">Free-text items handed to you on a job (no barcode / not stock-tracked).</p>
+        <div className="flex min-h-0 flex-1 flex-col gap-3">
+          <p className="shrink-0 text-xs text-[var(--muted)]">Free-text items handed to you on a job (no barcode / not stock-tracked).</p>
           {miscMsg && <Notice msg={miscMsg} />}
           {miscLoading ? (
-            <TableCardSkeleton headers={MISC_HEADERS} cells={["h-3 w-44", "h-3 w-12"]} minWidth={320} />
+            <TableCardSkeleton headers={MISC_HEADERS} cells={["h-3 w-44", "h-3 w-12"]} minWidth={320} fill />
           ) : miscMsg?.type === "error" ? null : misc.length === 0 ? (
             <EmptyState icon={Wrench} title="No misc items" hint="Misc kit items issued to you for a job will appear here." />
           ) : (
-            <TableCard headers={MISC_HEADERS} minWidth={320}>
+            <TableCard headers={MISC_HEADERS} minWidth={320} fill>
               {misc.map((m, i) => (
                 <tr key={`${m.itemName}-${i}`} className="border-b border-[var(--border)] last:border-0">
                   <td className="px-4 py-3 font-semibold text-[var(--ink)]">{m.itemName}</td>
@@ -228,7 +230,7 @@ export function EngineerInventory() {
               ))}
             </TableCard>
           )}
-        </>
+        </div>
       )}
     </div>
   );

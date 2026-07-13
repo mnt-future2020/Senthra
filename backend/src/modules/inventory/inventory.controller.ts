@@ -5,11 +5,10 @@ import { movementFiltersFrom } from "./movement.service.js";
 import { decodeCursor } from "./movement.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
-import { param, queryInt } from "../../utils/request.js";
+import { param, queryInt, queryStr } from "../../utils/request.js";
 import type { AddStockInput, AdjustStockInput, CreateTransferInput } from "./inventory.validation.js";
 import type { Ownership, LocationType, StockPositionStatus } from "./stock-position.js";
 
-const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 
 // GET /inventory?search=&warehouse=&irmItem=&category=&status=&page=&pageSize=
 export const listInventory = asyncHandler(async (req, res) => {
@@ -17,11 +16,11 @@ export const listInventory = asyncHandler(async (req, res) => {
   res.json(
     await inventoryService.listInventory(
       {
-        search: str(search),
-        warehouse: str(warehouse),
-        irmItem: str(irmItem),
-        category: str(category),
-        status: str(status),
+        search: queryStr(search),
+        warehouse: queryStr(warehouse),
+        irmItem: queryStr(irmItem),
+        category: queryStr(category),
+        status: queryStr(status),
         page: queryInt(page),
         pageSize: queryInt(pageSize),
       },
@@ -34,7 +33,7 @@ export const listInventory = asyncHandler(async (req, res) => {
 export const exportInventoryCsv = asyncHandler(async (req, res) => {
   const { search, warehouse, category, status } = req.query;
   const { csv, capped } = await inventoryService.exportInventoryCsv(
-    { search: str(search), warehouse: str(warehouse), category: str(category), status: str(status) },
+    { search: queryStr(search), warehouse: queryStr(warehouse), category: queryStr(category), status: queryStr(status) },
     actorFrom(req),
   );
   const date = new Date().toISOString().slice(0, 10);
@@ -46,13 +45,13 @@ export const exportInventoryCsv = asyncHandler(async (req, res) => {
 
 // GET /inventory/availability?irmItem=&warehouse=
 export const getAvailability = asyncHandler(async (req, res) => {
-  res.json(await inventoryService.getAvailability(str(req.query.irmItem) ?? "", str(req.query.warehouse) ?? "", actorFrom(req)));
+  res.json(await inventoryService.getAvailability(queryStr(req.query.irmItem) ?? "", queryStr(req.query.warehouse) ?? "", actorFrom(req)));
 });
 
 // GET /inventory/transfers (movement history)
 export const listTransfers = asyncHandler(async (req, res) => {
   const { search, irmItem, warehouse, page, pageSize } = req.query;
-  res.json(await inventoryService.listTransfers({ search: str(search), irmItem: str(irmItem), warehouse: str(warehouse), page: queryInt(page), pageSize: queryInt(pageSize) }, actorFrom(req)));
+  res.json(await inventoryService.listTransfers({ search: queryStr(search), irmItem: queryStr(irmItem), warehouse: queryStr(warehouse), page: queryInt(page), pageSize: queryInt(pageSize) }, actorFrom(req)));
 });
 
 // POST /inventory/transfers (move stock)
@@ -116,7 +115,7 @@ export const listMovements = asyncHandler(async (req, res) => {
   res.json(
     await movementService.listMovements(
       movementFiltersFrom(req.query),
-      decodeCursor(str(req.query.cursor)),
+      decodeCursor(queryStr(req.query.cursor)),
       queryInt(req.query.limit),
     ),
   );

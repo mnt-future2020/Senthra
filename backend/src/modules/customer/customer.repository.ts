@@ -23,16 +23,15 @@ type Db = Prisma.TransactionClient | typeof prisma;
 // pass the customerId resolved from the route (admin) or from req.principal
 // (customer portal) — a customer can only ever address its own rows.
 
+// NOTE: sites/projects are deliberately NOT included here — sites can be bulk-imported in the
+// thousands, so the detail read must never carry the full child sets. The detail page's Sites /
+// Projects tabs read them through the PAGED queries below instead.
 export type CustomerWithChildren = Customer & {
-  projects: CustomerProject[];
-  sites: CustomerSite[];
   users: CustomerUser[];
   stockRequests: CustomerStockRequest[];
 };
 
 const childInclude = {
-  projects: { orderBy: { name: "asc" } },
-  sites: { orderBy: { name: "asc" } },
   users: { orderBy: { fullName: "asc" } },
   // In-flight submissions ride along on the admin detail (the Stock Submissions
   // queue): everything still needing action or partway through receiving. Once a
@@ -533,6 +532,64 @@ export function findSitesByCustomer(
   });
 }
 
+// --- portal paged children reads --------------------------------------------------------------
+// Sites can be BULK-IMPORTED (thousands per customer), so the portal lists page at the DB — they
+// must never load the full child set the way the admin detail's findByIdWithChildren does.
+export interface PortalChildFilters {
+  search?: string;
+  status?: string;
+}
+function siteListWhere(customerId: string, f: PortalChildFilters): Prisma.CustomerSiteWhereInput {
+  const q = f.search ? escapeRegex(f.search) : undefined;
+  return {
+    customerId,
+    ...(f.status && { status: f.status }),
+    ...(q && {
+      OR: [
+        { name: { contains: q, mode: "insensitive" } },
+        { code: { contains: q, mode: "insensitive" } },
+        { postcode: { contains: q, mode: "insensitive" } },
+        { city: { contains: q, mode: "insensitive" } },
+      ],
+    }),
+  };
+}
+export function findSitesByCustomerPaged(customerId: string, f: PortalChildFilters, skip: number, take: number, sort?: string) {
+  return prisma.customerSite.findMany({
+    where: siteListWhere(customerId, f),
+    orderBy: { createdAt: sort === "oldest" ? "asc" : "desc" },
+    skip,
+    take,
+  });
+}
+export function countSitesByCustomer(customerId: string, f: PortalChildFilters = {}): Promise<number> {
+  return prisma.customerSite.count({ where: siteListWhere(customerId, f) });
+}
+function projectListWhere(customerId: string, f: PortalChildFilters): Prisma.CustomerProjectWhereInput {
+  const q = f.search ? escapeRegex(f.search) : undefined;
+  return {
+    customerId,
+    ...(f.status && { status: f.status }),
+    ...(q && {
+      OR: [
+        { name: { contains: q, mode: "insensitive" } },
+        { code: { contains: q, mode: "insensitive" } },
+      ],
+    }),
+  };
+}
+export function findProjectsByCustomerPaged(customerId: string, f: PortalChildFilters, skip: number, take: number, sort?: string) {
+  return prisma.customerProject.findMany({
+    where: projectListWhere(customerId, f),
+    orderBy: { createdAt: sort === "oldest" ? "asc" : "desc" },
+    skip,
+    take,
+  });
+}
+export function countProjectsByCustomer(customerId: string, f: PortalChildFilters = {}): Promise<number> {
+  return prisma.customerProject.count({ where: projectListWhere(customerId, f) });
+}
+
 // Bulk-create sites with a RACE-SAFE contiguous STE-#### block.
 // Allocation mirrors allocateNestedCode: reserve the whole block with ONE atomic $inc (by
 // N) on the per-customer counter — NEVER inside a transaction (a $inc in a Mongo tx can hit
@@ -696,6 +753,8 @@ export function createStockRequest(
 export function findStockRequestsByCustomer(
   customerId: string,
   status?: string,
+  skip?: number,
+  take?: number,
 ) {
   return prisma.customerStockRequest.findMany({
     where: { customerId, ...(status ? { status } : {}) },
@@ -706,7 +765,13 @@ export function findStockRequestsByCustomer(
       },
     },
     orderBy: { createdAt: "desc" },
+    // Optional paging — the portal list pages; existing unpaged callers pass nothing and are unchanged.
+    ...(skip !== undefined ? { skip } : {}),
+    ...(take !== undefined ? { take } : {}),
   });
+}
+export function countStockRequestsByCustomer(customerId: string, status?: string): Promise<number> {
+  return prisma.customerStockRequest.count({ where: { customerId, ...(status ? { status } : {}) } });
 }
 
 export function findStockRequestById(id: string): Promise<CustomerStockRequest | null> {
@@ -953,9 +1018,28 @@ export function findStockEntryById(id: string, client: Db = prisma) {
   });
 }
 
-export function findStockEntriesByCustomer(customerId: string, status?: string) {
+// Shared where for a customer's stock-entry list — optional status + free-text search over the
+// fields the picker/list shows (item name, SKU, serial, barcode). `search` is escaped (the Mongo
+// `contains` gotcha) before it feeds any $regex.
+function stockEntryListWhere(customerId: string, status?: string, search?: string): Prisma.CustomerStockEntryWhereInput {
+  const q = search ? escapeRegex(search) : undefined;
+  return {
+    customerId,
+    ...(status ? { status } : {}),
+    ...(q && {
+      OR: [
+        { itemName: { contains: q, mode: "insensitive" } },
+        { sku: { contains: q, mode: "insensitive" } },
+        { serialNumber: { contains: q, mode: "insensitive" } },
+        { barcode: { contains: q, mode: "insensitive" } },
+      ],
+    }),
+  };
+}
+
+export function findStockEntriesByCustomer(customerId: string, status?: string, skip?: number, take?: number, search?: string) {
   return prisma.customerStockEntry.findMany({
-    where: { customerId, ...(status ? { status } : {}) },
+    where: stockEntryListWhere(customerId, status, search),
     // Drop the heavy base64 barcode image from list reads — list views only show the
     // short `barcode` string; the full image is fetched only on the single-entry detail.
     omit: { barcodeDataUri: true },
@@ -965,13 +1049,16 @@ export function findStockEntriesByCustomer(customerId: string, status?: string) 
       category: { select: { id: true, name: true } },
     },
     orderBy: { createdAt: "desc" },
+    // Optional paging — the portal list pages; existing unpaged callers pass nothing and are unchanged.
+    ...(skip !== undefined ? { skip } : {}),
+    ...(take !== undefined ? { take } : {}),
   });
 }
 
-// Count a customer's stock entries (optionally by status) — used for the portal dashboard "Stock
-// entries" stat without loading the (heavy, barcode-image-bearing) rows.
-export function countStockEntriesByCustomer(customerId: string, status?: string): Promise<number> {
-  return prisma.customerStockEntry.count({ where: { customerId, ...(status ? { status } : {}) } });
+// Count a customer's stock entries (optionally by status + search) — used for the portal dashboard
+// "Stock entries" stat and paged list without loading the (heavy, barcode-image-bearing) rows.
+export function countStockEntriesByCustomer(customerId: string, status?: string, search?: string): Promise<number> {
+  return prisma.customerStockEntry.count({ where: stockEntryListWhere(customerId, status, search) });
 }
 
 export function findStockEntriesByWarehouse(warehouseId: string, status?: string) {

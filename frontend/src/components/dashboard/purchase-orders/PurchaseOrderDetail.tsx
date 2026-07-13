@@ -12,7 +12,7 @@ import { useDashboard } from "@/hooks/useDashboard";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Select } from "@/components/ui/Select";
 import { inputCls, labelCls } from "@/components/ui/styles";
-import { actionLabel, actionTone, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
+import { actionLabel, actionTone, changeLabels, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
 import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
 import { GrnStatusBadge, formatDate as grnDate } from "@/components/dashboard/goods-in/grnStatus";
 import { PO_PRIORITY_LABELS, PoStatusBadge, formatDate, formatMoney } from "./poStatus";
@@ -104,6 +104,13 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
           : "Approved.",
         divertedToReview ? "info" : "success",
       );
+      // Guide the finance user straight into the next step of the flow (approve → route to PM → PM
+      // sends). Auto-open the Route-to-PM dialog ONLY on a clean approval — never when the approval
+      // was diverted back into review (the PO isn't `approved` then) — and only for a user who can
+      // actually assign a PM. Sending directly stays available: they can just close the dialog.
+      if (!divertedToReview && purchaseOrder.status === "approved" && can("purchase_orders.assign_pm")) {
+        setAssignPmOpen(true);
+      }
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Action failed.", "alert");
     } finally {
@@ -915,15 +922,27 @@ function AuditTrail({ poId }: { poId: string }) {
   return (
     <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
       <ul className="divide-y divide-[var(--border)]">
-        {entries.map((e) => (
-          <li key={e.id} className="flex items-center justify-between gap-3 px-4 py-3">
-            <div className="flex items-center gap-3">
-              <span className={`inline-block shrink-0 rounded-full px-2.5 py-1 text-[11px] font-bold ${TONE_CLASSES[actionTone(e.action)]}`}>{actionLabel(e.action)}</span>
-              <span className="text-xs text-[var(--muted)]">{e.actorEmail ?? "system"}</span>
-            </div>
-            <span className="shrink-0 text-[11px] text-[var(--faint)]" title={new Date(e.createdAt).toLocaleString("en-GB")}>{relativeTime(e.createdAt)}</span>
-          </li>
-        ))}
+        {entries.map((e) => {
+          const changes = changeLabels(e.metadata);
+          return (
+            <li key={e.id} className="px-4 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <span className={`inline-block shrink-0 rounded-full px-2.5 py-1 text-[11px] font-bold ${TONE_CLASSES[actionTone(e.action)]}`}>{actionLabel(e.action)}</span>
+                  <span className="text-xs text-[var(--muted)]">{e.actorEmail ?? "system"}</span>
+                </div>
+                <span className="shrink-0 text-[11px] text-[var(--faint)]" title={new Date(e.createdAt).toLocaleString("en-GB")}>{relativeTime(e.createdAt)}</span>
+              </div>
+              {changes.length > 0 && (
+                <ul className="mt-2 space-y-1 border-l-2 border-[var(--border)] pl-3">
+                  {changes.map((c, i) => (
+                    <li key={i} className="text-xs text-[var(--muted)]">{c}</li>
+                  ))}
+                </ul>
+              )}
+            </li>
+          );
+        })}
       </ul>
     </div>
   );

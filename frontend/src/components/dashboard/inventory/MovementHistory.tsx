@@ -71,8 +71,8 @@ export function MovementHistory() {
   const isFiltered = Boolean(debounced);
 
   return (
-    <div className="space-y-5">
-      <div className="border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs" style={{ borderRadius: "var(--radius)" }}>
+    <div className="flex h-full flex-col gap-5">
+      <div className="shrink-0 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs" style={{ borderRadius: "var(--radius)" }}>
         <button onClick={() => router.push("/dashboard/inventory")} className="mb-2 flex items-center gap-1.5 text-[11px] font-bold text-[var(--muted)] transition-colors hover:text-[var(--ink)]">
           <ArrowLeft className="h-3.5 w-3.5" /> Back to inventory
         </button>
@@ -89,27 +89,29 @@ export function MovementHistory() {
         </div>
       </div>
 
-      <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs">
+      <div className="shrink-0 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs">
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="Search TRF, item or warehouse…" className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]" />
         </div>
       </div>
 
-      <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
         {showSkeleton ? (
-          <TableSkeleton />
+          <div className="min-h-0 flex-1 overflow-auto">
+            <TableSkeleton />
+          </div>
         ) : error ? (
-          <p className="py-16 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>
+          <div className="flex flex-1 items-center justify-center p-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</div>
         ) : rows.length === 0 ? (
-          <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
+          <div className="flex flex-1 flex-col items-center justify-center gap-2 p-12 text-center">
             <ArrowLeftRight className="h-7 w-7 text-[var(--faint)]" />
             <p className="text-sm font-semibold text-[var(--ink)]">{isFiltered ? "No movements match" : "No stock movements yet"}</p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <div className={`min-h-0 flex-1 overflow-auto transition-opacity ${loading ? "pointer-events-none opacity-60" : ""}`}>
             <table className="w-full min-w-[860px] text-left text-sm">
-              <thead>
+              <thead className="sticky top-0 z-10 bg-[var(--surface)]">
                 <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
                   <th className="px-4 py-3">Movement</th><th className="px-4 py-3">Item</th><th className="px-4 py-3">From</th>
                   <th className="px-4 py-3">To</th><th className="px-4 py-3 text-right">Quantity</th><th className="px-4 py-3">Date</th><th className="px-4 py-3">By</th>
@@ -136,7 +138,11 @@ export function MovementHistory() {
         )}
       </div>
 
-      {data && data.total > 0 && <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="movements" onPage={setPage} />}
+      {data && data.total > 0 && (
+        <div className="shrink-0">
+          <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="movements" onPage={setPage} />
+        </div>
+      )}
     </div>
   );
 }

@@ -24,6 +24,7 @@ import { getCloudinaryCreds, getStockCodePrefix } from "#modules/settings/settin
 import { assertWarehouseAccess } from "../../lib/warehouse-access.js";
 import { generateTempPassword } from "../../utils/generate-password.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
+import { paginate } from "../../utils/pagination.js";
 import { hashPassword } from "../../utils/password.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
@@ -178,9 +179,9 @@ export interface PublicCustomerSummary {
   updatedAt: string;
 }
 
+// NOTE: sites/projects are deliberately NOT part of the detail payload — they can number in the
+// thousands (bulk import), so the detail tabs read them through the paged list endpoints instead.
 export interface PublicCustomer extends PublicCustomerSummary {
-  projects: PublicCustomerProject[];
-  sites: PublicCustomerSite[];
   users: PublicCustomerUser[];
   stockRequests: PublicStockRequest[]; // PENDING only (the admin review queue)
 }
@@ -320,8 +321,6 @@ function toPublic(
 ): PublicCustomer {
   return {
     ...toSummary(c),
-    projects: c.projects.map(toProject),
-    sites: c.sites.map(toSite),
     users: c.users.map(toCustomerUser),
     // The pending stock-request queue is its own capability (stock_requests.view) —
     // never expose it to a caller who only holds customers.view.
@@ -348,7 +347,6 @@ export interface PagedCustomers {
 }
 
 export async function listCustomers(params: ListCustomersParams = {}): Promise<PagedCustomers> {
-  const pageSize = Math.min(Math.max(Math.trunc(params.pageSize ?? 20), 1), 100);
   // Constrain the status filter to the known values; an unknown/typo value is
   // ignored (no filter) rather than silently matching zero rows.
   const status =
@@ -357,9 +355,8 @@ export async function listCustomers(params: ListCustomersParams = {}): Promise<P
       : undefined;
   const filters = { search: params.search, status };
   const total = await customerRepo.count(filters);
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  const page = Math.min(Math.max(Math.trunc(params.page ?? 1), 1), totalPages);
-  const customers = await customerRepo.findMany(filters, (page - 1) * pageSize, pageSize, params.sort);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const customers = await customerRepo.findMany(filters, skip, pageSize, params.sort);
   return { customers: customers.map(toSummary), total, page, pageSize, totalPages };
 }
 
@@ -1239,10 +1236,28 @@ export async function createStockRequestForCustomer(
   return toStockRequest(created);
 }
 
-// PORTAL: the authenticated customer's own requests (all statuses).
-export async function getOwnStockRequests(customerId: string): Promise<PublicStockRequest[]> {
-  const requests = await customerRepo.findStockRequestsByCustomer(customerId);
-  return requests.map(toStockRequest);
+// ── Portal paged lists ────────────────────────────────────────────────────────────────────────
+// Shared param/clamping shape for the portal's paged lists (same maths as every other paged list).
+export interface PortalListParams {
+  search?: string;
+  status?: string;
+  sort?: string;
+  page?: number;
+  pageSize?: number;
+}
+// PORTAL: the authenticated customer's own requests, PAGED (they accumulate forever).
+export interface PagedStockRequests {
+  requests: PublicStockRequest[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+export async function getOwnStockRequests(customerId: string, params: PortalListParams = {}): Promise<PagedStockRequests> {
+  const total = await customerRepo.countStockRequestsByCustomer(customerId, params.status);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const requests = await customerRepo.findStockRequestsByCustomer(customerId, params.status, skip, pageSize);
+  return { requests: requests.map(toStockRequest), total, page, pageSize, totalPages };
 }
 
 // ADMIN: a customer's stock requests (optionally filtered by status).
@@ -1653,17 +1668,53 @@ export function getOwnStock(customerId: string): Promise<CustomerStock> {
 }
 
 // PORTAL: the customer's own projects (read-only).
-export async function getOwnProjects(customerId: string): Promise<PublicCustomerProject[]> {
-  const c = await customerRepo.findByIdWithChildren(customerId);
-  if (!c) throw notFound("Customer not found.");
-  return c.projects.map(toProject);
+export interface PagedCustomerProjects {
+  projects: PublicCustomerProject[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+export async function getOwnProjects(customerId: string, params: PortalListParams = {}): Promise<PagedCustomerProjects> {
+  const filters = { search: params.search, status: params.status };
+  const total = await customerRepo.countProjectsByCustomer(customerId, filters);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const rows = await customerRepo.findProjectsByCustomerPaged(customerId, filters, skip, pageSize, params.sort);
+  return { projects: rows.map(toProject), total, page, pageSize, totalPages };
 }
 
-// PORTAL: the customer's own sites (read-only).
-export async function getOwnSites(customerId: string): Promise<PublicCustomerSite[]> {
-  const c = await customerRepo.findByIdWithChildren(customerId);
-  if (!c) throw notFound("Customer not found.");
-  return c.sites.map(toSite);
+// PORTAL: the customer's own sites (read-only), PAGED — sites can be bulk-imported in the
+// thousands, so this must never ride on findByIdWithChildren's load-everything include.
+export interface PagedCustomerSites {
+  sites: PublicCustomerSite[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+export async function getOwnSites(customerId: string, params: PortalListParams = {}): Promise<PagedCustomerSites> {
+  const filters = { search: params.search, status: params.status };
+  const total = await customerRepo.countSitesByCustomer(customerId, filters);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const rows = await customerRepo.findSitesByCustomerPaged(customerId, filters, skip, pageSize, params.sort);
+  return { sites: rows.map(toSite), total, page, pageSize, totalPages };
+}
+
+// ADMIN: paged sites / projects for the customer detail tabs (the detail payload itself no longer
+// carries the child sets). Same shapes as the portal lists; requireCustomer 404s a bad id.
+export async function listCustomerSites(customerId: string, params: PortalListParams = {}): Promise<PagedCustomerSites> {
+  await requireCustomer(customerId);
+  return getOwnSites(customerId, params);
+}
+export async function listCustomerProjects(customerId: string, params: PortalListParams = {}): Promise<PagedCustomerProjects> {
+  await requireCustomer(customerId);
+  return getOwnProjects(customerId, params);
+}
+// ADMIN: the lean dedupe-key source for the site-import preview — name + postcode ONLY, so the
+// modal never downloads full site rows just to mark duplicates (the server re-checks on import).
+export async function listCustomerSiteKeys(customerId: string): Promise<{ name: string; postcode: string | null }[]> {
+  await requireCustomer(customerId);
+  return customerRepo.findSitesByCustomer(customerId);
 }
 
 // PORTAL dashboard summary: company header + live counts + a few recent requests.
@@ -1688,15 +1739,21 @@ export interface CustomerOverview {
 }
 
 export async function getOwnOverview(customerId: string): Promise<CustomerOverview> {
-  const c = await customerRepo.findByIdWithChildren(customerId);
+  // Lean header read — the overview needs only 5 scalar fields; the counts + recent list come from
+  // the dedicated queries below, so there's no reason to hydrate the users / pending-request children.
+  const c = await customerRepo.findById(customerId);
   if (!c) throw notFound("Customer not found.");
-  // All requests (any status), newest first — for the "recent activity" card and an
-  // accurate pending count (the included children are pre-filtered to pending only).
-  const [allRequests, stockEntries] = await Promise.all([
-    customerRepo.findStockRequestsByCustomer(customerId),
+  // Counts come from COUNT queries (never from loading the child sets — sites/projects can be
+  // bulk-imported in the thousands). Recent activity needs only the newest 5 requests.
+  const [recentRequests, pendingRequests, stockEntries, activeProjects, totalProjects, totalSites] = await Promise.all([
+    customerRepo.findStockRequestsByCustomer(customerId, undefined, 0, 5),
+    customerRepo.countStockRequestsByCustomer(customerId, "pending"),
     // Count ALL statuses (draft + active). This card links straight to "My Stock", which lists every
     // entry regardless of status, so the number must match what the customer sees when they click through.
     customerRepo.countStockEntriesByCustomer(customerId),
+    customerRepo.countProjectsByCustomer(customerId, { status: "active" }),
+    customerRepo.countProjectsByCustomer(customerId),
+    customerRepo.countSitesByCustomer(customerId),
   ]);
   return {
     customer: {
@@ -1707,13 +1764,13 @@ export async function getOwnOverview(customerId: string): Promise<CustomerOvervi
       status: c.status,
     },
     counts: {
-      activeProjects: c.projects.filter((p) => p.status === "active").length,
-      totalProjects: c.projects.length,
-      totalSites: c.sites.length,
-      pendingRequests: allRequests.filter((r) => r.status === "pending").length,
+      activeProjects,
+      totalProjects,
+      totalSites,
+      pendingRequests,
       stockEntries,
     },
-    recentRequests: allRequests.slice(0, 5).map(toStockRequest),
+    recentRequests: recentRequests.map(toStockRequest),
   };
 }
 
@@ -2032,6 +2089,22 @@ export async function listCustomerStockEntries(
 ): Promise<PublicStockEntry[]> {
   const entries = await customerRepo.findStockEntriesByCustomer(customerId, status);
   return entries.map((e) => toStockEntry(e as StockEntryRow));
+}
+
+// PORTAL: the customer's own stock entries, PAGED (consignment history grows forever). The
+// unpaged variant above stays for the admin detail tab, which loads a single customer's set.
+export interface PagedStockEntries {
+  entries: PublicStockEntry[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+export async function listCustomerStockEntriesPaged(customerId: string, params: PortalListParams = {}): Promise<PagedStockEntries> {
+  const total = await customerRepo.countStockEntriesByCustomer(customerId, params.status, params.search);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const rows = await customerRepo.findStockEntriesByCustomer(customerId, params.status, skip, pageSize, params.search);
+  return { entries: rows.map((e) => toStockEntry(e as StockEntryRow)), total, page, pageSize, totalPages };
 }
 
 export async function listWarehouseStockEntries(

@@ -445,3 +445,107 @@ export async function createWithCode(
   }
   throw new Error("Could not allocate a unique purchase-order code.");
 }
+
+// --- Dashboard read-models — not a generic reporting API (read-only; warehouse-scoped) ---
+
+// Non-terminal, not-fully-received "open" statuses — same definition as the supplier summary.
+const OPEN_PO_STATUSES = ["draft", "pending_approval", "approved", "pm_review", "sent", "supplier_accepted", "partially_received"] as const;
+// Open statuses that represent a real financial commitment — a draft is workload, not spend.
+const COMMITTED_PO_STATUSES = OPEN_PO_STATUSES.filter((s) => s !== "draft");
+// Per-queue fetch cap for dashboard worklists — the merged list is re-sorted and capped again in
+// the service, so this only bounds the DB read (oldest-first, so the cap keeps the actionable head).
+const WORKLIST_QUERY_CAP = 50;
+// Statuses that count as "issued spend" (reached the supplier). Cancelled excluded.
+const ISSUED_PO_STATUSES = ["sent", "supplier_accepted", "partially_received", "fully_received", "closed"] as const;
+// Pipeline = current count per non-terminal status.
+const PIPELINE_STATUSES = OPEN_PO_STATUSES;
+
+function whereWarehouse(warehouseIds?: string[]) {
+  return warehouseIds ? { warehouseId: { in: warehouseIds } } : {};
+}
+
+/** Open PO count + committed value (pence). The count is a workload metric (drafts included);
+ *  the value is financial, so drafts — not yet approved commitments — are excluded from the sum. */
+export async function openSummary(warehouseIds?: string[]): Promise<{ count: number; valuePence: number }> {
+  const scoped = { deletedAt: null, ...whereWarehouse(warehouseIds) };
+  const [count, agg] = await Promise.all([
+    prisma.purchaseOrder.count({ where: { status: { in: [...OPEN_PO_STATUSES] }, ...scoped } }),
+    prisma.purchaseOrder.aggregate({
+      where: { status: { in: [...COMMITTED_PO_STATUSES] }, ...scoped },
+      _sum: { grandTotalPence: true },
+    }),
+  ]);
+  return { count, valuePence: agg._sum.grandTotalPence ?? 0 };
+}
+
+/** Current count per pipeline status; zero-filled so every bar renders. */
+export async function pipelineCounts(warehouseIds?: string[]): Promise<Array<{ status: string; count: number }>> {
+  const grouped = await prisma.purchaseOrder.groupBy({
+    by: ["status"],
+    where: { status: { in: [...PIPELINE_STATUSES] }, deletedAt: null, ...whereWarehouse(warehouseIds) },
+    _count: { _all: true },
+  });
+  const counts = new Map(grouped.map((g) => [g.status, g._count._all]));
+  return PIPELINE_STATUSES.map((status) => ({ status, count: counts.get(status) ?? 0 }));
+}
+
+/** orderDate + grandTotalPence for issued POs since `since`, for the 12-month spend chart. */
+export async function issuedSpendSince(since: Date, warehouseIds?: string[]): Promise<Array<{ at: Date; value: number }>> {
+  const rows = await prisma.purchaseOrder.findMany({
+    where: { status: { in: [...ISSUED_PO_STATUSES] }, orderDate: { gte: since }, deletedAt: null, ...whereWarehouse(warehouseIds) },
+    select: { orderDate: true, grandTotalPence: true },
+  });
+  return rows.map((r) => ({ at: r.orderDate, value: r.grandTotalPence ?? 0 }));
+}
+
+/** createdAt of POs since `since`, for the 8-week sparkline. */
+export async function createdSince(since: Date, warehouseIds?: string[]): Promise<Array<{ at: Date }>> {
+  const rows = await prisma.purchaseOrder.findMany({
+    where: { createdAt: { gte: since }, deletedAt: null, ...whereWarehouse(warehouseIds) },
+    select: { createdAt: true },
+  });
+  return rows.map((r) => ({ at: r.createdAt }));
+}
+
+type PoWorklistRow = { id: string; code: string; supplierName: string | null; priority: string | null; status: string; expectedDeliveryDate: Date | null; createdAt: Date };
+
+// PO code field is `code` (@unique, e.g. PO-0001). `supplierName` is snapshotted on the row.
+const poWorklistSelect = { id: true, code: true, priority: true, status: true, expectedDeliveryDate: true, createdAt: true, supplierName: true } satisfies Prisma.PurchaseOrderSelect;
+function mapPoWorklist(r: {
+  id: string; code: string; priority: string | null; status: string; expectedDeliveryDate: Date | null; createdAt: Date; supplierName: string | null;
+}): PoWorklistRow {
+  return { id: r.id, code: r.code, supplierName: r.supplierName, priority: r.priority, status: r.status, expectedDeliveryDate: r.expectedDeliveryDate, createdAt: r.createdAt };
+}
+
+/** Draft POs converted from a PRF (fast-path approval queue). */
+export async function fastPathDraftWorklist(warehouseIds?: string[]): Promise<PoWorklistRow[]> {
+  const rows = await prisma.purchaseOrder.findMany({
+    where: { status: "draft", purchaseRequestId: { not: null }, deletedAt: null, ...whereWarehouse(warehouseIds) },
+    select: poWorklistSelect,
+    orderBy: { createdAt: "asc" },
+    take: WORKLIST_QUERY_CAP,
+  });
+  return rows.map(mapPoWorklist);
+}
+
+/** POs in a given status (optionally restricted to a PM) for the worklist. */
+export async function statusWorklist(status: string, opts: { pmUserId?: string; warehouseIds?: string[] } = {}): Promise<PoWorklistRow[]> {
+  const rows = await prisma.purchaseOrder.findMany({
+    where: { status, deletedAt: null, ...(opts.pmUserId ? { pmUserId: opts.pmUserId } : {}), ...whereWarehouse(opts.warehouseIds) },
+    select: poWorklistSelect,
+    orderBy: { createdAt: "asc" },
+    take: WORKLIST_QUERY_CAP,
+  });
+  return rows.map(mapPoWorklist);
+}
+
+/** POs that can still receive goods (warehouse-scoped receive queue). */
+export async function receivableWorklist(warehouseIds?: string[]): Promise<PoWorklistRow[]> {
+  const rows = await prisma.purchaseOrder.findMany({
+    where: { status: { in: ["sent", "supplier_accepted", "partially_received"] }, deletedAt: null, ...whereWarehouse(warehouseIds) },
+    select: poWorklistSelect,
+    orderBy: { expectedDeliveryDate: "asc" },
+    take: WORKLIST_QUERY_CAP,
+  });
+  return rows.map(mapPoWorklist);
+}

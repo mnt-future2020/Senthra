@@ -475,6 +475,30 @@ export function countOverdueIssues(beforeDate: Date): Promise<number> {
     where: { direction: "issue", status: "posted", deletedAt: null, createdAt: { lt: beforeDate } },
   });
 }
+
+/** Dashboard read-model: DISTINCT unreconciled jobs with a posted issue older than `cutoff` —
+ *  the same population OverdueHoldingsView lists, as a cheap count (no per-job enrichment).
+ *  A job with no jobStockSummary yet counts as unreconciled (summary is created on first issue,
+ *  so an old posted issue without one is a legacy/edge row — still outstanding). */
+export async function countOverdueUnreconciledJobs(cutoff: Date, warehouseIds?: string[]): Promise<number> {
+  const movements = await prisma.jobStockMovement.findMany({
+    where: {
+      direction: "issue",
+      status: "posted",
+      deletedAt: null,
+      createdAt: { lt: cutoff },
+      ...(warehouseIds ? { warehouseId: { in: warehouseIds } } : {}),
+    },
+    select: { jobId: true },
+    distinct: ["jobId"],
+  });
+  if (movements.length === 0) return 0;
+  const jobIds = movements.map((m) => m.jobId);
+  const reconciled = await prisma.jobStockSummary.count({
+    where: { jobId: { in: jobIds }, goodsStatus: "reconciled" },
+  });
+  return jobIds.length - reconciled;
+}
 // Gross units WRITTEN OFF as damaged since `since` — write-offs only (quantityDelta > 0). Restores
 // carry a negative delta; netting them in here would understate the "damaged this month" KPI and could
 // even render it negative when this month's restores exceed this month's write-offs.

@@ -62,6 +62,36 @@ export function canAccessDashboard(principal: Principal | null): boolean {
   return firstDashboardPath(principal) !== null;
 }
 
+// The permissions that make the Overview landing (/dashboard) worth showing — i.e. the ones the
+// backend dashboard summary actually populates a card / chart / worklist / activity from. Kept in
+// lockstep with backend `dashboard.service.ts` gating. A staff user holding NONE of these would see
+// only the empty-state on the Overview, so they're routed to their first real section instead.
+export const OVERVIEW_PERMS = [
+  "purchase_requests.view",
+  "purchase_orders.view",
+  "jobs.view",
+  "inventory.view",
+  "goods_in.view", // goodsReceived card
+  "goods_management.view", // overdueHoldings card
+  "audit.view",
+  // worklist queue perms (a user may hold an action perm without the matching *.view)
+  "purchase_requests.approve",
+  "purchase_orders.approve",
+  "purchase_orders.send",
+  "purchase_orders.acknowledge",
+  "goods_in.create",
+  "jobs.kit_request.review",
+];
+
+// Should this principal land on the Overview screen? True for the super-admin and for any staff user
+// who holds at least one Overview-content permission. Customers (external portal) are always false;
+// Overview-blind staff (e.g. a Users-only or engineer-only role) are false too — they belong on their
+// own first section. (principalCan already returns true for every key when the principal is an admin.)
+export function canSeeOverview(principal: Principal | null): boolean {
+  if (!principal || principal.type === "customer") return false;
+  return OVERVIEW_PERMS.some((p) => principalCan(principal, p));
+}
+
 // Where to send a principal after authentication. Everyone enters the unified
 // dashboard shell: the shell intercepts a first-login principal with the
 // set-password screen, then the landing routes to their first section. A staff user

@@ -149,9 +149,10 @@ export function OverdueHoldingsView({ days = 14 }: { days?: number }) {
   }
 
   return (
-    <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+      <div className="min-h-0 flex-1 overflow-auto">
       <table className="w-full text-left text-sm" style={{ minWidth: 650 }}>
-        <thead>
+        <thead className="sticky top-0 z-10 bg-[var(--surface)]">
           <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
             <th className="px-4 py-3">Job</th>
             <th className="px-4 py-3">Engineer</th>
@@ -231,6 +232,7 @@ export function OverdueHoldingsView({ days = 14 }: { days?: number }) {
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }

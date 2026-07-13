@@ -67,12 +67,17 @@ type Tab = "overview" | "inventory" | "incoming" | "goods" | "demand" | "transac
 // `perms` is an anyOf gate. "Incoming stock" hosts BOTH receiving flows behind an inner toggle —
 // company goods receipts (goods_in.view) and customer consignment intake (stock_requests.view) — so
 // it shows if the user can see EITHER pool.
-const TABS: { key: Tab; label: string; perms?: string[] }[] = [
+// `fill: true` marks a tab whose content is a full-height inline-scroll layout (flex h-full → the
+// table body scrolls internally): the content region gives it a bounded, non-scrolling box. Omit it
+// for card-style tabs (overview / transactions / audit) that scroll the whole page naturally. Set it
+// declaratively per tab rather than string-matching keys in the render, so a new tab can't silently
+// clip by being missed off a hardcoded list.
+const TABS: { key: Tab; label: string; perms?: string[]; fill?: boolean }[] = [
   { key: "overview", label: "Overview" },
-  { key: "incoming", label: "Incoming stock", perms: ["goods_in.view", "stock_requests.view"] },
-  { key: "inventory", label: "Inventory" },
-  { key: "goods", label: "Goods Management", perms: ["goods_management.view"] },
-  { key: "demand", label: "Demand", perms: ["inventory.view"] },
+  { key: "incoming", label: "Incoming stock", perms: ["goods_in.view", "stock_requests.view"], fill: true },
+  { key: "inventory", label: "Inventory", fill: true },
+  { key: "goods", label: "Goods Management", perms: ["goods_management.view"], fill: true },
+  { key: "demand", label: "Demand", perms: ["inventory.view"], fill: true },
   { key: "transactions", label: "Transactions" },
   { key: "audit", label: "Audit trail" },
 ];
@@ -88,7 +93,8 @@ export function WarehouseDetail({ initial }: { initial: Warehouse }) {
 
   const visibleTabs = TABS.filter((t) => !t.perms || t.perms.some((p) => can(p)));
   const requestedTab = searchParams.get("tab");
-  const tab: Tab = visibleTabs.find((t) => t.key === requestedTab)?.key ?? "overview";
+  const activeTab = visibleTabs.find((t) => t.key === requestedTab) ?? visibleTabs[0];
+  const tab: Tab = activeTab?.key ?? "overview";
 
   const toggleStatus = async () => {
     const next = w.status === "active" ? "inactive" : "active";
@@ -166,7 +172,10 @@ export function WarehouseDetail({ initial }: { initial: Warehouse }) {
         ))}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto">
+      {/* A `fill` tab owns its own scrolling (full-height inline-scroll layout) → give it a bounded,
+          non-scrolling box so only its table body scrolls (sticky headers, pinned pagination).
+          Card-style tabs scroll as a whole page. Driven by the tab's declarative `fill` flag. */}
+      <div className={`min-h-0 flex-1 ${activeTab?.fill ? "overflow-hidden" : "overflow-auto"}`}>
         {tab === "overview" && <Overview w={w} />}
         {tab === "inventory" && <StockTab warehouseCode={w.code} warehouseId={w.id} router={router} />}
         {tab === "incoming" && <IncomingTab warehouseCode={w.code} warehouseId={w.id} router={router} pushToast={pushToast} />}
@@ -347,11 +356,11 @@ function IncomingTab({
   const showViewSwitcher = active === "grn" && canExpected;
 
   return (
-    <div className="space-y-4">
+    <div className="flex h-full flex-col gap-4">
       {/* One toolbar row: owner toggle (Company/Customer) on the left — matching the Inventory tab —
           and, only while Company is active, the Expected/Received view switcher on the right. */}
       {(showOwnerToggle || showViewSwitcher) && (
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
           {showOwnerToggle &&
             ([
               { key: "grn", label: "Company (GRN)" },
@@ -393,15 +402,17 @@ function IncomingTab({
           )}
         </div>
       )}
-      {active === "grn" ? (
-        inbound === "expected" ? (
-          <ExpectedDeliveries warehouseId={warehouseId} warehouseCode={warehouseCode} />
+      <div className="min-h-0 flex-1">
+        {active === "grn" ? (
+          inbound === "expected" ? (
+            <ExpectedDeliveries warehouseId={warehouseId} warehouseCode={warehouseCode} />
+          ) : (
+            <GoodsReceiptsView warehouseId={warehouseId} warehouseCode={warehouseCode} embedded />
+          )
         ) : (
-          <GoodsReceiptsView warehouseId={warehouseId} warehouseCode={warehouseCode} embedded />
-        )
-      ) : (
-        <IncomingStock warehouseId={warehouseId} pushToast={pushToast} />
-      )}
+          <IncomingStock warehouseId={warehouseId} pushToast={pushToast} />
+        )}
+      </div>
     </div>
   );
 }
@@ -460,9 +471,10 @@ function IncomingStock({
 
   return (
     <>
-      <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+      <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+        <div className="min-h-0 flex-1 overflow-auto">
         <table className="w-full text-left text-sm" style={{ minWidth: 700 }}>
-          <thead>
+          <thead className="sticky top-0 z-10 bg-[var(--surface)]">
             <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
               <th className="px-4 py-3">Customer</th>
               <th className="px-4 py-3">Item</th>
@@ -515,6 +527,7 @@ function IncomingStock({
             })}
           </tbody>
         </table>
+        </div>
       </div>
 
       {receiveTarget && (
@@ -579,9 +592,9 @@ function StockTab({
     : ([] as const);
 
   return (
-    <div className="space-y-4">
+    <div className="flex h-full flex-col gap-4">
       {canIrm && (
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           {POOL_PILLS.map((p) => (
             <button
               key={p.key}
@@ -599,11 +612,19 @@ function StockTab({
         </div>
       )}
       {active === "irm" ? (
-        <InventoryView warehouseId={warehouseId} embedded />
+        // Embedded InventoryView manages its own natural height — give it a scrolling box
+        // (same contract as InventoryHub's IRM lens).
+        <div className="min-h-0 flex-1 overflow-auto">
+          <InventoryView warehouseId={warehouseId} embedded />
+        </div>
       ) : active === "damaged" ? (
-        <DamagedStockView warehouseId={warehouseId} />
+        <div className="min-h-0 flex-1">
+          <DamagedStockView warehouseId={warehouseId} fill />
+        </div>
       ) : (
-        <WarehouseStockEntries warehouseId={warehouseId} router={router} />
+        <div className="min-h-0 flex-1">
+          <WarehouseStockEntries warehouseId={warehouseId} router={router} />
+        </div>
       )}
     </div>
   );
@@ -681,9 +702,9 @@ function WarehouseStockEntries({
   }
 
   return (
-    <div className="space-y-3">
+    <div className="flex h-full flex-col gap-3">
       {/* Status filter */}
-      <div className="flex items-center gap-2">
+      <div className="flex shrink-0 items-center gap-2">
         <Select
           size="sm"
           value={stockFilter}
@@ -703,9 +724,10 @@ function WarehouseStockEntries({
         </div>
       ) : (
         <>
-          <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+            <div className="min-h-0 flex-1 overflow-auto">
             <table className="w-full text-left text-sm" style={{ minWidth: 750 }}>
-              <thead>
+              <thead className="sticky top-0 z-10 bg-[var(--surface)]">
                 <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
                   <th className="px-4 py-3">Item</th>
                   <th className="px-4 py-3">Customer</th>
@@ -768,14 +790,17 @@ function WarehouseStockEntries({
                 ))}
               </tbody>
             </table>
+            </div>
           </div>
-          <Pagination
-            page={Math.min(page, totalPages)}
-            totalPages={totalPages}
-            total={visibleEntries.length}
-            label="entries"
-            onPage={(n) => patchPage(n)}
-          />
+          <div className="shrink-0">
+            <Pagination
+              page={Math.min(page, totalPages)}
+              totalPages={totalPages}
+              total={visibleEntries.length}
+              label="entries"
+              onPage={(n) => patchPage(n)}
+            />
+          </div>
         </>
       )}
     </div>

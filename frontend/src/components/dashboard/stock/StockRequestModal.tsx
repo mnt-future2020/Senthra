@@ -29,24 +29,33 @@ export function StockRequestModal({
   const [item, setItem] = React.useState<StockItemValue>({ entryId: null, name: "" });
   const [options, setOptions] = React.useState<StockItemOption[]>([]);
   const [loadingItems, setLoadingItems] = React.useState(true);
+  const [itemQuery, setItemQuery] = React.useState("");
   const [quantity, setQuantity] = React.useState("");
   const [notes, setNotes] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [errors, setErrors] = React.useState<{ name?: string; quantity?: string }>({});
   const [error, setError] = React.useState<string | null>(null);
 
-  // Existing stock the customer can top up (pick one instead of typing a duplicate name).
+  // Existing stock the customer can top up (pick one instead of typing a duplicate name). Consignment
+  // history grows past one page, so the picker searches SERVER-SIDE: its query drives this refetch
+  // (the endpoint filters by item name/SKU/serial/barcode) rather than showing only the first page.
   React.useEffect(() => {
     let alive = true;
-    customerService
-      .getOwnStockEntries()
-      .then((entries) => alive && setOptions(toStockItemOptions(entries)))
-      .catch(() => alive && setOptions([]))
-      .finally(() => alive && setLoadingItems(false));
+    void (async () => {
+      if (alive) setLoadingItems(true);
+      try {
+        const r = await customerService.getOwnStockEntries({ q: itemQuery || undefined, pageSize: 100 });
+        if (alive) setOptions(toStockItemOptions(r.entries));
+      } catch {
+        if (alive) setOptions([]);
+      } finally {
+        if (alive) setLoadingItems(false);
+      }
+    })();
     return () => {
       alive = false;
     };
-  }, []);
+  }, [itemQuery]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -109,6 +118,7 @@ export function StockRequestModal({
               loading={loadingItems}
               invalid={Boolean(errors.name)}
               autoFocus
+              onQueryChange={setItemQuery}
             />
             <FieldErr msg={errors.name} />
           </div>

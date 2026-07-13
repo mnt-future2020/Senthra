@@ -288,10 +288,12 @@ export interface EngineerInventoryDetail {
 
 // One engineer's current holdings (company IRM + customer consignment) and their active jobs.
 export async function getEngineerInventory(engineerId: string): Promise<EngineerInventoryDetail> {
-  const [company, customer, jobsAll] = await Promise.all([
+  const [company, customer, activeJobs] = await Promise.all([
     engineerRepo.findBalancesByEngineer(engineerId),
     gmRepo.findCustomerHoldingsByEngineer(engineerId),
-    jobRepo.findManyByEngineer(engineerId),
+    // Every OPEN job for this engineer — DB-filtered to the active statuses. (findManyByEngineer is
+    // paged and would cap this at 20; the Hub must list them all.)
+    jobRepo.findActiveByEngineer(engineerId),
   ]);
   const holdings: EngineerHeldItem[] = [
     ...company.map((b) => ({
@@ -309,9 +311,7 @@ export async function getEngineerInventory(engineerId: string): Promise<Engineer
       quantity: h.quantityOnHand,
     })),
   ];
-  const active = new Set(["assigned", "accepted", "in_progress"]);
-  const jobs: EngineerJobRow[] = jobsAll
-    .filter((j) => active.has(j.status))
+  const jobs: EngineerJobRow[] = activeJobs
     .map((j) => ({ id: j.id, jobNumber: j.jobNumber, name: j.name, status: j.status, customerName: j.customerName ?? null }));
   return { holdings, jobs };
 }

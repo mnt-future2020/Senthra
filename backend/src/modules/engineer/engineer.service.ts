@@ -100,8 +100,8 @@ export async function getOwnOverview(engineerId: string): Promise<EngineerOvervi
 // Delegates entirely to the job service (the single source of truth for the job status machine,
 // realtime emits, and audit). The engineer id is always the signed-in user's id, never a route param.
 
-export function getOwnJobs(engineerId: string) {
-  return jobService.listJobsForEngineer(engineerId);
+export function getOwnJobs(engineerId: string, params: jobService.ListEngineerJobsParams = {}) {
+  return jobService.listJobsForEngineer(engineerId, params);
 }
 
 export function getOwnJob(engineerId: string, jobId: string) {

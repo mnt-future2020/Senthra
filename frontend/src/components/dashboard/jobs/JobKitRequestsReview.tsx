@@ -20,7 +20,7 @@ import { formatDate } from "./jobStatus";
 // gated by jobs.kit_request.review. Calls onJobChanged after an approval so the parent refetches the
 // job and the grown kit shows immediately.
 
-export function JobKitRequestsReview({ jobId, assignedEngineerId, onJobChanged }: { jobId: string; assignedEngineerId: string | null; onJobChanged: () => void }) {
+export function JobKitRequestsReview({ jobId, assignedEngineerId, locked, onJobChanged }: { jobId: string; assignedEngineerId: string | null; locked: boolean; onJobChanged: () => void }) {
   const { pushToast } = useDashboard();
   const [requests, setRequests] = React.useState<KitRequest[] | null>(null);
   const [approving, setApproving] = React.useState<KitRequest | null>(null);
@@ -52,6 +52,12 @@ export function JobKitRequestsReview({ jobId, assignedEngineerId, onJobChanged }
         )}
       </div>
 
+      {locked && pending.length > 0 && (
+        <p className="mb-3 rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-[11px] text-[var(--muted)]">
+          This job&apos;s goods have been reconciled and locked, so pending requests can&apos;t be approved. Decline them to clear the list.
+        </p>
+      )}
+
       {requests === null ? (
         <p className="text-sm text-[var(--muted)]">Loading…</p>
       ) : (
@@ -73,8 +79,16 @@ export function JobKitRequestsReview({ jobId, assignedEngineerId, onJobChanged }
                   {r.status === "declined" && <p className="mt-0.5 text-[11px] text-[var(--neg)]">Declined{r.decisionNote ? ` — ${r.decisionNote}` : ""}</p>}
                 </div>
                 {r.status === "pending" && (
+                  // Reconciled goods lock the job — approving grows the kit (a goods write the server
+                  // rejects), so disable Approve and say why. Decline stays available to clear it out.
                   <div className="flex shrink-0 items-center gap-2">
-                    <button type="button" onClick={() => setApproving(r)} className="flex items-center gap-1 rounded-lg bg-[var(--pos)] px-2.5 py-1.5 text-[11px] font-extrabold text-white hover:opacity-90">
+                    <button
+                      type="button"
+                      onClick={() => setApproving(r)}
+                      disabled={locked}
+                      title={locked ? "This job's goods are reconciled and locked — the kit can't be grown." : undefined}
+                      className="flex items-center gap-1 rounded-lg bg-[var(--pos)] px-2.5 py-1.5 text-[11px] font-extrabold text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
                       <Check className="h-3.5 w-3.5" /> Approve
                     </button>
                     <button type="button" onClick={() => setDeclining(r)} className="flex items-center gap-1 rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-[11px] font-bold text-[var(--ink)] hover:bg-[var(--surface)]">

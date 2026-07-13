@@ -1,7 +1,7 @@
 import * as prfService from "./purchase-request.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
-import { param, queryInt } from "../../utils/request.js";
+import { param, queryInt, queryStr } from "../../utils/request.js";
 import type {
   CreatePurchaseRequestInput,
   PrfAttachmentInput,
@@ -15,13 +15,13 @@ import type {
 export const listPurchaseRequests = asyncHandler(async (req, res) => {
   const { search, status, statuses, supplier, warehouse, job, sort, page, pageSize } = req.query;
   const result = await prfService.listPurchaseRequests({
-    search: typeof search === "string" ? search : undefined,
-    status: typeof status === "string" ? status : undefined,
+    search: queryStr(search),
+    status: queryStr(status),
     statuses: typeof statuses === "string" ? statuses.split(",").map((s) => s.trim()).filter(Boolean) : undefined,
-    supplier: typeof supplier === "string" ? supplier : undefined,
-    warehouse: typeof warehouse === "string" ? warehouse : undefined,
-    job: typeof job === "string" ? job : undefined,
-    sort: typeof sort === "string" ? sort : undefined,
+    supplier: queryStr(supplier),
+    warehouse: queryStr(warehouse),
+    job: queryStr(job),
+    sort: queryStr(sort),
     page: queryInt(page),
     pageSize: queryInt(pageSize),
   }, actorFrom(req));

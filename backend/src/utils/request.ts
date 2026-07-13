@@ -14,3 +14,12 @@ export function queryInt(value: unknown): number | undefined {
   const n = typeof value === "string" ? parseInt(value, 10) : NaN;
   return Number.isFinite(n) ? n : undefined;
 }
+
+// Read a query value as a single string (or undefined). A DUPLICATED param (`?q=a&q=b`) arrives as
+// an array — collapse to the first value rather than letting `typeof array === "string"` coerce the
+// whole thing to undefined (which silently drops the filter). The single shared home for this so
+// list endpoints don't each re-implement it (some with the weaker array-unaware form).
+export function queryStr(value: unknown): string | undefined {
+  const v = Array.isArray(value) ? value[0] : value;
+  return typeof v === "string" ? v : undefined;
+}

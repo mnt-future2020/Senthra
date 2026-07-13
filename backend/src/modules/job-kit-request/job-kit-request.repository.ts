@@ -235,3 +235,16 @@ export async function cancelPending(id: string, requesterId: string): Promise<nu
   });
   return res.count;
 }
+
+// --- Dashboard read-model — not a generic reporting API ---
+
+/** Pending kit requests for the PM-review worklist. code = JKR-####; jobNumber = JOB-YYYY-#### (link target). */
+export async function pendingWorklist(): Promise<Array<{ id: string; code: string; jobNumber: string; createdAt: Date }>> {
+  const rows = await prisma.jobKitRequest.findMany({
+    where: { status: "pending", deletedAt: null },
+    select: { id: true, code: true, jobNumber: true, createdAt: true },
+    orderBy: { createdAt: "asc" },
+    take: 50, // per-queue cap — oldest-first keeps the actionable head; the service re-caps the merge
+  });
+  return rows.map((r) => ({ id: r.id, code: r.code, jobNumber: r.jobNumber, createdAt: r.createdAt }));
+}

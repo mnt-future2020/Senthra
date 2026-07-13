@@ -19,8 +19,29 @@ export function getOwnStock(): Promise<EngineerStockItem[]> {
 // Jobs assigned to the signed-in engineer. The :id below is the JOB id (a resource the engineer
 // owns) — the engineer's own id is resolved server-side from the principal, never passed here.
 
-export function getOwnJobs(): Promise<Job[]> {
-  return api<{ jobs: Job[] }>("/engineer/jobs").then((r) => r.jobs);
+export interface OwnJobsParams {
+  status?: string;
+  q?: string;
+  sort?: string;
+  page?: number;
+  pageSize?: number;
+}
+export interface PagedOwnJobs {
+  jobs: Job[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+export function getOwnJobs(params: OwnJobsParams = {}): Promise<PagedOwnJobs> {
+  const qs = new URLSearchParams();
+  if (params.status) qs.set("status", params.status);
+  if (params.q) qs.set("q", params.q);
+  if (params.sort) qs.set("sort", params.sort);
+  if (params.page) qs.set("page", String(params.page));
+  if (params.pageSize) qs.set("pageSize", String(params.pageSize));
+  const suffix = qs.size ? `?${qs.toString()}` : "";
+  return api<PagedOwnJobs>(`/engineer/jobs${suffix}`);
 }
 
 export function getOwnJob(id: string): Promise<Job> {

@@ -1216,6 +1216,7 @@ model EngineerStockTransfer {
   fromEngineerId    String  @db.ObjectId
   fromEngineerName  String
   fromEngineerEmail String?
+  fromEngineerPhone String? // snapshot so the recipient can call the holder to coordinate handover
   toEngineerId      String  @db.ObjectId
   toEngineerName    String
   toEngineerEmail   String?

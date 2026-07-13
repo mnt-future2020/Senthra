@@ -148,7 +148,7 @@ function JobView({ initial }: { initial: Job }) {
       </div>
 
       {can("jobs.kit_request.review") && (
-        <JobKitRequestsReview jobId={job.id} assignedEngineerId={job.assignedEngineerId} onJobChanged={reloadJob} />
+        <JobKitRequestsReview jobId={job.id} assignedEngineerId={job.assignedEngineerId} locked={job.goodsStatus === "reconciled"} onJobChanged={reloadJob} />
       )}
 
       <div className="grid gap-4 lg:grid-cols-2">
@@ -274,7 +274,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 function ReassignDialog({ current, busy, onConfirm, onClose }: { current: string | null; busy: boolean; onConfirm: (engineerId: string) => void; onClose: () => void }) {
   const [engineers, setEngineers] = React.useState<{ id: string; name: string; jobTitle: string | null }[]>([]);
   const [engineerId, setEngineerId] = React.useState(current ?? "");
-  useReferenceData([
+  const { isLoading: engineersLoading } = useReferenceData([
     { label: "engineers", load: () => listEngineerOptions(), onData: (us: WarehouseManager[]) => setEngineers(us.map((u) => ({ id: u.id, name: u.name, jobTitle: u.jobTitle }))) },
   ]);
   return (
@@ -283,7 +283,7 @@ function ReassignDialog({ current, busy, onConfirm, onClose }: { current: string
         <h3 className="text-sm font-extrabold text-[var(--ink)]">Reassign engineer</h3>
         <p className="mt-1 text-xs text-[var(--muted)]">The new engineer is notified immediately and must accept the job.</p>
         <div className="mt-3">
-          <Select value={engineerId} onChange={setEngineerId} options={engineers.map((s) => ({ value: s.id, label: s.jobTitle ? `${s.name} — ${s.jobTitle}` : s.name }))} placeholder="— Select engineer —" ariaLabel="New engineer" />
+          <Select value={engineerId} onChange={setEngineerId} options={engineers.map((s) => ({ value: s.id, label: s.jobTitle ? `${s.name} — ${s.jobTitle}` : s.name }))} placeholder={engineersLoading && !engineerId ? "Loading engineers…" : "— Select engineer —"} disabled={engineersLoading && !engineerId} ariaLabel="New engineer" />
         </div>
         <div className="mt-4 flex justify-end gap-2">
           <button type="button" onClick={onClose} className="rounded-xl border border-[var(--border)] px-3.5 py-2 text-xs font-bold text-[var(--ink)] hover:bg-[var(--surface-2)]">Cancel</button>
