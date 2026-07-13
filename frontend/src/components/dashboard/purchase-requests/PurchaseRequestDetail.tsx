@@ -9,7 +9,7 @@ import * as auditService from "@/services/audit.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
-import { actionLabel, actionTone, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
+import { actionLabel, actionTone, changeLabels, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
 import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
 import { PrfStatusBadge, formatDate, formatMoney } from "./prfStatus";
 import type { AuditEntry } from "@/types/audit";
@@ -45,6 +45,33 @@ export function PurchaseRequestDetail({ initial }: { initial: PurchaseRequest })
       pushToast(ok, "success");
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Action failed.", "alert");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Power-user shortcut for a user who can BOTH submit and approve: submit then immediately approve
+  // in one click. The record still passes through both states server-side (draft → submitted →
+  // approved), so the audit trail keeps both stamps (submitted-by + approved-by). Partial failure is
+  // handled explicitly: if the submit lands but the approve is rejected, the PRF is left in the
+  // `submitted` state (its numbers now frozen for review) and the user is told to approve it manually
+  // — never silently swallowed.
+  const submitAndApprove = async () => {
+    setBusy(true);
+    try {
+      const submitted = await prfService.submitPurchaseRequest(prf.id);
+      setPrf(submitted); // reflect `submitted` even if the approve step then fails
+      try {
+        setPrf(await prfService.approvePurchaseRequest(prf.id));
+        pushToast("Submitted and approved.", "success");
+      } catch (approveErr) {
+        pushToast(
+          `Submitted, but approval failed: ${approveErr instanceof Error ? approveErr.message : "please approve it manually."}`,
+          "alert",
+        );
+      }
+    } catch (submitErr) {
+      pushToast(submitErr instanceof Error ? submitErr.message : "Could not submit the request.", "alert");
     } finally {
       setBusy(false);
     }
@@ -109,8 +136,15 @@ export function PurchaseRequestDetail({ initial }: { initial: PurchaseRequest })
   const actions: React.ReactNode[] = [];
   if (s === "draft" && can("purchase_requests.edit"))
     actions.push(<ActionBtn key="edit" icon={Pencil} onClick={() => router.push(`/dashboard/purchase-requests/${prf.code}/edit`)} disabled={busy}>Edit</ActionBtn>);
-  if (s === "draft" && can("purchase_requests.submit"))
-    actions.push(<ActionBtn key="submit" icon={Send} primary onClick={() => run(() => prfService.submitPurchaseRequest(prf.id), "Submitted for finance approval.")} disabled={busy}>Submit</ActionBtn>);
+  if (s === "draft" && can("purchase_requests.submit")) {
+    // A user who can BOTH submit and approve gets the single one-click "Submit & Approve" (it passes
+    // through both states server-side, so the audit trail keeps both stamps). A submit-only user gets
+    // plain "Submit" for the normal two-person flow (they submit; finance approves).
+    if (can("purchase_requests.approve"))
+      actions.push(<ActionBtn key="submit-approve" icon={CheckCircle2} primary onClick={submitAndApprove} disabled={busy}>Submit &amp; Approve</ActionBtn>);
+    else
+      actions.push(<ActionBtn key="submit" icon={Send} primary onClick={() => run(() => prfService.submitPurchaseRequest(prf.id), "Submitted for finance approval.")} disabled={busy}>Submit</ActionBtn>);
+  }
   if (s === "draft" && can("purchase_requests.delete"))
     actions.push(<ActionBtn key="delete" icon={Trash2} onClick={() => setConfirmDelete(true)} disabled={busy}>Delete</ActionBtn>);
   if (s === "submitted" && can("purchase_requests.approve")) {
@@ -503,15 +537,27 @@ function AuditTrail({ prfId }: { prfId: string }) {
   return (
     <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
       <ul className="divide-y divide-[var(--border)]">
-        {entries.map((e) => (
-          <li key={e.id} className="flex items-center justify-between gap-3 px-4 py-3">
-            <div className="flex items-center gap-3">
-              <span className={`inline-block shrink-0 rounded-full px-2.5 py-1 text-[11px] font-bold ${TONE_CLASSES[actionTone(e.action)]}`}>{actionLabel(e.action)}</span>
-              <span className="text-xs text-[var(--muted)]">{e.actorEmail ?? "system"}</span>
-            </div>
-            <span className="shrink-0 text-[11px] text-[var(--faint)]" title={new Date(e.createdAt).toLocaleString("en-GB")}>{relativeTime(e.createdAt)}</span>
-          </li>
-        ))}
+        {entries.map((e) => {
+          const changes = changeLabels(e.metadata);
+          return (
+            <li key={e.id} className="px-4 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <span className={`inline-block shrink-0 rounded-full px-2.5 py-1 text-[11px] font-bold ${TONE_CLASSES[actionTone(e.action)]}`}>{actionLabel(e.action)}</span>
+                  <span className="text-xs text-[var(--muted)]">{e.actorEmail ?? "system"}</span>
+                </div>
+                <span className="shrink-0 text-[11px] text-[var(--faint)]" title={new Date(e.createdAt).toLocaleString("en-GB")}>{relativeTime(e.createdAt)}</span>
+              </div>
+              {changes.length > 0 && (
+                <ul className="mt-2 space-y-1 border-l-2 border-[var(--border)] pl-3">
+                  {changes.map((c, i) => (
+                    <li key={i} className="text-xs text-[var(--muted)]">{c}</li>
+                  ))}
+                </ul>
+              )}
+            </li>
+          );
+        })}
       </ul>
     </div>
   );

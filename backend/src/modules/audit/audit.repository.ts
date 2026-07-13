@@ -9,6 +9,9 @@ import { escapeRegex } from "../../utils/search.js";
 export interface AuditListFilters {
   search?: string;
   action?: string;
+  /** Exclude actions whose dotted key starts with this prefix (e.g. "auth." to drop login/logout/
+   *  refresh from a business-activity view). The full Audit Log leaves this unset and shows everything. */
+  excludeActionPrefix?: string;
   actorType?: string;
   targetType?: string;
   targetId?: string;
@@ -18,7 +21,10 @@ export interface AuditListFilters {
 
 function buildWhere(filters: AuditListFilters): Prisma.AuditLogWhereInput {
   const where: Prisma.AuditLogWhereInput = {};
+  // Exact `action` wins over the prefix exclusion (they're never usefully combined; a specific
+  // action filter already scopes tighter than "everything except a prefix").
   if (filters.action) where.action = filters.action;
+  else if (filters.excludeActionPrefix) where.action = { not: { startsWith: filters.excludeActionPrefix } };
   if (filters.actorType) where.actorType = filters.actorType;
   if (filters.targetType) where.targetType = filters.targetType;
   if (filters.targetId) where.targetId = filters.targetId;

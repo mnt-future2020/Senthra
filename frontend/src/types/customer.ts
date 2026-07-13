@@ -182,9 +182,9 @@ export interface CustomerSummary {
   updatedAt: string;
 }
 
+// NOTE: sites/projects are NOT on the detail payload — they can number in the thousands
+// (bulk import), so the detail tabs load them through the paged list endpoints instead.
 export interface Customer extends CustomerSummary {
-  projects: CustomerProject[];
-  sites: CustomerSite[];
   users: CustomerUser[];
   stockRequests: StockRequest[]; // in-flight submissions (pending → partially_received)
 }

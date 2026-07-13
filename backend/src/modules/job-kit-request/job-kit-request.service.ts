@@ -5,6 +5,7 @@ import * as jobService from "#modules/job/job.service.js";
 import * as transferService from "#modules/engineer-transfer/engineer-transfer.service.js";
 import * as irmRepo from "#modules/irm/irm.repository.js";
 import * as goodsManagementRepo from "#modules/goods-management/goods-management.repository.js";
+import * as goodsManagementService from "#modules/goods-management/goods-management.service.js";
 import * as engineerStockRepo from "#modules/engineer-stock/engineer-stock.repository.js";
 import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
@@ -123,6 +124,12 @@ export async function create(input: CreateKitRequestInput, actor: AuditActor): P
   if (job.assignedEngineerId !== engineerId) throw forbidden("You can only request kit for a job assigned to you.");
   if (!["accepted", "in_progress"].includes(job.status)) {
     throw conflict("You can request extra kit once the job is accepted and in progress.");
+  }
+  // Reconciled goods lock the job — approving a kit request grows the kit (a goods write), which the
+  // reconciled lock rejects downstream. Block it HERE so the request is never raised on a locked job,
+  // instead of failing only when the PM tries to approve it. Mirrors the lock in job.service.
+  if ((await goodsManagementService.getGoodsStatus(input.jobId)) === "reconciled") {
+    throw conflict("This job's goods have been reconciled and locked — no more kit can be requested.");
   }
 
   // Resolve fresh item snapshots — the per-line lookups are independent, so run them in parallel

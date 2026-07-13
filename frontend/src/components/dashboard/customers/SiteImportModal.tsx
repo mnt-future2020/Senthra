@@ -30,12 +30,10 @@ type Result = { created: number; skipped: number; failed: number };
 
 export function SiteImportModal({
   customerId,
-  existingSites,
   onClose,
   onImported,
 }: {
   customerId: string;
-  existingSites: CustomerSite[];
   onClose: () => void;
   onImported: (created: CustomerSite[]) => void;
 }) {
@@ -52,10 +50,18 @@ export function SiteImportModal({
   // then failed/skipped is re-tagged), so the downloaded report reflects what actually saved.
   const [reportRows, setReportRows] = React.useState<PreviewRow[]>([]);
 
-  const existingKeys = React.useMemo(
-    () => new Set(existingSites.map((s) => dedupeKey(s.name, s.postcode ?? ""))),
-    [existingSites],
-  );
+  // Dedupe keys come from the LEAN site-keys endpoint (name + postcode only) — never the full
+  // site rows: a bulk-imported customer can have thousands. The server re-checks on import, so a
+  // key set that's still loading only affects the PREVIEW labels, never what actually saves.
+  const [existingKeys, setExistingKeys] = React.useState<Set<string>>(new Set());
+  React.useEffect(() => {
+    let active = true;
+    customerService
+      .getCustomerSiteKeys(customerId)
+      .then((keys) => { if (active) setExistingKeys(new Set(keys.map((k) => dedupeKey(k.name, k.postcode ?? "")))); })
+      .catch(() => { /* preview-only — the server's own dedupe still applies on import */ });
+    return () => { active = false; };
+  }, [customerId]);
 
   const counts = React.useMemo(() => ({
     total: rows.length,

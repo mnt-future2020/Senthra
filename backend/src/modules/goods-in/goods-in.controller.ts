@@ -1,18 +1,18 @@
 import * as grnService from "./goods-in.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
-import { param, queryInt } from "../../utils/request.js";
+import { param, queryInt, queryStr } from "../../utils/request.js";
 import type { CreateGoodsReceiptInput, GRNAttachmentInput, GRNCancelInput, UpdateGoodsReceiptInput } from "./goods-in.validation.js";
 
 // GET /goods-in?search=&status=&warehouse=&purchaseOrder=&sort=&page=&pageSize=
 export const listGoodsReceipts = asyncHandler(async (req, res) => {
   const { search, status, warehouse, purchaseOrder, sort, page, pageSize } = req.query;
   const result = await grnService.listGoodsReceipts({
-    search: typeof search === "string" ? search : undefined,
-    status: typeof status === "string" ? status : undefined,
-    warehouse: typeof warehouse === "string" ? warehouse : undefined,
-    purchaseOrder: typeof purchaseOrder === "string" ? purchaseOrder : undefined,
-    sort: typeof sort === "string" ? sort : undefined,
+    search: queryStr(search),
+    status: queryStr(status),
+    warehouse: queryStr(warehouse),
+    purchaseOrder: queryStr(purchaseOrder),
+    sort: queryStr(sort),
     page: queryInt(page),
     pageSize: queryInt(pageSize),
   }, actorFrom(req));

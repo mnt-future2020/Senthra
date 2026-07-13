@@ -1,10 +1,9 @@
 import * as jobService from "./job.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
-import { param, queryInt } from "../../utils/request.js";
+import { param, queryInt, queryStr } from "../../utils/request.js";
 import type { AssignJobInput, CancelJobInput, CreateJobInput, UpdateJobInput } from "./job.validation.js";
 
-const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
 
 // GET /jobs?search=&status=&customer=&engineer=&project=&sort=&page=&pageSize=
 export const listJobs = asyncHandler(async (req, res) => {
@@ -12,12 +11,12 @@ export const listJobs = asyncHandler(async (req, res) => {
   res.json(
     await jobService.listJobs(
       {
-        search: str(search),
-        status: str(status),
-        customer: str(customer),
-        engineer: str(engineer),
-        project: str(project),
-        sort: str(sort),
+        search: queryStr(search),
+        status: queryStr(status),
+        customer: queryStr(customer),
+        engineer: queryStr(engineer),
+        project: queryStr(project),
+        sort: queryStr(sort),
         page: queryInt(page),
         pageSize: queryInt(pageSize),
       },

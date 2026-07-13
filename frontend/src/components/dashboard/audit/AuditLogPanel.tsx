@@ -150,10 +150,10 @@ export function AuditLogPanel() {
   };
 
   return (
-    <div className="space-y-5">
+    <div className="flex h-full flex-col gap-5">
       {/* Header + export */}
       <div
-        className="flex flex-col gap-3 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:flex-row sm:items-center sm:justify-between"
+        className="flex shrink-0 flex-col gap-3 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:flex-row sm:items-center sm:justify-between"
         style={{ borderRadius: "var(--radius)" }}
       >
         <div>
@@ -173,7 +173,7 @@ export function AuditLogPanel() {
       </div>
 
       {/* Filter bar */}
-      <div className="flex flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:items-center lg:flex-wrap">
+      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:items-center lg:flex-wrap">
         <div className="relative w-full lg:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input
@@ -251,22 +251,30 @@ export function AuditLogPanel() {
       </div>
 
       {/* Table */}
-      <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
         {showSkeleton ? (
-          <TableSkeleton />
+          <div className="min-h-0 flex-1 overflow-auto">
+            <TableSkeleton />
+          </div>
         ) : error ? (
-          <p className="py-16 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>
+          <div className="flex flex-1 items-center justify-center p-12 text-center text-sm font-semibold text-[var(--neg)]">
+            {error}
+          </div>
         ) : entries.length === 0 ? (
-          <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
+          <div className="flex flex-1 flex-col items-center justify-center gap-2 p-12 text-center">
             <ScrollText className="h-7 w-7 text-[var(--faint)]" />
             <p className="text-sm font-semibold text-[var(--ink)]">
               {isFiltered ? "No entries match these filters" : "No audit entries yet"}
             </p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <div
+            className={`min-h-0 flex-1 overflow-auto transition-opacity ${
+              loading ? "pointer-events-none opacity-60" : ""
+            }`}
+          >
             <table className="w-full text-left text-sm">
-              <thead>
+              <thead className="sticky top-0 z-10 bg-[var(--surface)]">
                 <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
                   <th className="px-4 py-3">When</th>
                   <th className="px-4 py-3">Action</th>
@@ -316,13 +324,15 @@ export function AuditLogPanel() {
       </div>
 
       {data && data.total > 0 && (
-        <Pagination
-          page={data.page}
-          totalPages={data.totalPages}
-          total={data.total}
-          label="entries"
-          onPage={setPage}
-        />
+        <div className="shrink-0">
+          <Pagination
+            page={data.page}
+            totalPages={data.totalPages}
+            total={data.total}
+            label="entries"
+            onPage={setPage}
+          />
+        </div>
       )}
 
       <AuditEntryDrawer entry={selected} onClose={() => setSelected(null)} />

@@ -43,6 +43,11 @@ adminRouter.post(
   customerController.createCustomer,
 );
 adminRouter.get("/:id", requirePermission("customers.view"), customerController.getCustomer);
+// Paged children for the detail tabs (the detail payload no longer carries the full child sets —
+// sites can be bulk-imported in the thousands). Same view gate as the detail itself.
+adminRouter.get("/:id/sites", requirePermission("customers.view"), customerController.listCustomerSites);
+adminRouter.get("/:id/projects", requirePermission("customers.view"), customerController.listCustomerProjects);
+adminRouter.get("/:id/site-keys", requirePermission("customers.view"), customerController.listCustomerSiteKeys);
 adminRouter.put(
   "/:id",
   requirePermission("customers.edit"),

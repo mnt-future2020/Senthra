@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ArrowLeftRight, CheckCircle2, MapPin, ExternalLink, X, XCircle, PlayCircle, ClipboardCheck } from "lucide-react";
+import { ArrowLeftRight, CheckCircle2, MapPin, ExternalLink, PackagePlus, X, XCircle, PlayCircle, ClipboardCheck } from "lucide-react";
 
 import * as engineerService from "@/services/engineer.service";
 import { useAuth } from "@/hooks/useAuth";
@@ -9,6 +9,7 @@ import { EngineerKitRequests } from "./EngineerKitRequests";
 import { Notice } from "@/components/ui/Notice";
 import { ghostBtn, primaryBtn } from "@/components/ui/styles";
 import { fmtDate, fmtDateTime, JobStatusChip, PortalHeader, TableCard } from "@/components/dashboard/portal/portalUi";
+import { GoodsStatusChip } from "@/components/dashboard/jobs/jobStatus";
 import { crossWarehouseReturnNote } from "@/components/dashboard/jobs/jobStatus";
 import { FormError, FormPageSkeleton } from "@/components/ui/FormScaffold";
 import type { Job, JobKitLine, JobKitWarehouse } from "@/types/job";
@@ -76,6 +77,7 @@ export function EngineerJobDetail({ id }: { id: string }) {
   const [usedRows, setUsedRows] = React.useState<UsedRow[]>([]);
   const busy = accepting || rejecting || starting || completing;
   const [whModal, setWhModal] = React.useState<JobKitWarehouse | null>(null);
+  const [kitOpen, setKitOpen] = React.useState(false); // controls the "Request items" modal (trigger in header)
 
   React.useEffect(() => {
     let active = true;
@@ -192,6 +194,14 @@ export function EngineerJobDetail({ id }: { id: string }) {
   const canAccept = job.status === "assigned";
   const canStart = job.status === "accepted";
   const canComplete = job.status === "in_progress";
+  // Reconciled goods lock the job's kit — no more requests possible. The CARD stays visible (the
+  // engineer keeps their request history + a note saying why it's locked); only the request
+  // TRIGGERS (header button + card button) go by this flag.
+  const kitLocked = job.goodsStatus === "reconciled";
+  // The Additional Kit card shows while the job is live for an engineer who can request kit; the
+  // "Request items" trigger sits in the header (and the card), gated additionally by kitLocked.
+  const showKitCard = (job.status === "accepted" || job.status === "in_progress") && can("engineer.jobs.request_kit");
+  const canRequestKit = showKitCard && !kitLocked;
   // Can't start until the kit is COLLECTED: every stock-tracked line (IRM / customer stock) must be
   // fully issued by the warehouse. Misc/free-text lines aren't warehouse stock, so they don't block.
   const stockLines = job.kitLines.filter((l) => l.lineType === "irm" || l.lineType === "customer_stock");
@@ -229,15 +239,29 @@ export function EngineerJobDetail({ id }: { id: string }) {
             </div>
           ) : canStart ? (
             <div className="flex flex-col items-end gap-1">
-              <button type="button" onClick={onStart} disabled={busy || !goodsCollected} title={!goodsCollected ? "Collect your kit from the warehouse first" : undefined} className={primaryBtn}>
-                <PlayCircle className="h-4 w-4" /> {starting ? "Starting…" : "Start work"}
-              </button>
+              <div className="flex items-center gap-2">
+                {canRequestKit && (
+                  <button type="button" onClick={() => setKitOpen(true)} disabled={busy} className={ghostBtn}>
+                    <PackagePlus className="h-4 w-4" /> Request items
+                  </button>
+                )}
+                <button type="button" onClick={onStart} disabled={busy || !goodsCollected} title={!goodsCollected ? "Collect your kit from the warehouse first" : undefined} className={primaryBtn}>
+                  <PlayCircle className="h-4 w-4" /> {starting ? "Starting…" : "Start work"}
+                </button>
+              </div>
               {!goodsCollected && <p className="text-[11px] font-semibold text-[var(--muted)]">Collect your kit from the warehouse first</p>}
             </div>
           ) : canComplete ? (
-            <button type="button" onClick={() => openCompleteForm(job)} disabled={busy} className={primaryBtn}>
-              <ClipboardCheck className="h-4 w-4" /> Complete work
-            </button>
+            <div className="flex items-center gap-2">
+              {canRequestKit && (
+                <button type="button" onClick={() => setKitOpen(true)} disabled={busy} className={ghostBtn}>
+                  <PackagePlus className="h-4 w-4" /> Request items
+                </button>
+              )}
+              <button type="button" onClick={() => openCompleteForm(job)} disabled={busy} className={primaryBtn}>
+                <ClipboardCheck className="h-4 w-4" /> Complete work
+              </button>
+            </div>
           ) : (
             <JobStatusChip value={job.status} />
           )
@@ -359,6 +383,9 @@ export function EngineerJobDetail({ id }: { id: string }) {
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Job number" value={job.jobNumber} />
             <Field label="Status" value={<JobStatusChip value={job.status} />} />
+            {/* Goods lifecycle — the engineer needs to SEE when goods are reconciled (locked), since
+                that's why kit requests disappear. Same chip the admin jobs list uses. */}
+            <Field label="Goods" value={<GoodsStatusChip status={job.goodsStatus} />} />
             <Field label="Customer" value={job.customerName} />
             <Field label="Project" value={job.projectName} />
             <Field label="Customer ref" value={job.customerRef} />
@@ -461,8 +488,11 @@ export function EngineerJobDetail({ id }: { id: string }) {
         )}
       </Card>
 
-      {(job.status === "accepted" || job.status === "in_progress") && can("engineer.jobs.request_kit") && (
-        <EngineerKitRequests job={job} />
+      {/* The card stays visible even when goods are reconciled — the engineer keeps their request
+          HISTORY and sees a lock note instead of the button (silently removing the whole section
+          reads as a bug). The "Request items" triggers live in the page header + card header. */}
+      {showKitCard && (
+        <EngineerKitRequests job={job} locked={kitLocked} open={kitOpen} onOpenChange={setKitOpen} />
       )}
 
       {job.notes ? (

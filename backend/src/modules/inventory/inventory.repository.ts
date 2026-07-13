@@ -3,6 +3,7 @@ import { Prisma, type InventoryBalance, type InventoryTransaction, type StockTra
 import { prisma, withTransaction } from "../../lib/prisma.js";
 import { conflict } from "../../utils/http-error.js";
 import { escapeRegex } from "../../utils/search.js";
+import { positionStatus } from "./stock-position.js";
 
 // Data-access for the Warehouse Inventory module: the inventory PRIMITIVES (on-hand balance +
 // immutable ledger) plus the StockTransfer movement records. The ONLY place Prisma is touched for
@@ -484,4 +485,45 @@ export async function createNegativeAdjustmentWithCode(
     }
   }
   throw new Error("Could not allocate a unique stock-adjustment code.");
+}
+
+// --- Dashboard read-model — not a generic reporting API ---
+
+/**
+ * Low-stock + critical counts for the Overview KPI. An item is "low" when it tracks inventory,
+ * has a reorderLevel set, and its total on-hand across the scoped warehouses is ≤ reorderLevel
+ * (this INCLUDES out-of-stock — the most severe low). "Critical" is the same on-hand tested against
+ * criticalLevel. Reuses positionStatus so the low-stock rule stays defined in exactly one place.
+ * Warehouse-scoped: undefined = all warehouses.
+ */
+export async function lowStockCounts(warehouseIds?: string[]): Promise<{ count: number; criticalCount: number }> {
+  const items = await prisma.irmItem.findMany({
+    where: { trackInventory: true, status: "active", deletedAt: null },
+    select: { id: true, reorderLevel: true, criticalLevel: true },
+  });
+  if (items.length === 0) return { count: 0, criticalCount: 0 };
+
+  const balances = await prisma.inventoryBalance.findMany({
+    where: { irmItemId: { in: items.map((i) => i.id) }, ...(warehouseIds ? { warehouseId: { in: warehouseIds } } : {}) },
+    select: { irmItemId: true, quantityOnHand: true },
+  });
+  const onHand = new Map<string, number>();
+  for (const b of balances) onHand.set(b.irmItemId, (onHand.get(b.irmItemId) ?? 0) + b.quantityOnHand);
+
+  // When warehouse-scoped, only items the scoped warehouses actually hold a balance row for are in
+  // scope — an item never stocked here has no reorder position here, so it must NOT be counted as
+  // low/out (otherwise the whole global catalogue leaks in as "out of stock" for a scoped user).
+  // Unscoped (all warehouses) keeps the full catalogue: a globally-untracked item is genuinely out.
+  const inScope = warehouseIds ? (id: string) => onHand.has(id) : () => true;
+
+  let count = 0;
+  let criticalCount = 0;
+  for (const it of items) {
+    if (!inScope(it.id)) continue;
+    const qty = onHand.get(it.id) ?? 0;
+    // low = low_stock OR out_of_stock (reuse the canonical rule for the reorderLevel test)
+    if (it.reorderLevel != null && positionStatus(qty, it.reorderLevel) !== "in_stock") count += 1;
+    if (it.criticalLevel != null && positionStatus(qty, it.criticalLevel) !== "in_stock") criticalCount += 1;
+  }
+  return { count, criticalCount };
 }

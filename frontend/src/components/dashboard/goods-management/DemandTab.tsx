@@ -30,8 +30,8 @@ export function DemandTab({ warehouseId }: { warehouseId: string }) {
   const shortCount = rows?.filter((r) => r.free < 0).length ?? 0;
 
   return (
-    <div className="space-y-4">
-      <div>
+    <div className="flex h-full flex-col gap-4">
+      <div className="shrink-0">
         <h3 className="text-sm font-extrabold tracking-tight text-[var(--ink)]">Demand from active jobs</h3>
         <p className="mt-0.5 text-xs text-[var(--muted)]">
           Stock that assigned jobs plan to collect from this warehouse but haven&apos;t issued yet — so you can prepare or restock.
@@ -39,10 +39,10 @@ export function DemandTab({ warehouseId }: { warehouseId: string }) {
         </p>
       </div>
 
-      <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
-        <div className="overflow-x-auto">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+        <div className="min-h-0 flex-1 overflow-auto">
           <table className="w-full min-w-[640px] text-left text-sm">
-            <thead>
+            <thead className="sticky top-0 z-10 bg-[var(--surface)]">
               <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
                 {HEADERS.map((h, i) => (
                   <th key={h} className={`px-4 py-3 ${i >= 2 ? "text-right" : ""}`}>{h}</th>

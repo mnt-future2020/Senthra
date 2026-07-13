@@ -279,3 +279,36 @@ export async function createWithCode(
   }
   throw new Error("Could not allocate a unique purchase-request code.");
 }
+
+// --- Dashboard read-models — not a generic reporting API (read-only; warehouse-scoped where applicable) ---
+
+/** Count of PRFs awaiting Finance review. */
+export async function countSubmitted(warehouseIds?: string[]): Promise<number> {
+  return prisma.purchaseRequest.count({
+    where: { status: "submitted", deletedAt: null, ...(warehouseIds ? { warehouseId: { in: warehouseIds } } : {}) },
+  });
+}
+
+/** createdAt of PRFs created since `since`, for the 8-week sparkline. */
+export async function createdSince(since: Date, warehouseIds?: string[]): Promise<Array<{ at: Date }>> {
+  const rows = await prisma.purchaseRequest.findMany({
+    where: { createdAt: { gte: since }, deletedAt: null, ...(warehouseIds ? { warehouseId: { in: warehouseIds } } : {}) },
+    select: { createdAt: true },
+  });
+  return rows.map((r) => ({ at: r.createdAt }));
+}
+
+/** Submitted PRFs for the worklist. PRF has no priority/title — label with the supplier snapshot. */
+export async function submittedWorklist(
+  warehouseIds?: string[],
+): Promise<Array<{ id: string; code: string; title: string | null; priority: string | null; createdAt: Date }>> {
+  const rows = await prisma.purchaseRequest.findMany({
+    where: { status: "submitted", deletedAt: null, ...(warehouseIds ? { warehouseId: { in: warehouseIds } } : {}) },
+    select: { id: true, code: true, supplierName: true, createdAt: true },
+    orderBy: { createdAt: "asc" },
+    take: 50, // per-queue cap — oldest-first keeps the actionable head; the service re-caps the merge
+  });
+  // Keep the {id, code, title, priority, createdAt} shape stable — the service depends on it;
+  // title = supplierName snapshot, priority = null (PRF carries neither field).
+  return rows.map((r) => ({ id: r.id, code: r.code, title: r.supplierName, priority: null, createdAt: r.createdAt }));
+}

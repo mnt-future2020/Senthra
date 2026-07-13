@@ -1,15 +1,11 @@
 import * as transferService from "./engineer-transfer.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
-import { param, queryInt } from "../../utils/request.js";
+import { param, queryInt, queryStr } from "../../utils/request.js";
 import type { CreateTransferInput, DeclineInput, AcknowledgeInput, UploadAttachmentInput } from "./engineer-transfer.validation.js";
 
 // Collapse a possibly-array query value (e.g. `?search=a&search=b`) to its first string, matching the
 // `param()` convention — otherwise a duplicated param silently coerces to undefined → empty results.
-const str = (v: unknown): string | undefined => {
-  const s = Array.isArray(v) ? v[0] : v;
-  return typeof s === "string" ? s : undefined;
-};
 
 // POST /engineer-transfers
 export const createTransfer = asyncHandler(async (req, res) => {
@@ -22,11 +18,11 @@ export const listAll = asyncHandler(async (req, res) => {
   const { status, engineerId, ownership, sort, search, page, pageSize } = req.query;
   const result = await transferService.listAll(
     {
-      status: str(status),
-      engineerId: str(engineerId),
-      ownership: str(ownership),
-      sort: str(sort),
-      search: str(search),
+      status: queryStr(status),
+      engineerId: queryStr(engineerId),
+      ownership: queryStr(ownership),
+      sort: queryStr(sort),
+      search: queryStr(search),
       page: queryInt(page),
       pageSize: queryInt(pageSize),
     },
@@ -44,12 +40,12 @@ export const listMine = asyncHandler(async (req, res) => {
     return;
   }
   const { role, status, sort, search, page, pageSize } = req.query;
-  const roleVal = str(role) as "incoming" | "outgoing" | "all" | undefined;
+  const roleVal = queryStr(role) as "incoming" | "outgoing" | "all" | undefined;
   const result = await transferService.listMine(engineerId, {
     role: roleVal,
-    status: str(status),
-    sort: str(sort),
-    search: str(search),
+    status: queryStr(status),
+    sort: queryStr(sort),
+    search: queryStr(search),
     page: queryInt(page),
     pageSize: queryInt(pageSize),
   });
@@ -63,9 +59,9 @@ export const getHolders = asyncHandler(async (req, res) => {
   const { ownership, irmItemId, customerStockEntryId } = req.query;
   const holders = await transferService.getHolders(
     {
-      ownership: str(ownership) ?? "",
-      irmItemId: str(irmItemId),
-      customerStockEntryId: str(customerStockEntryId),
+      ownership: queryStr(ownership) ?? "",
+      irmItemId: queryStr(irmItemId),
+      customerStockEntryId: queryStr(customerStockEntryId),
     },
     requesterId,
   );
@@ -80,14 +76,14 @@ export const getEngineerHoldings = asyncHandler(async (req, res) => {
 // GET /engineer-transfers/company-search?search=  (engineer company/IRM discovery)
 export const companyCandidates = asyncHandler(async (req, res) => {
   const actor = actorFrom(req);
-  const candidates = await transferService.getCompanyCandidates(str(req.query.search) ?? "", actor.id ?? "");
+  const candidates = await transferService.getCompanyCandidates(queryStr(req.query.search) ?? "", actor.id ?? "");
   res.json({ candidates });
 });
 
 // GET /engineer-transfers/customer-search?search=  (engineer customer-consignment discovery)
 export const customerCandidates = asyncHandler(async (req, res) => {
   const actor = actorFrom(req);
-  const candidates = await transferService.getCustomerCandidates(str(req.query.search) ?? "", actor.id ?? "");
+  const candidates = await transferService.getCustomerCandidates(queryStr(req.query.search) ?? "", actor.id ?? "");
   res.json({ candidates });
 });
 

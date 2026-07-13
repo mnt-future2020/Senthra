@@ -14,6 +14,7 @@ import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as engineerStockRepo from "#modules/engineer-stock/engineer-stock.repository.js";
 import { generateTempPassword } from "../../utils/generate-password.js";
 import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
+import { paginate } from "../../utils/pagination.js";
 import { hashPassword } from "../../utils/password.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
@@ -276,17 +277,15 @@ export interface PagedUsers {
 }
 
 export async function listUsers(params: ListUsersParams = {}): Promise<PagedUsers> {
-  const pageSize = Math.min(Math.max(Math.trunc(params.pageSize ?? 20), 1), 100);
   const filters = {
     search: params.search,
     status: params.status,
     roleId: params.roleId,
   };
   const total = await userRepo.count(filters);
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
   // Clamp the requested page so an out-of-range page returns the last page.
-  const page = Math.min(Math.max(Math.trunc(params.page ?? 1), 1), totalPages);
-  const users = await userRepo.findMany(filters, (page - 1) * pageSize, pageSize, params.sort);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const users = await userRepo.findMany(filters, skip, pageSize, params.sort);
   // The list intentionally omits per-user warehouse assignments (avoids an N+1); publicUser
   // defaults them to []. The single-user reads (get/create/update) populate them.
   return { users: users.map((u) => publicUser(u)), total, page, pageSize, totalPages };

@@ -98,9 +98,10 @@ function TableSkeleton({ actions }: { actions: boolean }) {
   );
 }
 
-// `warehouseId` locks the list to one warehouse and `embedded` drops the standalone page header +
-// full-height layout — both used when this renders inside the Warehouse detail "Incoming stock"
-// Company (GRN) pane. No props = the global GRN page. Mirrors InventoryView's embedded contract.
+// `warehouseId` locks the list to one warehouse and `embedded` drops the standalone page header —
+// both used when this renders inside the Warehouse detail "Incoming stock" Company (GRN) pane.
+// No props = the global GRN page. Either way the view fills its (bounded) parent and only the
+// table body scrolls, with a sticky header row. Mirrors InventoryView's embedded contract.
 export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { warehouseId?: string; warehouseCode?: string; embedded?: boolean } = {}) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -208,7 +209,7 @@ export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { wa
   };
 
   return (
-    <div className={embedded ? "flex flex-col gap-4" : "flex h-full flex-col gap-5"}>
+    <div className={`flex h-full flex-col ${embedded ? "gap-4" : "gap-5"}`}>
       {!embedded && (
         <div className="shrink-0 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs" style={{ borderRadius: "var(--radius)" }}>
           <h2 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">Goods Receipt Notes (GRN)</h2>
@@ -232,13 +233,15 @@ export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { wa
         )}
       </div>
 
-      <div className={`flex flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)] ${embedded ? "" : "min-h-0 flex-1"}`}>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
         {showSkeleton ? (
-          <TableSkeleton actions={showActions} />
+          <div className="min-h-0 flex-1 overflow-auto">
+            <TableSkeleton actions={showActions} />
+          </div>
         ) : error ? (
-          <p className="py-16 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>
+          <div className="flex flex-1 items-center justify-center p-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</div>
         ) : rows.length === 0 ? (
-          <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
+          <div className="flex flex-1 flex-col items-center justify-center gap-2 py-16 text-center">
             <PackageCheck className="h-7 w-7 text-[var(--faint)]" />
             <p className="text-sm font-semibold text-[var(--ink)]">{isFiltered ? "No goods receipts match" : "No goods receipts yet"}</p>
             {!embedded && !isFiltered && can("goods_in.create") && (
@@ -246,9 +249,9 @@ export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { wa
             )}
           </div>
         ) : (
-          <div className={embedded ? "overflow-x-auto" : "min-h-0 flex-1 overflow-auto"}>
+          <div className={`min-h-0 flex-1 overflow-auto transition-opacity ${loading ? "pointer-events-none opacity-60" : ""}`}>
             <table className="w-full min-w-[900px] text-left text-sm">
-              <thead>
+              <thead className="sticky top-0 z-10 bg-[var(--surface)]">
                 <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
                   <th className="px-4 py-3">Code</th><th className="px-4 py-3">Purchase Order</th><th className="px-4 py-3">Supplier</th>
                   <th className="px-4 py-3">Warehouse</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Received</th>

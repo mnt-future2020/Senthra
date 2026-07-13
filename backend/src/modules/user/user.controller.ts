@@ -1,7 +1,7 @@
 import * as userService from "./user.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
-import { param, queryInt } from "../../utils/request.js";
+import { param, queryInt, queryStr } from "../../utils/request.js";
 import type {
   CreateUserInput,
   UpdateMyProfileInput,
@@ -15,10 +15,10 @@ import type {
 export const listUsers = asyncHandler(async (req, res) => {
   const { search, status, roleId, sort, page, pageSize } = req.query;
   const result = await userService.listUsers({
-    search: typeof search === "string" ? search : undefined,
-    status: typeof status === "string" ? status : undefined,
-    roleId: typeof roleId === "string" ? roleId : undefined,
-    sort: typeof sort === "string" ? sort : undefined,
+    search: queryStr(search),
+    status: queryStr(status),
+    roleId: queryStr(roleId),
+    sort: queryStr(sort),
     page: queryInt(page),
     pageSize: queryInt(pageSize),
   });

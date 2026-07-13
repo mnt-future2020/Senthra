@@ -5,7 +5,7 @@ import type { CompleteJobInput, RejectJobInput } from "#modules/job/job.validati
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
 import { forbidden } from "../../utils/http-error.js";
-import { param } from "../../utils/request.js";
+import { param, queryInt, queryStr } from "../../utils/request.js";
 
 // The engineer always reads THEIR OWN data — the scoping id is the authenticated principal's id,
 // never a route param (mirrors the customer portal's `customerId(req)` safety, keyed on User.id).
@@ -25,9 +25,18 @@ export const getOwnStock = asyncHandler(async (req, res) => {
   res.json({ stock: await engineerService.getOwnStock(ownId(req)) });
 });
 
-// GET /engineer/jobs — jobs assigned to the signed-in engineer.
+// GET /engineer/jobs — jobs assigned to the signed-in engineer (filtered + paged).
 export const listOwnJobs = asyncHandler(async (req, res) => {
-  res.json({ jobs: await engineerService.getOwnJobs(ownId(req)) });
+  const { status, q, sort, page, pageSize } = req.query;
+  res.json(
+    await engineerService.getOwnJobs(ownId(req), {
+      status: queryStr(status),
+      search: queryStr(q),
+      sort: queryStr(sort),
+      page: queryInt(page),
+      pageSize: queryInt(pageSize),
+    }),
+  );
 });
 
 // GET /engineer/jobs/:id — one of the engineer's own jobs (scoped; :id is the JOB id).

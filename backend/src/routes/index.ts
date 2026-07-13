@@ -5,6 +5,7 @@ import authRoutes from "#modules/auth/auth.routes.js";
 import engineerTransferRoutes from "#modules/engineer-transfer/engineer-transfer.routes.js";
 import categoryRoutes from "#modules/category/category.routes.js";
 import { adminRouter as customerRoutes, portalRouter as customerPortalRoutes, stockAssignmentRouter, warehousePendingRouter, stockEntryRouter } from "#modules/customer/customer.routes.js";
+import dashboardRoutes from "#modules/dashboard/dashboard.routes.js";
 import departmentRoutes from "#modules/department/department.routes.js";
 import emailTemplateRoutes from "#modules/email/emailTemplate.routes.js";
 import engineerRoutes from "#modules/engineer/engineer.routes.js";
@@ -38,6 +39,7 @@ router.get("/", (_req, res) => {
 // Feature routes
 router.use("/auth", authRoutes);
 router.use("/audit", auditRoutes);
+router.use("/dashboard", dashboardRoutes);
 router.use("/settings", settingsRoutes);
 router.use("/users", userRoutes);
 router.use("/roles", roleRoutes);

@@ -1,19 +1,19 @@
 import * as irmService from "./irm.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
-import { param, queryInt } from "../../utils/request.js";
+import { param, queryInt, queryStr } from "../../utils/request.js";
 import type { CreateIrmItemInput, UpdateIrmItemInput } from "./irm.validation.js";
 
 // GET /irm-items?search=&status=&type=&category=&supplier=&sort=&page=&pageSize=
 export const listIrmItems = asyncHandler(async (req, res) => {
   const { search, status, type, category, supplier, sort, page, pageSize } = req.query;
   const result = await irmService.listIrmItems({
-    search: typeof search === "string" ? search : undefined,
-    status: typeof status === "string" ? status : undefined,
-    type: typeof type === "string" ? type : undefined,
-    category: typeof category === "string" ? category : undefined,
-    supplier: typeof supplier === "string" ? supplier : undefined,
-    sort: typeof sort === "string" ? sort : undefined,
+    search: queryStr(search),
+    status: queryStr(status),
+    type: queryStr(type),
+    category: queryStr(category),
+    supplier: queryStr(supplier),
+    sort: queryStr(sort),
     page: queryInt(page),
     pageSize: queryInt(pageSize),
   });

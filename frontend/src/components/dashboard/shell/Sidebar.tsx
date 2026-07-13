@@ -41,6 +41,9 @@ type NavItem = {
 };
 
 const NAV: NavItem[] = [
+  // Overview landing — visible to every staff member (perms: [] = always show). Kept out of the
+  // "pure engineer" detection below so an engineer-only user still routes to their portal.
+  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, perms: [] },
   { href: "/dashboard/users", label: "Users & Roles", icon: UserCog, perms: ["users.view", "roles.view"] },
   { href: "/dashboard/customers", label: "Customers", icon: Building2, perms: ["customers.view"] },
   { href: "/dashboard/jobs", label: "Jobs", icon: ClipboardList, perms: ["jobs.view"] },
@@ -124,7 +127,8 @@ export function Sidebar({
   const HIDE_GLOBAL_GRN_FOR_SCOPED = true;
   const isWarehouseScoped = principal?.type === "user" && principal.isWarehouseScoped === true;
   const adminNav = NAV.filter((item) => {
-    if (!item.perms.some((p) => can(p))) return false;
+    // perms: [] = always-visible (e.g. the Dashboard landing); otherwise show if the actor holds ANY.
+    if (item.perms.length > 0 && !item.perms.some((p) => can(p))) return false;
     if (HIDE_GLOBAL_GRN_FOR_SCOPED && isWarehouseScoped && item.href === "/dashboard/goods-in") return false;
     return true;
   });
@@ -135,7 +139,10 @@ export function Sidebar({
   // engineer nav. The super-admin (a different principal type) is intentionally excluded, even though
   // its "*" technically grants engineer.* — its surface stays the Admin Suite.
   const canEngineer = principal?.type === "user" && can("engineer.dashboard.view");
-  const isEngineerOnly = canEngineer && adminNav.length === 0;
+  // "Pure engineer" = holds no ADMIN section beyond the always-on Dashboard landing. Excluding the
+  // permless Dashboard item keeps engineer-only users routing to their portal (not a lone-Dashboard menu).
+  const adminNavBeyondLanding = adminNav.filter((i) => i.perms.length > 0);
+  const isEngineerOnly = canEngineer && adminNavBeyondLanding.length === 0;
 
   // Engineer items shown alongside the admin menu drop the shared account "Settings" link (admins
   // reach their account via the profile menu) to avoid a duplicate Settings entry. A pure engineer
@@ -148,10 +155,13 @@ export function Sidebar({
 
   // Nav groups. Customers get a single surface; staff get the admin menu and/or the engineer portal.
   type NavGroup = { key: string; label: string; items: NavItem[] };
+  // A pure engineer's home is the Engineer Portal, so the admin "Menu" (which would otherwise be just
+  // the always-on Dashboard landing) is suppressed for them; everyone else keeps their admin menu.
+  const menuNav = isEngineerOnly ? [] : adminNav;
   const navGroups: NavGroup[] = isCustomer
     ? [{ key: "menu", label: "Menu", items: CUSTOMER_NAV }]
     : [
-        ...(adminNav.length > 0 ? [{ key: "menu", label: "Menu", items: adminNav }] : []),
+        ...(menuNav.length > 0 ? [{ key: "menu", label: "Menu", items: menuNav }] : []),
         ...(canEngineer ? [{ key: "engineer", label: "Engineer Portal", items: engineerNav }] : []),
       ];
 

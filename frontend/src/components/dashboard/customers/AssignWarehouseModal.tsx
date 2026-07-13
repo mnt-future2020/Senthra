@@ -34,7 +34,7 @@ export function AssignWarehouseModal({
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
-  useReferenceData([
+  const { isLoading: refLoading } = useReferenceData([
     { label: "warehouses", load: () => listWarehouses({ status: "active", pageSize: 200 }), onData: (r: PagedWarehouses) => setWarehouses(r.warehouses.map((w) => ({ id: w.id, name: w.name, code: w.code }))) },
   ]);
 
@@ -117,7 +117,8 @@ export function AssignWarehouseModal({
                   label: `${w.name} (${w.code})`,
                   disabled: usedIds.has(w.id) && w.id !== row.warehouseId,
                 }))}
-                placeholder="Select warehouse…"
+                placeholder={refLoading && !row.warehouseId ? "Loading warehouses…" : "Select warehouse…"}
+                disabled={refLoading && !row.warehouseId}
                 ariaLabel="Warehouse"
               />
             </div>

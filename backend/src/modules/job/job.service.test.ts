@@ -5,6 +5,7 @@ vi.mock("./job.repository.js", () => ({
   findById: vi.fn(),
   findByIdForEngineer: vi.fn(),
   findManyByEngineer: vi.fn(),
+  countByEngineer: vi.fn(),
   startIfAccepted: vi.fn(),
   completeIfInProgressTx: vi.fn(),
   acceptIfAssigned: vi.fn(),

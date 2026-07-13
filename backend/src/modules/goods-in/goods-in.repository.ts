@@ -243,6 +243,23 @@ export function receivedHistoryForItemWarehouse(irmItemId: string, warehouseId: 
   });
 }
 
+// --- Dashboard read-model — not a generic reporting API (read-only; warehouse-scoped) ---------
+
+/** receivedDate of completed GRNs since `since` — feeds the "Goods Received" card
+ *  (last-7-day count + weekly sparkline are both derived from this one read). */
+export async function completedReceiptsSince(since: Date, warehouseIds?: string[]): Promise<Array<{ at: Date }>> {
+  const rows = await prisma.goodsReceipt.findMany({
+    where: {
+      status: "completed",
+      receivedDate: { gte: since },
+      deletedAt: null,
+      ...(warehouseIds ? { warehouseId: { in: warehouseIds } } : {}),
+    },
+    select: { receivedDate: true },
+  });
+  return rows.map((r) => ({ at: r.receivedDate }));
+}
+
 // --- serial uniqueness (app-level, per item, across non-deleted GRNs) ------------------------
 export function findSerialConflicts(irmItemId: string, serialLowers: string[], excludeGoodsReceiptId?: string): Promise<{ serialLower: string }[]> {
   if (serialLowers.length === 0) return Promise.resolve([]);

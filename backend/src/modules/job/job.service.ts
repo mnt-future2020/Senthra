@@ -15,6 +15,7 @@ import { sendTemplatedEmail } from "#modules/email/email.service.js";
 import { roleGrants } from "#modules/role/permissions.js";
 import { emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
 import { conflict, forbidden, notFound, badRequest } from "../../utils/http-error.js";
+import { paginate } from "../../utils/pagination.js";
 import type { CreateJobInput, JobKitLineInput, UpdateJobInput, CompleteJobInput } from "./job.validation.js";
 import * as goodsManagementService from "#modules/goods-management/goods-management.service.js";
 import * as kitRequestRepo from "#modules/job-kit-request/job-kit-request.repository.js";
@@ -404,12 +405,10 @@ export interface ListJobsParams {
 }
 
 export async function listJobs(params: ListJobsParams = {}, _actor?: AuditActor): Promise<PagedJobs> {
-  const pageSize = Math.min(Math.max(Math.trunc(params.pageSize ?? 20), 1), 100);
   const filters = { search: params.search, status: params.status, customerId: params.customer, assignedEngineerId: params.engineer, projectId: params.project };
   const total = await jobRepo.count(filters);
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  const page = Math.min(Math.max(Math.trunc(params.page ?? 1), 1), totalPages);
-  const rows = await jobRepo.findMany(filters, (page - 1) * pageSize, pageSize, params.sort);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const rows = await jobRepo.findMany(filters, skip, pageSize, params.sort);
   const ids = rows.map((r) => r.id);
   // Merge each job's goods-lifecycle status + pending kit-request count in batched queries (no N+1).
   const [goodsStatusByJob, pendingByJob] = await Promise.all([
@@ -964,9 +963,21 @@ export async function deleteJob(id: string, actor?: AuditActor): Promise<void> {
 }
 
 // ── Engineer portal (scoped to the signed-in engineer's own id) ───────────────────────────────
-export async function listJobsForEngineer(engineerId: string): Promise<PublicJob[]> {
-  const rows = await jobRepo.findManyByEngineer(engineerId);
-  return rows.map(toPublic);
+export interface ListEngineerJobsParams {
+  status?: string;
+  search?: string;
+  sort?: string;
+  page?: number;
+  pageSize?: number;
+}
+// Paged like the admin list (same clamping) — an engineer's job history grows unbounded, so the
+// portal list must never fetch it all at once.
+export async function listJobsForEngineer(engineerId: string, params: ListEngineerJobsParams = {}): Promise<PagedJobs> {
+  const filters = { status: params.status, search: params.search };
+  const total = await jobRepo.countByEngineer(engineerId, filters);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const rows = await jobRepo.findManyByEngineer(engineerId, filters, skip, pageSize, params.sort);
+  return { jobs: rows.map(toPublic), total, page, pageSize, totalPages };
 }
 
 export async function getJobForEngineer(engineerId: string, jobId: string): Promise<PublicJob> {

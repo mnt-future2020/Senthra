@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { canAccessDashboard, firstDashboardPath, homeFor, principalCan } from "./auth";
+import { canAccessDashboard, canSeeOverview, firstDashboardPath, homeFor, principalCan } from "./auth";
 import type { AdminPrincipal, UserPrincipal } from "@/types/auth";
 
 const admin: AdminPrincipal = { type: "admin", id: "a", email: "a@x.com", name: "Admin" };
@@ -79,6 +79,30 @@ describe("canAccessDashboard", () => {
   });
   it("is false with no permissions", () => {
     expect(canAccessDashboard(makeUser([]))).toBe(false);
+  });
+});
+
+describe("canSeeOverview", () => {
+  // OVERVIEW_PERMS must stay in lockstep with the cards/worklists the backend dashboard populates:
+  // a user who holds a perm that produces Overview content must be routed TO the Overview.
+  it("the super-admin sees the Overview", () => {
+    expect(canSeeOverview(admin)).toBe(true);
+  });
+  it("a goods-in user sees the Overview (goodsReceived card)", () => {
+    expect(canSeeOverview(makeUser(["goods_in.view"]))).toBe(true);
+  });
+  it("a goods-management user sees the Overview (overdueHoldings card)", () => {
+    expect(canSeeOverview(makeUser(["goods_management.view"]))).toBe(true);
+  });
+  it("a worklist-only user (goods_in.create) sees the Overview", () => {
+    expect(canSeeOverview(makeUser(["goods_in.create"]))).toBe(true);
+  });
+  it("an Overview-blind user (users-only) does not", () => {
+    expect(canSeeOverview(makeUser(["users.view"]))).toBe(false);
+  });
+  it("a customer never sees the staff Overview", () => {
+    const customer = { type: "customer" as const, id: "c", email: "c@x.com", name: "Cust", customerId: "c1" };
+    expect(canSeeOverview(customer as never)).toBe(false);
   });
 });
 

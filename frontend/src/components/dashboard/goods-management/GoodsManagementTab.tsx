@@ -256,28 +256,31 @@ export function GoodsManagementTab({
     [data, selectedJobId],
   );
 
-  // When a job row is selected (active queue only), show the full-screen scan panel.
+  // When a job row is selected (active queue only), show the full-screen scan panel. It's a
+  // naturally-sized detail panel, so it gets its own scrolling box inside the bounded tab area.
   if (selectedJobId && selectedRow) {
     return (
-      <JobScanPanel
-        jobId={selectedJobId}
-        jobNumber={selectedRow.jobNumber}
-        jobName={selectedRow.jobName}
-        warehouseId={warehouseId}
-        warehouseCode={warehouseCode}
-        miscLines={selectedRow.kitLines.filter((k) => k.lineType === "misc")}
-        onBack={() => {
-          setSelectedJobId(null);
-          load(); // refresh after any movements
-        }}
-      />
+      <div className="h-full min-h-0 overflow-auto">
+        <JobScanPanel
+          jobId={selectedJobId}
+          jobNumber={selectedRow.jobNumber}
+          jobName={selectedRow.jobName}
+          warehouseId={warehouseId}
+          warehouseCode={warehouseCode}
+          miscLines={selectedRow.kitLines.filter((k) => k.lineType === "misc")}
+          onBack={() => {
+            setSelectedJobId(null);
+            load(); // refresh after any movements
+          }}
+        />
+      </div>
     );
   }
 
   return (
-    <div className="space-y-4">
+    <div className="flex h-full flex-col gap-4">
       {/* Section switcher — Queue / Closed / Overdue (segmented control, matches the scan panel) */}
-      <div className="inline-flex rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-1">
+      <div className="inline-flex shrink-0 self-start rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-1">
         {SECTION_PILLS.map(({ key, label, icon: Icon }) => (
           <button
             key={key}
@@ -303,7 +306,7 @@ export function GoodsManagementTab({
       {showsTable && (
         <>
           {/* Search */}
-          <div className="relative">
+          <div className="relative shrink-0">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--faint)]" />
             <input
               type="search"
@@ -332,9 +335,10 @@ export function GoodsManagementTab({
             </div>
           ) : (
             <>
-              <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)] shadow-xs">
+              <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)] shadow-xs">
+                <div className="min-h-0 flex-1 overflow-auto">
                 <table className="w-full text-left text-sm" style={{ minWidth: 1020 }}>
-                  <thead>
+                  <thead className="sticky top-0 z-10 bg-[var(--surface)]">
                     <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
                       <th className="px-4 py-3">Job</th>
                       <th className="px-4 py-3">Engineer</th>
@@ -438,9 +442,12 @@ export function GoodsManagementTab({
                     })}
                   </tbody>
                 </table>
+                </div>
               </div>
 
-              <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="jobs" onPage={(p) => patch({ gmPage: p > 1 ? String(p) : null }, false)} />
+              <div className="shrink-0">
+                <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="jobs" onPage={(p) => patch({ gmPage: p > 1 ? String(p) : null }, false)} />
+              </div>
             </>
           )}
         </>

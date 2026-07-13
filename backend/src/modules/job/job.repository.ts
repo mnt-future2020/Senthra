@@ -168,10 +168,49 @@ export function findActiveWithKitLines(excludeJobId?: string): Promise<JobWithRe
 }
 
 // --- engineer-scoped reads (engineer portal) -------------------------------------------------
-// Every job assigned to one engineer, newest first. Scoped on assignedEngineerId so an engineer can
-// only ever read their OWN jobs.
-export function findManyByEngineer(engineerId: string): Promise<JobWithRelations[]> {
-  return prisma.job.findMany({ where: { assignedEngineerId: engineerId, deletedAt: null }, include: withRelations, orderBy: { createdAt: "desc" } });
+// Jobs assigned to one engineer, filtered + PAGED (an engineer accumulates hundreds of completed
+// jobs over time — never return the unbounded set). Scoped on assignedEngineerId so an engineer can
+// only ever read their OWN jobs. Search matches job number / name / customer, like the admin list.
+export interface EngineerJobFilters {
+  status?: string;
+  search?: string;
+}
+function buildEngineerWhere(engineerId: string, filters: EngineerJobFilters): Prisma.JobWhereInput {
+  return {
+    assignedEngineerId: engineerId,
+    deletedAt: null,
+    ...(filters.status && { status: filters.status }),
+    ...(filters.search && {
+      OR: [
+        { jobNumber: { contains: escapeRegex(filters.search), mode: "insensitive" } },
+        { name: { contains: escapeRegex(filters.search), mode: "insensitive" } },
+        { customerName: { contains: escapeRegex(filters.search), mode: "insensitive" } },
+      ],
+    }),
+  };
+}
+export function findManyByEngineer(
+  engineerId: string,
+  filters: EngineerJobFilters = {},
+  skip = 0,
+  take = 20,
+  sort?: string,
+): Promise<JobWithRelations[]> {
+  return prisma.job.findMany({ where: buildEngineerWhere(engineerId, filters), include: withRelations, orderBy: orderBy(sort), skip, take });
+}
+export function countByEngineer(engineerId: string, filters: EngineerJobFilters = {}): Promise<number> {
+  return prisma.job.count({ where: buildEngineerWhere(engineerId, filters) });
+}
+// An engineer's OPEN jobs only (assigned / accepted / in_progress) — bounded by nature (an engineer
+// holds a handful of live jobs at a time, however many hundreds they've completed). Used by the
+// Inventory Hub engineer detail, which must show EVERY active job — so this filters at the DB
+// rather than page (the paged findManyByEngineer above would silently cap that list).
+export function findActiveByEngineer(engineerId: string): Promise<JobWithRelations[]> {
+  return prisma.job.findMany({
+    where: { assignedEngineerId: engineerId, deletedAt: null, status: { in: ["assigned", "accepted", "in_progress"] } },
+    include: withRelations,
+    orderBy: { createdAt: "desc" },
+  });
 }
 export function findByIdForEngineer(jobId: string, engineerId: string): Promise<JobWithRelations | null> {
   if (!jobId) return Promise.resolve(null);
@@ -375,4 +414,32 @@ export async function countActiveJobsByEngineer(): Promise<Map<string, number>> 
   const m = new Map<string, number>();
   for (const r of rows) if (r.assignedEngineerId) m.set(r.assignedEngineerId, r._count._all);
   return m;
+}
+
+// --- Dashboard read-models — not a generic reporting API ---
+
+const ACTIVE_JOB_STATUSES = ["assigned", "accepted", "in_progress"] as const;
+
+/** Count of jobs currently in flight. */
+export async function countActive(): Promise<number> {
+  return prisma.job.count({ where: { status: { in: [...ACTIVE_JOB_STATUSES] }, deletedAt: null } });
+}
+
+/** createdAt of jobs since `since`, for the 8-week sparkline. */
+export async function createdSince(since: Date): Promise<Array<{ at: Date }>> {
+  const rows = await prisma.job.findMany({ where: { createdAt: { gte: since }, deletedAt: null }, select: { createdAt: true } });
+  return rows.map((r) => ({ at: r.createdAt }));
+}
+
+/** Active jobs past / approaching their completionDate (UTC day boundaries). Jobs with no
+ *  completionDate count in neither bucket — there is nothing to be overdue against. */
+export async function dueBreakdown(now: Date): Promise<{ overdue: number; dueThisWeek: number }> {
+  const startToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const in7Days = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 7));
+  const active = { status: { in: [...ACTIVE_JOB_STATUSES] }, deletedAt: null };
+  const [overdue, dueThisWeek] = await Promise.all([
+    prisma.job.count({ where: { ...active, completionDate: { lt: startToday } } }),
+    prisma.job.count({ where: { ...active, completionDate: { gte: startToday, lt: in7Days } } }),
+  ]);
+  return { overdue, dueThisWeek };
 }

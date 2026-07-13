@@ -278,7 +278,7 @@ export function AdminTransferBoard() {
   // remounts — same URL-as-state approach as the Inventory Hub lens (?tab).
   const searchParams = useSearchParams();
   const statusFilter = searchParams.get("status") ?? "";
-  const sortOldest = searchParams.get("sort") !== "newest"; // default: oldest first
+  const sortOldest = searchParams.get("sort") === "oldest"; // default: newest first (matches every other list)
   const search = searchParams.get("q") ?? "";
   const page = Math.max(1, Number(searchParams.get("page")) || 1);
 
@@ -370,7 +370,7 @@ export function AdminTransferBoard() {
           <Select
             size="sm"
             value={sortOldest ? "oldest" : "newest"}
-            onChange={(v) => patchParams({ sort: v === "oldest" ? null : "newest" }, true)}
+            onChange={(v) => patchParams({ sort: v === "oldest" ? "oldest" : null }, true)}
             options={[
               { value: "newest", label: "Newest first" },
               { value: "oldest", label: "Oldest first" },

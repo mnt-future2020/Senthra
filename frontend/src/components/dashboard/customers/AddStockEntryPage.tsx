@@ -44,7 +44,7 @@ export function AddStockEntryPage({ customer }: { customer: CustomerInfo }) {
   );
   const [warehouses, setWarehouses] = React.useState<{ id: string; name: string; code: string }[]>([]);
 
-  useReferenceData([
+  const { isLoading: refLoading } = useReferenceData([
     {
       label: "categories",
       load: () => listCategories(),
@@ -240,7 +240,8 @@ export function AddStockEntryPage({ customer }: { customer: CustomerInfo }) {
                     value={categoryId}
                     onChange={(v) => { setCategoryId(v); clearError("categoryId"); }}
                     options={categories.map((c) => ({ value: c.id, label: c.name }))}
-                    placeholder="— Select category —"
+                    placeholder={refLoading && !categoryId ? "Loading categories…" : "— Select category —"}
+                    disabled={refLoading && !categoryId}
                     ariaLabel="Category"
                     invalid={Boolean(errors.categoryId)}
                   />
@@ -291,11 +292,11 @@ export function AddStockEntryPage({ customer }: { customer: CustomerInfo }) {
                   value={warehouseId}
                   onChange={(v) => { setWarehouseId(v); clearError("warehouseId"); }}
                   options={warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))}
-                  placeholder="— Select warehouse —"
+                  placeholder={refLoading && !warehouseId ? "Loading warehouses…" : "— Select warehouse —"}
                   ariaLabel="Warehouse"
                   required
                   invalid={Boolean(errors.warehouseId)}
-                  disabled={Boolean(created)}
+                  disabled={Boolean(created) || (refLoading && !warehouseId)}
                 />
                 {created && <p className={hintCls}>Set on creation — cannot be changed here.</p>}
                 <FieldError message={errors.warehouseId} />

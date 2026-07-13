@@ -155,7 +155,7 @@ export function UserForm({
   // Load active-warehouse options the first time a warehouse-scoped role is selected (lean endpoint;
   // only fetched when the field actually becomes relevant).
   const needWarehouseOptions = isWarehouseScoped && warehouseOptions.length === 0;
-  useReferenceData(
+  const { isLoading: warehousesLoading } = useReferenceData(
     needWarehouseOptions
       ? [{ label: "warehouses", load: () => listWarehouseOptions(), onData: (opts) => setWarehouseOptions(opts) }]
       : [],
@@ -529,7 +529,8 @@ export function UserForm({
                       clearError("warehouseIds");
                     }}
                     options={warehouseOptions.map((w) => ({ value: w.id, label: `${w.code} — ${w.name}` }))}
-                    placeholder="Select one or more warehouses…"
+                    placeholder={warehousesLoading && warehouseIds.length === 0 ? "Loading warehouses…" : "Select one or more warehouses…"}
+                    disabled={warehousesLoading && warehouseIds.length === 0}
                     ariaLabel="Assigned warehouses"
                     invalid={Boolean(errors.warehouseIds)}
                     describedBy={errors.warehouseIds ? "warehouseIds-error" : undefined}

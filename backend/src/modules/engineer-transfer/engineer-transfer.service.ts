@@ -33,6 +33,7 @@ export interface PublicTransfer {
   fromEngineerId: string;
   fromEngineerName: string;
   fromEngineerEmail: string | null;
+  fromEngineerPhone: string | null;
   toEngineerId: string;
   toEngineerName: string;
   toEngineerEmail: string | null;
@@ -94,6 +95,7 @@ function toPublic(t: TransferWithLines): PublicTransfer {
     fromEngineerId: t.fromEngineerId,
     fromEngineerName: t.fromEngineerName,
     fromEngineerEmail: t.fromEngineerEmail,
+    fromEngineerPhone: t.fromEngineerPhone,
     toEngineerId: t.toEngineerId,
     toEngineerName: t.toEngineerName,
     toEngineerEmail: t.toEngineerEmail,
@@ -136,12 +138,12 @@ function engineerName(u: { firstName: string; lastName: string }): string {
 }
 
 // Assert that a user exists, is active, and their role canHoldStock.
-async function assertEngineer(id: string, label: string): Promise<{ id: string; name: string; email: string }> {
+async function assertEngineer(id: string, label: string): Promise<{ id: string; name: string; email: string; phone: string | null }> {
   const user = await userRepo.findById(id);
   if (!user) throw notFound(`${label} engineer not found.`);
   if (user.status !== "active") throw badRequest(`${label} engineer account is not active.`);
   if (!user.role?.canHoldStock) throw badRequest(`${label} user is not a stock-holding engineer.`);
-  return { id: user.id, name: engineerName(user), email: user.email };
+  return { id: user.id, name: engineerName(user), email: user.email, phone: user.phone ?? null };
 }
 
 // ---- getEngineerTransferRequireSignature helper -----------------------------------------------
@@ -241,6 +243,7 @@ export async function createJobTransfer(
     fromEngineerId: fromEng.id,
     fromEngineerName: fromEng.name,
     fromEngineerEmail: fromEng.email,
+    fromEngineerPhone: fromEng.phone,
     toEngineerId: toEng.id,
     toEngineerName: toEng.name,
     toEngineerEmail: toEng.email,
@@ -308,6 +311,7 @@ export async function createTransfer(input: CreateTransferInput, actor: AuditAct
     fromEngineerId: fromEng.id,
     fromEngineerName: fromEng.name,
     fromEngineerEmail: fromEng.email,
+    fromEngineerPhone: fromEng.phone,
     toEngineerId: toEng.id,
     toEngineerName: toEng.name,
     toEngineerEmail: toEng.email,

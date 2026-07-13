@@ -11,6 +11,7 @@ import * as grnRepo from "#modules/goods-in/goods-in.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
+import { paginate } from "../../utils/pagination.js";
 import type { CreateSupplierInput, UpdateSupplierInput } from "./supplier.validation.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
@@ -182,16 +183,14 @@ export interface ListSuppliersParams {
 }
 
 export async function listSuppliers(params: ListSuppliersParams = {}): Promise<PagedSuppliers> {
-  const pageSize = Math.min(Math.max(Math.trunc(params.pageSize ?? 20), 1), 100);
   const status =
     params.status && (STATUSES as readonly string[]).includes(params.status)
       ? params.status
       : undefined;
   const filters = { search: params.search, status, typeId: params.type };
   const total = await supplierRepo.count(filters);
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  const page = Math.min(Math.max(Math.trunc(params.page ?? 1), 1), totalPages);
-  const rows = await supplierRepo.findMany(filters, (page - 1) * pageSize, pageSize, params.sort);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const rows = await supplierRepo.findMany(filters, skip, pageSize, params.sort);
   return { suppliers: rows.map(toPublic), total, page, pageSize, totalPages };
 }
 

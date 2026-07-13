@@ -11,6 +11,7 @@ import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
+import { paginate } from "../../utils/pagination.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { geocodePostcode } from "../../lib/geocode.js";
 import type { CreateWarehouseInput, UpdateWarehouseInput } from "./warehouse.validation.js";
@@ -176,7 +177,6 @@ export async function listWarehouses(
   params: ListWarehousesParams = {},
   actor?: AuditActor,
 ): Promise<PagedWarehouses> {
-  const pageSize = Math.min(Math.max(Math.trunc(params.pageSize ?? 20), 1), 100);
   const status =
     params.status && (STATUSES as readonly string[]).includes(params.status)
       ? params.status
@@ -184,9 +184,8 @@ export async function listWarehouses(
   // Warehouse-scoped users only ever see their assigned warehouses (undefined = unrestricted).
   const filters = { search: params.search, status, typeId: params.type, ids: warehouseScopeFilter(actor) };
   const total = await warehouseRepo.count(filters);
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  const page = Math.min(Math.max(Math.trunc(params.page ?? 1), 1), totalPages);
-  const rows = await warehouseRepo.findMany(filters, (page - 1) * pageSize, pageSize, params.sort);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const rows = await warehouseRepo.findMany(filters, skip, pageSize, params.sort);
   return { warehouses: rows.map(toPublic), total, page, pageSize, totalPages };
 }
 

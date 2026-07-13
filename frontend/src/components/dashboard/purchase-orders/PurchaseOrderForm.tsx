@@ -104,7 +104,7 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
   const [errors, setErrors] = React.useState<Record<string, string>>({});
   const touch = () => setDirty(true);
 
-  useReferenceData(
+  const { isLoading: refLoading } = useReferenceData(
     [
       { label: "suppliers", load: () => listSuppliers({ status: "active", pageSize: 100 }), onData: (r) => setSuppliers(r.suppliers) },
       // Create: per-row warehouse picker from the SCOPED options endpoint (manager → only their
@@ -427,7 +427,7 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className={labelCls}>Supplier<RequiredMark /></label>
-                <Select value={supplierId} onChange={onPickSupplier} options={suppliers.map((s) => ({ value: s.id, label: `${s.name} (${s.code})` }))} placeholder="— Select a supplier —" ariaLabel="Supplier" invalid={Boolean(errors.supplierId)} />
+                <Select value={supplierId} onChange={onPickSupplier} options={suppliers.map((s) => ({ value: s.id, label: `${s.name} (${s.code})` }))} placeholder={refLoading && !supplierId ? "Loading suppliers…" : "— Select a supplier —"} disabled={refLoading && !supplierId} ariaLabel="Supplier" invalid={Boolean(errors.supplierId)} />
                 <FieldError id="err-supplierId" message={errors.supplierId} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Choose who this order is being placed with.</p>
               </div>
@@ -436,7 +436,7 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
               {mode === "edit" && (
                 <div>
                   <label className={labelCls}>Delivery warehouse<RequiredMark /></label>
-                  <Select value={warehouseId} onChange={(v) => { setWarehouseId(v); touch(); clearError("warehouseId"); }} options={warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})${w.isDefault ? " — default" : ""}` }))} placeholder="— Select a warehouse —" ariaLabel="Delivery warehouse" invalid={Boolean(errors.warehouseId)} />
+                  <Select value={warehouseId} onChange={(v) => { setWarehouseId(v); touch(); clearError("warehouseId"); }} options={warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})${w.isDefault ? " — default" : ""}` }))} placeholder={refLoading && !warehouseId ? "Loading warehouses…" : "— Select a warehouse —"} disabled={refLoading && !warehouseId} ariaLabel="Delivery warehouse" invalid={Boolean(errors.warehouseId)} />
                   <FieldError id="err-warehouseId" message={errors.warehouseId} />
                   <p className="mt-1.5 text-[11px] text-[var(--faint)]">The warehouse this order delivers to.</p>
                 </div>
@@ -465,7 +465,7 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
               </div>
               <div>
                 <label className={labelCls}>Job</label>
-                <Select value={jobId} onChange={(v) => { setJobId(v); touch(); }} options={jobs.map((j) => ({ value: j.id, label: `${j.jobNumber} — ${j.name}` }))} placeholder="— No job link —" ariaLabel="Job" />
+                <Select value={jobId} onChange={(v) => { setJobId(v); touch(); }} options={jobs.map((j) => ({ value: j.id, label: `${j.jobNumber} — ${j.name}` }))} placeholder={refLoading && !jobId ? "Loading jobs…" : "— No job link —"} disabled={refLoading && !jobId} ariaLabel="Job" />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Optional — link this order to a job.</p>
               </div>
               <div>
@@ -510,7 +510,7 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
                       <div className={mode === "create" ? "grid gap-3 md:grid-cols-2" : undefined}>
                         <div className="min-w-0">
                           <label className={labelCls}>Item</label>
-                          <Select value={row.irmItemId} onChange={(v) => onPickItem(idx, v)} options={itemOptions.list.map((i) => ({ value: i.id, label: `${i.name} (${i.code})` }))} placeholder="— Select an item —" ariaLabel="Item" />
+                          <Select value={row.irmItemId} onChange={(v) => onPickItem(idx, v)} options={itemOptions.list.map((i) => ({ value: i.id, label: `${i.name} (${i.code})` }))} placeholder={refLoading && !row.irmItemId ? "Loading items…" : "— Select an item —"} disabled={refLoading && !row.irmItemId} ariaLabel="Item" />
                           {pickedItem && supplierId && (
                             supplierLink?.supplierSku ? (
                               <p className="mt-1.5 text-[11px] text-[var(--muted)]">Supplier item code: <span className="font-mono text-[var(--ink)]">{supplierLink.supplierSku}</span></p>
@@ -528,9 +528,9 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
                               value={rowWarehouseId(row)}
                               onChange={(v) => updateLine(idx, { warehouseId: v })}
                               options={warehouseOptions.map((w) => ({ value: w.id, label: `${w.code} — ${w.name}` }))}
-                              placeholder="— Select —"
+                              placeholder={refLoading && !rowWarehouseId(row) ? "Loading…" : "— Select —"}
                               ariaLabel="Destination warehouse"
-                              disabled={Boolean(lockedWarehouseId)}
+                              disabled={Boolean(lockedWarehouseId) || (refLoading && !rowWarehouseId(row))}
                             />
                           </div>
                         )}

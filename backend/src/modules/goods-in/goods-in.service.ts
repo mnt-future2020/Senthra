@@ -12,6 +12,7 @@ import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { withTransaction } from "../../lib/prisma.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
+import { paginate } from "../../utils/pagination.js";
 import type { CreateGoodsReceiptInput, GRNLineInput, GRNAttachmentInput, UpdateGoodsReceiptInput } from "./goods-in.validation.js";
 import { GRN_ATTACHMENT_MAX_COUNT, GRN_ATTACHMENT_MAX_TOTAL_BYTES } from "./goods-in.validation.js";
 
@@ -333,12 +334,10 @@ export interface ListGoodsReceiptsParams {
 }
 
 export async function listGoodsReceipts(params: ListGoodsReceiptsParams = {}, actor?: AuditActor): Promise<PagedGoodsReceipts> {
-  const pageSize = Math.min(Math.max(Math.trunc(params.pageSize ?? 20), 1), 100);
   const filters = { search: params.search, status: params.status, warehouseId: params.warehouse, warehouseIds: warehouseScopeFilter(actor), purchaseOrderId: params.purchaseOrder };
   const total = await grnRepo.count(filters);
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  const page = Math.min(Math.max(Math.trunc(params.page ?? 1), 1), totalPages);
-  const rows = await grnRepo.findMany(filters, (page - 1) * pageSize, pageSize, params.sort);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const rows = await grnRepo.findMany(filters, skip, pageSize, params.sort);
   // List rows use the stored snapshot (no live override) — the per-line remaining only matters on
   // the single-GRN edit/detail read, and a live lookup per row here would be an N+1.
   return { goodsReceipts: rows.map((g) => toPublic(g)), total, page, pageSize, totalPages };

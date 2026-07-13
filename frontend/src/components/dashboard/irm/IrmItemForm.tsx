@@ -102,7 +102,7 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
   const [error, setError] = React.useState<string | null>(null);
   const [errors, setErrors] = React.useState<Record<string, string>>({});
 
-  useReferenceData(
+  const { isLoading: refLoading } = useReferenceData(
     [
       {
         label: "types",
@@ -394,6 +394,8 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
                   value={typeId}
                   onChange={(id) => { setTypeId(id); clearError("typeId"); }}
                   options={typeOptions}
+                  disabled={refLoading && !typeId}
+                  placeholder={refLoading && !typeId ? "Loading types…" : undefined}
                   onCreate={async (name) => {
                     const t = await createIrmType({ name });
                     setTypes((prev) => [...prev, t]);
@@ -418,6 +420,8 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
                   value={irmCategoryId}
                   onChange={(id) => { setIrmCategoryId(id); clearError("irmCategoryId"); }}
                   options={categoryOptions}
+                  disabled={refLoading && !irmCategoryId}
+                  placeholder={refLoading && !irmCategoryId ? "Loading categories…" : undefined}
                   onCreate={async (name) => {
                     const c = await createIrmCategory({ name });
                     setCategories((prev) => [...prev, c]);
@@ -487,7 +491,8 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
                         value={row.supplierId}
                         onChange={(v) => updateRow(idx, { supplierId: v })}
                         options={supplierOptions.map((s) => ({ value: s.id, label: s.label }))}
-                        placeholder="— Select a supplier —"
+                        placeholder={refLoading && !row.supplierId ? "Loading suppliers…" : "— Select a supplier —"}
+                        disabled={refLoading && !row.supplierId}
                         ariaLabel="Supplier"
                       />
                     </div>
@@ -623,7 +628,8 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
                   value={ownerUserId}
                   onChange={(v) => setOwnerUserId(v)}
                   options={ownerOptions.map((m) => ({ value: m.id, label: m.jobTitle ? `${m.name} — ${m.jobTitle}` : m.name }))}
-                  placeholder="— No owner assigned —"
+                  placeholder={refLoading && !ownerUserId ? "Loading owners…" : "— No owner assigned —"}
+                  disabled={refLoading && !ownerUserId}
                   ariaLabel="Internal owner"
                 />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">The staff member responsible for this item (optional).</p>

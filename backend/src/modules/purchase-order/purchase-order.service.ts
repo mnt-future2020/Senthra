@@ -17,6 +17,8 @@ import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
+import { paginate } from "../../utils/pagination.js";
+import { diffProcurementChanges } from "../../utils/procurement-diff.js";
 import type {
   CreatePurchaseOrderInput,
   CreatePurchaseOrdersSplitInput,
@@ -357,7 +359,6 @@ export interface ListPurchaseOrdersParams {
 }
 
 export async function listPurchaseOrders(params: ListPurchaseOrdersParams = {}, actor?: AuditActor): Promise<PagedPurchaseOrders> {
-  const pageSize = Math.min(Math.max(Math.trunc(params.pageSize ?? 20), 1), 100);
   const filters = {
     search: params.search,
     status: params.status,
@@ -371,9 +372,8 @@ export async function listPurchaseOrders(params: ListPurchaseOrdersParams = {}, 
     warehouseIds: warehouseScopeFilter(actor),
   };
   const total = await poRepo.count(filters);
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  const page = Math.min(Math.max(Math.trunc(params.page ?? 1), 1), totalPages);
-  const rows = await poRepo.findMany(filters, (page - 1) * pageSize, pageSize, params.sort);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const rows = await poRepo.findMany(filters, skip, pageSize, params.sort);
   return { purchaseOrders: rows.map(toPublic), total, page, pageSize, totalPages };
 }
 
@@ -586,7 +586,23 @@ export async function updatePurchaseOrder(id: string, input: UpdatePurchaseOrder
   } else {
     result = await poRepo.update(id, headerPatch);
   }
-  audit.record({ actor, action: "purchase_order.updated", targetType: "purchase_order", targetId: id, targetLabel: result.code });
+  // Field-level change audit (Zoho/SAP-style): capture the before→after of the commercially-meaningful
+  // fields — supplier, warehouse, and each line's qty/price/VAT — so a pre-issue edit is traceable.
+  // `result` carries the fully-resolved post-update values; lines only diffed when the update sent them.
+  const changes = diffProcurementChanges(existing, {
+    supplierId: result.supplierId,
+    supplierName: result.supplierName,
+    warehouseId: result.warehouseId,
+    items: input.items !== undefined ? result.items : undefined,
+  });
+  audit.record({
+    actor,
+    action: "purchase_order.updated",
+    targetType: "purchase_order",
+    targetId: id,
+    targetLabel: result.code,
+    metadata: changes.length ? { changes } : undefined,
+  });
   return toPublic(result);
 }
 

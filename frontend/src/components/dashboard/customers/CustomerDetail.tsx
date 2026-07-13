@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -21,6 +21,7 @@ import {
   Pencil,
   Phone,
   Plus,
+  Search as SearchIcon,
   Trash2,
   Upload,
   User as UserIcon,
@@ -302,7 +303,11 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
         ))}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div
+        className={`min-h-0 flex-1 ${
+          activeTab === "catalogue" ? "overflow-hidden" : "overflow-auto"
+        }`}
+      >
         {activeTab === "overview" && <OverviewTab customer={customer} />}
         {activeTab === "projects" && (
           <ProjectsSection customer={customer} caps={projectCaps} onChange={setCustomer} pushToast={pushToast} />
@@ -636,21 +641,29 @@ type SectionProps = {
 };
 
 // --- Projects ---------------------------------------------------------------
-function ProjectsSection({ customer, caps, onChange, pushToast }: SectionProps) {
+function ProjectsSection({ customer, caps, pushToast }: SectionProps) {
   const canWrite = caps.edit || caps.delete;
   const [open, setOpen] = React.useState(false);
   const [editing, setEditing] = React.useState<CustomerProject | null>(null);
 
-  const onSaved = (project: CustomerProject) => {
-    onChange((p) => {
-      const exists = p.projects.some((x) => x.id === project.id);
-      return {
-        ...p,
-        projects: exists
-          ? p.projects.map((x) => (x.id === project.id ? project : x))
-          : [...p.projects, project],
-      };
-    });
+  // Server-paged — the detail payload no longer carries the child sets, so this tab owns its
+  // own paged fetch (same local-state pattern as the Inventory tab below).
+  const [paged, setPaged] = React.useState<customerService.PagedCustomerProjects | null>(null);
+  const [page, setPage] = React.useState(1);
+  const [refreshKey, setRefreshKey] = React.useState(0);
+  React.useEffect(() => {
+    let active = true;
+    customerService
+      .listCustomerProjects(customer.id, { page, pageSize: 20 })
+      .then((r) => { if (active) setPaged(r); })
+      .catch((err) => { if (active) pushToast(err instanceof Error ? err.message : "Could not load projects.", "alert"); });
+    return () => { active = false; };
+  }, [customer.id, page, refreshKey, pushToast]);
+  const reload = () => setRefreshKey((k) => k + 1);
+  const projects = paged?.projects ?? [];
+
+  const onSaved = () => {
+    reload();
     setOpen(false);
     setEditing(null);
   };
@@ -658,7 +671,7 @@ function ProjectsSection({ customer, caps, onChange, pushToast }: SectionProps) 
   const remove = async (project: CustomerProject) => {
     try {
       await customerService.deleteProject(customer.id, project.id);
-      onChange((p) => ({ ...p, projects: p.projects.filter((x) => x.id !== project.id) }));
+      reload();
     } catch (err) {
       pushToast(err instanceof Error ? err.message : "Could not remove project.", "alert");
     }
@@ -675,11 +688,14 @@ function ProjectsSection({ customer, caps, onChange, pushToast }: SectionProps) 
         }}
       />
 
-      {customer.projects.length === 0 ? (
+      {paged === null ? (
+        <Empty>Loading projects…</Empty>
+      ) : projects.length === 0 ? (
         <Empty>No projects yet.</Empty>
       ) : (
+        <>
         <TableShell head={["Code", "Project", "Dates", "Status", canWrite ? "" : null]}>
-          {customer.projects.map((project) => (
+          {projects.map((project) => (
             <tr key={project.id} className="border-b border-[var(--border)] align-top last:border-0">
               <td className="px-3 py-2 font-mono text-xs text-[var(--muted)]">{project.code ?? "—"}</td>
               <td className="px-3 py-2">
@@ -710,6 +726,12 @@ function ProjectsSection({ customer, caps, onChange, pushToast }: SectionProps) 
             </tr>
           ))}
         </TableShell>
+        {(paged?.totalPages ?? 1) > 1 && (
+          <div className="mt-3">
+            <Pagination page={paged?.page ?? 1} totalPages={paged?.totalPages ?? 1} total={paged?.total ?? 0} label="projects" onPage={setPage} />
+          </div>
+        )}
+        </>
       )}
 
       {open && (
@@ -763,6 +785,15 @@ function StockEntriesTab({
     [router],
   );
 
+  // --- URL-persisted sub-tab pool filter ("pool") ----------------------------
+  const requestedPool = searchParams.get("pool");
+  const activePool: "usable" | "damaged" =
+    canViewDamaged && requestedPool === "damaged" ? "damaged" : "usable";
+
+  const setPool = (p: "usable" | "damaged") => {
+    patch({ pool: p === "usable" ? "" : "damaged" });
+  };
+
   // --- URL-persisted stock page ("stockPage") ----------------------------
   const page = Math.max(1, Number(searchParams.get("stockPage")) || 1);
   const patchPage = React.useCallback(
@@ -804,146 +835,169 @@ function StockEntriesTab({
   }, [entries, page]);
 
   return (
-    <div className="space-y-6">
-      {/* Stock entries table */}
-      {error ? (
-        <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>
-      ) : entries === null ? (
-        /* Skeleton — mirrors the loaded table layout */
-        <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
-          <div className="border-b border-[var(--border)] px-4 py-3">
-            <div className="h-4 w-32 animate-pulse rounded bg-[var(--surface-2)]" />
-          </div>
-          <div className="divide-y divide-[var(--border)]">
-            {Array.from({ length: 5 }).map((_, i) => (
-              <div key={i} className="flex items-center gap-4 px-4 py-3">
-                <div className="h-4 w-40 animate-pulse rounded bg-[var(--surface-2)]" />
-                <div className="h-4 w-28 animate-pulse rounded bg-[var(--surface-2)]" />
-                <div className="h-4 w-20 animate-pulse rounded bg-[var(--surface-2)]" />
-                <div className="h-4 w-10 animate-pulse rounded bg-[var(--surface-2)]" />
-                <div className="h-4 w-24 animate-pulse rounded bg-[var(--surface-2)]" />
-                <div className="ml-auto h-6 w-16 animate-pulse rounded-full bg-[var(--surface-2)]" />
-              </div>
-            ))}
-          </div>
+    <div className="flex h-full flex-col gap-4">
+      {canViewDamaged && (
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          {([
+            { key: "usable", label: "Usable stock" },
+            { key: "damaged", label: "Damaged stock" },
+          ] as const).map((p) => (
+            <button
+              key={p.key}
+              type="button"
+              onClick={() => setPool(p.key)}
+              className={`rounded-full px-3 py-1.5 text-[11px] font-bold transition-all ${
+                activePool === p.key
+                  ? "bg-[var(--accent)] text-white shadow-xs"
+                  : "border border-[var(--border)] bg-[var(--surface-2)] text-[var(--muted)] hover:text-[var(--ink)]"
+              }`}
+            >
+              {p.label}
+            </button>
+          ))}
         </div>
-      ) : (
-        <>
-          <div className="flex flex-wrap items-center gap-2">
-            <Select
-              size="sm"
-              value={stockFilter}
-              onChange={(v) => patch({ stock_filter: v, stockPage: "" })}
-              options={[
-                { value: "", label: "All" },
-                { value: "active", label: "Active" },
-                { value: "draft", label: "Draft" },
-              ]}
-              ariaLabel="Filter by status"
-            />
-            <span className="ml-1 text-xs text-[var(--muted)]">
-              {entryCount} {entryCount === 1 ? "entry" : "entries"}
-            </span>
-            {stockCaps.create && (
-              <button
-                type="button"
-                onClick={() => router.push(`/dashboard/customers/${customer.id}/add-stock-entry`)}
-                className={`${primaryBtn} ml-auto`}
-              >
-                <Plus className="h-4 w-4" /> Add item
-              </button>
-            )}
-          </div>
+      )}
 
-          {entries.length === 0 ? (
-            <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
-              <Boxes className="h-7 w-7 text-[var(--faint)]" />
-              <p className="text-sm font-semibold text-[var(--ink)]">No stock entries</p>
-              <p className="text-xs text-[var(--muted)]">
-                {stockFilter ? `No ${stockFilter} entries found.` : "Received stock for this customer will appear here."}
-              </p>
+      {activePool === "usable" ? (
+        <div className="flex min-h-0 flex-1 flex-col gap-4">
+          {/* Stock entries table */}
+          {error ? (
+            <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>
+          ) : entries === null ? (
+            /* Skeleton — mirrors the loaded table layout */
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+              <div className="border-b border-[var(--border)] px-4 py-3 shrink-0">
+                <div className="h-4 w-32 animate-pulse rounded bg-[var(--surface-2)]" />
+              </div>
+              <div className="divide-y divide-[var(--border)] min-h-0 flex-1 overflow-auto">
+                {Array.from({ length: 5 }).map((_, i) => (
+                  <div key={i} className="flex items-center gap-4 px-4 py-3">
+                    <div className="h-4 w-40 animate-pulse rounded bg-[var(--surface-2)]" />
+                    <div className="h-4 w-28 animate-pulse rounded bg-[var(--surface-2)]" />
+                    <div className="h-4 w-20 animate-pulse rounded bg-[var(--surface-2)]" />
+                    <div className="h-4 w-10 animate-pulse rounded bg-[var(--surface-2)]" />
+                    <div className="h-4 w-24 animate-pulse rounded bg-[var(--surface-2)]" />
+                    <div className="ml-auto h-6 w-16 animate-pulse rounded-full bg-[var(--surface-2)]" />
+                  </div>
+                ))}
+              </div>
             </div>
           ) : (
             <>
-              <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
-                <table className="w-full text-left text-sm" style={{ minWidth: 750 }}>
-                  <thead>
-                    <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                      <th className="px-4 py-3">Item</th>
-                      <th className="px-4 py-3">Warehouse</th>
-                      <th className="px-4 py-3">SKU</th>
-                      <th className="px-4 py-3">Qty</th>
-                      <th className="px-4 py-3">Barcode</th>
-                      <th className="px-4 py-3">Status</th>
-                      <th className="px-4 py-3">Received</th>
-                      <th className="px-4 py-3" />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {pageEntries.map((e) => (
-                      <tr
-                        key={e.id}
-                        className="cursor-pointer border-b border-[var(--border)] align-top transition-colors last:border-0 hover:bg-[var(--surface-2)]"
-                        onClick={() => router.push(`/dashboard/stock-entries/${e.id}?from=customer`)}
-                      >
-                        <td className="px-4 py-3 font-semibold text-[var(--ink)]">{e.itemName}</td>
-                        <td className="px-4 py-3">
-                          <div className="text-[var(--ink)]">{e.warehouseName}</div>
-                          <div className="font-mono text-[11px] text-[var(--faint)]">{e.warehouseCode}</div>
-                        </td>
-                        <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.sku ?? "—"}</td>
-                        <td className="px-4 py-3 font-bold text-[var(--ink)]">{e.quantity}</td>
-                        <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.barcode ?? "—"}</td>
-                        <td className="px-4 py-3">
-                          <span
-                            className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${
-                              e.status === "active"
-                                ? "bg-[var(--pos)]/12 text-[var(--pos)]"
-                                : "bg-amber-500/15 text-amber-600"
-                            }`}
-                          >
-                            {e.status}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-xs text-[var(--muted)]">{fmtDate(e.receivedAt ?? e.createdAt)}</td>
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-1.5">
-                            <button
-                              type="button"
-                              title="View"
-                              onClick={(ev) => { ev.stopPropagation(); router.push(`/dashboard/stock-entries/${e.id}?from=customer`); }}
-                              className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface-2)] text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)]"
-                            >
-                              <Eye className="h-4 w-4" />
-                            </button>
-                            {/* View only. Managing a customer's stock (edit / activate / barcode / delete)
-                                is a warehouse-manager action done from the warehouse's Customer-pool
-                                inventory — in the customer module a PM only VIEWS. */}
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <div className="flex shrink-0 flex-wrap items-center gap-2">
+                <Select
+                  size="sm"
+                  value={stockFilter}
+                  onChange={(v) => patch({ stock_filter: v, stockPage: "" })}
+                  options={[
+                    { value: "", label: "All" },
+                    { value: "active", label: "Active" },
+                    { value: "draft", label: "Draft" },
+                  ]}
+                  ariaLabel="Filter by status"
+                />
+                <span className="ml-1 text-xs text-[var(--muted)]">
+                  {entryCount} {entryCount === 1 ? "entry" : "entries"}
+                </span>
+                {stockCaps.create && (
+                  <button
+                    type="button"
+                    onClick={() => router.push(`/dashboard/customers/${customer.id}/add-stock-entry`)}
+                    className={`${primaryBtn} ml-auto`}
+                  >
+                    <Plus className="h-4 w-4" /> Add item
+                  </button>
+                )}
               </div>
-              <Pagination
-                page={Math.min(page, totalPages)}
-                totalPages={totalPages}
-                total={entryCount}
-                label="entries"
-                onPage={(n) => patchPage(n)}
-              />
+
+              {entries.length === 0 ? (
+                <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
+                  <Boxes className="h-7 w-7 text-[var(--faint)]" />
+                  <p className="text-sm font-semibold text-[var(--ink)]">No stock entries</p>
+                  <p className="text-xs text-[var(--muted)]">
+                    {stockFilter ? `No ${stockFilter} entries found.` : "Received stock for this customer will appear here."}
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+                    <div className="min-h-0 flex-1 overflow-auto">
+                      <table className="w-full text-left text-sm" style={{ minWidth: 750 }}>
+                        <thead className="sticky top-0 z-10 bg-[var(--surface)] shadow-[0_1px_0_0_var(--border)]">
+                          <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)] bg-[var(--surface)]">
+                            <th className="px-4 py-3">Item</th>
+                            <th className="px-4 py-3">Warehouse</th>
+                            <th className="px-4 py-3">SKU</th>
+                            <th className="px-4 py-3">Qty</th>
+                            <th className="px-4 py-3">Barcode</th>
+                            <th className="px-4 py-3">Status</th>
+                            <th className="px-4 py-3">Received</th>
+                            <th className="px-4 py-3" />
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {pageEntries.map((e) => (
+                            <tr
+                              key={e.id}
+                              className="cursor-pointer border-b border-[var(--border)] align-top transition-colors last:border-0 hover:bg-[var(--surface-2)]"
+                              onClick={() => router.push(`/dashboard/stock-entries/${e.id}?from=customer`)}
+                            >
+                              <td className="px-4 py-3 font-semibold text-[var(--ink)]">{e.itemName}</td>
+                              <td className="px-4 py-3">
+                                <div className="text-[var(--ink)]">{e.warehouseName}</div>
+                                <div className="font-mono text-[11px] text-[var(--faint)]">{e.warehouseCode}</div>
+                              </td>
+                              <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.sku ?? "—"}</td>
+                              <td className="px-4 py-3 font-bold text-[var(--ink)]">{e.quantity}</td>
+                              <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.barcode ?? "—"}</td>
+                              <td className="px-4 py-3">
+                                <span
+                                  className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                                    e.status === "active"
+                                      ? "bg-[var(--pos)]/12 text-[var(--pos)]"
+                                      : "bg-amber-500/15 text-amber-600"
+                                  }`}
+                                >
+                                  {e.status}
+                                </span>
+                              </td>
+                              <td className="px-4 py-3 text-xs text-[var(--muted)]">{fmtDate(e.receivedAt ?? e.createdAt)}</td>
+                              <td className="px-4 py-3">
+                                <div className="flex items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    title="View"
+                                    onClick={(ev) => { ev.stopPropagation(); router.push(`/dashboard/stock-entries/${e.id}?from=customer`); }}
+                                    className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface-2)] text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)]"
+                                  >
+                                    <Eye className="h-4 w-4" />
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                  <div className="shrink-0">
+                    <Pagination
+                      page={Math.min(page, totalPages)}
+                      totalPages={totalPages}
+                      total={entryCount}
+                      label="entries"
+                      onPage={(n) => patchPage(n)}
+                    />
+                  </div>
+                </>
+              )}
             </>
           )}
-        </>
-      )}
-
-      {/* Damaged stock section — gated by goods_management.view; no price/cost displayed */}
-      {canViewDamaged && (
-        <section>
-          <h2 className="mb-3 text-sm font-extrabold text-[var(--ink)]">Damaged stock</h2>
-          <DamagedStockView customerId={customer.id} />
-        </section>
+        </div>
+      ) : (
+        <div className="min-h-0 flex-1">
+          <DamagedStockView customerId={customer.id} fill />
+        </div>
       )}
     </div>
   );
@@ -1210,34 +1264,55 @@ function StockSubmissionsTab({
 }
 
 // --- Sites ------------------------------------------------------------------
-function SitesSection({ customer, caps, onChange, pushToast }: SectionProps) {
+function SitesSection({ customer, caps, pushToast }: SectionProps) {
   const canWrite = caps.edit || caps.delete;
   const [open, setOpen] = React.useState(false);
   const [importing, setImporting] = React.useState(false);
   const [editing, setEditing] = React.useState<CustomerSite | null>(null);
 
-  const onSaved = (site: CustomerSite) => {
-    onChange((p) => {
-      const exists = p.sites.some((x) => x.id === site.id);
-      return {
-        ...p,
-        sites: exists ? p.sites.map((x) => (x.id === site.id ? site : x)) : [...p.sites, site],
-      };
-    });
+  // Server-paged with search — sites can be bulk-imported in the THOUSANDS, so this tab never
+  // loads the full set (the detail payload no longer carries it either).
+  const [paged, setPaged] = React.useState<customerService.PagedCustomerSites | null>(null);
+  const [page, setPage] = React.useState(1);
+  const [search, setSearch] = React.useState("");
+  const [searchInput, setSearchInput] = React.useState("");
+  const [refreshKey, setRefreshKey] = React.useState(0);
+  React.useEffect(() => {
+    const t = setTimeout(() => {
+      if (searchInput.trim() !== search) {
+        setSearch(searchInput.trim());
+        setPage(1);
+      }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [searchInput, search]);
+  React.useEffect(() => {
+    let active = true;
+    customerService
+      .listCustomerSites(customer.id, { q: search || undefined, page, pageSize: 20 })
+      .then((r) => { if (active) setPaged(r); })
+      .catch((err) => { if (active) pushToast(err instanceof Error ? err.message : "Could not load sites.", "alert"); });
+    return () => { active = false; };
+  }, [customer.id, search, page, refreshKey, pushToast]);
+  const reload = () => setRefreshKey((k) => k + 1);
+  const sites = paged?.sites ?? [];
+
+  const onSaved = () => {
+    reload();
     setOpen(false);
     setEditing(null);
   };
 
-  // Append the newly-created sites to the list, but keep the modal open on its result step
-  // (the modal's own "Done" button closes it). Closing here would unmount the result screen.
+  // Refresh the paged list, but keep the modal open on its result step (the modal's own "Done"
+  // button closes it). Closing here would unmount the result screen.
   const onImported = (created: CustomerSite[]) => {
-    if (created.length) onChange((p) => ({ ...p, sites: [...p.sites, ...created] }));
+    if (created.length) reload();
   };
 
   const remove = async (site: CustomerSite) => {
     try {
       await customerService.deleteSite(customer.id, site.id);
-      onChange((p) => ({ ...p, sites: p.sites.filter((x) => x.id !== site.id) }));
+      reload();
     } catch (err) {
       pushToast(err instanceof Error ? err.message : "Could not remove site.", "alert");
     }
@@ -1263,11 +1338,26 @@ function SitesSection({ customer, caps, onChange, pushToast }: SectionProps) {
         </div>
       )}
 
-      {customer.sites.length === 0 ? (
-        <Empty>No sites yet.</Empty>
+      {/* Search — server-side (a bulk-imported customer can have thousands of sites). */}
+      <div className="relative mb-3 w-full sm:max-w-xs">
+        <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--faint)]" />
+        <input
+          type="text"
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
+          placeholder="Search name, code or postcode…"
+          className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
+        />
+      </div>
+
+      {paged === null ? (
+        <Empty>Loading sites…</Empty>
+      ) : sites.length === 0 ? (
+        <Empty>{search ? "No matching sites." : "No sites yet."}</Empty>
       ) : (
+        <>
         <TableShell head={["Code", "Site", "Postcode", "Contact", "Status", canWrite ? "" : null]}>
-          {customer.sites.map((site) => (
+          {sites.map((site) => (
             <tr key={site.id} className="border-b border-[var(--border)] align-top last:border-0">
               <td className="px-3 py-2 font-mono text-xs text-[var(--muted)]">{site.code ?? "—"}</td>
               <td className="px-3 py-2">
@@ -1307,6 +1397,12 @@ function SitesSection({ customer, caps, onChange, pushToast }: SectionProps) {
             </tr>
           ))}
         </TableShell>
+        {(paged?.totalPages ?? 1) > 1 && (
+          <div className="mt-3">
+            <Pagination page={paged?.page ?? 1} totalPages={paged?.totalPages ?? 1} total={paged?.total ?? 0} label="sites" onPage={setPage} />
+          </div>
+        )}
+        </>
       )}
 
       {open && (
@@ -1325,7 +1421,6 @@ function SitesSection({ customer, caps, onChange, pushToast }: SectionProps) {
       {importing && (
         <SiteImportModal
           customerId={customer.id}
-          existingSites={customer.sites}
           onClose={() => setImporting(false)}
           onImported={onImported}
         />

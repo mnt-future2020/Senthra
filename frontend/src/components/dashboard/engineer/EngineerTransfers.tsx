@@ -10,6 +10,7 @@ import {
   Clock,
   Loader2,
   PenLine,
+  Phone,
   Search,
   X,
 } from "lucide-react";
@@ -193,7 +194,18 @@ function AcknowledgeCard({
         <PenLine className="mt-0.5 h-4 w-4 shrink-0 text-[var(--accent)]" />
         <div>
           <p className="text-sm font-bold text-[var(--ink)]">Awaiting your signature — {transfer.code}</p>
-          <p className="text-xs text-[var(--muted)]">From {transfer.fromEngineerName}. Sign to acknowledge receipt of the transferred stock.</p>
+          <p className="text-xs text-[var(--muted)]">
+            From {transfer.fromEngineerName}
+            {transfer.fromEngineerPhone && (
+              <>
+                {" "}·{" "}
+                <a href={`tel:${transfer.fromEngineerPhone}`} className="font-semibold text-[var(--accent)] hover:underline">
+                  {transfer.fromEngineerPhone}
+                </a>
+              </>
+            )}
+            . Sign to acknowledge receipt of the transferred stock.
+          </p>
         </div>
       </div>
       {signing ? (
@@ -352,7 +364,21 @@ function TransferRow({
           </div>
         </td>
         <td className="px-4 py-3 text-sm text-[var(--ink)]">
-          {role === "incoming" ? transfer.toEngineerName : transfer.fromEngineerName}
+          {/* Incoming = I'm the HOLDER being asked → show the RECIPIENT who's requesting my stock.
+              My requests (outgoing) = I'm the RECIPIENT → show the HOLDER I collect from, with their
+              phone so I can call to coordinate the handover. */}
+          {role === "incoming" ? (
+            transfer.toEngineerName
+          ) : (
+            <div>
+              <div>{transfer.fromEngineerName}</div>
+              {transfer.fromEngineerPhone && (
+                <a href={`tel:${transfer.fromEngineerPhone}`} className="flex items-center gap-1 text-[11px] font-semibold text-[var(--accent)] hover:underline">
+                  <Phone className="h-3 w-3" /> {transfer.fromEngineerPhone}
+                </a>
+              )}
+            </div>
+          )}
         </td>
         <td className="px-4 py-3 text-xs text-[var(--muted)]">{transfer.reason}</td>
         <td className="px-4 py-3">
@@ -500,7 +526,7 @@ function TransferList({ role }: { role: "incoming" | "outgoing" }) {
   // Filters live in the URL (?status, ?sort, ?q, ?page) so they survive a refresh — same approach as
   // the admin board. The active tab is ?view= (owned by the parent), preserved on every patch.
   const status = searchParams.get("status") ?? "";
-  const sortOldest = searchParams.get("sort") !== "newest"; // default: oldest first
+  const sortOldest = searchParams.get("sort") === "oldest"; // default: newest first (matches every other list)
   const search = searchParams.get("q") ?? "";
   const page = Math.max(1, Number(searchParams.get("page")) || 1);
 
@@ -573,7 +599,7 @@ function TransferList({ role }: { role: "incoming" | "outgoing" }) {
 
   const headers = [
     "Code / Age",
-    role === "incoming" ? "To (me from)" : "From (holder)",
+    role === "incoming" ? "Requested by" : "From (holder)",
     "Reason",
     "Status",
     "",
@@ -613,7 +639,7 @@ function TransferList({ role }: { role: "incoming" | "outgoing" }) {
         <Select
           size="sm"
           value={sortOldest ? "oldest" : "newest"}
-          onChange={(v) => patchParams({ sort: v === "oldest" ? null : "newest" }, true)}
+          onChange={(v) => patchParams({ sort: v === "oldest" ? "oldest" : null }, true)}
           options={[
             { value: "newest", label: "Newest first" },
             { value: "oldest", label: "Oldest first" },

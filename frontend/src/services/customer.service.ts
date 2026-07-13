@@ -232,6 +232,19 @@ export function deleteSite(customerId: string, siteId: string): Promise<void> {
   );
 }
 
+// ADMIN paged children for the detail tabs — the detail payload no longer carries the full
+// sets (sites can be bulk-imported in the thousands). Same paged shapes as the portal lists.
+export function listCustomerSites(customerId: string, params: PortalListParams = {}): Promise<PagedCustomerSites> {
+  return api<PagedCustomerSites>(`/customers/${customerId}/sites${portalQs(params)}`);
+}
+export function listCustomerProjects(customerId: string, params: PortalListParams = {}): Promise<PagedCustomerProjects> {
+  return api<PagedCustomerProjects>(`/customers/${customerId}/projects${portalQs(params)}`);
+}
+// Lean dedupe-key source for the site-import preview (name + postcode only).
+export function getCustomerSiteKeys(customerId: string): Promise<{ name: string; postcode: string | null }[]> {
+  return api<{ keys: { name: string; postcode: string | null }[] }>(`/customers/${customerId}/site-keys`).then((r) => r.keys);
+}
+
 // One row in a bulk import: the site payload plus its original 1-based sheet row number,
 // which the server echoes back in `failed`/`skipped` notes so they point at the user's file.
 export type SiteImportRow = SitePayload & { rowNumber: number };
@@ -533,24 +546,52 @@ export function getOwnOverview(): Promise<CustomerOverview> {
   return api<{ overview: CustomerOverview }>("/customer/overview").then((r) => r.overview);
 }
 
-export function getOwnProjects(): Promise<CustomerProject[]> {
-  return api<{ projects: CustomerProject[] }>("/customer/projects").then((r) => r.projects);
+// Shared paged-list params + query-string helper for the portal lists (?q, ?status, ?sort, ?page).
+export interface PortalListParams {
+  q?: string;
+  status?: string;
+  sort?: string;
+  page?: number;
+  pageSize?: number;
+}
+interface Paged {
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+const portalQs = (p: PortalListParams): string => {
+  const qs = new URLSearchParams();
+  if (p.q) qs.set("q", p.q);
+  if (p.status) qs.set("status", p.status);
+  if (p.sort) qs.set("sort", p.sort);
+  if (p.page) qs.set("page", String(p.page));
+  if (p.pageSize) qs.set("pageSize", String(p.pageSize));
+  return qs.size ? `?${qs.toString()}` : "";
+};
+
+export type PagedCustomerProjects = Paged & { projects: CustomerProject[] };
+export function getOwnProjects(params: PortalListParams = {}): Promise<PagedCustomerProjects> {
+  return api<PagedCustomerProjects>(`/customer/projects${portalQs(params)}`);
 }
 
-export function getOwnSites(): Promise<CustomerSite[]> {
-  return api<{ sites: CustomerSite[] }>("/customer/sites").then((r) => r.sites);
+export type PagedCustomerSites = Paged & { sites: CustomerSite[] };
+export function getOwnSites(params: PortalListParams = {}): Promise<PagedCustomerSites> {
+  return api<PagedCustomerSites>(`/customer/sites${portalQs(params)}`);
 }
 
 export function getOwnStock(): Promise<CustomerStock> {
   return api<{ stock: CustomerStock }>("/customer/stock").then((r) => r.stock);
 }
 
-export function getOwnStockEntries(): Promise<CustomerStockEntry[]> {
-  return api<{ entries: CustomerStockEntry[] }>("/customer/stock-entries").then((r) => r.entries);
+export type PagedStockEntries = Paged & { entries: CustomerStockEntry[] };
+export function getOwnStockEntries(params: PortalListParams = {}): Promise<PagedStockEntries> {
+  return api<PagedStockEntries>(`/customer/stock-entries${portalQs(params)}`);
 }
 
-export function getOwnStockRequests(): Promise<StockRequest[]> {
-  return api<{ requests: StockRequest[] }>("/customer/stock-requests").then((r) => r.requests);
+export type PagedStockRequests = Paged & { requests: StockRequest[] };
+export function getOwnStockRequests(params: PortalListParams = {}): Promise<PagedStockRequests> {
+  return api<PagedStockRequests>(`/customer/stock-requests${portalQs(params)}`);
 }
 
 export function submitStockRequest(payload: StockRequestPayload): Promise<StockRequest> {

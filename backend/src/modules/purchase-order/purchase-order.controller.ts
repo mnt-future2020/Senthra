@@ -2,7 +2,7 @@ import * as poService from "./purchase-order.service.js";
 import * as documentService from "#modules/document/document.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
-import { param, queryInt } from "../../utils/request.js";
+import { param, queryInt, queryStr } from "../../utils/request.js";
 import type {
   CreatePurchaseOrderInput,
   CreatePurchaseOrdersSplitInput,
@@ -24,15 +24,15 @@ export const listPurchaseOrders = asyncHandler(async (req, res) => {
   // pm=me resolves to the signed-in user — the PM's "Awaiting my action" worklist.
   const pmParam = typeof pm === "string" ? (pm === "me" ? actor.id ?? undefined : pm) : undefined;
   const result = await poService.listPurchaseOrders({
-    search: typeof search === "string" ? search : undefined,
-    status: typeof status === "string" ? status : undefined,
+    search: queryStr(search),
+    status: queryStr(status),
     statuses: typeof statuses === "string" ? statuses.split(",").map((s) => s.trim()).filter(Boolean) : undefined,
-    priority: typeof priority === "string" ? priority : undefined,
-    supplier: typeof supplier === "string" ? supplier : undefined,
-    warehouse: typeof warehouse === "string" ? warehouse : undefined,
+    priority: queryStr(priority),
+    supplier: queryStr(supplier),
+    warehouse: queryStr(warehouse),
     pm: pmParam,
-    job: typeof job === "string" ? job : undefined,
-    sort: typeof sort === "string" ? sort : undefined,
+    job: queryStr(job),
+    sort: queryStr(sort),
     page: queryInt(page),
     pageSize: queryInt(pageSize),
   }, actor);
@@ -43,7 +43,7 @@ export const listPurchaseOrders = asyncHandler(async (req, res) => {
 // suggested default (the linked job's creator, when they qualify).
 export const listPmCandidates = asyncHandler(async (req, res) => {
   const { jobId } = req.query;
-  res.json(await poService.resolvePmCandidates(typeof jobId === "string" ? jobId : undefined));
+  res.json(await poService.resolvePmCandidates(queryStr(jobId)));
 });
 
 // GET /purchase-orders/suppliers/:supplierId/summary — the supplier detail "Procurement" tab.

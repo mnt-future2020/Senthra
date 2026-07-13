@@ -1,15 +1,11 @@
 import * as kitRequestService from "./job-kit-request.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
-import { param, queryInt } from "../../utils/request.js";
+import { param, queryInt, queryStr } from "../../utils/request.js";
 import { forbidden } from "../../utils/http-error.js";
 import type { ApproveKitRequestInput, CreateKitRequestInput, DeclineKitRequestInput, UploadAttachmentInput } from "./job-kit-request.validation.js";
 
 // Collapse a possibly-array query value to its first string (matches the engineer-transfer convention).
-const str = (v: unknown): string | undefined => {
-  const s = Array.isArray(v) ? v[0] : v;
-  return typeof s === "string" ? s : undefined;
-};
 
 // POST /job-kit-requests  (field engineer raises a request for their own job)
 export const create = asyncHandler(async (req, res) => {
@@ -24,10 +20,10 @@ export const listMine = asyncHandler(async (req, res) => {
   if (!engineerId) throw forbidden("Could not determine engineer identity.");
   const { status, jobId, search, sort, page, pageSize } = req.query;
   const result = await kitRequestService.listMine(engineerId, {
-    status: str(status),
-    jobId: str(jobId),
-    search: str(search),
-    sort: str(sort),
+    status: queryStr(status),
+    jobId: queryStr(jobId),
+    search: queryStr(search),
+    sort: queryStr(sort),
     page: queryInt(page),
     pageSize: queryInt(pageSize),
   });
@@ -38,10 +34,10 @@ export const listMine = asyncHandler(async (req, res) => {
 export const listAll = asyncHandler(async (req, res) => {
   const { status, jobId, search, sort, page, pageSize } = req.query;
   const result = await kitRequestService.listAll({
-    status: str(status),
-    jobId: str(jobId),
-    search: str(search),
-    sort: str(sort),
+    status: queryStr(status),
+    jobId: queryStr(jobId),
+    search: queryStr(search),
+    sort: queryStr(sort),
     page: queryInt(page),
     pageSize: queryInt(pageSize),
   });
@@ -50,12 +46,12 @@ export const listAll = asyncHandler(async (req, res) => {
 
 // GET /job-kit-requests/pending-count  (review-queue badge)
 export const pendingCount = asyncHandler(async (req, res) => {
-  res.json({ count: await kitRequestService.countPending(str(req.query.jobId)) });
+  res.json({ count: await kitRequestService.countPending(queryStr(req.query.jobId)) });
 });
 
 // GET /job-kit-requests/item-search?q=  (IRM catalogue search for the FE request composer)
 export const itemSearch = asyncHandler(async (req, res) => {
-  res.json({ items: await kitRequestService.searchItems(str(req.query.q) ?? "") });
+  res.json({ items: await kitRequestService.searchItems(queryStr(req.query.q) ?? "") });
 });
 
 // GET /job-kit-requests/:id
