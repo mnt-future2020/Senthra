@@ -15,7 +15,7 @@ router.use(requireAuth);
 // ---- Engineer self-service (own requests) ----------------------------------------------------
 // GET /job-kit-requests/mine?status=&jobId=&sort=&page=&pageSize=
 router.get("/mine", requirePermission("engineer.jobs.request_kit"), ctrl.listMine);
-// GET /job-kit-requests/item-search?q=  (IRM catalogue search for the composer; static before /:id)
+// GET /job-kit-requests/item-search?q=&jobId=  (composer search: IRM catalogue + the job's own customer stock; static before /:id)
 router.get("/item-search", requirePermission("engineer.jobs.request_kit"), ctrl.itemSearch);
 
 // ---- PM/planner review queue -----------------------------------------------------------------

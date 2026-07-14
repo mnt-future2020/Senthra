@@ -17,6 +17,10 @@ export interface KitRequestLine {
   uom: string | null;
   qty: number;
   jobKitLineId: string | null;
+  // customer_stock lines: the warehouse the entry is stored in (read-only pickup location on approve).
+  // Null for irm/misc, and on responses that don't drive the approve modal.
+  warehouseName: string | null;
+  warehouseCode: string | null;
 }
 
 export interface KitRequest {
@@ -137,18 +141,35 @@ export function eligibleKitHolders(id: string): Promise<EligibleHolder[]> {
   return api<{ holders: EligibleHolder[] }>(`/job-kit-requests/${id}/eligible-holders`).then((r) => r.holders);
 }
 
-// ── IRM catalogue search (for the FE request composer's "add item" search-select) ──────────────
+// ── Item search (for the FE request composer's "add item" search-select) ───────────────────────
+// Two sources, discriminated by `source`: the company IRM catalogue, and — when a jobId is passed —
+// the job's own customer's active, in-stock consignment entries (one option per CustomerStockEntry).
 
-export interface KitItemOption {
+export interface KitItemIrmOption {
+  source: "irm";
   irmItemId: string;
   code: string;
   name: string;
   sku: string | null;
   uom: string | null;
 }
+export interface KitItemCustomerStockOption {
+  source: "customer_stock";
+  customerStockEntryId: string;
+  name: string;
+  sku: string | null;
+  uom: string | null;
+  qty: number;
+  warehouseName: string;
+  warehouseCode: string | null;
+  serialNumber: string | null;
+}
+export type KitItemOption = KitItemIrmOption | KitItemCustomerStockOption;
 
-export function searchKitItems(q: string): Promise<KitItemOption[]> {
-  return api<{ items: KitItemOption[] }>(`/job-kit-requests/item-search?q=${encodeURIComponent(q)}`).then((r) => r.items);
+// jobId scopes the customer-stock half to that job's customer; omit it for IRM-only search.
+export function searchKitItems(q: string, jobId?: string): Promise<KitItemOption[]> {
+  const query = `q=${encodeURIComponent(q)}${jobId ? `&jobId=${encodeURIComponent(jobId)}` : ""}`;
+  return api<{ items: KitItemOption[] }>(`/job-kit-requests/item-search?${query}`).then((r) => r.items);
 }
 
 export function approveKitRequest(id: string, payload: ApproveKitRequestPayload): Promise<KitRequest> {

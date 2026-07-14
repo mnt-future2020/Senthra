@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Check, PackagePlus, X } from "lucide-react";
+import { Check, Lock, PackagePlus, X } from "lucide-react";
 
 import * as kitRequestService from "@/services/jobKitRequest.service";
 import type { ApproveKitRequestPayload, FulfillmentMode, KitRequest } from "@/services/jobKitRequest.service";
@@ -12,7 +12,7 @@ import { useDashboard } from "@/hooks/useDashboard";
 import { Select } from "@/components/ui/Select";
 import { Modal } from "@/components/ui/Modal";
 import { inputCls } from "@/components/ui/styles";
-import { KitRequestStatusChip } from "@/components/dashboard/engineer/EngineerKitRequests";
+import { KitLineChips, KitRequestStatusChip } from "@/components/dashboard/engineer/EngineerKitRequests";
 import { formatDate } from "./jobStatus";
 
 // PM/planner review of a job's additional-kit requests: approve (grow the kit + open fulfilment via a
@@ -71,8 +71,8 @@ export function JobKitRequestsReview({ jobId, assignedEngineerId, locked, onJobC
                     <KitRequestStatusChip value={r.status} />
                     <span className="text-[11px] text-[var(--faint)]">{r.requestedByEngineerName} · {formatDate(r.createdAt)}</span>
                   </div>
-                  <p className="mt-1 text-xs text-[var(--ink)]">{r.lines.map((l) => `${l.itemName} ×${l.qty}`).join(", ")}</p>
-                  <p className="mt-0.5 text-[11px] italic text-[var(--muted)]">“{r.reason}”</p>
+                  <KitLineChips lines={r.lines} />
+                  <p className="mt-1 text-[11px] italic text-[var(--muted)]">“{r.reason}”</p>
                   {r.status === "approved" && r.fulfillmentMode && (
                     <p className="mt-0.5 text-[11px] text-[var(--pos)]">Approved · {r.fulfillmentMode === "engineer_transfer" ? "engineer transfer" : "warehouse issue"}{r.reviewedByEmail ? ` by ${r.reviewedByEmail}` : ""}</p>
                   )}
@@ -235,41 +235,56 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
           {allMisc && <p className="mt-1 text-[11px] text-[var(--faint)]">Misc-only request — issue from a warehouse.</p>}
         </div>
 
-        {/* Warehouse issue: a pickup warehouse PER IRM item — each on its own row, full-width select so
-            the "name (code) · N in stock" label is never clipped. Defaults to the most-stocked warehouse. */}
+        {/* Warehouse issue: EVERY request line is shown so the planner sees the full request (an item that
+            never rendered read like a bug). IRM lines get a pickup-warehouse dropdown (the app-wide Select,
+            same as every other warehouse picker); customer-stock and misc lines are read-only — they're
+            issued automatically. */}
         {mode === "warehouse_issue" && (
           <div>
             <p className="mb-2 text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">Pickup warehouse — per item</p>
-            {irmLines.length === 0 ? (
-              <p className="text-[11px] text-[var(--muted)]">No IRM items on this request — customer-stock and misc items are handled automatically.</p>
-            ) : whLoading ? (
+            {whLoading ? (
               <p className="text-[11px] text-[var(--muted)]">Checking stock…</p>
             ) : (
               <div className="space-y-2.5">
-                {irmLines.map((l) => {
-                  const opts = whOptions[l.id] ?? [];
-                  const notStocked = unstocked.has(l.id);
-                  return (
-                    <div key={l.id} className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3">
-                      <p className="mb-1.5 truncate text-xs font-semibold text-[var(--ink)]">
-                        {l.itemName} <span className="font-normal text-[var(--faint)]">×{l.qty}</span>
-                      </p>
-                      {opts.length === 0 ? (
+                {request.lines.map((l) => (
+                  <div key={l.id} className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3">
+                    <p className="mb-1.5 truncate text-xs font-semibold text-[var(--ink)]">
+                      {l.itemName} <span className="font-normal text-[var(--faint)]">×{l.qty}</span>
+                    </p>
+                    {l.source === "irm" ? (
+                      (whOptions[l.id] ?? []).length === 0 ? (
                         <p className="text-[11px] font-semibold text-[var(--neg)]">No warehouses configured — add one to issue this item.</p>
                       ) : (
                         <>
-                          <Select value={lineWh[l.id] ?? ""} onChange={(v) => setLineWh((p) => ({ ...p, [l.id]: v }))} options={opts} placeholder="— Pick warehouse —" ariaLabel={`Warehouse for ${l.itemName}`} />
-                          {notStocked && (
-                            <p className="mt-1 text-[11px] text-amber-600">Not in stock in any warehouse right now — pick where it will be issued once restocked, or switch to Engineer transfer.</p>
+                          <Select value={lineWh[l.id] ?? ""} onChange={(v) => setLineWh((p) => ({ ...p, [l.id]: v }))} options={whOptions[l.id] ?? []} placeholder="— Pick warehouse —" ariaLabel={`Warehouse for ${l.itemName}`} />
+                          {unstocked.has(l.id) && (
+                            <p className="mt-1.5 text-[11px] text-amber-600">Not in stock in any warehouse right now — pick where it will be issued once restocked, or switch to Engineer transfer.</p>
                           )}
                         </>
-                      )}
-                    </div>
-                  );
-                })}
+                      )
+                    ) : l.source === "customer_stock" ? (
+                      // Customer stock is issued from the warehouse its entry is stored in — the planner
+                      // can't change it (the stock is physically there), so show the location as a
+                      // disabled dropdown-look field: same visual language as the IRM picker, but locked.
+                      <>
+                        <div
+                          aria-label={`Pickup warehouse for ${l.itemName} (fixed)`}
+                          className="flex items-center justify-between gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-xs text-[var(--muted)]"
+                        >
+                          <span className="min-w-0 truncate">
+                            {l.warehouseName ? `${l.warehouseName}${l.warehouseCode ? ` (${l.warehouseCode})` : ""}` : "Stored location"}
+                          </span>
+                          <Lock aria-hidden className="h-3.5 w-3.5 shrink-0 text-[var(--faint)]" />
+                        </div>
+                        <p className="mt-1.5 text-[11px] text-[var(--faint)]">Customer stock — issued from where it’s stored. This can’t be changed.</p>
+                      </>
+                    ) : (
+                      <p className="text-[11px] text-[var(--muted)]">Misc item · handed over without a warehouse.</p>
+                    )}
+                  </div>
+                ))}
               </div>
             )}
-            {stockLines.length < request.lines.length && <p className="mt-2 text-[11px] text-[var(--faint)]">Misc items are handed over without a warehouse; customer-stock uses its stored location.</p>}
           </div>
         )}
 
