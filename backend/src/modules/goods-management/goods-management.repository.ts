@@ -2,6 +2,7 @@ import { Prisma, type EngineerCustomerStockHolding, type EngineerCustomerStockTr
 
 import { prisma, withTransaction } from "../../lib/prisma.js";
 import { conflict } from "../../utils/http-error.js";
+import { escapeRegex } from "../../utils/search.js";
 
 const GM_CODE_PREFIX = "GM";
 
@@ -375,11 +376,77 @@ export async function findCustomerEntryMetaByIds(ids: string[]): Promise<Map<str
   for (const r of rows) out.set(r.id, { itemName: r.itemName, sku: r.sku ?? null, customerId: r.customerId ?? null, customerName: r.customer?.name ?? null });
   return out;
 }
+// Resolve the warehouse each customer-stock entry is stored in, by id — batched (one query) for the
+// kit-request approve modal, which shows the pickup location per customer_stock line read-only.
+export async function findCustomerEntryWarehousesByIds(ids: string[]): Promise<Map<string, { name: string | null; code: string | null }>> {
+  const out = new Map<string, { name: string | null; code: string | null }>();
+  if (!ids.length) return out;
+  const rows = await prisma.customerStockEntry.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, warehouse: { select: { name: true, code: true } } },
+  });
+  for (const r of rows) out.set(r.id, { name: r.warehouse?.name ?? null, code: r.warehouse?.code ?? null });
+  return out;
+}
+
 // Resolve customer-stock-entry ids belonging to a customer — to translate a customerId filter for the
 // consignment ledger (which stores only the entry id).
 export async function findCustomerStockEntryIdsByCustomer(customerId: string): Promise<string[]> {
   const rows = await prisma.customerStockEntry.findMany({ where: { customerId }, select: { id: true } });
   return rows.map((r) => r.id);
+}
+
+// Search a single customer's ACTIVE, in-stock consignment entries by name/sku — powers the kit-request
+// composer's "add a customer-owned item" search. Scoped HARD to customerId (never leaks another
+// customer's stock), active-only, quantity > 0. One row per entry (a serialized item is one row per
+// serial). `contains` is a raw Mongo regex, so escape the term (see irm.repository search).
+export interface CustomerStockSearchRow {
+  id: string;
+  itemName: string;
+  sku: string | null;
+  uom: string | null;
+  quantity: number;
+  serialNumber: string | null;
+  warehouseId: string;
+  warehouseName: string;
+  warehouseCode: string | null;
+}
+export async function searchActiveCustomerStock(customerId: string, term: string, take = 20): Promise<CustomerStockSearchRow[]> {
+  const q = escapeRegex(term);
+  const rows = await prisma.customerStockEntry.findMany({
+    where: {
+      customerId,
+      status: "active",
+      quantity: { gt: 0 },
+      OR: [
+        { itemName: { contains: q, mode: "insensitive" } },
+        { sku: { contains: q, mode: "insensitive" } },
+      ],
+    },
+    orderBy: { itemName: "asc" },
+    take,
+    select: {
+      id: true,
+      itemName: true,
+      sku: true,
+      uom: true,
+      quantity: true,
+      serialNumber: true,
+      warehouseId: true,
+      warehouse: { select: { name: true, code: true } },
+    },
+  });
+  return rows.map((r) => ({
+    id: r.id,
+    itemName: r.itemName,
+    sku: r.sku ?? null,
+    uom: r.uom ?? null,
+    quantity: r.quantity,
+    serialNumber: r.serialNumber ?? null,
+    warehouseId: r.warehouseId,
+    warehouseName: r.warehouse?.name ?? "",
+    warehouseCode: r.warehouse?.code ?? null,
+  }));
 }
 const damagedBalanceInclude = {
   warehouse: { select: { id: true, name: true } },

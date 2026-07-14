@@ -30,6 +30,11 @@ export interface PublicKitRequestLine {
   uom: string | null;
   qty: number;
   jobKitLineId: string | null;
+  // For customer_stock lines: the warehouse the entry is stored in (where it will be issued from). The
+  // planner can't change it — it's shown read-only so the approve modal reveals the pickup location.
+  // Null for irm/misc lines. Populated on reads that feed the approve modal (list/getOne).
+  warehouseName: string | null;
+  warehouseCode: string | null;
 }
 
 export interface PublicKitRequest {
@@ -68,7 +73,10 @@ function iso(d: Date | null | undefined): string | null {
   return d ? d.toISOString() : null;
 }
 
-function toPublic(r: KitRequestWithLines): PublicKitRequest {
+// whByEntry: customerStockEntryId → its warehouse label, resolved by the caller in one batched query
+// (see resolveLineWarehouses) so toPublic stays synchronous and free of per-line DB hits. Absent map =
+// no customer-stock warehouse labels (fine for responses that don't drive the approve modal).
+function toPublic(r: KitRequestWithLines, whByEntry?: Map<string, { name: string | null; code: string | null }>): PublicKitRequest {
   return {
     id: r.id,
     code: r.code,
@@ -90,18 +98,35 @@ function toPublic(r: KitRequestWithLines): PublicKitRequest {
     createdBy: r.createdBy,
     createdAt: r.createdAt.toISOString(),
     updatedAt: r.updatedAt.toISOString(),
-    lines: r.lines.map((l) => ({
-      id: l.id,
-      source: l.source,
-      irmItemId: l.irmItemId,
-      customerStockEntryId: l.customerStockEntryId,
-      itemName: l.itemName,
-      sku: l.sku,
-      uom: l.uom,
-      qty: l.qty,
-      jobKitLineId: l.jobKitLineId,
-    })),
+    lines: r.lines.map((l) => {
+      const wh = l.source === "customer_stock" && l.customerStockEntryId ? whByEntry?.get(l.customerStockEntryId) : undefined;
+      return {
+        id: l.id,
+        source: l.source,
+        irmItemId: l.irmItemId,
+        customerStockEntryId: l.customerStockEntryId,
+        itemName: l.itemName,
+        sku: l.sku,
+        uom: l.uom,
+        qty: l.qty,
+        jobKitLineId: l.jobKitLineId,
+        warehouseName: wh?.name ?? null,
+        warehouseCode: wh?.code ?? null,
+      };
+    }),
   };
+}
+
+// Batch-resolve the warehouse each customer_stock line's entry is stored in — one query for all lines
+// across all given requests (no N+1). Returns entryId → { name, code }. IRM/misc lines are ignored.
+async function resolveLineWarehouses(requests: KitRequestWithLines[]): Promise<Map<string, { name: string | null; code: string | null }>> {
+  const entryIds = [
+    ...new Set(
+      requests.flatMap((r) => r.lines.filter((l) => l.source === "customer_stock" && l.customerStockEntryId).map((l) => l.customerStockEntryId as string)),
+    ),
+  ];
+  if (entryIds.length === 0) return new Map();
+  return goodsManagementRepo.findCustomerEntryWarehousesByIds(entryIds);
 }
 
 function emitUpdate(engineerId: string, jobId: string, data: { id: string; code: string; status: string }): void {
@@ -391,9 +416,10 @@ export async function cancel(id: string, actor: AuditActor): Promise<PublicKitRe
 
 // ---- reads -----------------------------------------------------------------------------------
 
-function paged(result: { requests: KitRequestWithLines[]; total: number }, page: number, pageSize: number): PagedKitRequests {
+async function paged(result: { requests: KitRequestWithLines[]; total: number }, page: number, pageSize: number): Promise<PagedKitRequests> {
+  const whByEntry = await resolveLineWarehouses(result.requests);
   return {
-    requests: result.requests.map(toPublic),
+    requests: result.requests.map((r) => toPublic(r, whByEntry)),
     total: result.total,
     page,
     pageSize,
@@ -425,24 +451,65 @@ export async function getOne(id: string, actor: AuditActor): Promise<PublicKitRe
   if (!isReviewer(actor) && (actor.id ?? "") !== req.requestedByEngineerId) {
     throw forbidden("You don't have access to this request.");
   }
-  return toPublic(req);
+  return toPublic(req, await resolveLineWarehouses([req]));
 }
 
-// IRM catalogue search for the request composer — lets a field engineer (who has no irm.view) pick a
-// real, in-catalogue item to request instead of free-typing a name. Read-only, name/code/sku fields
-// only; capped and active-only. A blank term returns nothing (never enumerates the whole catalogue).
-export interface KitItemOption {
-  irmItemId: string;
-  code: string;
-  name: string;
-  sku: string | null;
-  uom: string | null;
-}
-export async function searchItems(q: string): Promise<KitItemOption[]> {
+// Item search for the request composer — lets a field engineer (who has no irm.view) pick a real item
+// to request instead of free-typing a name. Read-only, name/code/sku only; capped, active-only. A blank
+// term returns nothing (never enumerates a whole catalogue). Two sources, discriminated by `source`:
+//   • irm            — the company IRM catalogue (always searched)
+//   • customer_stock — the JOB'S OWN customer's active, in-stock consignment entries (only when jobId is
+//                      given). Scoped HARD to the job's customerId — never leaks another customer's stock.
+export type KitItemOption =
+  | { source: "irm"; irmItemId: string; code: string; name: string; sku: string | null; uom: string | null }
+  | {
+      source: "customer_stock";
+      customerStockEntryId: string;
+      name: string;
+      sku: string | null;
+      uom: string | null;
+      qty: number;
+      warehouseName: string;
+      warehouseCode: string | null;
+      serialNumber: string | null;
+    };
+
+export async function searchItems(q: string, jobId?: string): Promise<KitItemOption[]> {
   const term = (q ?? "").trim();
   if (term.length < 1) return [];
-  const rows = await irmRepo.findMany({ search: term, status: "active" }, 0, 20, "name");
-  return rows.map((r) => ({ irmItemId: r.id, code: r.code, name: r.name, sku: r.sku ?? null, uom: r.baseUnit ?? null }));
+
+  const irmRows = await irmRepo.findMany({ search: term, status: "active" }, 0, 20, "name");
+  const irmOptions: KitItemOption[] = irmRows.map((r) => ({
+    source: "irm",
+    irmItemId: r.id,
+    code: r.code,
+    name: r.name,
+    sku: r.sku ?? null,
+    uom: r.baseUnit ?? null,
+  }));
+
+  // Customer stock only when we can resolve the job's customer. If the job is missing/soft-deleted, stay
+  // resilient and return IRM only rather than failing the whole search.
+  let customerOptions: KitItemOption[] = [];
+  if (jobId) {
+    const job = await jobRepo.findById(jobId);
+    if (job?.customerId) {
+      const rows = await goodsManagementRepo.searchActiveCustomerStock(job.customerId, term, 20);
+      customerOptions = rows.map((r) => ({
+        source: "customer_stock",
+        customerStockEntryId: r.id,
+        name: r.itemName,
+        sku: r.sku,
+        uom: r.uom,
+        qty: r.quantity,
+        warehouseName: r.warehouseName,
+        warehouseCode: r.warehouseCode,
+        serialNumber: r.serialNumber,
+      }));
+    }
+  }
+
+  return [...irmOptions, ...customerOptions];
 }
 
 export async function uploadAttachment(image: string): Promise<{ url: string }> {

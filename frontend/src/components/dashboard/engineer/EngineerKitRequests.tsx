@@ -5,7 +5,7 @@ import Link from "next/link";
 import { Check, Loader2, PackagePlus, Plus, Search, Trash2 } from "lucide-react";
 
 import * as kitRequestService from "@/services/jobKitRequest.service";
-import type { KitItemOption, KitRequest, KitRequestLinePayload } from "@/services/jobKitRequest.service";
+import type { KitItemCustomerStockOption, KitItemOption, KitRequest, KitRequestLinePayload } from "@/services/jobKitRequest.service";
 import { subscribe } from "@/lib/socket";
 import { Modal } from "@/components/ui/Modal";
 import { Notice } from "@/components/ui/Notice";
@@ -29,6 +29,31 @@ const KIT_STATUS: Record<KitRequest["status"], { cls: string; label: string }> =
 export function KitRequestStatusChip({ value }: { value: KitRequest["status"] }) {
   const s = KIT_STATUS[value] ?? KIT_STATUS.pending;
   return <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider ${s.cls}`}>{s.label}</span>;
+}
+
+// Requested items as readable chips (one per line) instead of a cramped comma-joined sentence — each
+// chip is the item name + a qty pill, with a subtle tint per source (customer stock / misc) so company
+// IRM is distinguishable from customer-owned at a glance. Shared by the engineer's own request list and
+// the PM review card, so both read the same.
+export function KitLineChips({ lines }: { lines: KitRequest["lines"] }) {
+  return (
+    <div className="mt-1.5 flex flex-wrap gap-1.5">
+      {lines.map((l) => {
+        const tint =
+          l.source === "customer_stock"
+            ? "border-[var(--accent)]/30 bg-[var(--accent-10)] text-[var(--accent)]"
+            : l.source === "misc"
+              ? "border-[var(--border)] bg-[var(--surface)] text-[var(--muted)]"
+              : "border-[var(--border)] bg-[var(--surface)] text-[var(--ink)]";
+        return (
+          <span key={l.id} className={`inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-semibold ${tint}`}>
+            <span className="truncate">{l.itemName}</span>
+            <span className="rounded bg-[var(--surface-2)] px-1.5 py-0.5 text-[10px] font-bold text-[var(--faint)]">×{l.qty}</span>
+          </span>
+        );
+      })}
+    </div>
+  );
 }
 
 // ── Card ───────────────────────────────────────────────────────────────────────────────────────
@@ -106,8 +131,8 @@ export function EngineerKitRequests({ job, locked, open, onOpenChange }: { job: 
                     <KitRequestStatusChip value={r.status} />
                     <span className="text-[11px] text-[var(--faint)]">{fmtDate(r.createdAt)}</span>
                   </div>
-                  <p className="mt-1 truncate text-xs text-[var(--muted)]">{r.lines.map((l) => `${l.itemName} ×${l.qty}`).join(", ")}</p>
-                  {r.reason && <p className="mt-0.5 text-[11px] italic text-[var(--faint)]">“{r.reason}”</p>}
+                  <KitLineChips lines={r.lines} />
+                  {r.reason && <p className="mt-1 text-[11px] italic text-[var(--faint)]">“{r.reason}”</p>}
                   {r.status === "declined" && r.decisionNote && <p className="mt-0.5 text-[11px] text-[var(--neg)]">Planner: {r.decisionNote}</p>}
                   {r.status === "approved" && r.fulfillmentMode === "engineer_transfer" && (
                     <p className="mt-0.5 text-[11px] text-[var(--pos)]">
@@ -157,12 +182,21 @@ interface PlannedOption {
   qty: number;
 }
 interface CartItem {
-  key: string; // dedup key: `irm:<id>` for a catalogue item, `misc:<name>` for a typed custom item
-  source: "irm" | "misc";
+  key: string; // dedup key: `irm:<id>`, `cse:<id>` (customer stock), or `misc:<name>` (typed custom item)
+  source: "irm" | "customer_stock" | "misc";
   irmItemId: string | null;
+  customerStockEntryId: string | null;
   name: string;
-  code: string | null;
+  code: string | null; // IRM code or the customer-stock warehouse label; null for misc
   qty: number;
+}
+
+// One-line label for a customer-stock search option: "Warehouse (CODE) · N in stock · SN ...". Falls
+// back to "Stored location" when the warehouse name is missing (only an orphaned FK — the schema makes
+// the warehouse mandatory), so the label never starts with a stray space.
+function customerStockLabel(it: KitItemCustomerStockOption): string {
+  const where = it.warehouseName ? `${it.warehouseName}${it.warehouseCode ? ` (${it.warehouseCode})` : ""}` : "Stored location";
+  return `${where} · ${it.qty} in stock${it.serialNumber ? ` · SN ${it.serialNumber}` : ""}`;
 }
 
 function plannedOptionsFrom(job: Job): PlannedOption[] {
@@ -185,16 +219,28 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
   const [submitting, setSubmitting] = React.useState(false);
   const [msg, setMsg] = React.useState<Msg>(null);
 
-  // Keys already on the request (planned IRM lines + everything in the cart) — so the search can grey
-  // out an item that's already added and the cart can't hold duplicates.
+  // Keys already on the request (planned IRM + customer-stock lines + everything in the cart) — so the
+  // search can grey out an item that's already added and the cart can't hold duplicates.
   const excludeKeys = React.useMemo(
-    () => new Set<string>([...planned.filter((p) => p.source === "irm" && p.irmItemId).map((p) => `irm:${p.irmItemId}`), ...cart.map((c) => c.key)]),
+    () =>
+      new Set<string>([
+        ...planned.filter((p) => p.source === "irm" && p.irmItemId).map((p) => `irm:${p.irmItemId}`),
+        ...planned.filter((p) => p.source === "customer_stock" && p.customerStockEntryId).map((p) => `cse:${p.customerStockEntryId}`),
+        ...cart.map((c) => c.key),
+      ]),
     [planned, cart],
   );
 
   const setPlannedQty = (key: string, qty: number) => setPlanned((rows) => rows.map((r) => (r.key === key ? { ...r, qty } : r)));
-  const addIrm = (it: KitItemOption) =>
-    setCart((c) => { const key = `irm:${it.irmItemId}`; return c.some((x) => x.key === key) ? c : [...c, { key, source: "irm" as const, irmItemId: it.irmItemId, name: it.name, code: it.code, qty: 1 }]; });
+  const addItem = (it: KitItemOption) =>
+    setCart((c) => {
+      if (it.source === "irm") {
+        const key = `irm:${it.irmItemId}`;
+        return c.some((x) => x.key === key) ? c : [...c, { key, source: "irm" as const, irmItemId: it.irmItemId, customerStockEntryId: null, name: it.name, code: it.code, qty: 1 }];
+      }
+      const key = `cse:${it.customerStockEntryId}`;
+      return c.some((x) => x.key === key) ? c : [...c, { key, source: "customer_stock" as const, irmItemId: null, customerStockEntryId: it.customerStockEntryId, name: it.name, code: customerStockLabel(it), qty: 1 }];
+    });
   const addCustom = (name: string) => {
     const n = name.trim();
     if (!n) return;
@@ -205,7 +251,7 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
       setMsg({ type: "error", text: `“${n}” is already listed above under “More of a planned item” — set its extra quantity there.` });
       return;
     }
-    setCart((c) => (c.some((x) => x.key === key) ? c : [...c, { key, source: "misc" as const, irmItemId: null, name: n, code: null, qty: 1 }]));
+    setCart((c) => (c.some((x) => x.key === key) ? c : [...c, { key, source: "misc" as const, irmItemId: null, customerStockEntryId: null, name: n, code: null, qty: 1 }]));
   };
   const setCartQty = (key: string, qty: number) => setCart((c) => c.map((x) => (x.key === key ? { ...x, qty } : x)));
   const removeCart = (key: string) => setCart((c) => c.filter((x) => x.key !== key));
@@ -227,6 +273,7 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
     for (const c of cart) {
       if (c.qty <= 0) continue;
       if (c.source === "irm" && c.irmItemId) push(c.key, { source: "irm", irmItemId: c.irmItemId, itemName: c.name, qty: c.qty });
+      else if (c.source === "customer_stock" && c.customerStockEntryId) push(c.key, { source: "customer_stock", customerStockEntryId: c.customerStockEntryId, itemName: c.name, qty: c.qty });
       else push(c.key, { source: "misc", itemName: c.name, qty: c.qty });
     }
     return [...byKey.values()];
@@ -288,7 +335,7 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
 
         <div>
           <p className="mb-2 text-xs font-bold text-[var(--faint)]">Add another item</p>
-          <KitItemSearch excludeKeys={excludeKeys} onAddItem={addIrm} onAddCustom={addCustom} />
+          <KitItemSearch jobId={job.id} excludeKeys={excludeKeys} onAddItem={addItem} onAddCustom={addCustom} />
           {cart.length > 0 && (
             <div className="mt-3 overflow-hidden rounded-xl border border-[var(--border)]">
               <table className="w-full text-left text-sm">
@@ -306,8 +353,9 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
                         <div className="flex items-center gap-2">
                           <span className="font-semibold text-[var(--ink)]">{c.name}</span>
                           {c.source === "misc" && <span className="rounded border border-[var(--border)] bg-[var(--surface)] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-[var(--faint)]">Misc</span>}
+                          {c.source === "customer_stock" && <span className="rounded border border-[var(--accent)]/30 bg-[var(--accent-10)] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-[var(--accent)]">Customer stock</span>}
                         </div>
-                        {c.code && <div className="font-mono text-[10px] text-[var(--muted)]">{c.code}</div>}
+                        {c.code && <div className={c.source === "customer_stock" ? "text-[10px] text-[var(--muted)]" : "font-mono text-[10px] text-[var(--muted)]"}>{c.code}</div>}
                       </td>
                       <td className="px-3 py-2">
                         <input type="number" min={1} step={1} value={c.qty} aria-label={`Quantity for ${c.name}`} onChange={(e) => setCartQty(c.key, Math.max(1, Math.floor(Number(e.target.value) || 1)))} className={`${inputCls} py-1.5`} />
@@ -338,7 +386,7 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
 
 // ── Item search-select (debounced IRM catalogue search) ────────────────────────────────────────
 
-function KitItemSearch({ excludeKeys, onAddItem, onAddCustom }: { excludeKeys: Set<string>; onAddItem: (it: KitItemOption) => void; onAddCustom: (name: string) => void }) {
+function KitItemSearch({ jobId, excludeKeys, onAddItem, onAddCustom }: { jobId: string; excludeKeys: Set<string>; onAddItem: (it: KitItemOption) => void; onAddCustom: (name: string) => void }) {
   const [search, setSearch] = React.useState("");
   const [results, setResults] = React.useState<KitItemOption[]>([]);
   const [loading, setLoading] = React.useState(false);
@@ -368,7 +416,7 @@ function KitItemSearch({ excludeKeys, onAddItem, onAddCustom }: { excludeKeys: S
       setTouched(true);
       setFailed(false);
       try {
-        const items = await kitRequestService.searchKitItems(q);
+        const items = await kitRequestService.searchKitItems(q, jobId);
         if (myId !== reqId.current) return; // superseded
         setResults(items);
       } catch (e) {
@@ -393,17 +441,23 @@ function KitItemSearch({ excludeKeys, onAddItem, onAddCustom }: { excludeKeys: S
       </div>
 
       {touched && !loading && failed && <p className="text-xs font-semibold text-[var(--neg)]">Couldn’t run the search just now. Check your connection and try again.</p>}
-      {touched && !loading && !failed && results.length === 0 && <p className="text-xs text-[var(--muted)]">No matching item in the catalogue.</p>}
+      {touched && !loading && !failed && results.length === 0 && <p className="text-xs text-[var(--muted)]">No matching catalogue or customer-stock item.</p>}
 
       {results.length > 0 && (
         <div className="max-h-56 space-y-1.5 overflow-auto">
           {results.map((it) => {
-            const added = excludeKeys.has(`irm:${it.irmItemId}`);
+            const key = it.source === "irm" ? `irm:${it.irmItemId}` : `cse:${it.customerStockEntryId}`;
+            const added = excludeKeys.has(key);
+            // Sub-line: IRM shows its catalogue code (mono); customer stock shows warehouse · qty · serial.
+            const sub = it.source === "irm" ? it.code : customerStockLabel(it);
             return (
-              <button key={it.irmItemId} type="button" disabled={added} onClick={() => onAddItem(it)} className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left transition-all ${added ? "cursor-default border-[var(--border)] bg-[var(--surface-2)] opacity-60" : "border-[var(--border)] bg-[var(--surface-2)] hover:border-[var(--accent)]"}`}>
+              <button key={key} type="button" disabled={added} onClick={() => onAddItem(it)} className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left transition-all ${added ? "cursor-default border-[var(--border)] bg-[var(--surface-2)] opacity-60" : "border-[var(--border)] bg-[var(--surface-2)] hover:border-[var(--accent)]"}`}>
                 <span className="min-w-0">
-                  <span className="block truncate text-sm font-semibold text-[var(--ink)]">{it.name}</span>
-                  {it.code && <span className="block truncate font-mono text-[11px] text-[var(--muted)]">{it.code}</span>}
+                  <span className="flex items-center gap-2">
+                    <span className="truncate text-sm font-semibold text-[var(--ink)]">{it.name}</span>
+                    {it.source === "customer_stock" && <span className="shrink-0 rounded border border-[var(--accent)]/30 bg-[var(--accent-10)] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-[var(--accent)]">Customer stock</span>}
+                  </span>
+                  {sub && <span className={`block truncate text-[11px] text-[var(--muted)] ${it.source === "irm" ? "font-mono" : ""}`}>{sub}</span>}
                 </span>
                 {added ? <Check className="h-4 w-4 shrink-0 text-[var(--pos)]" /> : <Plus className="h-4 w-4 shrink-0 text-[var(--accent)]" />}
               </button>

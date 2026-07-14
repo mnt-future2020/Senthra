@@ -49,9 +49,10 @@ export const pendingCount = asyncHandler(async (req, res) => {
   res.json({ count: await kitRequestService.countPending(queryStr(req.query.jobId)) });
 });
 
-// GET /job-kit-requests/item-search?q=  (IRM catalogue search for the FE request composer)
+// GET /job-kit-requests/item-search?q=&jobId=  (item search for the FE request composer: IRM catalogue
+// always, plus the job's own customer stock when jobId is given)
 export const itemSearch = asyncHandler(async (req, res) => {
-  res.json({ items: await kitRequestService.searchItems(queryStr(req.query.q) ?? "") });
+  res.json({ items: await kitRequestService.searchItems(queryStr(req.query.q) ?? "", queryStr(req.query.jobId)) });
 });
 
 // GET /job-kit-requests/:id
