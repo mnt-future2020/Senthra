@@ -122,7 +122,10 @@ export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
         categoryId: categoryId || undefined,
         description: description.trim() || undefined,
         uom: uom.trim() || undefined,
-        // Tracking flags are set during receive — preserved here as-is (not editable on this screen).
+        // No UI collects serialized / highValue anywhere (see CustomerStockEntry in the Prisma schema),
+        // but the backend update overwrites them with `?? false` — so we MUST echo the entry's existing
+        // values back or a plain name/SKU edit would silently reset them. Not a live feature; just don't
+        // clobber the stored value.
         serialized: entry.serialized,
         serialNumber: entry.serialNumber ?? undefined,
         highValue: entry.highValue,

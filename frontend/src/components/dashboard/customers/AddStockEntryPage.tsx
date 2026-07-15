@@ -7,7 +7,6 @@ import { ArrowLeft, Barcode, Loader2, Save } from "lucide-react";
 import * as customerService from "@/services/customer.service";
 import * as warehouseService from "@/services/warehouse.service";
 import { listCategories, getCachedCategories } from "@/services/category.service";
-import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
 import { FormSection, FormAsideCard, RequiredMark } from "@/components/ui/FormScaffold";
@@ -34,7 +33,6 @@ interface CustomerInfo {
 
 export function AddStockEntryPage({ customer }: { customer: CustomerInfo }) {
   const router = useRouter();
-  const { can } = useAuth();
   const { pushToast } = useDashboard();
 
   const [categories, setCategories] = React.useState<{ id: string; name: string }[]>(() =>
@@ -64,9 +62,6 @@ export function AddStockEntryPage({ customer }: { customer: CustomerInfo }) {
   const [uom, setUom] = React.useState("");
   const [quantity, setQuantity] = React.useState("");
   const [warehouseId, setWarehouseId] = React.useState("");
-  const [serialized, setSerialized] = React.useState(false);
-  const [serialNumber, setSerialNumber] = React.useState("");
-  const [highValue, setHighValue] = React.useState(false);
 
   const [errors, setErrors] = React.useState<Record<string, string>>({});
   const [saving, setSaving] = React.useState(false);
@@ -88,7 +83,6 @@ export function AddStockEntryPage({ customer }: { customer: CustomerInfo }) {
     if (!warehouseId) errs.warehouseId = "Select a warehouse.";
     const qty = parseInt(quantity, 10);
     if (!quantity || isNaN(qty) || qty < 1) errs.quantity = "Quantity must be at least 1.";
-    if (serialized && !serialNumber.trim()) errs.serialNumber = "Serial number is required for serialized items.";
     return errs;
   };
 
@@ -108,9 +102,6 @@ export function AddStockEntryPage({ customer }: { customer: CustomerInfo }) {
         categoryId: categoryId || undefined,
         description: description.trim() || undefined,
         uom: uom.trim() || undefined,
-        serialized,
-        serialNumber: serialNumber.trim() || undefined,
-        highValue,
       });
       setCreated(updated);
       return updated;
@@ -128,9 +119,6 @@ export function AddStockEntryPage({ customer }: { customer: CustomerInfo }) {
         description: description.trim() || undefined,
         uom: uom.trim() || undefined,
         quantity: parseInt(quantity, 10),
-        serialized,
-        serialNumber: serialNumber.trim() || undefined,
-        highValue,
       });
       setCreated(entry);
       return entry;
@@ -303,46 +291,9 @@ export function AddStockEntryPage({ customer }: { customer: CustomerInfo }) {
               </div>
             </FormSection>
 
-            <FormSection title="Tracking" description="Serial number and high-value designation.">
-              <div className="grid gap-4 sm:grid-cols-2">
-                <div className="flex items-center gap-3">
-                  <input
-                    type="checkbox"
-                    id="serialized"
-                    checked={serialized}
-                    onChange={(e) => { setSerialized(e.target.checked); if (!e.target.checked) clearError("serialNumber"); }}
-                    className="h-4 w-4 rounded border-[var(--border)] accent-[var(--accent)]"
-                  />
-                  <label htmlFor="serialized" className="text-sm font-semibold text-[var(--ink)]">
-                    Serialized item
-                  </label>
-                </div>
-                <div className="flex items-center gap-3">
-                  <input
-                    type="checkbox"
-                    id="highValue"
-                    checked={highValue}
-                    onChange={(e) => setHighValue(e.target.checked)}
-                    className="h-4 w-4 rounded border-[var(--border)] accent-[var(--accent)]"
-                  />
-                  <label htmlFor="highValue" className="text-sm font-semibold text-[var(--ink)]">
-                    High-value item
-                  </label>
-                </div>
-                {serialized && (
-                  <div className="sm:col-span-2">
-                    <label className={labelCls}>Serial number<RequiredMark /></label>
-                    <input
-                      className={inputCls}
-                      value={serialNumber}
-                      onChange={(e) => { setSerialNumber(e.target.value); clearError("serialNumber"); }}
-                      aria-invalid={Boolean(errors.serialNumber)}
-                    />
-                    <FieldError message={errors.serialNumber} />
-                  </div>
-                )}
-              </div>
-            </FormSection>
+            {/* Tracking (serialized / high-value) intentionally omitted — the app doesn't use these flags
+                (nothing downstream reads a user-set value; they stay false). See CustomerStockEntry in
+                the Prisma schema for the full note. */}
 
             <FormSection title="Barcode" description="Generate a unique Code128 barcode for this stock entry.">
               {created?.barcodeDataUri ? (
