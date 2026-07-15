@@ -967,6 +967,28 @@ export async function findStockEntryForTopUp(
   return target ? { id: target.id } : null;
 }
 
+// Find an existing ACTIVE-or-draft entry that a Direct Add would DUPLICATE: same customer +
+// warehouse + name (case/space-insensitive) + EXACT sku (null matches only null). Same matching
+// predicate as findStockEntryForTopUp, but returns the entry's `code` too so the caller can point
+// the user at it. A different warehouse or a different sku is NOT a duplicate (legitimately distinct
+// stock), so this returns null for those.
+export async function findDuplicateStockEntry(
+  customerId: string,
+  warehouseId: string,
+  itemName: string,
+  sku: string | null,
+  client: Db = prisma,
+): Promise<{ id: string; code: string | null } | null> {
+  const candidates = await client.customerStockEntry.findMany({
+    where: { customerId, warehouseId },
+    select: { id: true, itemName: true, sku: true, barcode: true },
+    orderBy: { createdAt: "asc" },
+  });
+  const norm = (s: string) => s.trim().toLowerCase();
+  const target = candidates.find((e) => norm(e.itemName) === norm(itemName) && e.sku === sku);
+  return target ? { id: target.id, code: target.barcode ?? null } : null;
+}
+
 // Add newly-received units onto the assignment's existing stock entry (partial
 // receives accumulate into one entry instead of spawning a new row each time).
 export function addStockEntryQuantity(id: string, addQuantity: number, receivedBy: string | null, receivedAt: Date, client: Db = prisma) {

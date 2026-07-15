@@ -1786,9 +1786,14 @@ model CustomerStockEntry {
   description   String?
   uom           String?   // unit of measure (Each / Metre / Box etc.)
   quantity      Int       // received quantity
+  // NOTE: serialized / serialNumber / highValue are NOT surfaced anywhere the user sets them —
+  // no form collects them (the Add-stock-entry Tracking section was removed) and no receive/request
+  // flow captures them, so in practice they are always the default `false`/null. They stay here only
+  // because stock-position `flags` still reads them (harmlessly false) and StockEntryDetail passes the
+  // existing value straight through on edit. Don't be misled into thinking this is a live feature.
   serialized    Boolean   @default(false)
-  serialNumber  String?   // if serialized
-  highValue     Boolean   @default(false)
+  serialNumber  String?   // if serialized (unused — see note above)
+  highValue     Boolean   @default(false) // unused — see note above
   thresholdQty  Int?      // low-stock reorder threshold
   attributes    Json?     // dynamic per-category custom fields
 

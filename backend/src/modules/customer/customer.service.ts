@@ -1999,6 +1999,21 @@ export async function createDirectStockEntry(
   if (!warehouse) throw badRequest("Selected warehouse no longer exists.");
   assertWarehouseAccess(actor, warehouse.id);
 
+  // Duplicate guard: the receive flow tops up an existing same-warehouse/same-sku line instead of
+  // spawning a duplicate — Direct Add must be consistent. Same name + warehouse + exact sku already
+  // present ⇒ block (edit that entry to add stock). A different warehouse or sku is legitimately
+  // distinct stock and is allowed through. Trust boundary: enforced here, not just on the form.
+  const duplicate = await customerRepo.findDuplicateStockEntry(
+    customerId,
+    input.warehouseId,
+    input.itemName,
+    input.sku || null,
+  );
+  if (duplicate) {
+    const ref = duplicate.code ? ` (${duplicate.code})` : "";
+    throw badRequest(`"${input.itemName.trim()}" already exists in ${warehouse.name}${ref}. Edit that entry to add more stock instead of creating a duplicate.`);
+  }
+
   const entry = await customerRepo.createDirectStockEntry({
     customerId,
     warehouseId: input.warehouseId,
