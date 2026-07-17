@@ -20,6 +20,17 @@ let io: IOServer | null = null;
 // receive job payloads over the socket.
 export const OFFICE_JOBS_ROOM = "jobs:office";
 
+// Shared room for the field-stock (van stock request) REVIEW surface — every user who can
+// review/fulfil van stock requests (admin → always; a warehouse manager via
+// van_stock_request.review) joins it, so a request's lifecycle events fan out to ALL
+// reviewers, not just the requesting engineer. Warehouse managers do NOT hold jobs.view, so
+// they were never in OFFICE_JOBS_ROOM — their VSR board never live-refreshed. This is the room
+// VSR events belong in (they have no place in the jobs room). The event payload carries no
+// privileged data (just {id, code, status, type}) and every client refetches through its OWN
+// warehouse-scoped REST list, so a shared room can't leak another warehouse's request — a
+// reviewer whose scope excludes the request just does one harmless no-op refetch.
+export const VAN_STOCK_REVIEWERS_ROOM = "van_stock:reviewers";
+
 // Identity resolved from the handshake, stashed on the socket for handlers.
 interface SocketAuth {
   principalId: string; // token sub — also the room name
@@ -86,28 +97,34 @@ export function initRealtime(httpServer: HttpServer): IOServer {
     // emitToUser can target every device/tab of one user.
     void socket.join(auth.principalId);
     // Staff who can view jobs (admins always) also join the shared office room so the
-    // Jobs list live-updates for every watcher. Permission load is one query per connect.
-    void joinOfficeJobsRoom(socket, auth);
+    // Jobs list live-updates for every watcher, and van-stock reviewers join their own room
+    // so the field-stock board live-updates. One permission query loads the role for both.
+    void joinScopedRooms(socket, auth);
   });
 
   return io;
 }
 
-// Join the office Jobs room iff the principal may view jobs (admin → always; staff user →
-// holds jobs.view / "*"). Best-effort: any failure just skips the room (REST still works).
-async function joinOfficeJobsRoom(socket: Socket, auth: SocketAuth): Promise<void> {
+// Join the permission-gated broadcast rooms this principal is entitled to, off a SINGLE role
+// load (admin → all rooms; staff → per-permission). Mirrors the REST guards: OFFICE_JOBS_ROOM =
+// jobs.view; VAN_STOCK_REVIEWERS_ROOM = van_stock_request.review (same gate as VSR's isReviewer,
+// so a warehouse manager — who lacks jobs.view — still gets a live field-stock board). Best-effort:
+// any failure just skips the rooms (REST still works, the surface just won't live-refresh).
+async function joinScopedRooms(socket: Socket, auth: SocketAuth): Promise<void> {
   try {
-    if (auth.actor === "customer") return; // customers never see internal jobs
+    if (auth.actor === "customer") return; // customers never see internal staff surfaces
     if (auth.actor === "admin") {
-      await socket.join(OFFICE_JOBS_ROOM);
+      await Promise.all([Promise.resolve(socket.join(OFFICE_JOBS_ROOM)), Promise.resolve(socket.join(VAN_STOCK_REVIEWERS_ROOM))]);
       return;
     }
     const user = await userRepo.findById(auth.principalId);
-    if (user && roleGrants(user.role?.permissions ?? [], "jobs.view")) {
-      await socket.join(OFFICE_JOBS_ROOM);
-    }
+    const perms = user?.role?.permissions ?? [];
+    const joins: Promise<unknown>[] = [];
+    if (roleGrants(perms, "jobs.view")) joins.push(Promise.resolve(socket.join(OFFICE_JOBS_ROOM)));
+    if (roleGrants(perms, "van_stock_request.review")) joins.push(Promise.resolve(socket.join(VAN_STOCK_REVIEWERS_ROOM)));
+    await Promise.all(joins);
   } catch {
-    /* best-effort — a missed office join just means no live office refresh for this socket */
+    /* best-effort — a missed room join just means no live refresh for that surface on this socket */
   }
 }
 

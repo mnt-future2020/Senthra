@@ -10,6 +10,7 @@ import * as grnService from "@/services/goods-in.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { DetailHeader } from "@/components/ui/DetailHeader";
 import { Select } from "@/components/ui/Select";
 import { inputCls, labelCls } from "@/components/ui/styles";
 import { actionLabel, actionTone, changeLabels, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
@@ -181,10 +182,11 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
 
   return (
     <div className="flex h-full flex-col gap-5">
-      <div className="shrink-0 flex flex-col gap-4 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:flex-row sm:items-start sm:justify-between" style={{ borderRadius: "var(--radius)" }}>
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">{po.code}</h1>
+      <DetailHeader
+        storageKey="purchase-order-detail"
+        title={po.code}
+        badges={
+          <>
             <PoStatusBadge status={po.status} />
             {/* Delivery is "scheduled" once the supplier has confirmed a date. */}
             {po.confirmedDeliveryDate && !["cancelled", "closed"].includes(po.status) && (
@@ -193,17 +195,19 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
               </span>
             )}
             {busy && <Loader2 className="h-4 w-4 animate-spin text-[var(--muted)]" />}
-          </div>
-          <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
+          </>
+        }
+        meta={
+          <>
             <span>{po.supplierName ?? po.supplier?.name ?? "—"}</span>
             <span aria-hidden>·</span>
             <span>{po.warehouse?.name ?? "—"}</span>
             <span aria-hidden>·</span>
             <span>{PO_PRIORITY_LABELS[po.priority]} priority</span>
-          </p>
-        </div>
-        {actions.length > 0 && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
-      </div>
+          </>
+        }
+        actions={actions.length > 0 ? actions : undefined}
+      />
 
       <ProcurementChain po={po} />
 

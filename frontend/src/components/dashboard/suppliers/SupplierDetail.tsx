@@ -11,6 +11,7 @@ import * as prfService from "@/services/purchase-request.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { DetailHeader } from "@/components/ui/DetailHeader";
 import { Pagination } from "@/components/ui/Pagination";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { actionLabel, actionTone, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
@@ -80,43 +81,40 @@ export function SupplierDetail({ initial }: { initial: Supplier }) {
 
   return (
     <div className="flex h-full flex-col gap-5">
-      {/* Header card */}
-      <div
-        className="flex shrink-0 flex-col gap-4 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:flex-row sm:items-start sm:justify-between"
-        style={{ borderRadius: "var(--radius)" }}
-      >
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">{s.name}</h1>
-            <StatusBadge status={s.status as UserStatus} />
-          </div>
-          <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
+      <DetailHeader
+        storageKey="supplier-detail"
+        title={s.name}
+        badges={<StatusBadge status={s.status as UserStatus} />}
+        meta={
+          <>
             <span className="font-mono">{s.code}</span>
             <span aria-hidden>·</span>
             <span>{s.type?.name ?? "—"}</span>
-          </p>
-        </div>
-        {canEdit && (
-          <div className="flex shrink-0 items-center gap-2">
-            <button
-              type="button"
-              onClick={toggleStatus}
-              disabled={busy}
-              className="flex items-center gap-1.5 rounded-xl border border-[var(--border)] px-3 py-2 text-xs font-bold text-[var(--ink)] transition-all hover:bg-[var(--surface-2)] disabled:opacity-60"
-            >
-              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Power className="h-3.5 w-3.5" />}
-              {s.status === "active" ? "Deactivate" : "Activate"}
-            </button>
-            <button
-              type="button"
-              onClick={() => router.push(`/dashboard/suppliers/${s.code}/edit`)}
-              className="flex items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3 py-2 text-xs font-extrabold text-white transition-all hover:opacity-90"
-            >
-              <Pencil className="h-3.5 w-3.5" /> Edit
-            </button>
-          </div>
-        )}
-      </div>
+          </>
+        }
+        actions={
+          canEdit && (
+            <>
+              <button
+                type="button"
+                onClick={toggleStatus}
+                disabled={busy}
+                className="flex items-center gap-1.5 rounded-xl border border-[var(--border)] px-3 py-2 text-xs font-bold text-[var(--ink)] transition-all hover:bg-[var(--surface-2)] disabled:opacity-60"
+              >
+                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Power className="h-3.5 w-3.5" />}
+                {s.status === "active" ? "Deactivate" : "Activate"}
+              </button>
+              <button
+                type="button"
+                onClick={() => router.push(`/dashboard/suppliers/${s.code}/edit`)}
+                className="flex items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3 py-2 text-xs font-extrabold text-white transition-all hover:opacity-90"
+              >
+                <Pencil className="h-3.5 w-3.5" /> Edit
+              </button>
+            </>
+          )
+        }
+      />
 
       {/* Tabs */}
       <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-[var(--border)]">

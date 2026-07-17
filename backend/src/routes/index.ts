@@ -26,6 +26,7 @@ import settingsRoutes from "#modules/settings/settings.routes.js";
 import supplierRoutes from "#modules/supplier/supplier.routes.js";
 import supplierTypeRoutes from "#modules/supplier-type/supplier-type.routes.js";
 import userRoutes from "#modules/user/user.routes.js";
+import vanStockRequestRoutes from "#modules/van-stock-request/van-stock-request.routes.js";
 import warehouseRoutes from "#modules/warehouse/warehouse.routes.js";
 import warehouseTypeRoutes from "#modules/warehouse-type/warehouse-type.routes.js";
 
@@ -74,5 +75,7 @@ router.use("/warehouses", warehousePendingRouter);
 router.use("/engineer-transfers", engineerTransferRoutes);
 // Field-Engineer → PM additional-kit requests (raise / review / approve / decline).
 router.use("/job-kit-requests", jobKitRequestRoutes);
+// Non-job engineer van restock/return requests (raise / review / scan-fulfil).
+router.use("/van-stock-requests", vanStockRequestRoutes);
 
 export default router;

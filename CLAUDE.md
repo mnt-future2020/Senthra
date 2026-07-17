@@ -21,9 +21,29 @@ The frontend talks to the backend over HTTP; auth is carried in **httpOnly cooki
 | `pnpm build` | Compile to `dist/` with `tsc` |
 | `pnpm typecheck` | Type-check without emitting |
 | `pnpm lint` / `pnpm lint:fix` | ESLint over `src` |
-| `pnpm prisma:generate` | Regenerate the Prisma client (run after schema changes) |
+| `pnpm test` | Vitest unit tests (`vitest run`) |
+| `pnpm prisma:generate` | Regenerate the Prisma client — types only, **does NOT touch the database** |
+| `npx prisma db push` | Push the schema (incl. **indexes**) to MongoDB — no script alias; run it directly |
 
-There is **no backend test runner** (`pnpm test` is a placeholder). Verify changes with `pnpm typecheck` + `pnpm lint`.
+Verify changes with `pnpm typecheck` + `pnpm lint` + `pnpm test`.
+
+### After ANY `schema.prisma` change, BOTH are required
+
+`prisma:generate` only rebuilds the client's TypeScript types. It never contacts the database, so
+typecheck/lint/tests all pass green while the live DB silently lacks whatever you added. For an
+`@@index`/`@@unique` that drift is invisible until production: queries quietly fall back to full
+collection scans, and a uniqueness rule you *think* is enforced simply isn't.
+
+```bash
+npx prisma db push      # applies indexes + field changes to MongoDB (also regenerates the client)
+```
+
+This is not hypothetical — on 2026-07-17 a single `db push` applied **29 accumulated indexes** across
+PurchaseRequest, PurchaseOrder, JobKitRequest and VanStockRequest, including `code` unique indexes.
+Those modules had been running unindexed with no DB-level uniqueness guarantee.
+
+Before pushing a new `@@unique` to a database that already holds data, check for existing rows that
+violate it — the index build fails if any duplicates exist, and MongoDB will not tell you which.
 
 **Frontend** (`cd frontend`): `pnpm dev` (serves on :3000), `pnpm build`, `pnpm lint`. Requires `NEXT_PUBLIC_API_URL` in `frontend/.env` pointing at the backend (e.g. `http://localhost:8000`).
 

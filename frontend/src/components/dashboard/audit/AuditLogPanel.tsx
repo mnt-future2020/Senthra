@@ -5,6 +5,7 @@ import { Download, ScrollText, Search } from "lucide-react";
 
 import * as auditService from "@/services/audit.service";
 import { useDashboard } from "@/hooks/useDashboard";
+import { ListPageHeader } from "@/components/ui/ListPageHeader";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -152,25 +153,20 @@ export function AuditLogPanel() {
   return (
     <div className="flex h-full flex-col gap-5">
       {/* Header + export */}
-      <div
-        className="flex shrink-0 flex-col gap-3 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:flex-row sm:items-center sm:justify-between"
-        style={{ borderRadius: "var(--radius)" }}
-      >
-        <div>
-          <h2 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">Audit Log</h2>
-          <p className="mt-0.5 text-xs text-[var(--muted)]">
-            Every change made in the system, newest first.
-          </p>
-        </div>
-        <button
-          onClick={doExport}
-          disabled={exporting || total === 0}
-          className="flex shrink-0 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3.5 py-2.5 text-xs font-extrabold text-[var(--ink)] transition-all hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          <Download className="h-4 w-4" />
-          {exporting ? "Exporting…" : "Export CSV"}
-        </button>
-      </div>
+      <ListPageHeader
+        title="Audit Log"
+        subtitle="Every change made in the system, newest first."
+        right={
+          <button
+            onClick={doExport}
+            disabled={exporting || total === 0}
+            className="flex shrink-0 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3.5 py-2.5 text-xs font-extrabold text-[var(--ink)] transition-all hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Download className="h-4 w-4" />
+            {exporting ? "Exporting…" : "Export CSV"}
+          </button>
+        }
+      />
 
       {/* Filter bar */}
       <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:items-center lg:flex-wrap">

@@ -14,6 +14,7 @@ import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
 import { useJobSocket } from "@/hooks/useJobSocket";
 import { subscribe } from "@/lib/socket";
+import { ListPageHeader } from "@/components/ui/ListPageHeader";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -227,10 +228,7 @@ export function JobsView() {
 
   return (
     <div className="flex h-full flex-col gap-5">
-      <div className="shrink-0 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs" style={{ borderRadius: "var(--radius)" }}>
-        <h2 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">Jobs</h2>
-        <p className="mt-0.5 text-xs text-[var(--muted)]">Create and assign installation, survey and maintenance jobs. Assigning a job notifies the engineer in real time; they accept it from their portal.</p>
-      </div>
+      <ListPageHeader title="Jobs" subtitle="Create and assign installation, survey and maintenance jobs. Assigning a job notifies the engineer in real time; they accept it from their portal." />
 
       <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:items-center">
         <div className="relative w-full lg:max-w-xs">

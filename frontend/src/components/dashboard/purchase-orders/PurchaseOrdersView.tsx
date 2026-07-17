@@ -8,6 +8,7 @@ import { ClipboardList, MoreHorizontal, Pencil, Plus, Search, Trash2 } from "luc
 import * as poService from "@/services/purchase-order.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
+import { ListPageHeader } from "@/components/ui/ListPageHeader";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -241,10 +242,7 @@ export function PurchaseOrdersView() {
 
   return (
     <div className="flex h-full flex-col gap-5">
-      <div className="shrink-0 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs" style={{ borderRadius: "var(--radius)" }}>
-        <h2 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">Purchase Orders</h2>
-        <p className="mt-0.5 text-xs text-[var(--muted)]">Raise, approve and issue orders to suppliers. Goods are received later by Goods In.</p>
-      </div>
+      <ListPageHeader title="Purchase Orders" subtitle="Raise, approve and issue orders to suppliers. Goods are received later by Goods In." />
 
       <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center">
         <div className="relative w-full sm:max-w-xs">

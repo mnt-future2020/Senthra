@@ -11,6 +11,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
 import { Select } from "@/components/ui/Select";
+import { DetailHeader } from "@/components/ui/DetailHeader";
 import { JobKitRequestsReview } from "./JobKitRequestsReview";
 import { FormError, FormPageSkeleton } from "@/components/ui/FormScaffold";
 import {
@@ -78,28 +79,37 @@ function JobView({ initial }: { initial: Job }) {
 
   return (
     <div className="space-y-5">
-      <div className="flex flex-col gap-4 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:flex-row sm:items-start sm:justify-between" style={{ borderRadius: "var(--radius)" }}>
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">{job.jobNumber}</h1>
+      <DetailHeader
+        storageKey="job-detail"
+        title={job.jobNumber}
+        badges={
+          <>
             <JobStatusChip status={job.status} />
             {busy && <Loader2 className="h-4 w-4 animate-spin text-[var(--muted)]" />}
-          </div>
-          <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
+          </>
+        }
+        meta={
+          <>
             <span className="font-semibold text-[var(--ink)]">{job.name}</span>
             <span aria-hidden>·</span>
             <span>{job.customerName ?? "—"}</span>
             {job.projectName && (<><span aria-hidden>·</span><span>{job.projectName}</span></>)}
             <span aria-hidden>·</span>
             <span>{job.assignedEngineerName ?? "Unassigned"}</span>
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {editable && <ActionBtn icon={Pencil} onClick={() => router.push(`/dashboard/jobs/${job.jobNumber}/edit`)} disabled={busy}>Edit</ActionBtn>}
-          {reassignable && <ActionBtn icon={UserCog} onClick={() => setReassignOpen(true)} disabled={busy}>Reassign</ActionBtn>}
-          {cancellable && <ActionBtn icon={XCircle} onClick={() => setCancelOpen(true)} disabled={busy}>Cancel</ActionBtn>}
-        </div>
-      </div>
+          </>
+        }
+        actions={
+          // Gate on the disjunction, not a bare fragment: a fragment is always truthy, so a read-only
+          // viewer (no edit/assign/cancel rights) would otherwise render an empty actions container.
+          (editable || reassignable || cancellable) && (
+            <>
+              {editable && <ActionBtn icon={Pencil} onClick={() => router.push(`/dashboard/jobs/${job.jobNumber}/edit`)} disabled={busy}>Edit</ActionBtn>}
+              {reassignable && <ActionBtn icon={UserCog} onClick={() => setReassignOpen(true)} disabled={busy}>Reassign</ActionBtn>}
+              {cancellable && <ActionBtn icon={XCircle} onClick={() => setCancelOpen(true)} disabled={busy}>Cancel</ActionBtn>}
+            </>
+          )
+        }
+      />
 
       {/* Kit list */}
       <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">

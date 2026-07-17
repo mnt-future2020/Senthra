@@ -9,6 +9,7 @@ import * as stockPositionService from "@/services/stockPosition.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useReferenceData } from "@/hooks/useReferenceData";
 import { Pagination } from "@/components/ui/Pagination";
+import { DetailHeader } from "@/components/ui/DetailHeader";
 import { Skeleton } from "@/components/ui/Skeleton";
 import {
   InventoryStatusBadge,
@@ -357,23 +358,18 @@ export function InventoryDetailPage({ initial }: { initial: InventoryDetailType 
 
   return (
     <div className="space-y-5">
-      {/* Header */}
-      <div
-        className="flex flex-col gap-4 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:flex-row sm:items-start sm:justify-between"
-        style={{ borderRadius: "var(--radius)" }}
+      <button
+        onClick={onBack}
+        className="flex items-center gap-1.5 text-[11px] font-bold text-[var(--muted)] transition-colors hover:text-[var(--ink)]"
       >
-        <div className="min-w-0">
-          <button
-            onClick={onBack}
-            className="mb-2 flex items-center gap-1.5 text-[11px] font-bold text-[var(--muted)] transition-colors hover:text-[var(--ink)]"
-          >
-            <ArrowLeft className="h-3.5 w-3.5" /> Back to inventory
-          </button>
-          <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">{inv.itemName}</h1>
-            <InventoryStatusBadge status={inv.status} />
-          </div>
-          <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-[var(--muted)]">
+        <ArrowLeft className="h-3.5 w-3.5" /> Back to inventory
+      </button>
+      <DetailHeader
+        storageKey="inventory-detail"
+        title={inv.itemName}
+        badges={<InventoryStatusBadge status={inv.status} />}
+        meta={
+          <>
             <span className="font-mono">{inv.itemCode}</span>
             {inv.sku && (
               <>
@@ -391,17 +387,19 @@ export function InventoryDetailPage({ initial }: { initial: InventoryDetailType 
             <span>
               {inv.warehouseName} ({inv.warehouseCode})
             </span>
-          </p>
-        </div>
-        {canMove && (
-          <button
-            onClick={() => router.push(`/dashboard/inventory/move?item=${inv.irmItemId}&from=${inv.warehouseId}`)}
-            className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90"
-          >
-            <ArrowLeftRight className="h-4 w-4" /> Move stock
-          </button>
-        )}
-      </div>
+          </>
+        }
+        actions={
+          canMove && (
+            <button
+              onClick={() => router.push(`/dashboard/inventory/move?item=${inv.irmItemId}&from=${inv.warehouseId}`)}
+              className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90"
+            >
+              <ArrowLeftRight className="h-4 w-4" /> Move stock
+            </button>
+          )
+        }
+      />
 
       {/* KPIs — at this warehouse */}
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">

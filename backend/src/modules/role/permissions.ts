@@ -323,6 +323,15 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     ],
   },
   {
+    key: "van_stock_request",
+    label: "Field Stock Requests",
+    description: "Non-job engineer restock/return requests — review, approve/decline, and fulfil by scan (per-warehouse tab).",
+    category: "Goods Management",
+    permissions: [
+      { key: "van_stock_request.review", action: "Review & fulfil", description: "See the warehouse's field-stock queue, approve/decline restocks, scan-fulfil restocks and returns, close short, and create walk-in requests." },
+    ],
+  },
+  {
     key: "jobs",
     label: "Jobs",
     description: "Field jobs — created for a customer/project, assigned to engineers and tracked through to completion.",
@@ -358,6 +367,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       // settings/signature endpoint; wire it into that route's requirePermission(...) when it ships.
       { key: "engineer.settings.edit", action: "Settings", description: "Manage own profile + signature from the engineer portal. (Reserved — no endpoint enforces this yet.)" },
       { key: "engineer.transfer", action: "Transfer", description: "Request/approve engineer-to-engineer stock transfers." },
+      { key: "engineer.van_stock.request", action: "Field stock", description: "Request field-stock restock from a warehouse or return excess stock — non-job. Cancel own pending requests." },
     ],
   },
   {

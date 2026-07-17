@@ -55,6 +55,9 @@ const NAV: NavItem[] = [
   { href: "/dashboard/purchase-requests", label: "Purchase Requests", icon: FileText, perms: ["purchase_requests.view"] },
   { href: "/dashboard/purchase-orders", label: "Purchase Orders", icon: ClipboardList, perms: ["purchase_orders.view"] },
   { href: "/dashboard/goods-in", label: "GRN", icon: PackageCheck, perms: ["goods_in.view"] },
+  // Van Requests deliberately has NO top-level entry — every request is owned by exactly one
+  // warehouse (final, or the pending restock's collection warehouse), so the queue lives in the
+  // warehouse detail's "Van Requests" tab and the Overview worklist deep-links straight there.
   { href: "/dashboard/inventory", label: "Inventory", icon: Boxes, perms: ["inventory.view"] },
   {
     // Only the perms that map to a real Settings section (see SettingsPanel). Master-data view perms
@@ -94,6 +97,7 @@ const ENGINEER_NAV: NavItem[] = [
   { href: "/dashboard/engineer/jobs", label: "Jobs", icon: ClipboardList, perms: ["engineer.jobs.view"] },
   { href: "/dashboard/engineer/inventory", label: "Stock", icon: Boxes, perms: ["engineer.inventory.view"] },
   { href: "/dashboard/engineer/transfers", label: "Transfers", icon: ArrowRightLeft, perms: ["engineer.transfer"] },
+  { href: "/dashboard/engineer/van-stock", label: "Field Stock", icon: Truck, perms: ["engineer.van_stock.request"] },
   { href: "/dashboard/account", label: "Settings", icon: Settings, perms: [] },
 ];
 

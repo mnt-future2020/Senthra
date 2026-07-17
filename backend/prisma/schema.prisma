@@ -242,6 +242,8 @@ model Warehouse {
   // Goods Management (back-relations; no DB column).
   jobStockMovements     JobStockMovement[]
   damagedStockBalances  DamagedStockBalance[]
+  // Non-job van stock requests fulfilled at this warehouse (back-relation; no DB column).
+  vanStockRequests      VanStockRequest[]
 
   deletedAt DateTime? // soft delete — excluded from listings; history stays intact
 
@@ -1352,6 +1354,141 @@ model JobKitRequestLine {
   @@index([requestId])
 }
 
+// ── Van Stock Request (engineer ↔ warehouse, NON-job) ──────────────────────────────────────────
+// The non-job twin of the JKR/GM pair: restock (warehouse → van, reviewed) and return (van →
+// warehouse, no review gate — scan-in IS acceptance). The request is the source document (like
+// StockAdjustment); postings write the existing inventory/engineer/damaged ledgers with VSR-####
+// provenance. See docs/superpowers/specs/2026-07-14-van-stock-request-design.md
+model VanStockRequest {
+  id   String @id @default(auto()) @map("_id") @db.ObjectId
+  code String @unique // VSR-#### (atomic Counter)
+
+  type       String // restock | return
+  status     String @default("pending") // pending | approved | partially_fulfilled | fulfilled | declined | cancelled
+  priority   String @default("normal") // normal | high | urgent
+  createdVia String @default("engineer_request") // engineer_request | walk_in
+
+  engineerId    String @db.ObjectId
+  engineer      User   @relation("VanStockRequestEngineer", fields: [engineerId], references: [id])
+  engineerName  String // snapshot
+  engineerEmail String? // snapshot
+
+  // Engineer's collection warehouse (REQUIRED on restock create — routes the pending request to
+  // that warehouse's queue); the reviewer confirms/overrides the FINAL warehouse on approve.
+  // Returns carry the final warehouse from create. Name/code are snapshots for list + worklist links.
+  preferredWarehouseId   String? @db.ObjectId
+  preferredWarehouseName String? // snapshot
+  preferredWarehouseCode String? // snapshot
+  warehouseId          String?    @db.ObjectId
+  warehouse            Warehouse? @relation(fields: [warehouseId], references: [id])
+  warehouseName        String? // snapshot (once final)
+  warehouseCode        String? // snapshot (once final)
+
+  reason      String
+  notes       String?
+  attachments String[] // request-level evidence (Cloudinary URLs)
+
+  reviewedByUserId String?   @db.ObjectId
+  reviewedByEmail  String?
+  reviewedAt       DateTime?
+  decisionNote     String?
+
+  lastFulfilledAt DateTime? // stamped on every posting (drives the stale indicator)
+  completionType  String? // complete | closed_short | cancelled_remaining — set when status → fulfilled
+  closedShortBy   String? // actor email
+  closedShortAt   DateTime?
+  closeShortNote  String?
+  cancelledAt     DateTime?
+
+  lines       VanStockRequestLine[]
+  fulfilments VanStockFulfilment[]
+
+  createdBy String?
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([status])
+  @@index([engineerId, status])
+  @@index([warehouseId, status])
+  @@index([createdAt])
+}
+
+model VanStockRequestLine {
+  id        String          @id @default(auto()) @map("_id") @db.ObjectId
+  requestId String          @db.ObjectId
+  request   VanStockRequest @relation(fields: [requestId], references: [id])
+
+  irmItemId String @db.ObjectId // loose socket — company IRM only
+  itemName  String // snapshot
+  code      String? // snapshot — the IRM item code (e.g. IRM-0002), shown + copyable in the UI
+  sku       String? // snapshot
+  uom       String? // snapshot
+
+  requestedQty Int
+  approvedQty  Int? // set on approve (reviewer may trim); returns: = requestedQty at create
+  fulfilledQty Int  @default(0) // accumulates across postings
+
+  // Per-line source (restock): the warehouse that ISSUES this line. Set on approve; defaults to the
+  // request's warehouseId. Returns/walk-in: = req.warehouseId for every line (no split).
+  sourceWarehouseId   String? @db.ObjectId
+  sourceWarehouseName String?
+  sourceWarehouseCode String?
+
+  // Per-warehouse close-short: the source warehouse that owns this line writes off its outstanding qty.
+  closedShortQty  Int?
+  closedShortBy   String?
+  closedShortNote String?
+  closedShortAt   DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([requestId])
+  @@index([irmItemId])
+  @@index([sourceWarehouseId])
+}
+
+// One row per POSTING event (a scan session that was posted). Restock lines are always "good";
+// return lines split good/damaged with mandatory photo + reason on damaged (GM rules).
+model VanStockFulfilment {
+  id        String          @id @default(auto()) @map("_id") @db.ObjectId
+  requestId String          @db.ObjectId
+  request   VanStockRequest @relation(fields: [requestId], references: [id])
+
+  sequence    Int // 1, 2, 3… per request
+  performedBy String // actor email snapshot
+  postedAt    DateTime @default(now())
+
+  lines VanStockFulfilmentLine[]
+
+  @@index([requestId])
+  // Two reviewers posting concurrently on a SPLIT restock (different source warehouses, the exact
+  // concurrency this feature exists for) both read fulfilments.length and compute the same next
+  // sequence. The line-qty guard keeps stock correct, but the audit trail would get two "#2"s that
+  // render in nondeterministic order. This makes the collision a P2002 the poster retries instead.
+  @@unique([requestId, sequence])
+}
+
+model VanStockFulfilmentLine {
+  id           String             @id @default(auto()) @map("_id") @db.ObjectId
+  fulfilmentId String             @db.ObjectId
+  fulfilment   VanStockFulfilment @relation(fields: [fulfilmentId], references: [id])
+
+  lineId    String @db.ObjectId // the VanStockRequestLine fulfilled (loose socket)
+  irmItemId String @db.ObjectId // loose socket
+  itemName  String // snapshot
+
+  qty            Int
+  condition      String  @default("good") // good | damaged (returns only)
+  damagePhotoUrl String? // required when damaged (Cloudinary URL)
+  damageReason   String? // required when damaged
+  scannedCode    String? // decoded barcode
+
+  createdAt DateTime @default(now())
+
+  @@index([fulfilmentId])
+}
+
 // Damaged-stock pool (write-off). Both owner types; never re-enters usable stock in v1.
 model DamagedStockBalance {
   id          String    @id @default(auto()) @map("_id") @db.ObjectId
@@ -1523,6 +1660,8 @@ model User {
   // Goods Management (back-relations; no DB column).
   jobStockMovements              JobStockMovement[]              @relation("JobStockMovementEngineer")
   engineerCustomerStockHoldings  EngineerCustomerStockHolding[]  @relation("EngineerCustomerStockOwner")
+  // Non-job van stock requests raised by this engineer (back-relation; no DB column).
+  vanStockRequests               VanStockRequest[]               @relation("VanStockRequestEngineer")
 
   @@index([roleId])
   @@index([status])
