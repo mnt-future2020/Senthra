@@ -4,6 +4,7 @@ import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Boxes, Layers, Tags } from "lucide-react";
 
+import { ListPageHeader } from "@/components/ui/ListPageHeader";
 import { IrmItemsView } from "./IrmItemsView";
 import { IrmTypesView } from "./IrmTypesView";
 import { IrmCategoriesView } from "./IrmCategoriesView";
@@ -88,18 +89,11 @@ export function IrmPanel({ embedded = false, tab }: { embedded?: boolean; tab?: 
       {embedded ? (
         tabSwitcher ? <div className="flex shrink-0">{tabSwitcher}</div> : null
       ) : (
-        <div
-          className="flex shrink-0 flex-col gap-4 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:flex-row sm:items-center sm:justify-between"
-          style={{ borderRadius: "var(--radius)" }}
-        >
-          <div className="space-y-0.5">
-            <h2 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">IRM Catalogue</h2>
-            <p className="text-xs text-[var(--muted)]">
-              Company-owned internal stock items, with the type and category lists used to classify them.
-            </p>
-          </div>
-          {tabSwitcher}
-        </div>
+        <ListPageHeader
+          title="IRM Catalogue"
+          subtitle="Company-owned internal stock items, with the type and category lists used to classify them."
+          right={tabSwitcher}
+        />
       )}
 
       <div className="flex min-h-0 flex-1 flex-col">{content}</div>

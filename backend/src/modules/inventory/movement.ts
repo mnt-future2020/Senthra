@@ -59,6 +59,8 @@ const TYPE_LABELS: Record<string, string> = {
   job_lost: "Lost on Job",
   usage: "Used on Site",
   return: "Returned",
+  van_restock: "Field Restock",
+  van_return: "Field Return",
   restore: "Restored from Damaged",
   write_off: "Marked Damaged",
 };

@@ -8,6 +8,7 @@ import { MoreHorizontal, PackageCheck, Pencil, Search, Trash2 } from "lucide-rea
 import * as grnService from "@/services/goods-in.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
+import { ListPageHeader } from "@/components/ui/ListPageHeader";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -211,10 +212,10 @@ export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { wa
   return (
     <div className={`flex h-full flex-col ${embedded ? "gap-4" : "gap-5"}`}>
       {!embedded && (
-        <div className="shrink-0 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs" style={{ borderRadius: "var(--radius)" }}>
-          <h2 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">Goods Receipt Notes (GRN)</h2>
-          <p className="mt-0.5 text-xs text-[var(--muted)]">Search, track and audit goods receipts across every warehouse. Receive a delivery here, from a Purchase Order, or from a warehouse&apos;s Incoming stock — all feed the same flow.</p>
-        </div>
+        <ListPageHeader
+          title="Goods Receipt Notes (GRN)"
+          subtitle="Search, track and audit goods receipts across every warehouse. Receive a delivery here, from a Purchase Order, or from a warehouse's Incoming stock — all feed the same flow."
+        />
       )}
 
       <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center">

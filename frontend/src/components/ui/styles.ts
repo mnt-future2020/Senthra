@@ -11,6 +11,11 @@ export const hintCls = "mt-1.5 text-[11px] leading-snug text-[var(--faint)]";
 export const primaryBtn =
   "flex items-center gap-2 rounded-xl bg-[var(--accent)] px-5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 disabled:opacity-60";
 
+// Danger button — same shape as primary, red fill. For confirming a DESTRUCTIVE action (decline,
+// delete). Signals the action's severity so it never reads the same as a positive primary.
+export const dangerBtn =
+  "flex items-center gap-2 rounded-xl bg-[var(--neg)] px-5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 disabled:opacity-60";
+
 // Secondary / outline button used for inline actions (upload, copy, etc.).
 export const ghostBtn =
   "flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-1.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)] disabled:opacity-60";

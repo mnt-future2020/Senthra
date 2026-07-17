@@ -33,6 +33,8 @@ const TYPE_OPTIONS: SelectOption[] = [
   { value: "manual_adjust", label: "Adjustment (remove)" },
   { value: "job_issue", label: "Job Issue" },
   { value: "job_return", label: "Job Return" },
+  { value: "van_restock", label: "Field Restock" },
+  { value: "van_return", label: "Field Return" },
   { value: "job_consume", label: "Consumed on Job" },
   { value: "job_lost", label: "Lost on Job" },
   { value: "write_off", label: "Marked Damaged" },

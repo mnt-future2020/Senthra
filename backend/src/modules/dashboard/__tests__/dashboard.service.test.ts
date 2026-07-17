@@ -22,6 +22,9 @@ vi.mock("#modules/job/job.repository.js", () => ({
 vi.mock("#modules/job-kit-request/job-kit-request.repository.js", () => ({
   pendingWorklist: vi.fn(async () => []),
 }));
+vi.mock("#modules/van-stock-request/van-stock-request.repository.js", () => ({
+  pendingWorklist: vi.fn(async () => []),
+}));
 vi.mock("#modules/inventory/inventory.repository.js", () => ({
   lowStockCounts: vi.fn(async () => ({ count: 5, criticalCount: 2 })),
 }));

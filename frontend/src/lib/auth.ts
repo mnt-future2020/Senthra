@@ -81,6 +81,7 @@ export const OVERVIEW_PERMS = [
   "purchase_orders.acknowledge",
   "goods_in.create",
   "jobs.kit_request.review",
+  "van_stock_request.review",
 ];
 
 // Should this principal land on the Overview screen? True for the super-admin and for any staff user

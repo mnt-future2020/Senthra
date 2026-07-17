@@ -8,6 +8,7 @@ import { MoreHorizontal, Pencil, Plus, Search, Send, Trash2, Users2 } from "luci
 import * as customerService from "@/services/customer.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
+import { ListPageHeader } from "@/components/ui/ListPageHeader";
 import { Pagination } from "@/components/ui/Pagination";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { StatusBadge } from "@/components/ui/StatusBadge";
@@ -323,15 +324,7 @@ export function CustomersView() {
 
   return (
     <div className="flex h-full flex-col gap-5">
-      <div
-        className="shrink-0 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs"
-        style={{ borderRadius: "var(--radius)" }}
-      >
-        <h2 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">Customers</h2>
-        <p className="mt-0.5 text-xs text-[var(--muted)]">
-          Customer companies and their read-only portal access.
-        </p>
-      </div>
+      <ListPageHeader title="Customers" subtitle="Customer companies and their read-only portal access." />
 
       {/* Toolbar: search + filter + sort + add */}
       <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center">

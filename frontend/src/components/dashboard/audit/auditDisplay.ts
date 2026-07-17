@@ -41,11 +41,83 @@ const VERB_TONE: Record<string, ActionTone> = {
   viewed: "neutral",
   // Goods Out — dispatching stock to an engineer is a movement (update).
   dispatched: "update",
+  // Lifecycle acceptance — a job/transfer/PO accepted or acknowledged is a positive confirmation.
+  accepted: "create",
+  supplier_accepted: "create",
+  acknowledged: "create",
+  started: "update",
+  // Refusals read as negative, matching `rejected` above. VSR + engineer transfers + kit requests
+  // all use `declined` rather than `rejected`, so it needs its own entry.
+  declined: "delete",
+  overridden: "delete",
+  // Goods Management scan flow — issuing/returning stock is a movement; reconcile closes the job
+  // (neutral terminal, like `closed`); restoring damaged stock to usable is positive.
+  issued: "update",
+  return_posted: "update",
+  reconciled: "neutral",
+  damaged_restored: "create",
+  // Field Stock (VSR) — a posting moves stock; walk-in creates a pre-approved request; closing short
+  // is a neutral terminal (the remainder is written off, not an error); cancelling remainder is negative.
+  fulfilment_posted: "update",
+  walk_in_created: "create",
+  closed_short: "neutral",
+  cancelled_remaining: "delete",
+  // Inventory adjustments — adding stock is positive, an adjustment is a correction (update).
+  stock_added: "create",
+  stock_adjusted: "update",
+  transferred: "update",
+  received: "create",
+  // Assignment lifecycle — assign reads positive, unassign negative.
+  assigned: "create",
+  warehouse_assigned: "create",
+  warehouse_unassigned: "delete",
+  // Record/content lifecycle.
+  created_by_admin: "create",
+  bulk_imported: "create",
+  duplicated: "create",
+  restored: "create",
+  kit_line_added: "create",
+  barcode_generated: "create",
+  invite_resent: "update",
+  profile_updated: "update",
+  delivery_date_updated: "update",
+  signature_uploaded: "create",
+  signature_removed: "delete",
 };
+
+// Verb suffixes checked (longest-first) when the full verb isn't in VERB_TONE. This keeps a NEW
+// action like `foo.delivery_window_updated` reading as an update instead of silently going grey —
+// the map above stays the source of truth, this is only the safety net.
+//
+// Order matters: longer suffixes win, so `_unassigned` is tested before `_assigned` and can't be
+// mis-toned as positive. Every suffix is `_`-prefixed so it only ever matches a whole trailing word
+// (`cancelled_remaining` does NOT match `cancelled`, which is why it's mapped explicitly above).
+const SUFFIX_TONE: ReadonlyArray<readonly [string, ActionTone]> = [
+  ["_unassigned", "delete"],
+  ["_removed", "delete"],
+  ["_deleted", "delete"],
+  ["_rejected", "delete"],
+  ["_declined", "delete"],
+  ["_cancelled", "delete"],
+  ["_created", "create"],
+  ["_added", "create"],
+  ["_assigned", "create"],
+  ["_uploaded", "create"],
+  ["_generated", "create"],
+  ["_approved", "create"],
+  ["_accepted", "create"],
+  ["_restored", "create"],
+  ["_updated", "update"],
+  ["_posted", "update"],
+  ["_changed", "update"],
+];
 
 export function actionTone(action: string): ActionTone {
   const verb = action.split(".").pop() ?? "";
-  return VERB_TONE[verb] ?? "neutral";
+  const exact = VERB_TONE[verb];
+  if (exact) return exact;
+  for (const [suffix, tone] of SUFFIX_TONE) if (verb.endsWith(suffix)) return tone;
+  return "neutral";
 }
 
 // Tailwind classes per tone (uses the app's CSS variables / a small fixed palette).

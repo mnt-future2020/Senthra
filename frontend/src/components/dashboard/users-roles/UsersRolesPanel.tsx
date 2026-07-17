@@ -4,6 +4,7 @@ import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Briefcase, Building2, Shield, Users2 } from "lucide-react";
 
+import { ListPageHeader } from "@/components/ui/ListPageHeader";
 import { RolesView } from "@/components/dashboard/users-roles/roles/RolesView";
 import { UsersView } from "./users/UsersView";
 import { DepartmentsView } from "@/components/dashboard/users-roles/departments/DepartmentsView";
@@ -38,37 +39,30 @@ export function UsersRolesPanel() {
 
   return (
     <div className="flex h-full flex-col gap-6">
-      <div
-        className="flex shrink-0 flex-col gap-4 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:flex-row sm:items-center sm:justify-between"
-        style={{ borderRadius: "var(--radius)" }}
-      >
-        <div className="space-y-0.5">
-          <h2 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">
-            Users &amp; Roles
-          </h2>
-          <p className="text-xs text-[var(--muted)]">
-            Create the people who run the system and the roles they hold.
-          </p>
-        </div>
-        {visibleTabs.length > 1 && (
-          <div className="flex gap-1 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-1">
-            {visibleTabs.map((t) => (
-              <button
-                key={t.id}
-                onClick={() => selectTab(t.id)}
-                className={`flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-bold transition-all ${
-                  activeTab === t.id
-                    ? "bg-[var(--accent)] text-white shadow-xs"
-                    : "text-[var(--muted)] hover:text-[var(--ink)]"
-                }`}
-              >
-                <t.icon className="h-4 w-4" />
-                {t.label}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
+      <ListPageHeader
+        title="Users & Roles"
+        subtitle="Create the people who run the system and the roles they hold."
+        right={
+          visibleTabs.length > 1 && (
+            <div className="flex gap-1 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-1">
+              {visibleTabs.map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => selectTab(t.id)}
+                  className={`flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-bold transition-all ${
+                    activeTab === t.id
+                      ? "bg-[var(--accent)] text-white shadow-xs"
+                      : "text-[var(--muted)] hover:text-[var(--ink)]"
+                  }`}
+                >
+                  <t.icon className="h-4 w-4" />
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          )
+        }
+      />
 
       <div className="flex min-h-0 flex-1 flex-col">
         {activeTab === "users" ? (

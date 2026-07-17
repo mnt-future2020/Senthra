@@ -27,3 +27,8 @@ coverage/
 
 # local dev server log
 dev.log
+
+# Ad-hoc DB inspection / scratch scripts (never production code — kept out of the repo)
+_inspect.mjs
+_scratch.*
+*.scratch.*

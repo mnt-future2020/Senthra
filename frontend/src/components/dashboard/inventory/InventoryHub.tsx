@@ -3,6 +3,7 @@
 import * as React from "react";
 import { MinusCircle, X } from "lucide-react";
 
+import { ListPageHeader } from "@/components/ui/ListPageHeader";
 import { InventoryView } from "./InventoryView";
 import { MovementsTable } from "./MovementsTable";
 import { StockPositionTable } from "./StockPositionTable";
@@ -128,15 +129,7 @@ export function InventoryHub() {
 
   return (
     <div className="flex h-full flex-col gap-4">
-      <div
-        className="shrink-0 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs"
-        style={{ borderRadius: "var(--radius)" }}
-      >
-        <h2 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">Inventory Hub</h2>
-        <p className="mt-0.5 text-xs text-[var(--muted)]">
-          Everything the business is accountable for — by ownership and current location.
-        </p>
-      </div>
+      <ListPageHeader title="Inventory Hub" subtitle="Everything the business is accountable for — by ownership and current location." />
 
       <SummaryCards key={`cards-${refreshKey}`} active={lens} onSelect={switchLens} />
 

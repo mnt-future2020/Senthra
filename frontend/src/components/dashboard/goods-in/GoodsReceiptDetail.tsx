@@ -9,6 +9,7 @@ import * as auditService from "@/services/audit.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { DetailHeader } from "@/components/ui/DetailHeader";
 import { actionLabel, actionTone, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
 import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
 import { GRN_QUALITY_LABELS, GrnStatusBadge, formatDate } from "./grnStatus";
@@ -66,14 +67,17 @@ export function GoodsReceiptDetail({ initial }: { initial: GoodsReceipt }) {
 
   return (
     <div className="flex h-full flex-col gap-5">
-      <div className="shrink-0 flex flex-col gap-4 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:flex-row sm:items-start sm:justify-between" style={{ borderRadius: "var(--radius)" }}>
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">{grn.code}</h1>
+      <DetailHeader
+        storageKey="grn-detail"
+        title={grn.code}
+        badges={
+          <>
             <GrnStatusBadge status={grn.status} />
             {busy && <Loader2 className="h-4 w-4 animate-spin text-[var(--muted)]" />}
-          </div>
-          <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
+          </>
+        }
+        meta={
+          <>
             <span className="font-mono">{grn.poCode ?? "—"}</span>
             <span aria-hidden>·</span>
             <span>{grn.supplierName ?? "—"}</span>
@@ -81,10 +85,10 @@ export function GoodsReceiptDetail({ initial }: { initial: GoodsReceipt }) {
             <span>{grn.warehouse?.name ?? "—"}</span>
             <span aria-hidden>·</span>
             <span>Received {formatDate(grn.receivedDate)}</span>
-          </p>
-        </div>
-        {actions.length > 0 && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
-      </div>
+          </>
+        }
+        actions={actions.length > 0 ? actions : undefined}
+      />
 
       <div className="shrink-0 flex gap-1 overflow-x-auto border-b border-[var(--border)]">
         {(["overview", "attachments", "audit"] as Tab[]).map((t) => (

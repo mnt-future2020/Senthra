@@ -16,6 +16,7 @@ const KIND_LABELS: Record<string, string> = {
   acknowledge_po: "Record acceptance",
   receive_goods: "Receive goods",
   review_kit_request: "Review kit request",
+  review_van_stock_request: "Review field stock",
 };
 
 const KIND_TONE: Record<string, string> = {
@@ -26,6 +27,7 @@ const KIND_TONE: Record<string, string> = {
   acknowledge_po: "bg-teal-500/12 text-teal-600",
   receive_goods: "bg-emerald-500/12 text-emerald-600",
   review_kit_request: "bg-amber-500/12 text-amber-600",
+  review_van_stock_request: "bg-orange-500/12 text-orange-600",
 };
 
 function isOverdue(dueDate: string | null): boolean {

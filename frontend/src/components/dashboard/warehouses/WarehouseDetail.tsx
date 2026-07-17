@@ -12,6 +12,7 @@ import { Pagination } from "@/components/ui/Pagination";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { DetailHeader } from "@/components/ui/DetailHeader";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { actionLabel, actionTone, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
 import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
@@ -19,6 +20,7 @@ import { ReceiveStockModal } from "@/components/dashboard/customers/ReceiveStock
 import { InventoryView } from "@/components/dashboard/inventory/InventoryView";
 import { GoodsReceiptsView } from "@/components/dashboard/goods-in/GoodsReceiptsView";
 import { GoodsManagementTab } from "@/components/dashboard/goods-management/GoodsManagementTab";
+import { VanRequestsBoard } from "@/components/dashboard/van-requests/VanRequestsBoard";
 import { DemandTab } from "@/components/dashboard/goods-management/DemandTab";
 import { DamagedStockView } from "@/components/dashboard/goods-management/DamagedStockView";
 import { ExpectedDeliveries } from "./ExpectedDeliveries";
@@ -63,7 +65,7 @@ function TableSkeleton({ headers, minWidth }: { headers: string[]; minWidth: num
 // catalogue's per-warehouse balances) and customer consignment stock the customer shipped in.
 // (Incoming tab is gated by stock_requests.view; customer stock under Inventory is visible to
 // all; the IRM pool inside is gated by inventory.view.)
-type Tab = "overview" | "inventory" | "incoming" | "goods" | "demand" | "transactions" | "audit";
+type Tab = "overview" | "inventory" | "incoming" | "goods" | "van" | "demand" | "transactions" | "audit";
 // `perms` is an anyOf gate. "Incoming stock" hosts BOTH receiving flows behind an inner toggle —
 // company goods receipts (goods_in.view) and customer consignment intake (stock_requests.view) — so
 // it shows if the user can see EITHER pool.
@@ -77,6 +79,7 @@ const TABS: { key: Tab; label: string; perms?: string[]; fill?: boolean }[] = [
   { key: "incoming", label: "Incoming stock", perms: ["goods_in.view", "stock_requests.view"], fill: true },
   { key: "inventory", label: "Inventory", fill: true },
   { key: "goods", label: "Goods Management", perms: ["goods_management.view"], fill: true },
+  { key: "van", label: "Field Stock Requests", perms: ["van_stock_request.review"], fill: true },
   { key: "demand", label: "Demand", perms: ["inventory.view"], fill: true },
   { key: "transactions", label: "Transactions" },
   { key: "audit", label: "Audit trail" },
@@ -112,48 +115,49 @@ export function WarehouseDetail({ initial }: { initial: Warehouse }) {
 
   return (
     <div className="flex h-full flex-col gap-5">
-      {/* Header card */}
-      <div
-        className="flex shrink-0 flex-col gap-4 border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs sm:flex-row sm:items-start sm:justify-between"
-        style={{ borderRadius: "var(--radius)" }}
-      >
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-xl font-extrabold tracking-tight text-[var(--ink)]">{w.name}</h1>
+      <DetailHeader
+        storageKey="warehouse-detail"
+        title={w.name}
+        badges={
+          <>
             <StatusBadge status={w.status as UserStatus} />
             {w.isDefault && (
               <span className="rounded-full bg-[var(--accent-10)] px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-[var(--accent)]">
                 Default
               </span>
             )}
-          </div>
-          <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[var(--muted)]">
+          </>
+        }
+        meta={
+          <>
             <span className="font-mono">{w.code}</span>
             <span aria-hidden>·</span>
             <span>{w.type?.name ?? "—"}</span>
-          </p>
-        </div>
-        {canEdit && (
-          <div className="flex shrink-0 items-center gap-2">
-            <button
-              type="button"
-              onClick={toggleStatus}
-              disabled={busy}
-              className="flex items-center gap-1.5 rounded-xl border border-[var(--border)] px-3 py-2 text-xs font-bold text-[var(--ink)] transition-all hover:bg-[var(--surface-2)] disabled:opacity-60"
-            >
-              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Power className="h-3.5 w-3.5" />}
-              {w.status === "active" ? "Deactivate" : "Activate"}
-            </button>
-            <button
-              type="button"
-              onClick={() => router.push(`/dashboard/warehouses/${w.code}/edit`)}
-              className="flex items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3 py-2 text-xs font-extrabold text-white transition-all hover:opacity-90"
-            >
-              <Pencil className="h-3.5 w-3.5" /> Edit
-            </button>
-          </div>
-        )}
-      </div>
+          </>
+        }
+        actions={
+          canEdit && (
+            <>
+              <button
+                type="button"
+                onClick={toggleStatus}
+                disabled={busy}
+                className="flex items-center gap-1.5 rounded-xl border border-[var(--border)] px-3 py-2 text-xs font-bold text-[var(--ink)] transition-all hover:bg-[var(--surface-2)] disabled:opacity-60"
+              >
+                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Power className="h-3.5 w-3.5" />}
+                {w.status === "active" ? "Deactivate" : "Activate"}
+              </button>
+              <button
+                type="button"
+                onClick={() => router.push(`/dashboard/warehouses/${w.code}/edit`)}
+                className="flex items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3 py-2 text-xs font-extrabold text-white transition-all hover:opacity-90"
+              >
+                <Pencil className="h-3.5 w-3.5" /> Edit
+              </button>
+            </>
+          )
+        }
+      />
 
       {/* Tabs */}
       <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-[var(--border)]">
@@ -180,6 +184,7 @@ export function WarehouseDetail({ initial }: { initial: Warehouse }) {
         {tab === "inventory" && <StockTab warehouseCode={w.code} warehouseId={w.id} router={router} />}
         {tab === "incoming" && <IncomingTab warehouseCode={w.code} warehouseId={w.id} router={router} pushToast={pushToast} />}
         {tab === "goods" && <GoodsManagementTab warehouseId={w.id} warehouseCode={w.code} router={router} />}
+        {tab === "van" && <VanRequestsBoard warehouse={{ id: w.id, name: w.name, code: w.code }} />}
         {tab === "demand" && <DemandTab warehouseId={w.id} />}
         {tab === "transactions" && (
           <Placeholder

@@ -157,6 +157,12 @@ export function JobScanPanel({
   };
 
   // ── Scan handler ──────────────────────────────────────────────────────────
+  // ⚠️ These scan rules are MIRRORED in van-requests/VanRequestDetail.tsx `onScan` (the non-job van
+  // stock flow): in-flight guard → dead-scan message → re-scan bumps qty → otherwise stage a new line.
+  // Its good/damaged split + evidence-clearing mirror `setPortion` below. The BEHAVIOUR is shared; the
+  // CODE is not — VSR sits on a different document (a VSR line, not a job kit line) and has no
+  // issue/return toggle or misc no-barcode lines, so a shared hook would leak. If you change the
+  // scan/split rules HERE, change them THERE too. (ScannerInput itself is already shared by both.)
   const onCode = async (code: string) => {
     if (scanning) return;
     setScanning(true);

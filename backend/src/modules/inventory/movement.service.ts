@@ -85,7 +85,7 @@ const ALL_LEDGERS: LedgerKind[] = ["inventory", "engineer", "engineerCustomer", 
 // Which `type` values each ledger can emit — lets a type filter prune ledgers that could never match.
 const CAN_EMIT: Record<LedgerKind, ReadonlySet<string>> = {
   inventory: new Set(["goods_in", "goods_out", "transfer_in", "transfer_out", "manual_add", "manual_adjust", "restore"]),
-  engineer: new Set(["goods_out", "transfer_in", "transfer_out", "job_issue", "job_return", "job_consume", "job_lost", "return", "usage"]),
+  engineer: new Set(["goods_out", "transfer_in", "transfer_out", "job_issue", "job_return", "job_consume", "job_lost", "return", "usage", "van_restock", "van_return"]),
   engineerCustomer: new Set(["job_issue", "job_return", "job_consume", "job_lost", "transfer_in", "transfer_out"]),
   damaged: new Set(["write_off", "restore"]),
 };

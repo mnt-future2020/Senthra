@@ -9,7 +9,8 @@ export type WorklistKind =
   | "send_po"
   | "acknowledge_po"
   | "receive_goods"
-  | "review_kit_request";
+  | "review_kit_request"
+  | "review_van_stock_request";
 
 export interface WorklistItem {
   kind: WorklistKind;

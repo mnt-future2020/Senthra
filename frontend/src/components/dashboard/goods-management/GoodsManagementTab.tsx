@@ -14,13 +14,14 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ClipboardList, Clock, PackageCheck, Search } from "lucide-react";
+import { ClipboardList, Clock, PackageCheck } from "lucide-react";
 
 import * as gmService from "@/services/goodsManagement.service";
 import type { QueuePage, QueueKitLine } from "@/types/goodsManagement";
 import { useGoodsSocket } from "@/hooks/useGoodsSocket";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { Pagination } from "@/components/ui/Pagination";
+import { WorkspaceToolbar } from "@/components/ui/WorkspaceToolbar";
 import { JobScanPanel } from "./JobScanPanel";
 import { OverdueHoldingsView } from "./OverdueHoldingsView";
 
@@ -305,17 +306,17 @@ export function GoodsManagementTab({
       {/* Queue / Closed sections */}
       {showsTable && (
         <>
-          {/* Search */}
-          <div className="relative shrink-0">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--faint)]" />
-            <input
-              type="search"
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-              placeholder="Search job no., name, customer or engineer…"
-              className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] py-2.5 pl-9 pr-3 text-sm text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
-            />
-          </div>
+          {/* Operational workspace tab: no title (the Warehouse header owns the identity) — the
+              controls start directly. Full-width search (this tab has no filters/actions beside it). */}
+          <WorkspaceToolbar
+            search={{
+              value: searchInput,
+              onChange: setSearchInput,
+              placeholder: "Search job no., name, customer or engineer…",
+              ariaLabel: "Search goods management jobs",
+              constrained: false,
+            }}
+          />
 
           {error ? (
             <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>

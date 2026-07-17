@@ -5,6 +5,7 @@ import * as prfRepo from "#modules/purchase-request/purchase-request.repository.
 import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import * as jobRepo from "#modules/job/job.repository.js";
 import * as kitRepo from "#modules/job-kit-request/job-kit-request.repository.js";
+import * as vsrRepo from "#modules/van-stock-request/van-stock-request.repository.js";
 import * as invRepo from "#modules/inventory/inventory.repository.js";
 import * as auditRepo from "#modules/audit/audit.repository.js";
 import * as grnRepo from "#modules/goods-in/goods-in.repository.js";
@@ -120,6 +121,7 @@ export async function buildDashboardSummary(
   const qAckPo = can("purchase_orders.acknowledge");
   const qReceive = can("goods_in.create");
   const qKit = can("jobs.kit_request.review");
+  const qVsr = can("van_stock_request.review");
 
   // The "send to supplier" action restricts a pm_review PO to its assigned PM UNLESS the actor can
   // override (holds "*" or purchase_orders.assign_pm) — mirror that here so an admin / assign_pm holder
@@ -195,9 +197,9 @@ export async function buildDashboardSummary(
     }),
     section(
       "worklist",
-      qReviewPrf || qApprovePo || qSendPo || qAckPo || qReceive || qKit,
+      qReviewPrf || qApprovePo || qSendPo || qAckPo || qReceive || qKit || qVsr,
       async () => {
-        const [wlPrf, wlFastPath, wlPending, wlPmReview, wlSent, wlReceive, wlKit] = await Promise.all([
+        const [wlPrf, wlFastPath, wlPending, wlPmReview, wlSent, wlReceive, wlKit, wlVsr] = await Promise.all([
           qReviewPrf ? prfRepo.submittedWorklist(scope) : Promise.resolve([]),
           qApprovePo ? poRepo.fastPathDraftWorklist(scope) : Promise.resolve([]),
           qApprovePo ? poRepo.statusWorklist("pending_approval", { warehouseIds: scope }) : Promise.resolve([]),
@@ -205,6 +207,7 @@ export async function buildDashboardSummary(
           qAckPo ? poRepo.statusWorklist("sent", { warehouseIds: scope }) : Promise.resolve([]),
           qReceive ? poRepo.receivableWorklist(scope) : Promise.resolve([]),
           qKit ? kitRepo.pendingWorklist() : Promise.resolve([]),
+          qVsr ? vsrRepo.pendingWorklist(scope) : Promise.resolve([]),
         ]);
         const items: WorklistItem[] = [];
         const push = (row: WorklistItem) => items.push(row);
@@ -226,11 +229,16 @@ export async function buildDashboardSummary(
         // Kit request: code = the JKR (JKR-####); title/link target = its job (JOB-YYYY-####), where the PM acts.
         for (const r of wlKit)
           push({ kind: "review_kit_request", id: r.id, code: r.code, title: r.jobNumber, priority: null, dueDate: null, ageDays: daysBetween(r.createdAt, now), href: `/dashboard/jobs/${r.jobNumber}` });
+        // Van stock request: code = VSR-####; title = who's asking; priority feeds the urgency band.
+        // Deep-links to the OWNING warehouse's Van Requests tab (final warehouse, or the pending
+        // restock's collection warehouse) — the queue lives inside the warehouse, not top-level.
+        for (const r of wlVsr)
+          push({ kind: "review_van_stock_request", id: r.id, code: r.code, title: `${r.engineerName} — ${r.type === "return" ? "stock return" : "restock"}`, priority: r.priority === "normal" ? null : r.priority, dueDate: null, ageDays: daysBetween(r.createdAt, now), href: r.targetWarehouseCode ? `/dashboard/warehouses/${r.targetWarehouseCode}?tab=van` : "/dashboard/warehouses" });
         items.sort((a, b) => compareWorklist(a, b, now));
         // `total` is the merged backlog size. It is EXACT unless some queue returned its full cap —
         // then more rows exist behind that queue, so `total` is a floor and `truncated` says so
         // (the FE renders "10 of 50+"). No extra count queries: we infer it from the cap-hit.
-        const truncated = [wlPrf, wlFastPath, wlPending, wlPmReview, wlSent, wlReceive, wlKit].some(
+        const truncated = [wlPrf, wlFastPath, wlPending, wlPmReview, wlSent, wlReceive, wlKit, wlVsr].some(
           (q) => q.length >= WORKLIST_QUERY_CAP,
         );
         return { items: items.slice(0, WORKLIST_RETURN_CAP), total: items.length, truncated };
