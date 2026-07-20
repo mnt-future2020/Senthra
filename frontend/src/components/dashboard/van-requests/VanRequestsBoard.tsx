@@ -2,24 +2,18 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ChevronRight, Loader2, PackagePlus, Trash2 } from "lucide-react";
+import { ChevronRight, PackagePlus } from "lucide-react";
 
 import * as vanStockSvc from "@/services/vanStockRequest.service";
-import type { VanStockItemOption, VanStockPriority, VanStockRequest } from "@/services/vanStockRequest.service";
-import { listEngineerOptions } from "@/services/warehouse.service";
+import type { VanStockRequest } from "@/services/vanStockRequest.service";
 import { subscribe } from "@/lib/socket";
-import { useDashboard } from "@/hooks/useDashboard";
-import { Modal } from "@/components/ui/Modal";
-import { Notice } from "@/components/ui/Notice";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
-import { inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
+import { primaryBtn } from "@/components/ui/styles";
 import { WorkspaceToolbar } from "@/components/ui/WorkspaceToolbar";
 import { EmptyState, fmtDateTime } from "@/components/dashboard/portal/portalUi";
 import { VanStockStatusChip } from "@/components/dashboard/engineer/EngineerVanStock";
-import { VanRequestItemsSummary, VanRequestLinesTable, VanRequestListSkeleton, VanStockItemSearch, VanStockTypeBadge, warehouseCaption } from "./vanRequestUi";
-import { VanRequestDetail } from "./VanRequestDetail";
-import type { Msg } from "@/components/ui/types";
+import { VanRequestItemsSummary, VanRequestLinesTable, VanRequestListSkeleton, VanStockTypeBadge, VanStockWalkInBadge, warehouseCaption } from "./vanRequestUi";
 
 // Warehouse-side board for NON-job van stock requests: review pending restocks (approve with trims /
 // decline), receive returns and fulfil approved restocks by scan, close short, and raise walk-ins.
@@ -47,31 +41,48 @@ const PRIORITY_FILTER_OPTIONS = [
   { value: "urgent", label: "Urgent" },
 ];
 
+// A walk-in is pre-approved at the counter, never reviewed — so "what did we actually review?" and
+// "what went out over the counter?" are different questions the reviewer needs to ask separately.
+const ORIGIN_OPTIONS = [
+  { value: "", label: "All origins" },
+  { value: "engineer_request", label: "Engineer requests" },
+  { value: "walk_in", label: "Walk-ins" },
+];
+
 const SORT_OPTIONS = [
   { value: "newest", label: "Newest first" },
   { value: "oldest", label: "Oldest first" },
 ];
 
 // Rendered inside a warehouse-detail tab: `warehouse` narrows the queue to that warehouse (final
-// warehouse = it, or pending restocks whose collection warehouse is it) and pre-fixes the walk-in.
+// warehouse = it, or pending restocks whose collection warehouse is it). Opening a request or the
+// walk-in composer is the workspace's job (both swap this board out) — hence onOpen / onWalkIn.
 const PAGE_SIZE = 20;
 
-export function VanRequestsBoard({ warehouse }: { warehouse: { id: string; name: string; code: string | null } }) {
-  const { pushToast } = useDashboard();
+export function VanRequestsBoard({
+  warehouse,
+  onOpen,
+  onWalkIn,
+}: {
+  warehouse: { id: string; name: string; code: string | null };
+  onOpen: (code: string) => void;
+  onWalkIn: () => void;
+}) {
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  // Filters/sort/page and the open request live in the URL (namespaced `v*` so they don't clash with
-  // sibling tabs) — so a refresh, browser Back, or a shared link restores the exact view, matching the
-  // other WarehouseDetail tabs. The search TEXT is local (for responsive typing) and its debounced
-  // value is written to the URL.
+  // Filters/sort/page live in the URL (namespaced `v*` so they don't clash with sibling tabs) — so a
+  // refresh, browser Back, or a shared link restores the exact view, matching the other WarehouseDetail
+  // tabs. The search TEXT is local (for responsive typing) and its debounced value is written to the
+  // URL. Which request is OPEN is also URL state, but it belongs to VanRequestsWorkspace (`vRequest`),
+  // which swaps this whole board out for the detail — the queue never renders both.
   const status = searchParams.get("vStatus") ?? "";
   const type = searchParams.get("vType") ?? "";
   const priority = searchParams.get("vPriority") ?? "";
+  const createdVia = searchParams.get("vOrigin") ?? "";
   const sort = searchParams.get("vSort") ?? "newest";
   const urlSearch = searchParams.get("vSearch") ?? "";
   const page = Math.max(1, Number(searchParams.get("vPage")) || 1);
-  const openId = searchParams.get("vReq");
 
   const patch = React.useCallback(
     (updates: Record<string, string | null>) => {
@@ -84,7 +95,6 @@ export function VanRequestsBoard({ warehouse }: { warehouse: { id: string; name:
     },
     [router],
   );
-  const setOpenId = React.useCallback((id: string | null) => patch({ vReq: id }), [patch]);
   const setPage = React.useCallback((p: number) => patch({ vPage: p > 1 ? String(p) : null }), [patch]);
   // A filter/sort change also resets to page 1, so you're never stranded on a now-empty page.
   const onFilter = (key: string) => (v: string) => patch({ [key]: v || null, vPage: null });
@@ -93,7 +103,6 @@ export function VanRequestsBoard({ warehouse }: { warehouse: { id: string; name:
   const [meta, setMeta] = React.useState({ total: 0, totalPages: 1 });
   const [search, setSearch] = React.useState(urlSearch); // local input mirror (initialised from the URL)
   const [error, setError] = React.useState<string | null>(null); // load failure — distinct from an empty queue
-  const [walkInOpen, setWalkInOpen] = React.useState(false);
   const [expanded, setExpanded] = React.useState<Set<string>>(new Set()); // rows whose inline item detail is open
   const toggleExpand = React.useCallback((id: string) => setExpanded((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; }), []);
 
@@ -108,7 +117,7 @@ export function VanRequestsBoard({ warehouse }: { warehouse: { id: string; name:
 
   const load = React.useCallback(() => {
     vanStockSvc
-      .listVanStockRequests({ status: status || undefined, type: type || undefined, priority: priority || undefined, search: urlSearch || undefined, warehouseId: warehouse.id, page, pageSize: PAGE_SIZE, sort: sort as "newest" | "oldest" })
+      .listVanStockRequests({ status: status || undefined, type: type || undefined, priority: priority || undefined, createdVia: createdVia || undefined, search: urlSearch || undefined, warehouseId: warehouse.id, page, pageSize: PAGE_SIZE, sort: sort as "newest" | "oldest" })
       .then((r) => {
         // A filter change resets to page 1, but a DATA change (another reviewer fulfils the last
         // pending request on this page) doesn't — totalPages drops below `page`, the server returns
@@ -121,7 +130,7 @@ export function VanRequestsBoard({ warehouse }: { warehouse: { id: string; name:
         setError(null);
       })
       .catch((err) => { setRequests([]); setMeta({ total: 0, totalPages: 1 }); setError(err instanceof Error ? err.message : "Could not load the queue."); });
-  }, [status, type, priority, sort, urlSearch, page, warehouse.id, setPage]);
+  }, [status, type, priority, createdVia, sort, urlSearch, page, warehouse.id, setPage]);
 
   React.useEffect(() => load(), [load]);
   React.useEffect(() => subscribe(["van_stock_request:updated"], load), [load]);
@@ -137,11 +146,12 @@ export function VanRequestsBoard({ warehouse }: { warehouse: { id: string; name:
             <Select size="sm" ariaLabel="Filter by status" value={status} onChange={onFilter("vStatus")} options={STATUS_OPTIONS} />
             <Select size="sm" ariaLabel="Filter by type" value={type} onChange={onFilter("vType")} options={TYPE_OPTIONS} />
             <Select size="sm" ariaLabel="Filter by priority" value={priority} onChange={onFilter("vPriority")} options={PRIORITY_FILTER_OPTIONS} />
+            <Select size="sm" ariaLabel="Filter by origin" value={createdVia} onChange={onFilter("vOrigin")} options={ORIGIN_OPTIONS} />
             <Select size="sm" ariaLabel="Sort order" value={sort} onChange={onFilter("vSort")} options={SORT_OPTIONS} />
           </>
         }
         actions={
-          <button type="button" onClick={() => setWalkInOpen(true)} className={primaryBtn}>
+          <button type="button" onClick={onWalkIn} className={primaryBtn}>
             <PackagePlus className="h-3.5 w-3.5" /> Walk-in issue
           </button>
         }
@@ -162,8 +172,9 @@ export function VanRequestsBoard({ warehouse }: { warehouse: { id: string; name:
               const caption = warehouseCaption(r);
               return (
                 <li key={r.id} className="rounded-lg border border-[var(--border)] bg-[var(--surface)] shadow-xs transition-colors hover:border-[var(--accent)]">
-                  {/* Compact row: click opens the detail drawer (approve / scan-fulfil live there); the
-                      chevron toggles an inline peek at the full item list + warehouse without leaving. */}
+                  {/* Compact row: click opens the request's review workspace (approve / scan-fulfil live
+                      there, in place of this queue); the chevron toggles an inline peek at the full item
+                      list + warehouse without leaving. */}
                   <div className="flex items-start gap-2 px-3 py-2.5">
                     <button
                       type="button"
@@ -174,11 +185,14 @@ export function VanRequestsBoard({ warehouse }: { warehouse: { id: string; name:
                     >
                       <ChevronRight className={`h-4 w-4 transition-transform ${isOpen ? "rotate-90" : ""}`} />
                     </button>
-                    <button type="button" onClick={() => setOpenId(r.id)} className="min-w-0 flex-1 text-left">
+                    <button type="button" onClick={() => onOpen(r.code)} className="min-w-0 flex-1 text-left">
                       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                         <span className="font-mono text-xs font-bold text-[var(--accent)]">{r.code}</span>
                         <VanStockTypeBadge type={r.type} />
                         <VanStockStatusChip value={r.status} />
+                        {/* Qualifies the status beside it: a walk-in's "Approved" was never reviewed —
+                            without this the queue reads as though someone here approved it. */}
+                        <VanStockWalkInBadge createdVia={r.createdVia} />
                         {r.stale && <span className="inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-amber-600">Stale</span>}
                         {r.priority !== "normal" && (
                           <span className="inline-flex items-center rounded-full border border-red-500/30 bg-red-500/10 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-red-600">{r.priority}</span>
@@ -214,143 +228,6 @@ export function VanRequestsBoard({ warehouse }: { warehouse: { id: string; name:
         </div>
       )}
 
-      {openId && <VanRequestDetail id={openId} onClose={() => setOpenId(null)} onChanged={load} />}
-      {walkInOpen && (
-        <WalkInModal
-          fixedWarehouse={warehouse}
-          onClose={() => setWalkInOpen(false)}
-          onCreated={() => { setWalkInOpen(false); pushToast("Walk-in created (pre-approved) — fulfil it by scan.", "success"); load(); }}
-        />
-      )}
     </div>
   );
 }
-
-// ── Walk-in modal (reviewer creates pre-approved for an engineer at the counter) ─────────────────
-
-interface WalkInCartItem {
-  irmItemId: string;
-  name: string;
-  code: string | null;
-  qty: number;
-}
-
-function WalkInModal({ fixedWarehouse, onClose, onCreated }: { fixedWarehouse: { id: string; name: string; code: string | null }; onClose: () => void; onCreated: () => void }) {
-  const [engineers, setEngineers] = React.useState<Array<{ id: string; name: string }>>([]);
-  const [engineerId, setEngineerId] = React.useState("");
-  const warehouseId = fixedWarehouse.id; // the tab's warehouse — a walk-in is issued HERE by definition
-  const [reason, setReason] = React.useState("");
-  const [priority, setPriority] = React.useState<VanStockPriority>("normal");
-  const [cart, setCart] = React.useState<WalkInCartItem[]>([]);
-  const [submitting, setSubmitting] = React.useState(false);
-  const [msg, setMsg] = React.useState<Msg>(null);
-
-  React.useEffect(() => {
-    listEngineerOptions().then((us) => setEngineers(us.map((u) => ({ id: u.id, name: u.name })))).catch(() => setEngineers([]));
-  }, []);
-
-  const excludeIds = React.useMemo(() => new Set(cart.map((c) => c.irmItemId)), [cart]);
-  const addItem = (it: VanStockItemOption) =>
-    setCart((c) => (c.some((x) => x.irmItemId === it.irmItemId) ? c : [...c, { irmItemId: it.irmItemId, name: it.name, code: it.code, qty: 1 }]));
-
-  const onSubmit = async () => {
-    if (!engineerId) { setMsg({ type: "error", text: "Pick the engineer receiving the stock." }); return; }
-    if (!warehouseId) { setMsg({ type: "error", text: "Pick the issuing warehouse." }); return; }
-    if (cart.length === 0) { setMsg({ type: "error", text: "Add at least one item." }); return; }
-    if (!reason.trim()) { setMsg({ type: "error", text: "A reason is required." }); return; }
-    setSubmitting(true);
-    setMsg(null);
-    try {
-      await vanStockSvc.createVanStockWalkIn({
-        engineerId,
-        warehouseId,
-        reason: reason.trim(),
-        priority,
-        lines: cart.map((c) => ({ irmItemId: c.irmItemId, itemName: c.name, qty: c.qty })),
-      });
-      onCreated();
-    } catch (err) {
-      setMsg({ type: "error", text: err instanceof Error ? err.message : "Could not create the walk-in request." });
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const footer = (
-    <>
-      <button type="button" onClick={onClose} disabled={submitting} className="rounded-xl border border-[var(--border)] px-3.5 py-2 text-xs font-bold text-[var(--ink)] hover:bg-[var(--surface-2)] disabled:opacity-60">Cancel</button>
-      <button type="button" onClick={onSubmit} disabled={submitting} className={primaryBtn}>
-        {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <PackagePlus className="h-4 w-4" />} {submitting ? "Creating…" : "Create pre-approved"}
-      </button>
-    </>
-  );
-
-  return (
-    <Modal open onClose={submitting ? () => {} : onClose} title="Walk-in issue" subtitle="Creates a pre-approved request for an engineer at the counter — fulfil it by scan next" footer={footer} size="lg" scrollBody>
-      <div className="space-y-5">
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div>
-            <label className={labelCls}>Engineer <span className="text-[var(--neg)]">*</span></label>
-            <Select ariaLabel="Engineer" value={engineerId} onChange={setEngineerId} options={[{ value: "", label: "Pick an engineer…" }, ...engineers.map((e) => ({ value: e.id, label: e.name }))]} />
-          </div>
-          <div>
-            <label className={labelCls}>Warehouse</label>
-            <p className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-sm font-semibold text-[var(--ink)]">
-              {fixedWarehouse.code ? `${fixedWarehouse.name} (${fixedWarehouse.code})` : fixedWarehouse.name}
-            </p>
-          </div>
-        </div>
-
-        <div>
-          <p className="mb-2 text-xs font-bold text-[var(--faint)]">Items</p>
-          <VanStockItemSearch excludeIds={excludeIds} onAddItem={addItem} />
-          {cart.length > 0 && (
-            <div className="mt-3 overflow-hidden rounded-xl border border-[var(--border)]">
-              <table className="w-full text-left text-sm">
-                <thead>
-                  <tr className="border-b border-[var(--border)] text-[10px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                    <th className="px-3 py-2">Item</th>
-                    <th className="w-24 px-3 py-2">Qty</th>
-                    <th className="w-10 px-3 py-2"><span className="sr-only">Remove</span></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {cart.map((c) => (
-                    <tr key={c.irmItemId} className="border-b border-[var(--border)] last:border-0">
-                      <td className="px-3 py-2">
-                        <span className="font-semibold text-[var(--ink)]">{c.name}</span>
-                        {c.code && <div className="font-mono text-[10px] text-[var(--muted)]">{c.code}</div>}
-                      </td>
-                      <td className="px-3 py-2">
-                        <input type="number" min={1} step={1} value={c.qty} aria-label={`Quantity for ${c.name}`} onChange={(e) => setCart((rows) => rows.map((x) => (x.irmItemId === c.irmItemId ? { ...x, qty: Math.max(1, Math.floor(Number(e.target.value) || 1)) } : x)))} className={`${inputCls} py-1.5`} />
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        <button type="button" onClick={() => setCart((rows) => rows.filter((x) => x.irmItemId !== c.irmItemId))} aria-label="Remove item" className="rounded-lg border border-[var(--border)] p-1.5 text-[var(--muted)] transition-all hover:border-[var(--neg)] hover:text-[var(--neg)]">
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div>
-            <label className={labelCls}>Priority</label>
-            <Select ariaLabel="Priority" value={priority} onChange={(v) => setPriority((v || "normal") as VanStockPriority)} options={[{ value: "normal", label: "Normal" }, { value: "high", label: "High" }, { value: "urgent", label: "Urgent" }]} />
-          </div>
-          <div>
-            <label className={labelCls}>Reason <span className="text-[var(--neg)]">*</span></label>
-            <input value={reason} onChange={(e) => setReason(e.target.value)} maxLength={2000} placeholder="e.g. Engineer collected consumables at the counter." className={inputCls} />
-          </div>
-        </div>
-
-        {msg && <Notice msg={msg} />}
-      </div>
-    </Modal>
-  );
-}
-

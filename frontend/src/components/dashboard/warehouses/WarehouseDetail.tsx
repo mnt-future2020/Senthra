@@ -20,7 +20,7 @@ import { ReceiveStockModal } from "@/components/dashboard/customers/ReceiveStock
 import { InventoryView } from "@/components/dashboard/inventory/InventoryView";
 import { GoodsReceiptsView } from "@/components/dashboard/goods-in/GoodsReceiptsView";
 import { GoodsManagementTab } from "@/components/dashboard/goods-management/GoodsManagementTab";
-import { VanRequestsBoard } from "@/components/dashboard/van-requests/VanRequestsBoard";
+import { VanRequestsWorkspace } from "@/components/dashboard/van-requests/VanRequestsWorkspace";
 import { DemandTab } from "@/components/dashboard/goods-management/DemandTab";
 import { DamagedStockView } from "@/components/dashboard/goods-management/DamagedStockView";
 import { ExpectedDeliveries } from "./ExpectedDeliveries";
@@ -184,7 +184,7 @@ export function WarehouseDetail({ initial }: { initial: Warehouse }) {
         {tab === "inventory" && <StockTab warehouseCode={w.code} warehouseId={w.id} router={router} />}
         {tab === "incoming" && <IncomingTab warehouseCode={w.code} warehouseId={w.id} router={router} pushToast={pushToast} />}
         {tab === "goods" && <GoodsManagementTab warehouseId={w.id} warehouseCode={w.code} router={router} />}
-        {tab === "van" && <VanRequestsBoard warehouse={{ id: w.id, name: w.name, code: w.code }} />}
+        {tab === "van" && <VanRequestsWorkspace warehouse={{ id: w.id, name: w.name, code: w.code }} />}
         {tab === "demand" && <DemandTab warehouseId={w.id} />}
         {tab === "transactions" && (
           <Placeholder

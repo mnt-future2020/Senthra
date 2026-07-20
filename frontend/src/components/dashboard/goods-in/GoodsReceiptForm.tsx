@@ -6,13 +6,16 @@ import { Loader2, Plus, Trash2 } from "lucide-react";
 
 import * as grnService from "@/services/goods-in.service";
 import { listPurchaseOrders } from "@/services/purchase-order.service";
-import { listIrmItems } from "@/services/irm.service";
+import { listIrmItems, generateBarcode, getIrmItem } from "@/services/irm.service";
+import { printLabels, MAX_LABEL_COPIES } from "@/lib/printBarcode";
+import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import { inputCls, ghostBtn, labelCls, primaryBtn } from "@/components/ui/styles";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { Select } from "@/components/ui/Select";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
+import { BarcodePanel } from "@/components/dashboard/irm/BarcodePanel";
 import { PO_STATUS_LABELS } from "@/components/dashboard/purchase-orders/poStatus";
 import { AttachmentGrid, DocPicker, attachmentToDoc, type DocItem, type PickedDoc } from "./DeliveryDocuments";
 import type { GoodsReceipt, GrnAttachment } from "@/types/goods-in";
@@ -28,6 +31,7 @@ type BatchRow = { _key: string; batchNumber: string; expiryDate: string; quantit
 type LineState = {
   purchaseOrderItemId: string;
   irmItemId: string;
+  itemCode: string;
   itemName: string;
   sku: string | null;
   baseUnit: string | null;
@@ -40,6 +44,10 @@ type LineState = {
   notes: string;
   serialsText: string;
   batches: BatchRow[];
+  // Label printing — never sent to the backend. `barcodeDataUri` is lazy-loaded per item (the IRM
+  // list endpoint omits the image to stay light); `copies` blank means "use the accepted qty".
+  barcodeDataUri: string | null;
+  copies: string;
 };
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -48,15 +56,26 @@ const num = (s: string) => Number(s) || 0;
 const acceptedOf = (l: LineState) => Math.max(0, num(l.receive) - num(l.damaged));
 const parseSerials = (text: string) => text.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
 
+// One sticker per accepted unit by default — staff put away N boxes and label each one. A blank
+// box tracks the accepted qty live; typing a number pins it (e.g. reprinting 3 that smudged).
+const defaultCopies = (accepted: number) => Math.max(1, accepted);
+const effectiveCopies = (l: LineState, accepted: number) =>
+  l.copies.trim() === "" ? defaultCopies(accepted) : num(l.copies);
+// Only barcode-able lines get a label panel: serial/batch-tracked items would print an identical
+// sticker on every unit AND are rejected by scan lookup, so a label there is a dead sticker.
+const canLabel = (l: LineState) => !l.trackSerials && !l.trackBatches && Boolean(l.itemCode);
+
 function FieldError({ message }: { message?: string }) {
   if (!message) return null;
   return <p className="mt-1.5 text-[11px] font-semibold text-[var(--neg)]">{message}</p>;
 }
 
+type ItemFlags = { serials: boolean; batches: boolean; code: string };
+
 // Build the received-item lines for a picked PO (only lines with remaining > 0). Pure —
 // shared by the user's manual pick and the ?po= deep-link preselect, so both paths
 // produce identical rows (incl. serial/batch tracking flags).
-function buildLines(po: PurchaseOrder, flags: Map<string, { serials: boolean; batches: boolean }>): LineState[] {
+function buildLines(po: PurchaseOrder, flags: Map<string, ItemFlags>): LineState[] {
   return po.items
     .filter((i) => i.quantity - i.receivedQuantity > 0)
     .map((i) => {
@@ -64,6 +83,7 @@ function buildLines(po: PurchaseOrder, flags: Map<string, { serials: boolean; ba
       return {
         purchaseOrderItemId: i.id,
         irmItemId: i.irmItemId,
+        itemCode: f?.code ?? "",
         itemName: i.itemName,
         sku: i.sku,
         baseUnit: i.baseUnit,
@@ -76,6 +96,8 @@ function buildLines(po: PurchaseOrder, flags: Map<string, { serials: boolean; ba
         notes: "",
         serialsText: "",
         batches: [],
+        barcodeDataUri: null,
+        copies: "",
       };
     });
 }
@@ -85,6 +107,8 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
   const searchParams = useSearchParams();
   const guard = useNavigationGuard();
   const { pushToast } = useDashboard();
+  const { can } = useAuth();
+  const canManageBarcode = can("irm.barcode.manage");
 
   // Deep-link from the PO detail "Receive" action: ?po=<id> preselects that PO on create.
   const presetPoId = mode === "create" ? searchParams.get("po") : null;
@@ -123,6 +147,7 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
       ? o.items.map((i) => ({
           purchaseOrderItemId: i.purchaseOrderItemId,
           irmItemId: i.irmItemId,
+          itemCode: i.irmItem?.code ?? "",
           itemName: i.itemName,
           sku: i.sku,
           baseUnit: i.baseUnit,
@@ -135,6 +160,8 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
           notes: i.notes ?? "",
           serialsText: i.serials.map((s) => s.serialNumber).join("\n"),
           batches: i.batches.map((b) => ({ _key: crypto.randomUUID(), batchNumber: b.batchNumber, expiryDate: dateInput(b.expiryDate), quantity: String(b.quantity) })),
+          barcodeDataUri: null,
+          copies: "",
         }))
       : [],
   );
@@ -143,7 +170,12 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
   // True once the receivable-PO fetch settles — lets us tell "still loading" (don't nag) from
   // "genuinely none" (show a clear empty-state instead of a bare placeholder).
   const [posLoaded, setPosLoaded] = React.useState(false);
-  const [flags, setFlags] = React.useState<Map<string, { serials: boolean; batches: boolean }>>(new Map());
+  const [flags, setFlags] = React.useState<Map<string, ItemFlags>>(new Map());
+  // Barcode label state. `barcodeBusyId` is the IRM item currently generating (one at a time);
+  // `loadedBarcodeIds` remembers which items' images we've already fetched so a re-render or a
+  // PO reselect never refetches. Failures aren't cached, so they retry.
+  const [barcodeBusyId, setBarcodeBusyId] = React.useState<string | null>(null);
+  const loadedBarcodeIds = React.useRef<Set<string>>(new Set());
   const [dirty, setDirty] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
@@ -179,7 +211,7 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
       const pos = receivable.status === "fulfilled" ? receivable.value.purchaseOrders : [];
       const flagMap = new Map(
         (irm.status === "fulfilled" ? irm.value.items : []).map(
-          (i) => [i.id, { serials: i.trackSerialNumbers, batches: i.trackBatchNumbers }] as const,
+          (i) => [i.id, { serials: i.trackSerialNumbers, batches: i.trackBatchNumbers, code: i.code }] as const,
         ),
       );
       setReceivablePos(pos);
@@ -203,6 +235,72 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
   }, [mode, presetPoId, presetWarehouseId, pushToast]);
 
   useReportDirty("grn-form", dirty && !saved);
+
+  // Lazy-load the barcode image for each labelable line (the IRM list endpoint omits barcodeDataUri
+  // to stay light even with 100+ barcoded items). A GRN has a handful of lines, so they're fetched
+  // in parallel; allSettled keeps one failure from blanking the rest. Also backfills itemCode when
+  // the flags fetch failed. This is NOT a user edit — it must never set the dirty flag.
+  const labelableIds = lines.filter((l) => !l.trackSerials && !l.trackBatches).map((l) => l.irmItemId).join(",");
+  React.useEffect(() => {
+    const ids = labelableIds.split(",").filter((id) => id && !loadedBarcodeIds.current.has(id));
+    if (ids.length === 0) return;
+    let active = true;
+    Promise.allSettled(ids.map((id) => getIrmItem(id))).then((results) => {
+      if (!active) return;
+      const loaded = new Map<string, { barcodeDataUri: string | null; code: string }>();
+      results.forEach((r, i) => {
+        if (r.status !== "fulfilled") return;
+        loadedBarcodeIds.current.add(ids[i]);
+        loaded.set(ids[i], { barcodeDataUri: r.value.barcodeDataUri, code: r.value.code });
+      });
+      if (loaded.size === 0) return;
+      setLines((rows) =>
+        rows.map((r) => {
+          const hit = loaded.get(r.irmItemId);
+          return hit ? { ...r, barcodeDataUri: hit.barcodeDataUri, itemCode: r.itemCode || hit.code } : r;
+        }),
+      );
+    });
+    return () => { active = false; };
+  }, [labelableIds]);
+
+  // Generate the line item's Code128 barcode (one-time — it encodes the item's permanent code, so
+  // this can never mint a new value). Syncs every line sharing that item so the panel flips to
+  // "Reprint Label" without a reload. Independent of the GRN save.
+  const generateLineBarcode = async (irmItemId: string) => {
+    if (barcodeBusyId) return;
+    setBarcodeBusyId(irmItemId);
+    try {
+      const updated = await generateBarcode(irmItemId);
+      loadedBarcodeIds.current.add(updated.id); // generate returns the image — no need to lazy-fetch
+      setLines((rows) => rows.map((r) => (r.irmItemId === updated.id ? { ...r, barcodeDataUri: updated.barcodeDataUri, itemCode: r.itemCode || updated.code } : r)));
+      pushToast("Barcode generated.", "success");
+    } catch (e) {
+      pushToast(e instanceof Error ? e.message : "Could not generate the barcode.", "alert");
+    } finally {
+      setBarcodeBusyId(null);
+    }
+  };
+
+  // Copies is a print-only control (never part of the payload), so unlike updateLine it must NOT
+  // mark the form dirty — picking a label count shouldn't trip the unsaved-changes guard.
+  const setLineCopies = (idx: number, value: string) =>
+    setLines((rows) => rows.map((r, i) => (i === idx ? { ...r, copies: value } : r)));
+
+  const printLineLabels = (l: LineState, accepted: number) => {
+    if (!l.barcodeDataUri) return;
+    printLabels({ dataUri: l.barcodeDataUri, code: l.itemCode, copies: effectiveCopies(l, accepted) });
+  };
+
+  // Copies is print-only — it never blocks the GRN save, so it's validated here rather than in
+  // validate(). Blank is valid (falls back to the accepted qty).
+  const copiesError = (l: LineState): string | undefined => {
+    if (l.copies.trim() === "") return undefined;
+    const n = Number(l.copies);
+    if (!Number.isInteger(n) || n < 1) return "Enter a whole number of at least 1.";
+    if (n > MAX_LABEL_COPIES) return `Up to ${MAX_LABEL_COPIES} labels per print run.`;
+    return undefined;
+  };
 
   // On create: when the user picks a PO, build the received-item lines (only lines with
   // remaining > 0). This IS a user edit, so it marks the form dirty.
@@ -519,6 +617,34 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
                           <input className={inputCls} value={l.notes} onChange={(e) => updateLine(idx, { notes: e.target.value })} maxLength={2000} placeholder="e.g. Outer box damaged" />
                         </div>
                       </div>
+
+                      {/* Item barcode — staff generate (one-time) and print one label per accepted
+                          unit to stick on the stock as it's put away. Same shared BarcodePanel as the
+                          IRM Catalogue and Add Stock. Independent of the save: printable on a draft,
+                          and the label stays valid forever (it encodes the item's permanent code). */}
+                      {canLabel(l) && (
+                        <div className="mt-3 border-t border-[var(--border)] pt-3">
+                          <label className={labelCls}>Item barcode</label>
+                          <BarcodePanel
+                            code={l.itemCode}
+                            barcodeDataUri={l.barcodeDataUri}
+                            canManage={canManageBarcode}
+                            busy={barcodeBusyId === l.irmItemId}
+                            onGenerate={() => generateLineBarcode(l.irmItemId)}
+                            onPrint={() => printLineLabels(l, accepted)}
+                            copies={l.copies}
+                            onCopiesChange={(v) => setLineCopies(idx, v)}
+                            copiesPlaceholder={String(defaultCopies(accepted))}
+                            copiesError={copiesError(l)}
+                          />
+                          {l.barcodeDataUri && !copiesError(l) && (
+                            <p className="mt-1.5 text-[11px] text-[var(--faint)]">
+                              Prints {effectiveCopies(l, accepted)} label{effectiveCopies(l, accepted) === 1 ? "" : "s"}
+                              {l.copies.trim() === "" ? " — one per accepted unit." : "."}
+                            </p>
+                          )}
+                        </div>
+                      )}
 
                       {l.trackSerials && (
                         <div className="mt-3">

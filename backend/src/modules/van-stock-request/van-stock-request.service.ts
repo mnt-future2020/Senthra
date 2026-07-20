@@ -32,6 +32,10 @@ import type {
 const SOURCE_TYPE = "van_stock_request";
 const DAMAGED_SOURCE_TYPE = "van_stock_return";
 
+// A 24-hex string is a Mongo ObjectId; anything else is a VSR code ("VSR-0030"). Mirrors the
+// id-or-code reads on purchase-request / goods-in / customer.
+const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
+
 // ── Stale indicator (derived; no scheduler — spec §9) ─────────────────────────────────────────
 export const STALE_PENDING_DAYS = 7;
 export const STALE_ACTIVE_DAYS = 30;
@@ -62,7 +66,24 @@ export interface PublicVanStockLine {
   sourceWarehouseId: string | null;
   sourceWarehouseName: string | null;
   sourceWarehouseCode: string | null;
+  // The source warehouse's LIVE address — the engineer has no warehouse-module access, so on a split
+  // request this is the only way they can find where to collect each line. Null until approve sets the
+  // line's source (and for a line whose warehouse was since removed).
+  sourceWarehouse: PublicVanStockLineWarehouse | null;
   isMine: boolean; // sourceWarehouseId ∈ the reading actor's warehouse scope (false for the engineer's own read)
+}
+
+export interface PublicVanStockLineWarehouse {
+  id: string;
+  name: string;
+  code: string | null;
+  addressLine1: string | null;
+  addressLine2: string | null;
+  city: string | null;
+  county: string | null;
+  postcode: string | null;
+  country: string | null;
+  contactPhone: string | null;
 }
 
 export interface PublicVanStockFulfilmentLine {
@@ -246,6 +267,7 @@ export function toPublic(r: RequestWithLines, now: Date, scope: string[] | undef
       sourceWarehouseId: l.sourceWarehouseId,
       sourceWarehouseName: l.sourceWarehouseName,
       sourceWarehouseCode: l.sourceWarehouseCode,
+      sourceWarehouse: l.sourceWarehouse,
       isMine: lineIsMine(l, scope),
     })),
     fulfilments: r.fulfilments.map((f) => ({
@@ -549,7 +571,7 @@ export async function approve(id: string, input: ApproveVanStockRequestInput, ac
     lineApprovals,
   );
 
-  audit.record({ actor, action: "van_stock_request.approved", targetType: "van_stock_request", targetId: id, targetLabel: req.code, metadata: { warehouseId: wh.id, lineApprovals: lineApprovals.map((l) => ({ lineId: l.lineId, approvedQty: l.approvedQty, sourceWarehouseId: l.sourceWarehouseId })) } });
+  audit.record({ actor, action: "van_stock_request.approved", targetType: "van_stock_request", targetId: id, targetLabel: req.code, metadata: { warehouseId: wh.id, decisionNote: input.decisionNote ?? null, lineApprovals: lineApprovals.map((l) => ({ lineId: l.lineId, approvedQty: l.approvedQty, sourceWarehouseId: l.sourceWarehouseId })) } });
   emitUpdate(req.engineerId, { id, code: req.code, status: "approved", type: req.type });
   return toPublic(updated, new Date(), warehouseScopeFilter(actor));
 }
@@ -768,14 +790,14 @@ function paged(result: { requests: RequestWithLines[]; total: number }, page: nu
   return { requests: result.requests.map((r) => toPublic(r, now, scope)), total: result.total, page, pageSize, totalPages: Math.max(1, Math.ceil(result.total / pageSize)) };
 }
 
-export async function listMine(engineerId: string, params: { status?: string; type?: string; search?: string; sort?: string; page?: number; pageSize?: number }): Promise<PagedVanStockRequests> {
+export async function listMine(engineerId: string, params: { status?: string; type?: string; createdVia?: string; search?: string; sort?: string; page?: number; pageSize?: number }): Promise<PagedVanStockRequests> {
   const pageSize = Math.min(Math.max(params.pageSize ?? 20, 1), 100);
   const page = Math.max(params.page ?? 1, 1);
   // Engineer's own list — scope null ⇒ isMine false, myProgress null (they have no warehouse role).
   return paged(await vsrRepo.listRequests({ ...params, engineerId, page, pageSize }), page, pageSize, null);
 }
 
-export async function listAll(actor: AuditActor, params: { status?: string; type?: string; priority?: string; search?: string; sort?: string; warehouseId?: string; page?: number; pageSize?: number }): Promise<PagedVanStockRequests> {
+export async function listAll(actor: AuditActor, params: { status?: string; type?: string; priority?: string; createdVia?: string; search?: string; sort?: string; warehouseId?: string; page?: number; pageSize?: number }): Promise<PagedVanStockRequests> {
   const pageSize = Math.min(Math.max(params.pageSize ?? 20, 1), 100);
   const page = Math.max(params.page ?? 1, 1);
   if (params.warehouseId) assertWarehouseAccess(actor, params.warehouseId);
@@ -787,8 +809,11 @@ export function countPending(actor: AuditActor): Promise<number> {
   return vsrRepo.countPending(warehouseScopeFilter(actor));
 }
 
-export async function getOne(id: string, actor: AuditActor): Promise<PublicVanStockRequest> {
-  const req = await vsrRepo.findById(id);
+// Accepts a db id OR a code ("VSR-0030") — the reviewer workspace deep-links by code, so a shared URL
+// is readable. Resolution happens BEFORE any access check; every gate below runs on the resolved
+// request, so which key opened it grants nothing.
+export async function getOne(idOrCode: string, actor: AuditActor): Promise<PublicVanStockRequest> {
+  const req = OBJECT_ID_RE.test(idOrCode) ? await vsrRepo.findById(idOrCode) : await vsrRepo.findByCode(idOrCode);
   if (!req) throw notFound("Van stock request not found.");
   const isOwner = (actor.id ?? "") === req.engineerId;
   if (!isReviewer(actor) && !isOwner) throw forbidden("You don't have access to this request.");

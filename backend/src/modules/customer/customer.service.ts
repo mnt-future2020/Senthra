@@ -1910,6 +1910,21 @@ export async function updateStockEntry(
   return toStockEntry(updated);
 }
 
+// Render a Code128 PNG (base64 data URI) of the given value. The human-readable text is baked in by
+// bwip's includetext, so the printed label needs nothing but the image.
+async function renderBarcodePng(text: string): Promise<string> {
+  const bwipjs = await import("bwip-js");
+  const pngBuffer = await bwipjs.default.toBuffer({
+    bcid: "code128",
+    text,
+    scale: 3,
+    height: 10,
+    includetext: true,
+    textxalign: "center",
+  });
+  return `data:image/png;base64,${pngBuffer.toString("base64")}`;
+}
+
 export async function generateStockEntryBarcode(
   entryId: string,
   actor?: AuditActor,
@@ -1918,34 +1933,47 @@ export async function generateStockEntryBarcode(
   if (!entry) throw notFound("Stock entry not found.");
   assertWarehouseAccess(actor, entry.warehouseId);
 
-  const [prefix, seq] = await Promise.all([
-    getStockCodePrefix(),
-    customerRepo.nextStockEntryBarcodeSeq(),
-  ]);
-  const barcodeValue = `${prefix}-${String(seq).padStart(5, "0")}`;
+  const recordGenerated = (barcodeValue: string) =>
+    audit.record({
+      actor,
+      action: "customer.stock_entry.barcode_generated",
+      targetType: "customer_stock_entry",
+      targetId: entryId,
+      targetLabel: `${entry.itemName} → ${barcodeValue}`,
+    });
 
-  const bwipjs = await import("bwip-js");
-  const pngBuffer = await bwipjs.default.toBuffer({
-    bcid: "code128",
-    text: barcodeValue,
-    scale: 3,
-    height: 10,
-    includetext: true,
-    textxalign: "center",
-  });
-  const dataUri = `data:image/png;base64,${pngBuffer.toString("base64")}`;
+  // A value already exists → NEVER allocate another one. That label may already be printed and stuck
+  // to the physical stock, so re-issuing would orphan it and leave the sticker pointing at nothing.
+  // Nothing to do if the image is there (a double-submit / stale tab is a no-op); if only the image
+  // is missing, re-render THAT value. Mirrors irmService.generateBarcode, which re-renders the
+  // item's own permanent code rather than minting a new one.
+  if (entry.barcode) {
+    if (entry.barcodeDataUri) return toStockEntry(entry);
+    const updated = await customerRepo.updateStockEntryBarcode(entryId, entry.barcode, await renderBarcodePng(entry.barcode));
+    recordGenerated(entry.barcode);
+    return toStockEntry(updated);
+  }
 
-  const updated = await customerRepo.updateStockEntryBarcode(entryId, barcodeValue, dataUri);
+  const prefix = await getStockCodePrefix();
 
-  audit.record({
-    actor,
-    action: "customer.stock_entry.barcode_generated",
-    targetType: "customer_stock_entry",
-    targetId: entryId,
-    targetLabel: `${entry.itemName} → ${barcodeValue}`,
-  });
+  // Allocate → render → write, retrying past a unique-index collision (P2002). A collision only
+  // happens if the counter has drifted behind the data (e.g. it was restored/recreated), so
+  // fast-forward past the highest issued value and try again. Mirrors irmRepo.createWithCode.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const seq = await customerRepo.nextStockEntryBarcodeSeq();
+    const barcodeValue = `${prefix}-${String(seq).padStart(5, "0")}`;
+    const dataUri = await renderBarcodePng(barcodeValue);
 
-  return toStockEntry(updated);
+    try {
+      const updated = await customerRepo.updateStockEntryBarcode(entryId, barcodeValue, dataUri);
+      recordGenerated(barcodeValue);
+      return toStockEntry(updated);
+    } catch (e) {
+      if (!customerRepo.isStockEntryBarcodeConflict(e)) throw e;
+      await customerRepo.fastForwardStockEntryBarcodeCounter();
+    }
+  }
+  throw new Error("Could not allocate a unique stock entry barcode.");
 }
 
 export async function deleteStockEntry(

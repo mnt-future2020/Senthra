@@ -2,6 +2,7 @@ import { env } from "../config/env.js";
 import { prisma } from "../lib/prisma.js";
 import * as adminRepo from "#modules/auth/admin.repository.js";
 import * as categoryRepo from "#modules/category/category.repository.js";
+import * as customerRepo from "#modules/customer/customer.repository.js";
 import * as emailTemplateRepo from "#modules/email/emailTemplate.repository.js";
 import * as irmRepo from "#modules/irm/irm.repository.js";
 import * as irmTypeRepo from "#modules/irm-type/irm-type.repository.js";
@@ -482,6 +483,13 @@ export async function seedDatabase(): Promise<void> {
   // index (Prisma can't express partial/sparse indexes for MongoDB — see the repository).
   // Idempotent — a no-op once the index exists, so it runs safely on every boot.
   await irmRepo.ensureSkuUniqueIndex();
+
+  // Barcode uniqueness for BOTH stock pools, same partial-unique mechanics. These barcodes are
+  // scannable physical identities: a duplicate resolves the wrong item / wrong customer's stock
+  // silently (both lookups use findFirst). They also index the scan path, which would otherwise be
+  // a full collection scan. Idempotent — no-ops once the indexes exist.
+  await irmRepo.ensureBarcodeUniqueIndex();
+  await customerRepo.ensureStockEntryBarcodeUniqueIndex();
 
   // One-time migration: backfill Warehouse.typeId from the legacy `type` string, then
   // ensure EVERY warehouse has a typeId (so it can become the single source of truth).

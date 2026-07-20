@@ -23,8 +23,8 @@ export const create = asyncHandler(async (req, res) => {
 export const listMine = asyncHandler(async (req, res) => {
   const actor = actorFrom(req);
   if (!actor.id) throw forbidden("Could not determine engineer identity.");
-  const { status, type, search, sort, page, pageSize } = req.query;
-  res.json(await vsrService.listMine(actor.id, { status: queryStr(status), type: queryStr(type), search: queryStr(search), sort: queryStr(sort), page: queryInt(page), pageSize: queryInt(pageSize) }));
+  const { status, type, createdVia, search, sort, page, pageSize } = req.query;
+  res.json(await vsrService.listMine(actor.id, { status: queryStr(status), type: queryStr(type), createdVia: queryStr(createdVia), search: queryStr(search), sort: queryStr(sort), page: queryInt(page), pageSize: queryInt(pageSize) }));
 });
 
 // GET /van-stock-requests/mine/open-lines?type=  (duplicate-warning source for the composer)
@@ -61,8 +61,8 @@ export const availability = asyncHandler(async (req, res) => {
 
 // GET /van-stock-requests  (reviewer queue; ?warehouseId= narrows to one warehouse's queue)
 export const listAll = asyncHandler(async (req, res) => {
-  const { status, type, priority, search, sort, warehouseId, page, pageSize } = req.query;
-  res.json(await vsrService.listAll(actorFrom(req), { status: queryStr(status), type: queryStr(type), priority: queryStr(priority), search: queryStr(search), sort: queryStr(sort), warehouseId: queryStr(warehouseId), page: queryInt(page), pageSize: queryInt(pageSize) }));
+  const { status, type, priority, createdVia, search, sort, warehouseId, page, pageSize } = req.query;
+  res.json(await vsrService.listAll(actorFrom(req), { status: queryStr(status), type: queryStr(type), priority: queryStr(priority), createdVia: queryStr(createdVia), search: queryStr(search), sort: queryStr(sort), warehouseId: queryStr(warehouseId), page: queryInt(page), pageSize: queryInt(pageSize) }));
 });
 
 // GET /van-stock-requests/pending-count  (reviewer badge — scoped to the actor's warehouses)

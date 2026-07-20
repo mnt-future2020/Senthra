@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { Check, Loader2, Plus, Trash2, Upload, X } from "lucide-react";
+import { Check, Loader2, Plus, Upload, X } from "lucide-react";
 
 import * as vanStockSvc from "@/services/vanStockRequest.service";
 import type {
@@ -14,8 +14,7 @@ import type {
 } from "@/services/vanStockRequest.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { readFileAsDataUrl } from "@/lib/image";
-import { CopyableCode } from "@/components/ui/CopyableCode";
-import { VanStockItemSearch } from "@/components/dashboard/van-requests/vanRequestUi";
+import { VanStockCartTable, VanStockItemSearch, type VanStockCartItem } from "@/components/dashboard/van-requests/vanRequestUi";
 import { FormPageHeader, FormSection, FormAsideCard, RequiredMark } from "@/components/ui/FormScaffold";
 import { Notice } from "@/components/ui/Notice";
 import { Select } from "@/components/ui/Select";
@@ -38,14 +37,6 @@ const PRIORITY_OPTIONS = [
   { value: "urgent", label: "Urgent" },
 ];
 
-interface CartItem {
-  irmItemId: string;
-  name: string;
-  code: string | null;
-  qty: number;
-  maxQty?: number; // returns: capped at on-hand
-}
-
 // Non-blocking duplicate warning (spec §8): items already on one of the engineer's OPEN requests.
 function useOpenLineMap(type: "restock" | "return"): Map<string, string> {
   const [map, setMap] = React.useState<Map<string, string>>(new Map());
@@ -58,7 +49,7 @@ function useOpenLineMap(type: "restock" | "return"): Map<string, string> {
   return map;
 }
 
-function DuplicateWarning({ cart, openLines }: { cart: CartItem[]; openLines: Map<string, string> }) {
+function DuplicateWarning({ cart, openLines }: { cart: VanStockCartItem[]; openLines: Map<string, string> }) {
   const dups = cart.filter((c) => openLines.has(c.irmItemId));
   if (dups.length === 0) return null;
   return (
@@ -73,81 +64,12 @@ function DuplicateWarning({ cart, openLines }: { cart: CartItem[]; openLines: Ma
   );
 }
 
-function CartTable({
-  cart,
-  onQty,
-  onRemove,
-  shelfByItem,
-}: {
-  cart: CartItem[];
-  onQty: (irmItemId: string, qty: number) => void;
-  onRemove: (irmItemId: string) => void;
-  // Restock only: on-hand at the SELECTED collect-from warehouse (advisory).
-  shelfByItem?: Map<string, number>;
-}) {
-  if (cart.length === 0) return <p className="text-xs text-[var(--muted)]">No items added yet.</p>;
-  return (
-    <div className="overflow-hidden rounded-xl border border-[var(--border)]">
-      <table className="w-full text-left text-sm">
-        <thead>
-          <tr className="border-b border-[var(--border)] text-[10px] font-bold uppercase tracking-wider text-[var(--faint)]">
-            <th className="px-3 py-2">Item</th>
-            <th className="w-24 px-3 py-2">Qty</th>
-            <th className="w-10 px-3 py-2"><span className="sr-only">Remove</span></th>
-          </tr>
-        </thead>
-        <tbody>
-          {cart.map((c) => {
-            const shelf = shelfByItem?.get(c.irmItemId);
-            return (
-              <tr key={c.irmItemId} className="border-b border-[var(--border)] last:border-0">
-                <td className="px-3 py-2">
-                  <span className="font-semibold text-[var(--ink)]">{c.name}</span>
-                  {c.code && <div className="mt-0.5"><CopyableCode code={c.code} /></div>}
-                  {typeof c.maxQty === "number" && <div className="text-[10px] text-[var(--faint)]">Holding {c.maxQty}</div>}
-                  {typeof shelf === "number" && (
-                    <div className={`text-[10px] font-semibold ${shelf >= c.qty ? "text-[var(--pos)]" : shelf > 0 ? "text-amber-600" : "text-[var(--neg)]"}`}>
-                      On shelf there: {shelf}
-                      {shelf < c.qty && shelf > 0 && " — less than you're asking"}
-                      {shelf === 0 && " — out of stock at that warehouse"}
-                    </div>
-                  )}
-                </td>
-                <td className="px-3 py-2">
-                  <input
-                    type="number"
-                    min={1}
-                    max={c.maxQty}
-                    step={1}
-                    value={c.qty}
-                    aria-label={`Quantity for ${c.name}`}
-                    onChange={(e) => {
-                      const raw = Math.max(1, Math.floor(Number(e.target.value) || 1));
-                      onQty(c.irmItemId, typeof c.maxQty === "number" ? Math.min(raw, c.maxQty) : raw);
-                    }}
-                    className={`${inputCls} py-1.5`}
-                  />
-                </td>
-                <td className="px-3 py-2 text-right">
-                  <button type="button" onClick={() => onRemove(c.irmItemId)} aria-label="Remove item" className="rounded-lg border border-[var(--border)] p-1.5 text-[var(--muted)] transition-all hover:border-[var(--neg)] hover:text-[var(--neg)]">
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
 // ── Restock composer page ────────────────────────────────────────────────────────────────────────
 
 export function RestockComposerPage() {
   const router = useRouter();
   const { pushToast } = useDashboard();
-  const [cart, setCart] = React.useState<CartItem[]>([]);
+  const [cart, setCart] = React.useState<VanStockCartItem[]>([]);
   const [reason, setReason] = React.useState("");
   const [priority, setPriority] = React.useState<VanStockPriority>("normal");
   const [preferredWarehouseId, setPreferredWarehouseId] = React.useState("");
@@ -265,7 +187,7 @@ export function RestockComposerPage() {
           </FormSection>
 
           <FormSection title={`Selected items${cart.length ? ` (${cart.length})` : ""}`} description="Set the quantity for each item.">
-            <CartTable cart={cart} onQty={setQty} onRemove={remove} shelfByItem={shelfByItem} />
+            <VanStockCartTable cart={cart} onQty={setQty} onRemove={remove} shelfByItem={shelfByItem} />
             <DuplicateWarning cart={cart} openLines={openLines} />
           </FormSection>
 
@@ -385,7 +307,7 @@ export function ReturnComposerPage() {
   const router = useRouter();
   const { pushToast } = useDashboard();
   const [holdings, setHoldings] = React.useState<HoldingOption[] | null>(null);
-  const [cart, setCart] = React.useState<CartItem[]>([]);
+  const [cart, setCart] = React.useState<VanStockCartItem[]>([]);
   const [warehouseId, setWarehouseId] = React.useState("");
   const [warehouses, setWarehouses] = React.useState<Array<{ id: string; name: string; code: string | null }>>([]);
   const [reason, setReason] = React.useState("");
@@ -479,7 +401,7 @@ export function ReturnComposerPage() {
           </FormSection>
 
           <FormSection title={`Selected items${cart.length ? ` (${cart.length})` : ""}`} description="Set the quantity you're bringing back.">
-            <CartTable cart={cart} onQty={setQty} onRemove={remove} />
+            <VanStockCartTable cart={cart} onQty={setQty} onRemove={remove} />
             <DuplicateWarning cart={cart} openLines={openLines} />
           </FormSection>
 

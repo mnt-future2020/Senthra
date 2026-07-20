@@ -1151,9 +1151,29 @@ export function updateStockEntryBarcode(id: string, barcode: string, barcodeData
 
 const STOCK_BARCODE_KEY = "CSE";
 
+// Highest barcode number across ALL stock entries, regardless of prefix (every generated barcode is
+// "<PREFIX>-<NNNNN>"). Prefix-agnostic so recovery stays correct after the configured prefix changes.
+// Mirrors highestIrmNumber() in irm.repository — the same recovery problem, solved the same way.
+async function highestStockEntryBarcodeNumber(): Promise<number> {
+  const rows = await prisma.customerStockEntry.findMany({ where: { barcode: { not: null } }, select: { barcode: true } });
+  let max = 0;
+  for (const { barcode } of rows) {
+    const m = /-(\d+)$/.exec(barcode ?? "");
+    if (!m) continue;
+    const n = Number(m[1]);
+    if (Number.isSafeInteger(n) && n > max) max = n;
+  }
+  return max;
+}
+
 // Atomic barcode sequence — mirrors the GRN/GDN code counters. Using an atomic Counter
 // (not a row count) means concurrent barcode generation can't collide, and deleting an
 // entry never recycles a previously-issued number.
+//
+// The cold-start seed MUST come from the highest number ever issued, NOT a row count:
+// deleteStockEntry is a HARD delete, so a count under-seeds by exactly the number of deleted
+// entries and re-issues barcodes that are still live on other rows. The partial unique index
+// (ensureStockEntryBarcodeUniqueIndex) is the backstop if this is ever wrong again.
 export async function nextStockEntryBarcodeSeq(): Promise<number> {
   try {
     const c = await prisma.counter.update({ where: { key: STOCK_BARCODE_KEY }, data: { seq: { increment: 1 } }, select: { seq: true } });
@@ -1161,16 +1181,54 @@ export async function nextStockEntryBarcodeSeq(): Promise<number> {
   } catch (e) {
     if (!(e instanceof Prisma.PrismaClientKnownRequestError) || e.code !== "P2025") throw e;
   }
-  // Counter row doesn't exist yet — seed it past any already-issued barcodes.
-  const start = await prisma.customerStockEntry.count({ where: { barcode: { not: null } } });
+  // Counter row doesn't exist yet — seed it past any already-issued barcode.
+  const start = await highestStockEntryBarcodeNumber();
   try {
-    await prisma.counter.create({ data: { key: STOCK_BARCODE_KEY, seq: start + 1 } });
-    return start + 1;
+    await prisma.counter.create({ data: { key: STOCK_BARCODE_KEY, seq: start } });
   } catch (e) {
     if (!(e instanceof Prisma.PrismaClientKnownRequestError) || e.code !== "P2002") throw e;
-    const c = await prisma.counter.update({ where: { key: STOCK_BARCODE_KEY }, data: { seq: { increment: 1 } }, select: { seq: true } });
-    return c.seq;
   }
+  const c = await prisma.counter.update({ where: { key: STOCK_BARCODE_KEY }, data: { seq: { increment: 1 } }, select: { seq: true } });
+  return c.seq;
+}
+
+// Push the counter past the highest issued barcode after a P2002 — recovers a counter that has
+// drifted behind the data (the only way a generated value can collide).
+export async function fastForwardStockEntryBarcodeCounter(): Promise<void> {
+  const max = await highestStockEntryBarcodeNumber();
+  await prisma.counter.upsert({ where: { key: STOCK_BARCODE_KEY }, create: { key: STOCK_BARCODE_KEY, seq: max }, update: { seq: max } });
+}
+
+// True for a unique-constraint violation (P2002) on the barcode partial index. `meta.target` is
+// matched leniently (index name or field path); a missing target is treated as the barcode clash,
+// since barcode is the only unique index on this collection.
+export function isStockEntryBarcodeConflict(e: unknown): boolean {
+  if (!(e instanceof Prisma.PrismaClientKnownRequestError) || e.code !== "P2002") return false;
+  const target = (e.meta as { target?: unknown } | undefined)?.target;
+  if (target == null) return true;
+  return String(target).toLowerCase().includes("barcode");
+}
+
+// Enforce barcode uniqueness at the DATABASE with a PARTIAL unique index. A customer-stock barcode
+// is a scannable physical identity — a duplicate makes findCustomerStockEntryByBarcode resolve the
+// WRONG customer's stock, silently. Prisma can't express partial/sparse indexes for MongoDB (a plain
+// `@unique` on an optional field builds a NON-sparse index that rejects a second null, and draft
+// entries have no barcode yet — prisma/prisma#23870), so we create it directly. Only documents whose
+// `barcode` is a string are indexed: unlimited nulls allowed, real barcodes unique across every row.
+// This also gives the barcode scan lookup an index instead of a collection scan.
+// Idempotent: createIndexes is a no-op once an identical index exists — safe on every boot.
+export async function ensureStockEntryBarcodeUniqueIndex(): Promise<void> {
+  await prisma.$runCommandRaw({
+    createIndexes: "CustomerStockEntry",
+    indexes: [
+      {
+        key: { barcode: 1 },
+        name: "CustomerStockEntry_barcode_unique",
+        unique: true,
+        partialFilterExpression: { barcode: { $type: "string" } },
+      },
+    ],
+  });
 }
 
 // True when a nested write hit a per-customer unique index (P2002) — duplicate
