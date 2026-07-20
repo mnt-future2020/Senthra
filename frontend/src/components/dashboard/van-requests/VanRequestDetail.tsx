@@ -1,12 +1,13 @@
 "use client";
 
 import * as React from "react";
-import { Camera, Check, Loader2, PackageCheck, Trash2, X } from "lucide-react";
+import { ArrowLeft, Camera, Check, Loader2, PackageCheck, Trash2, X } from "lucide-react";
 
 import * as vanStockSvc from "@/services/vanStockRequest.service";
 import type { FulfilEntryPayload, VanStockRequest, WarehouseAvailability } from "@/services/vanStockRequest.service";
 import { listWarehouseOptions, type WarehouseOption } from "@/services/warehouse.service";
 import { subscribe } from "@/lib/socket";
+import { cn } from "@/lib/utils";
 import { useDashboard } from "@/hooks/useDashboard";
 import { CopyableCode } from "@/components/ui/CopyableCode";
 import { Modal } from "@/components/ui/Modal";
@@ -17,6 +18,7 @@ import { dangerBtn, inputCls, labelCls, primaryBtn, secondaryBtn } from "@/compo
 import { fmtDateTime } from "@/components/dashboard/portal/portalUi";
 import { ScannerInput } from "@/components/dashboard/goods-management/ScannerInput";
 import { VanStockStatusChip } from "@/components/dashboard/engineer/EngineerVanStock";
+import { VanStockPostings, VanStockWalkInBadge } from "./vanRequestUi";
 import type { Msg } from "@/components/ui/types";
 
 // Review + fulfil panel for one van stock request. Three zones by state:
@@ -53,8 +55,8 @@ const entryCap = (e: { remainingQty: number; available: number | null }): number
 // Total being moved for a row = good + damaged (GM's returnTotal).
 const rowTotal = (e: FulfilRow): number => e.goodQty + e.damagedQty;
 
-// Loading placeholder for the modal body — mirrors the loaded layout (status chips → reason card →
-// lines table) so the modal doesn't jump when the request arrives.
+// Loading placeholder — mirrors the loaded layout (status chips → reason card → lines table) so the
+// workspace doesn't jump when the request arrives.
 function DetailSkeleton() {
   return (
     <div className="space-y-5" aria-hidden>
@@ -85,9 +87,18 @@ function DetailSkeleton() {
   );
 }
 
-export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClose: () => void; onChanged: () => void }) {
+// One request's review workspace — fills the warehouse tab in place of the queue (see
+// VanRequestsWorkspace). `idOrCode` is normally the code from the URL; the backend's getOne takes
+// either, so an old `?vReq=<objectId>` link still resolves.
+export function VanRequestDetail({ idOrCode, warehouseName, onClose }: { idOrCode: string; warehouseName: string; onClose: () => void }) {
   const { pushToast } = useDashboard();
   const [req, setReq] = React.useState<VanStockRequest | null>(null);
+  // TOAST vs `msg`, and the split is about whether the user would SEE it, not severity:
+  //  • toast — the scan/post zone (an inline error there lands below the fold while the scanner keeps
+  //    focus, so "no active catalogue item matches that code" is simply never read) and the Decline /
+  //    Close-short dialogs (whose own errors would render on the page BEHIND the modal). Matches
+  //    goods-management's JobScanPanel, which toasts every scan outcome.
+  //  • msg  — the load failure, and the approve zone, which renders beside the button that raised it.
   const [msg, setMsg] = React.useState<Msg>(null);
   const [busy, setBusy] = React.useState(false);
 
@@ -128,7 +139,7 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
   const load = React.useCallback(() => {
     const seq = ++fetchSeq.current;
     vanStockSvc
-      .getVanStockRequest(id)
+      .getVanStockRequest(idOrCode)
       .then((r) => {
         if (seq !== fetchSeq.current) return; // superseded by a newer fetch
         setReq(r);
@@ -139,7 +150,7 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
         if (seq !== fetchSeq.current) return;
         setMsg({ type: "error", text: err instanceof Error ? err.message : "Could not load the request." });
       });
-  }, [id, setEntries]); // setEntries is stable (useCallback, no deps) — this never re-triggers the load
+  }, [idOrCode, setEntries]); // setEntries is stable (useCallback, no deps) — this never re-triggers the load
 
   React.useEffect(() => load(), [load]);
 
@@ -163,7 +174,7 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
       if (busyRef.current) return;
       const seq = ++fetchSeq.current;
       vanStockSvc
-        .getVanStockRequest(id)
+        .getVanStockRequest(idOrCode)
         .then((r) => {
           if (seq !== fetchSeq.current) return; // a newer load()/event won — don't rewind `req`
           setReq(r);
@@ -171,7 +182,7 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
         .catch(() => {}); // background refresh — a transient failure just leaves the last-known state
     };
     return subscribe(["van_stock_request:updated"], onEvent);
-  }, [id]);
+  }, [idOrCode]);
   React.useEffect(() => {
     listWarehouseOptions().then(setWarehouses).catch(() => setWarehouses([]));
   }, []);
@@ -272,7 +283,9 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
     // so both would read busy===false and fire. The ref flips synchronously. Same reason the socket
     // handler reads busyRef.
     if (busyRef.current) return;
-    if (!warehouseId) { setMsg({ type: "error", text: "Pick the fulfilment warehouse." }); return; }
+    // The bulk setter doubles as the request's FINAL fulfilment warehouse (backend requires it), so it
+    // must be set even when every line was individually re-pointed.
+    if (!warehouseId) { setMsg({ type: "error", text: "Set the warehouse the lines are issued from." }); return; }
     setBusyBoth(true);
     setMsg(null);
     try {
@@ -288,9 +301,7 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
         .filter((x): x is { lineId: string; approvedQty: number; sourceWarehouseId?: string } => x !== null);
       await vanStockSvc.approveVanStockRequest(req.id, { warehouseId, lineApprovals: lineApprovals.length ? lineApprovals : undefined, decisionNote: decisionNote.trim() || undefined });
       pushToast("Request approved — fulfil it by scan.", "success");
-      setMsg({ type: "success", text: "Approved — fulfil it by scan below." });
       load();
-      onChanged();
     } catch (err) {
       setMsg({ type: "error", text: err instanceof Error ? err.message : "Could not approve the request." });
     } finally {
@@ -300,7 +311,7 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
 
   const onDecline = async () => {
     if (!req) return;
-    if (!declineNote.trim()) { setMsg({ type: "error", text: "A decline note is required." }); return; }
+    if (!declineNote.trim()) { pushToast("A decline note is required.", "alert"); return; }
     setBusyBoth(true);
     setMsg(null);
     try {
@@ -308,9 +319,8 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
       pushToast("Request declined.", "success");
       setDeclineOpen(false);
       load();
-      onChanged();
     } catch (err) {
-      setMsg({ type: "error", text: err instanceof Error ? err.message : "Could not decline the request." });
+      pushToast(err instanceof Error ? err.message : "Could not decline the request.", "alert");
     } finally {
       setBusyBoth(false);
     }
@@ -341,12 +351,12 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
       const result = await vanStockSvc.vanStockScanLookup(req.id, code);
       const line = req.lines.find((l) => l.id === result.lineId);
       if (!line || !line.isMine) {
-        setMsg({ type: "error", text: `"${result.itemName}" is fulfilled by another warehouse.` });
+        pushToast(`"${result.itemName}" is fulfilled by another warehouse.`, "alert");
         return;
       }
       // Nothing left to move — say so here rather than staging a line the server would reject on Post.
       if (line.remainingQty <= 0) {
-        setMsg({ type: "error", text: `"${line.itemName}" is already fully fulfilled on this request.` });
+        pushToast(`"${line.itemName}" is already fully fulfilled on this request.`, "alert");
         return;
       }
       // This scan's lookup is the freshest truth for both numbers: a split-fulfilment sibling may have
@@ -362,7 +372,7 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
       if (staged && rowTotal(staged) >= cap) {
         // At the cap — refresh the row's numbers from this lookup, but don't bump.
         setEntries((rows) => rows.map((r) => (r.lineId === line.id ? { ...r, ...fresh } : r)));
-        setMsg({ type: "error", text: `"${line.itemName}": ${cap} is the most you can post — adjust the quantities if that's wrong.` });
+        pushToast(`"${line.itemName}": ${cap} is the most you can post — adjust the quantities if that's wrong.`, "alert");
         return;
       }
       setEntries((rows) => {
@@ -376,7 +386,7 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
         return rows.map((r) => (r.lineId === line.id ? { ...r, ...fresh, goodQty: r.goodQty + 1, scannedCode: code } : r));
       });
     } catch (err) {
-      setMsg({ type: "error", text: err instanceof Error ? err.message : "Scan failed." });
+      pushToast(err instanceof Error ? err.message : "Scan failed.", "alert");
     } finally {
       setScanning(false);
     }
@@ -425,7 +435,7 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
       setEntry(lineId, { damagePhotoUrl: url, uploading: false });
     } catch (err) {
       setEntry(lineId, { damagePhotoDataUrl: undefined, damagePhotoUrl: undefined, uploading: false });
-      setMsg({ type: "error", text: err instanceof Error ? err.message : "Could not upload the photo." });
+      pushToast(err instanceof Error ? err.message : "Could not upload the photo.", "alert");
     }
   };
 
@@ -440,19 +450,19 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
     // is already in the ref but may be a render behind in state (see the setEntries/entriesRef contract
     // above) — validating and posting the stale copy would silently drop that unit.
     const rows = entriesRef.current;
-    if (!req || rows.length === 0) { setMsg({ type: "error", text: "Scan at least one item to post." }); return; }
+    if (!req || rows.length === 0) { pushToast("Scan at least one item to post.", "alert"); return; }
     // Mirrors JobScanPanel.onPost's return validation: a row must move something, and any damaged
     // portion needs its evidence (photo + reason) with the upload finished — a half-uploaded photo would
     // post a damaged write-off with no proof.
     for (const e of rows) {
       if (rowTotal(e) < 1) {
-        setMsg({ type: "error", text: `"${e.itemName}": set a quantity (good and/or damaged).` });
+        pushToast(`"${e.itemName}": set a quantity (good and/or damaged).`, "alert");
         return;
       }
       if (e.damagedQty > 0) {
-        if (e.uploading) { setMsg({ type: "error", text: `"${e.itemName}": the damage photo is still uploading — please wait.` }); return; }
-        if (!e.damagePhotoUrl) { setMsg({ type: "error", text: `"${e.itemName}": a damage photo is required for the damaged units.` }); return; }
-        if (!e.damageReason?.trim()) { setMsg({ type: "error", text: `"${e.itemName}": a damage reason is required for the damaged units.` }); return; }
+        if (e.uploading) { pushToast(`"${e.itemName}": the damage photo is still uploading — please wait.`, "alert"); return; }
+        if (!e.damagePhotoUrl) { pushToast(`"${e.itemName}": a damage photo is required for the damaged units.`, "alert"); return; }
+        if (!e.damageReason?.trim()) { pushToast(`"${e.itemName}": a damage reason is required for the damaged units.`, "alert"); return; }
       }
     }
     setBusyBoth(true);
@@ -471,11 +481,9 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
       });
       await vanStockSvc.fulfilVanStockRequest(req.id, payload);
       pushToast(req.type === "return" ? "Return received — balances updated." : "Stock issued — balances updated.", "success");
-      setMsg({ type: "success", text: "Posted — stock and ledgers updated." });
       load();
-      onChanged();
     } catch (err) {
-      setMsg({ type: "error", text: err instanceof Error ? err.message : "Could not post the fulfilment." });
+      pushToast(err instanceof Error ? err.message : "Could not post the fulfilment.", "alert");
     } finally {
       setBusyBoth(false);
     }
@@ -483,7 +491,7 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
 
   const onCloseShort = async () => {
     if (!req) return;
-    if (!closeShortNote.trim()) { setMsg({ type: "error", text: "Say why the remainder won't be fulfilled." }); return; }
+    if (!closeShortNote.trim()) { pushToast("Say why the remainder won't be fulfilled.", "alert"); return; }
     setBusyBoth(true);
     setMsg(null);
     try {
@@ -491,9 +499,8 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
       pushToast("Closed short — remaining quantity written off.", "success");
       setCloseShortOpen(false);
       load();
-      onChanged();
     } catch (err) {
-      setMsg({ type: "error", text: err instanceof Error ? err.message : "Could not close the request." });
+      pushToast(err instanceof Error ? err.message : "Could not close the request.", "alert");
     } finally {
       setBusyBoth(false);
     }
@@ -512,7 +519,33 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
   const myPartDone = !!req?.myProgress?.allMineDone;
 
   return (
-    <Modal open onClose={busy ? () => {} : onClose} title={req ? `${req.code} — ${req.type === "return" ? "Stock return" : "Restock request"}` : "Field stock request"} subtitle={req ? `${req.engineerName}${req.warehouseName ? ` · ${req.warehouseName}` : ""}` : undefined} size="lg" scrollBody>
+    // Fills WarehouseDetail's `fill` box: pinned header, ONE scrolling body. The reviewer keeps the
+    // warehouse header + tab strip above them, so this reads as a place inside the warehouse rather
+    // than an overlay on top of it.
+    <div className="flex h-full flex-col">
+      <div className="flex shrink-0 items-start gap-3 border-b border-[var(--border)] pb-3">
+        <button
+          type="button"
+          onClick={onClose}
+          disabled={busy}
+          // Disabled (not ignored) mid-post: a scan-fulfil posting is in flight and navigating away
+          // would strand the reviewer without its result. Mirrors the old modal's no-op onClose.
+          title={busy ? "Finishing the current action…" : "Back to the queue"}
+          className="mt-0.5 flex shrink-0 items-center gap-1.5 rounded-xl border border-[var(--border)] px-2.5 py-1.5 text-xs font-bold text-[var(--ink)] transition-all hover:bg-[var(--surface-2)] disabled:opacity-50"
+        >
+          <ArrowLeft className="h-3.5 w-3.5" /> Queue
+        </button>
+        <div className="min-w-0 flex-1">
+          <h2 className="truncate text-base font-extrabold text-[var(--ink)]">
+            {req ? `${req.code} — ${req.type === "return" ? "Stock return" : "Restock request"}` : "Field stock request"}
+          </h2>
+          <p className="truncate text-xs text-[var(--muted)]">{req ? `${req.engineerName}${req.warehouseName ? ` · ${req.warehouseName}` : ""}` : warehouseName}</p>
+        </div>
+      </div>
+
+      {/* Full width, like every other `fill` tab (the queue, Inventory, Incoming) — the reviewer's
+          table needs the room, and a max-w here strands a third of the screen empty beside it. */}
+      <div className="min-h-0 flex-1 overflow-y-auto pb-6 pt-4">
       {!req ? (
         msg ? (
           <Notice msg={msg} />
@@ -524,19 +557,21 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
           {/* ── Info ─────────────────────────────────────────────────────────── */}
           <div className="flex flex-wrap items-center gap-2">
             <VanStockStatusChip value={req.status} />
+            {/* Next to the status it qualifies: this "Approved" was never reviewed. */}
+            <VanStockWalkInBadge createdVia={req.createdVia} />
             {req.stale && <span className="inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-amber-600">Stale</span>}
             {req.priority !== "normal" && <span className="inline-flex items-center rounded-full border border-red-500/30 bg-red-500/10 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-red-600">{req.priority}</span>}
-            {req.createdVia === "walk_in" && <span className="inline-flex items-center rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-[var(--muted)]">Walk-in</span>}
+            {/* Per-warehouse progress ("your part is done" even while the request is still partial
+                overall) rides with the other status chips — it's one short fact, and a full-width band
+                of its own just to say "0/4 done" reads as a second, emptier card. */}
+            {req.myProgress && req.myProgress.lines > 0 && (
+              <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider ${req.myProgress.allMineDone ? "border-[var(--pos)]/30 bg-[var(--pos)]/10 text-[var(--pos)]" : "border-[var(--border)] bg-[var(--surface-2)] text-[var(--muted)]"}`}>
+                {req.myProgress.allMineDone ? "✓ Your part complete" : `Your lines ${req.myProgress.linesDone}/${req.myProgress.lines}`}
+                {req.progress.lines > req.myProgress.lines && <span className="ml-1 font-bold normal-case text-[var(--faint)]">· overall {req.progress.linesDone}/{req.progress.lines}</span>}
+              </span>
+            )}
             <span className="ml-auto text-[11px] text-[var(--faint)]">{fmtDateTime(req.createdAt)}</span>
           </div>
-
-          {/* Per-warehouse progress: "your part is done" even while the request is still partial overall. */}
-          {req.myProgress && req.myProgress.lines > 0 && (
-            <div className={`rounded-lg border px-3 py-2 text-xs font-semibold ${req.myProgress.allMineDone ? "border-[var(--pos)]/30 bg-[var(--pos)]/10 text-[var(--pos)]" : "border-[var(--border)] bg-[var(--surface-2)] text-[var(--muted)]"}`}>
-              {req.myProgress.allMineDone ? "✓ Your part is complete" : `Your lines: ${req.myProgress.linesDone}/${req.myProgress.lines} done`}
-              {req.progress.lines > req.myProgress.lines && <span className="ml-2 font-normal text-[var(--faint)]">· Overall {req.progress.linesDone}/{req.progress.lines}</span>}
-            </div>
-          )}
 
           <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3">
             <p className="text-xs text-[var(--muted)]"><span className="font-bold text-[var(--faint)]">Reason:</span> {req.reason}</p>
@@ -553,20 +588,67 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
             )}
           </div>
 
-          {/* Lines */}
+          {/* Duplicate context sits ABOVE the lines — the reviewer must weigh "has he already asked for
+              this?" BEFORE trimming quantities, not after. In the old modal it was buried under a
+              scrolling table, so a reviewer could approve having never seen it.
+              Amber, not red: nothing is broken and nothing is blocked — it's a "look before you approve"
+              caution, sized like the reviewer warning on job kit requests. Deliberately NOT <Notice>,
+              which is the full-width banner forms use to report a submit result. */}
+          {isReviewZone && otherOpen.length > 0 && (
+            <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] font-semibold text-amber-600">
+              Other open requests from {req.engineerName}: {otherOpen.join(", ")} — check for duplicates before approving.
+            </p>
+          )}
+
+          {/* Bulk setter — a TOOL for the table below, not a review decision, so it sits with the table
+              rather than in the Review box (where it read as "approve from here?" next to Approve). It
+              re-points every line the reviewer hasn't manually overridden; per-line dropdowns win. The
+              engineer's preference rides alongside as context — it's what this defaults to. */}
+          {isReviewZone && (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+              <span className="text-xs font-bold text-[var(--faint)]">Set all lines from</span>
+              <div className="min-w-64">
+                <Select
+                  ariaLabel="Set all lines from"
+                  value={warehouseId}
+                  onChange={(v) => {
+                    // Re-default every line's source that the reviewer hasn't manually re-pointed.
+                    setSources((prev) => Object.fromEntries(req.lines.map((l) => [l.id, prev[l.id] && prev[l.id] !== warehouseId ? prev[l.id] : v])));
+                    setWarehouseId(v);
+                  }}
+                  options={[{ value: "", label: "Pick a warehouse…" }, ...warehouses.map((w) => ({ value: w.id, label: w.code ? `${w.name} (${w.code})` : w.name }))]}
+                />
+              </div>
+              {/* Only the engineer's preference is worth saying — that this sets the lines below, and
+                  that each can be re-pointed, is already evident from the control and the table. */}
+              {req.preferredWarehouseName && (
+                <p className="text-[11px] text-[var(--faint)]">
+                  Engineer is collecting from <span className="font-semibold text-[var(--muted)]">{req.preferredWarehouseName}</span>
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Lines. overflow-x-auto + the table's min-w: at full width every column fits and nothing
+              scrolls (the old modal's 32rem box is what truncated the warehouse names); on a narrow
+              viewport the table scrolls sideways rather than crushing the source dropdown. Same
+              wrapper shape as purchase-requests / goods-in. */}
           <div className="overflow-x-auto rounded-xl border border-[var(--border)]">
-            <table className="w-full text-sm">
+            {/* Columns are UNSIZED and left-aligned — the same shape as every other lines table in the
+                app (purchase-requests, goods-in, the shared VanRequestLinesTable). Hand-picked `w-*`
+                widths here are what left Item hogging the slack while the data columns crowded. */}
+            <table className="w-full min-w-[680px] text-left text-sm">
               <thead>
                 <tr className="border-b border-[var(--border)] bg-[var(--surface-2)] text-[10px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                  <th className="px-3 py-2 text-left">Item</th>
-                  <th className="w-24 px-3 py-2 text-right">Requested</th>
-                  <th className="w-28 px-3 py-2 text-right">{isReviewZone ? "Approve qty" : "Approved"}</th>
+                  <th className="px-4 py-3">Item</th>
+                  <th className="px-4 py-3">Requested</th>
+                  <th className="px-4 py-3">{isReviewZone ? "Approve qty" : "Approved"}</th>
                   {isReviewZone ? (
-                    <th className="w-56 px-3 py-2 text-right">Source warehouse</th>
+                    <th className="px-4 py-3">Source warehouse</th>
                   ) : req.type === "restock" && (req.status === "approved" || req.status === "partially_fulfilled") ? (
-                    <th className="w-40 px-3 py-2 text-right">Source</th>
+                    <th className="px-4 py-3">Source</th>
                   ) : null}
-                  <th className="w-24 px-3 py-2 text-right">Fulfilled</th>
+                  <th className="px-4 py-3">Fulfilled</th>
                 </tr>
               </thead>
               <tbody>
@@ -574,12 +656,12 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
                   const need = trims[l.id] ?? l.requestedQty;
                   return (
                   <tr key={l.id} className="border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]/50">
-                    <td className="px-3 py-2 font-semibold text-[var(--ink)]">
-                      {l.itemName}
+                    <td className="px-4 py-3">
+                      <div className="font-semibold text-[var(--ink)]">{l.itemName}</div>
                       {l.code && <div className="mt-0.5"><CopyableCode code={l.code} /></div>}
                     </td>
-                    <td className="px-3 py-2 text-right text-[var(--muted)]">{l.requestedQty}</td>
-                    <td className="px-3 py-2 text-right">
+                    <td className="px-4 py-3 text-[var(--muted)]">{l.requestedQty}</td>
+                    <td className="px-4 py-3">
                       {isReviewZone ? (
                         <input
                           type="number"
@@ -589,7 +671,11 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
                           value={need}
                           aria-label={`Approved quantity for ${l.itemName}`}
                           onChange={(e) => setTrims((t) => ({ ...t, [l.id]: Math.min(l.requestedQty, Math.max(0, Math.floor(Number(e.target.value) || 0))) }))}
-                          className={`${inputCls} py-1.5 text-right`}
+                          // w-20 via cn(): a qty is 1-4 digits, so inputCls's w-full just leaves a long
+                          // empty box (goods-management's scan stepper sizes its qty box the same way).
+                          // twMerge drops the w-full — a bare template string would leave both classes
+                          // and let source order decide.
+                          className={cn(inputCls, "w-20 py-1.5 text-right")}
                         />
                       ) : (
                         <span className="text-[var(--muted)]">{l.approvedQty ?? "—"}</span>
@@ -628,7 +714,7 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
                         )}
                       </td>
                     ) : req.type === "restock" && (req.status === "approved" || req.status === "partially_fulfilled") ? (
-                      <td className="px-3 py-2 text-right text-[11px] text-[var(--muted)]">
+                      <td className="px-4 py-3 text-[11px] text-[var(--muted)]">
                         {l.approvedQty === 0 ? (
                           <span className="font-bold uppercase text-[var(--faint)]">Excluded</span>
                         ) : (
@@ -637,7 +723,7 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
                         {l.isMine && l.approvedQty !== 0 && <span className="ml-1 rounded bg-[var(--accent)]/10 px-1 text-[9px] font-bold uppercase text-[var(--accent)]">Yours</span>}
                       </td>
                     ) : null}
-                    <td className="px-3 py-2 text-right text-[var(--muted)]">{l.fulfilledQty}</td>
+                    <td className="px-4 py-3 text-[var(--muted)]">{l.fulfilledQty}</td>
                   </tr>
                   );
                 })}
@@ -649,29 +735,13 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
           {isReviewZone && (
             <div className="space-y-3 rounded-xl border border-[var(--border)] p-3">
               <p className="text-xs font-bold text-[var(--faint)]">Review</p>
-              {otherOpen.length > 0 && (
-                <Notice msg={{ type: "error", text: `Other open requests from ${req.engineerName}: ${otherOpen.join(", ")} — check for duplicates before approving.` }} />
-              )}
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div>
-                  <label className={labelCls}>Primary warehouse <span className="text-[var(--neg)]">*</span></label>
-                  <Select
-                    ariaLabel="Primary warehouse"
-                    value={warehouseId}
-                    onChange={(v) => {
-                      // Re-default every line's source that the reviewer hasn't manually re-pointed.
-                      setSources((prev) => Object.fromEntries(req.lines.map((l) => [l.id, prev[l.id] && prev[l.id] !== warehouseId ? prev[l.id] : v])));
-                      setWarehouseId(v);
-                    }}
-                    options={[{ value: "", label: "Pick a warehouse…" }, ...warehouses.map((w) => ({ value: w.id, label: w.code ? `${w.name} (${w.code})` : w.name }))]}
-                  />
-                  {req.preferredWarehouseName && <p className="mt-1 text-[11px] text-[var(--faint)]">Engineer is collecting from: {req.preferredWarehouseName}</p>}
-                  <p className="mt-1 text-[11px] text-[var(--faint)]">Sets each line&apos;s default source — re-point out-of-stock lines below.</p>
-                </div>
-                <div>
-                  <label className={labelCls}>Decision note (optional)</label>
-                  <input value={decisionNote} onChange={(e) => setDecisionNote(e.target.value)} maxLength={2000} placeholder="e.g. Trimmed ties to shelf stock." className={inputCls} />
-                </div>
+              <div>
+                {/* NOT shown to the engineer (their list only surfaces a DECLINE note) — this is
+                    reviewer-to-reviewer. It earns its keep on a SPLIT: when a line is re-pointed to
+                    another warehouse, that warehouse's manager opens the request off their own queue
+                    with no idea why it reached them. This note is that context. */}
+                <label className={labelCls}>Review note (optional)</label>
+                <input value={decisionNote} onChange={(e) => setDecisionNote(e.target.value)} maxLength={2000} placeholder="e.g. No ties in London — re-pointed to Manchester." className={inputCls} />
               </div>
               <div className="flex justify-end gap-2">
                 <button type="button" onClick={() => setDeclineOpen(true)} disabled={busy} className={secondaryBtn}>
@@ -684,6 +754,9 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
               {approveBlocked && (
                 <p className="text-right text-[11px] font-semibold text-[var(--neg)]">Every line needs a source warehouse holding enough stock (or set its qty to 0 to exclude it).</p>
               )}
+              {/* Beside the button that raised it — a rejected approve/decline must be visible without
+                  scrolling, right where the reviewer just clicked. */}
+              {msg && <Notice msg={msg} />}
             </div>
           )}
 
@@ -868,40 +941,17 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
             </div>
           )}
 
-          {/* Fulfilment history */}
-          {req.fulfilments.length > 0 && (
-            <div>
-              <p className="mb-2 text-xs font-bold text-[var(--faint)]">Postings</p>
-              <div className="space-y-1.5">
-                {req.fulfilments.map((f) => (
-                  <div key={f.id} className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-2.5 text-xs text-[var(--muted)]">
-                    <span className="font-bold text-[var(--ink)]">#{f.sequence}</span> · {fmtDateTime(f.postedAt)} · {f.performedBy}
-                    <div className="mt-0.5">
-                      {f.lines.map((fl) => (
-                        <span key={fl.id} className="mr-3">
-                          {fl.itemName} ×{fl.qty}
-                          {fl.condition === "damaged" && (
-                            <>
-                              {" "}
-                              <span className="font-bold text-[var(--neg)]">damaged</span>
-                              {fl.damagePhotoUrl && (
-                                <a href={fl.damagePhotoUrl} target="_blank" rel="noreferrer" className="ml-1 font-semibold text-[var(--accent)] hover:underline">photo</a>
-                              )}
-                            </>
-                          )}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
+          {/* Fulfilment history — shared with the engineer's list so both sides read the same record
+              of what physically moved (and, on a return, what came back damaged). */}
+          <VanStockPostings fulfilments={req.fulfilments} type={req.type} />
 
-          {msg && <Notice msg={msg} />}
         </div>
       )}
+      </div>
 
+      {/* Decline / Close-short stay MODALS: each is one focused decision with a mandatory note, taken
+          on top of this workspace and dismissed. They sit outside the scrolling body — they overlay
+          the page, they aren't part of its flow. */}
       {/* Decline modal */}
       {declineOpen && req && (
         <Modal
@@ -921,7 +971,7 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
         >
           <div>
             <label className={labelCls}>Why is this declined? <span className="text-[var(--neg)]">*</span></label>
-            <textarea value={declineNote} onChange={(e) => setDeclineNote(e.target.value)} rows={2} maxLength={2000} className={`${inputCls} resize-none`} />
+            <textarea value={declineNote} onChange={(e) => setDeclineNote(e.target.value)} rows={2} maxLength={2000} placeholder="e.g. Already collected on VSR-0025 — duplicate request." className={`${inputCls} resize-none`} />
           </div>
         </Modal>
       )}
@@ -932,7 +982,7 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
           open
           onClose={busy ? () => {} : () => setCloseShortOpen(false)}
           title={`Close ${req.code} short`}
-          subtitle="Finalises the request at what's been fulfilled so far"
+          subtitle="Finalises the request at what's been fulfilled — the engineer sees this note"
           size="sm"
           footer={
             <>
@@ -945,10 +995,10 @@ export function VanRequestDetail({ id, onClose, onChanged }: { id: string; onClo
         >
           <div>
             <label className={labelCls}>Why won&apos;t the remainder be fulfilled? <span className="text-[var(--neg)]">*</span></label>
-            <textarea value={closeShortNote} onChange={(e) => setCloseShortNote(e.target.value)} rows={2} maxLength={2000} className={`${inputCls} resize-none`} />
+            <textarea value={closeShortNote} onChange={(e) => setCloseShortNote(e.target.value)} rows={2} maxLength={2000} placeholder="e.g. Out of stock — raise a new request when restocked." className={`${inputCls} resize-none`} />
           </div>
         </Modal>
       )}
-    </Modal>
+    </div>
   );
 }

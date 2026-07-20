@@ -244,6 +244,8 @@ model Warehouse {
   damagedStockBalances  DamagedStockBalance[]
   // Non-job van stock requests fulfilled at this warehouse (back-relation; no DB column).
   vanStockRequests      VanStockRequest[]
+  // Van stock request lines ISSUED from this warehouse (back-relation; no DB column).
+  vanStockRequestLines  VanStockRequestLine[]
 
   deletedAt DateTime? // soft delete — excluded from listings; history stays intact
 
@@ -406,6 +408,11 @@ model IrmItem {
   // and most items have no SKU. The partial index only covers string skuLower values.
   sku      String?
   skuLower String?
+  // Free-text / manufacturer barcode (e.g. an EAN). UNIQUE across all rows, enforced by a PARTIAL
+  // unique index (irmRepo.ensureBarcodeUniqueIndex) for the same reason as skuLower above — do NOT
+  // add `@unique`. Uniqueness is load-bearing: findActiveByCodeOrBarcode resolves a scan against
+  // this field with findFirst, so a duplicate would silently return the wrong item. The index also
+  // keeps that $or off a collection scan (Mongo needs every $or arm indexed to use index union).
   barcode  String?
   qrCode   String?
   // Rendered Code128 barcode image (base64 PNG data URI) — generated on demand from the
@@ -1429,9 +1436,14 @@ model VanStockRequestLine {
   approvedQty  Int? // set on approve (reviewer may trim); returns: = requestedQty at create
   fulfilledQty Int  @default(0) // accumulates across postings
 
-  // Per-line source (restock): the warehouse that ISSUES this line. Set on approve; defaults to the
-  // request's warehouseId. Returns/walk-in: = req.warehouseId for every line (no split).
-  sourceWarehouseId   String? @db.ObjectId
+  // Per-line source (restock): the warehouse that ISSUES this line — i.e. where the engineer collects
+  // it. Set on approve; defaults to the request's warehouseId. Returns/walk-in: = req.warehouseId for
+  // every line (no split). A real relation so the engineer's view can show the warehouse's LIVE address
+  // on a split (they have no warehouse-module access, and "collect from <primary>" would send them to
+  // the wrong place); name/code stay snapshotted so the line still reads correctly after a rename or if
+  // the warehouse is later removed. Mirrors JobKitLine.warehouse.
+  sourceWarehouseId   String?    @db.ObjectId
+  sourceWarehouse     Warehouse? @relation(fields: [sourceWarehouseId], references: [id])
   sourceWarehouseName String?
   sourceWarehouseCode String?
 
@@ -1936,7 +1948,12 @@ model CustomerStockEntry {
   thresholdQty  Int?      // low-stock reorder threshold
   attributes    Json?     // dynamic per-category custom fields
 
-  // Barcode — generated on demand, stored for print / scan.
+  // Barcode — generated on demand, stored for print / scan. `barcode` is UNIQUE across all rows,
+  // enforced by a PARTIAL unique index (customerRepo.ensureStockEntryBarcodeUniqueIndex) — do NOT
+  // add `@unique` here: a plain @unique on an optional field builds a NON-sparse index that rejects
+  // a second null, and draft entries have no barcode yet (prisma/prisma#23870). Uniqueness is
+  // load-bearing: scanning resolves this with findFirst, so a duplicate silently returns another
+  // CUSTOMER's stock. The index also keeps the scan lookup off a collection scan.
   barcode         String?  // the barcode value string (e.g. "CSE-00001")
   barcodeDataUri  String?  // base64 data URI of the rendered barcode image
 

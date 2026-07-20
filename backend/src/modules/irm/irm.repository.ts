@@ -172,6 +172,27 @@ export async function ensureSkuUniqueIndex(): Promise<void> {
   });
 }
 
+// Enforce free-text barcode uniqueness at the DB with a PARTIAL unique index — same mechanics and
+// same reason as ensureSkuUniqueIndex (Prisma can't express partial indexes for MongoDB, and most
+// items carry no barcode). Two items sharing a manufacturer barcode would make the scan lookup
+// ambiguous — findActiveByCodeOrBarcode uses findFirst and would silently resolve whichever row
+// came first. It also gives the `barcode` arm of that $or an index: MongoDB can only use index
+// union when EVERY $or arm is indexed, so without this every scan is a full collection scan.
+// Idempotent: createIndexes is a no-op once an identical index exists — safe on every boot.
+export async function ensureBarcodeUniqueIndex(): Promise<void> {
+  await prisma.$runCommandRaw({
+    createIndexes: "IrmItem",
+    indexes: [
+      {
+        key: { barcode: 1 },
+        name: "IrmItem_barcode_unique",
+        unique: true,
+        partialFilterExpression: { barcode: { $type: "string" } },
+      },
+    ],
+  });
+}
+
 export function update(id: string, data: Prisma.IrmItemUncheckedUpdateInput): Promise<IrmItemWithRelations> {
   return prisma.irmItem.update({ where: { id }, data, include: withRelations });
 }

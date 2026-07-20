@@ -8,9 +8,31 @@ import { escapeRegex } from "../../utils/search.js";
 // atomic Counter + retry mechanism; the posting transaction mirrors GM's createMovementWithCode.
 
 export type FulfilmentWithLines = VanStockFulfilment & { lines: VanStockFulfilmentLine[] };
-export type RequestWithLines = VanStockRequest & { lines: VanStockRequestLine[]; fulfilments: FulfilmentWithLines[] };
 
-const INCLUDE = { lines: true, fulfilments: { include: { lines: true }, orderBy: { sequence: "asc" as const } } };
+// The per-line source warehouse with its LIVE address — surfaced to the engineer (who has no
+// warehouse-module access) so a SPLIT request tells them where to collect each item. Mirrors the job
+// module's kitWarehouseSelect.
+const sourceWarehouseSelect = {
+  id: true,
+  name: true,
+  code: true,
+  addressLine1: true,
+  addressLine2: true,
+  city: true,
+  county: true,
+  postcode: true,
+  country: true,
+  contactPhone: true,
+} satisfies Prisma.WarehouseSelect;
+
+export type SourceWarehouse = Prisma.WarehouseGetPayload<{ select: typeof sourceWarehouseSelect }>;
+export type LineWithSource = VanStockRequestLine & { sourceWarehouse: SourceWarehouse | null };
+export type RequestWithLines = VanStockRequest & { lines: LineWithSource[]; fulfilments: FulfilmentWithLines[] };
+
+const INCLUDE = {
+  lines: { include: { sourceWarehouse: { select: sourceWarehouseSelect } } },
+  fulfilments: { include: { lines: true }, orderBy: { sequence: "asc" as const } },
+};
 
 // ── Canonical line math — the SINGLE SOURCE OF TRUTH for "how much is left" and "is this line done".
 // Every cap, remaining-qty, and status-recompute MUST use these (posting, scan-lookup, close-short,
@@ -148,6 +170,11 @@ export function findById(id: string): Promise<RequestWithLines | null> {
   return prisma.vanStockRequest.findFirst({ where: { id, deletedAt: null }, include: INCLUDE });
 }
 
+export function findByCode(code: string): Promise<RequestWithLines | null> {
+  if (!code) return Promise.resolve(null);
+  return prisma.vanStockRequest.findFirst({ where: { code, deletedAt: null }, include: INCLUDE });
+}
+
 function searchOr(s: string): Prisma.VanStockRequestWhereInput[] {
   const term = escapeRegex(s);
   return [
@@ -176,6 +203,7 @@ export interface ListParams {
   type?: string;
   engineerId?: string;
   priority?: string;
+  createdVia?: string; // engineer_request | walk_in — a walk-in was never reviewed, so it reads differently
   search?: string;
   sort?: string;
   page?: number;
@@ -187,12 +215,13 @@ export interface ListParams {
 }
 
 export async function listRequests(params: ListParams = {}): Promise<{ requests: RequestWithLines[]; total: number }> {
-  const { status, type, engineerId, priority, search, sort, page = 1, pageSize = 20, warehouseId, warehouseScope } = params;
+  const { status, type, engineerId, priority, createdVia, search, sort, page = 1, pageSize = 20, warehouseId, warehouseScope } = params;
   const and: Prisma.VanStockRequestWhereInput[] = [{ deletedAt: null }];
   if (status) and.push({ status });
   if (type) and.push({ type });
   if (engineerId) and.push({ engineerId });
   if (priority) and.push({ priority });
+  if (createdVia) and.push({ createdVia });
   if (search?.trim()) and.push({ OR: searchOr(search.trim()) });
   if (warehouseId) and.push(belongsToWarehouses([warehouseId]));
   if (warehouseScope) and.push(belongsToWarehouses(warehouseScope));

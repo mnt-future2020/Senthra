@@ -1,4 +1,5 @@
 import { api } from "@/lib/api";
+import type { JobKitWarehouse } from "@/types/job";
 
 // Typed wrapper around the non-job Van Stock Request API. Engineers raise restocks/returns and
 // cancel their own; warehouse reviewers approve/decline, scan-fulfil, close short, create walk-ins.
@@ -21,6 +22,9 @@ export interface VanStockLine {
   sourceWarehouseId: string | null;
   sourceWarehouseName: string | null;
   sourceWarehouseCode: string | null;
+  // Live address of the line's source warehouse — null until approve sets it. Typed as the job kit's
+  // warehouse shape so the engineer's pickup modal is literally the same component in both flows.
+  sourceWarehouse: JobKitWarehouse | null;
   isMine: boolean; // server-computed: this line's source is in the reading actor's warehouse scope
 }
 
@@ -152,6 +156,8 @@ export interface ListParams {
   status?: string;
   type?: string;
   priority?: string;
+  // engineer_request | walk_in — a walk-in never went through review, so both sides filter on it.
+  createdVia?: string;
   search?: string;
   sort?: "oldest" | "newest";
   // Reviewer list only: narrow to one warehouse's queue (final warehouse, or pending preferring it).
