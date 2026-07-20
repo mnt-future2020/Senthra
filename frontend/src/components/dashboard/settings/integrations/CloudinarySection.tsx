@@ -116,10 +116,12 @@ export function CloudinarySection() {
             />
           </Field>
           <Field
-            label={
-              <>API secret {secretSet && "(saved — leave blank to keep)"}</>
+            label="API secret"
+            hint={
+              secretSet
+                ? "Saved — leave blank to keep. Stored encrypted, never shown again."
+                : "Stored encrypted, never shown again."
             }
-            hint="Stored encrypted, never shown again."
           >
             <PasswordInput
               value={apiSecret}

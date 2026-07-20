@@ -71,6 +71,46 @@ export function FormSection({
   );
 }
 
+/**
+ * Wrapper for one field in a multi-column form row.
+ *
+ * Forms across the dashboard hand-roll `<label className={labelCls}>` + control
+ * rather than using `<Field>`. In a grid row of side-by-side fields, a label long
+ * enough to wrap to two lines pushes only its own control down, leaving that input
+ * sitting lower than its row-mates (e.g. "Supplier item code" in a 2/12 cell).
+ *
+ * This lays the pair out as a 3-row grid (label / control / anything trailing, such as
+ * an error or hint), mirroring `<Field>`. The label and control rows size to content
+ * and the trailing `1fr` row absorbs the cell's spare height, so a longer hint or error
+ * under one field never shifts the control above it.
+ *
+ * Like `<Field>`, it does not equalise label heights across a row — a label that wraps
+ * to two lines still sits its control ~16px lower than its row-mates. See the note in
+ * Field.tsx for why, and why a `min-h` floor is the wrong cure.
+ *
+ * Use it as the grid child, carrying the col-span:
+ *
+ *   <FormField className="sm:col-span-3">
+ *     <label className={labelCls}>Supplier item code</label>
+ *     <input className={inputCls} … />
+ *   </FormField>
+ */
+export function FormField({
+  className,
+  children,
+}: {
+  className?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      className={`grid h-full grid-rows-[auto_auto_1fr] content-start ${className ?? ""}`}
+    >
+      {children}
+    </div>
+  );
+}
+
 // A sticky aside card (the right column of a form): summary / photo / preview.
 export function FormAsideCard({
   title,

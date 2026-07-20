@@ -411,7 +411,7 @@ export function SupplierForm({ mode, supplier }: { mode: "create" | "edit"; supp
           <FormSection title="Business information" description="Registration and tax details.">
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
-                <label className={labelCls}>Company registration number</label>
+                <label className={labelCls}>Company reg. number</label>
                 <input
                   className={inputCls}
                   value={companyRegistrationNumber}

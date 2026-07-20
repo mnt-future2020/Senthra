@@ -205,8 +205,8 @@ export function EngineerVanStock() {
       {/* Toolbar — search + filters + sort. Same pattern (and same URL-state approach) as the engineer
           Jobs and Transfers pages; the reviewer board offers the mirror-image filters over the same
           list, so both sides can ask the same questions of it. */}
-      <div className="flex shrink-0 flex-col gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-xs sm:flex-row sm:items-center">
-        <div className="relative w-full sm:max-w-xs">
+      <div className="flex shrink-0 flex-col gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-xs lg:flex-row lg:flex-wrap lg:items-center">
+        <div className="relative w-full lg:min-w-60 lg:max-w-xs lg:flex-1">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--faint)]" />
           <input
             type="text"

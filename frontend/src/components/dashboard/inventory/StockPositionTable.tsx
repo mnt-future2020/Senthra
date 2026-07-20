@@ -304,9 +304,9 @@ export function StockPositionTable({
   return (
     <div className="flex h-full flex-col gap-3">
       {/* Filter bar — shown when any filter or export is configured */}
-      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:items-center">
+      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:flex-wrap lg:items-center">
         {/* Search always shown */}
-        <div className="relative w-full lg:max-w-xs">
+        <div className="relative w-full lg:min-w-64 lg:max-w-xs lg:flex-1">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input
             value={searchInput}

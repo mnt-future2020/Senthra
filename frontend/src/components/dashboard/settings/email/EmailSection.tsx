@@ -258,8 +258,12 @@ export function EmailSection() {
           />
         </Field>
         <Field
-          label={<>Password {passwordSet && "(saved — leave blank to keep)"}</>}
-          hint="Use an app password for Gmail/Outlook, not your login."
+          label="Password"
+          hint={
+            passwordSet
+              ? "Saved — leave blank to keep. Use an app password for Gmail/Outlook, not your login."
+              : "Use an app password for Gmail/Outlook, not your login."
+          }
         >
           <PasswordInput
             value={password}

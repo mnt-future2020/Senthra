@@ -100,10 +100,12 @@ export function IntegrationsSection() {
             />
           </Field>
           <Field
-            label={
-              <>Client secret {secretSet && "(saved — leave blank to keep)"}</>
+            label="Client secret"
+            hint={
+              secretSet
+                ? "Saved — leave blank to keep. Stored encrypted, never shown again."
+                : "Stored encrypted, never shown again."
             }
-            hint="Stored encrypted, never shown again."
           >
             <PasswordInput
               value={clientSecret}
