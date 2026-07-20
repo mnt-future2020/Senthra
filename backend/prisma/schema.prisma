@@ -485,7 +485,8 @@ model IrmItem {
 
 // Junction: which suppliers can provide an IRM item, with ranking + per-supplier detail.
 // Replaces a scalar array so future Purchase Orders can do preferred-supplier / ranking /
-// price-comparison / lead-time work. Exactly one row per item has isPrimary = true.
+// price-comparison / lead-time work. Suppliers are OPTIONAL — an item may have no rows at all —
+// and at most one row per item has isPrimary = true.
 model IrmItemSupplier {
   id           String   @id @default(auto()) @map("_id") @db.ObjectId
   irmItemId    String   @db.ObjectId
@@ -539,6 +540,12 @@ model PurchaseRequest {
   quoteReference  String?
   quoteDate       DateTime?
   quoteValidUntil DateTime?
+
+  // When the requester needs the goods on site. Becomes the generated PO's expectedDeliveryDate
+  // at conversion — the ONLY source for it (never derived from the supplier's lead time, which
+  // would look like a commitment nobody made). REQUIRED on create; nullable only because PRFs
+  // raised before this field existed have none — convert refuses those until a date is added.
+  requiredByDate DateTime?
 
   justification String? // business justification (the client's PRF field)
   notes         String?
@@ -679,8 +686,11 @@ model PurchaseOrder {
   pmAssignedAt DateTime?
   pmAssignedBy String?
 
-  // Supplier acceptance (sent → supplier_accepted) — recorded manually by staff when the
-  // supplier confirms. confirmedDeliveryDate is updatable later; EVERY change is audited
+  // Supplier acceptance — recorded manually by staff when the supplier confirms. An EVENT, not a
+  // workflow gate: goods routinely arrive before the paperwork, so it is recordable at any
+  // non-terminal issued status (sent | supplier_accepted | partially_received | fully_received)
+  // and only ADVANCES sent → supplier_accepted; on the others the receipt status stays the truth.
+  // confirmedDeliveryDate is required at capture and updatable later; EVERY change is audited
   // with {previousDate, newDate, reason} metadata (the audit ledger IS the revision history).
   supplierAcceptedAt    DateTime? // when acceptance was recorded
   supplierAcceptedBy    String?   // staff email snapshot — who recorded it

@@ -191,8 +191,8 @@ async function resolveOwner(ownerUserId: string | null | undefined): Promise<str
   return user.id;
 }
 
-// Normalise supplier rows to junction rows. The zod schema already guarantees ≥1 row,
-// exactly one primary, and no duplicate supplier. NEW supplier links must be ACTIVE, but
+// Normalise supplier rows to junction rows. Suppliers are optional, so the list may be empty;
+// the zod schema guarantees at most one primary and no duplicate supplier. NEW links must be ACTIVE, but
 // suppliers already on the item are preserved even if since deactivated — so editing the
 // item's other fields keeps working (mirrors the owner/manager "only validate on change"
 // rule). `preserveSupplierIds` holds the ids currently linked to the item (empty on create,
@@ -344,7 +344,7 @@ export async function createIrmItem(input: CreateIrmItemInput, actor?: AuditActo
   await irmCategoryService.requireActiveIrmCategory(input.irmCategoryId);
   const ownerUserId = await resolveOwner(input.ownerUserId);
   const { skuLower } = await resolveSku(input.sku);
-  const supplierRows = await buildSupplierRows(input.suppliers);
+  const supplierRows = await buildSupplierRows(input.suppliers ?? []);
   const standardCostPence = costToPence(input.standardCost);
   const codePrefix = await getIrmCodePrefix();
   const actorLabel = actor?.email ?? null;
@@ -452,7 +452,8 @@ export async function updateIrmItem(id: string, input: UpdateIrmItemInput, actor
     events.push(input.status === "active" ? "irm.activated" : "irm.deactivated");
   }
 
-  // Suppliers reconcile (mandatory ≥1 + one primary already guaranteed by zod when present).
+  // Suppliers reconcile (optional; an empty array clears every link. Uniqueness + at most one
+  // primary already guaranteed by zod when present).
   // Suppliers already linked to this item are preserved even if since deactivated, so an
   // unrelated edit never fails on a stale link; only newly-added suppliers must be active.
   let supplierRows: SupplierLinkRow[] | null = null;

@@ -1,10 +1,15 @@
 import { z } from "zod";
 
-// Goods In (GRN) validation. RECEIVING WORKFLOW ONLY. Codes/status/accepted/previouslyReceived
+// Goods In (GRN) validation. RECEIVING WORKFLOW ONLY. Codes/status/damaged/previouslyReceived
 // and all inventory writes are SYSTEM-owned and never accepted from the client. Editable only in
 // `draft` (enforced in the service). Required on create: purchase order, received date, and at
 // least one line receiving ≥ 1. Serial/batch COUNT rules (= accepted) are service-enforced
-// because they need the IRM track flags + the computed accepted quantity.
+// because they need the IRM track flags alongside the accepted quantity.
+//
+// The client sends received + ACCEPTED (what QC physically passed); damaged is DERIVED
+// (received − accepted) in the service. acceptedQuantity is deliberately REQUIRED, not
+// optional-defaulting-to-0: a missing field would otherwise silently mean "everything was
+// damaged" and quietly keep good stock out of inventory.
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 
@@ -12,6 +17,16 @@ export const GRN_QUALITY_STATUSES = ["passed", "partial", "failed"] as const;
 export const GRN_ATTACHMENT_TYPES = ["pdf", "docx", "png", "jpg"] as const;
 
 const emptyToUndef = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
+
+// Guard for a REQUIRED quantity that must never default to 0. z.coerce.number() happily turns
+// "", null, [], false and true into numbers, so a missing/blank value would sail through as a
+// meaningful 0. Anything that isn't a number or a non-blank numeric string becomes `undefined`
+// here, which the required inner schema then rejects with a proper "is required" message.
+const numericOnly = (v: unknown) => {
+  if (typeof v === "number") return v;
+  if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) return v;
+  return undefined;
+};
 
 const requiredDate = (label: string) =>
   z
@@ -41,14 +56,18 @@ const lineSchema = z
   .object({
     purchaseOrderItemId: z.string().regex(OBJECT_ID_RE, "Select a purchase order line."),
     receivedQuantity: intQty("Received quantity"),
-    damagedQuantity: z.preprocess(emptyToUndef, intQty("Damaged quantity").optional()),
+    // Deliberately NOT bare `intQty`: z.coerce.number() coerces "", null, [] and false all to 0,
+    // so any of them would parse as "zero accepted" — i.e. the whole delivery silently marked
+    // damaged, posting no stock while the PO still advances by the full received qty. Only a
+    // real number (or a numeric string from a form) may reach the coercion.
+    acceptedQuantity: z.preprocess(numericOnly, intQty("Accepted quantity")),
     notes: z.string().trim().max(2000).optional(),
     serials: z.array(z.string().trim().min(1, "Serial number can't be blank.").max(120)).max(5000, "Too many serial numbers on one line.").optional(),
     batches: z.array(batchSchema).max(500, "Too many batches on one line.").optional(),
   })
-  .refine((l) => (l.damagedQuantity ?? 0) <= l.receivedQuantity, {
-    message: "Damaged quantity can't exceed received quantity.",
-    path: ["damagedQuantity"],
+  .refine((l) => l.acceptedQuantity <= l.receivedQuantity, {
+    message: "Accepted quantity can't exceed received quantity.",
+    path: ["acceptedQuantity"],
   });
 export type GRNLineInput = z.infer<typeof lineSchema>;
 

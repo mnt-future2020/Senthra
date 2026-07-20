@@ -181,8 +181,9 @@ export function RoleForm({ mode, role }: { mode: "create" | "edit"; role?: Role 
       />
 
       <form id="role-form" onSubmit={submit} className="grid gap-6 lg:grid-cols-3">
-        {/* Main column */}
-        <div className="space-y-6 lg:col-span-2">
+        {/* Main column — min-w-0 stops wide permission rows from forcing the
+            track wider than its 2fr share (grid children default to min-width:auto). */}
+        <div className="min-w-0 space-y-6 lg:col-span-2">
           <FormSection title="Details">
             <div className="space-y-4">
               <div>

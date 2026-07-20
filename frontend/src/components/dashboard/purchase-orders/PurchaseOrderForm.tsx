@@ -8,7 +8,6 @@ import * as poService from "@/services/purchase-order.service";
 import { listSuppliers } from "@/services/supplier.service";
 import { listWarehouses, listWarehouseOptions, type WarehouseOption } from "@/services/warehouse.service";
 import { listIrmItems } from "@/services/irm.service";
-import { listJobs } from "@/services/job.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
@@ -24,7 +23,6 @@ import type { PoPriority, PurchaseOrder } from "@/types/purchase-order";
 import type { Supplier } from "@/types/supplier";
 import type { Warehouse } from "@/types/warehouse";
 import type { IrmItem } from "@/types/irm";
-import type { JobSummary } from "@/types/job";
 
 const PO_LIST = "/dashboard/purchase-orders";
 const PRIORITIES = ["low", "normal", "high", "urgent"] as const;
@@ -67,7 +65,9 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
   const [expectedDeliveryDate, setExpectedDeliveryDate] = React.useState(dateInput(o?.expectedDeliveryDate));
   const [referenceNumber, setReferenceNumber] = React.useState(o?.referenceNumber ?? "");
   const [priority, setPriority] = React.useState<PoPriority>(o?.priority ?? "normal");
-  const [jobId, setJobId] = React.useState(o?.jobId ?? "");
+  // The Job picker was removed from the form; the value is still carried so an EDIT does not
+  // silently unset a job link the order inherited from its source PRF.
+  const jobId = o?.jobId ?? "";
   const [projectRef, setProjectRef] = React.useState(o?.projectRef ?? "");
   const [description, setDescription] = React.useState(o?.description ?? "");
   const [deliveryAddress, setDeliveryAddress] = React.useState(o?.deliveryAddress ?? "");
@@ -90,7 +90,6 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
 
   const [suppliers, setSuppliers] = React.useState<Supplier[]>([]);
   const [warehouses, setWarehouses] = React.useState<Warehouse[]>([]);
-  const [jobs, setJobs] = React.useState<JobSummary[]>([]);
   // Active-warehouse OPTIONS for the per-row picker (create flow). Server-scoped: a Warehouse Manager
   // receives only their assigned warehouses, so the picker can never offer one they aren't allowed.
   const [warehouseOptions, setWarehouseOptions] = React.useState<WarehouseOption[]>([]);
@@ -113,7 +112,6 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
         ? { label: "warehouses", load: () => listWarehouseOptions(), onData: (opts) => setWarehouseOptions(opts) }
         : { label: "warehouses", load: () => listWarehouses({ status: "active", pageSize: 100 }), onData: (r) => setWarehouses(r.warehouses) },
       { label: "the item catalogue", load: () => listIrmItems({ status: "active", pageSize: 100 }), onData: (r) => setItems(r.items) },
-      { label: "jobs", load: () => listJobs({ pageSize: 100 }), onData: (r) => setJobs(r.jobs) },
     ],
     [mode],
   );
@@ -463,12 +461,7 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
                 <Select value={priority} onChange={(v) => { setPriority(v as typeof priority); touch(); }} options={PRIORITIES.map((p) => ({ value: p, label: PRIORITY_LABELS[p] }))} ariaLabel="Priority" />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Use Urgent only for exceptional cases.</p>
               </div>
-              <div>
-                <label className={labelCls}>Job</label>
-                <Select value={jobId} onChange={(v) => { setJobId(v); touch(); }} options={jobs.map((j) => ({ value: j.id, label: `${j.jobNumber} — ${j.name}` }))} placeholder={refLoading && !jobId ? "Loading jobs…" : "— No job link —"} disabled={refLoading && !jobId} ariaLabel="Job" />
-                <p className="mt-1.5 text-[11px] text-[var(--faint)]">Optional — link this order to a job.</p>
-              </div>
-              <div>
+              <div className="sm:col-span-2">
                 <label className={labelCls}>Project reference</label>
                 <input className={inputCls} value={projectRef} onChange={(e) => { setProjectRef(e.target.value); touch(); }} maxLength={120} placeholder="e.g. PROJ-001" />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Optional free-text project reference.</p>
@@ -511,12 +504,8 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
                         <div className="min-w-0">
                           <label className={labelCls}>Item</label>
                           <Select value={row.irmItemId} onChange={(v) => onPickItem(idx, v)} options={itemOptions.list.map((i) => ({ value: i.id, label: `${i.name} (${i.code})` }))} placeholder={refLoading && !row.irmItemId ? "Loading items…" : "— Select an item —"} disabled={refLoading && !row.irmItemId} ariaLabel="Item" />
-                          {pickedItem && supplierId && (
-                            supplierLink?.supplierSku ? (
-                              <p className="mt-1.5 text-[11px] text-[var(--muted)]">Supplier item code: <span className="font-mono text-[var(--ink)]">{supplierLink.supplierSku}</span></p>
-                            ) : !supplierLink ? (
-                              <p className="mt-1.5 text-[11px] text-[var(--warn)]">Not listed for the selected supplier.</p>
-                            ) : null
+                          {pickedItem && supplierId && supplierLink?.supplierSku && (
+                            <p className="mt-1.5 text-[11px] text-[var(--muted)]">Supplier item code: <span className="font-mono text-[var(--ink)]">{supplierLink.supplierSku}</span></p>
                           )}
                         </div>
                         {/* Per-row destination warehouse (create only) — the order auto-splits by this.

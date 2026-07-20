@@ -204,7 +204,10 @@ const optionalDateField = z.preprocess(
 export const poSupplierAcceptSchema = z
   .object({
     acceptedDate: optionalDateField, // defaults to "now" server-side
-    confirmedDeliveryDate: optionalDateField,
+    // REQUIRED: accepting an order means committing to a delivery date. This is the authoritative
+    // date the warehouse plans against, and it stays revisable afterwards via the delivery-date
+    // endpoint — so asking for it up front costs nothing and removes the guesswork.
+    confirmedDeliveryDate: requiredDate("Confirmed delivery date"),
     supplierAckReference: z.string().trim().max(120).optional(),
     notes: z.string().trim().max(2000).optional(),
   })
@@ -225,7 +228,7 @@ export const poSupplierAcceptSchema = z
   );
 export type PoSupplierAcceptInput = z.infer<typeof poSupplierAcceptSchema>;
 
-// --- confirmed-delivery-date revision (supplier_accepted only; audited with prev/new/reason) --
+// --- confirmed-delivery-date revision (any non-terminal PO that already has one; audited) -----
 export const poDeliveryDateSchema = z.object({
   confirmedDeliveryDate: requiredDate("Confirmed delivery date"),
   reason: z.string().trim().max(500).optional(),

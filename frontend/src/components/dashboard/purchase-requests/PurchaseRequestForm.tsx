@@ -8,7 +8,6 @@ import * as prfService from "@/services/purchase-request.service";
 import { listSuppliers } from "@/services/supplier.service";
 import { listWarehouses } from "@/services/warehouse.service";
 import { listIrmItems } from "@/services/irm.service";
-import { listJobs } from "@/services/job.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
@@ -25,7 +24,6 @@ import type { PurchaseRequest } from "@/types/purchase-request";
 import type { Supplier } from "@/types/supplier";
 import type { Warehouse } from "@/types/warehouse";
 import type { IrmItem } from "@/types/irm";
-import type { JobSummary } from "@/types/job";
 
 const PRF_LIST = "/dashboard/purchase-requests";
 
@@ -47,6 +45,7 @@ function FieldError({ id, message }: { id: string; message?: string }) {
 }
 
 const dateInput = (iso: string | null | undefined) => (iso ? iso.slice(0, 10) : "");
+const today = () => new Date().toISOString().slice(0, 10);
 const blankLine = (): LineRow => ({ _key: crypto.randomUUID(), irmItemId: "", quantity: "1", unitPrice: "", vatRate: "20", notes: "" });
 
 export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"; request?: PurchaseRequest | null }) {
@@ -57,11 +56,14 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
   const r = request;
   const [supplierId, setSupplierId] = React.useState(r?.supplierId ?? "");
   const [warehouseId, setWarehouseId] = React.useState(r?.warehouseId ?? "");
-  const [jobId, setJobId] = React.useState(r?.jobId ?? "");
+  // The Job picker was removed from the form; the value is still carried so an EDIT does not
+  // silently unset a job link created elsewhere.
+  const jobId = r?.jobId ?? "";
   const [projectRef, setProjectRef] = React.useState(r?.projectRef ?? "");
   const [quoteReference, setQuoteReference] = React.useState(r?.quoteReference ?? "");
   const [quoteDate, setQuoteDate] = React.useState(dateInput(r?.quoteDate));
   const [quoteValidUntil, setQuoteValidUntil] = React.useState(dateInput(r?.quoteValidUntil));
+  const [requiredByDate, setRequiredByDate] = React.useState(dateInput(r?.requiredByDate));
   const [justification, setJustification] = React.useState(r?.justification ?? "");
   const [notes, setNotes] = React.useState(r?.notes ?? "");
   const [deliveryTerms, setDeliveryTerms] = React.useState(r?.deliveryTerms ?? "");
@@ -77,7 +79,6 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
 
   const [suppliers, setSuppliers] = React.useState<Supplier[]>([]);
   const [warehouses, setWarehouses] = React.useState<Warehouse[]>([]);
-  const [jobs, setJobs] = React.useState<JobSummary[]>([]);
   const [items, setItems] = React.useState<IrmItem[]>([]);
   // Quote files picked on the create form, held until the PRF exists (create only — on edit the
   // detail page owns attachments).
@@ -98,7 +99,6 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
   const { isLoading: refLoading } = useReferenceData([
     { label: "suppliers", load: () => listSuppliers({ status: "active", pageSize: 100 }), onData: (s) => setSuppliers(s.suppliers) },
     { label: "delivery warehouses", load: () => listWarehouses({ status: "active", pageSize: 100 }), onData: (w) => setWarehouses(w.warehouses) },
-    { label: "jobs", load: () => listJobs({ pageSize: 100 }), onData: (j) => setJobs(j.jobs) },
     { label: "the item catalogue", load: () => listIrmItems({ status: "active", pageSize: 100 }), onData: (i) => setItems(i.items) },
   ]);
 
@@ -222,6 +222,11 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
     if (!supplierId) errs.supplierId = "Select a supplier.";
     if (!warehouseId) errs.warehouseId = "Select a delivery warehouse.";
     if (quoteDate && quoteValidUntil && quoteValidUntil < quoteDate) errs.quoteValidUntil = "Can't end before the quote date.";
+    // Required: it becomes the PO's expected delivery date, and nothing else derives one.
+    if (!requiredByDate) errs.requiredByDate = "Required-by date is required.";
+    // A needed-by date in the past can't be met by an order that hasn't been placed yet. Only
+    // checked on CREATE — an old draft being edited may legitimately have slipped past its date.
+    else if (mode === "create" && requiredByDate < today()) errs.requiredByDate = "Can't be in the past.";
 
     const effective = lineRows.filter((row) => row.irmItemId);
     if (effective.length === 0) errs.items = "Add at least one item.";
@@ -241,6 +246,9 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
     quoteReference: quoteReference.trim(),
     quoteDate: quoteDate || null,
     quoteValidUntil: quoteValidUntil || null,
+    // NOT `|| null` like its neighbours: this one can never be cleared (it becomes the PO's
+    // delivery date), so the schema rejects null. Omit it instead — "leave unchanged".
+    requiredByDate: requiredByDate || undefined,
     justification: justification.trim(),
     notes: notes.trim(),
     deliveryTerms: deliveryTerms || null,
@@ -349,14 +357,17 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Where the goods would be delivered once ordered.</p>
               </div>
               <div>
-                <label className={labelCls}>Job</label>
-                <Select value={jobId} onChange={(v) => { setJobId(v); touch(); }} options={jobs.map((j) => ({ value: j.id, label: `${j.jobNumber} — ${j.name}` }))} placeholder={refLoading && !jobId ? "Loading jobs…" : "— No job link —"} disabled={refLoading && !jobId} ariaLabel="Job" />
-                <p className="mt-1.5 text-[11px] text-[var(--faint)]">Optional — link this request to a job.</p>
-              </div>
-              <div>
                 <label className={labelCls}>Project reference</label>
                 <input className={inputCls} value={projectRef} onChange={(e) => { setProjectRef(e.target.value); touch(); }} maxLength={120} placeholder="e.g. PROJ-001" />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Optional free-text project reference.</p>
+              </div>
+              <div>
+                <label className={labelCls}>Required by<RequiredMark /></label>
+                <input type="date" className={inputCls} value={requiredByDate} onChange={(e) => { setRequiredByDate(e.target.value); touch(); clearError("requiredByDate"); }} aria-invalid={Boolean(errors.requiredByDate)} placeholder="dd-mm-yyyy" />
+                <FieldError id="err-requiredByDate" message={errors.requiredByDate} />
+                <p className="mt-1.5 text-[11px] text-[var(--faint)]">
+                  When the goods are needed on site. Becomes the purchase order&apos;s expected delivery date.
+                </p>
               </div>
               <div className="sm:col-span-2">
                 <label className={labelCls}>Justification</label>
@@ -465,12 +476,8 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
                       <div className="min-w-0">
                         <label className={labelCls}>Item</label>
                         <Select value={row.irmItemId} onChange={(v) => onPickItem(idx, v)} options={itemOptions.list.map((i) => ({ value: i.id, label: `${i.name} (${i.code})` }))} placeholder={refLoading && !row.irmItemId ? "Loading items…" : "— Select an item —"} disabled={refLoading && !row.irmItemId} ariaLabel="Item" />
-                        {pickedItem && supplierId && (
-                          supplierLink?.supplierSku ? (
-                            <p className="mt-1.5 text-[11px] text-[var(--muted)]">Supplier item code: <span className="font-mono text-[var(--ink)]">{supplierLink.supplierSku}</span></p>
-                          ) : !supplierLink ? (
-                            <p className="mt-1.5 text-[11px] text-[var(--warn)]">Not listed for the selected supplier.</p>
-                          ) : null
+                        {pickedItem && supplierId && supplierLink?.supplierSku && (
+                          <p className="mt-1.5 text-[11px] text-[var(--muted)]">Supplier item code: <span className="font-mono text-[var(--ink)]">{supplierLink.supplierSku}</span></p>
                         )}
                       </div>
                       {/* Numerics — narrow, kept on their own row so the Quantity stepper never gets

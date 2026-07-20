@@ -84,7 +84,8 @@ router.post(
   validateBody(poAssignPmSchema),
   poController.assignPmPurchaseOrder,
 );
-// Record the supplier's acceptance of an issued order (sent → supplier_accepted).
+// Record the supplier's acknowledgement of an issued order. Advances sent → supplier_accepted;
+// on an already-receiving order it records the acknowledgement without changing status.
 router.post(
   "/:id/accept",
   requirePermission("purchase_orders.acknowledge"),
@@ -92,7 +93,7 @@ router.post(
   validateBody(poSupplierAcceptSchema),
   poController.recordSupplierAcceptance,
 );
-// Revise the confirmed delivery date on an accepted order (audited with prev/new/reason).
+// Revise an existing confirmed delivery date, until the order closes (audited prev/new/reason).
 router.patch(
   "/:id/delivery-date",
   requirePermission("purchase_orders.acknowledge"),

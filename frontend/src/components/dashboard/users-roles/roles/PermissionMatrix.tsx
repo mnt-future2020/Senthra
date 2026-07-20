@@ -78,8 +78,10 @@ function clearGroups(granted: string[], groups: PermissionGroup[]): string[] {
   return [...set];
 }
 
+// min-h-[36px] on pointer-coarse devices keeps chips comfortably tappable without
+// inflating the dense desktop layout (WCAG 2.5.5 target size).
 const chipBase =
-  "rounded-lg border px-2.5 py-1.5 text-[11px] font-bold transition-all";
+  "inline-flex items-center rounded-lg border px-2.5 py-1.5 text-[11px] font-bold transition-all [@media(pointer:coarse)]:min-h-[36px] [@media(pointer:coarse)]:px-3";
 const chipOn = "border-[var(--accent)] bg-[var(--accent-10)] text-[var(--accent)]";
 const chipOffEditable =
   "border-[var(--border)] text-[var(--muted)] hover:border-[var(--border-2)] hover:text-[var(--ink)]";
@@ -230,11 +232,11 @@ export function PermissionMatrix({ groups, categories, granted, onChange }: Perm
                     return (
                       <div
                         key={group.key}
-                        className={`flex flex-col gap-2.5 py-3 pr-4 sm:flex-row sm:items-start sm:justify-between ${
+                        className={`flex flex-col gap-2.5 py-3 pr-4 ${
                           isChild ? "pl-10" : "pl-4"
                         }`}
                       >
-                        <div className="relative min-w-0 sm:pr-4">
+                        <div className="relative min-w-0">
                           {isChild && (
                             <span
                               aria-hidden
@@ -246,7 +248,7 @@ export function PermissionMatrix({ groups, categories, granted, onChange }: Perm
                             {group.description}
                           </p>
                         </div>
-                        <div className="flex flex-wrap gap-1.5 sm:shrink-0 sm:justify-end">
+                        <div className="flex flex-wrap gap-1.5">
                           {group.permissions.map((p) => {
                             const checked = grantedSet.has(p.key);
                             if (readOnly) {

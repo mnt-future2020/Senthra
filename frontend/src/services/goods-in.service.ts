@@ -23,10 +23,13 @@ export interface PagedGoodsReceipts {
 }
 
 // One received line. Serial numbers are plain strings; batches carry an optional expiry.
+// Send received + ACCEPTED (what passed QC); the server derives damaged = received − accepted.
+// `acceptedQuantity` is required — omitting it is a validation error server-side, never a
+// silent "nothing accepted".
 export interface GrnLinePayload {
   purchaseOrderItemId: string;
   receivedQuantity: number | string;
-  damagedQuantity?: number | string;
+  acceptedQuantity: number | string;
   notes?: string;
   serials?: string[];
   batches?: { batchNumber: string; expiryDate?: string; quantity: number | string }[];

@@ -4,9 +4,10 @@ import { z } from "zod";
 // auto-allocated (IRM-0001). Type + Category reference the IRM masters (NOT the customer
 // Category). Cost is collected in POUNDS here and stored as integer pence by the service.
 //
-// REQUIRED on create: name, typeId, irmCategoryId, baseUnit, and at least one supplier with
-// exactly one marked primary. On UPDATE everything is optional (partial PATCH) but
-// non-empty / valid when sent.
+// REQUIRED on create: name, typeId, irmCategoryId, baseUnit. Suppliers are OPTIONAL — an item
+// may have none (not every item is bought in) — but when rows ARE sent they must be unique and
+// mark at most one primary. On UPDATE everything is optional (partial PATCH) but
+// non-empty / valid when sent; an empty suppliers array clears all links.
 
 const statusEnum = z.enum(["active", "inactive"]);
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
@@ -77,23 +78,16 @@ const supplierRowSchema = z.object({
 });
 export type SupplierRowInput = z.infer<typeof supplierRowSchema>;
 
-// Mandatory: at least one supplier, exactly one primary, no duplicate supplier.
+// Optional: zero suppliers is allowed. When rows are present they must be unique and mark at
+// most one primary (an empty list simply has no primary).
 const suppliersValid = (arr: { supplierId: string; isPrimary?: boolean }[]) => {
   const ids = arr.map((s) => s.supplierId);
   const noDup = new Set(ids).size === ids.length;
   const primaries = arr.filter((s) => s.isPrimary === true).length;
-  return noDup && primaries === 1;
+  return noDup && primaries <= 1;
 };
-const suppliersMessage = "Add at least one supplier and mark exactly one as primary (no duplicates).";
-const suppliersCreate = z
-  .array(supplierRowSchema)
-  .min(1, "Add at least one supplier.")
-  .refine(suppliersValid, { message: suppliersMessage });
-const suppliersUpdate = z
-  .array(supplierRowSchema)
-  .min(1, "Add at least one supplier.")
-  .refine(suppliersValid, { message: suppliersMessage })
-  .optional();
+const suppliersMessage = "Each supplier can only be added once, and only one can be primary.";
+const suppliersField = z.array(supplierRowSchema).refine(suppliersValid, { message: suppliersMessage }).optional();
 
 // Shared optional fields (create + update). Required ones are overridden on create.
 const sharedIrmFields = {
@@ -137,7 +131,7 @@ export const createIrmItemSchema = z
     typeId: z.string({ error: "Select an IRM type." }).regex(OBJECT_ID_RE, "Select an IRM type."),
     irmCategoryId: z.string({ error: "Select an IRM category." }).regex(OBJECT_ID_RE, "Select an IRM category."),
     baseUnit: baseUnitCreate,
-    suppliers: suppliersCreate,
+    suppliers: suppliersField,
   })
   .refine(maxGteMin, maxGteMinError);
 export type CreateIrmItemInput = z.infer<typeof createIrmItemSchema>;
@@ -146,7 +140,7 @@ export const updateIrmItemSchema = z
   .object({
     name: z.string().trim().min(1, "Item name can't be empty.").max(150).optional(),
     ...sharedIrmFields,
-    suppliers: suppliersUpdate,
+    suppliers: suppliersField,
   })
   .refine(maxGteMin, maxGteMinError);
 export type UpdateIrmItemInput = z.infer<typeof updateIrmItemSchema>;

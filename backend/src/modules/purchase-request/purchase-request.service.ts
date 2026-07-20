@@ -14,6 +14,7 @@ import type { AuditActor } from "#modules/audit/audit.service.js";
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
 import { withTransaction } from "../../lib/prisma.js";
+import { emitToRoom, PURCHASE_ORDER_WATCHERS_ROOM, PURCHASE_REQUEST_WATCHERS_ROOM } from "../../lib/realtime.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import { paginate } from "../../utils/pagination.js";
@@ -112,6 +113,7 @@ export interface PublicPurchaseRequest {
   quoteReference: string | null;
   quoteDate: string | null;
   quoteValidUntil: string | null;
+  requiredByDate: string | null;
   justification: string | null;
   notes: string | null;
   deliveryTerms: string | null;
@@ -200,6 +202,7 @@ function toPublic(prf: PurchaseRequestWithRelations): PublicPurchaseRequest {
     quoteReference: prf.quoteReference,
     quoteDate: iso(prf.quoteDate),
     quoteValidUntil: iso(prf.quoteValidUntil),
+    requiredByDate: iso(prf.requiredByDate),
     justification: prf.justification,
     notes: prf.notes,
     deliveryTerms: prf.deliveryTerms,
@@ -355,6 +358,7 @@ export async function createPurchaseRequest(input: CreatePurchaseRequestInput, a
       quoteReference: trimToNull(input.quoteReference),
       quoteDate: input.quoteDate ? new Date(input.quoteDate) : null,
       quoteValidUntil: input.quoteValidUntil ? new Date(input.quoteValidUntil) : null,
+      requiredByDate: new Date(input.requiredByDate), // required by the schema
       justification: trimToNull(input.justification),
       notes: trimToNull(input.notes),
       deliveryTerms: input.deliveryTerms ?? null,
@@ -367,6 +371,7 @@ export async function createPurchaseRequest(input: CreatePurchaseRequestInput, a
     lineRows,
   );
   audit.record({ actor, action: "purchase_request.created", targetType: "purchase_request", targetId: created.id, targetLabel: created.code });
+  emitPrfUpdated(created);
   return toPublic(created);
 }
 
@@ -396,6 +401,7 @@ export async function updatePurchaseRequest(id: string, input: UpdatePurchaseReq
   if (input.quoteReference !== undefined) headerPatch.quoteReference = trimToNull(input.quoteReference);
   if (input.quoteDate !== undefined) headerPatch.quoteDate = input.quoteDate ? new Date(input.quoteDate) : null;
   if (input.quoteValidUntil !== undefined) headerPatch.quoteValidUntil = input.quoteValidUntil ? new Date(input.quoteValidUntil) : null;
+  if (input.requiredByDate !== undefined) headerPatch.requiredByDate = new Date(input.requiredByDate);
   if (input.justification !== undefined) headerPatch.justification = trimToNull(input.justification);
   if (input.notes !== undefined) headerPatch.notes = trimToNull(input.notes);
   if (input.deliveryTerms !== undefined) headerPatch.deliveryTerms = input.deliveryTerms ?? null;
@@ -426,6 +432,7 @@ export async function updatePurchaseRequest(id: string, input: UpdatePurchaseReq
     targetLabel: result.code,
     metadata: changes.length ? { changes } : undefined,
   });
+  emitPrfUpdated(result);
   return toPublic(result);
 }
 
@@ -440,12 +447,30 @@ function recordStatus(actor: AuditActor | undefined, id: string, code: string, a
   audit.record({ actor, action, targetType: "purchase_request", targetId: id, targetLabel: code, metadata });
 }
 
+// Fan a PRF's change out to every watcher so their list/detail live-refreshes. A request passes
+// through several hands (raiser → finance approver → procurement, who converts it to a PO), so a
+// screen left open on one desk goes stale the moment the next person acts — which is how a user
+// ends up clicking "Approve" on a request finance already approved from another session.
+//
+// The payload is a scope-agnostic REFETCH SIGNAL, not the request itself: each client re-pulls
+// through its own warehouse-scoped REST call, so the shared room can never leak a request outside a
+// watcher's scope. Fire-and-forget — a realtime failure must never roll back a committed
+// transition (emitToRoom already no-ops when realtime is uninitialised, e.g. in unit tests).
+function emitPrfUpdated(prf: { id: string; code: string; status: string }): void {
+  emitToRoom(PURCHASE_REQUEST_WATCHERS_ROOM, "purchase_request:updated", {
+    id: prf.id,
+    code: prf.code,
+    status: prf.status,
+  });
+}
+
 export async function submitPurchaseRequest(id: string, actor?: AuditActor): Promise<PublicPurchaseRequest> {
   const prf = await loadOrThrow(id, actor);
   assertTransition(prf.status, "submitted");
   if (prf.items.length === 0) throw badRequest("Add at least one item before submitting.");
   const updated = await prfRepo.update(id, { status: "submitted", submittedBy: actor?.email ?? null, submittedAt: new Date() });
   recordStatus(actor, id, updated.code, "purchase_request.submitted");
+  emitPrfUpdated(updated);
   // Fire-and-forget: notify the finance reviewers a PRF awaits their decision. NEVER blocks.
   void prfEmail.notifyReviewersPrfSubmitted(updated, actor?.email ?? null).catch((e) =>
     console.error(`PRF ${updated.code} review notification failed:`, e instanceof Error ? e.message : e),
@@ -458,6 +483,7 @@ export async function approvePurchaseRequest(id: string, actor?: AuditActor): Pr
   assertTransition(prf.status, "approved");
   const updated = await prfRepo.update(id, { status: "approved", approvedBy: actor?.email ?? null, approvedAt: new Date() });
   recordStatus(actor, id, updated.code, "purchase_request.approved");
+  emitPrfUpdated(updated);
   void prfEmail.notifyRequesterPrfDecision(updated, "approved").catch((e) =>
     console.error(`PRF ${updated.code} approval email failed:`, e instanceof Error ? e.message : e),
   );
@@ -472,6 +498,7 @@ export async function rejectPurchaseRequest(id: string, reason: string, actor?: 
   // Clear any prior reopenReason so the detail page never shows a stale reason from an earlier cycle.
   const updated = await prfRepo.update(id, { status: "draft", rejectionReason: reason.trim(), reopenReason: null });
   recordStatus(actor, id, updated.code, "purchase_request.rejected", { reason: reason.trim() });
+  emitPrfUpdated(updated);
   void prfEmail.notifyRequesterPrfDecision(updated, "rejected", reason).catch((e) =>
     console.error(`PRF ${updated.code} rejection email failed:`, e instanceof Error ? e.message : e),
   );
@@ -495,6 +522,7 @@ export async function reopenPurchaseRequest(id: string, reason: string, actor?: 
     updatedBy: actor?.email ?? null,
   });
   recordStatus(actor, id, updated.code, "purchase_request.reopened", { reason: reason.trim() });
+  emitPrfUpdated(updated);
   return toPublic(updated);
 }
 
@@ -505,6 +533,7 @@ export async function cancelPurchaseRequest(id: string, reason: string | undefin
   const updated = await prfRepo.update(id, { status: "cancelled", cancelledAt: new Date(), cancelReason });
   // Carry the reason into the audit metadata (parity with reject + the PO cancel audit).
   recordStatus(actor, id, updated.code, "purchase_request.cancelled", { reason: cancelReason ?? undefined });
+  emitPrfUpdated(updated);
   return toPublic(updated);
 }
 
@@ -513,6 +542,9 @@ export async function deletePurchaseRequest(id: string, actor?: AuditActor): Pro
   if (prf.status !== "draft") throw conflict("Only draft purchase requests can be deleted.");
   await prfRepo.softDelete(id);
   audit.record({ actor, action: "purchase_request.deleted", targetType: "purchase_request", targetId: id, targetLabel: prf.code });
+  // Same refetch signal as a status change: a watcher's list re-pulls and the row simply disappears.
+  // `deleted` is not a real PRF status — it is only a hint; clients act on the refetch, not the value.
+  emitPrfUpdated({ id, code: prf.code, status: "deleted" });
 }
 
 // ── Convert: generate the Purchase Order from a finance-approved PRF ─────────────────────────
@@ -524,6 +556,14 @@ export async function deletePurchaseRequest(id: string, actor?: AuditActor): Pro
 // URLs), and the PRF flips to `converted` (read-only forever). The PO lands in `draft` so Finance
 // can complete delivery address/terms; the commercial-equality fast-path in the PO service then
 // lets it go draft → approved without a second review — unless it diverged.
+// Mirrors `datesOk` in purchase-order.validation.ts, which guards every MANUAL PO path: expected
+// delivery can't precede the order date. DATE-ONLY, matching that refine (and the confirmed-date
+// rule in the PO service) — converting on the very day the goods are due is legitimate, so
+// comparing raw timestamps would wrongly reject a same-day conversion because of the time of day.
+const dayStart = (d: Date) => Date.parse(d.toISOString().slice(0, 10));
+const datesOk = (orderDate: Date, expectedDeliveryDate: Date) =>
+  dayStart(expectedDeliveryDate) >= dayStart(orderDate);
+
 export interface ConvertResult {
   purchaseRequest: PublicPurchaseRequest;
   purchaseOrderId: string;
@@ -533,6 +573,15 @@ export interface ConvertResult {
 export async function convertPurchaseRequest(id: string, actor?: AuditActor): Promise<ConvertResult> {
   const prf = await loadOrThrow(id, actor);
   assertTransition(prf.status, "converted"); // clear pre-check (the tx re-checks authoritatively)
+  // Fail before allocating a PO code (the tx re-checks authoritatively). See the notes there.
+  if (!prf.requiredByDate) {
+    throw conflict("This purchase request has no required-by date. Add one before converting it to a purchase order.");
+  }
+  if (!datesOk(new Date(), prf.requiredByDate)) {
+    throw conflict(
+      "This purchase request's required-by date has passed. Reopen it and set a new date before converting it to a purchase order.",
+    );
+  }
   const supplier = await supplierService.requireActiveSupplier(prf.supplierId);
   await warehouseService.requireActiveWarehouse(prf.warehouseId);
   // Every line's item must still be active — a PO must never be issued for a retired item.
@@ -554,6 +603,30 @@ export async function convertPurchaseRequest(id: string, actor?: AuditActor): Pr
         if (!live) throw notFound("Purchase request not found.");
         if (live.status !== "approved") {
           throw conflict(`This purchase request is ${humanStatus(live.status)} and can no longer be converted.`);
+        }
+        // The PO's expected delivery date is the date the REQUESTER asked for. Deliberately NOT
+        // derived from the supplier's lead time: a computed date looks like a commitment nobody
+        // made, and would sit on screen contradicting the date the supplier later confirms.
+        //
+        // Required on new PRFs, but nullable in the schema — anything raised before the field
+        // existed still has none. Refuse rather than mint a dateless PO, which would be blocked at
+        // approval with nothing explaining why. Editing the draft PRF to add the date clears this.
+        const orderDate = new Date();
+        const expectedDeliveryDate = live.requiredByDate;
+        if (!expectedDeliveryDate) {
+          throw conflict("This purchase request has no required-by date. Add one before converting it to a purchase order.");
+        }
+        // The required-by date was captured when the PRF was RAISED; approval is a human step, so
+        // it can easily have gone stale by the time procurement converts. Every manual PO path
+        // enforces expectedDeliveryDate >= orderDate (`datesOk` in purchase-order.validation.ts);
+        // this path builds the row directly and would otherwise be the one way to mint a PO whose
+        // delivery date precedes its own order date — which the submit/approve/send gates then
+        // treat as trustworthy and the issued PDF prints. Refuse and make them re-date the PRF
+        // rather than silently shipping a date the supplier can no longer meet.
+        if (!datesOk(orderDate, expectedDeliveryDate)) {
+          throw conflict(
+            "This purchase request's required-by date has passed. Reopen it and set a new date before converting it to a purchase order.",
+          );
         }
         poCode = await poRepo.allocatePoCodeTx(tx);
         const lines = live.items.map((l, i) => ({
@@ -580,7 +653,8 @@ export async function convertPurchaseRequest(id: string, actor?: AuditActor): Pr
             status: "draft",
             priority: "normal",
             referenceNumber: live.quoteReference,
-            orderDate: new Date(),
+            orderDate,
+            expectedDeliveryDate,
             currency: "GBP",
             ...computeTotals(lines),
             // Carry the commercial terms captured on the PRF onto the PO. Payment term falls back
@@ -630,6 +704,10 @@ export async function convertPurchaseRequest(id: string, actor?: AuditActor): Pr
     metadata: { purchaseRequestId: id, purchaseRequestCode: prf.code },
   });
   const fresh = await prfRepo.findById(id);
+  // Conversion is the one action that touches BOTH surfaces: the PRF becomes `converted` and a
+  // brand-new PO appears. Notify each room so an open PRF detail AND an open PO list both refresh.
+  emitPrfUpdated({ id, code: prf.code, status: fresh?.status ?? "converted" });
+  emitToRoom(PURCHASE_ORDER_WATCHERS_ROOM, "purchase_order:updated", { id: poId, code: poCode, status: "draft" });
   return { purchaseRequest: toPublic(fresh ?? prf), purchaseOrderId: poId, purchaseOrderCode: poCode };
 }
 
@@ -660,6 +738,7 @@ export async function duplicatePurchaseRequest(id: string, actor?: AuditActor): 
       quoteReference: original.quoteReference,
       quoteDate: original.quoteDate,
       quoteValidUntil: original.quoteValidUntil,
+      requiredByDate: original.requiredByDate,
       justification: original.justification,
       notes: original.notes,
       deliveryTerms: original.deliveryTerms,
@@ -693,6 +772,8 @@ export async function duplicatePurchaseRequest(id: string, actor?: AuditActor): 
     targetLabel: created.code,
     metadata: { revisionOf: original.code },
   });
+  // A duplicate is a brand-new draft PRF — a watcher's board must show it like any other create.
+  emitPrfUpdated(created);
   return toPublic(created);
 }
 

@@ -40,7 +40,7 @@ type LineState = {
   trackSerials: boolean;
   trackBatches: boolean;
   receive: string;
-  damaged: string;
+  accepted: string;
   notes: string;
   serialsText: string;
   batches: BatchRow[];
@@ -53,7 +53,13 @@ type LineState = {
 const today = () => new Date().toISOString().slice(0, 10);
 const dateInput = (iso: string | null | undefined) => (iso ? iso.slice(0, 10) : "");
 const num = (s: string) => Number(s) || 0;
-const acceptedOf = (l: LineState) => Math.max(0, num(l.receive) - num(l.damaged));
+const blank = (s: string) => s.trim() === "";
+// Staff type Received + Accepted (what passed QC); damaged/rejected is DERIVED. Accepted is
+// deliberately left blank on a new line and is required to submit — defaulting it to 0 would
+// read as "all damaged", and defaulting it to the received qty would rubber-stamp a QC decision
+// nobody made. Until it's filled, the Damaged cell shows "—" rather than a misleading number.
+const acceptedOf = (l: LineState) => Math.max(0, num(l.accepted));
+const damagedOf = (l: LineState) => Math.max(0, num(l.receive) - num(l.accepted));
 const parseSerials = (text: string) => text.split(/[\n,]/).map((s) => s.trim()).filter(Boolean);
 
 // One sticker per accepted unit by default — staff put away N boxes and label each one. A blank
@@ -92,7 +98,7 @@ function buildLines(po: PurchaseOrder, flags: Map<string, ItemFlags>): LineState
         trackSerials: f?.serials ?? false,
         trackBatches: f?.batches ?? false,
         receive: "",
-        damaged: "0",
+        accepted: "",
         notes: "",
         serialsText: "",
         batches: [],
@@ -156,7 +162,7 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
           trackSerials: i.irmItem?.trackSerialNumbers ?? false,
           trackBatches: i.irmItem?.trackBatchNumbers ?? false,
           receive: String(i.receivedQuantity),
-          damaged: String(i.damagedQuantity),
+          accepted: String(i.acceptedQuantity),
           notes: i.notes ?? "",
           serialsText: i.serials.map((s) => s.serialNumber).join("\n"),
           batches: i.batches.map((b) => ({ _key: crypto.randomUUID(), batchNumber: b.batchNumber, expiryDate: dateInput(b.expiryDate), quantity: String(b.quantity) })),
@@ -343,10 +349,15 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
     for (const l of active) {
       const remaining = l.ordered - l.previouslyReceived;
       const receive = num(l.receive);
-      const damaged = num(l.damaged);
-      const accepted = receive - damaged;
+      const accepted = num(l.accepted);
+      // Quantities are whole units. NumberInput blocks "e"/"+"/"-" but NOT ".", so a decimal is
+      // typeable — catch it here rather than letting the server reject it as a generic 400.
+      if (!Number.isInteger(receive)) { errs.items = `${l.itemName}: received quantity must be a whole number.`; break; }
       if (receive > remaining) { errs.items = `${l.itemName}: can't receive more than the ${remaining} remaining.`; break; }
-      if (damaged > receive) { errs.items = `${l.itemName}: damaged can't exceed received.`; break; }
+      // Blank is NOT zero — every receiving line needs an explicit QC call before it can be saved.
+      if (blank(l.accepted)) { errs.items = `${l.itemName}: enter the accepted quantity (0 if the whole line was rejected).`; break; }
+      if (!Number.isInteger(accepted)) { errs.items = `${l.itemName}: accepted quantity must be a whole number.`; break; }
+      if (accepted > receive) { errs.items = `${l.itemName}: accepted can't exceed received.`; break; }
       if (l.trackSerials && parseSerials(l.serialsText).length !== accepted) { errs.items = `${l.itemName}: enter exactly ${accepted} serial number(s).`; break; }
       if (l.trackBatches) {
         const sum = l.batches.reduce((a, b) => a + num(b.quantity), 0);
@@ -372,7 +383,7 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
       .map((l) => ({
         purchaseOrderItemId: l.purchaseOrderItemId,
         receivedQuantity: num(l.receive),
-        damagedQuantity: num(l.damaged),
+        acceptedQuantity: num(l.accepted),
         notes: l.notes.trim() || undefined,
         serials: l.trackSerials ? parseSerials(l.serialsText) : undefined,
         batches: l.trackBatches
@@ -567,7 +578,7 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
             </FormSection>
           )}
 
-          <FormSection title="Received items" description="Enter the quantities physically received. Accepted quantity (Received − Damaged) is added to inventory when the receipt is completed.">
+          <FormSection title="Received items" description="Enter the quantity physically received and how much passed inspection. Damaged / rejected (Received − Accepted) is calculated for you; only the accepted quantity is added to inventory when the receipt is completed.">
             {lines.length === 0 ? (
               <p className="rounded-xl border border-dashed border-[var(--border)] px-3 py-6 text-center text-xs text-[var(--muted)]">
                 {mode === "create" ? "Select a purchase order to load its outstanding items." : "This receipt has no lines."}
@@ -583,7 +594,10 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
                   // over-receive / over-damage is flagged the moment it's typed.
                   const receiveNum = num(l.receive);
                   const over = receiveNum > remaining;
-                  const damagedOver = num(l.damaged) > receiveNum;
+                  const acceptedOver = accepted > receiveNum;
+                  // A line being received needs an explicit accepted qty; until then the derived
+                  // damaged cell shows "—" instead of claiming the whole delivery was rejected.
+                  const acceptedMissing = receiveNum > 0 && blank(l.accepted);
                   return (
                     <div key={l.purchaseOrderItemId} className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/30 p-3">
                       <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
@@ -604,13 +618,23 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
                           {over && <p className="mt-1 text-[11px] font-semibold text-[var(--neg)]">Only {remaining} left to receive on this line.</p>}
                         </div>
                         <div>
-                          <label className={labelCls}>Damaged</label>
-                          <NumberInput className={inputCls} min={0} value={l.damaged} onChange={(e) => updateLine(idx, { damaged: e.target.value })} placeholder="e.g. 2" aria-invalid={damagedOver} />
-                          {damagedOver && <p className="mt-1 text-[11px] font-semibold text-[var(--neg)]">Damaged can&apos;t exceed received ({receiveNum}).</p>}
+                          <div className="mb-1.5 flex items-center justify-between gap-2">
+                            <label className="text-xs font-bold uppercase tracking-wider text-[var(--muted)]">Accepted</label>
+                            {receiveNum > 0 && num(l.accepted) !== receiveNum && (
+                              <button type="button" onClick={() => updateLine(idx, { accepted: String(receiveNum) })} className="text-[11px] font-bold text-[var(--accent)] hover:underline">
+                                All good ({receiveNum})
+                              </button>
+                            )}
+                          </div>
+                          <NumberInput className={inputCls} min={0} max={receiveNum || undefined} value={l.accepted} onChange={(e) => updateLine(idx, { accepted: e.target.value })} placeholder="e.g. 100" aria-invalid={acceptedOver || acceptedMissing} />
+                          {acceptedOver && <p className="mt-1 text-[11px] font-semibold text-[var(--neg)]">Accepted can&apos;t exceed received ({receiveNum}).</p>}
+                          {acceptedMissing && <p className="mt-1 text-[11px] font-semibold text-[var(--neg)]">Enter how many passed inspection (0 if all rejected).</p>}
                         </div>
                         <div>
-                          <label className={labelCls}>Accepted</label>
-                          <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3.5 py-2.5 text-sm font-semibold text-[var(--ink)]">{accepted}{l.baseUnit ? ` ${l.baseUnit}` : ""}</div>
+                          <label className={labelCls}>Damaged / rejected</label>
+                          <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3.5 py-2.5 text-sm font-semibold text-[var(--ink)]">
+                            {acceptedMissing || acceptedOver ? "—" : `${damagedOf(l)}${l.baseUnit ? ` ${l.baseUnit}` : ""}`}
+                          </div>
                         </div>
                         <div>
                           <label className={labelCls}>Line notes</label>

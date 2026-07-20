@@ -45,6 +45,9 @@ export interface PurchaseRequestPayload {
   quoteReference?: string;
   quoteDate?: string | null;
   quoteValidUntil?: string | null;
+  // No `| null`: unlike the other dates this one can't be cleared once set (it becomes the PO's
+  // expected delivery date), so the server rejects null. Omit the key to leave it unchanged.
+  requiredByDate?: string;
   justification?: string;
   notes?: string;
   deliveryTerms?: string | null;

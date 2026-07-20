@@ -15,6 +15,7 @@ import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
+import { emitToRoom, PURCHASE_ORDER_WATCHERS_ROOM } from "../../lib/realtime.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
 import { paginate } from "../../utils/pagination.js";
@@ -57,6 +58,15 @@ function assertTransition(from: string, to: string): void {
     throw conflict(`Can't move a ${humanStatus(from)} purchase order to ${humanStatus(to)}.`);
   }
 }
+
+// Statuses at which the supplier's acknowledgement may be RECORDED. This is deliberately NOT a
+// transition list: acceptance is a business event, not a workflow gate. A supplier can acknowledge
+// late — after the truck has already turned up — and losing that record (the ack reference, the
+// date they committed to) just because goods arrived first is an audit hole. From `sent` the
+// status also advances to `supplier_accepted`; from the received states the data is recorded with
+// NO status change, because moving a partially-received order back would rewrite history.
+// Terminal states are excluded, matching assertAttachmentsEditable.
+export const ACCEPTANCE_RECORDABLE = new Set(["sent", "supplier_accepted", "partially_received", "fully_received"]);
 
 // ── DTO ────────────────────────────────────────────────────────────────────────────────────
 export interface PublicPoSupplier {
@@ -464,6 +474,7 @@ export async function createPurchaseOrder(input: CreatePurchaseOrderInput, actor
     lineRows,
   );
   audit.record({ actor, action: "purchase_order.created", targetType: "purchase_order", targetId: created.id, targetLabel: created.code });
+  emitPoUpdated(created);
   return toPublic(created);
 }
 
@@ -533,9 +544,10 @@ export async function createPurchaseOrdersBySplit(
 
   const created = await poRepo.createManyWithCodes(groups);
 
-  // One audit row per resulting PO — each is an independent purchase order.
+  // One audit row + one realtime signal per resulting PO — each is an independent purchase order.
   for (const po of created) {
     audit.record({ actor, action: "purchase_order.created", targetType: "purchase_order", targetId: po.id, targetLabel: po.code });
+    emitPoUpdated(po);
   }
   return created.map(toPublic);
 }
@@ -603,6 +615,7 @@ export async function updatePurchaseOrder(id: string, input: UpdatePurchaseOrder
     targetLabel: result.code,
     metadata: changes.length ? { changes } : undefined,
   });
+  emitPoUpdated(result);
   return toPublic(result);
 }
 
@@ -620,12 +633,33 @@ function recordStatus(actor: AuditActor | undefined, id: string, code: string, a
   audit.record({ actor, action, targetType: "purchase_order", targetId: id, targetLabel: code });
 }
 
+// Fan a PO's change out to every procurement watcher so their list/detail live-refreshes. A PO
+// passes through several hands (raiser → finance approver → PM → warehouse), so a screen left open
+// on one desk goes stale the moment someone else acts on it — that is exactly how a user ends up
+// clicking "Send to supplier" on an order another session already sent.
+//
+// The payload is a scope-agnostic REFETCH SIGNAL, not the order itself: each client re-pulls
+// through its own warehouse-scoped REST call, so the shared room can never leak an order outside a
+// watcher's scope. Emitting is fire-and-forget and MUST NOT affect the caller — a realtime failure
+// can never roll back a committed transition (emitToRoom is already a no-op when realtime is
+// uninitialised, e.g. in unit tests).
+function emitPoUpdated(po: { id: string; code: string; status: string }): void {
+  emitToRoom(PURCHASE_ORDER_WATCHERS_ROOM, "purchase_order:updated", {
+    id: po.id,
+    code: po.code,
+    status: po.status,
+  });
+}
+
 export async function submitPurchaseOrder(id: string, actor?: AuditActor): Promise<PublicPurchaseOrder> {
   const po = await loadOrThrow(id, actor);
   assertTransition(po.status, "pending_approval");
   if (po.items.length === 0) throw badRequest("Add at least one item before submitting.");
+  // Same reason as approve: this is the last point where the PO is still an editable draft.
+  if (!po.expectedDeliveryDate) throw conflict("Set an expected delivery date before submitting this purchase order.");
   const updated = await poRepo.update(id, { status: "pending_approval", submittedBy: actor?.email ?? null, submittedAt: new Date() });
   recordStatus(actor, id, updated.code, "purchase_order.submitted");
+  emitPoUpdated(updated);
   // Fire-and-forget: notify approvers a PO awaits their decision. NEVER blocks or rolls back.
   void poEmail.notifyApproversPoSubmitted(updated, actor?.email ?? null).catch((e) =>
     console.error(`PO ${updated.code} approval notification failed:`, e instanceof Error ? e.message : e),
@@ -669,6 +703,13 @@ export interface ApproveResult {
 
 export async function approvePurchaseOrder(id: string, actor?: AuditActor): Promise<ApproveResult> {
   const po = await loadOrThrow(id, actor);
+  // Catch a missing delivery date HERE, while the order is still an editable draft and the Edit
+  // button is on screen (updatePurchaseOrder accepts the date, but only in draft). Past this point
+  // the PO locks and there is no reverse edge back to draft, so an order that slipped through
+  // dateless could be neither sent nor fixed — only cancelled. Send re-checks as a backstop.
+  if (!po.expectedDeliveryDate) {
+    throw conflict("Set an expected delivery date before approving this purchase order.");
+  }
   if (po.status === "draft" && po.purchaseRequestId) {
     // FAST PATH — finance already approved these numbers on the PRF; skip pending_approval as long
     // as the PO still commercially matches it. If it has DIVERGED (a draft edit changed supplier /
@@ -680,6 +721,7 @@ export async function approvePurchaseOrder(id: string, actor?: AuditActor): Prom
     if (!commerciallyMatchesPrf(po, prf)) {
       const submitted = await poRepo.update(id, { status: "pending_approval", submittedBy: actor?.email ?? null, submittedAt: new Date() });
       recordStatus(actor, id, submitted.code, "purchase_order.submitted");
+      emitPoUpdated(submitted);
       // Fire-and-forget: notify approvers, same as a normal submit.
       void poEmail.notifyApproversPoSubmitted(submitted, actor?.email ?? null).catch((e) =>
         console.error(`PO ${submitted.code} approval notification failed:`, e instanceof Error ? e.message : e),
@@ -695,11 +737,13 @@ export async function approvePurchaseOrder(id: string, actor?: AuditActor): Prom
       targetLabel: updated.code,
       metadata: { fastPath: true, purchaseRequestId: po.purchaseRequestId },
     });
+    emitPoUpdated(updated);
     return { purchaseOrder: toPublic(updated), divertedToReview: false };
   }
   assertTransition(po.status, "approved");
   const updated = await poRepo.update(id, { status: "approved", approvedBy: actor?.email ?? null, approvedAt: new Date() });
   recordStatus(actor, id, updated.code, "purchase_order.approved");
+  emitPoUpdated(updated);
   return { purchaseOrder: toPublic(updated), divertedToReview: false };
 }
 
@@ -757,6 +801,7 @@ export async function assignPmPurchaseOrder(id: string, pmUserId: string, actor?
     targetLabel: updated.code,
     metadata: { pmEmail: pm.email, previousPmEmail: reassign ? po.pmEmail : undefined },
   });
+  emitPoUpdated(updated);
   // Fire-and-forget: tell the PM a PO awaits their review + send. NEVER blocks or rolls back.
   void poEmail.notifyPmAssigned(updated).catch((e) =>
     console.error(`PO ${updated.code} PM notification failed:`, e instanceof Error ? e.message : e),
@@ -769,6 +814,7 @@ export async function rejectPurchaseOrder(id: string, reason: string, actor?: Au
   assertTransition(po.status, "draft"); // reject = back to draft for rework
   const updated = await poRepo.update(id, { status: "draft", rejectionReason: reason.trim() });
   recordStatus(actor, id, updated.code, "purchase_order.rejected");
+  emitPoUpdated(updated);
   return toPublic(updated);
 }
 
@@ -807,6 +853,12 @@ async function archiveIssuedPdf(po: PurchaseOrderWithRelations, actor?: AuditAct
 export async function sendPurchaseOrder(id: string, actor?: AuditActor): Promise<PublicPurchaseOrder> {
   const po = await loadOrThrow(id, actor);
   assertTransition(po.status, "sent");
+  // A dateless PO must never reach a supplier: the delivery date is on the issued document, and
+  // the receiving warehouse schedules against it. Drafts may legitimately lack one (the PRF-born
+  // ones do when the supplier has no lead time on file), so this is the gate — not create/submit.
+  if (!po.expectedDeliveryDate) {
+    throw conflict("Set an expected delivery date before sending this purchase order to the supplier.");
+  }
   // In pm_review only the ASSIGNED PM may send (that's the whole point of the stage). A holder
   // of assign_pm may override — e.g. the PM is away — and the override is visible in the audit
   // trail because sentBy won't match pmEmail.
@@ -820,6 +872,7 @@ export async function sendPurchaseOrder(id: string, actor?: AuditActor): Promise
   // sentBy is the issuer — the signer printed on the PO document (deterministic for email + download).
   const updated = await poRepo.update(id, { status: "sent", sentAt: new Date(), sentBy: actor?.email ?? null });
   recordStatus(actor, id, updated.code, "purchase_order.sent");
+  emitPoUpdated(updated);
   // Fire-and-forget: email the supplier the issued PO with its PDF. NEVER blocks or rolls back.
   void poEmail.notifySupplierPoSent(updated, actor).catch((e) =>
     console.error(`PO ${updated.code} supplier email failed:`, e instanceof Error ? e.message : e),
@@ -831,20 +884,33 @@ export async function sendPurchaseOrder(id: string, actor?: AuditActor): Promise
   return toPublic(updated);
 }
 
-// ── Supplier acceptance (sent → supplier_accepted) ────────────────────────────────────────────
+// ── Supplier acceptance (a recorded EVENT, not a workflow gate) ───────────────────────────────
 // Recorded manually by staff when the supplier confirms by email/phone. The confirmed delivery
-// date is OPTIONAL here (suppliers often accept first and schedule later) and is revisable via
-// updateConfirmedDeliveryDate — never a status of its own, so receiving is never blocked on it.
+// date is REQUIRED: accepting an order means committing to a date, and this is the date the
+// warehouse plans against (it takes precedence over expectedDeliveryDate in the incoming-stock
+// worklist). A supplier who later moves it is handled by updateConfirmedDeliveryDate, which
+// audits {previousDate, newDate, reason}.
+//
+// Receiving is NEVER blocked on acknowledgement (see requireReceivablePurchaseOrder), so goods
+// routinely arrive before the paperwork. The acknowledgement is therefore recordable at any
+// non-terminal issued status — but it only ADVANCES the status from `sent`. Recording it on an
+// already-receiving order keeps the receipt status as the source of truth rather than rewinding
+// the lifecycle. Re-recording on an accepted order corrects the details (e.g. a mistyped ack
+// reference) and is audited like any other.
 export async function recordSupplierAcceptance(
   id: string,
   input: PoSupplierAcceptInput,
   actor?: AuditActor,
 ): Promise<PublicPurchaseOrder> {
   const po = await loadOrThrow(id, actor);
-  assertTransition(po.status, "supplier_accepted");
-  const confirmed = input.confirmedDeliveryDate ? new Date(input.confirmedDeliveryDate) : null;
+  if (!ACCEPTANCE_RECORDABLE.has(po.status)) {
+    throw conflict(`Supplier acceptance can't be recorded on a ${humanStatus(po.status)} purchase order.`);
+  }
+  // Only the awaiting-acknowledgement state moves; every other recordable status stays put.
+  const advances = po.status === "sent";
+  const confirmed = new Date(input.confirmedDeliveryDate); // required by the schema
   const updated = await poRepo.update(id, {
-    status: "supplier_accepted",
+    ...(advances ? { status: "supplier_accepted" } : {}),
     supplierAcceptedAt: input.acceptedDate ? new Date(input.acceptedDate) : new Date(),
     supplierAcceptedBy: actor?.email ?? null,
     supplierAckReference: trimToNull(input.supplierAckReference),
@@ -859,15 +925,21 @@ export async function recordSupplierAcceptance(
     targetLabel: updated.code,
     metadata: {
       supplierAckReference: trimToNull(input.supplierAckReference) ?? undefined,
-      confirmedDeliveryDate: confirmed ? confirmed.toISOString() : undefined,
+      confirmedDeliveryDate: confirmed.toISOString(),
+      // Makes a LATE acknowledgement self-evident in the ledger: the status it was recorded
+      // against, and whether that status moved as a result.
+      statusAtAcceptance: po.status,
+      statusChanged: advances,
     },
   });
+  emitPoUpdated(updated);
   return toPublic(updated);
 }
 
-// Revise the confirmed delivery date on an accepted order. The audit metadata carries
-// {previousDate, newDate, reason} — the audit ledger IS the revision history (Friday → Monday
-// → Wednesday stays fully traceable for disputes); no separate history table.
+// Revise a confirmed delivery date the supplier has already given, at any point before the order
+// closes. The audit metadata carries {previousDate, newDate, reason} — the audit ledger IS the
+// revision history (Friday → Monday → Wednesday stays fully traceable for disputes); no separate
+// history table.
 export async function updateConfirmedDeliveryDate(
   id: string,
   confirmedDeliveryDate: string,
@@ -875,10 +947,27 @@ export async function updateConfirmedDeliveryDate(
   actor?: AuditActor,
 ): Promise<PublicPurchaseOrder> {
   const po = await loadOrThrow(id, actor);
-  if (po.status !== "supplier_accepted") {
-    throw conflict("The confirmed delivery date can only be updated after the supplier has accepted the order.");
+  // Revisable right up to closure — a supplier can move the date after part of the order has
+  // already landed, and the warehouse plans against this field, so it must stay correctable.
+  if (po.status === "closed" || po.status === "cancelled") {
+    throw conflict(`The confirmed delivery date can't be changed on a ${humanStatus(po.status)} purchase order.`);
+  }
+  // This endpoint REVISES an existing promise; recordSupplierAcceptance is the only way to create
+  // one. That keeps a single entry point and keeps the audit's `previousDate` meaningful.
+  if (!po.confirmedDeliveryDate) {
+    throw conflict("Record the supplier's acceptance before revising the confirmed delivery date.");
   }
   const next = new Date(confirmedDeliveryDate);
+  // Same invariant poSupplierAcceptSchema enforces at capture: a supplier can't promise delivery
+  // BEFORE they acknowledged the order. Enforced here too, or a revision could smuggle in a date
+  // the original capture would have rejected — which lands as a phantom "overdue" in the
+  // warehouse worklist. Date-only comparison, matching the schema's refine.
+  if (po.supplierAcceptedAt) {
+    const dayStart = (d: Date) => Date.parse(d.toISOString().slice(0, 10));
+    if (dayStart(next) < dayStart(po.supplierAcceptedAt)) {
+      throw conflict("The confirmed delivery date can't be before the date the supplier accepted the order.");
+    }
+  }
   const updated = await poRepo.update(id, { confirmedDeliveryDate: next });
   audit.record({
     actor,
@@ -892,6 +981,7 @@ export async function updateConfirmedDeliveryDate(
       reason: reason?.trim() || undefined,
     },
   });
+  emitPoUpdated(updated);
   return toPublic(updated);
 }
 
@@ -900,6 +990,7 @@ export async function cancelPurchaseOrder(id: string, reason: string | undefined
   assertTransition(po.status, "cancelled");
   const updated = await poRepo.update(id, { status: "cancelled", cancelledAt: new Date(), cancelReason: trimToNull(reason) });
   recordStatus(actor, id, updated.code, "purchase_order.cancelled");
+  emitPoUpdated(updated);
   // Fire-and-forget: notify the supplier ONLY if the PO had already been issued to them.
   void poEmail.notifySupplierPoCancelled(updated).catch((e) =>
     console.error(`PO ${updated.code} cancellation email failed:`, e instanceof Error ? e.message : e),
@@ -912,6 +1003,7 @@ export async function closePurchaseOrder(id: string, actor?: AuditActor): Promis
   assertTransition(po.status, "closed");
   const updated = await poRepo.update(id, { status: "closed", closedAt: new Date() });
   recordStatus(actor, id, updated.code, "purchase_order.closed");
+  emitPoUpdated(updated);
   return toPublic(updated);
 }
 
@@ -920,6 +1012,9 @@ export async function deletePurchaseOrder(id: string, actor?: AuditActor): Promi
   if (po.status !== "draft") throw conflict("Only draft purchase orders can be deleted.");
   await poRepo.softDelete(id);
   audit.record({ actor, action: "purchase_order.deleted", targetType: "purchase_order", targetId: id, targetLabel: po.code });
+  // Same refetch signal as a status change: a watcher's list re-pulls and the row simply disappears.
+  // `deleted` is not a real PO status — it is only a hint; clients act on the refetch, not the value.
+  emitPoUpdated({ id, code: po.code, status: "deleted" });
 }
 
 // ── Attachments ──────────────────────────────────────────────────────────────────────────────
@@ -1036,6 +1131,11 @@ export async function applyGoodsReceipt(
   if (next !== header.status && (next === "partially_received" || next === "fully_received")) {
     await poRepo.setStatusTx(tx, purchaseOrderId, next);
     recordStatus(actor, purchaseOrderId, header.code, `purchase_order.${next}`);
+    // NOTE: emitted from inside the GRN completion transaction, matching the audit record on the
+    // line above. If that transaction later rolls back, watchers have been told to refetch a change
+    // that never landed — harmless, because the payload is only a refetch SIGNAL: each client
+    // re-pulls the committed truth over REST and simply sees the unchanged order.
+    emitPoUpdated({ id: purchaseOrderId, code: header.code, status: next });
   }
 }
 

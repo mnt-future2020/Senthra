@@ -15,6 +15,14 @@ export const PO_STATUS_LABELS: Record<PoStatus, string> = {
   cancelled: "Cancelled",
 };
 
+// Statuses at which the supplier's acknowledgement may be recorded. MIRRORS the backend's
+// ACCEPTANCE_RECORDABLE set (purchase-order.service.ts) — the server is authoritative; this only
+// decides whether to show the control. Keep the two in sync.
+export const ACCEPTANCE_RECORDABLE_STATUSES: PoStatus[] = ["sent", "supplier_accepted", "partially_received", "fully_received"];
+
+// Statuses at which stock can be received against a PO. MIRRORS requireReceivablePurchaseOrder.
+export const RECEIVABLE_STATUSES: PoStatus[] = ["sent", "supplier_accepted", "partially_received"];
+
 const PO_STATUS_CLASSES: Record<PoStatus, string> = {
   draft: "bg-[var(--surface-2)] text-[var(--muted)]",
   pending_approval: "bg-amber-500/12 text-amber-600",

@@ -8,6 +8,7 @@ import { ClipboardList, MoreHorizontal, Pencil, Plus, Search, Trash2 } from "luc
 import * as poService from "@/services/purchase-order.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
+import { usePurchaseOrderSocket } from "@/hooks/usePurchaseOrderSocket";
 import { ListPageHeader } from "@/components/ui/ListPageHeader";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
@@ -219,6 +220,12 @@ export function PurchaseOrdersView() {
       active = false;
     };
   }, [search, statusFilter, awaitingMine, page, refreshKey]);
+
+  // Live-refresh the list whenever anyone moves a PO through the flow, so a board left open shows
+  // the current statuses (and the "awaiting mine" queue empties as the PM sends each order) without
+  // a manual reload. The cached read above is only an instant placeholder — the refetch this
+  // triggers always goes to the network, so the row that changed is real data, not the stale cache.
+  usePurchaseOrderSocket(React.useCallback(() => setRefreshKey((k) => k + 1), []));
 
   const orders = data?.purchaseOrders ?? [];
   const showSkeleton = loading && orders.length === 0;

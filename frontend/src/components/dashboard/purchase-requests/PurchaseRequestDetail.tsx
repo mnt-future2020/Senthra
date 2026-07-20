@@ -6,8 +6,10 @@ import { ArrowUpRight, CheckCircle2, Copy, ExternalLink, Loader2, Paperclip, Pen
 
 import * as prfService from "@/services/purchase-request.service";
 import * as auditService from "@/services/audit.service";
+import { isStaleStateError } from "@/lib/api";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
+import { usePurchaseRequestSocket } from "@/hooks/usePurchaseRequestSocket";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { DetailHeader } from "@/components/ui/DetailHeader";
 import { actionLabel, actionTone, changeLabels, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
@@ -39,15 +41,75 @@ export function PurchaseRequestDetail({ initial }: { initial: PurchaseRequest })
   const [confirmDuplicate, setConfirmDuplicate] = React.useState(false);
   const [confirmDelete, setConfirmDelete] = React.useState(false);
 
-  const run = async (fn: () => Promise<PurchaseRequest>, ok: string) => {
-    setBusy(true);
+  // Monotonic counter for background refetches. A slow response must NEVER overwrite a newer one:
+  // without it, a socket event and a focus event racing (or two events in quick succession) can
+  // land out of order and REWIND the view to an older status — the exact staleness this cures.
+  const fetchSeq = React.useRef(0);
+  // Mirrors `busy` synchronously so background refreshes can be suppressed while the user's OWN
+  // action is in flight. `busy` state alone is not enough: it only lands on the next render, so an
+  // event arriving in the same commit would still clobber the action's fresher result.
+  const busyRef = React.useRef(false);
+
+  // Pull the current server state into the view. This page fetches once on mount, so anything the
+  // next person in the chain does (finance approving, procurement converting) would otherwise leave
+  // this tab showing an outdated status with actionable buttons.
+  const refresh = React.useCallback(async () => {
+    const seq = ++fetchSeq.current;
     try {
-      setPrf(await fn());
+      const fresh = await prfService.getPurchaseRequest(prf.id);
+      if (seq !== fetchSeq.current) return; // a newer refresh won — don't rewind
+      setPrf(fresh);
+    } catch {
+      /* keep showing what we have; the next action, event or refocus will try again */
+    }
+  }, [prf.id]);
+
+  // A background refresh that yields to the user's own in-flight action.
+  const refreshIfIdle = React.useCallback(() => {
+    if (busyRef.current) return;
+    void refresh();
+  }, [refresh]);
+
+  // Live-refresh when anyone moves this request on — finance approving/rejecting from their own
+  // session, or procurement converting it. Also fires on socket RECONNECT, recovering events
+  // missed during a network blip.
+  usePurchaseRequestSocket(refreshIfIdle);
+
+  // Revalidate when the tab regains focus. Belt-and-braces alongside the socket: covers the window
+  // where the tab was backgrounded, and any client that never established a socket.
+  React.useEffect(() => {
+    const onFocus = () => { if (document.visibilityState === "visible") refreshIfIdle(); };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    };
+  }, [refreshIfIdle]);
+
+  // Flip the ref FIRST (synchronously) so a background event in the same commit already sees it.
+  const setBusyBoth = (v: boolean) => {
+    busyRef.current = v;
+    setBusy(v);
+  };
+
+  const run = async (fn: () => Promise<PurchaseRequest>, ok: string) => {
+    setBusyBoth(true);
+    try {
+      // The action's own response is the freshest truth — claim the sequence so an in-flight
+      // background refetch issued before it can't land afterwards and rewind the status.
+      const updated = await fn();
+      fetchSeq.current += 1;
+      setPrf(updated);
       pushToast(ok, "success");
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Action failed.", "alert");
+      // The server refused because the request is no longer in the state this screen showed (someone
+      // else moved it on). Refetch so the badge + buttons correct themselves instead of leaving a
+      // button that fails identically on every click.
+      if (isStaleStateError(e)) await refresh();
     } finally {
-      setBusy(false);
+      setBusyBoth(false);
     }
   };
 
@@ -58,23 +120,30 @@ export function PurchaseRequestDetail({ initial }: { initial: PurchaseRequest })
   // `submitted` state (its numbers now frozen for review) and the user is told to approve it manually
   // — never silently swallowed.
   const submitAndApprove = async () => {
-    setBusy(true);
+    setBusyBoth(true);
     try {
       const submitted = await prfService.submitPurchaseRequest(prf.id);
+      fetchSeq.current += 1; // this response is the freshest truth — see run()
       setPrf(submitted); // reflect `submitted` even if the approve step then fails
       try {
-        setPrf(await prfService.approvePurchaseRequest(prf.id));
+        const approved = await prfService.approvePurchaseRequest(prf.id);
+        fetchSeq.current += 1;
+        setPrf(approved);
         pushToast("Submitted and approved.", "success");
       } catch (approveErr) {
         pushToast(
           `Submitted, but approval failed: ${approveErr instanceof Error ? approveErr.message : "please approve it manually."}`,
           "alert",
         );
+        // The approve half may have been refused because someone else already moved it on — resync
+        // so the buttons reflect where the request ACTUALLY is, not where this tab thought it was.
+        if (isStaleStateError(approveErr)) await refresh();
       }
     } catch (submitErr) {
       pushToast(submitErr instanceof Error ? submitErr.message : "Could not submit the request.", "alert");
+      if (isStaleStateError(submitErr)) await refresh();
     } finally {
-      setBusy(false);
+      setBusyBoth(false);
     }
   };
 
@@ -94,40 +163,48 @@ export function PurchaseRequestDetail({ initial }: { initial: PurchaseRequest })
 
   const onConvert = async () => {
     setConfirmConvert(false);
-    setBusy(true);
+    setBusyBoth(true);
     try {
       const result = await prfService.convertPurchaseRequest(prf.id);
       pushToast(`Purchase order ${result.purchaseOrderCode} generated.`, "success");
       router.push(`/dashboard/purchase-orders/${result.purchaseOrderCode}`);
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Could not generate the purchase order.", "alert");
-      setBusy(false);
+      // Resync BEFORE clearing busy (same ordering as run()): dropping the latch first would let a
+      // socket event fire a competing refetch, and re-enable the buttons against a status this
+      // screen is still resolving. Most likely someone else already converted it (one PO per PRF),
+      // so this leaves the tab showing `converted` with the linked PO instead of a dead button.
+      if (isStaleStateError(e)) await refresh();
+      setBusyBoth(false);
     }
   };
 
   const onDuplicate = async () => {
     setConfirmDuplicate(false);
-    setBusy(true);
+    setBusyBoth(true);
     try {
       const copy = await prfService.duplicatePurchaseRequest(prf.id);
       pushToast(`Revision draft ${copy.code} created.`, "success");
       router.push(`/dashboard/purchase-requests/${copy.code}`);
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Could not duplicate the request.", "alert");
-      setBusy(false);
+      setBusyBoth(false);
     }
   };
 
   const onDelete = async () => {
     setConfirmDelete(false);
-    setBusy(true);
+    setBusyBoth(true);
     try {
       await prfService.deletePurchaseRequest(prf.id);
       pushToast("Draft purchase request removed.", "success");
       router.push("/dashboard/purchase-requests");
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Delete failed.", "alert");
-      setBusy(false);
+      // Resync BEFORE clearing busy (same ordering as run()). Delete is draft-only, so a refusal
+      // means it either left draft (409) or someone else already deleted it (404) — both covered.
+      if (isStaleStateError(e)) await refresh();
+      setBusyBoth(false);
     }
   };
 
@@ -373,6 +450,9 @@ function Overview({ prf }: { prf: PurchaseRequest }) {
           <div className="space-y-3">
             <Field label="Warehouse">{prf.warehouse?.name}</Field>
             <Field label="Address">{prf.warehouse?.address}</Field>
+            {/* Sits with the warehouse (where) as the matching "when" — it becomes the generated
+                purchase order's expected delivery date. */}
+            <Field label="Required by">{formatDate(prf.requiredByDate)}</Field>
           </div>
         </Card>
         <Card title="Approval">

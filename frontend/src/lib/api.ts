@@ -35,6 +35,25 @@ export function isPermissionError(err: unknown): boolean {
   return err instanceof ApiError && err.status === 403;
 }
 
+/**
+ * True when the server rejected an action because the record moved on underneath the screen, so a
+ * refetch will show the user something DIFFERENT and the UI can self-correct:
+ *
+ *   409 — a workflow transition guard ("Can't move a sent purchase order to sent.")
+ *   404 — the record was deleted by someone else while this page was open
+ *
+ * 403 is deliberately EXCLUDED. Nearly every 403 in this app is a static warehouse-scope or
+ * role-permission failure (`assertWarehouseAccess`, `requirePermission`) that does NOT depend on
+ * the record's status — so refetching would hit the very same guard, fail identically, and achieve
+ * nothing but a wasted round-trip. Worse, since the realtime rooms are permission-gated but NOT
+ * warehouse-partitioned, a warehouse-scoped user holding a detail page open would fire one doomed
+ * request for every socket event in the system. Use `isPermissionError` for the rare genuinely
+ * state-dependent 403 (see the assigned-PM rule on sending a PO) and refetch explicitly there.
+ */
+export function isStaleStateError(err: unknown): boolean {
+  return err instanceof ApiError && (err.status === 409 || err.status === 404);
+}
+
 // Fail fast on a hung backend instead of spinning forever. SMTP-heavy calls
 // (e.g. sending a test email) can override this with a longer value.
 const DEFAULT_TIMEOUT = 20_000;

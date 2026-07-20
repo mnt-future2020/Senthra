@@ -34,6 +34,14 @@ vi.mock("#modules/irm/irm.service.js", () => ({ requireActiveIrmItem: vi.fn(), r
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn() }));
 vi.mock("../../lib/cloudinary.js", () => ({ uploadFileToCloudinary: vi.fn() }));
+// Realtime is fire-and-forget; mock it so we can assert every transition fans a refetch signal out
+// to the watchers (a stale detail page is what lets a user act on an already-moved request).
+vi.mock("../../lib/realtime.js", () => ({
+  emitToRoom: vi.fn(),
+  emitToUser: vi.fn(),
+  PURCHASE_REQUEST_WATCHERS_ROOM: "purchase_requests:watchers",
+  PURCHASE_ORDER_WATCHERS_ROOM: "purchase_orders:watchers",
+}));
 // The convert transaction is orchestrated in the service; execute the callback with a stub tx.
 vi.mock("../../lib/prisma.js", () => ({ withTransaction: vi.fn(async (fn: (tx: unknown) => unknown) => fn({})), prisma: {} }));
 vi.mock("./purchase-request.email.js", () => ({
@@ -47,6 +55,7 @@ import * as supplierService from "#modules/supplier/supplier.service.js";
 import * as warehouseService from "#modules/warehouse/warehouse.service.js";
 import * as irmService from "#modules/irm/irm.service.js";
 import * as audit from "#modules/audit/audit.service.js";
+import { emitToRoom, PURCHASE_ORDER_WATCHERS_ROOM, PURCHASE_REQUEST_WATCHERS_ROOM } from "../../lib/realtime.js";
 import * as prfEmail from "./purchase-request.email.js";
 import {
   approvePurchaseRequest,
@@ -56,11 +65,13 @@ import {
   createPurchaseRequest,
   deletePurchaseRequest,
   duplicatePurchaseRequest,
+  getPurchaseRequest,
   rejectPurchaseRequest,
   reopenPurchaseRequest,
   submitPurchaseRequest,
   updatePurchaseRequest,
 } from "./purchase-request.service.js";
+import { createPurchaseRequestSchema, updatePurchaseRequestSchema } from "./purchase-request.validation.js";
 
 const PRF_ID = "f".repeat(24);
 const SUP_ID = "a".repeat(24);
@@ -86,6 +97,11 @@ function prfItem(over: Record<string, unknown> = {}) {
   };
 }
 
+// Convert refuses a PRF whose required-by date has already passed, so fixtures feeding that path
+// must stay in the future RELATIVE TO NOW — a hardcoded calendar date would silently turn these
+// tests red the day it went by.
+const FUTURE_REQUIRED_BY = new Date(Date.now() + 30 * 86_400_000);
+
 function prfRow(over: Record<string, unknown> = {}) {
   return {
     id: PRF_ID,
@@ -104,6 +120,7 @@ function prfRow(over: Record<string, unknown> = {}) {
     quoteReference: "Q-2026-17",
     quoteDate: new Date("2026-07-01T00:00:00Z"),
     quoteValidUntil: new Date("2026-08-01T00:00:00Z"),
+    requiredByDate: FUTURE_REQUIRED_BY,
     justification: "Fibre rollout phase 2",
     notes: null,
     currency: "GBP",
@@ -175,6 +192,7 @@ describe("createPurchaseRequest — financials + snapshots", () => {
       supplierId: SUP_ID,
       warehouseId: WH_ID,
       quoteReference: "Q-1",
+      requiredByDate: "2026-08-20",
       items: [
         { irmItemId: IRM_ID, quantity: 10, unitPricePence: 500, vatRate: 20 },
         { irmItemId: IRM_ID_2, quantity: 2, unitPricePence: 1000 }, // vat defaults from the item (20)
@@ -188,6 +206,55 @@ describe("createPurchaseRequest — financials + snapshots", () => {
     expect(header.status).toBe("draft");
     expect(lines[0]).toMatchObject({ irmItemId: IRM_ID, itemName: "CAT6", lineTotalPence: 5000 });
     expect(auditActions()).toContain("purchase_request.created");
+  });
+
+  // The PRF's required-by date is the ONLY source of the generated PO's expected delivery date
+  // (nothing derives one from supplier lead time), so it must persist as a real Date.
+  it("stores the required-by date that the PO will inherit", async () => {
+    mockCreateWithCode.mockImplementation((header: Record<string, unknown>) => Promise.resolve(prfRow({ ...header, items: [] })));
+    await createPurchaseRequest({
+      supplierId: SUP_ID,
+      warehouseId: WH_ID,
+      requiredByDate: "2026-08-20",
+      items: [{ irmItemId: IRM_ID, quantity: 1, unitPricePence: 500, vatRate: 20 }],
+    } as Parameters<typeof createPurchaseRequest>[0]);
+    const [header] = mockCreateWithCode.mock.calls[0];
+    expect(header.requiredByDate).toEqual(new Date("2026-08-20"));
+  });
+});
+
+// The date is enforced by the zod schema at the route boundary, not the service — assert it there
+// so a future refactor can't quietly relax it back to optional.
+describe("createPurchaseRequestSchema — required-by date", () => {
+  const body = (over: Record<string, unknown> = {}) => ({
+    supplierId: SUP_ID,
+    warehouseId: WH_ID,
+    requiredByDate: "2026-08-20",
+    items: [{ irmItemId: IRM_ID, quantity: 1, unitPricePence: 500, vatRate: 20 }],
+    ...over,
+  });
+
+  it("rejects a request with no required-by date", () => {
+    expect(createPurchaseRequestSchema.safeParse(body({ requiredByDate: undefined })).success).toBe(false);
+    expect(createPurchaseRequestSchema.safeParse(body({ requiredByDate: "" })).success).toBe(false);
+  });
+
+  it("rejects an unparseable date", () => {
+    expect(createPurchaseRequestSchema.safeParse(body({ requiredByDate: "not-a-date" })).success).toBe(false);
+  });
+
+  it("accepts a valid date", () => {
+    expect(createPurchaseRequestSchema.safeParse(body()).success).toBe(true);
+  });
+
+  // An EDIT is a partial patch: omitting the field means "leave unchanged", not "clear it".
+  // NOTE the asymmetry with jobId/quoteDate/deliveryTerms, which ARE nullable — the edit form must
+  // send `undefined` (omit) for this one, never `null`, or it gets a raw zod 400 naming no field.
+  it("lets an edit omit the date, but never blank it", () => {
+    expect(updatePurchaseRequestSchema.safeParse({ requiredByDate: undefined }).success).toBe(true);
+    expect(updatePurchaseRequestSchema.safeParse({ requiredByDate: "2026-09-01" }).success).toBe(true);
+    expect(updatePurchaseRequestSchema.safeParse({ requiredByDate: null }).success).toBe(false);
+    expect(updatePurchaseRequestSchema.safeParse({ requiredByDate: "" }).success).toBe(true); // treated as omitted
   });
 });
 
@@ -270,6 +337,63 @@ describe("read-only lock (draft-only edits; converted is read-only forever)", ()
   });
 });
 
+// A PRF is raised by one person, approved/rejected by finance, then converted by procurement — so a
+// screen left open on one desk goes stale as soon as the next person acts, which is how a user ends
+// up clicking "Approve" on a request finance already approved elsewhere.
+describe("realtime: transitions notify purchase-request watchers", () => {
+  const mockEmitRoom = emitToRoom as ReturnType<typeof vi.fn>;
+  const emitsTo = (room: string, event: string) =>
+    mockEmitRoom.mock.calls
+      .filter((c) => c[0] === room && c[1] === event)
+      .map((c) => c[2] as { id: string; code: string; status: string });
+  const prfEmits = () => emitsTo(PURCHASE_REQUEST_WATCHERS_ROOM, "purchase_request:updated");
+
+  it("notifies on every status transition", async () => {
+    // submit refuses an empty request, so that row needs a line; the rest turn on status alone.
+    const aLine = [{ id: "l1", irmItemId: IRM_ID, quantity: 1, unitPricePence: 100, vatRate: 20 }];
+    const cases: [string, () => Promise<unknown>, string, Record<string, unknown>?][] = [
+      ["draft", () => submitPurchaseRequest(PRF_ID), "submitted", { items: aLine }],
+      ["submitted", () => approvePurchaseRequest(PRF_ID), "approved"],
+      ["submitted", () => rejectPurchaseRequest(PRF_ID, "Too expensive"), "draft"],
+      ["approved", () => reopenPurchaseRequest(PRF_ID, "Supplier revised the quote"), "draft"],
+      ["draft", () => cancelPurchaseRequest(PRF_ID, "No longer needed"), "cancelled"],
+    ];
+    for (const [from, act, to, extra] of cases) {
+      vi.clearAllMocks();
+      mockUpdate.mockImplementation((_id: string, data: Record<string, unknown>) => Promise.resolve(prfRow(data)));
+      mockFindById.mockResolvedValue(prfRow({ status: from, ...extra }));
+      await act();
+      expect(prfEmits(), `${from} → ${to}`).toEqual([{ id: PRF_ID, code: "PRF-0001", status: to }]);
+    }
+  });
+
+  it("does NOT notify when the transition is REJECTED (nothing changed)", async () => {
+    // The stale-state 409 is precisely where a spurious "go refetch" would be most confusing.
+    mockFindById.mockResolvedValue(prfRow({ status: "converted" }));
+    await expect(approvePurchaseRequest(PRF_ID)).rejects.toThrow(/can't move/i);
+    expect(prfEmits()).toEqual([]);
+  });
+
+  it("does NOT notify on a pure READ", async () => {
+    mockFindById.mockResolvedValue(prfRow({ status: "approved" }));
+    await getPurchaseRequest(PRF_ID);
+    expect(prfEmits()).toEqual([]);
+  });
+
+  it("notifies on DELETE so a watcher's list drops the row", async () => {
+    // Without this a watcher keeps seeing a row that no longer exists; acting on it 404s.
+    mockFindById.mockResolvedValue(prfRow({ status: "draft" }));
+    await deletePurchaseRequest(PRF_ID);
+    expect(prfEmits()).toEqual([{ id: PRF_ID, code: "PRF-0001", status: "deleted" }]);
+  });
+
+  it("does NOT notify when a delete is REFUSED", async () => {
+    mockFindById.mockResolvedValue(prfRow({ status: "approved" }));
+    await expect(deletePurchaseRequest(PRF_ID)).rejects.toThrow(/only draft/i);
+    expect(prfEmits()).toEqual([]);
+  });
+});
+
 describe("convert — generate the PO from an approved PRF (one per PRF, transactional)", () => {
   const liveApproved = (over: Record<string, unknown> = {}) => ({
     id: PRF_ID,
@@ -280,6 +404,7 @@ describe("convert — generate the PO from an approved PRF (one per PRF, transac
     jobId: null,
     projectRef: "Fibre P2",
     quoteReference: "Q-2026-17",
+    requiredByDate: FUTURE_REQUIRED_BY, // required on the PRF; becomes the PO's date
     justification: "Fibre rollout phase 2",
     notes: null,
     items: [
@@ -325,11 +450,104 @@ describe("convert — generate the PO from an approved PRF (one per PRF, transac
     expect(auditActions()).toEqual(expect.arrayContaining(["purchase_request.converted", "purchase_order.created"]));
   });
 
+  // Conversion is the one action that changes BOTH surfaces, so it must notify BOTH rooms: an open
+  // PRF detail sees it become `converted`, and an open PO list sees the new draft order appear.
+  it("notifies the PRF watchers AND the PO watchers (a new PO appears)", async () => {
+    const mockEmitRoom = emitToRoom as ReturnType<typeof vi.fn>;
+    const poId = "6".repeat(24);
+    await convertPurchaseRequest(PRF_ID, { type: "user", id: "u1", email: "fin@x.co", permissions: [] });
+
+    const sentTo = (room: string, event: string) =>
+      mockEmitRoom.mock.calls.filter((c) => c[0] === room && c[1] === event).map((c) => c[2]);
+    expect(sentTo(PURCHASE_REQUEST_WATCHERS_ROOM, "purchase_request:updated")).toEqual([
+      { id: PRF_ID, code: "PRF-0001", status: "approved" }, // findById stub's status (post-convert refetch)
+    ]);
+    expect(sentTo(PURCHASE_ORDER_WATCHERS_ROOM, "purchase_order:updated")).toEqual([
+      { id: poId, code: "PO-0042", status: "draft" },
+    ]);
+  });
+
+  it("a failed convert notifies NOBODY (no PO was created)", async () => {
+    const mockEmitRoom = emitToRoom as ReturnType<typeof vi.fn>;
+    mockFindForConvertTx.mockResolvedValue(liveApproved({ status: "converted" }));
+    await expect(convertPurchaseRequest(PRF_ID)).rejects.toThrow(/converted and can no longer/i);
+    expect(mockEmitRoom).not.toHaveBeenCalled();
+  });
+
   it("a concurrent second convert fails inside the transaction (already converted) — no PO created", async () => {
     mockFindForConvertTx.mockResolvedValue(liveApproved({ status: "converted" }));
     await expect(convertPurchaseRequest(PRF_ID)).rejects.toThrow(/converted and can no longer/i);
     expect(mockCreatePoTx).not.toHaveBeenCalled();
     expect(mockSetConvertedTx).not.toHaveBeenCalled();
+  });
+
+  // The PO's delivery date is the date the REQUESTER asked for — carried across verbatim.
+  it("carries the PRF's required-by date onto the PO as its expected delivery date", async () => {
+    const requiredBy = new Date(Date.now() + 60 * 86_400_000);
+    mockFindForConvertTx.mockResolvedValue(liveApproved({ requiredByDate: requiredBy }));
+    await convertPurchaseRequest(PRF_ID);
+
+    const [, header] = mockCreatePoTx.mock.calls[0];
+    expect(header.expectedDeliveryDate).toEqual(requiredBy);
+  });
+
+  // A date computed from the supplier's standing lead time looks like a commitment nobody made,
+  // and would sit on screen contradicting whatever the supplier later confirms.
+  it("does NOT derive a date from the supplier's lead time", async () => {
+    const requiredBy = new Date(Date.now() + 60 * 86_400_000);
+    mockFindForConvertTx.mockResolvedValue(liveApproved({ requiredByDate: requiredBy }));
+    mockReqSupplier.mockResolvedValue({ name: "Acme", leadTimeDays: 14 });
+    await convertPurchaseRequest(PRF_ID);
+
+    const [, header] = mockCreatePoTx.mock.calls[0];
+    expect(header.expectedDeliveryDate).toEqual(requiredBy); // NOT orderDate + 14 days
+  });
+
+  // The field is nullable in the schema (PRFs raised before it existed have none), so convert must
+  // refuse rather than mint a PO with no delivery date — that PO would be blocked at approval with
+  // nothing on screen explaining why.
+  it("refuses to convert a legacy PRF that has no required-by date", async () => {
+    mockFindById.mockResolvedValue(prfRow({ status: "approved", requiredByDate: null }));
+    await expect(convertPurchaseRequest(PRF_ID)).rejects.toThrow(/no required-by date/i);
+    expect(mockCreatePoTx).not.toHaveBeenCalled();
+    expect(mockAllocateCode).not.toHaveBeenCalled(); // fails BEFORE burning a PO code
+  });
+
+  it("refuses inside the transaction too, if the date vanished after the pre-check", async () => {
+    mockFindForConvertTx.mockResolvedValue(liveApproved({ requiredByDate: null }));
+    await expect(convertPurchaseRequest(PRF_ID)).rejects.toThrow(/no required-by date/i);
+    expect(mockCreatePoTx).not.toHaveBeenCalled();
+  });
+
+  // The required-by date is captured when the PRF is RAISED, but approval is a human step — so by
+  // conversion time it can already have passed. Every manual PO path enforces
+  // expectedDeliveryDate >= orderDate; this one builds the row directly, so without an explicit
+  // guard it is the single way to mint a PO whose delivery date precedes its own order date.
+  // Dates are relative to "now" so these can never rot into false failures on a fixed calendar day.
+  const daysFromNow = (n: number) => new Date(Date.now() + n * 86_400_000);
+
+  it("refuses to convert when the required-by date has already passed", async () => {
+    const stale = daysFromNow(-1);
+    mockFindById.mockResolvedValue(prfRow({ status: "approved", requiredByDate: stale }));
+    await expect(convertPurchaseRequest(PRF_ID)).rejects.toThrow(/required-by date has passed/i);
+    expect(mockCreatePoTx).not.toHaveBeenCalled();
+    expect(mockAllocateCode).not.toHaveBeenCalled(); // fails BEFORE burning a PO code
+  });
+
+  it("refuses inside the transaction too, if the live PRF's date has passed", async () => {
+    mockFindForConvertTx.mockResolvedValue(liveApproved({ requiredByDate: daysFromNow(-1) }));
+    await expect(convertPurchaseRequest(PRF_ID)).rejects.toThrow(/required-by date has passed/i);
+    expect(mockCreatePoTx).not.toHaveBeenCalled();
+  });
+
+  // Date-only comparison: goods due TODAY are still legitimately convertible, whatever the time of
+  // day. A raw timestamp comparison would reject this the moment the clock passed midnight.
+  it("allows converting when the goods are required TODAY", async () => {
+    const today = new Date();
+    mockFindById.mockResolvedValue(prfRow({ status: "approved", requiredByDate: today }));
+    mockFindForConvertTx.mockResolvedValue(liveApproved({ requiredByDate: today }));
+    await convertPurchaseRequest(PRF_ID);
+    expect(mockCreatePoTx).toHaveBeenCalled();
   });
 
   it("refuses to convert when the supplier has gone inactive", async () => {

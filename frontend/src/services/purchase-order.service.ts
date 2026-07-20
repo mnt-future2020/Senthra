@@ -211,21 +211,24 @@ export const closePurchaseOrder = (id: string) => action(id, "close");
 // --- PM routing (approved → pm_review; re-assign while in pm_review) ---------
 export const assignPmPurchaseOrder = (id: string, pmUserId: string) => action(id, "assign-pm", { pmUserId });
 
-// Eligible PMs for the Route-to-PM picker (+ the suggested default from the linked job).
+// Eligible PMs for the Route-to-PM picker. The endpoint still returns `suggestedUserId` (it derives
+// one from a linked job), but POs are no longer job-linked in the UI, so the picker ignores it and
+// the caller always chooses explicitly — hence no jobId is sent.
 export interface PmCandidate {
   id: string;
   name: string;
   email: string;
 }
-export function listPmCandidates(jobId?: string): Promise<{ candidates: PmCandidate[]; suggestedUserId: string | null }> {
-  const q = jobId ? `?jobId=${encodeURIComponent(jobId)}` : "";
-  return api<{ candidates: PmCandidate[]; suggestedUserId: string | null }>(`/purchase-orders/pm-candidates${q}`);
+export function listPmCandidates(): Promise<{ candidates: PmCandidate[]; suggestedUserId: string | null }> {
+  return api<{ candidates: PmCandidate[]; suggestedUserId: string | null }>("/purchase-orders/pm-candidates");
 }
 
 // --- supplier acceptance (sent → supplier_accepted) ---------------------------
 export interface SupplierAcceptancePayload {
   acceptedDate?: string;
-  confirmedDeliveryDate?: string;
+  // Required by the backend: accepting an order means committing to a delivery date. Revisable
+  // afterwards via updateConfirmedDeliveryDate.
+  confirmedDeliveryDate: string;
   supplierAckReference?: string;
   notes?: string;
 }

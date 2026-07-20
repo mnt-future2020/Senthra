@@ -14,6 +14,11 @@ export const PRF_ATTACHMENT_TYPES = ["pdf", "docx", "png", "jpg"] as const;
 
 const emptyToUndef = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
 
+const requiredDate = (label: string) =>
+  z
+    .string({ error: `${label} is required.` })
+    .min(1, `${label} is required.`)
+    .refine((v) => !Number.isNaN(Date.parse(v)), `Enter a valid ${label.toLowerCase()}.`);
 const optionalDate = z.preprocess(
   emptyToUndef,
   z
@@ -89,6 +94,10 @@ export const createPurchaseRequestSchema = z
     warehouseId: z
       .string({ error: "Select a delivery warehouse." })
       .regex(OBJECT_ID_RE, "Select a delivery warehouse."),
+    // REQUIRED: when the goods are needed on site. This becomes the generated PO's expected
+    // delivery date — nothing else derives it, so without it a PO would be born dateless and
+    // stuck (it can't be approved or sent). Editable later while the PRF is still a draft.
+    requiredByDate: requiredDate("Required-by date"),
     ...sharedHeader,
     items: itemsField,
   })
@@ -102,6 +111,12 @@ export const updatePurchaseRequestSchema = z
     warehouseId: z.preprocess(
       emptyToUndef,
       z.string().regex(OBJECT_ID_RE, "Select a delivery warehouse.").optional(),
+    ),
+    // Optional on PATCH ("leave unchanged") but NOT nullable — once set it can be moved, never
+    // cleared back to nothing, since conversion has no other source for the PO's delivery date.
+    requiredByDate: z.preprocess(
+      emptyToUndef,
+      z.string().refine((v) => !Number.isNaN(Date.parse(v)), "Enter a valid required-by date.").optional(),
     ),
     ...sharedHeader,
     items: itemsField.optional(),
