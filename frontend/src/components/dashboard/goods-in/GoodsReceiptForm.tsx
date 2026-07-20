@@ -604,7 +604,7 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
                         <span className="text-sm font-bold text-[var(--ink)]">{l.itemName}{l.sku ? <span className="ml-1.5 text-[11px] font-normal text-[var(--faint)]">{l.sku}</span> : null}</span>
                         <span className="text-[11px] text-[var(--muted)]">Ordered {l.ordered} · Already received {l.previouslyReceived} · <strong className={over ? "text-[var(--neg)]" : "text-[var(--ink)]"}>Remaining {remaining}</strong></span>
                       </div>
-                      <div className="grid gap-3 sm:grid-cols-4">
+                      <div className="grid gap-3 grid-cols-2 xl:grid-cols-4">
                         <div>
                           <div className="mb-1.5 flex items-center justify-between gap-2">
                             <label className="text-xs font-bold uppercase tracking-wider text-[var(--muted)]">Receive qty</label>
@@ -631,7 +631,7 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
                           {acceptedMissing && <p className="mt-1 text-[11px] font-semibold text-[var(--neg)]">Enter how many passed inspection (0 if all rejected).</p>}
                         </div>
                         <div>
-                          <label className={labelCls}>Damaged / rejected</label>
+                          <label className={labelCls}>Damaged</label>
                           <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3.5 py-2.5 text-sm font-semibold text-[var(--ink)]">
                             {acceptedMissing || acceptedOver ? "—" : `${damagedOf(l)}${l.baseUnit ? ` ${l.baseUnit}` : ""}`}
                           </div>
@@ -683,11 +683,11 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
                           <label className={labelCls}>Batches</label>
                           <div className="space-y-2">
                             {l.batches.map((b, bi) => (
-                              <div key={b._key} className="grid gap-2 sm:grid-cols-12">
-                                <input className={`${inputCls} sm:col-span-5`} value={b.batchNumber} onChange={(e) => updateBatch(idx, bi, { batchNumber: e.target.value })} maxLength={120} placeholder="Batch / lot number" />
-                                <input className={`${inputCls} sm:col-span-4`} type="date" value={b.expiryDate} onChange={(e) => updateBatch(idx, bi, { expiryDate: e.target.value })} />
-                                <NumberInput className={`${inputCls} sm:col-span-2`} min={1} value={b.quantity} onChange={(e) => updateBatch(idx, bi, { quantity: e.target.value })} placeholder="Qty" />
-                                <button type="button" onClick={() => removeBatch(idx, bi)} className="flex items-center justify-center rounded-lg p-2 text-[var(--muted)] hover:bg-[var(--surface-2)] hover:text-[var(--neg)] sm:col-span-1" aria-label="Remove batch"><Trash2 className="h-4 w-4" /></button>
+                              <div key={b._key} className="grid grid-cols-2 gap-2 lg:grid-cols-12">
+                                <input className={`${inputCls} col-span-2 lg:col-span-5`} value={b.batchNumber} onChange={(e) => updateBatch(idx, bi, { batchNumber: e.target.value })} maxLength={120} placeholder="Batch / lot number" />
+                                <input className={`${inputCls} lg:col-span-4`} type="date" value={b.expiryDate} onChange={(e) => updateBatch(idx, bi, { expiryDate: e.target.value })} />
+                                <NumberInput className={`${inputCls} lg:col-span-2`} min={1} value={b.quantity} onChange={(e) => updateBatch(idx, bi, { quantity: e.target.value })} placeholder="Qty" />
+                                <button type="button" onClick={() => removeBatch(idx, bi)} className="col-span-2 flex items-center justify-center rounded-lg p-2 text-[var(--muted)] hover:bg-[var(--surface-2)] hover:text-[var(--neg)] lg:col-span-1" aria-label="Remove batch"><Trash2 className="h-4 w-4" /></button>
                               </div>
                             ))}
                             <button type="button" onClick={() => addBatch(idx)} className="flex items-center gap-1.5 rounded-lg border border-dashed border-[var(--border)] px-3 py-1.5 text-xs font-bold text-[var(--accent)] hover:bg-[var(--surface-2)]"><Plus className="h-3.5 w-3.5" /> Add batch</button>

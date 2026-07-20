@@ -140,8 +140,8 @@ export function InventoryView({ warehouseId, embedded }: { warehouseId?: string;
         />
       )}
 
-      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:items-center">
-        <div className="relative w-full lg:max-w-xs">
+      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:flex-wrap lg:items-center">
+        <div className="relative w-full lg:min-w-64 lg:max-w-xs lg:flex-1">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="Search item or SKU…" className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]" />
         </div>

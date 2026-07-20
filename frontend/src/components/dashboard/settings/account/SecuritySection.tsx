@@ -57,7 +57,7 @@ export function SecuritySection() {
       desc="Set a strong password you don't reuse — at least 8 characters."
     >
       <form onSubmit={save} className="space-y-4">
-        <div className="grid gap-4 sm:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2">
           <Field
             label="Current password"
             hint="Confirms it's you."

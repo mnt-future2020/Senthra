@@ -194,7 +194,7 @@ export function RestockComposerPage() {
           <FormSection title="Collection & priority" description="Your request goes to that warehouse's team — they confirm (or change) it on approval.">
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
-                <label className={labelCls}>Collect from warehouse <RequiredMark /></label>
+                <label className={labelCls}>Collect from <RequiredMark /></label>
                 <Select
                   ariaLabel="Collection warehouse"
                   value={preferredWarehouseId}

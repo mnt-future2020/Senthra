@@ -22,7 +22,7 @@ import { NumberInput } from "@/components/ui/NumberInput";
 import { CreatableSelect } from "@/components/ui/CreatableSelect";
 import { Select } from "@/components/ui/Select";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
+import { FormAsideCard, FormField, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import type { UserStatus } from "@/types/user";
 
 // The IRM catalogue now lives in the Inventory Hub (Inventory → IRM → Catalogue), so that's the
@@ -448,12 +448,12 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
                 <label className={labelCls}>Manufacturer</label>
                 <input className={inputCls} value={manufacturer} onChange={(e) => setManufacturer(e.target.value)} maxLength={120} placeholder="e.g. CommScope Inc." />
               </div>
-              <div>
+              <FormField>
                 <label className={labelCls}>Manufacturer part number (MPN)</label>
                 <input className={inputCls} value={mpn} onChange={(e) => setMpn(e.target.value)} maxLength={120} placeholder="e.g. 100-024-RL" />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">The maker&apos;s own part number, if known.</p>
-              </div>
-              <div>
+              </FormField>
+              <FormField>
                 <label className={labelCls}>Status</label>
                 <Select
                   value={status}
@@ -464,7 +464,7 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
                   ]}
                   ariaLabel="Status"
                 />
-              </div>
+              </FormField>
               <div className="sm:col-span-2">
                 <label className={labelCls}>Description</label>
                 <textarea className={inputCls} rows={2} value={description} onChange={(e) => setDescription(e.target.value)} maxLength={2000} placeholder="Specification, variant or usage notes (optional)." />
@@ -491,8 +491,8 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
               )}
               {supplierRows.map((row, idx) => (
                 <div key={idx} className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/30 p-3">
-                  <div className="grid gap-3 sm:grid-cols-12">
-                    <div className="sm:col-span-5">
+                  <div className="grid grid-cols-2 gap-3 xl:grid-cols-12">
+                    <FormField className="col-span-2 xl:col-span-4">
                       <label className={labelCls}>Supplier</label>
                       <Select
                         value={row.supplierId}
@@ -502,20 +502,20 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
                         disabled={refLoading && !row.supplierId}
                         ariaLabel="Supplier"
                       />
-                    </div>
-                    <div className="sm:col-span-2">
+                    </FormField>
+                    <FormField className="xl:col-span-2">
                       <label className={labelCls}>Priority</label>
                       <NumberInput className={inputCls} min={0} value={row.priority} onChange={(e) => updateRow(idx, { priority: e.target.value })} placeholder="1" />
-                    </div>
-                    <div className="sm:col-span-2">
-                      <label className={labelCls}>Supplier item code</label>
-                      <input className={inputCls} value={row.supplierSku} onChange={(e) => updateRow(idx, { supplierSku: e.target.value })} maxLength={80} placeholder="Supplier's code" />
-                    </div>
-                    <div className="sm:col-span-2">
+                    </FormField>
+                    <FormField className="xl:col-span-3">
+                      <label className={labelCls}>Supplier code</label>
+                      <input className={inputCls} value={row.supplierSku} onChange={(e) => updateRow(idx, { supplierSku: e.target.value })} maxLength={80} placeholder="Supplier's code" aria-label="Supplier item code" />
+                    </FormField>
+                    <FormField className="xl:col-span-2">
                       <label className={labelCls}>Lead time</label>
                       <NumberInput className={inputCls} min={0} max={365} value={row.leadTimeDays} onChange={(e) => updateRow(idx, { leadTimeDays: e.target.value })} placeholder="days" />
-                    </div>
-                    <div className="flex items-end justify-between sm:col-span-1">
+                    </FormField>
+                    <div className="col-span-2 flex items-end justify-between xl:col-span-1">
                       <button
                         type="button"
                         onClick={() => removeRow(idx)}
@@ -561,7 +561,7 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
                 <NumberInput className={inputCls} min={1} value={packSize} onChange={(e) => setPackSize(e.target.value)} placeholder="e.g. 1" />
               </div>
               <div>
-                <label className={labelCls}>Conversion ratio</label>
+                <label className={labelCls}>Conversion</label>
                 <NumberInput className={inputCls} min={0} step="any" value={conversionRatio} onChange={(e) => setConversionRatio(e.target.value)} placeholder="e.g. 305" />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Base units in one pack — e.g. a 305 m box = 305.</p>
               </div>
@@ -579,7 +579,7 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
                 <NumberInput className={inputCls} min={0} value={reorderLevel} onChange={(e) => setReorderLevel(e.target.value)} placeholder="e.g. 100" />
               </div>
               <div>
-                <label className={labelCls}>Reorder quantity</label>
+                <label className={labelCls}>Reorder qty</label>
                 <NumberInput className={inputCls} min={0} value={reorderQuantity} onChange={(e) => setReorderQuantity(e.target.value)} placeholder="e.g. 200" />
               </div>
               <div>
@@ -601,13 +601,13 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
 
           <FormSection title="Cost" description="Internal cost — never shown to customers.">
             <div className="grid gap-4 sm:grid-cols-3">
-              <div>
+              <FormField>
                 <label className={labelCls}>Standard cost ({currency === "EUR" ? "€" : "£"})</label>
                 <NumberInput className={inputCls} min={0} step="0.01" value={standardCost} onChange={(e) => { setStandardCost(e.target.value); clearError("standardCost"); }} placeholder="e.g. 42.50" aria-invalid={Boolean(errors.standardCost)} />
                 <FieldError id="err-standardCost" message={errors.standardCost} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Unit cost excluding VAT. Never shown to customers.</p>
-              </div>
-              <div>
+              </FormField>
+              <FormField>
                 <label className={labelCls}>Currency</label>
                 <Select
                   value={currency}
@@ -616,13 +616,13 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
                   ariaLabel="Currency"
                 />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Defaults to GBP — change only if this item is priced in another currency.</p>
-              </div>
-              <div>
+              </FormField>
+              <FormField>
                 <label className={labelCls}>VAT rate (%)</label>
                 <NumberInput className={inputCls} min={0} max={100} step="0.01" value={vatRatePercent} onChange={(e) => { setVatRatePercent(e.target.value); clearError("vatRatePercent"); }} placeholder="e.g. 20" aria-invalid={Boolean(errors.vatRatePercent)} />
                 <FieldError id="err-vatRatePercent" message={errors.vatRatePercent} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">UK standard rate is 20%. Use 5% or 0% where applicable.</p>
-              </div>
+              </FormField>
             </div>
           </FormSection>
 

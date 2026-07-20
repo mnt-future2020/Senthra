@@ -331,7 +331,7 @@ export function CustomerForm({ mode, customer }: { mode: "create" | "edit"; cust
                 </div>
               )}
               <div>
-                <label className={labelCls}>Company / registration no.</label>
+                <label className={labelCls}>Company reg. number</label>
                 <input className={inputCls} value={registrationNumber} onChange={(e) => setRegistrationNumber(e.target.value)} placeholder="e.g. 01234567" maxLength={40} />
               </div>
               <div>

@@ -121,7 +121,7 @@ export function CompanyProfileSection() {
           </Field>
 
           <div className="grid gap-5 sm:grid-cols-2">
-            <Field label="Company registration number">
+            <Field label="Company reg. number">
               <input className={inputCls} value={form.companyRegNumber} onChange={(e) => set("companyRegNumber", e.target.value)} placeholder="01234567" />
             </Field>
             <Field label="VAT number">

@@ -72,8 +72,21 @@ export function Field({
     }
   }
 
+  // Laid out as a 3-row grid (label / control / hint). The grid stretches every cell in
+  // a form row to the same height; sizing the label and control rows to content and
+  // letting the trailing `1fr` row absorb the slack means a taller hint under one field
+  // never shifts the control above it, so side-by-side hints of different lengths stay
+  // aligned.
+  //
+  // What this deliberately does NOT do is equalise label heights across a row: a label
+  // that wraps to two lines still sits its own control ~16px lower than its row-mates.
+  // Fixing that needs the parent row to coordinate (`grid-template-rows: subgrid`),
+  // which a field cannot do from the inside. The earlier attempt — a `min-h-8` floor on
+  // every label — did equalise them, but reserved two lines of space under every
+  // single-line label on every form in the app (~224px of dead space on one settings
+  // tab alone). Prefer shortening an over-long label to reintroducing that floor.
   return (
-    <div>
+    <div className="grid h-full grid-rows-[auto_auto_1fr] content-start">
       <label id={labelId} htmlFor={labelFor} className={labelCls}>
         {label}
         {required && <span className="ml-0.5 text-[var(--accent)]">*</span>}
