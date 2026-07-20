@@ -75,6 +75,8 @@ export interface PurchaseRequest {
   quoteReference: string | null;
   quoteDate: string | null;
   quoteValidUntil: string | null;
+  // When the requester needs the goods on site — becomes the PO's expected delivery date.
+  requiredByDate: string | null;
   justification: string | null;
   notes: string | null;
   // Commercial terms: `deliveryTerms` is the Incoterm code (e.g. "DDP"), `deliveryTermsLabel`

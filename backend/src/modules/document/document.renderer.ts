@@ -399,6 +399,24 @@ function drawSignature(doc: Doc, data: PurchaseOrderDocumentData, x: number, y: 
   }
 }
 
+/**
+ * Trims `text` with a trailing "…" until it fits `maxWidth` at the doc's current font/size.
+ * Returns "" when there is no usable space at all. Callers must set the font before calling.
+ */
+function ellipsize(doc: Doc, text: string, maxWidth: number): string {
+  // Reject non-finite budgets FIRST. Every comparison against NaN is false, so a NaN width would
+  // fall through all three guards below AND skip the trim loop — returning the full string, which
+  // the caller then draws with `lineBreak: false`, i.e. exactly the unclipped overrun this helper
+  // exists to prevent. A width can go NaN if widthOfString() misses a glyph's font metrics.
+  if (!Number.isFinite(maxWidth) || maxWidth <= 0) return "";
+  if (doc.widthOfString(text) <= maxWidth) return text;
+  const ellipsis = "…";
+  if (doc.widthOfString(ellipsis) > maxWidth) return "";
+  let out = text;
+  while (out.length > 0 && doc.widthOfString(out + ellipsis) > maxWidth) out = out.slice(0, -1);
+  return out.length > 0 ? out + ellipsis : "";
+}
+
 function drawFooters(doc: Doc, data: PurchaseOrderDocumentData, regional: DocumentRegional): void {
   const M = PAGE.margin;
   const W = doc.page.width - M * 2;
@@ -414,10 +432,25 @@ function drawFooters(doc: Doc, data: PurchaseOrderDocumentData, regional: Docume
     const yy = doc.page.height - M - 16;
     doc.lineWidth(0.5).strokeColor(COLORS.line).moveTo(M, yy - 6).lineTo(M + W, yy - 6).stroke();
     doc.font("Helvetica").fontSize(FONT.small).fillColor(COLORS.faint);
-    if (left) doc.text(left, M, yy, { width: W * 0.6, lineBreak: false });
-    const meta = `${data.meta.documentCode}   ·   Generated ${generatedAt}${
-      data.meta.generatedBy ? `   ·   ${data.meta.generatedBy}` : ""
-    }   ·   Page ${i + 1} of ${range.count}`;
+    // The generating user is deliberately NOT printed — it is internal audit data the supplier has
+    // no use for, and at A4 it cost ~88pt, which forced the company's own email to be truncated
+    // ("shahul@mnt…") on an outward-facing document. It remains recorded in the audit log.
+    const meta = `${data.meta.documentCode}   ·   Generated ${generatedAt}   ·   Page ${i + 1} of ${range.count}`;
+    // `lineBreak: false` makes pdfkit ignore `width` for wrapping AND clipping, so a long left
+    // string silently overruns into the right-aligned meta block ("…@mntfuturePO-0031"). Measure
+    // the meta text and hand the left side only the space that is actually left over, ellipsizing
+    // it if it still doesn't fit (a safety net — the two sides fit at A4 today).
+    const rawMetaW = doc.widthOfString(meta);
+    // Fall back to a conservative half-width if the measurement is unusable (a NaN from a missing
+    // glyph metric). Without this the left budget would be NaN and the company line would silently
+    // vanish from the document — degrade to "possibly ellipsized" rather than "missing".
+    const metaW = Number.isFinite(rawMetaW) ? rawMetaW : W / 2;
+    if (left) {
+      const gap = 12;
+      const leftW = W - metaW - gap;
+      const fitted = ellipsize(doc, left, leftW);
+      if (fitted) doc.text(fitted, M, yy, { width: leftW, lineBreak: false });
+    }
     doc.text(meta, M, yy, { width: W, align: "right", lineBreak: false });
   }
 }

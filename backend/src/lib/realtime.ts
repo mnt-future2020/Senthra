@@ -31,6 +31,23 @@ export const OFFICE_JOBS_ROOM = "jobs:office";
 // reviewer whose scope excludes the request just does one harmless no-op refetch.
 export const VAN_STOCK_REVIEWERS_ROOM = "van_stock:reviewers";
 
+// Shared room for the procurement surface — every user who can VIEW purchase orders joins it, so a
+// PO's lifecycle events fan out to ALL watchers (the finance approver, the assigned PM, the
+// warehouse expecting the goods). A PO is handled by several people in sequence — raised by one,
+// approved by another, sent by the PM — so a detail page left open on one desk goes stale the
+// moment someone else acts. Like the VSR room, the payload is a scope-agnostic "refetch" signal
+// ({id, code, status}) and every client re-pulls through its OWN warehouse-scoped REST call, so a
+// shared room can't leak another warehouse's order — a watcher outside the scope just does one
+// harmless no-op refetch.
+export const PURCHASE_ORDER_WATCHERS_ROOM = "purchase_orders:watchers";
+
+// Shared room for the purchase-request surface, for the same reason as the PO room above: a PRF is
+// raised by one person, approved/rejected by finance, then converted to a PO by procurement — so a
+// request left open on one desk goes stale as soon as the next person in the chain acts. Same
+// contract: the payload is a scope-agnostic refetch signal and every client re-pulls through its
+// own scoped REST call, so the shared room leaks nothing.
+export const PURCHASE_REQUEST_WATCHERS_ROOM = "purchase_requests:watchers";
+
 // Identity resolved from the handshake, stashed on the socket for handlers.
 interface SocketAuth {
   principalId: string; // token sub — also the room name
@@ -108,13 +125,21 @@ export function initRealtime(httpServer: HttpServer): IOServer {
 // Join the permission-gated broadcast rooms this principal is entitled to, off a SINGLE role
 // load (admin → all rooms; staff → per-permission). Mirrors the REST guards: OFFICE_JOBS_ROOM =
 // jobs.view; VAN_STOCK_REVIEWERS_ROOM = van_stock_request.review (same gate as VSR's isReviewer,
-// so a warehouse manager — who lacks jobs.view — still gets a live field-stock board). Best-effort:
-// any failure just skips the rooms (REST still works, the surface just won't live-refresh).
+// so a warehouse manager — who lacks jobs.view — still gets a live field-stock board);
+// PURCHASE_ORDER_WATCHERS_ROOM = purchase_orders.view and PURCHASE_REQUEST_WATCHERS_ROOM =
+// purchase_requests.view (the same gates their REST routes use).
+// Best-effort: any failure just skips the rooms (REST still works, the surface just won't
+// live-refresh).
 async function joinScopedRooms(socket: Socket, auth: SocketAuth): Promise<void> {
   try {
     if (auth.actor === "customer") return; // customers never see internal staff surfaces
     if (auth.actor === "admin") {
-      await Promise.all([Promise.resolve(socket.join(OFFICE_JOBS_ROOM)), Promise.resolve(socket.join(VAN_STOCK_REVIEWERS_ROOM))]);
+      await Promise.all([
+        Promise.resolve(socket.join(OFFICE_JOBS_ROOM)),
+        Promise.resolve(socket.join(VAN_STOCK_REVIEWERS_ROOM)),
+        Promise.resolve(socket.join(PURCHASE_ORDER_WATCHERS_ROOM)),
+        Promise.resolve(socket.join(PURCHASE_REQUEST_WATCHERS_ROOM)),
+      ]);
       return;
     }
     const user = await userRepo.findById(auth.principalId);
@@ -122,6 +147,8 @@ async function joinScopedRooms(socket: Socket, auth: SocketAuth): Promise<void> 
     const joins: Promise<unknown>[] = [];
     if (roleGrants(perms, "jobs.view")) joins.push(Promise.resolve(socket.join(OFFICE_JOBS_ROOM)));
     if (roleGrants(perms, "van_stock_request.review")) joins.push(Promise.resolve(socket.join(VAN_STOCK_REVIEWERS_ROOM)));
+    if (roleGrants(perms, "purchase_orders.view")) joins.push(Promise.resolve(socket.join(PURCHASE_ORDER_WATCHERS_ROOM)));
+    if (roleGrants(perms, "purchase_requests.view")) joins.push(Promise.resolve(socket.join(PURCHASE_REQUEST_WATCHERS_ROOM)));
     await Promise.all(joins);
   } catch {
     /* best-effort — a missed room join just means no live refresh for that surface on this socket */

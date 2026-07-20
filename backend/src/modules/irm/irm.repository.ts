@@ -225,10 +225,11 @@ export function findOwnerOptions(): Promise<
   });
 }
 
-// Replace ALL supplier-junction rows for an item (delete + recreate), atomically. Wrapped in
-// a transaction so a failure mid-reconcile can never leave the item with ZERO suppliers (it
-// rolls back to the prior set); the @@unique([irmItemId, supplierId]) guards dupes. Caller
-// (the service) guarantees the new set is ≥1 row with exactly one primary.
+// Replace ALL supplier-junction rows for an item (delete + recreate), atomically. Wrapped in a
+// transaction so a failure mid-reconcile can never leave the item with a PARTIAL set (it rolls
+// back to the prior one); the @@unique([irmItemId, supplierId]) guards dupes. Caller (the service)
+// guarantees the new set is unique with AT MOST one primary — an EMPTY set is valid and deliberate
+// (not every item is bought in), and clears every link.
 export interface SupplierLinkRow {
   supplierId: string;
   isPrimary: boolean;

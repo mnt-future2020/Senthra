@@ -21,7 +21,7 @@ describe("createIrmItemSchema — required fields", () => {
     expect(createIrmItemSchema.safeParse(valid()).success).toBe(true);
   });
 
-  it.each(["name", "typeId", "irmCategoryId", "baseUnit", "suppliers"])("rejects a missing %s", (field) => {
+  it.each(["name", "typeId", "irmCategoryId", "baseUnit"])("rejects a missing %s", (field) => {
     const payload = valid();
     delete (payload as Record<string, unknown>)[field];
     expect(createIrmItemSchema.safeParse(payload).success).toBe(false);
@@ -32,13 +32,19 @@ describe("createIrmItemSchema — required fields", () => {
   });
 });
 
-describe("createIrmItemSchema — suppliers (mandatory, one primary)", () => {
-  it("rejects an empty suppliers array", () => {
-    expect(createIrmItemSchema.safeParse(valid({ suppliers: [] })).success).toBe(false);
+describe("createIrmItemSchema — suppliers (optional, at most one primary)", () => {
+  it("accepts a missing suppliers key", () => {
+    const payload = valid();
+    delete (payload as Record<string, unknown>).suppliers;
+    expect(createIrmItemSchema.safeParse(payload).success).toBe(true);
   });
 
-  it("rejects when no supplier is primary", () => {
-    expect(createIrmItemSchema.safeParse(valid({ suppliers: [{ supplierId: SUP_ID }] })).success).toBe(false);
+  it("accepts an empty suppliers array", () => {
+    expect(createIrmItemSchema.safeParse(valid({ suppliers: [] })).success).toBe(true);
+  });
+
+  it("accepts a supplier with no primary flag", () => {
+    expect(createIrmItemSchema.safeParse(valid({ suppliers: [{ supplierId: SUP_ID }] })).success).toBe(true);
   });
 
   it("rejects two primaries", () => {
@@ -99,8 +105,8 @@ describe("updateIrmItemSchema", () => {
     expect(updateIrmItemSchema.safeParse({ name: "   " }).success).toBe(false);
   });
 
-  it("rejects an empty suppliers array when provided", () => {
-    expect(updateIrmItemSchema.safeParse({ suppliers: [] }).success).toBe(false);
+  it("accepts an empty suppliers array (clears every link)", () => {
+    expect(updateIrmItemSchema.safeParse({ suppliers: [] }).success).toBe(true);
   });
 
   it("accepts clearing the owner via empty string", () => {

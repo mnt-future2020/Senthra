@@ -7,7 +7,9 @@ import { CalendarClock, CheckCircle2, ChevronRight, ClipboardCheck, Download, Fi
 import * as poService from "@/services/purchase-order.service";
 import * as auditService from "@/services/audit.service";
 import * as grnService from "@/services/goods-in.service";
+import { isPermissionError, isStaleStateError } from "@/lib/api";
 import { useAuth } from "@/hooks/useAuth";
+import { usePurchaseOrderSocket } from "@/hooks/usePurchaseOrderSocket";
 import { useDashboard } from "@/hooks/useDashboard";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { DetailHeader } from "@/components/ui/DetailHeader";
@@ -16,7 +18,7 @@ import { inputCls, labelCls } from "@/components/ui/styles";
 import { actionLabel, actionTone, changeLabels, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
 import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
 import { GrnStatusBadge, formatDate as grnDate } from "@/components/dashboard/goods-in/grnStatus";
-import { PO_PRIORITY_LABELS, PoStatusBadge, formatDate, formatMoney } from "./poStatus";
+import { ACCEPTANCE_RECORDABLE_STATUSES, PO_PRIORITY_LABELS, PoStatusBadge, RECEIVABLE_STATUSES, formatDate, formatMoney } from "./poStatus";
 import { Pagination } from "@/components/ui/Pagination";
 import type { AuditEntry } from "@/types/audit";
 import type { GoodsReceipt } from "@/types/goods-in";
@@ -79,15 +81,86 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
     }
   };
 
-  const run = async (fn: () => Promise<PurchaseOrder>, ok: string) => {
-    setBusy(true);
+  // Monotonic counter for background refetches. A slow response must NEVER overwrite a newer one:
+  // without it, a socket event and a focus event racing (or two events in quick succession) can
+  // land out of order and REWIND the view to an older status — the exact staleness this is meant
+  // to cure. Only the latest issued fetch is allowed to commit.
+  const fetchSeq = React.useRef(0);
+  // Mirrors `busy` synchronously so background refreshes can be suppressed while the user's OWN
+  // action is in flight. `busy` state alone is not enough: it only lands on the next render, so an
+  // event arriving in the same commit would still slip through and clobber the action's fresher
+  // result with the pre-action row.
+  const busyRef = React.useRef(false);
+
+  // Pull the current server state into the view. Used to self-heal a stale screen — this page
+  // fetches once on mount, so anything another user does in the meantime (a PM sending the order
+  // from their own session) would otherwise leave this tab showing an outdated status with
+  // actionable buttons. Best-effort: a failed refetch leaves the existing view untouched.
+  const refresh = React.useCallback(async () => {
+    const seq = ++fetchSeq.current;
     try {
-      setPo(await fn());
+      const fresh = await poService.getPurchaseOrder(po.id);
+      if (seq !== fetchSeq.current) return; // a newer refresh won — don't rewind
+      setPo(fresh);
+    } catch {
+      /* keep showing what we have; the next action, event or refocus will try again */
+    }
+  }, [po.id]);
+
+  // A background refresh that yields to the user's own in-flight action.
+  const refreshIfIdle = React.useCallback(() => {
+    if (busyRef.current) return;
+    void refresh();
+  }, [refresh]);
+
+  // Live-refresh when anyone moves this order on — the finance approver, the assigned PM sending it
+  // from their own session, or the warehouse receiving stock against it. Also fires on socket
+  // RECONNECT, so events missed during a network blip are recovered.
+  usePurchaseOrderSocket(refreshIfIdle);
+
+  // Revalidate when the tab regains focus. Belt-and-braces alongside the socket: covers the window
+  // where the tab was backgrounded, and any client that never established a socket.
+  React.useEffect(() => {
+    const onFocus = () => { if (document.visibilityState === "visible") refreshIfIdle(); };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    };
+  }, [refreshIfIdle]);
+
+  // Flip the ref FIRST (synchronously) so a background event in the same commit already sees it.
+  const setBusyBoth = (v: boolean) => {
+    busyRef.current = v;
+    setBusy(v);
+  };
+
+  /**
+   * Run a workflow action and fold the result back into the view.
+   *
+   * `alsoResyncOn403` is for the ONE action whose 403 is genuinely state-dependent: sending while
+   * in `pm_review` is restricted to the assigned PM, so a re-assignment elsewhere turns a valid
+   * button into a 403. Every other 403 in this app is a static warehouse/permission failure where
+   * refetching is futile, which is why `isStaleStateError` excludes 403 by default.
+   */
+  const run = async (fn: () => Promise<PurchaseOrder>, ok: string, alsoResyncOn403 = false) => {
+    setBusyBoth(true);
+    try {
+      // The action's own response is the freshest truth — claim the sequence so an in-flight
+      // background refetch issued before it can't land afterwards and rewind the status.
+      const updated = await fn();
+      fetchSeq.current += 1;
+      setPo(updated);
       pushToast(ok, "success");
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Action failed.", "alert");
+      // The server refused because the order is no longer in the state this screen showed (someone
+      // else moved it on, or deleted it). Refetch so the badge + buttons correct themselves instead
+      // of leaving a button that fails identically on every click.
+      if (isStaleStateError(e) || (alsoResyncOn403 && isPermissionError(e))) await refresh();
     } finally {
-      setBusy(false);
+      setBusyBoth(false);
     }
   };
 
@@ -95,9 +168,10 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   // has diverged from its PRF, routes it into the review queue instead — so there's never a
   // dead-end. Message the two outcomes distinctly.
   const onApprove = async () => {
-    setBusy(true);
+    setBusyBoth(true);
     try {
       const { purchaseOrder, divertedToReview } = await poService.approvePurchaseOrder(po.id);
+      fetchSeq.current += 1; // this response is the freshest truth — see run()
       setPo(purchaseOrder);
       pushToast(
         divertedToReview
@@ -114,8 +188,9 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
       }
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Action failed.", "alert");
+      if (isStaleStateError(e)) await refresh();
     } finally {
-      setBusy(false);
+      setBusyBoth(false);
     }
   };
 
@@ -142,6 +217,11 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
       {downloading ? "Preparing…" : "Download PDF"}
     </ActionBtn>,
   ];
+  // A PO locks once approved (edits are draft-only, and there's no way back to draft), so an order
+  // with no expected delivery date must be stopped while Edit is still on screen — otherwise it can
+  // neither be sent nor fixed. The backend enforces this on approve/submit/send; this mirrors it.
+  const noDate = !po.expectedDeliveryDate;
+  const noDateReason = "Set an expected delivery date first — use Edit.";
   if (s === "draft" && can("purchase_orders.edit"))
     actions.push(<ActionBtn key="edit" icon={Pencil} onClick={() => router.push(`/dashboard/purchase-orders/${po.code}/edit`)} disabled={busy}>Edit</ActionBtn>);
   // A PRF-born draft takes the FAST PATH: Finance already reviewed these numbers on the PRF, so it
@@ -149,11 +229,11 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   // draft → pending_approval → approved path via Submit. The backend enforces the same split (and
   // re-checks commercial equality on the fast path), so this only mirrors what the server allows.
   if (s === "draft" && po.purchaseRequestId && can("purchase_orders.approve"))
-    actions.push(<ActionBtn key="approve-fast" icon={CheckCircle2} primary onClick={onApprove} disabled={busy}>Approve</ActionBtn>);
+    actions.push(<ActionBtn key="approve-fast" icon={CheckCircle2} primary onClick={onApprove} disabled={busy || noDate} title={noDate ? noDateReason : undefined}>Approve</ActionBtn>);
   if (s === "draft" && !po.purchaseRequestId && can("purchase_orders.submit"))
-    actions.push(<ActionBtn key="submit" icon={Send} primary onClick={() => run(() => poService.submitPurchaseOrder(po.id), "Submitted for approval.")} disabled={busy}>Submit</ActionBtn>);
+    actions.push(<ActionBtn key="submit" icon={Send} primary onClick={() => run(() => poService.submitPurchaseOrder(po.id), "Submitted for approval.")} disabled={busy || noDate} title={noDate ? noDateReason : undefined}>Submit</ActionBtn>);
   if (s === "pending_approval" && can("purchase_orders.approve")) {
-    actions.push(<ActionBtn key="approve" icon={CheckCircle2} primary onClick={onApprove} disabled={busy}>Approve</ActionBtn>);
+    actions.push(<ActionBtn key="approve" icon={CheckCircle2} primary onClick={onApprove} disabled={busy || noDate} title={noDate ? noDateReason : undefined}>Approve</ActionBtn>);
     actions.push(<ActionBtn key="reject" icon={XCircle} onClick={() => { setReason(""); setReasonFor("reject"); }} disabled={busy}>Reject</ActionBtn>);
   }
   // Route an approved PO to a Project Manager for review + send (or re-assign while in
@@ -161,19 +241,38 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   // the backend enforces the assigned-PM rule in pm_review, and a 403 surfaces as a toast.
   if ((s === "approved" || s === "pm_review") && can("purchase_orders.assign_pm"))
     actions.push(<ActionBtn key="assign-pm" icon={UserRound} onClick={() => setAssignPmOpen(true)} disabled={busy}>{s === "pm_review" ? "Re-assign PM" : "Route to PM"}</ActionBtn>);
+  // The backend rejects sending a PO with no expected delivery date (it's printed on the issued
+  // document and the warehouse schedules against it). Mirror that here so it's caught before the
+  // round-trip. Approve/Submit gate on the same thing, so this is a backstop.
   if ((s === "approved" || s === "pm_review") && can("purchase_orders.send"))
-    actions.push(<ActionBtn key="send" icon={Send} primary onClick={() => setConfirmSend(true)} disabled={busy}>Send to supplier</ActionBtn>);
-  // Record the supplier's acceptance of an issued order (sent → supplier_accepted).
-  if (s === "sent" && can("purchase_orders.acknowledge"))
+    actions.push(
+      <ActionBtn
+        key="send"
+        icon={Send}
+        primary
+        onClick={() => setConfirmSend(true)}
+        disabled={busy || !po.expectedDeliveryDate}
+        title={!po.expectedDeliveryDate ? "Set an expected delivery date before sending to the supplier." : undefined}
+      >
+        Send to supplier
+      </ActionBtn>,
+    );
+  // Record the supplier's acknowledgement. Available on any issued, non-terminal order — goods
+  // often arrive before the paperwork, and the ack reference/date must not be lost just because
+  // the truck was quick. Only `sent` advances the status; later ones record the event in place.
+  // Once recorded this drops out of the toolbar: corrections belong on the Supplier acceptance
+  // card, and revising the DATE has its own action below (which also captures a reason).
+  if (!po.supplierAcceptedAt && ACCEPTANCE_RECORDABLE_STATUSES.includes(s) && can("purchase_orders.acknowledge"))
     actions.push(<ActionBtn key="accept" icon={ClipboardCheck} onClick={() => setAcceptOpen(true)} disabled={busy}>Record supplier acceptance</ActionBtn>);
-  // Revise the confirmed delivery date while the order sits accepted-but-not-yet-delivered.
-  if (s === "supplier_accepted" && can("purchase_orders.acknowledge"))
+  // Revise a date the supplier already gave — gated on the FIELD, not the status, so it stays
+  // available after goods start arriving (the warehouse plans against this date).
+  if (po.confirmedDeliveryDate && !["closed", "cancelled"].includes(s) && can("purchase_orders.acknowledge"))
     actions.push(<ActionBtn key="delivery-date" icon={CalendarClock} onClick={() => setDeliveryDateOpen(true)} disabled={busy}>Update delivery date</ActionBtn>);
   // Receive: launch the existing Goods In form with this PO preselected. Only for
   // receivable statuses (sent / supplier_accepted / partially_received) — never draft/approved
   // (not sent yet) or fully_received/cancelled/completed (terminal). The form + backend stay
   // authoritative.
-  if ((s === "sent" || s === "supplier_accepted" || s === "partially_received") && can("goods_in.create"))
+  if (RECEIVABLE_STATUSES.includes(s) && can("goods_in.create"))
     actions.push(<ActionBtn key="receive" icon={Package} primary onClick={() => router.push(`/dashboard/goods-in/new?po=${po.id}`)} disabled={busy}>Receive</ActionBtn>);
   if ((s === "partially_received" || s === "fully_received") && can("purchase_orders.close"))
     actions.push(<ActionBtn key="close" icon={CheckCircle2} primary onClick={() => run(() => poService.closePurchaseOrder(po.id), "Purchase order closed.")} disabled={busy}>Close</ActionBtn>);
@@ -221,7 +320,16 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto">
-        {tab === "overview" && <Overview po={po} />}
+        {tab === "overview" && (
+          <Overview
+            po={po}
+            onEditAcceptance={
+              !busy && !["closed", "cancelled"].includes(po.status) && can("purchase_orders.acknowledge")
+                ? () => setAcceptOpen(true)
+                : undefined
+            }
+          />
+        )}
         {tab === "receipts" && <Receipts poId={po.id} />}
         {tab === "attachments" && <Attachments po={po} setPo={setPo} canEdit={can("purchase_orders.edit")} />}
         {tab === "audit" && <AuditTrail poId={po.id} />}
@@ -289,6 +397,9 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
           run(
             () => poService.sendPurchaseOrder(po.id),
             po.supplier?.contactEmail ? `Issued — emailing ${po.supplier.contactEmail}.` : "Issued to the supplier.",
+            // A 403 here is state-dependent: in pm_review only the ASSIGNED PM may send, so a
+            // re-assignment made elsewhere turns this button into a 403. Resync to show who owns it.
+            true,
           );
         }}
         onClose={() => setConfirmSend(false)}
@@ -297,18 +408,23 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   );
 }
 
-function ActionBtn({ icon: Icon, primary, disabled, onClick, children }: { icon: React.ElementType; primary?: boolean; disabled?: boolean; onClick: () => void; children: React.ReactNode }) {
+function ActionBtn({ icon: Icon, primary, disabled, title, onClick, children }: { icon: React.ElementType; primary?: boolean; disabled?: boolean; title?: string; onClick: () => void; children: React.ReactNode }) {
   return (
-    <button type="button" onClick={onClick} disabled={disabled} className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-bold transition-all disabled:opacity-60 ${primary ? "bg-[var(--accent)] text-white hover:opacity-90" : "border border-[var(--border)] text-[var(--ink)] hover:bg-[var(--surface-2)]"}`}>
+    <button type="button" onClick={onClick} disabled={disabled} title={title} className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-bold transition-all disabled:opacity-60 ${primary ? "bg-[var(--accent)] text-white hover:opacity-90" : "border border-[var(--border)] text-[var(--ink)] hover:bg-[var(--surface-2)]"}`}>
       <Icon className="h-3.5 w-3.5" /> {children}
     </button>
   );
 }
 
-function Card({ title, children }: { title: string; children: React.ReactNode }) {
+// `action` is an optional control rendered against the title — for edits that belong WITH the data
+// rather than in the page toolbar (which stays reserved for workflow actions).
+function Card({ title, action, children }: { title: string; action?: React.ReactNode; children: React.ReactNode }) {
   return (
     <section className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
-      <h2 className="mb-4 text-sm font-extrabold text-[var(--ink)]">{title}</h2>
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <h2 className="text-sm font-extrabold text-[var(--ink)]">{title}</h2>
+        {action}
+      </div>
       {children}
     </section>
   );
@@ -366,8 +482,8 @@ function ProcurementChain({ po }: { po: PurchaseOrder }) {
   );
 }
 
-// Route-to-PM picker. Candidates + the suggested default (the linked job's creator, when
-// they qualify) come from the backend; the picker pre-selects the suggestion.
+// Route-to-PM picker. Candidates come from the backend and the user picks one explicitly — POs are
+// no longer job-linked in the UI, so there is no job creator to suggest as a default.
 function AssignPmDialog({ po, busy, onAssign, onClose }: { po: PurchaseOrder; busy: boolean; onAssign: (pmUserId: string) => void; onClose: () => void }) {
   const { pushToast } = useDashboard();
   const [candidates, setCandidates] = React.useState<poService.PmCandidate[] | null>(null);
@@ -376,11 +492,10 @@ function AssignPmDialog({ po, busy, onAssign, onClose }: { po: PurchaseOrder; bu
   React.useEffect(() => {
     let active = true;
     poService
-      .listPmCandidates(po.jobId ?? undefined)
+      .listPmCandidates()
       .then((res) => {
         if (!active) return;
         setCandidates(res.candidates);
-        setPmUserId((prev) => prev || res.suggestedUserId || "");
       })
       .catch((e) => {
         if (!active) return;
@@ -388,7 +503,7 @@ function AssignPmDialog({ po, busy, onAssign, onClose }: { po: PurchaseOrder; bu
         pushToast(e instanceof Error ? e.message : "Could not load project managers.", "alert");
       });
     return () => { active = false; };
-  }, [po.jobId, pushToast]);
+  }, [pushToast]);
 
   const confirm = () => {
     if (!pmUserId) {
@@ -429,26 +544,55 @@ function AssignPmDialog({ po, busy, onAssign, onClose }: { po: PurchaseOrder; bu
 }
 
 // "Record supplier acceptance" — the supplier confirmed the issued order (sent →
-// supplier_accepted), optionally with their acknowledgement reference + confirmed delivery date.
+// supplier_accepted). The confirmed delivery date is REQUIRED: accepting means committing to a
+// date, and it's what the warehouse plans against. It stays revisable via "Update delivery date".
 function SupplierAcceptanceDialog({ po, busy, onConfirm, onClose }: { po: PurchaseOrder; busy: boolean; onConfirm: (payload: poService.SupplierAcceptancePayload) => void; onClose: () => void }) {
-  const [acceptedDate, setAcceptedDate] = React.useState(new Date().toISOString().slice(0, 10));
-  const [confirmedDeliveryDate, setConfirmedDeliveryDate] = React.useState("");
-  const [supplierAckReference, setSupplierAckReference] = React.useState("");
-  const [notes, setNotes] = React.useState("");
+  const { pushToast } = useDashboard();
+  // Prefill from what's already recorded — the same dialog doubles as "correct the details" on an
+  // order that was acknowledged earlier, so starting blank would look like the data was lost.
+  const existing = Boolean(po.supplierAcceptedAt);
+  const [acceptedDate, setAcceptedDate] = React.useState(po.supplierAcceptedAt?.slice(0, 10) ?? new Date().toISOString().slice(0, 10));
+  const [confirmedDeliveryDate, setConfirmedDeliveryDate] = React.useState(po.confirmedDeliveryDate?.slice(0, 10) ?? "");
+  const [supplierAckReference, setSupplierAckReference] = React.useState(po.supplierAckReference ?? "");
+  const [notes, setNotes] = React.useState(po.supplierAcceptNotes ?? "");
+
+  const confirm = () => {
+    if (!confirmedDeliveryDate) {
+      pushToast("Enter the delivery date the supplier confirmed.", "alert");
+      return;
+    }
+    onConfirm({
+      acceptedDate: acceptedDate || undefined,
+      confirmedDeliveryDate,
+      supplierAckReference: supplierAckReference.trim() || undefined,
+      notes: notes.trim() || undefined,
+    });
+  };
 
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
       <div className="w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
-        <h3 className="text-sm font-extrabold text-[var(--ink)]">Record supplier acceptance</h3>
-        <p className="mt-1 text-xs text-[var(--muted)]">{po.supplierName ?? po.supplier?.name ?? "The supplier"} has confirmed {po.code}.</p>
+        <h3 className="text-sm font-extrabold text-[var(--ink)]">{existing ? "Update acknowledgement" : "Record supplier acceptance"}</h3>
+        <p className="mt-1 text-xs text-[var(--muted)]">
+          {existing
+            ? `Correct the acknowledgement details recorded for ${po.code}. To log a delivery-date change with its reason, use “Update delivery date” instead.`
+            : `${po.supplierName ?? po.supplier?.name ?? "The supplier"} has confirmed ${po.code}.`}
+        </p>
+        {/* Recording against an order that's already receiving is legitimate (a late ack) — say so,
+            and be explicit that it won't rewind the order's status. */}
+        {(po.status === "partially_received" || po.status === "fully_received") && (
+          <p className="mt-2 rounded-lg bg-[var(--surface-2)] px-2.5 py-1.5 text-[11px] text-[var(--muted)]">
+            Goods have already been received. This records the supplier&apos;s acknowledgement without changing the order status.
+          </p>
+        )}
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
           <div>
             <label className={labelCls}>Accepted on</label>
             <input type="date" className={inputCls} value={acceptedDate} onChange={(e) => setAcceptedDate(e.target.value)} />
           </div>
           <div>
-            <label className={labelCls}>Confirmed delivery date</label>
-            <input type="date" className={inputCls} value={confirmedDeliveryDate} onChange={(e) => setConfirmedDeliveryDate(e.target.value)} />
+            <label className={labelCls}>Confirmed delivery date<span className="ml-0.5 text-[var(--neg)]">*</span></label>
+            <input type="date" className={inputCls} value={confirmedDeliveryDate} onChange={(e) => setConfirmedDeliveryDate(e.target.value)} min={acceptedDate || undefined} />
           </div>
           <div className="sm:col-span-2">
             <label className={labelCls}>Supplier reference</label>
@@ -463,14 +607,7 @@ function SupplierAcceptanceDialog({ po, busy, onConfirm, onClose }: { po: Purcha
           <button type="button" onClick={onClose} className="rounded-xl border border-[var(--border)] px-3.5 py-2 text-xs font-bold text-[var(--ink)] hover:bg-[var(--surface-2)]">Cancel</button>
           <button
             type="button"
-            onClick={() =>
-              onConfirm({
-                acceptedDate: acceptedDate || undefined,
-                confirmedDeliveryDate: confirmedDeliveryDate || undefined,
-                supplierAckReference: supplierAckReference.trim() || undefined,
-                notes: notes.trim() || undefined,
-              })
-            }
+            onClick={confirm}
             disabled={busy}
             className="rounded-xl bg-[var(--accent)] px-3.5 py-2 text-xs font-extrabold text-white hover:opacity-90 disabled:opacity-60"
           >
@@ -523,7 +660,9 @@ function DeliveryDateDialog({ po, busy, onConfirm, onClose }: { po: PurchaseOrde
   );
 }
 
-function Overview({ po }: { po: PurchaseOrder }) {
+// `onEditAcceptance` is supplied only when the viewer may amend the acknowledgement — the parent
+// owns the permission/status decision, so this stays a dumb renderer.
+function Overview({ po, onEditAcceptance }: { po: PurchaseOrder; onEditAcceptance?: () => void }) {
   const router = useRouter();
   return (
     <div className="space-y-4">
@@ -578,18 +717,16 @@ function Overview({ po }: { po: PurchaseOrder }) {
         <Card title="Order">
           <div className="grid grid-cols-2 gap-3">
             <Field label="Order date">{formatDate(po.orderDate)}</Field>
-            <Field label="Expected delivery">{formatDate(po.expectedDeliveryDate)}</Field>
-            <Field label="Reference">{po.referenceNumber}</Field>
-            <Field label="Priority">{PO_PRIORITY_LABELS[po.priority]}</Field>
-            <Field label="Job">
-              {po.job ? (
-                <button type="button" onClick={() => router.push(`/dashboard/jobs/${po.job!.jobNumber}`)} className="text-left font-semibold text-[var(--accent)] hover:underline">
-                  {po.job.jobNumber} — {po.job.name}
-                </button>
+            <Field label="Expected delivery">
+              {po.expectedDeliveryDate ? (
+                formatDate(po.expectedDeliveryDate)
               ) : (
-                ""
+                // Not just a blank "—": the order cannot be sent until this is set, so say so.
+                <span className="font-semibold text-[var(--neg)]">Not set — required before sending</span>
               )}
             </Field>
+            <Field label="Reference">{po.referenceNumber}</Field>
+            <Field label="Priority">{PO_PRIORITY_LABELS[po.priority]}</Field>
             <Field label="Project reference">{po.projectRef}</Field>
             {po.purchaseRequest && (
               <div className="col-span-2">
@@ -621,7 +758,23 @@ function Overview({ po }: { po: PurchaseOrder }) {
           </Card>
         )}
         {po.supplierAcceptedAt && (
-          <Card title="Supplier acceptance">
+          <Card
+            title="Supplier acceptance"
+            // Corrections live WITH the record (fix a mistyped reference, a wrong accepted-on
+            // date). The everyday date slip has its own toolbar action, which also captures a
+            // reason — so this stays out of the toolbar to avoid two buttons doing one job.
+            action={
+              onEditAcceptance ? (
+                <button
+                  type="button"
+                  onClick={onEditAcceptance}
+                  className="shrink-0 text-[11px] font-bold text-[var(--accent)] hover:underline"
+                >
+                  Edit
+                </button>
+              ) : undefined
+            }
+          >
             <div className="grid grid-cols-2 gap-3">
               <Field label="Accepted">{formatDate(po.supplierAcceptedAt)}</Field>
               <Field label="Recorded by">{po.supplierAcceptedBy}</Field>

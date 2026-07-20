@@ -122,9 +122,12 @@ describe("poSupplierAcceptSchema — confirmed delivery can't precede acceptance
     expect(poSupplierAcceptSchema.safeParse({ acceptedDate: "2026-07-20", confirmedDeliveryDate: "2026-07-10" }).success).toBe(false);
   });
 
-  it("allows omitting the confirmed date entirely (accept first, schedule later)", () => {
-    expect(poSupplierAcceptSchema.safeParse({ acceptedDate: "2026-07-20" }).success).toBe(true);
-    expect(poSupplierAcceptSchema.safeParse({}).success).toBe(true);
+  // Accepting an order means committing to a delivery date — it's what the warehouse plans
+  // against, and it stays revisable afterwards via the delivery-date endpoint.
+  it("REQUIRES the confirmed delivery date", () => {
+    expect(poSupplierAcceptSchema.safeParse({ acceptedDate: "2026-07-20" }).success).toBe(false);
+    expect(poSupplierAcceptSchema.safeParse({}).success).toBe(false);
+    expect(poSupplierAcceptSchema.safeParse({ confirmedDeliveryDate: "" }).success).toBe(false);
   });
 
   it("allows a SAME-DAY confirmed delivery when acceptedDate is omitted (date-only compare, not now)", () => {

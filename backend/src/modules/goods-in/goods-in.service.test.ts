@@ -165,9 +165,9 @@ describe("getGoodsReceipt — previouslyReceived freshness", () => {
 });
 
 describe("createGoodsReceipt — quantity maths + snapshots", () => {
-  it("computes accepted = received − damaged and snapshots ordered + previouslyReceived", async () => {
+  it("derives damaged = received − accepted and snapshots ordered + previouslyReceived", async () => {
     await createGoodsReceipt(
-      { purchaseOrderId: PO_ID, receivedDate: "2026-06-15", items: [{ purchaseOrderItemId: POI_ID, receivedQuantity: 6, damagedQuantity: 1 }] } as Parameters<typeof createGoodsReceipt>[0],
+      { purchaseOrderId: PO_ID, receivedDate: "2026-06-15", items: [{ purchaseOrderItemId: POI_ID, receivedQuantity: 6, acceptedQuantity: 5 }] } as Parameters<typeof createGoodsReceipt>[0],
       { type: "admin", email: "wh@x.com" },
     );
     const [header, lines] = mockCreateWithCode.mock.calls[0];
@@ -176,10 +176,28 @@ describe("createGoodsReceipt — quantity maths + snapshots", () => {
     expect(auditActions()).toContain("goods_in.created");
   });
 
+  it("rejects accepting more than was received", async () => {
+    await expect(
+      createGoodsReceipt(
+        { purchaseOrderId: PO_ID, receivedDate: "2026-06-15", items: [{ purchaseOrderItemId: POI_ID, receivedQuantity: 4, acceptedQuantity: 5 }] } as Parameters<typeof createGoodsReceipt>[0],
+      ),
+    ).rejects.toThrow(/accepted quantity can't exceed received/i);
+    expect(mockCreateWithCode).not.toHaveBeenCalled();
+  });
+
+  it("records a fully rejected line as all-damaged, none accepted", async () => {
+    await createGoodsReceipt(
+      { purchaseOrderId: PO_ID, receivedDate: "2026-06-15", items: [{ purchaseOrderItemId: POI_ID, receivedQuantity: 4, acceptedQuantity: 0 }] } as Parameters<typeof createGoodsReceipt>[0],
+      { type: "admin", email: "wh@x.com" },
+    );
+    const [, lines] = mockCreateWithCode.mock.calls[0];
+    expect(lines[0]).toMatchObject({ receivedQuantity: 4, damagedQuantity: 4, acceptedQuantity: 0 });
+  });
+
   it("rejects receiving more than the remaining quantity", async () => {
     mockReqReceivable.mockResolvedValue(poForReceipt({ items: [{ id: POI_ID, irmItemId: IRM_ID, itemName: "CAT6", sku: null, baseUnit: null, quantity: 10, receivedQuantity: 8 }] }));
     await expect(
-      createGoodsReceipt({ purchaseOrderId: PO_ID, receivedDate: "2026-06-15", items: [{ purchaseOrderItemId: POI_ID, receivedQuantity: 5 }] } as Parameters<typeof createGoodsReceipt>[0]),
+      createGoodsReceipt({ purchaseOrderId: PO_ID, receivedDate: "2026-06-15", items: [{ purchaseOrderItemId: POI_ID, receivedQuantity: 5, acceptedQuantity: 5 }] } as Parameters<typeof createGoodsReceipt>[0]),
     ).rejects.toThrow(/remaining/i);
     expect(mockCreateWithCode).not.toHaveBeenCalled();
   });
@@ -188,7 +206,7 @@ describe("createGoodsReceipt — quantity maths + snapshots", () => {
     mockFlags.mockResolvedValue([{ id: IRM_ID, trackInventory: true, trackSerialNumbers: true, trackBatchNumbers: false }]);
     await expect(
       createGoodsReceipt(
-        { purchaseOrderId: PO_ID, receivedDate: "2026-06-15", items: [{ purchaseOrderItemId: POI_ID, receivedQuantity: 5, damagedQuantity: 0, serials: ["S1", "S2"] }] } as Parameters<typeof createGoodsReceipt>[0],
+        { purchaseOrderId: PO_ID, receivedDate: "2026-06-15", items: [{ purchaseOrderItemId: POI_ID, receivedQuantity: 5, acceptedQuantity: 5, serials: ["S1", "S2"] }] } as Parameters<typeof createGoodsReceipt>[0],
       ),
     ).rejects.toThrow(/serial/i);
   });
@@ -197,7 +215,7 @@ describe("createGoodsReceipt — quantity maths + snapshots", () => {
     mockFlags.mockResolvedValue([{ id: IRM_ID, trackInventory: true, trackSerialNumbers: false, trackBatchNumbers: true }]);
     await expect(
       createGoodsReceipt(
-        { purchaseOrderId: PO_ID, receivedDate: "2026-06-15", items: [{ purchaseOrderItemId: POI_ID, receivedQuantity: 5, damagedQuantity: 0, batches: [{ batchNumber: "B1", quantity: 4 }] }] } as Parameters<typeof createGoodsReceipt>[0],
+        { purchaseOrderId: PO_ID, receivedDate: "2026-06-15", items: [{ purchaseOrderItemId: POI_ID, receivedQuantity: 5, acceptedQuantity: 5, batches: [{ batchNumber: "B1", quantity: 4 }] }] } as Parameters<typeof createGoodsReceipt>[0],
       ),
     ).rejects.toThrow(/total 5/i);
   });
@@ -207,7 +225,7 @@ describe("createGoodsReceipt — quantity maths + snapshots", () => {
     mockSerialConflicts.mockResolvedValue([{ serialLower: "s1" }]);
     await expect(
       createGoodsReceipt(
-        { purchaseOrderId: PO_ID, receivedDate: "2026-06-15", items: [{ purchaseOrderItemId: POI_ID, receivedQuantity: 1, damagedQuantity: 0, serials: ["S1"] }] } as Parameters<typeof createGoodsReceipt>[0],
+        { purchaseOrderId: PO_ID, receivedDate: "2026-06-15", items: [{ purchaseOrderItemId: POI_ID, receivedQuantity: 1, acceptedQuantity: 1, serials: ["S1"] }] } as Parameters<typeof createGoodsReceipt>[0],
       ),
     ).rejects.toThrow(/already received/i);
   });

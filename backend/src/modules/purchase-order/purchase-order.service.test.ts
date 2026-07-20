@@ -29,6 +29,13 @@ vi.mock("#modules/irm/irm.service.js", () => ({ requireActiveIrmItem: vi.fn(), r
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn() }));
 vi.mock("../../lib/cloudinary.js", () => ({ uploadFileToCloudinary: vi.fn() }));
+// Realtime is fire-and-forget; mock it so we can assert every transition fans a refetch signal out
+// to the procurement watchers (a stale detail page is what let a user re-send an already-sent PO).
+vi.mock("../../lib/realtime.js", () => ({
+  emitToRoom: vi.fn(),
+  emitToUser: vi.fn(),
+  PURCHASE_ORDER_WATCHERS_ROOM: "purchase_orders:watchers",
+}));
 // PRF fast-path + PM routing collaborators.
 vi.mock("#modules/purchase-request/purchase-request.repository.js", () => ({ findById: vi.fn(), countBySupplier: vi.fn() }));
 vi.mock("#modules/job/job.repository.js", () => ({ findById: vi.fn() }));
@@ -53,6 +60,7 @@ import * as irmService from "#modules/irm/irm.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
+import { emitToRoom, PURCHASE_ORDER_WATCHERS_ROOM } from "../../lib/realtime.js";
 import {
   ISSUED_PO_ATTACHMENT_LABEL,
   addAttachment,
@@ -367,6 +375,116 @@ describe("status state machine (forward-only, enforced)", () => {
   });
 });
 
+// A PO is handled by several people in sequence (raiser → finance approver → PM → warehouse), so a
+// detail page left open on one desk goes stale the moment someone else acts. That is exactly how a
+// user came to click "Send to supplier" on an order the assigned PM had ALREADY sent from their own
+// session. Every transition must therefore fan a refetch signal out to the watchers room.
+// A PO with no expected delivery date must never leave draft. Editing is draft-only and the state
+// machine has no reverse edge back to draft, so an order that escapes draft dateless can neither be
+// sent NOR fixed — only cancelled. These guards keep it in draft, where Edit is still available.
+describe("expected delivery date is required to leave draft", () => {
+  const dateless = (over: Record<string, unknown> = {}) =>
+    poRow({ expectedDeliveryDate: null, items: [{ id: "l1", quantity: 1, receivedQuantity: 0 }], ...over });
+
+  it("submit: blocks a dateless draft", async () => {
+    mockFindById.mockResolvedValue(dateless({ status: "draft" }));
+    await expect(submitPurchaseOrder(PO_ID)).rejects.toThrow(/expected delivery date/i);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it("approve: blocks a dateless PRF-born draft on the fast path", async () => {
+    mockFindById.mockResolvedValue(dateless({ status: "draft", purchaseRequestId: PRF_ID }));
+    await expect(approvePurchaseOrder(PO_ID)).rejects.toThrow(/expected delivery date/i);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it("approve: blocks a dateless order in the normal review queue too", async () => {
+    mockFindById.mockResolvedValue(dateless({ status: "pending_approval" }));
+    await expect(approvePurchaseOrder(PO_ID)).rejects.toThrow(/expected delivery date/i);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  // Backstop: the approve/submit gates should mean this is unreachable, but the date is printed on
+  // the issued document and the warehouse schedules against it — so send re-checks regardless.
+  it("send: blocks a dateless order that somehow reached approved", async () => {
+    mockFindById.mockResolvedValue(dateless({ status: "approved" }));
+    await expect(sendPurchaseOrder(PO_ID)).rejects.toThrow(/expected delivery date/i);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it("lets a dated order through every one of those gates", async () => {
+    // Same fixtures, date present — proves the guards are the only thing being tested above.
+    mockFindById.mockResolvedValue(poRow({ status: "draft", items: [{ id: "l1", quantity: 1, receivedQuantity: 0 }] }));
+    expect((await submitPurchaseOrder(PO_ID)).status).toBe("pending_approval");
+    mockFindById.mockResolvedValue(poRow({ status: "pending_approval" }));
+    expect((await approvePurchaseOrder(PO_ID)).purchaseOrder.status).toBe("approved");
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    expect((await sendPurchaseOrder(PO_ID)).status).toBe("sent");
+  });
+});
+
+describe("realtime: transitions notify procurement watchers", () => {
+  const mockEmitRoom = emitToRoom as ReturnType<typeof vi.fn>;
+  // The payloads sent to the PO watchers room, in order.
+  const poEmits = () =>
+    mockEmitRoom.mock.calls
+      .filter((c) => c[0] === PURCHASE_ORDER_WATCHERS_ROOM && c[1] === "purchase_order:updated")
+      .map((c) => c[2] as { id: string; code: string; status: string });
+
+  it("send: notifies watchers with the NEW status", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
+    await sendPurchaseOrder(PO_ID);
+    expect(poEmits()).toEqual([{ id: PO_ID, code: "PO-0001", status: "sent" }]);
+  });
+
+  it("notifies on every other status transition", async () => {
+    // submit refuses an empty order, so that row needs a line; the rest transition on status alone.
+    const aLine = [{ id: "l1", irmItemId: IRM_ID, quantity: 1, unitPricePence: 100, vatRatePercent: 20 }];
+    const cases: [string, () => Promise<unknown>, string, Record<string, unknown>?][] = [
+      ["draft", () => submitPurchaseOrder(PO_ID), "pending_approval", { items: aLine }],
+      ["pending_approval", () => approvePurchaseOrder(PO_ID), "approved"],
+      ["pending_approval", () => rejectPurchaseOrder(PO_ID, "Wrong supplier"), "draft"],
+      ["sent", () => recordSupplierAcceptance(PO_ID, { confirmedDeliveryDate: "2026-07-25" }), "supplier_accepted"],
+      ["sent", () => cancelPurchaseOrder(PO_ID, "No longer needed"), "cancelled"],
+      ["fully_received", () => closePurchaseOrder(PO_ID), "closed"],
+    ];
+    for (const [from, act, to, extra] of cases) {
+      vi.clearAllMocks();
+      mockUpdate.mockImplementation((_id: string, data: Record<string, unknown>) => Promise.resolve(poRow(data)));
+      mockFindById.mockResolvedValue(poRow({ status: from, ...extra }));
+      await act();
+      expect(poEmits(), `${from} → ${to}`).toEqual([{ id: PO_ID, code: "PO-0001", status: to }]);
+    }
+  });
+
+  it("does NOT notify when the transition is REJECTED (nothing changed)", async () => {
+    // A guard throwing must not tell watchers to refetch — there is nothing new to see, and the
+    // stale-state 409 is precisely the case where a spurious signal would be most confusing.
+    mockFindById.mockResolvedValue(poRow({ status: "sent" }));
+    await expect(sendPurchaseOrder(PO_ID)).rejects.toThrow(/can't move/i);
+    expect(poEmits()).toEqual([]);
+  });
+
+  it("does NOT notify on a pure READ", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "sent" }));
+    await requireReceivablePurchaseOrder(PO_ID);
+    expect(poEmits()).toEqual([]);
+  });
+
+  it("notifies on DELETE so a watcher's list drops the row", async () => {
+    // Without this a watcher keeps seeing a row that no longer exists; acting on it 404s.
+    mockFindById.mockResolvedValue(poRow({ status: "draft" }));
+    await deletePurchaseOrder(PO_ID);
+    expect(poEmits()).toEqual([{ id: PO_ID, code: "PO-0001", status: "deleted" }]);
+  });
+
+  it("does NOT notify when a delete is REFUSED", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "sent" }));
+    await expect(deletePurchaseOrder(PO_ID)).rejects.toThrow(/only draft/i);
+    expect(poEmits()).toEqual([]);
+  });
+});
+
 describe("draft-only editability + delete", () => {
   it("blocks editing a non-draft PO", async () => {
     mockFindById.mockResolvedValue(poRow({ status: "approved" }));
@@ -580,6 +698,31 @@ describe("approvePurchaseOrder — PRF fast-path (draft → approved)", () => {
     mockFindById.mockResolvedValue(poRow({ status: "draft" }));
     await expect(approvePurchaseOrder(PO_ID)).rejects.toThrow(/can't move/i);
   });
+
+  // REGRESSION: both fast-path arms return EARLY, so they were originally missed when realtime was
+  // added — only the generic `pending_approval → approved` arm emitted. Since every PRF-born PO
+  // takes this path, the single most-watched approval in the system silently failed to broadcast.
+  it("BOTH fast-path arms notify watchers (regression: early returns skipped the emit)", async () => {
+    const mockEmitRoom = emitToRoom as ReturnType<typeof vi.fn>;
+    const poEmits = () =>
+      mockEmitRoom.mock.calls
+        .filter((c) => c[0] === PURCHASE_ORDER_WATCHERS_ROOM && c[1] === "purchase_order:updated")
+        .map((c) => (c[2] as { status: string }).status);
+
+    // Arm 1 — still matches the PRF → approved outright.
+    mockFindById.mockResolvedValue(prfBornDraft());
+    mockPrfFind.mockResolvedValue(matchingPrf());
+    await approvePurchaseOrder(PO_ID);
+    expect(poEmits(), "fast-path approve").toEqual(["approved"]);
+
+    // Arm 2 — diverged from the PRF → routed into the review queue.
+    vi.clearAllMocks();
+    mockUpdate.mockImplementation((_id: string, data: Record<string, unknown>) => Promise.resolve(poRow(data)));
+    mockFindById.mockResolvedValue(prfBornDraft());
+    mockPrfFind.mockResolvedValue({ ...matchingPrf(), items: [{ irmItemId: IRM_ID, quantity: 10, unitPricePence: 400, vatRate: 20 }] });
+    await approvePurchaseOrder(PO_ID);
+    expect(poEmits(), "diverted to review").toEqual(["pending_approval"]);
+  });
 });
 
 // ── PM routing: approved → pm_review → sent, with the assigned-PM send guard. ────────────────
@@ -657,8 +800,13 @@ describe("PM routing (approved → pm_review → sent)", () => {
 });
 
 // ── Supplier acceptance + delivery-date revisions (audit ledger IS the history). ─────────────
-describe("supplier acceptance (sent → supplier_accepted)", () => {
-  it("records acceptance with reference + confirmed date", async () => {
+// Acceptance is a recorded EVENT, not a workflow gate: receiving is never blocked on it, so goods
+// routinely arrive first. The acknowledgement must still be capturable afterwards — WITHOUT
+// rewinding the order's status, which would rewrite history.
+describe("supplier acceptance (a recorded event, not a gate)", () => {
+  const acceptedMeta = () => mockAudit.mock.calls.find((c) => c[0].action === "purchase_order.supplier_accepted")?.[0].metadata;
+
+  it("records acceptance with reference + confirmed date, advancing sent → supplier_accepted", async () => {
     mockFindById.mockResolvedValue(poRow({ status: "sent" }));
     const r = await recordSupplierAcceptance(
       PO_ID,
@@ -668,11 +816,36 @@ describe("supplier acceptance (sent → supplier_accepted)", () => {
     expect(r.status).toBe("supplier_accepted");
     expect(mockUpdate.mock.calls[0][1]).toMatchObject({ supplierAckReference: "ACK-77", supplierAcceptedBy: "pm@x.co" });
     expect(auditActions()).toContain("purchase_order.supplier_accepted");
+    expect(acceptedMeta()).toMatchObject({ statusAtAcceptance: "sent", statusChanged: true });
   });
 
-  it("acceptance is only recordable on a SENT order", async () => {
-    mockFindById.mockResolvedValue(poRow({ status: "approved" }));
-    await expect(recordSupplierAcceptance(PO_ID, {})).rejects.toThrow(/can't move/i);
+  // The whole point of the decoupling: a supplier acknowledging after the truck arrived must not
+  // lose their ack reference just because the goods beat the paperwork.
+  it.each(["partially_received", "fully_received"])(
+    "records a LATE acknowledgement on a %s order without changing its status",
+    async (status) => {
+      mockFindById.mockResolvedValue(poRow({ status }));
+      await recordSupplierAcceptance(PO_ID, { confirmedDeliveryDate: "2026-07-20", supplierAckReference: "ACK-99" });
+      // The patch carries NO status key — the receipt state stays the source of truth. (Asserting
+      // the patch, not the returned row: the repo stub rebuilds the row from the patch alone.)
+      expect(mockUpdate.mock.calls[0][1]).not.toHaveProperty("status");
+      // …but the acknowledgement IS captured.
+      expect(mockUpdate.mock.calls[0][1]).toMatchObject({ supplierAckReference: "ACK-99" });
+      expect(acceptedMeta()).toMatchObject({ statusAtAcceptance: status, statusChanged: false });
+    },
+  );
+
+  it("re-recording on an accepted order corrects the details without moving it", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "supplier_accepted", supplierAckReference: "TYPO-1" }));
+    await recordSupplierAcceptance(PO_ID, { confirmedDeliveryDate: "2026-07-20", supplierAckReference: "ACK-1023" });
+    expect(mockUpdate.mock.calls[0][1]).not.toHaveProperty("status");
+    expect(mockUpdate.mock.calls[0][1]).toMatchObject({ supplierAckReference: "ACK-1023" });
+  });
+
+  it.each(["draft", "approved", "closed", "cancelled"])("refuses to record acceptance on a %s order", async (status) => {
+    mockFindById.mockResolvedValue(poRow({ status }));
+    await expect(recordSupplierAcceptance(PO_ID, { confirmedDeliveryDate: "2026-07-25" })).rejects.toThrow(/can't be recorded/i);
+    expect(mockUpdate).not.toHaveBeenCalled();
   });
 
   it("delivery-date revision audits {previousDate, newDate, reason}", async () => {
@@ -688,9 +861,56 @@ describe("supplier acceptance (sent → supplier_accepted)", () => {
     expect(String(call?.[0].metadata.newDate)).toContain("2026-07-22");
   });
 
-  it("delivery-date revision is blocked before acceptance", async () => {
-    mockFindById.mockResolvedValue(poRow({ status: "sent" }));
-    await expect(updateConfirmedDeliveryDate(PO_ID, "2026-07-22", undefined)).rejects.toThrow(/after the supplier has accepted/i);
+  // The warehouse plans against this date, so a slip announced mid-delivery must still land.
+  it("allows revising the delivery date after goods have started arriving", async () => {
+    mockFindById.mockResolvedValue(
+      poRow({ status: "partially_received", confirmedDeliveryDate: new Date("2026-07-20T00:00:00Z") }),
+    );
+    await updateConfirmedDeliveryDate(PO_ID, "2026-07-24", "Rest of the order slipped");
+    // Only the date is patched — the status is never touched by this endpoint.
+    expect(mockUpdate.mock.calls[0][1]).toEqual({ confirmedDeliveryDate: new Date("2026-07-24") });
+    expect(auditActions()).toContain("purchase_order.delivery_date_updated");
+  });
+
+  it("blocks revising the delivery date once the order is closed or cancelled", async () => {
+    for (const status of ["closed", "cancelled"]) {
+      vi.clearAllMocks();
+      mockUpdate.mockImplementation((_id, data) => Promise.resolve(poRow(data)));
+      mockFindById.mockResolvedValue(poRow({ status, confirmedDeliveryDate: new Date("2026-07-20T00:00:00Z") }));
+      await expect(updateConfirmedDeliveryDate(PO_ID, "2026-07-22", undefined)).rejects.toThrow(/can't be changed/i);
+    }
+  });
+
+  // The same invariant the acceptance schema enforces at capture — otherwise a revision could
+  // smuggle in a date the original capture would have rejected, landing as a phantom "overdue".
+  it("delivery-date revision can't set a date before the supplier accepted", async () => {
+    mockFindById.mockResolvedValue(
+      poRow({
+        status: "supplier_accepted",
+        supplierAcceptedAt: new Date("2026-07-20T09:00:00Z"),
+        confirmedDeliveryDate: new Date("2026-07-25T00:00:00Z"),
+      }),
+    );
+    await expect(updateConfirmedDeliveryDate(PO_ID, "2026-07-01", undefined)).rejects.toThrow(/before the date the supplier accepted/i);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it("allows revising to the acceptance day itself (date-only compare, not the instant)", async () => {
+    // Accepted mid-morning; a same-day delivery is legitimate and must not be rejected as "before".
+    mockFindById.mockResolvedValue(
+      poRow({
+        status: "supplier_accepted",
+        supplierAcceptedAt: new Date("2026-07-20T09:00:00Z"),
+        confirmedDeliveryDate: new Date("2026-07-25T00:00:00Z"),
+      }),
+    );
+    await expect(updateConfirmedDeliveryDate(PO_ID, "2026-07-20", undefined)).resolves.toBeTruthy();
+  });
+
+  // This endpoint REVISES a promise; recordSupplierAcceptance is the only way to create one.
+  it("delivery-date revision is blocked when no date has been confirmed yet", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "sent", confirmedDeliveryDate: null }));
+    await expect(updateConfirmedDeliveryDate(PO_ID, "2026-07-22", undefined)).rejects.toThrow(/record the supplier's acceptance/i);
   });
 
   it("a supplier_accepted order is receivable; an approved one is not", async () => {

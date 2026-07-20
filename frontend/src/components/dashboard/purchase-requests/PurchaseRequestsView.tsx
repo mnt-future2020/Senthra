@@ -10,6 +10,7 @@ import { listSuppliers } from "@/services/supplier.service";
 import { listWarehouses } from "@/services/warehouse.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
+import { usePurchaseRequestSocket } from "@/hooks/usePurchaseRequestSocket";
 import { useReferenceData } from "@/hooks/useReferenceData";
 import { ListPageHeader } from "@/components/ui/ListPageHeader";
 import { Pagination } from "@/components/ui/Pagination";
@@ -235,6 +236,12 @@ export function PurchaseRequestsView() {
       active = false;
     };
   }, [search, statusFilter, supplierFilter, warehouseFilter, page, refreshKey]);
+
+  // Live-refresh the list whenever anyone moves a request through the flow, so a board left open
+  // shows current statuses (and the finance review queue drains as decisions are made) without a
+  // manual reload. The cached read above is only an instant placeholder — the refetch this triggers
+  // always goes to the network, so the row that changed is real data, not the stale cache.
+  usePurchaseRequestSocket(React.useCallback(() => setRefreshKey((k) => k + 1), []));
 
   const requests = data?.purchaseRequests ?? [];
   const showSkeleton = loading && requests.length === 0;

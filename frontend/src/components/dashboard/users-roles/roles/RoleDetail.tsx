@@ -88,7 +88,7 @@ export function RoleDetail({ role }: { role: Role }) {
       <div className="min-h-0 flex-1 overflow-auto">
         <div className="grid gap-6 lg:grid-cols-3">
           {/* Main column */}
-          <div className="space-y-6 lg:col-span-2">
+          <div className="min-w-0 space-y-6 lg:col-span-2">
             <FormSection title="Details">
               <dl className="grid gap-5 sm:grid-cols-2">
                 <Field label="Name" value={role.name} />

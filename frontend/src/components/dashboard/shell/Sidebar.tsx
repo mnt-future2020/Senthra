@@ -20,7 +20,6 @@ import {
   BarChart3,
   Warehouse,
   Truck,
-  PackageCheck,
   Boxes,
   ArrowRightLeft,
   FileText,
@@ -54,7 +53,11 @@ const NAV: NavItem[] = [
   // they generate.
   { href: "/dashboard/purchase-requests", label: "Purchase Requests", icon: FileText, perms: ["purchase_requests.view"] },
   { href: "/dashboard/purchase-orders", label: "Purchase Orders", icon: ClipboardList, perms: ["purchase_orders.view"] },
-  { href: "/dashboard/goods-in", label: "GRN", icon: PackageCheck, perms: ["goods_in.view"] },
+  // Global GRN entry removed from the nav as redundant: receiving already happens inside the
+  // Warehouse detail ("Incoming" tab) and from a Purchase Order ("Receive"), which are the two
+  // places users actually start from. The module + /dashboard/goods-in routes stay fully
+  // reachable (deep links, PO/warehouse links) — only the top-level nav shortcut is gone.
+  // { href: "/dashboard/goods-in", label: "GRN", icon: PackageCheck, perms: ["goods_in.view"] },
   // Van Requests deliberately has NO top-level entry — every request is owned by exactly one
   // warehouse (final, or the pending restock's collection warehouse), so the queue lives in the
   // warehouse detail's "Van Requests" tab and the Overview worklist deep-links straight there.
@@ -124,16 +127,12 @@ export function Sidebar({
 
   const isCustomer = principal?.type === "customer";
 
-  // Staff admin nav, permission-filtered. Warehouse-scoped roles (e.g. Warehouse Manager) do their
-  // receiving inside their Warehouse Detail page (the primary GRN workspace), so by default the GLOBAL
-  // "GRN" entry is hidden for them (Option A). The module + routes stay reachable and the global list is
-  // already auto-scoped server-side — flip HIDE_GLOBAL_GRN_FOR_SCOPED to false to show it (Option B).
-  const HIDE_GLOBAL_GRN_FOR_SCOPED = true;
-  const isWarehouseScoped = principal?.type === "user" && principal.isWarehouseScoped === true;
+  // Staff admin nav, permission-filtered. (The GLOBAL "GRN" entry used to be hidden here for
+  // warehouse-scoped roles; it is now commented out of NAV entirely — receiving lives in the
+  // Warehouse detail and on the PO — so that special case is gone.)
   const adminNav = NAV.filter((item) => {
     // perms: [] = always-visible (e.g. the Dashboard landing); otherwise show if the actor holds ANY.
     if (item.perms.length > 0 && !item.perms.some((p) => can(p))) return false;
-    if (HIDE_GLOBAL_GRN_FOR_SCOPED && isWarehouseScoped && item.href === "/dashboard/goods-in") return false;
     return true;
   });
 

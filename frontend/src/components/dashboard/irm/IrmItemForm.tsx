@@ -81,16 +81,16 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
   const [ownerUserId, setOwnerUserId] = React.useState(o?.ownerUserId ?? "");
   const [notes, setNotes] = React.useState(o?.notes ?? "");
 
+  // Suppliers are optional, so an item with none starts with NO rows — the user adds one only if
+  // the item is actually bought in.
   const [supplierRows, setSupplierRows] = React.useState<SupplierRow[]>(() =>
-    o && o.suppliers.length
-      ? o.suppliers.map((s) => ({
-          supplierId: s.supplierId,
-          isPrimary: s.isPrimary,
-          priority: numStr(s.priority),
-          supplierSku: s.supplierSku ?? "",
-          leadTimeDays: numStr(s.leadTimeDays),
-        }))
-      : [{ supplierId: "", isPrimary: true, priority: "1", supplierSku: "", leadTimeDays: "" }],
+    (o?.suppliers ?? []).map((s) => ({
+      supplierId: s.supplierId,
+      isPrimary: s.isPrimary,
+      priority: numStr(s.priority),
+      supplierSku: s.supplierSku ?? "",
+      leadTimeDays: numStr(s.leadTimeDays),
+    })),
   );
 
   const [types, setTypes] = React.useState<IrmType[]>([]);
@@ -204,16 +204,13 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
         trackBatchNumbers: o?.trackBatchNumbers ?? false,
         ownerUserId: o?.ownerUserId ?? "",
         notes: o?.notes ?? "",
-        supplierRows:
-          o && o.suppliers.length
-            ? o.suppliers.map((s) => ({
-                supplierId: s.supplierId,
-                isPrimary: s.isPrimary,
-                priority: numStr(s.priority),
-                supplierSku: s.supplierSku ?? "",
-                leadTimeDays: numStr(s.leadTimeDays),
-              }))
-            : [{ supplierId: "", isPrimary: true, priority: "1", supplierSku: "", leadTimeDays: "" }],
+        supplierRows: (o?.suppliers ?? []).map((s) => ({
+          supplierId: s.supplierId,
+          isPrimary: s.isPrimary,
+          priority: numStr(s.priority),
+          supplierSku: s.supplierSku ?? "",
+          leadTimeDays: numStr(s.leadTimeDays),
+        })),
       }),
     [o, mode, types, categories],
   );
@@ -246,12 +243,16 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
   };
   const addRow = () =>
     setSupplierRows((rows) => [...rows, { supplierId: "", isPrimary: rows.length === 0, priority: "1", supplierSku: "", leadTimeDays: "" }]);
-  const removeRow = (idx: number) =>
+  // Removing the last row is allowed (suppliers are optional). When rows remain but the primary
+  // was the one removed, promote the first survivor so a supplied item always has a primary.
+  const removeRow = (idx: number) => {
     setSupplierRows((rows) => {
       const next = rows.filter((_, i) => i !== idx);
-      if (next.length && !next.some((r) => r.isPrimary)) next[0].isPrimary = true;
+      if (next.length && !next.some((r) => r.isPrimary)) return next.map((r, i) => (i === 0 ? { ...r, isPrimary: true } : r));
       return next;
     });
+    clearError("suppliers");
+  };
 
   const validate = (): Record<string, string> => {
     const errs: Record<string, string> = {};
@@ -261,12 +262,13 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
     if (!irmCategoryId) errs.irmCategoryId = "Select an IRM category.";
     if (!baseUnit) errs.baseUnit = "Select a base unit.";
 
+    // Suppliers are optional — an item may have none. Only the shape of the rows that DO name a
+    // supplier is checked: unique, and at most one primary.
     const effective = supplierRows.filter((r) => r.supplierId);
     const ids = effective.map((r) => r.supplierId);
     const primaries = effective.filter((r) => r.isPrimary).length;
-    if (effective.length === 0) errs.suppliers = "Add at least one supplier.";
-    else if (new Set(ids).size !== ids.length) errs.suppliers = "Each supplier can only be added once.";
-    else if (primaries !== 1) errs.suppliers = "Mark exactly one supplier as primary.";
+    if (new Set(ids).size !== ids.length) errs.suppliers = "Each supplier can only be added once.";
+    else if (primaries > 1) errs.suppliers = "Only one supplier can be primary.";
 
     if (standardCost.trim() && (Number.isNaN(Number(standardCost)) || Number(standardCost) < 0)) {
       errs.standardCost = "Enter a valid cost (0 or more).";
@@ -480,8 +482,13 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
             </div>
           </FormSection>
 
-          <FormSection title="Suppliers" description="Every supplier that can provide this item. At least one is required — mark exactly one as primary. Lower priority numbers rank higher (1 = first choice).">
+          <FormSection title="Suppliers" description="Every supplier that can provide this item. Optional — leave empty if this item isn't bought in. Mark one as primary. Lower priority numbers rank higher (1 = first choice).">
             <div className="space-y-3">
+              {supplierRows.length === 0 && (
+                <p className="rounded-xl border border-dashed border-[var(--border)] px-3 py-4 text-center text-xs text-[var(--muted)]">
+                  No suppliers linked to this item.
+                </p>
+              )}
               {supplierRows.map((row, idx) => (
                 <div key={idx} className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/30 p-3">
                   <div className="grid gap-3 sm:grid-cols-12">
@@ -512,8 +519,7 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
                       <button
                         type="button"
                         onClick={() => removeRow(idx)}
-                        disabled={supplierRows.length === 1}
-                        className="rounded-lg p-2 text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--neg)] disabled:opacity-40"
+                        className="rounded-lg p-2 text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--neg)]"
                         title="Remove supplier"
                         aria-label="Remove supplier"
                       >

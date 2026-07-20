@@ -247,12 +247,14 @@ function buildLineRows(items: GRNLineInput[], poLines: Map<string, PoLineLite>, 
     if (!po) throw badRequest("A selected line isn't on this purchase order.");
     const remaining = po.quantity - po.receivedQuantity;
     const received = line.receivedQuantity;
-    const damaged = line.damagedQuantity ?? 0;
+    const accepted = line.acceptedQuantity;
     if (received > remaining) {
       throw conflict(`${po.itemName}: only ${remaining} remaining to receive (ordered ${po.quantity}, already received ${po.receivedQuantity}).`);
     }
-    if (damaged > received) throw badRequest(`${po.itemName}: damaged quantity can't exceed received quantity.`);
-    const accepted = received - damaged;
+    if (accepted > received) throw badRequest(`${po.itemName}: accepted quantity can't exceed received quantity.`);
+    // Damaged is DERIVED, never client-supplied: staff count what physically passed QC, and
+    // whatever's left of the delivery is by definition rejected.
+    const damaged = received - accepted;
     const f = flags.get(po.irmItemId) ?? { trackInventory: true, trackSerialNumbers: false, trackBatchNumbers: false };
 
     let serials: GRNLineRow["serials"] = [];
