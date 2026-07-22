@@ -44,6 +44,16 @@ export interface JobKitLine {
   used: number;
   returned: number;
   remaining: number;
+  // Hand-overs of this line's stock from another engineer's van. Non-empty ⇒ it does NOT come from
+  // the warehouse above — that's only where leftovers are returned to. Populated on the job detail.
+  vanSources: KitLineVanSource[];
+}
+
+export interface KitLineVanSource {
+  transferCode: string;
+  engineerName: string;
+  quantity: number;
+  status: string; // pending (awaiting their approval) | completed (already handed over)
 }
 
 export interface JobKitWarehouse {

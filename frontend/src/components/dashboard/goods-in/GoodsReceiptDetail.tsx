@@ -197,7 +197,9 @@ function Overview({ grn }: { grn: GoodsReceipt }) {
             <Field label="Purchase order">{grn.poCode}</Field>
             <Field label="Warehouse">{grn.warehouse?.name}</Field>
             <Field label="Received date">{formatDate(grn.receivedDate)}</Field>
-            <Field label="Delivery note">{grn.deliveryNoteNumber || (grn.status === "draft" ? <span className="font-semibold text-[var(--neg)]">Required before completing</span> : undefined)}</Field>
+            {/* Missing on a draft is a blocker for Complete, so flag it — but keep it to a chip so it
+                doesn't wrap and outweigh every other value in this two-column grid. */}
+            <Field label="Delivery note">{grn.deliveryNoteNumber || (grn.status === "draft" ? <span className="inline-flex items-center rounded-md bg-[var(--neg)]/10 px-1.5 py-0.5 text-[11px] font-bold text-[var(--neg)]" title="Required before you can complete this receipt">Required</span> : undefined)}</Field>
             <Field label="Carrier">{grn.carrier}</Field>
             <Field label="Vehicle">{grn.vehicleRegistration}</Field>
             <Field label="Reference">{grn.referenceNumber}</Field>

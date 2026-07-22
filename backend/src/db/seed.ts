@@ -657,6 +657,28 @@ export async function seedDatabase(): Promise<void> {
     }
   }
 
+  // Backfill JobKitLine.hasVanSource for lines a completed engineer transfer fed BEFORE the flag
+  // existed. Without it, those jobs' van returns wouldn't be discoverable away from home. Idempotent
+  // via read-then-update: a Mongo query filter of `hasVanSource: false` (or `not: true`) does NOT
+  // match documents written before the field existed (the field is simply ABSENT, not false), so we
+  // instead READ the flags — Prisma surfaces an absent field as its `false` default — and update only
+  // the still-unflagged ids. A repeat startup finds none and writes/logs nothing.
+  {
+    const vanFed = await prisma.engineerStockTransferLine.findMany({
+      where: { jobKitLineId: { not: null }, transfer: { status: "completed", deletedAt: null } },
+      select: { jobKitLineId: true },
+    });
+    const kitLineIds = [...new Set(vanFed.map((l) => l.jobKitLineId!).filter(Boolean))];
+    if (kitLineIds.length > 0) {
+      const lines = await prisma.jobKitLine.findMany({ where: { id: { in: kitLineIds } }, select: { id: true, hasVanSource: true } });
+      const toSet = lines.filter((l) => !l.hasVanSource).map((l) => l.id);
+      if (toSet.length > 0) {
+        await prisma.jobKitLine.updateMany({ where: { id: { in: toSet } }, data: { hasVanSource: true } });
+        console.log(`Backfilled hasVanSource on ${toSet.length} kit line(s).`);
+      }
+    }
+  }
+
   if ((await adminRepo.count()) === 0) {
     if (!env.ADMIN_EMAIL || !env.ADMIN_PASSWORD) {
       console.warn(

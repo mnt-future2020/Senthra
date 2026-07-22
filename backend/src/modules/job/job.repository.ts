@@ -134,19 +134,32 @@ export function findByNumber(jobNumber: string): Promise<JobWithRelations | null
 // warehouse OR any misc line (misc is actionable from any warehouse). Optional text search narrows by
 // job number / name / customer / engineer at the DB level. goodsStatus filtering + pagination happen
 // in the service, since goodsStatus lives in a separate summary collection.
+// The candidate set is "has a kit line homed here OR a misc line OR a VAN-sourced line". The last arm
+// (JobKitLine.hasVanSource, indexed) surfaces jobs whose van stock — returnable at ANY warehouse —
+// isn't homed here; without it the queue could never find a van return away from its nominal home.
+// It's an indexed boolean lookup, NOT a growing job-id list, so it stays O(1) as history grows. The
+// service then confirms per line that van stock is actually still returnable before showing the row.
 export function findActiveForGoodsManagement(warehouseId: string, search?: string): Promise<JobWithRelations[]> {
+  const candidateOr: Prisma.JobWhereInput[] = [
+    { kitLines: { some: { OR: [{ warehouseId }, { lineType: "misc" }] } } },
+    { kitLines: { some: { hasVanSource: true } } },
+  ];
   const where: Prisma.JobWhereInput = {
     deletedAt: null,
     status: { in: ["accepted", "in_progress", "completed"] },
-    kitLines: { some: { OR: [{ warehouseId }, { lineType: "misc" }] } },
-    ...(search && {
-      OR: [
-        { jobNumber: { contains: escapeRegex(search), mode: "insensitive" } },
-        { name: { contains: escapeRegex(search), mode: "insensitive" } },
-        { customerName: { contains: escapeRegex(search), mode: "insensitive" } },
-        { assignedEngineerName: { contains: escapeRegex(search), mode: "insensitive" } },
-      ],
-    }),
+    AND: [
+      { OR: candidateOr },
+      ...(search
+        ? [{
+            OR: [
+              { jobNumber: { contains: escapeRegex(search), mode: "insensitive" as const } },
+              { name: { contains: escapeRegex(search), mode: "insensitive" as const } },
+              { customerName: { contains: escapeRegex(search), mode: "insensitive" as const } },
+              { assignedEngineerName: { contains: escapeRegex(search), mode: "insensitive" as const } },
+            ],
+          }]
+        : []),
+    ],
   };
   return prisma.job.findMany({ where, include: withRelations, orderBy: { createdAt: "desc" } });
 }

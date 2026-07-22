@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ArrowLeftRight, CheckCircle2, MapPin, PackagePlus, XCircle, PlayCircle, ClipboardCheck } from "lucide-react";
+import { ArrowLeftRight, CheckCircle2, MapPin, PackagePlus, Truck, XCircle, PlayCircle, ClipboardCheck } from "lucide-react";
 
 import * as engineerService from "@/services/engineer.service";
 import { useAuth } from "@/hooks/useAuth";
@@ -10,7 +10,7 @@ import { Notice } from "@/components/ui/Notice";
 import { ghostBtn, primaryBtn } from "@/components/ui/styles";
 import { fmtDate, fmtDateTime, JobStatusChip, PortalHeader, TableCard } from "@/components/dashboard/portal/portalUi";
 import { GoodsStatusChip } from "@/components/dashboard/jobs/jobStatus";
-import { crossWarehouseReturnNote } from "@/components/dashboard/jobs/jobStatus";
+import { crossWarehouseReturnNote, kitLineSourceSplit } from "@/components/dashboard/jobs/jobStatus";
 import { FormError, FormPageSkeleton } from "@/components/ui/FormScaffold";
 import type { Job, JobKitLine, JobKitWarehouse } from "@/types/job";
 import { WarehousePickupModal } from "./WarehousePickupModal";
@@ -457,8 +457,49 @@ export function EngineerJobDetail({ id }: { id: string }) {
                 </td>
                 <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{line.seCode ?? "—"}</td>
                 <td className="px-4 py-3 text-[var(--muted)]">{LINE_TYPE_LABEL[line.lineType] ?? line.lineType}</td>
+                {/* Where this stock actually comes FROM. A van-sourced line still stores a warehouse
+                    (leftovers are returned there), so showing that warehouse as the pickup location
+                    would send the engineer to collect stock a colleague is already handing them. */}
                 <td className="px-4 py-3">
-                  {line.warehouse ? (
+                  {line.vanSources?.length ? (
+                    // A row can carry BOTH origins (kit lines merge same item + warehouse), so the
+                    // engineer sees each with its quantity — how many to collect vs how many a
+                    // colleague is handing over — then where the leftovers go back.
+                    (() => {
+                      const s = kitLineSourceSplit(line);
+                      return (
+                        <div className="flex flex-col items-start gap-0.5">
+                          {s.warehouseQty > 0 && line.warehouse && (
+                            <button type="button" onClick={() => setWhModal(line.warehouse)} className="inline-flex max-w-[200px] items-center gap-1 font-semibold text-[var(--accent)] hover:underline" title="View pickup address">
+                              <MapPin className="h-3.5 w-3.5 shrink-0" />
+                              <span className="truncate">{line.warehouse.name}</span>
+                              <span className="font-normal text-[var(--faint)]">×{s.warehouseQty}</span>
+                            </button>
+                          )}
+                          {line.vanSources.map((v) => (
+                            <span key={v.transferCode} className="inline-flex items-center gap-1 font-semibold text-[var(--ink)]" title={`${v.transferCode} — ${v.quantity} from ${v.engineerName}`}>
+                              <Truck className="h-3.5 w-3.5 shrink-0 text-[var(--muted)]" />
+                              <span className="truncate">{v.engineerName}</span>
+                              <span className="font-normal text-[var(--faint)]">×{v.quantity}</span>
+                              {v.status === "pending" && <span className="text-[10px] font-bold text-amber-600">awaiting handover</span>}
+                            </span>
+                          ))}
+                          {/* Van stock never left a warehouse, so it can be handed in anywhere;
+                              warehouse-issued units owe their own site. A merged line has both, so
+                              spell each part out — the server enforces exactly this on return. */}
+                          <span className="text-[10px] text-[var(--faint)]">
+                            {s.vanOnly
+                              ? "Return at any warehouse"
+                              : s.vanQty > 0 && s.warehouseQty > 0 && line.warehouseName
+                                ? `Return ×${s.warehouseQty} at ${line.warehouseName}, ×${s.vanQty} at any warehouse`
+                                : line.warehouseName
+                                  ? `Return at ${line.warehouseName}`
+                                  : ""}
+                          </span>
+                        </div>
+                      );
+                    })()
+                  ) : line.warehouse ? (
                     <button type="button" onClick={() => setWhModal(line.warehouse)} className="inline-flex max-w-[200px] items-center gap-1 font-semibold text-[var(--accent)] hover:underline" title="View pickup address">
                       <MapPin className="h-3.5 w-3.5 shrink-0" />
                       <span className="truncate">{line.warehouse.name}</span>

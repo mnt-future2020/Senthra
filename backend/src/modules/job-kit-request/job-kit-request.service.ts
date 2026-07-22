@@ -35,6 +35,11 @@ export interface PublicKitRequestLine {
   // Null for irm/misc lines. Populated on reads that feed the approve modal (list/getOne).
   warehouseName: string | null;
   warehouseCode: string | null;
+  // Where this line was actually sourced (set on approve): "warehouse" | "engineer" | null (misc, or
+  // a request approved before per-line sourcing shipped — fall back to the request's fulfillmentMode).
+  sourceType: string | null;
+  sourceWarehouseId: string | null;
+  sourceEngineerId: string | null;
 }
 
 export interface PublicKitRequest {
@@ -112,6 +117,9 @@ function toPublic(r: KitRequestWithLines, whByEntry?: Map<string, { name: string
         jobKitLineId: l.jobKitLineId,
         warehouseName: wh?.name ?? null,
         warehouseCode: wh?.code ?? null,
+        sourceType: l.sourceType,
+        sourceWarehouseId: l.sourceWarehouseId,
+        sourceEngineerId: l.sourceEngineerId,
       };
     }),
   };
@@ -232,32 +240,35 @@ async function deriveHomeWarehouse(irmItemId: string, job: NonNullable<Awaited<R
   throw conflict("No warehouse available to home this item — add a warehouse or issue from stock instead.");
 }
 
-// Engineers who can fulfil a request by transfer: those holding ENOUGH of EVERY stock-tracked line
-// (the job's own engineer is excluded). Powers the approve modal's source-engineer picker so the PM
-// only ever picks a valid holder. Empty ⇒ no single engineer holds it all (use warehouse issue).
 export interface EligibleHolder {
   engineerId: string;
   name: string;
 }
-export async function eligibleHolders(requestId: string): Promise<EligibleHolder[]> {
+// Holders PER REQUEST LINE — sourcing is chosen per line, so this asks "who can supply THIS item?"
+// rather than the old "who holds the entire request?" (which returned nobody the moment one item was
+// missing, dead-ending the PM even when a colleague could cover most of it). `holders` lists only
+// engineers with ENOUGH for that line, so the PM can never pick a short one. An empty list simply
+// means no van option for that item; the warehouse remains available.
+export interface LineHolders {
+  requestLineId: string;
+  holders: (EligibleHolder & { available: number })[];
+}
+export async function holdersByLine(requestId: string): Promise<LineHolders[]> {
   const req = await kitRequestRepo.findById(requestId);
   if (!req) throw notFound("Kit request not found.");
   const job = await jobRepo.findById(req.jobId);
-  const exclude = job?.assignedEngineerId ?? "";
+  const exclude = job?.assignedEngineerId ?? ""; // the job's own engineer can't supply themselves
   const stockLines = req.lines.filter((l) => l.source !== "misc");
   if (stockLines.length === 0) return [];
-  // Fetch each line's holders in parallel (independent queries), then intersect: engineers holding
-  // ENOUGH of every stock-tracked line.
   const perLine = await Promise.all(
     stockLines.map((l) => (l.source === "irm" ? transferRepo.findHoldersForIrm(l.irmItemId!, exclude) : transferRepo.findHoldersForCustomer(l.customerStockEntryId!, exclude))),
   );
-  let acc: Map<string, string> | null = null; // engineers holding every line seen so far → name
-  for (let i = 0; i < stockLines.length; i++) {
-    const enough = new Map<string, string>(perLine[i].filter((h) => h.available >= stockLines[i].qty).map((h) => [h.engineerId, h.name]));
-    if (acc === null) acc = enough;
-    else for (const k of [...acc.keys()]) if (!enough.has(k)) acc.delete(k);
-  }
-  return [...(acc ?? new Map<string, string>()).entries()].map(([engineerId, name]) => ({ engineerId, name }));
+  return stockLines.map((l, i) => ({
+    requestLineId: l.id,
+    holders: perLine[i]
+      .filter((h) => h.available >= l.qty)
+      .map((h) => ({ engineerId: h.engineerId, name: h.name, available: h.available })),
+  }));
 }
 
 // ---- approve (PM / planner) ------------------------------------------------------------------
@@ -274,12 +285,39 @@ export async function approve(id: string, input: ApproveKitRequestInput, actor: 
   const irmLines = req.lines.filter((l) => l.source === "irm");
   const stockLines = req.lines.filter((l) => l.source !== "misc");
 
-  // Resolve the pickup/home warehouse for every IRM line BEFORE we claim + grow, so any problem leaves
-  // the request pending. Keyed by request-line id.
-  const whByLine = new Map<string, string>();
-  if (input.fulfillmentMode === "warehouse_issue") {
-    // Each IRM item is issued from a warehouse the PM picked PER LINE (different items can come from
-    // different warehouses). Customer-stock lines derive their warehouse from the entry; misc need none.
+  // Resolve every line's SOURCE and its pickup/home warehouse BEFORE we claim + grow, so any problem
+  // leaves the request pending and nothing is half-applied.
+  //
+  // Stock for one request rarely sits in one place — the warehouse may hold some items while another
+  // engineer's van holds the rest — so the source is chosen PER LINE. `lineSources` expresses that
+  // directly; the legacy request-level fulfillmentMode is normalised into the same per-line shape
+  // below so there is exactly ONE code path from here on.
+  const engineerByLine = new Map<string, string>(); // request-line id → source engineer (transfer lines)
+  const whByLine = new Map<string, string>(); // request-line id → pickup/home warehouse (IRM lines)
+
+  const explicit = new Map((input.lineSources ?? []).map((s) => [s.requestLineId, s]));
+  if (explicit.size > 0) {
+    // Every line must be accounted for — a missing one would silently fall through to no source.
+    for (const l of req.lines) {
+      if (l.source === "misc") continue; // misc is handed over with the kit; it has no stock source
+      if (!explicit.has(l.id)) throw badRequest(`Choose where "${l.itemName}" will be fulfilled from.`);
+    }
+    for (const [lineId, s] of explicit) {
+      const line = req.lines.find((l) => l.id === lineId);
+      if (!line) throw badRequest("A chosen source refers to an item that isn't on this request.");
+      if (line.source === "misc") continue; // ignore a stray source on a misc line
+      if (s.sourceType === "engineer") {
+        if (!s.engineerId) throw badRequest(`Pick the engineer to transfer "${line.itemName}" from.`);
+        engineerByLine.set(lineId, s.engineerId);
+      } else if (line.source === "irm") {
+        if (!s.warehouseId) throw badRequest(`Choose a pickup warehouse for "${line.itemName}".`);
+        whByLine.set(lineId, s.warehouseId);
+      }
+      // customer_stock + warehouse source: the warehouse is the entry's own — derived downstream.
+    }
+  } else if (input.fulfillmentMode === "warehouse_issue") {
+    // Legacy shorthand: every IRM item issued from a warehouse the PM picked PER LINE (different items
+    // can come from different warehouses). Customer-stock derives from the entry; misc needs none.
     const picked = new Map((input.lineWarehouses ?? []).map((w) => [w.requestLineId, w.warehouseId]));
     for (const l of irmLines) {
       const wh = picked.get(l.id);
@@ -287,17 +325,38 @@ export async function approve(id: string, input: ApproveKitRequestInput, actor: 
       whByLine.set(l.id, wh);
     }
   } else {
-    // Engineer transfer: stock comes from a van, so NO warehouse is chosen. Validate the source engineer
-    // actually holds every stock-tracked line, then derive a nominal home warehouse per IRM line.
+    // Legacy shorthand: ALL stock-tracked lines transfer from one engineer's van.
     if (!input.fromEngineerId) throw badRequest("Pick the engineer to transfer stock from.");
-    if (input.fromEngineerId === job.assignedEngineerId) throw badRequest("Pick a different engineer — the job's own engineer can't transfer to themselves.");
     if (stockLines.length === 0) throw badRequest("These are all misc items — they must be issued from a warehouse, not transferred from a van.");
-    await transferService.assertTransferEngineers(input.fromEngineerId, job.assignedEngineerId);
-    const shortages = await findHolderShortages(input.fromEngineerId, stockLines);
-    if (shortages.length > 0) throw badRequest(`That engineer doesn't hold enough of: ${shortages.join("; ")}.`);
-    const homeWarehouses = await Promise.all(irmLines.map((l) => deriveHomeWarehouse(l.irmItemId!, job)));
-    irmLines.forEach((l, i) => whByLine.set(l.id, homeWarehouses[i]));
+    for (const l of stockLines) engineerByLine.set(l.id, input.fromEngineerId);
   }
+
+  // Validate the transfer side ONCE PER SOURCE ENGINEER, against only the lines they actually supply —
+  // checking their whole-request coverage would wrongly reject an engineer who covers just their share.
+  const linesByEngineer = new Map<string, KitRequestWithLines["lines"]>();
+  for (const l of stockLines) {
+    const eng = engineerByLine.get(l.id);
+    if (!eng) continue;
+    const bucket = linesByEngineer.get(eng);
+    if (bucket) bucket.push(l);
+    else linesByEngineer.set(eng, [l]);
+  }
+  for (const [engineerId, lines] of linesByEngineer) {
+    if (engineerId === job.assignedEngineerId) throw badRequest("Pick a different engineer — the job's own engineer can't transfer to themselves.");
+    await transferService.assertTransferEngineers(engineerId, job.assignedEngineerId);
+    const shortages = await findHolderShortages(engineerId, lines);
+    if (shortages.length > 0) throw badRequest(`That engineer doesn't hold enough of: ${shortages.join("; ")}.`);
+  }
+
+  // IRM lines coming from a van still need a nominal home warehouse (for returns), same as before.
+  const vanIrmLines = irmLines.filter((l) => engineerByLine.has(l.id));
+  const homeWarehouses = await Promise.all(vanIrmLines.map((l) => deriveHomeWarehouse(l.irmItemId!, job)));
+  vanIrmLines.forEach((l, i) => whByLine.set(l.id, homeWarehouses[i]));
+
+  // Request-level summary for list views + history; the per-line detail is authoritative.
+  const usesWarehouse = stockLines.some((l) => !engineerByLine.has(l.id)) || (stockLines.length === 0 && irmLines.length === 0);
+  const usesEngineer = linesByEngineer.size > 0;
+  const resolvedMode = usesEngineer && usesWarehouse ? "mixed" : usesEngineer ? "engineer_transfer" : "warehouse_issue";
 
   // Claim atomically — flips pending → approved so two concurrent approvals can't both grow the kit.
   const claimed = await kitRequestRepo.claimPending(id);
@@ -330,16 +389,32 @@ export async function approve(id: string, input: ApproveKitRequestInput, actor: 
       jobKitLineIds = grown.jobKitLineIds;
     }
 
-    // 2. Fulfilment (engineer transfer) — skip if a transfer was already opened for this request.
-    let transferId: string | null = req.transferId ?? null;
-    if (input.fulfillmentMode === "engineer_transfer" && !transferId) {
-      // Only stock-tracked lines transfer; any misc lines were still added to the kit and get issued
-      // from a warehouse the normal way.
-      const transferLines = req.lines.map((l, i) => ({ l, jobKitLineId: jobKitLineIds[i] })).filter((x) => x.l.source !== "misc");
+    // 2. Fulfilment — ONE transfer per distinct source engineer (warehouse-sourced lines need no
+    // transfer; they're collected via Goods Management once the kit has grown).
+    //
+    // Resumability: each transfer APPENDS its id to req.transferIds inside its own transaction, and
+    // we skip any engineer already recorded there. So a crash midway through a two-engineer approval
+    // resumes by opening only the transfer that never got created — never a duplicate.
+    const kitLineIdByRequestLine = new Map(req.lines.map((l, i) => [l.id, jobKitLineIds[i]]));
+    // Transfers already opened by a previous attempt, keyed by their SOURCE engineer — the only
+    // reliable way to tell which of several transfers survived a crash. Reads from the transfer
+    // records themselves rather than inferring from request state.
+    const priorIds = [...(req.transferIds ?? []), ...(req.transferId ? [req.transferId] : [])];
+    const priorByEngineer = new Map<string, string>();
+    for (const t of await transferRepo.findSourcesByIds([...new Set(priorIds)])) {
+      priorByEngineer.set(t.fromEngineerId, t.id);
+    }
+    const transferIds: string[] = [];
+    for (const [engineerId, lines] of linesByEngineer) {
+      const existing = priorByEngineer.get(engineerId);
+      if (existing) { transferIds.push(existing); continue; } // already opened — resume past it
+      const transferLines = lines
+        .map((l) => ({ l, jobKitLineId: kitLineIdByRequestLine.get(l.id) }))
+        .filter((x) => x.l.source !== "misc");
       if (transferLines.some((x) => !x.jobKitLineId)) throw conflict("Couldn't link a requested item to its kit line — refresh and try again.");
       const transfer = await transferService.createJobTransfer(
         {
-          fromEngineerId: input.fromEngineerId!,
+          fromEngineerId: engineerId,
           toEngineerId: job.assignedEngineerId,
           jobId: job.id,
           customerId: job.customerId,
@@ -354,23 +429,32 @@ export async function approve(id: string, input: ApproveKitRequestInput, actor: 
           })),
         },
         actor,
-        // afterCreate runs inside the transfer's transaction → transfer + transferId checkpoint are atomic.
-        (tx, tid) => kitRequestRepo.setTransferIdTx(tx, id, tid),
+        // afterCreate runs inside the transfer's transaction → transfer + checkpoint are atomic.
+        (tx, tid) => kitRequestRepo.appendTransferIdTx(tx, id, tid),
       );
-      transferId = transfer.id;
+      transferIds.push(transfer.id);
     }
+    // Keep the legacy single-id field meaningful for existing readers (first transfer wins).
+    const transferId: string | null = transferIds[0] ?? null;
 
-    // 3. Persist review metadata (line stamps + transferId already checkpointed above).
+    // 3. Persist review metadata + the per-line sources (line stamps / transfer ids checkpointed above).
     const finalized = await kitRequestRepo.finalizeApproval(id, {
       reviewedByUserId: actor.id ?? null,
       reviewedByEmail: actor.email ?? null,
       reviewedAt: new Date(),
       decisionNote: input.decisionNote ?? null,
-      fulfillmentMode: input.fulfillmentMode,
+      fulfillmentMode: resolvedMode,
       transferId,
+      transferIds,
+      lineSources: req.lines.map((l) => ({
+        id: l.id,
+        sourceType: l.source === "misc" ? null : engineerByLine.has(l.id) ? "engineer" : "warehouse",
+        sourceEngineerId: engineerByLine.get(l.id) ?? null,
+        sourceWarehouseId: engineerByLine.has(l.id) ? null : whByLine.get(l.id) ?? null,
+      })),
     });
 
-    audit.record({ actor, action: "job_kit_request.approved", targetType: "job", targetId: job.id, targetLabel: req.code, metadata: { fulfillmentMode: input.fulfillmentMode, transferId, jobNumber: job.jobNumber } });
+    audit.record({ actor, action: "job_kit_request.approved", targetType: "job", targetId: job.id, targetLabel: req.code, metadata: { fulfillmentMode: resolvedMode, transferIds, jobNumber: job.jobNumber } });
     emitUpdate(req.requestedByEngineerId, job.id, { id, code: req.code, status: "approved" });
     return toPublic(finalized);
   } catch (e) {

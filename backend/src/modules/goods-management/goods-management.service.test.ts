@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../../lib/prisma.js", () => ({ withTransaction: (fn: (tx: unknown) => unknown) => fn({}) }));
 vi.mock("../../lib/realtime.js", () => ({ emitToUser: vi.fn(), emitToRoom: vi.fn(), OFFICE_JOBS_ROOM: "jobs:office" }));
 vi.mock("./goods-management.repository.js", () => ({
-  createMovementWithCode: vi.fn(), findMovementsByJob: vi.fn(), findMovementsByJobs: vi.fn(), getSummary: vi.fn(), getSummariesByJobs: vi.fn(), upsertSummaryTx: vi.fn(),
+  createMovementWithCode: vi.fn(), findMovementsByJob: vi.fn(), findMovementsByJobs: vi.fn(), findIssuedQtyByKitLine: vi.fn(), getSummary: vi.fn(), getSummariesByJobs: vi.fn(), upsertSummaryTx: vi.fn(),
   upsertCustomerHoldingTx: vi.fn(), findCustomerHoldingTx: vi.fn(), insertCustomerHoldingTxnTx: vi.fn(), findCustomerHoldingsByEngineer: vi.fn(),
   adjustCustomerStockEntryQtyTx: vi.fn(), findCustomerStockEntryById: vi.fn(), findCustomerStockEntriesByIds: vi.fn(), findCustomerStockEntryByBarcode: vi.fn(),
   upsertDamagedBalanceTx: vi.fn(), insertDamagedTxnTx: vi.fn(), findDamagedByWarehouse: vi.fn(), findDamagedByCustomer: vi.fn(), findAllDamaged: vi.fn(), findRecentMovementsForOverdue: vi.fn(), findCustomerHolding: vi.fn(),
@@ -15,7 +15,11 @@ vi.mock("#modules/inventory/inventory.repository.js", () => ({ findBalancePair: 
 vi.mock("#modules/inventory/inventory.service.js", () => ({ applyOutbound: vi.fn(), applyInbound: vi.fn() }));
 vi.mock("#modules/engineer-stock/engineer-stock.repository.js", () => ({ upsertEngineerBalanceTx: vi.fn(), insertEngineerTxnTx: vi.fn(), findEngineerBalanceTx: vi.fn(), findEngineerBalance: vi.fn(), findEngineerBalances: vi.fn() }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
+vi.mock("#modules/engineer-transfer/engineer-transfer.repository.js", () => ({ findVanSourcesByKitLines: vi.fn() }));
+vi.mock("#modules/warehouse/warehouse.repository.js", () => ({ findById: vi.fn() }));
 
+import * as transferRepo from "#modules/engineer-transfer/engineer-transfer.repository.js";
+import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as repo from "./goods-management.repository.js";
 import * as jobRepo from "#modules/job/job.repository.js";
 import * as irmService from "#modules/irm/irm.service.js";
@@ -38,6 +42,104 @@ beforeEach(() => {
   mockMoves.mockResolvedValue([]);
   // Default: no customer stock entry found (IRM path is primary)
   mockCseByBarcode.mockResolvedValue(null);
+  // Default: nothing came from another engineer's van.
+  (transferRepo.findVanSourcesByKitLines as ReturnType<typeof vi.fn>).mockResolvedValue(new Map());
+});
+
+// Stock that reached the engineer via another engineer's VAN never left a warehouse, so no warehouse
+// is owed it back — it can be scanned in anywhere. Stock ISSUED by a warehouse must still go back to
+// that warehouse, or its ledger is credited for units it never released (and the issuing one is left
+// short). The split matters because a kit line MERGES both sources into one row.
+describe("scanLookup (return) — where van-sourced stock may be handed back", () => {
+  const OTHER_WH = "e".repeat(24);
+  const mockEngBal = engineerStockRepo.findEngineerBalance as ReturnType<typeof vi.fn>;
+  const mockVanSources = transferRepo.findVanSourcesByKitLines as ReturnType<typeof vi.fn>;
+
+  const vanSource = (quantity: number, status = "completed") => ({ transferCode: "ENG-0026", engineerName: "sahul FE", quantity, status });
+
+  beforeEach(() => {
+    mockEngBal.mockResolvedValue({ quantityOnHand: 4 });
+  });
+
+  it("accepts a purely van-sourced line at a DIFFERENT warehouse", async () => {
+    // All 4 issued units were attributed from a completed van transfer.
+    mockMoves.mockResolvedValue([{ status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 4 }] }]);
+    mockVanSources.mockResolvedValue(new Map([["k1", [vanSource(4)]]]));
+
+    const m = await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: OTHER_WH, code: "IRM-0004" });
+    expect(m).toMatchObject({ source: "irm", jobKitLineId: "k1", heldByEngineer: 4 });
+  });
+
+  it("still refuses a WAREHOUSE-issued line at a different warehouse", async () => {
+    mockMoves.mockResolvedValue([{ status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 4 }] }]);
+    mockVanSources.mockResolvedValue(new Map()); // nothing came from a van
+
+    await expect(scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: OTHER_WH, code: "IRM-0004" }))
+      .rejects.toThrow(/different warehouse/i);
+  });
+
+  it("accepts a MIXED line elsewhere but CAPS the return at the van portion", async () => {
+    // 6 issued, 2 of them from a van ⇒ only those 2 owe no warehouse and may land here; the other 4
+    // must return to WH_ID. The cap is the van qty (2), not the whole line (6).
+    mockMoves.mockResolvedValue([{ status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 6 }] }]);
+    mockVanSources.mockResolvedValue(new Map([["k1", [vanSource(2)]]]));
+    mockEngBal.mockResolvedValue({ quantityOnHand: 6 }); // engineer physically holds all 6
+
+    const m = await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: OTHER_WH, code: "IRM-0004" });
+    expect(m).toMatchObject({ jobKitLineId: "k1", heldByEngineer: 2 });
+  });
+
+  it("returns the FULL line at its home warehouse regardless of source mix", async () => {
+    mockMoves.mockResolvedValue([{ status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 6 }] }]);
+    mockVanSources.mockResolvedValue(new Map([["k1", [vanSource(2)]]]));
+    mockEngBal.mockResolvedValue({ quantityOnHand: 6 });
+
+    const m = await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: WH_ID, code: "IRM-0004" });
+    expect(m).toMatchObject({ jobKitLineId: "k1", heldByEngineer: 6 }); // home takes van + warehouse
+  });
+
+  it("shrinks the elsewhere cap by van units already returned at another warehouse", async () => {
+    // van 3; 1 already returned at OTHER_WH ⇒ only 2 van units remain returnable away from home.
+    mockMoves.mockResolvedValue([
+      { status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 5 }] },
+      { status: "posted", direction: "return", warehouseId: OTHER_WH, items: [{ jobKitLineId: "k1", qty: 1 }] },
+    ]);
+    mockVanSources.mockResolvedValue(new Map([["k1", [vanSource(3)]]]));
+    mockEngBal.mockResolvedValue({ quantityOnHand: 4 });
+
+    const m = await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: OTHER_WH, code: "IRM-0004" });
+    expect(m).toMatchObject({ jobKitLineId: "k1", heldByEngineer: 2 });
+  });
+
+  it("shrinks the elsewhere cap conservatively by consumed units (van assumed used first)", async () => {
+    // van 3, consumed 2 ⇒ at most 1 van unit is still returnable away from home. Conservative so a
+    // warehouse-owed unit can never be mis-credited to the wrong warehouse.
+    mockMoves.mockResolvedValue([
+      { status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 5 }] },
+      { status: "posted", direction: "consume", warehouseId: null, items: [{ jobKitLineId: "k1", qty: 2 }] },
+    ]);
+    mockVanSources.mockResolvedValue(new Map([["k1", [vanSource(3)]]]));
+    mockEngBal.mockResolvedValue({ quantityOnHand: 3 });
+
+    const m = await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: OTHER_WH, code: "IRM-0004" });
+    expect(m).toMatchObject({ jobKitLineId: "k1", heldByEngineer: 1 });
+  });
+
+  it("ignores a PENDING transfer — that stock hasn't been handed over yet", async () => {
+    mockMoves.mockResolvedValue([{ status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 4 }] }]);
+    mockVanSources.mockResolvedValue(new Map([["k1", [vanSource(4, "pending")]]]));
+
+    await expect(scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: OTHER_WH, code: "IRM-0004" }))
+      .rejects.toThrow(/different warehouse/i);
+  });
+
+  it("still resolves a van-sourced line at its own homed warehouse", async () => {
+    mockMoves.mockResolvedValue([{ status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 4 }] }]);
+    mockVanSources.mockResolvedValue(new Map([["k1", [vanSource(4)]]]));
+
+    const m = await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: WH_ID, code: "IRM-0004" });
+    expect(m).toMatchObject({ jobKitLineId: "k1" });
+  });
 });
 
 describe("scanLookup (issue)", () => {
@@ -187,6 +289,13 @@ describe("listQueue", () => {
   const mockCseByIds = repo.findCustomerStockEntriesByIds as ReturnType<typeof vi.fn>;
   const mockEngBalances = engineerStockRepo.findEngineerBalances as ReturnType<typeof vi.fn>;
   const mockCustHoldings = repo.findCustomerHoldingsByEngineer as ReturnType<typeof vi.fn>;
+  const mockIssuedByLine = repo.findIssuedQtyByKitLine as ReturnType<typeof vi.fn>;
+  // Stage issued-per-kit-line totals for the pre-pagination "is there work here?" filter. Kept as an
+  // explicit helper rather than derived from the movement fixtures: the two feed different stages
+  // (this one filters ALL candidates, findMovementsByJobs enriches only the page), so stating each
+  // test's totals outright is what makes a divergence between them visible instead of silent.
+  const stageIssued = (totals: Record<string, number> = {}) =>
+    mockIssuedByLine.mockResolvedValue(new Map(Object.entries(totals)));
 
   const A1 = "a1".padEnd(24, "0");
   const A2 = "a2".padEnd(24, "0");
@@ -203,6 +312,7 @@ describe("listQueue", () => {
     mockCseByIds.mockResolvedValue([]);
     mockEngBalances.mockResolvedValue([]);
     mockCustHoldings.mockResolvedValue([]);
+    stageIssued(); // nothing issued unless a test says otherwise
   });
 
   it("reports planned/issued/available from batched movements + balances and returns a page", async () => {
@@ -267,6 +377,141 @@ describe("listQueue", () => {
   it("rejects an invalid status filter", async () => {
     await expect(listQueue({ warehouseId: WH_ID, status: "bogus" })).rejects.toThrow(/invalid status/i);
   });
+
+  // The queue greys out any line not homed at the warehouse being managed, because only that
+  // warehouse may take it back. Van-sourced stock is the exception — no warehouse released it, so
+  // any may receive it — and the row has to say so or the WM standing in front of the engineer sees
+  // a greyed line and turns them away.
+  it("flags a fully van-sourced line as actionable at any warehouse", async () => {
+    mockFindActive.mockResolvedValue([job(JOB_ID, "JOB-1")]);
+    mockSummaries.mockResolvedValue([{ jobId: JOB_ID, goodsStatus: "issued" }]);
+    stageIssued({ [`${JOB_ID}-k1`]: 10 });
+    mockMovesBatch.mockResolvedValue([
+      { jobId: JOB_ID, status: "posted", direction: "issue", items: [{ jobKitLineId: `${JOB_ID}-k1`, qty: 10 }] },
+    ]);
+    (transferRepo.findVanSourcesByKitLines as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Map([[`${JOB_ID}-k1`, [{ transferCode: "ENG-1", engineerName: "sahul FE", quantity: 10, status: "completed" }]]]),
+    );
+
+    const res = await listQueue({ warehouseId: WH_ID });
+    expect(res.rows[0].kitLines[0].vanReturnableQty).toBe(10);
+  });
+
+  it("reports 0 van-returnable for a warehouse-issued line", async () => {
+    mockFindActive.mockResolvedValue([job(JOB_ID, "JOB-1")]);
+    mockMovesBatch.mockResolvedValue([
+      { jobId: JOB_ID, status: "posted", direction: "issue", items: [{ jobKitLineId: `${JOB_ID}-k1`, qty: 10 }] },
+    ]);
+    const res = await listQueue({ warehouseId: WH_ID });
+    expect(res.rows[0].kitLines[0].vanReturnableQty).toBe(0);
+  });
+
+  // Discoverability: a job's van stock is homed at one warehouse but returnable at any. It must
+  // surface in EVERY warehouse's queue that could receive it — no search needed — so a WM anywhere
+  // can process the return. The DB query widens via JobKitLine.hasVanSource (mocked: mockFindActive
+  // returns the job, simulating that widened match); the service then filters per line.
+  it("surfaces a van job at a warehouse where its stock isn't homed, without a search", async () => {
+    const OTHER_WH = "e2".padEnd(24, "0"); // k1 is homed at WH_ID, we query OTHER_WH
+    mockFindActive.mockResolvedValue([job(JOB_ID, "JOB-1")]);
+    mockMovesBatch.mockResolvedValue([{ jobId: JOB_ID, status: "posted", direction: "issue", items: [{ jobKitLineId: `${JOB_ID}-k1`, qty: 10 }] }]);
+    (transferRepo.findVanSourcesByKitLines as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Map([[`${JOB_ID}-k1`, [{ transferCode: "ENG-1", engineerName: "sahul FE", quantity: 10, status: "completed" }]]]),
+    );
+
+    const res = await listQueue({ warehouseId: OTHER_WH }); // NO search
+    expect(res.total).toBe(1);
+    expect(res.rows[0].kitLines[0].vanReturnableQty).toBe(10);
+  });
+
+  it("does NOT surface a van job elsewhere once its van stock is fully returned", async () => {
+    const OTHER_WH = "e2".padEnd(24, "0");
+    mockFindActive.mockResolvedValue([job(JOB_ID, "JOB-1")]);
+    // Issued 10 from a van, all 10 already returned at OTHER_WH ⇒ nothing left to receive anywhere.
+    mockMovesBatch.mockResolvedValue([
+      { jobId: JOB_ID, status: "posted", direction: "issue", items: [{ jobKitLineId: `${JOB_ID}-k1`, qty: 10 }] },
+      { jobId: JOB_ID, status: "posted", direction: "return", warehouseId: OTHER_WH, items: [{ jobKitLineId: `${JOB_ID}-k1`, qty: 10 }] },
+    ]);
+    (transferRepo.findVanSourcesByKitLines as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Map([[`${JOB_ID}-k1`, [{ transferCode: "ENG-1", engineerName: "sahul FE", quantity: 10, status: "completed" }]]]),
+    );
+
+    const res = await listQueue({ warehouseId: OTHER_WH });
+    expect(res.total).toBe(0);
+  });
+
+  it("does not surface a NON-van job at a warehouse where it has no line", async () => {
+    const OTHER_WH = "e2".padEnd(24, "0");
+    mockFindActive.mockResolvedValue([job(JOB_ID, "JOB-1")]); // homed at WH_ID, not OTHER_WH
+    // No van sources (default empty map) ⇒ nothing returnable away ⇒ not surfaced here.
+    mockMovesBatch.mockResolvedValue([{ jobId: JOB_ID, status: "posted", direction: "issue", items: [{ jobKitLineId: `${JOB_ID}-k1`, qty: 10 }] }]);
+
+    const res = await listQueue({ warehouseId: OTHER_WH });
+    expect(res.total).toBe(0);
+  });
+
+  // A job reaches this warehouse's queue via `some kitLine: warehouseId = here OR lineType = misc`.
+  // The misc arm is warehouse-blind, so a job whose ONLY tie to this warehouse is a misc line shows
+  // up in EVERY warehouse's queue. That's wanted while the misc item is still outstanding (someone
+  // has to hand it over), but once it's fully issued there is nothing left to do here and the row
+  // renders entirely greyed out — pure noise that also inflates the "Total: N jobs" count.
+  const OTHER_WH = "w2".padEnd(24, "0");
+  const miscOnlyJob = (id: string, num: string) => ({
+    id, jobNumber: num, name: "Elsewhere Job", customerId: "x".repeat(24), customerName: "Acme",
+    assignedEngineerId: ENG_ID, assignedEngineerName: "Bob", status: "accepted",
+    kitLines: [
+      // Real line belongs to ANOTHER warehouse — greyed out here, not actionable.
+      { id: `${id}-k1`, lineType: "irm", irmItemId: IRM_ID, warehouseId: OTHER_WH, itemName: "CAT6", qty: 3, warehouseName: "WH2", warehouseCode: "W2", customerStockEntryId: null },
+      // Misc line — no warehouse at all; this is what dragged the job in here.
+      { id: `${id}-k2`, lineType: "misc", irmItemId: null, warehouseId: null, itemName: "ckgkgkgkgk", qty: 2, warehouseName: null, warehouseCode: null, customerStockEntryId: null },
+    ],
+  });
+
+  it("drops a misc-only job from another warehouse's queue once its misc line is fully issued", async () => {
+    mockFindActive.mockResolvedValue([miscOnlyJob(A1, "JOB-0015")]);
+    // Every line issued in full ⇒ postIssue would have stamped goodsStatus "issued".
+    mockSummaries.mockResolvedValue([{ jobId: A1, goodsStatus: "issued" }]);
+    stageIssued({ [`${A1}-k1`]: 3, [`${A1}-k2`]: 2 }); // both lines fully issued (misc 2/2)
+
+    const res = await listQueue({ warehouseId: WH_ID });
+    expect(res.total).toBe(0);
+    expect(res.rows).toHaveLength(0);
+  });
+
+  it("KEEPS a misc-only job visible everywhere while its misc line is still outstanding", async () => {
+    mockFindActive.mockResolvedValue([miscOnlyJob(A1, "JOB-0015")]);
+    // Misc still pending ⇒ postIssue keeps the job "partially_issued".
+    mockSummaries.mockResolvedValue([{ jobId: A1, goodsStatus: "partially_issued" }]);
+    stageIssued({ [`${A1}-k1`]: 3 }); // misc line (k2) still 0/2 → outstanding
+
+    const res = await listQueue({ warehouseId: WH_ID });
+    expect(res.total).toBe(1);
+    expect(res.rows[0].jobNumber).toBe("JOB-0015");
+  });
+
+  it("drops a misc-done job whose only OUTSTANDING line belongs to another warehouse", async () => {
+    // The real-world case: job-level goodsStatus is "partially_issued", but that's driven by a real
+    // line at ANOTHER warehouse — the misc line here is already 2/2. Nothing is actionable at this
+    // warehouse, so the job must not appear. Proves the filter can't lean on goodsStatus alone.
+    mockFindActive.mockResolvedValue([miscOnlyJob(A1, "JOB-0015")]);
+    mockSummaries.mockResolvedValue([{ jobId: A1, goodsStatus: "partially_issued" }]);
+    // Misc line fully issued (2/2); the other-warehouse real line is still short (0/3) — which is
+    // what keeps the JOB-level status at "partially_issued" while leaving nothing to do HERE.
+    stageIssued({ [`${A1}-k2`]: 2 });
+
+    const res = await listQueue({ warehouseId: WH_ID });
+    expect(res.total).toBe(0);
+    expect(res.rows).toHaveLength(0);
+  });
+
+  it("keeps a job with a real line at THIS warehouse even when everything is issued", async () => {
+    // Guards the fix: filtering must key on "no actionable line here", never on goodsStatus alone —
+    // a fully-issued job still needs its returns processed at the warehouse that issued it.
+    mockFindActive.mockResolvedValue([job(A1, "JOB-0024")]);
+    mockSummaries.mockResolvedValue([{ jobId: A1, goodsStatus: "issued" }]);
+    const res = await listQueue({ warehouseId: WH_ID });
+    expect(res.total).toBe(1);
+    expect(res.rows[0].jobNumber).toBe("JOB-0024");
+  });
 });
 
 // ── shared mock aliases (used by both postReturn and recordConsumeAndComplete) ────────────────
@@ -321,6 +566,112 @@ describe("postReturn", () => {
     mockUpsertDamagedBalance.mockResolvedValue({ id: "dmg1", quantity: 1 });
     mockInsertDamagedTxn.mockResolvedValue({});
     mockUpsertSummaryTx.mockResolvedValue({});
+  });
+
+  // A van-sourced line's kit line is homed at some other warehouse, so it carries no snapshot that is
+  // valid HERE. Persisting null would leave the movement without the warehouse labels that keep
+  // history readable after a rename, so the receiving warehouse's own labels are resolved instead.
+  it("van return at another warehouse: credits the SCANNING warehouse and snapshots its labels", async () => {
+    const OTHER_WH = "e".repeat(24);
+    (transferRepo.findVanSourcesByKitLines as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Map([["k1", [{ transferCode: "ENG-1", engineerName: "sahul FE", quantity: 10, status: "completed" }]]]),
+    );
+    (warehouseRepo.findById as ReturnType<typeof vi.fn>).mockResolvedValue({ id: OTHER_WH, name: "London Logistics Hub", code: "WH-0005" });
+
+    await postReturn(
+      JOB_ID,
+      {
+        direction: "return", warehouseId: OTHER_WH,
+        lines: [{ source: "irm", irmItemId: IRM_ID, qty: 3, condition: "good", scannedCode: "IRM-0004", jobKitLineId: "k1" }],
+      },
+      { email: "wm@x.com" } as never,
+    );
+
+    // Stock lands where it physically arrived, not at the line's nominal home.
+    expect(mockApplyInbound.mock.calls[0][1]).toMatchObject({ warehouseId: OTHER_WH, quantity: 3 });
+    const header = mockCreateMovement.mock.calls[0][0];
+    expect(header).toMatchObject({ warehouseId: OTHER_WH, warehouseName: "London Logistics Hub", warehouseCode: "WH-0005" });
+  });
+
+  it("MIXED line: accepts the van portion at another warehouse and credits it", async () => {
+    const OTHER_WH = "e".repeat(24);
+    // k1 issued 10, of which 4 came from a van ⇒ 4 returnable away from home, crediting OTHER_WH.
+    mockMoves.mockResolvedValue([{ status: "posted", direction: "issue", items: [{ jobKitLineId: "k1", qty: 10 }] }]);
+    (transferRepo.findVanSourcesByKitLines as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Map([["k1", [{ transferCode: "ENG-1", engineerName: "sahul FE", quantity: 4, status: "completed" }]]]),
+    );
+    (warehouseRepo.findById as ReturnType<typeof vi.fn>).mockResolvedValue({ id: OTHER_WH, name: "London Logistics Hub", code: "WH-0005" });
+
+    await postReturn(
+      JOB_ID,
+      { direction: "return", warehouseId: OTHER_WH, lines: [{ source: "irm", irmItemId: IRM_ID, qty: 4, condition: "good", scannedCode: "IRM-0004", jobKitLineId: "k1" }] },
+      { email: "wm@x.com" } as never,
+    );
+    expect(mockApplyInbound.mock.calls[0][1]).toMatchObject({ warehouseId: OTHER_WH, quantity: 4 });
+  });
+
+  it("MIXED line: rejects more than the van portion at another warehouse", async () => {
+    const OTHER_WH = "e".repeat(24);
+    mockMoves.mockResolvedValue([{ status: "posted", direction: "issue", items: [{ jobKitLineId: "k1", qty: 10 }] }]);
+    (transferRepo.findVanSourcesByKitLines as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Map([["k1", [{ transferCode: "ENG-1", engineerName: "sahul FE", quantity: 4, status: "completed" }]]]),
+    );
+    (warehouseRepo.findById as ReturnType<typeof vi.fn>).mockResolvedValue({ id: OTHER_WH, name: "London Logistics Hub", code: "WH-0005" });
+
+    // 5 requested but only 4 are van-sourced ⇒ the 5th owes its home warehouse.
+    await expect(
+      postReturn(JOB_ID, { direction: "return", warehouseId: OTHER_WH, lines: [{ source: "irm", irmItemId: IRM_ID, qty: 5, condition: "good", scannedCode: "IRM-0004", jobKitLineId: "k1" }] }, { email: "wm@x.com" } as never),
+    ).rejects.toThrow(/came from a van|home warehouse/i);
+    expect(mockApplyInbound).not.toHaveBeenCalled();
+  });
+
+  it("resolves the EXACT scanned kit line for an away return, not a fresh capacity re-pick", async () => {
+    // Same IRM item on TWO kit lines homed at TWO different warehouses (WH-A, WH-B), returned at a
+    // THIRD (WH-C). The client sends the line it scanned (kA). A capacity-based re-pick would prefer
+    // kB (van 10 > kA's 3) and then size kA's budget with kB's home — miscounting kA's own home-return
+    // at WH-A as "away" and wrongly rejecting. Using the client's line keeps home/van consistent.
+    const WH_A = "a".repeat(24), WH_B = "e".repeat(24), WH_C = "f".repeat(24);
+    mockJob.mockResolvedValue({
+      ...returnBaseJob,
+      kitLines: [
+        { id: "kA", lineType: "irm", irmItemId: IRM_ID, customerStockEntryId: null, warehouseId: WH_A, itemName: "CAT6", qty: 5, warehouseName: "A", warehouseCode: "A" },
+        { id: "kB", lineType: "irm", irmItemId: IRM_ID, customerStockEntryId: null, warehouseId: WH_B, itemName: "CAT6", qty: 10, warehouseName: "B", warehouseCode: "B" },
+      ],
+    });
+    mockMoves.mockResolvedValue([
+      { status: "posted", direction: "issue", items: [{ jobKitLineId: "kA", qty: 5 }, { jobKitLineId: "kB", qty: 10 }] },
+      // kA already had 2 returned at its OWN home (WH-A) — a home return, must NOT count against kA's away budget.
+      { status: "posted", direction: "return", warehouseId: WH_A, items: [{ jobKitLineId: "kA", qty: 2 }] },
+    ]);
+    (transferRepo.findVanSourcesByKitLines as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Map([
+        ["kA", [{ transferCode: "ENG-1", engineerName: "sahul FE", quantity: 3, status: "completed" }]],
+        ["kB", [{ transferCode: "ENG-2", engineerName: "ravi FE", quantity: 10, status: "completed" }]],
+      ]),
+    );
+    (warehouseRepo.findById as ReturnType<typeof vi.fn>).mockResolvedValue({ id: WH_C, name: "London Logistics Hub", code: "WH-0005" });
+
+    // kA: van 3, one already returned away? No — the 2 at WH-A are home returns. So 3 still returnable
+    // away. Returning 2 of kA's van at WH-C must SUCCEED (budget 3 ≥ 2), not be rejected.
+    await postReturn(
+      JOB_ID,
+      { direction: "return", warehouseId: WH_C, lines: [{ source: "irm", irmItemId: IRM_ID, qty: 2, condition: "good", scannedCode: "IRM-0004", jobKitLineId: "kA" }] },
+      { email: "wm@x.com" } as never,
+    );
+    expect(mockApplyInbound.mock.calls[0][1]).toMatchObject({ warehouseId: WH_C, quantity: 2 });
+  });
+
+  it("ordinary same-warehouse return keeps the kit line's snapshot (no extra warehouse lookup)", async () => {
+    await postReturn(
+      JOB_ID,
+      {
+        direction: "return", warehouseId: WH_ID,
+        lines: [{ source: "irm", irmItemId: IRM_ID, qty: 3, condition: "good", scannedCode: "IRM-0004", jobKitLineId: "k1" }],
+      },
+      { email: "wm@x.com" } as never,
+    );
+    expect(mockCreateMovement.mock.calls[0][0]).toMatchObject({ warehouseName: "WH1", warehouseCode: "W1" });
+    expect(warehouseRepo.findById).not.toHaveBeenCalled();
   });
 
   it("good IRM return: calls applyInbound and drains the engineer holding", async () => {

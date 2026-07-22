@@ -35,8 +35,8 @@ router.post("/attachments", requirePermission("engineer.jobs.request_kit"), writ
 // ---- Single request detail (reviewer OR the requester — service scopes) ----------------------
 // GET /job-kit-requests/:id
 router.get("/:id", requireAnyPermission("engineer.jobs.request_kit", "jobs.kit_request.review"), ctrl.getOne);
-// GET /job-kit-requests/:id/eligible-holders  (transfer source-engineer picker — reviewer only)
-router.get("/:id/eligible-holders", requirePermission("jobs.kit_request.review"), ctrl.eligibleHolders);
+// GET /job-kit-requests/:id/line-holders  (per-line transfer source picker — reviewer only)
+router.get("/:id/line-holders", requirePermission("jobs.kit_request.review"), ctrl.lineHolders);
 
 // ---- State transitions -----------------------------------------------------------------------
 // POST /job-kit-requests/:id/approve  (PM/planner — grows the kit + opens fulfilment)

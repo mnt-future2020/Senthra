@@ -106,6 +106,34 @@ export function formatDateTime(iso: string | null | undefined): string {
   return d.toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
+// A kit line MERGES sources: the same item at the same warehouse is one row, so units collected from
+// the warehouse and units handed over from another engineer's van end up on a single line (e.g.
+// "planned 3" = 2 from stock + 1 from a van). Showing only one origin would misreport the other, so
+// the two views break the row down with this.
+//
+// `vanOnly` also decides where leftovers may go back: van stock never left a warehouse, so none is
+// owed it and it can be scanned in anywhere. A line with ANY warehouse-issued qty still owes that
+// part to its own warehouse — matching findVanOnlyKitLine on the server.
+export interface KitLineSourceSplit {
+  warehouseQty: number; // issued from this line's own warehouse
+  vanQty: number; // handed over from a van (transfer completed)
+  pendingVanQty: number; // agreed but not yet handed over
+  vanOnly: boolean;
+}
+export function kitLineSourceSplit(line: JobKitLine): KitLineSourceSplit {
+  const sources = line.vanSources ?? [];
+  const sum = (status: string) => sources.filter((v) => v.status === status).reduce((n, v) => n + v.quantity, 0);
+  const vanQty = sum("completed");
+  return {
+    vanQty,
+    pendingVanQty: sum("pending"),
+    // Whatever the van didn't supply came from the warehouse. Clamped: a return posted at another
+    // warehouse can push `issued` below `vanQty`, and a negative would render as nonsense.
+    warehouseQty: Math.max(0, line.issued - vanQty),
+    vanOnly: line.issued > 0 && vanQty >= line.issued,
+  };
+}
+
 // When the engineer returns units of an item at one warehouse that were actually issued from ANOTHER
 // warehouse (the same fungible item is on the job at >1 warehouse), this line's Returned exceeds its
 // Issued. This note explains the surplus and names the source warehouse(s) — the same item's sibling

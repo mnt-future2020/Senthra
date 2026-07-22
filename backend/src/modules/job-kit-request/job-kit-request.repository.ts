@@ -181,6 +181,13 @@ export async function revertToPending(id: string): Promise<void> {
   await prisma.jobKitRequest.updateMany({ where: { id, status: "approved", deletedAt: null }, data: { status: "pending" } });
 }
 
+export interface LineSourcePatch {
+  id: string;
+  sourceType: string | null; // warehouse | engineer | null (misc)
+  sourceEngineerId: string | null;
+  sourceWarehouseId: string | null;
+}
+
 export interface FinalizeApprovalPatch {
   reviewedByUserId: string | null;
   reviewedByEmail: string | null;
@@ -188,6 +195,9 @@ export interface FinalizeApprovalPatch {
   decisionNote: string | null;
   fulfillmentMode: string;
   transferId: string | null;
+  transferIds: string[];
+  // Where each line is actually sourced from — the authoritative detail behind fulfillmentMode.
+  lineSources: LineSourcePatch[];
 }
 
 // Approve CHECKPOINT 1 (tx-aware) — stamp each request line with the JobKitLine it grew, INSIDE the
@@ -206,10 +216,33 @@ export async function setTransferIdTx(tx: Prisma.TransactionClient, id: string, 
   await tx.jobKitRequest.update({ where: { id }, data: { transferId } });
 }
 
-// Approve CHECKPOINT 3 — persist the review metadata. Line stamping + transferId are already checkpointed
-// (stampLineKitIds / setTransferId), so this is a single field update.
-export function finalizeApproval(id: string, patch: FinalizeApprovalPatch): Promise<KitRequestWithLines> {
-  return prisma.jobKitRequest.update({ where: { id }, data: patch, include: { lines: true } });
+// Approve CHECKPOINT 2 (tx-aware, multi-source) — APPEND an opened transfer's id inside its own
+// creation transaction. Mixed fulfilment opens one transfer per source engineer, so the checkpoint
+// has to accumulate rather than overwrite: a crash between two transfers must leave the first one
+// recorded. `push` is atomic in Mongo, so concurrent appends can't clobber each other. Also mirrors
+// the first id into the legacy single `transferId` for readers that still use it.
+export async function appendTransferIdTx(tx: Prisma.TransactionClient, id: string, transferId: string): Promise<void> {
+  const current = await tx.jobKitRequest.findUnique({ where: { id }, select: { transferId: true } });
+  await tx.jobKitRequest.update({
+    where: { id },
+    data: {
+      transferIds: { push: transferId },
+      ...(current?.transferId ? {} : { transferId }),
+    },
+  });
+}
+
+// Approve CHECKPOINT 3 — persist the review metadata + each line's resolved source. Line kit-id
+// stamping and transfer ids are already checkpointed (stampLineKitIdsTx / appendTransferIdTx).
+export async function finalizeApproval(id: string, patch: FinalizeApprovalPatch): Promise<KitRequestWithLines> {
+  const { lineSources, ...header } = patch;
+  for (const s of lineSources) {
+    await prisma.jobKitRequestLine.update({
+      where: { id: s.id },
+      data: { sourceType: s.sourceType, sourceEngineerId: s.sourceEngineerId, sourceWarehouseId: s.sourceWarehouseId },
+    });
+  }
+  return prisma.jobKitRequest.update({ where: { id }, data: header, include: { lines: true } });
 }
 
 export interface DeclinePatch {

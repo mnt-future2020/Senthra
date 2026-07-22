@@ -4,7 +4,7 @@ import * as React from "react";
 import { Check, Lock, PackagePlus, X } from "lucide-react";
 
 import * as kitRequestService from "@/services/jobKitRequest.service";
-import type { ApproveKitRequestPayload, FulfillmentMode, KitRequest } from "@/services/jobKitRequest.service";
+import type { ApproveKitRequestPayload, KitRequest, LineSourceType } from "@/services/jobKitRequest.service";
 import { listWarehouseOptions } from "@/services/warehouse.service";
 import { listItemWarehouseStock } from "@/services/inventory.service";
 import { subscribe } from "@/lib/socket";
@@ -19,6 +19,15 @@ import { formatDate } from "./jobStatus";
 // warehouse issue or a job-scoped engineer transfer) or decline. Rendered on the office job detail,
 // gated by jobs.kit_request.review. Calls onJobChanged after an approval so the parent refetches the
 // job and the grown kit shows immediately.
+
+// Keyed lookup, not a two-way ternary: sourcing is per line now, so an approval can come back
+// "mixed" (some items from stock, some from a van). A ternary silently labelled those "warehouse
+// issue" — telling the PM the opposite of what they chose for half the request.
+const FULFILMENT_LABELS: Record<string, string> = {
+  warehouse_issue: "warehouse issue",
+  engineer_transfer: "engineer transfer",
+  mixed: "warehouse + engineer transfer",
+};
 
 export function JobKitRequestsReview({ jobId, assignedEngineerId, locked, onJobChanged }: { jobId: string; assignedEngineerId: string | null; locked: boolean; onJobChanged: () => void }) {
   const { pushToast } = useDashboard();
@@ -74,7 +83,7 @@ export function JobKitRequestsReview({ jobId, assignedEngineerId, locked, onJobC
                   <KitLineChips lines={r.lines} />
                   <p className="mt-1 text-[11px] italic text-[var(--muted)]">“{r.reason}”</p>
                   {r.status === "approved" && r.fulfillmentMode && (
-                    <p className="mt-0.5 text-[11px] text-[var(--pos)]">Approved · {r.fulfillmentMode === "engineer_transfer" ? "engineer transfer" : "warehouse issue"}{r.reviewedByEmail ? ` by ${r.reviewedByEmail}` : ""}</p>
+                    <p className="mt-0.5 text-[11px] text-[var(--pos)]">Approved · {FULFILMENT_LABELS[r.fulfillmentMode] ?? r.fulfillmentMode}{r.reviewedByEmail ? ` by ${r.reviewedByEmail}` : ""}</p>
                   )}
                   {r.status === "declined" && <p className="mt-0.5 text-[11px] text-[var(--neg)]">Declined{r.decisionNote ? ` — ${r.decisionNote}` : ""}</p>}
                 </div>
@@ -126,18 +135,20 @@ export function JobKitRequestsReview({ jobId, assignedEngineerId, locked, onJobC
 type Opt = { value: string; label: string };
 
 function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequest; assignedEngineerId: string | null; onClose: () => void; onDone: () => void; onError: (m: string) => void }) {
-  const [mode, setMode] = React.useState<FulfillmentMode>("warehouse_issue");
-  const [lineWh, setLineWh] = React.useState<Record<string, string>>({}); // requestLineId → warehouseId (IRM lines)
-  const [fromEngineerId, setFromEngineerId] = React.useState("");
+  // Requested stock is rarely all in one place: the warehouse may hold some items while another
+  // engineer's van holds the rest. So the SOURCE is chosen per line — there is no request-level mode.
+  const [lineSrc, setLineSrc] = React.useState<Record<string, LineSourceType>>({}); // lineId → warehouse | engineer
+  const [lineWh, setLineWh] = React.useState<Record<string, string>>({}); // lineId → warehouseId (IRM lines)
+  const [lineEng, setLineEng] = React.useState<Record<string, string>>({}); // lineId → source engineer
   const [decisionNote, setDecisionNote] = React.useState("");
   const [busy, setBusy] = React.useState(false);
 
   const [whOptions, setWhOptions] = React.useState<Record<string, Opt[]>>({}); // per IRM line: warehouses (stock-aware)
   const [whLoading, setWhLoading] = React.useState(true);
-  const [holders, setHolders] = React.useState<Opt[] | null>(null); // engineers holding ALL stock-tracked lines
+  const [vanOptions, setVanOptions] = React.useState<Record<string, Opt[]>>({}); // per line: engineers with enough
+  const [holdersFailed, setHoldersFailed] = React.useState(false); // lookup errored ≠ nobody holds it
   const [unstocked, setUnstocked] = React.useState<Set<string>>(new Set()); // IRM lines stocked in no warehouse
 
-  const irmLines = request.lines.filter((l) => l.source === "irm");
   const stockLines = request.lines.filter((l) => l.source !== "misc");
   const allMisc = stockLines.length === 0;
 
@@ -186,25 +197,47 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
       setLineWh((prev) => ({ ...defaults, ...prev }));
       setWhLoading(false);
     })();
-    kitRequestService.eligibleKitHolders(request.id).then(
-      (hs) => active && setHolders(hs.map((h) => ({ value: h.engineerId, label: h.name }))),
-      () => active && setHolders([]),
+    // Van options PER LINE — only engineers holding enough of that item, so a short source can't be
+    // picked. Every line defaults to "warehouse": the warehouse is always a valid source (it can be
+    // planned even at zero stock), whereas a van is only offered when someone actually holds it.
+    kitRequestService.kitLineHolders(request.id).then(
+      (rows) => {
+        if (!active) return;
+        const opts: Record<string, Opt[]> = {};
+        for (const r of rows) {
+          opts[r.requestLineId] = r.holders.map((h) => ({ value: h.engineerId, label: `${h.name} · holds ${h.available}` }));
+        }
+        setVanOptions(opts);
+      },
+      () => active && setHoldersFailed(true),
     );
     return () => { active = false; };
   }, [request]);
 
-  const whComplete = irmLines.every((l) => !!lineWh[l.id]);
-  const canSubmit = !busy && (mode === "warehouse_issue" ? whComplete : !!fromEngineerId);
+  const srcOf = (lineId: string): LineSourceType => lineSrc[lineId] ?? "warehouse";
+  // Every stock line needs a resolved source: a warehouse pick (IRM only) or a chosen engineer.
+  const lineReady = (l: KitRequest["lines"][number]) => {
+    if (l.source === "misc") return true;
+    if (srcOf(l.id) === "engineer") return !!lineEng[l.id];
+    return l.source !== "irm" || !!lineWh[l.id]; // customer stock issues from where it's stored
+  };
+  const canSubmit = !busy && request.lines.every(lineReady);
 
   const submit = async () => {
     setBusy(true);
     try {
-      const payload: ApproveKitRequestPayload = {
-        fulfillmentMode: mode,
-        lineWarehouses: mode === "warehouse_issue" ? irmLines.map((l) => ({ requestLineId: l.id, warehouseId: lineWh[l.id] })) : undefined,
-        fromEngineerId: mode === "engineer_transfer" ? fromEngineerId : undefined,
-        decisionNote: decisionNote.trim() || undefined,
-      };
+      // A misc-only request has no stock lines to source; the API's per-line shape requires at least one
+      // source, so fall back to the legacy warehouse-issue mode (which just grows the kit, moving no stock).
+      const payload: ApproveKitRequestPayload = allMisc
+        ? { fulfillmentMode: "warehouse_issue", decisionNote: decisionNote.trim() || undefined }
+        : {
+            lineSources: stockLines.map((l) =>
+              srcOf(l.id) === "engineer"
+                ? { requestLineId: l.id, sourceType: "engineer" as const, engineerId: lineEng[l.id] }
+                : { requestLineId: l.id, sourceType: "warehouse" as const, warehouseId: l.source === "irm" ? lineWh[l.id] : undefined },
+            ),
+            decisionNote: decisionNote.trim() || undefined,
+          };
       await kitRequestService.approveKitRequest(request.id, payload);
       onDone();
     } catch (e) {
@@ -226,40 +259,52 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
   return (
     <Modal open onClose={busy ? () => {} : onClose} title={`Approve ${request.code}`} subtitle={request.lines.map((l) => `${l.itemName} ×${l.qty}`).join(", ")} footer={footer} size="lg" scrollBody>
       <div className="space-y-4">
+        {/* One row per requested item, each choosing its OWN source. Stock is rarely all in one place —
+            the warehouse may hold some items while another engineer's van holds the rest — so a single
+            request-level mode would force the PM into a dead end whenever neither covers everything.
+            Misc lines have no stock source; they just ride along with the kit. */}
         <div>
-          <p className="mb-1.5 text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">Fulfilment</p>
-          <div className="grid grid-cols-2 gap-2">
-            <ModeButton active={mode === "warehouse_issue"} onClick={() => setMode("warehouse_issue")} title="Warehouse issue" hint="Collect from stock" />
-            <ModeButton active={mode === "engineer_transfer"} onClick={() => setMode("engineer_transfer")} title="Engineer transfer" hint="From another van" disabled={allMisc} />
-          </div>
-          {allMisc && <p className="mt-1 text-[11px] text-[var(--faint)]">Misc-only request — issue from a warehouse.</p>}
-        </div>
-
-        {/* Warehouse issue: EVERY request line is shown so the planner sees the full request (an item that
-            never rendered read like a bug). IRM lines get a pickup-warehouse dropdown (the app-wide Select,
-            same as every other warehouse picker); customer-stock and misc lines are read-only — they're
-            issued automatically. */}
-        {mode === "warehouse_issue" && (
-          <div>
-            <p className="mb-2 text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">Pickup warehouse — per item</p>
-            {whLoading ? (
-              <p className="text-[11px] text-[var(--muted)]">Checking stock…</p>
-            ) : (
-              <div className="space-y-2.5">
-                {request.lines.map((l) => (
+          <p className="mb-2 text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">Fulfil each item from</p>
+          {whLoading ? (
+            <p className="text-[11px] text-[var(--muted)]">Checking stock…</p>
+          ) : (
+            <div className="space-y-2.5">
+              {request.lines.map((l) => {
+                const vans = vanOptions[l.id] ?? [];
+                const src = srcOf(l.id);
+                return (
                   <div key={l.id} className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3">
                     <p className="mb-1.5 truncate text-xs font-semibold text-[var(--ink)]">
                       {l.itemName} <span className="font-normal text-[var(--faint)]">×{l.qty}</span>
                     </p>
-                    {l.source === "irm" ? (
+
+                    {/* Source switch — only where a van is genuinely an option for THIS item. */}
+                    {l.source !== "misc" && vans.length > 0 && (
+                      <div className="mb-2 grid grid-cols-2 gap-2">
+                        <ModeButton active={src === "warehouse"} onClick={() => setLineSrc((p) => ({ ...p, [l.id]: "warehouse" }))} title="Warehouse" hint="Collect from stock" />
+                        <ModeButton active={src === "engineer"} onClick={() => setLineSrc((p) => ({ ...p, [l.id]: "engineer" }))} title="Engineer" hint="From another van" />
+                      </div>
+                    )}
+
+                    {l.source !== "misc" && src === "engineer" ? (
+                      <Select value={lineEng[l.id] ?? ""} onChange={(v) => setLineEng((p) => ({ ...p, [l.id]: v }))} options={vans} placeholder="— Select engineer —" ariaLabel={`Source engineer for ${l.itemName}`} />
+                    ) : l.source === "irm" ? (
                       (whOptions[l.id] ?? []).length === 0 ? (
                         <p className="text-[11px] font-semibold text-[var(--neg)]">No warehouses configured — add one to issue this item.</p>
                       ) : (
                         <>
                           <Select value={lineWh[l.id] ?? ""} onChange={(v) => setLineWh((p) => ({ ...p, [l.id]: v }))} options={whOptions[l.id] ?? []} placeholder="— Pick warehouse —" ariaLabel={`Warehouse for ${l.itemName}`} />
                           {unstocked.has(l.id) && (
-                            <p className="mt-1.5 text-[11px] text-amber-600">Not in stock in any warehouse right now — pick where it will be issued once restocked, or switch to Engineer transfer.</p>
+                            <p className="mt-1.5 text-[11px] text-amber-600">
+                              Not in stock in any warehouse right now — pick where it will be issued once restocked
+                              {vans.length > 0 ? ", or take it from an engineer's van above." : "."}
+                            </p>
                           )}
+                          {/* Tells the PM WHY there's no van option, instead of silently offering only one route. */}
+                          {vans.length === 0 && !holdersFailed && (
+                            <p className="mt-1.5 text-[11px] text-[var(--faint)]">No engineer holds enough of this item — warehouse only.</p>
+                          )}
+                          {holdersFailed && <p className="mt-1.5 text-[11px] text-amber-600">Couldn&apos;t check engineer vans — warehouse issue only.</p>}
                         </>
                       )
                     ) : l.source === "customer_stock" ? (
@@ -282,28 +327,15 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
                       <p className="text-[11px] text-[var(--muted)]">Misc item · handed over without a warehouse.</p>
                     )}
                   </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Engineer transfer: pick a holder — NO warehouse (stock comes from their van). */}
-        {mode === "engineer_transfer" && (
-          <div>
-            <p className="mb-1.5 text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">Transfer from engineer *</p>
-            {holders === null ? (
-              <p className="text-[11px] text-[var(--muted)]">Finding engineers who hold these items…</p>
-            ) : holders.length === 0 ? (
-              <p className="text-[11px] font-semibold text-[var(--neg)]">No engineer currently holds all these items — use warehouse issue instead.</p>
-            ) : (
-              <>
-                <Select value={fromEngineerId} onChange={setFromEngineerId} options={holders} placeholder="— Select engineer —" ariaLabel="Source engineer" />
-                <p className="mt-1 text-[11px] text-[var(--muted)]">Only engineers currently holding every requested item are listed. They approve the transfer from their portal; it then counts on this job&apos;s kit.</p>
-              </>
-            )}
-          </div>
-        )}
+                );
+              })}
+            </div>
+          )}
+          {allMisc && <p className="mt-1.5 text-[11px] text-[var(--faint)]">Misc-only request — nothing to source from stock.</p>}
+          <p className="mt-2 text-[11px] text-[var(--muted)]">
+            Items taken from a van open a transfer that engineer approves from their portal; warehouse items are collected from stock. Both count on this job&apos;s kit.
+          </p>
+        </div>
 
         <div>
           <p className="mb-1 text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">Note (optional)</p>

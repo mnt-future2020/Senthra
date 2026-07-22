@@ -540,9 +540,11 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Inherited from the purchase order and locked for this receipt.</p>
               </div>
               <div>
-                <label className={labelCls}>Delivery note number</label>
-                <input className={inputCls} value={deliveryNoteNumber} onChange={(e) => { setDeliveryNoteNumber(e.target.value); touch(); }} maxLength={80} placeholder="e.g. DN-2026-001" />
-                <p className="mt-1.5 text-[11px] text-[var(--faint)]">The supplier&apos;s delivery / dispatch note number — <span className="font-semibold text-[var(--muted)]">required before you can complete this receipt</span>.</p>
+                {/* Not required to save a draft, only to complete the receipt — hence the asterisk
+                    plus the "to complete" qualifier rather than a bare required marker. */}
+                <label className={labelCls}>Delivery note number<RequiredMark /></label>
+                <input className={inputCls} value={deliveryNoteNumber} onChange={(e) => { setDeliveryNoteNumber(e.target.value); touch(); }} maxLength={80} placeholder="e.g. DN-2026-001" aria-required="true" />
+                <p className="mt-1.5 text-[11px] text-[var(--faint)]">Supplier&apos;s delivery / dispatch note — required to complete.</p>
               </div>
               <div>
                 <label className={labelCls}>Carrier</label>
