@@ -134,9 +134,14 @@ export function EngineerKitRequests({ job, locked, open, onOpenChange }: { job: 
                   <KitLineChips lines={r.lines} />
                   {r.reason && <p className="mt-1 text-[11px] italic text-[var(--faint)]">“{r.reason}”</p>}
                   {r.status === "declined" && r.decisionNote && <p className="mt-0.5 text-[11px] text-[var(--neg)]">Planner: {r.decisionNote}</p>}
-                  {r.status === "approved" && r.fulfillmentMode === "engineer_transfer" && (
+                  {/* "mixed" = some items from stock, some from another van. It must say BOTH: the two
+                      older checks were exact-equality, so a mixed approval matched neither and the
+                      engineer was told nothing at all about how their kit was arriving. */}
+                  {r.status === "approved" && (r.fulfillmentMode === "engineer_transfer" || r.fulfillmentMode === "mixed") && (
                     <p className="mt-0.5 text-[11px] text-[var(--pos)]">
-                      Approved — coming via an engineer transfer.{" "}
+                      {r.fulfillmentMode === "mixed"
+                        ? "Approved — some items come from another engineer, the rest from the warehouse. "
+                        : "Approved — coming via an engineer transfer. "}
                       {/* The holder's name + phone (to coordinate the handover) live on the Transfers page. */}
                       {/* The engineer viewing this card is the RECIPIENT of the transfer, so it lives on
                           their "My requests" (outgoing) tab — that's where the holder's name + phone show. */}

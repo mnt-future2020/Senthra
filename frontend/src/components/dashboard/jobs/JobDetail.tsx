@@ -21,6 +21,7 @@ import {
   JOB_TYPE_LABELS,
   JobStatusChip,
   crossWarehouseReturnNote,
+  kitLineSourceSplit,
   formatDate,
   formatDateTime,
 } from "./jobStatus";
@@ -75,7 +76,11 @@ function JobView({ initial }: { initial: Job }) {
   // Completed / cancelled jobs and reconciled goods are frozen — no edits (matches the backend lock).
   const editable = can("jobs.edit") && job.status !== "completed" && job.status !== "cancelled" && job.goodsStatus !== "reconciled";
   const cancellable = can("jobs.cancel") && job.status !== "cancelled" && job.status !== "completed";
-  const reassignable = can("jobs.assign") && job.status !== "cancelled" && job.status !== "completed";
+  // Only these two statuses can go back to "assigned" — mirrors ALLOWED_TRANSITIONS in
+  // backend/src/modules/job/job.service.ts. Listed positively rather than as "not completed,
+  // not cancelled, not …": an accepted or in-progress job is already underway, so the server
+  // refuses the move, and offering the button there just produced a guaranteed error toast.
+  const reassignable = can("jobs.assign") && (job.status === "assigned" || job.status === "rejected");
 
   return (
     <div className="space-y-5">
@@ -132,7 +137,41 @@ function JobView({ initial }: { initial: Job }) {
                       {l.seCode && <div className="text-[11px] text-[var(--faint)]">{l.seCode}</div>}
                       {l.description && <div className="text-[11px] text-[var(--muted)]">{l.description}</div>}
                     </td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{l.warehouseName ?? "—"}</td>
+                    {/* One row can hold BOTH origins (kit lines merge), so break it down per source
+                        with quantities rather than naming a single place. */}
+                    <td className="px-4 py-3 text-[var(--muted)]">
+                      {(() => {
+                        const s = kitLineSourceSplit(l);
+                        if (!l.vanSources?.length) return l.warehouseName ?? "—";
+                        return (
+                          <div className="flex flex-col gap-0.5">
+                            {s.warehouseQty > 0 && l.warehouseName && (
+                              <span className="text-[var(--ink)]">
+                                {l.warehouseName} <span className="text-[var(--faint)]">×{s.warehouseQty}</span>
+                              </span>
+                            )}
+                            {l.vanSources.map((v) => (
+                              <span key={v.transferCode} className="font-semibold text-[var(--ink)]" title={`${v.transferCode} — ${v.quantity} from ${v.engineerName}`}>
+                                {v.engineerName} <span className="font-normal text-[var(--faint)]">×{v.quantity}</span>
+                                {v.status === "pending" && <span className="ml-1 text-[10px] font-bold text-amber-600">awaiting handover</span>}
+                              </span>
+                            ))}
+                            {/* Van stock owes no warehouse, so it goes back anywhere; warehouse-issued
+                                units owe their own site. A MERGED line has both, so state each part
+                                — the server enforces exactly this split on return. */}
+                            <span className="text-[10px] text-[var(--faint)]">
+                              {s.vanOnly
+                                ? "Return at any warehouse"
+                                : s.vanQty > 0 && s.warehouseQty > 0 && l.warehouseName
+                                  ? `Return ×${s.warehouseQty} at ${l.warehouseName}, ×${s.vanQty} at any warehouse`
+                                  : l.warehouseName
+                                    ? `Return at ${l.warehouseName}`
+                                    : ""}
+                            </span>
+                          </div>
+                        );
+                      })()}
+                    </td>
                     <td className="px-4 py-3 text-right font-semibold text-[var(--ink)]">{l.qty}</td>
                     <td className="px-4 py-3 text-right text-[var(--ink)]">{l.issued}</td>
                     <td className="px-4 py-3 text-right text-[var(--ink)]">{l.used}</td>

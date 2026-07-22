@@ -368,8 +368,14 @@ export function GoodsManagementTab({
                       return visibleLines.map((line, lineIdx) => {
                         const isMisc = line.lineType === "misc";
                         const atWh = !!line.warehouseId && line.warehouseId === warehouseId;
+                        // Away from its home warehouse, a line is still actionable if it holds
+                        // van-sourced stock — that owes no warehouse, so ANY may receive it (the return
+                        // path enforces the same, capped at vanReturnableQty). Greying it here would
+                        // have the WM turn the engineer away for a return the server would accept. At
+                        // its own home warehouse `atWh` already covers it (full line returnable there).
+                        const anyWh = !atWh && line.vanReturnableQty > 0;
                         const miscDone = isMisc && line.issuedQty >= line.plannedQty;
-                        const active = isMisc ? !miscDone : atWh;
+                        const active = isMisc ? !miscDone : atWh || anyWh;
                         const dim = active ? "" : "opacity-45";
                         const effReturned = effReturns.get(line.id) ?? line.returnedQty;
                         const toReturn = toReturns.get(line.id) ?? 0;
@@ -394,8 +400,29 @@ export function GoodsManagementTab({
                             )}
                             <td className={`px-4 py-3 ${active ? "font-medium text-[var(--ink)]" : "text-[var(--faint)]"} ${dim}`}>
                               {line.itemName}
+                              {/* At its home warehouse a line reads "This warehouse" (full line
+                                  returnable there); away from home, only its van portion can land, so
+                                  it reads "Any warehouse" with that quantity. */}
                               {isMisc ? (
                                 <span className="ml-1 text-[10px] text-[var(--faint)]">(misc)</span>
+                              ) : atWh && line.vanIssuedQty > 0 ? (
+                                // Mixed line at its home warehouse: split into two badges so a merged
+                                // "issued 5" is self-explanatory — the stock part owes here, the van
+                                // part can go anywhere (including here).
+                                <>
+                                  {line.issuedQty > line.vanIssuedQty && (
+                                    <span className="ml-1 rounded-full bg-[var(--accent)]/10 px-1.5 py-0.5 text-[10px] font-bold text-[var(--accent)]" title="Collected from this warehouse's stock — must be returned here.">
+                                      This warehouse · ×{line.issuedQty - line.vanIssuedQty}
+                                    </span>
+                                  )}
+                                  <span className="ml-1 rounded-full bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-bold text-emerald-600" title="Handed over from another engineer's van, so it can be returned at any warehouse.">
+                                    Any warehouse · ×{line.vanIssuedQty}
+                                  </span>
+                                </>
+                              ) : anyWh ? (
+                                <span className="ml-1 rounded-full bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-bold text-emerald-600" title="Handed over from another engineer's van — no warehouse released it, so it can be returned at any warehouse.">
+                                  Any warehouse{line.vanReturnableQty < line.issuedQty ? ` · ×${line.vanReturnableQty}` : ""}
+                                </span>
                               ) : atWh ? (
                                 <span className="ml-1 rounded-full bg-[var(--accent)]/10 px-1.5 py-0.5 text-[10px] font-bold text-[var(--accent)]">This warehouse</span>
                               ) : line.warehouseName ? (

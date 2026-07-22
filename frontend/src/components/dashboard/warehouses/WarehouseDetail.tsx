@@ -360,10 +360,17 @@ function IncomingTab({
   const showOwnerToggle = canGrn && canCustomer;
   const showViewSwitcher = active === "grn" && canExpected;
 
+  // Slot in the toolbar row that ExpectedDeliveries portals its filter menu into. The filter stays
+  // owned by that component (its options and counts are derived from rows only it has loaded); this
+  // only lends it a position, so the menu sits in the toolbar's empty middle instead of claiming a
+  // second full-width row of its own directly above the table.
+  const [filterSlot, setFilterSlot] = React.useState<HTMLDivElement | null>(null);
+
   return (
     <div className="flex h-full flex-col gap-4">
       {/* One toolbar row: owner toggle (Company/Customer) on the left — matching the Inventory tab —
-          and, only while Company is active, the Expected/Received view switcher on the right. */}
+          the Expected-deliveries filter in the middle, and, only while Company is active, the
+          Expected/Received view switcher on the right. */}
       {(showOwnerToggle || showViewSwitcher) && (
         <div className="flex shrink-0 flex-wrap items-center gap-2">
           {showOwnerToggle &&
@@ -384,33 +391,44 @@ function IncomingTab({
                 {p.label}
               </button>
             ))}
-          {showViewSwitcher && (
-            <div className={`inline-flex items-center rounded-full border border-[var(--border)] bg-[var(--surface-2)] p-0.5 ${showOwnerToggle ? "ml-auto" : ""}`}>
-              {([
-                { key: "expected", label: "Expected" },
-                { key: "received", label: "Received" },
-              ] as const).map((v) => (
-                <button
-                  key={v.key}
-                  type="button"
-                  onClick={() => setInbound(v.key)}
-                  className={`rounded-full px-3 py-1 text-[11px] font-bold transition-all ${
-                    inbound === v.key
-                      ? "bg-[var(--accent)] text-white"
-                      : "text-[var(--muted)] hover:text-[var(--ink)]"
-                  }`}
-                >
-                  {v.label}
-                </button>
-              ))}
-            </div>
-          )}
+          {/* Portal target — see filterSlot — grouped with the view switcher so both sit together
+              on the right. ml-auto goes on the group, not the slot: on the slot it would claim the
+              row's free space and shove the switcher off the edge once the menu appeared. An empty
+              slot has no width, so the row looks exactly as it did before. */}
+          <div className={`flex items-center gap-2 ${showOwnerToggle ? "ml-auto" : ""}`}>
+            <div ref={setFilterSlot} className="flex items-center" />
+            {showViewSwitcher && (
+              <div className="inline-flex items-center rounded-full border border-[var(--border)] bg-[var(--surface-2)] p-0.5">
+                {([
+                  { key: "expected", label: "Expected" },
+                  { key: "received", label: "Received" },
+                ] as const).map((v) => (
+                  <button
+                    key={v.key}
+                    type="button"
+                    onClick={() => setInbound(v.key)}
+                    className={`rounded-full px-3 py-1 text-[11px] font-bold transition-all ${
+                      inbound === v.key
+                        ? "bg-[var(--accent)] text-white"
+                        : "text-[var(--muted)] hover:text-[var(--ink)]"
+                    }`}
+                  >
+                    {v.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
       <div className="min-h-0 flex-1">
         {active === "grn" ? (
           inbound === "expected" ? (
-            <ExpectedDeliveries warehouseId={warehouseId} warehouseCode={warehouseCode} />
+            // key: a different warehouse is a different worklist, so remount rather than reuse.
+            // Without it the previous warehouse's rows stay on screen during the refetch (no
+            // skeleton, because `rows` isn't null), a stale error pins the error state forever,
+            // and the active filter/page carry over to a warehouse where they may match nothing.
+            <ExpectedDeliveries key={warehouseId} warehouseId={warehouseId} warehouseCode={warehouseCode} filterSlot={filterSlot} />
           ) : (
             <GoodsReceiptsView warehouseId={warehouseId} warehouseCode={warehouseCode} embedded />
           )
@@ -421,6 +439,9 @@ function IncomingTab({
     </div>
   );
 }
+
+// Matches Expected deliveries' PAGE_SIZE so both Incoming-stock pools page identically.
+const INCOMING_PAGE_SIZE = 20;
 
 function IncomingStock({
   warehouseId,
@@ -433,6 +454,9 @@ function IncomingStock({
   const [items, setItems] = React.useState<PendingStockItem[] | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [receiveTarget, setReceiveTarget] = React.useState<PendingStockItem | null>(null);
+  // Client-side paging, matching the Company (GRN) pool's Expected deliveries: the whole
+  // worklist is already loaded in one call, so this only slices what's rendered.
+  const [page, setPage] = React.useState(1);
 
   const load = React.useCallback(() => {
     customerService
@@ -462,6 +486,16 @@ function IncomingStock({
     }
   };
 
+  const total = items?.length ?? 0;
+  const totalPages = Math.max(1, Math.ceil(total / INCOMING_PAGE_SIZE));
+  // Clamp rather than store a corrected page: receiving the last row on the last page shrinks the
+  // list, and a stale out-of-range `page` would otherwise render an empty table.
+  const safePage = Math.min(page, totalPages);
+  const pageRows = React.useMemo(
+    () => (items ?? []).slice((safePage - 1) * INCOMING_PAGE_SIZE, safePage * INCOMING_PAGE_SIZE),
+    [items, safePage],
+  );
+
   if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
   if (items === null) return <TableSkeleton headers={["Customer", "Item", "Qty", "Received", "Status", "Requested", ""]} minWidth={700} />;
   if (items.length === 0) {
@@ -475,8 +509,8 @@ function IncomingStock({
   }
 
   return (
-    <>
-      <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+    <div className="flex h-full min-h-0 flex-col gap-4">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
         <div className="min-h-0 flex-1 overflow-auto">
         <table className="w-full text-left text-sm" style={{ minWidth: 700 }}>
           <thead className="sticky top-0 z-10 bg-[var(--surface)]">
@@ -491,7 +525,7 @@ function IncomingStock({
             </tr>
           </thead>
           <tbody>
-            {items.map((it) => {
+            {pageRows.map((it) => {
               const remaining = it.quantity - it.receivedQuantity;
               return (
                 <tr key={it.assignmentId} className="border-b border-[var(--border)] align-top last:border-0">
@@ -535,6 +569,10 @@ function IncomingStock({
         </div>
       </div>
 
+      <div className="shrink-0">
+        <Pagination page={safePage} totalPages={totalPages} total={total} label="items" onPage={setPage} />
+      </div>
+
       {receiveTarget && (
         <ReceiveStockModal
           assignment={{
@@ -554,7 +592,7 @@ function IncomingStock({
           onSaved={onReceived}
         />
       )}
-    </>
+    </div>
   );
 }
 

@@ -9,6 +9,8 @@ import * as irmService from "#modules/irm/irm.service.js";
 import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
 import * as inventoryService from "#modules/inventory/inventory.service.js";
 import * as engineerStockRepo from "#modules/engineer-stock/engineer-stock.repository.js";
+import * as transferRepo from "#modules/engineer-transfer/engineer-transfer.repository.js";
+import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import * as goodsManagementRepo from "./goods-management.repository.js";
 import type { CloseReconcileInput, PostMovementInput, RestoreDamagedInput, ScanLookupInput } from "./goods-management.validation.js";
@@ -232,6 +234,67 @@ export async function getWarehouseDemand(warehouseId: string): Promise<Warehouse
     .sort((a, b) => a.free - b.free); // shortfalls (most negative free) first
 }
 
+// Qty on a kit line that reached the engineer from another engineer's VAN (a completed job-scoped
+// transfer), keyed by kit-line id. Pending transfers are excluded — nothing has physically moved yet.
+async function completedVanQtyByKitLine(kitLineIds: string[]): Promise<Map<string, number>> {
+  const byLine = await transferRepo.findVanSourcesByKitLines(kitLineIds);
+  const out = new Map<string, number>();
+  for (const [lineId, sources] of byLine) {
+    out.set(lineId, sources.filter((s) => s.status === "completed").reduce((n, s) => n + s.quantity, 0));
+  }
+  return out;
+}
+
+// A return may normally only be scanned at the kit line's own warehouse: that warehouse released the
+// stock, so it must be the one credited back, or its ledger gains units it never issued while the
+// real issuer stays short.
+//
+// Van-sourced stock is different — it came engineer→engineer and NO warehouse ever released it, so
+// none is owed it back. Handing it in anywhere is a clean gain for whichever warehouse receives it.
+//
+// Kit lines MERGE sources (2 collected from a warehouse + 3 from a van become one row), so a line can
+// owe part of itself to its home warehouse and none of the rest. This computes how many units of ONE
+// kit line may still be returned AWAY from its home. Only the van portion qualifies, and it's capped
+// conservatively — consumption and any prior away-from-home returns are assumed to have used the van
+// units first — so the running total of away-from-home returns can never exceed the van quantity.
+// That guarantees the warehouse-owed part is always brought home, never mis-credited elsewhere. We
+// can't tell one physical box from another; this is the safe accounting, not a per-unit truth.
+function vanReturnableAwayFromHome(
+  movements: Awaited<ReturnType<typeof goodsManagementRepo.findMovementsByJob>>,
+  kitLineId: string,
+  homeWarehouseId: string | null,
+  vanQty: number,
+): number {
+  let used = 0;
+  let awayReturned = 0;
+  for (const m of movements) {
+    if (m.status !== "posted") continue;
+    for (const l of m.items) {
+      if (l.jobKitLineId !== kitLineId) continue;
+      if (m.direction === "consume") used += l.qty;
+      else if (m.direction === "return" && m.warehouseId !== homeWarehouseId) awayReturned += l.qty;
+    }
+  }
+  return Math.max(0, vanQty - used - awayReturned);
+}
+
+// For a return being scanned at a warehouse that ISN'T a kit line's home: find the kit line for the
+// item that can still take a return here (its van portion), and how many units it may take. Picks the
+// line with the most remaining allowance when the item is homed at several. Null ⇒ nothing here.
+async function findAwayReturnKitLine<T extends { id: string; warehouseId: string | null }>(
+  candidates: T[],
+  movements: Awaited<ReturnType<typeof goodsManagementRepo.findMovementsByJob>>,
+): Promise<{ kit: T; cap: number } | null> {
+  if (candidates.length === 0) return null;
+  const vanQty = await completedVanQtyByKitLine(candidates.map((c) => c.id));
+  let best: { kit: T; cap: number } | null = null;
+  for (const c of candidates) {
+    const cap = vanReturnableAwayFromHome(movements, c.id, c.warehouseId, vanQty.get(c.id) ?? 0);
+    if (cap > 0 && (!best || cap > best.cap)) best = { kit: c, cap };
+  }
+  return best;
+}
+
 export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Promise<ScanMatch> {
   const job = await jobRepo.findById(input.jobId);
   if (!job) throw notFound("Job not found.");
@@ -246,7 +309,18 @@ export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Pr
     }
     // Match the kit line for THIS item AT THIS warehouse — a job can list the same IRM item at more
     // than one warehouse, so picking the first by item id alone would resolve the wrong warehouse.
-    const kit = (job.kitLines ?? []).find((k) => k.lineType === "irm" && k.irmItemId === irmItem.id && k.warehouseId === input.warehouseId);
+    let kit = (job.kitLines ?? []).find((k) => k.lineType === "irm" && k.irmItemId === irmItem.id && k.warehouseId === input.warehouseId);
+    // When the item isn't homed at the scanning warehouse, a RETURN of its VAN portion may still land
+    // here (van stock owes no warehouse). awayCap is that allowance; null ⇒ a normal same-warehouse
+    // return, capped by the whole line. Issues are unaffected — you can only issue what's actually held.
+    let awayCap: number | null = null;
+    if (!kit && input.direction === "return") {
+      const away = await findAwayReturnKitLine(
+        (job.kitLines ?? []).filter((k) => k.lineType === "irm" && k.irmItemId === irmItem.id),
+        movements,
+      );
+      if (away) { kit = away.kit; awayCap = away.cap; }
+    }
     if (!kit) {
       const onJobElsewhere = (job.kitLines ?? []).some((k) => k.lineType === "irm" && k.irmItemId === irmItem.id);
       throw badRequest(onJobElsewhere
@@ -255,19 +329,21 @@ export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Pr
     }
     assertWarehouseAccess(actor, input.warehouseId);
     const already = issuedForKitLine(movements, kit.id);
-    const bal = await inventoryRepo.findBalancePair(irmItem.id, kit.warehouseId!);
+    // Availability is always read at the warehouse being scanned — for a van return that's where the
+    // stock is actually landing, not the line's nominal home.
+    const bal = await inventoryRepo.findBalancePair(irmItem.id, input.warehouseId);
     const available = (bal?.quantityOnHand ?? 0) - (bal?.quantityReserved ?? 0);
-    // Return cap = what's still out FROM THIS warehouse's kit line (issued − used − returned), bounded
-    // by the engineer's REAL global holding. Per-warehouse, NOT raw global: an item issued from two
-    // warehouses must only allow back at each warehouse what actually left it — else returning all of a
-    // multi-warehouse holding at one warehouse would over-credit it (and short the other). The global
-    // bound also covers the cross-job case (item handed back under another job → global lower).
+    // Return cap, bounded by the engineer's REAL global holding. At the line's HOME warehouse that's
+    // the whole line still out (issued − used − returned) — an item issued from two warehouses must
+    // only allow back at each what actually left it, else one is over-credited and the other short.
+    // Away from home, only the van portion may land (awayCap). The global bound also covers the
+    // cross-job case (item handed back under another job → global lower).
     const split = kitLineSplit(movements, kit.id);
     const lineOutstanding = Math.max(0, split.issued - split.used - split.returned);
     const globalHeld = job.assignedEngineerId
       ? (await engineerStockRepo.findEngineerBalance(irmItem.id, job.assignedEngineerId))?.quantityOnHand ?? 0
       : 0;
-    const held = Math.min(lineOutstanding, globalHeld);
+    const held = Math.min(awayCap ?? lineOutstanding, globalHeld);
     return {
       source: "irm", irmItemId: irmItem.id, jobKitLineId: kit.id, itemName: irmItem.name, uom: irmItem.baseUnit,
       plannedQty: kit.qty, alreadyIssued: already, remainingIssuable: kit.qty - already,
@@ -558,6 +634,16 @@ export interface QueueKitLine {
   engineerHeld: number; // engineer's REAL current holding of this item (same balance the return scan
   // checks; shared per item across jobs/warehouses) — caps how much can actually be returned
   available: number; // warehouse pool (no cost/value exposed)
+  // How many still-out units of this line came from another engineer's van and so may be RETURNED at
+  // any warehouse (no warehouse released them; the return path enforces the same via
+  // vanReturnableAwayFromHome). > 0 lets the queue keep the line actionable away from its nominal home
+  // instead of greying it out. For a MIXED line this is just the van portion — the warehouse-issued
+  // part still owes its home. 0 for an ordinary warehouse-issued line.
+  vanReturnableQty: number;
+  // Total units of this line handed over from a van (completed transfers). Lets the queue show the
+  // source split — "N from stock · M from van" — so a merged line's composition is visible rather
+  // than hidden behind one issued total. The warehouse-issued part is issuedQty − vanIssuedQty.
+  vanIssuedQty: number;
 }
 
 export interface QueueRow {
@@ -634,6 +720,7 @@ function buildKitLineRow(
   balByKey: Map<string, Awaited<ReturnType<typeof inventoryRepo.findBalancesByItemsAndWarehouses>>[number]>,
   cseQty: Map<string, number>,
   engineerHeld: number,
+  vanQty: number, // qty on this line handed over from a van (completed transfers only)
 ): QueueKitLine {
   let available = 0;
   if (kl.lineType === "irm" && kl.irmItemId && kl.warehouseId) {
@@ -658,6 +745,8 @@ function buildKitLineRow(
     returnedQty: split.returned,
     engineerHeld,
     available,
+    vanReturnableQty: vanReturnableAwayFromHome(movements, kl.id, kl.warehouseId, vanQty),
+    vanIssuedQty: Math.min(vanQty, split.issued), // clamp: a transfer can outlive a since-reduced line
   };
 }
 
@@ -673,7 +762,11 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
   const pageSize = Math.min(Math.max(Math.trunc(params.pageSize ?? DEFAULT_QUEUE_PAGE_SIZE), 1), MAX_QUEUE_PAGE_SIZE);
   const search = params.search?.trim() || undefined;
 
-  // 1) Candidate jobs for this warehouse, DB-filtered by job status + search, newest first.
+  // 1) Candidate jobs for this warehouse, DB-filtered by job status + search, newest first. The query
+  // also widens to jobs holding van-sourced stock (JobKitLine.hasVanSource) — that owes no warehouse
+  // and is returnable at ANY of them, so a van return must be findable here even though its kit line
+  // is homed elsewhere. Widening adds candidates, not noise: step 2c keeps such a job only while it
+  // still has van stock out here.
   const jobs = await jobRepo.findActiveForGoodsManagement(params.warehouseId, search);
 
   // 2) goodsStatus per job (one batched query) → active / closed / exact-status filter.
@@ -681,7 +774,51 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
   const statusByJob = new Map(summaries.map((s) => [s.jobId, s.goodsStatus]));
   const goodsStatusOf = (jobId: string) => statusByJob.get(jobId) ?? "not_issued";
   const matchesStatus = (gs: string) => (status === "active" ? gs !== "reconciled" : gs === status);
-  const filtered = jobs.filter((j) => matchesStatus(goodsStatusOf(j.id)));
+
+  const byStatus = jobs.filter((j) => matchesStatus(goodsStatusOf(j.id)));
+
+  // 2b) Drop jobs the DB matched ONLY through the warehouse-blind misc arm of the kit-line filter
+  // (see jobRepo.findActiveForGoodsManagement) once that misc work is finished. A misc line carries
+  // no warehouseId, so it pulls its job into EVERY warehouse's queue — right while the item is still
+  // outstanding (any warehouse may hand it over), but pure noise afterwards: every line then renders
+  // greyed out, nothing can be issued or returned here, and the job still inflates "Total: N jobs".
+  //
+  // This MUST be decided per LINE, not from the job-level goodsStatus: a job sitting at
+  // "partially_issued" because a real line at ANOTHER warehouse is short has no work here at all,
+  // yet the job-level status can't tell which line type is pending. So we pull issued-per-kit-line
+  // for the status-matched candidates in ONE lean query (no relation includes) and mirror exactly
+  // what the UI calls actionable — a real line at this warehouse, or a misc line not yet fully
+  // issued (GoodsManagementTab: `active = isMisc ? !miscDone : atWh`). Running it here, BEFORE
+  // pagination, is what keeps page counts and "Total: N jobs" honest.
+  const issuedByLine = await goodsManagementRepo.findIssuedQtyByKitLine(byStatus.map((j) => j.id));
+  const hasWorkHere = (j: (typeof jobs)[number]) =>
+    (j.kitLines ?? []).some((kl) =>
+      kl.lineType === "misc"
+        ? (issuedByLine.get(kl.id) ?? 0) < kl.qty
+        : kl.warehouseId === params.warehouseId,
+    );
+
+  // 2c) A job pulled in ONLY by the van widening (no line here, no pending misc) stays only if it
+  // still has van stock returnable away from home — else it's a done job with nothing to do here, and
+  // showing it would be the every-warehouse noise we avoid. Precise per-line check; movements load
+  // ONLY for this subset (active van jobs not homed here), bounded well below the whole candidate set.
+  const maybeVanOnly = byStatus.filter((j) => !hasWorkHere(j));
+  const vanReturnableJobs = new Set<string>();
+  if (maybeVanOnly.length > 0) {
+    const movesByJob = new Map<string, Awaited<ReturnType<typeof goodsManagementRepo.findMovementsByJobs>>>();
+    for (const m of await goodsManagementRepo.findMovementsByJobs(maybeVanOnly.map((j) => j.id))) {
+      (movesByJob.get(m.jobId) ?? movesByJob.set(m.jobId, []).get(m.jobId)!).push(m);
+    }
+    const vanQtyByLine = await completedVanQtyByKitLine(maybeVanOnly.flatMap((j) => (j.kitLines ?? []).map((k) => k.id)));
+    for (const j of maybeVanOnly) {
+      const has = (j.kitLines ?? []).some(
+        (k) => k.lineType === "irm" && vanReturnableAwayFromHome(movesByJob.get(j.id) ?? [], k.id, k.warehouseId, vanQtyByLine.get(k.id) ?? 0) > 0,
+      );
+      if (has) vanReturnableJobs.add(j.id);
+    }
+  }
+
+  const filtered = byStatus.filter((j) => hasWorkHere(j) || vanReturnableJobs.has(j.id));
 
   // 3) Paginate (createdAt-desc order preserved from the query).
   const total = filtered.length;
@@ -724,6 +861,10 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
     for (const h of await goodsManagementRepo.findCustomerHoldingsByEngineer(engId)) engHeld.set(`${engId}|${h.customerStockEntryId}`, h.quantityOnHand);
   }
 
+  // Van-supplied qty per kit line for the PAGE (one lean query) — decides which lines stay actionable
+  // away from their nominal home warehouse.
+  const vanQtyByLine = await completedVanQtyByKitLine(pageJobs.flatMap((j) => (j.kitLines ?? []).map((k) => k.id)));
+
   const rows: QueueRow[] = pageJobs.map((job) => {
     const movements = movementsByJob.get(job.id) ?? [];
     const heldOf = (kl: { irmItemId: string | null; customerStockEntryId: string | null }) => {
@@ -731,7 +872,7 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
       const itemId = kl.irmItemId ?? kl.customerStockEntryId;
       return itemId ? engHeld.get(`${job.assignedEngineerId}|${itemId}`) ?? 0 : 0;
     };
-    const kitLines: QueueKitLine[] = (job.kitLines ?? []).map((kl) => buildKitLineRow(kl, movements, balByKey, cseQty, heldOf(kl)));
+    const kitLines: QueueKitLine[] = (job.kitLines ?? []).map((kl) => buildKitLineRow(kl, movements, balByKey, cseQty, heldOf(kl), vanQtyByLine.get(kl.id) ?? 0));
     return {
       jobId: job.id,
       jobNumber: job.jobNumber,
@@ -793,7 +934,8 @@ export async function getJobGoods(jobId: string, actor?: AuditActor): Promise<Jo
     const itemId = kl.irmItemId ?? kl.customerStockEntryId;
     return itemId ? engHeld.get(itemId) ?? 0 : 0;
   };
-  const lines: QueueKitLine[] = (job.kitLines ?? []).map((kl) => buildKitLineRow(kl, movements, balByKey, cseQty, heldOf(kl)));
+  const vanQtyByLine = await completedVanQtyByKitLine((job.kitLines ?? []).map((k) => k.id));
+  const lines: QueueKitLine[] = (job.kitLines ?? []).map((kl) => buildKitLineRow(kl, movements, balByKey, cseQty, heldOf(kl), vanQtyByLine.get(kl.id) ?? 0));
 
   return {
     job: {
@@ -825,6 +967,11 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
   if (returnSummary?.goodsStatus === "reconciled") throw conflict("This job has already been reconciled and is locked.");
   const actorEmail = actor?.email ?? null;
 
+  // Fetched at most ONCE per call and shared by the van-source check below and the outstanding-qty
+  // budget further down (which already needed them) — so allowing van returns costs no extra query.
+  let movementsCache: Awaited<ReturnType<typeof goodsManagementRepo.findMovementsByJob>> | null = null;
+  const loadMovements = async () => (movementsCache ??= await goodsManagementRepo.findMovementsByJob(job.id));
+
   // Resolve line details + warehouse for the movement header (derived from kit lines).
   // For returns we derive item names + warehouse from the kit list (already on the job), not by
   // re-fetching the IRM item or CSE — this keeps the pre-validation fast and test-friendly.
@@ -838,6 +985,8 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
     warehouseCode: string | null;
     customerId: string | null;
     condition: "good" | "damaged";
+    awayReturn?: boolean; // van portion returned away from the kit line's home warehouse
+    kitHomeWarehouseId?: string | null; // the kit line's own home (sizes the away-from-home budget)
   };
   const resolved: Resolved[] = [];
 
@@ -846,13 +995,48 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
     if (line.source === "irm") {
       if (!line.irmItemId) throw badRequest("IRM return line is missing irmItemId.");
       // Match the kit line for this item AT THIS warehouse (an item may be listed at several).
-      const kit = (job.kitLines ?? []).find((k) => k.lineType === "irm" && k.irmItemId === line.irmItemId && k.warehouseId === input.warehouseId);
+      let kit = (job.kitLines ?? []).find((k) => k.lineType === "irm" && k.irmItemId === line.irmItemId && k.warehouseId === input.warehouseId);
+      // Mirror scanLookup: the VAN portion of a line owes no warehouse, so it can be scanned back in
+      // anywhere. Must be enforced HERE too — scanLookup only feeds the UI, and this is the call that
+      // actually moves stock. `awayReturn` flags it so the per-warehouse budget below caps at the van
+      // portion (not the whole line) and the movement is credited to the receiving warehouse.
+      const awayReturn = !kit;
+      // The per-line van cap below is keyed by jobKitLineId. Without it an away return skips the cap
+      // entirely (bounded only by physical holding), so it could over-credit the receiving warehouse
+      // while leaving the line's home warehouse permanently short. scanLookup always supplies the line
+      // id, so require it here rather than letting the capacity-based fallback size an uncapped return.
+      if (awayReturn && !line.jobKitLineId) throw badRequest("An away-from-home return must reference its kit line.");
+      if (!kit) {
+        // Resolve the EXACT kit line the client scanned (its id came from scanLookup), NOT a fresh
+        // capacity-based re-pick. When the same item is homed at two warehouses, re-picking could land
+        // on the other line if caps shifted between scan and post, then size THIS return's budget with
+        // that line's home — miscounting home-vs-away returns and wrongly rejecting. The scanned line
+        // keeps scan and post consistent. Falls back to the capacity pick only if no line id was sent.
+        kit = line.jobKitLineId
+          ? (job.kitLines ?? []).find((k) => k.lineType === "irm" && k.id === line.jobKitLineId && k.irmItemId === line.irmItemId && !!k.warehouseId && k.warehouseId !== input.warehouseId)
+          : undefined;
+        if (!kit) {
+          const away = await findAwayReturnKitLine(
+            (job.kitLines ?? []).filter((k) => k.lineType === "irm" && k.irmItemId === line.irmItemId),
+            await loadMovements(),
+          );
+          kit = away?.kit;
+        }
+      }
       if (!kit?.warehouseId) throw badRequest("Cannot determine warehouse for this IRM return line.");
       assertWarehouseAccess(actor, input.warehouseId);
       resolved.push({
-        line, itemName: kit.itemName, uom: null, sku: null, warehouseId: kit.warehouseId,
-        warehouseName: kit.warehouseName ?? null, warehouseCode: kit.warehouseCode ?? null,
+        line, itemName: kit.itemName, uom: null, sku: null,
+        // Credit the warehouse that physically received it — for a van return that's the scanning
+        // warehouse, not the line's nominal home (which never held this stock).
+        warehouseId: awayReturn ? input.warehouseId : kit.warehouseId,
+        warehouseName: awayReturn ? null : kit.warehouseName ?? null,
+        warehouseCode: awayReturn ? null : kit.warehouseCode ?? null,
         customerId: null, condition,
+        awayReturn,
+        // The resolved line's own home — sizes the away-from-home budget (counts returns made at any
+        // warehouse other than this). Same as input.warehouseId for a home return.
+        kitHomeWarehouseId: kit.warehouseId,
       });
     } else {
       if (!line.customerStockEntryId) throw badRequest("Customer return line is missing customerStockEntryId.");
@@ -888,8 +1072,17 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
   }
 
   const warehouseId = resolved[0].warehouseId;
-  const warehouseName = resolved[0].warehouseName;
-  const warehouseCode = resolved[0].warehouseCode;
+  // Van-sourced lines carry no warehouse snapshot (their kit line is homed elsewhere, and naming
+  // THAT warehouse on a movement received here would be wrong). Every resolved line is guaranteed to
+  // be at input.warehouseId by the check above, so resolve the receiving warehouse's own labels once
+  // rather than persisting nulls — the snapshot is what keeps history readable after a rename.
+  let warehouseName = resolved[0].warehouseName;
+  let warehouseCode = resolved[0].warehouseCode;
+  if (warehouseName === null) {
+    const wh = await warehouseRepo.findById(warehouseId);
+    warehouseName = wh?.name ?? null;
+    warehouseCode = wh?.code ?? null;
+  }
   const engineerName = job.assignedEngineerName ?? "";
   const engineerEmail = job.assignedEngineerEmail ?? null;
 
@@ -909,17 +1102,25 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
     notes: r.line.notes ?? null,
   }));
 
-  // Per-warehouse return cap: each line can return only what's still out FROM ITS kit line
-  // (issued − used − returned), so a multi-warehouse holding can't be fully returned at one warehouse
-  // (which would over-credit it + short the other). Computed from the current movements; a running
-  // budget handles multiple lines (e.g. good + damaged split) against the same kit line in one request.
-  const returnMovements = await goodsManagementRepo.findMovementsByJob(job.id);
+  // Per-warehouse return cap: at the line's HOME warehouse it can return only what's still out from
+  // its kit line (issued − used − returned), so a multi-warehouse holding can't be fully returned at
+  // one warehouse (over-crediting it + shorting the other). AWAY from home, only the van portion may
+  // land (vanReturnableAwayFromHome). Computed from current movements; a running budget handles
+  // multiple lines (e.g. good + damaged split) against the same kit line in one request.
+  const returnMovements = await loadMovements();
+  const awayVanQty = await completedVanQtyByKitLine(
+    resolved.filter((r) => r.awayReturn && r.line.jobKitLineId).map((r) => r.line.jobKitLineId!),
+  );
   const outstandingByLine = new Map<string, number>();
   for (const r of resolved) {
     const klId = r.line.jobKitLineId;
     if (!klId || outstandingByLine.has(klId)) continue;
-    const s = kitLineSplit(returnMovements, klId);
-    outstandingByLine.set(klId, Math.max(0, s.issued - s.used - s.returned));
+    if (r.awayReturn) {
+      outstandingByLine.set(klId, vanReturnableAwayFromHome(returnMovements, klId, r.kitHomeWarehouseId ?? null, awayVanQty.get(klId) ?? 0));
+    } else {
+      const s = kitLineSplit(returnMovements, klId);
+      outstandingByLine.set(klId, Math.max(0, s.issued - s.used - s.returned));
+    }
   }
 
   const created = await goodsManagementRepo.createMovementWithCode(
@@ -943,11 +1144,14 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
         const { line, condition, warehouseId: wh } = r;
         const qty = line.qty;
 
-        // Per-warehouse cap: can't return more at this warehouse than its kit line still has out.
+        // Per-warehouse cap: can't return more than the kit line still has out here — the whole line
+        // at its home warehouse, or just the van portion away from home.
         if (line.jobKitLineId) {
           const remaining = outstandingByLine.get(line.jobKitLineId) ?? 0;
           if (qty > remaining) {
-            throw conflict(`Only ${remaining} of ${r.itemName} can be returned at this warehouse — that's all that's still out from here.`);
+            throw conflict(r.awayReturn
+              ? `Only ${remaining} of ${r.itemName} came from a van and can be returned away from its home warehouse — the rest must go back there.`
+              : `Only ${remaining} of ${r.itemName} can be returned at this warehouse — that's all that's still out from here.`);
           }
           outstandingByLine.set(line.jobKitLineId, remaining - qty);
         }

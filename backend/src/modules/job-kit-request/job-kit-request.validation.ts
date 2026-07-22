@@ -55,9 +55,29 @@ export const createKitRequestSchema = z.object({
 });
 export type CreateKitRequestInput = z.infer<typeof createKitRequestSchema>;
 
+// PER-LINE fulfilment source. Requested stock is rarely all in one place — the warehouse may hold
+// some items while another engineer's van holds the rest — so each line names its own source:
+//   warehouse → warehouseId required (IRM lines; misc/customer-stock derive or need none)
+//   engineer  → engineerId required (that line joins the transfer opened from that engineer)
+// A line is always fulfilled ENTIRELY from one source; quantities are never split.
+const lineSourceSchema = z
+  .object({
+    requestLineId: objectId,
+    sourceType: z.enum(["warehouse", "engineer"]),
+    warehouseId: objectId.optional(),
+    engineerId: objectId.optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (v.sourceType === "engineer" && !v.engineerId) {
+      ctx.addIssue({ code: "custom", path: ["engineerId"], message: "Pick the engineer to transfer this item from." });
+    }
+  });
+
 export const approveKitRequestSchema = z
   .object({
-    fulfillmentMode: z.enum(["warehouse_issue", "engineer_transfer"]),
+    // Legacy request-level mode. Optional now that sources are chosen per line — kept so older
+    // clients (and the all-warehouse / all-transfer shorthand) keep working unchanged.
+    fulfillmentMode: z.enum(["warehouse_issue", "engineer_transfer"]).optional(),
     // Warehouse-issue mode: the pickup warehouse chosen PER IRM request line (requestLineId → warehouseId),
     // so different items can be collected from different warehouses. Customer-stock lines derive their
     // warehouse from the stock entry; misc lines have none. Ignored in engineer-transfer mode.
@@ -65,11 +85,29 @@ export const approveKitRequestSchema = z
     // Engineer-transfer mode: the engineer to pull stock from (must hold every stock-tracked line). No
     // warehouse is involved — the stock comes from their van.
     fromEngineerId: objectId.optional(),
+    // Per-line sources — the preferred shape. When present it fully describes the fulfilment and
+    // takes precedence over fulfillmentMode/lineWarehouses/fromEngineerId.
+    lineSources: z.array(lineSourceSchema).max(100).optional(),
     decisionNote: z.string().trim().max(2000).optional(),
   })
   .superRefine((v, ctx) => {
-    if (v.fulfillmentMode === "engineer_transfer" && !v.fromEngineerId) {
+    // Exactly one shape must describe the fulfilment: per-line sources, or the legacy mode.
+    if (!v.lineSources?.length && !v.fulfillmentMode) {
+      ctx.addIssue({ code: "custom", path: ["lineSources"], message: "Choose where each item will be fulfilled from." });
+      return;
+    }
+    if (!v.lineSources?.length && v.fulfillmentMode === "engineer_transfer" && !v.fromEngineerId) {
       ctx.addIssue({ code: "custom", path: ["fromEngineerId"], message: "Pick the engineer to transfer stock from." });
+    }
+    // One source per request line — a duplicate would make the winning source ambiguous.
+    if (v.lineSources?.length) {
+      const seen = new Set<string>();
+      v.lineSources.forEach((l, i) => {
+        if (seen.has(l.requestLineId)) {
+          ctx.addIssue({ code: "custom", path: ["lineSources", i], message: "This item has two sources — choose one." });
+        }
+        seen.add(l.requestLineId);
+      });
     }
   });
 export type ApproveKitRequestInput = z.infer<typeof approveKitRequestSchema>;

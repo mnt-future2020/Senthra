@@ -60,9 +60,9 @@ export const getOne = asyncHandler(async (req, res) => {
   res.json({ request: await kitRequestService.getOne(param(req, "id"), actorFrom(req)) });
 });
 
-// GET /job-kit-requests/:id/eligible-holders  (engineers who hold ALL the request's stock-tracked lines)
-export const eligibleHolders = asyncHandler(async (req, res) => {
-  res.json({ holders: await kitRequestService.eligibleHolders(param(req, "id")) });
+// GET /job-kit-requests/:id/line-holders  (per-line van options for the per-line source picker)
+export const lineHolders = asyncHandler(async (req, res) => {
+  res.json({ lines: await kitRequestService.holdersByLine(param(req, "id")) });
 });
 
 // POST /job-kit-requests/:id/approve  (PM/planner)

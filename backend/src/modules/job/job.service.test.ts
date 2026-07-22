@@ -48,6 +48,7 @@ vi.mock("#modules/irm/irm.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/warehouse/warehouse.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/inventory/inventory.repository.js", () => ({ findBalancePair: vi.fn() }));
 vi.mock("#modules/user/user.repository.js", () => ({ findById: vi.fn() }));
+vi.mock("#modules/engineer-transfer/engineer-transfer.repository.js", () => ({ findVanSourcesByKitLines: vi.fn() }));
 vi.mock("#modules/email/email.service.js", () => ({ sendTemplatedEmail: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("#modules/role/permissions.js", () => ({ roleGrants: vi.fn().mockReturnValue(false) }));
 
@@ -56,7 +57,8 @@ import * as goodsManagementService from "#modules/goods-management/goods-managem
 import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
 import * as irmRepo from "#modules/irm/irm.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
-import { startJobForEngineer, completeJobForEngineer, updateJob, kitLinesChanged } from "./job.service.js";
+import * as transferRepo from "#modules/engineer-transfer/engineer-transfer.repository.js";
+import { startJobForEngineer, completeJobForEngineer, updateJob, kitLinesChanged, getJob } from "./job.service.js";
 
 const JOB_ID = "a".repeat(24);
 const ENG_ID = "b".repeat(24);
@@ -351,5 +353,58 @@ describe("kitLinesChanged", () => {
   });
   it("is true when the pickup warehouse changes", () => {
     expect(kitLinesChanged([{ ...base, warehouseId: "w1" }], [{ ...base, warehouseId: "w2" }])).toBe(true);
+  });
+});
+
+// A kit line fulfilled from another engineer's van still carries a warehouse — deriveHomeWarehouse
+// assigns a nominal one so leftovers have somewhere to be returned to. Without exposing the van
+// source, both kit lists render that warehouse as the PICKUP location ("View pickup address"), which
+// sends the engineer to a warehouse for stock another engineer already handed them.
+describe("getJob — van-sourced kit lines", () => {
+  const mockFindById = jobRepo.findById as ReturnType<typeof vi.fn>;
+  const mockTallies = goodsManagementService.getJobKitTallies as ReturnType<typeof vi.fn>;
+  const mockGoodsStatus = goodsManagementService.getGoodsStatus as ReturnType<typeof vi.fn>;
+  const mockVanSources = transferRepo.findVanSourcesByKitLines as ReturnType<typeof vi.fn>;
+
+  const jobRow = () => ({
+    id: JOB_ID,
+    jobNumber: "JOB-2026-0024",
+    name: "Fibre install",
+    kitLines: [
+      { id: "k1", lineType: "irm", seCode: null, itemName: "Cat6 Cable", description: null, customerStockEntryId: null, irmItemId: "i1", warehouseId: "w1", warehouseName: "London Fulfillment Centre", warehouseCode: "WH-0009", warehouse: null, qty: 4, notes: null },
+      { id: "k2", lineType: "irm", seCode: null, itemName: "Patch Panel", description: null, customerStockEntryId: null, irmItemId: "i2", warehouseId: "w1", warehouseName: "London Fulfillment Centre", warehouseCode: "WH-0009", warehouse: null, qty: 3, notes: null },
+    ],
+    attachments: [],
+    createdAt: new Date("2026-07-21T00:00:00Z"),
+    updatedAt: new Date("2026-07-21T00:00:00Z"),
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockFindById.mockResolvedValue(jobRow());
+    mockTallies.mockResolvedValue({});
+    mockGoodsStatus.mockResolvedValue("partially_issued");
+    mockVanSources.mockResolvedValue(new Map());
+  });
+
+  it("reports the source engineer on a line handed over from a van", async () => {
+    mockVanSources.mockResolvedValue(
+      new Map([["k1", [{ transferCode: "ENG-0026", engineerName: "sahul FE", quantity: 4, status: "completed" }]]]),
+    );
+
+    const job = await getJob(JOB_ID);
+    const k1 = job.kitLines.find((l) => l.id === "k1")!;
+    const k2 = job.kitLines.find((l) => l.id === "k2")!;
+
+    expect(k1.vanSources).toEqual([{ transferCode: "ENG-0026", engineerName: "sahul FE", quantity: 4, status: "completed" }]);
+    // The warehouse stays put — it's where leftovers go back to, not where this came from.
+    expect(k1.warehouseName).toBe("London Fulfillment Centre");
+    // A warehouse-collected line must NOT gain a phantom van source.
+    expect(k2.vanSources).toEqual([]);
+  });
+
+  it("defaults to an empty list when nothing was transferred", async () => {
+    const job = await getJob(JOB_ID);
+    expect(job.kitLines.every((l) => l.vanSources.length === 0)).toBe(true);
   });
 });

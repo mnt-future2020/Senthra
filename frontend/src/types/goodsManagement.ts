@@ -106,6 +106,13 @@ export interface QueueKitLine {
   returnedQty: number; // returned to the warehouse
   engineerHeld: number; // engineer's real current holding of this item (caps what can be returned)
   available: number; // current net warehouse availability
+  // Still-out units of this line that came from a van and so may be RETURNED at any warehouse (no
+  // warehouse released them). > 0 keeps the line actionable away from its nominal home instead of
+  // greyed out. For a MIXED line this is just the van portion; 0 for a plain warehouse-issued line.
+  vanReturnableQty: number;
+  // Total units handed over from a van — lets the queue show a merged line's source split
+  // ("N from stock · M from van"). Warehouse-issued part = issuedQty − vanIssuedQty.
+  vanIssuedQty: number;
 }
 
 export interface QueueRow {

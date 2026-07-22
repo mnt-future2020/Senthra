@@ -19,6 +19,7 @@ import { paginate } from "../../utils/pagination.js";
 import type { CreateJobInput, JobKitLineInput, UpdateJobInput, CompleteJobInput } from "./job.validation.js";
 import * as goodsManagementService from "#modules/goods-management/goods-management.service.js";
 import * as kitRequestRepo from "#modules/job-kit-request/job-kit-request.repository.js";
+import * as transferRepo from "#modules/engineer-transfer/engineer-transfer.repository.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 
@@ -40,6 +41,14 @@ function assertTransition(from: string, to: string): void {
 }
 
 // ── DTOs ──────────────────────────────────────────────────────────────────────────────────────
+// A hand-over of this line's stock from another engineer's van (job-scoped transfer).
+export interface KitLineVanSource {
+  transferCode: string;
+  engineerName: string;
+  quantity: number;
+  status: string; // pending (awaiting their approval) | completed (already handed over)
+}
+
 export interface PublicJobKitLine {
   id: string;
   lineType: string;
@@ -74,6 +83,10 @@ export interface PublicJobKitLine {
   used: number;
   returned: number;
   remaining: number;
+  // Van hand-overs feeding this line. Non-empty ⇒ some/all of this stock comes from another
+  // engineer, NOT the warehouse above (which is only the return location for a van-sourced line).
+  // Populated on the job detail; empty on list responses.
+  vanSources: KitLineVanSource[];
 }
 
 export interface PublicJob {
@@ -226,6 +239,7 @@ function toPublic(j: JobWithRelations): PublicJob {
       used: 0,
       returned: 0,
       remaining: 0,
+      vanSources: [], // overwritten by withGoodsTallies on the job detail
     })),
     assignedAt: iso(j.assignedAt),
     acceptedAt: iso(j.acceptedAt),
@@ -427,9 +441,12 @@ export async function listJobs(params: ListJobsParams = {}, _actor?: AuditActor)
 // Fill in each kit line's goods tallies (issued/used/returned/remaining) + the job's goods-lifecycle
 // status from its stock movements. Used on the single-job detail views (office + engineer "job pack").
 async function withGoodsTallies(pub: PublicJob): Promise<PublicJob> {
-  const [tallies, goodsStatus] = await Promise.all([
+  const [tallies, goodsStatus, vanSources] = await Promise.all([
     goodsManagementService.getJobKitTallies(pub.id),
     goodsManagementService.getGoodsStatus(pub.id),
+    // Which lines are being handed over from another engineer's van. Batched with the rest so the
+    // detail stays at a fixed number of round-trips.
+    transferRepo.findVanSourcesByKitLines(pub.kitLines.map((l) => l.id)),
   ]);
   pub.goodsStatus = goodsStatus;
   for (const kl of pub.kitLines) {
@@ -440,6 +457,7 @@ async function withGoodsTallies(pub: PublicJob): Promise<PublicJob> {
       kl.returned = t.returned;
       kl.remaining = t.remaining;
     }
+    kl.vanSources = vanSources.get(kl.id) ?? [];
   }
   return pub;
 }

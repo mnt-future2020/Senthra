@@ -1300,6 +1300,9 @@ model EngineerStockTransferLine {
   createdAt DateTime @default(now())
 
   @@index([transferId])
+  // Read by findVanSourcesByKitLines on hot paths (job detail, goods-management queue, scan, return),
+  // which filters transfer lines by the kit line they fulfil. Without this it's a collection scan.
+  @@index([jobKitLineId])
 }
 
 // ── Additional-kit request (Field Engineer → Project Manager) ───────────────────────────────────
@@ -1333,8 +1336,18 @@ model JobKitRequest {
   reviewedByEmail  String?
   reviewedAt       DateTime?
   decisionNote     String?
-  fulfillmentMode  String? // warehouse_issue | engineer_transfer (set on approve)
-  transferId       String?  @db.ObjectId // the EngineerStockTransfer opened on approve (transfer mode)
+  // Request-level summary of how it was fulfilled: warehouse_issue | engineer_transfer | mixed.
+  // "mixed" means the PM sourced different lines from different places — the authoritative per-line
+  // detail lives on JobKitRequestLine.sourceType/sourceEngineerId. Kept as a single field (not
+  // removed) so list views and history keep a one-glance answer.
+  fulfillmentMode  String?
+  // DEPRECATED for new approvals — retained so already-approved requests keep resolving their
+  // transfer. Mixed/multi-engineer fulfilment opens one transfer per source engineer, recorded in
+  // transferIds; readers should prefer transferIds and fall back to this.
+  transferId       String?  @db.ObjectId
+  // Every EngineerStockTransfer opened on approve (one per distinct source engineer). Empty for a
+  // pure warehouse issue. The approve flow stamps this to stay resumable after a crash.
+  transferIds      String[] @db.ObjectId
 
   lines     JobKitRequestLine[]
   createdBy String?
@@ -1365,6 +1378,19 @@ model JobKitRequestLine {
   // Set on approve → the JobKitLine this request line grew (loose socket, mirrors
   // JobStockMovementLine.jobKitLineId). Lets a transfer fulfilment attribute its qty to the kit line.
   jobKitLineId String? @db.ObjectId
+
+  // ── Per-line fulfilment source (set on approve) ──────────────────────────────────────────────
+  // Stock for a kit request rarely sits in one place: the warehouse may hold some items while
+  // another engineer's van holds the rest. So the SOURCE is chosen per line, not per request.
+  //   warehouse → collected from sourceWarehouseId (a Goods-Management issue, as before)
+  //   engineer  → transferred from sourceEngineerId's van (joins that engineer's transfer)
+  // A line is fulfilled ENTIRELY from one source — quantities are never split across sources, which
+  // keeps every downstream qty check, transfer line and audit entry one-to-one with a request line.
+  // Null on pending/declined requests and on rows approved before per-line sourcing shipped; readers
+  // must fall back to the request-level fulfillmentMode for those.
+  sourceType        String? // warehouse | engineer
+  sourceWarehouseId String? @db.ObjectId // when sourceType = warehouse (misc lines stay null)
+  sourceEngineerId  String? @db.ObjectId // when sourceType = engineer
 
   createdAt DateTime @default(now())
 
@@ -2127,12 +2153,21 @@ model JobKitLine {
   qty   Int
   notes String?
 
+  // Set true when a COMPLETED engineer→engineer transfer attributed van stock to this line. Van
+  // stock owes no warehouse, so it's returnable at ANY warehouse; the Goods-Management queue keys its
+  // candidate lookup off kit-line warehouses and would never surface such a line away from its home.
+  // This denormalized flag lets the queue widen its candidate set with an INDEXED lookup instead of a
+  // growing `id IN (…all van jobs…)` list. Stays true after full return (harmless — the service still
+  // confirms per line that van stock is actually still returnable before showing the row).
+  hasVanSource Boolean @default(false)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([jobId])
   @@index([irmItemId])
   @@index([warehouseId])
+  @@index([hasVanSource])
 }
 
 // A dynamic, admin-editable email template. Every email the app sends is

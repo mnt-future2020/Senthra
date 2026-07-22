@@ -139,6 +139,53 @@ export function findById(id: string): Promise<TransferWithLines | null> {
   return prisma.engineerStockTransfer.findFirst({ where: { id, deletedAt: null }, include: { lines: true } });
 }
 
+export interface KitLineVanSource {
+  transferCode: string;
+  engineerName: string;
+  quantity: number;
+  status: string; // pending | completed | declined | cancelled
+}
+
+// Van hand-overs feeding each of the given job kit lines, in ONE query, keyed by jobKitLineId.
+//
+// A kit line fulfilled from another engineer's van still stores a warehouse (deriveHomeWarehouse
+// picks a nominal one so leftovers have a return location). Both kit lists render that warehouse as
+// the PICKUP location, which would send the engineer to collect stock a colleague already handed
+// them. This is what lets the UI say "from sahul FE" instead. Declined/cancelled transfers are
+// excluded — they never moved anything.
+export async function findVanSourcesByKitLines(jobKitLineIds: string[]): Promise<Map<string, KitLineVanSource[]>> {
+  const out = new Map<string, KitLineVanSource[]>();
+  if (jobKitLineIds.length === 0) return out;
+  const lines = await prisma.engineerStockTransferLine.findMany({
+    where: { jobKitLineId: { in: jobKitLineIds }, transfer: { status: { in: ["pending", "completed"] }, deletedAt: null } },
+    select: { jobKitLineId: true, quantity: true, transfer: { select: { code: true, fromEngineerName: true, status: true } } },
+  });
+  for (const l of lines) {
+    if (!l.jobKitLineId || !l.transfer) continue;
+    const entry: KitLineVanSource = {
+      transferCode: l.transfer.code,
+      engineerName: l.transfer.fromEngineerName,
+      quantity: l.quantity,
+      status: l.transfer.status,
+    };
+    const bucket = out.get(l.jobKitLineId);
+    if (bucket) bucket.push(entry);
+    else out.set(l.jobKitLineId, [entry]);
+  }
+  return out;
+}
+
+// Source engineer per transfer id, in ONE query. Used by the kit-request approve flow to resume
+// after a crash: it opens one transfer per source engineer, so on retry it must know which engineers
+// already have one. Lean projection — the caller only needs the id ↔ fromEngineerId pairing.
+export function findSourcesByIds(ids: string[]): Promise<{ id: string; fromEngineerId: string }[]> {
+  if (ids.length === 0) return Promise.resolve([]);
+  return prisma.engineerStockTransfer.findMany({
+    where: { id: { in: ids }, deletedAt: null },
+    select: { id: true, fromEngineerId: true },
+  });
+}
+
 export interface ListForEngineerParams {
   role?: "incoming" | "outgoing" | "all";
   status?: string;
@@ -588,6 +635,13 @@ async function completeTransferOnce(transferId: string, opts: CompleteOptions): 
         },
         attributionLines,
       );
+      // Flag the fulfilled kit lines as van-sourced, atomically with the attribution above, so the
+      // Goods-Management queue can discover this job's van return at any warehouse via an indexed
+      // lookup (JobKitLine.hasVanSource) instead of a growing job-id list.
+      const kitLineIds = [...new Set(jobLines.map((l) => l.jobKitLineId!).filter(Boolean))];
+      if (kitLineIds.length > 0) {
+        await tx.jobKitLine.updateMany({ where: { id: { in: kitLineIds } }, data: { hasVanSource: true } });
+      }
       // NOTE: the job's coarse goodsStatus is refreshed AFTER this transaction commits (see
       // completeTransferTx) — kept out of the tx so its reads/write don't blow Mongo's 5s limit.
     }

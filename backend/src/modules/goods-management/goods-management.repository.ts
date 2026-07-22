@@ -207,6 +207,30 @@ export function findMovementsByJobs(jobIds: string[]): Promise<JobStockMovementW
   return prisma.jobStockMovement.findMany({ where: { jobId: { in: jobIds }, deletedAt: null }, include: withRelations, orderBy: { createdAt: "asc" } });
 }
 
+// Per-kit-line ISSUED totals for many jobs in ONE query — the minimum needed to tell whether a given
+// kit line still has work outstanding. Deliberately lean: no `include: withRelations` (which pulls
+// item/warehouse/customer joins for every movement) because the queue's pre-pagination filter runs
+// over ALL candidate jobs, not just the page. Returns a Map<jobKitLineId, issuedQty>; a line with no
+// movements is simply absent (treat as 0). Returns REDUCE the total — a returned unit is outstanding
+// again — matching issuedForKitLine's accounting in the service.
+export async function findIssuedQtyByKitLine(jobIds: string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  if (jobIds.length === 0) return out;
+  const movements = await prisma.jobStockMovement.findMany({
+    where: { jobId: { in: jobIds }, deletedAt: null, status: "posted" },
+    select: { direction: true, items: { select: { jobKitLineId: true, qty: true } } },
+  });
+  for (const m of movements) {
+    if (m.direction !== "issue" && m.direction !== "return") continue;
+    const sign = m.direction === "issue" ? 1 : -1;
+    for (const l of m.items) {
+      if (!l.jobKitLineId) continue;
+      out.set(l.jobKitLineId, (out.get(l.jobKitLineId) ?? 0) + sign * l.qty);
+    }
+  }
+  return out;
+}
+
 // --- per-job summary -------------------------------------------------------------------------
 export function getSummary(jobId: string): Promise<JobStockSummary | null> {
   return prisma.jobStockSummary.findUnique({ where: { jobId } });

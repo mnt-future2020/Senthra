@@ -4,6 +4,7 @@ import * as React from "react";
 import { FileText, Loader2, Trash2, Upload } from "lucide-react";
 
 import { useDashboard } from "@/hooks/useDashboard";
+import { viewDataUriInNewTab } from "@/lib/download";
 import { readFileAsDataUrl } from "@/lib/image";
 import { Modal } from "@/components/ui/Modal";
 import type { GrnAttachment } from "@/types/goods-in";
@@ -100,7 +101,17 @@ export function DocPicker({
 // Read-only grid of documents: image files show a thumbnail (click → lightbox), other
 // files show a type chip that opens in a new tab. Pass `onRemove` to make them deletable.
 export function AttachmentGrid({ items, onRemove }: { items: DocItem[]; onRemove?: (id: string) => void }) {
+  const { pushToast } = useDashboard();
   const [preview, setPreview] = React.useState<DocItem | null>(null);
+
+  // A staged (not-yet-uploaded) doc's src is an in-memory `data:` URI, and Chrome blocks a
+  // top-level navigation straight to one — the tab opens blank on the raw base64. Route those
+  // through a blob: URL instead. Saved attachments are plain Cloudinary URLs, so they just open.
+  const openDoc = (e: React.MouseEvent<HTMLAnchorElement>, doc: DocItem) => {
+    if (!doc.src.startsWith("data:")) return;
+    e.preventDefault();
+    if (!viewDataUriInNewTab(doc.src)) pushToast(`Couldn't preview "${doc.fileName}".`, "alert");
+  };
 
   if (items.length === 0) {
     return <p className="rounded-xl border border-dashed border-[var(--border)] px-3 py-6 text-center text-xs text-[var(--muted)]">No delivery documents attached yet.</p>;
@@ -117,7 +128,7 @@ export function AttachmentGrid({ items, onRemove }: { items: DocItem[]; onRemove
                 <img src={a.src} alt={a.fileName} className="h-full w-full object-cover transition-transform group-hover:scale-105" />
               </button>
             ) : (
-              <a href={a.src} target="_blank" rel="noopener noreferrer" className="flex aspect-[4/3] w-full flex-col items-center justify-center gap-1 bg-[var(--surface-2)] text-[var(--muted)] hover:text-[var(--accent)]">
+              <a href={a.src} target="_blank" rel="noopener noreferrer" onClick={(e) => openDoc(e, a)} className="flex aspect-[4/3] w-full flex-col items-center justify-center gap-1 bg-[var(--surface-2)] text-[var(--muted)] hover:text-[var(--accent)]">
                 <FileText className="h-7 w-7" />
                 <span className="text-[10px] font-bold">{a.fileType.toUpperCase()}</span>
               </a>

@@ -5,7 +5,10 @@ import { api } from "@/lib/api";
 
 export type KitRequestStatus = "pending" | "approved" | "declined" | "cancelled";
 export type KitRequestSource = "irm" | "customer_stock" | "misc";
-export type FulfillmentMode = "warehouse_issue" | "engineer_transfer";
+// "mixed" is a RESULT, never a choice: it's what the server records when the PM sourced different
+// lines from different places. The picker itself works per line (see LineSourcePayload).
+export type FulfillmentMode = "warehouse_issue" | "engineer_transfer" | "mixed";
+export type LineSourceType = "warehouse" | "engineer";
 
 export interface KitRequestLine {
   id: string;
@@ -21,6 +24,11 @@ export interface KitRequestLine {
   // Null for irm/misc, and on responses that don't drive the approve modal.
   warehouseName: string | null;
   warehouseCode: string | null;
+  // Where this line was sourced, set on approve. Null while pending/declined, and on requests
+  // approved before per-line sourcing shipped (fall back to the request's fulfillmentMode).
+  sourceType: LineSourceType | null;
+  sourceWarehouseId: string | null;
+  sourceEngineerId: string | null;
 }
 
 export interface KitRequest {
@@ -76,11 +84,22 @@ export interface KitLineWarehouse {
   warehouseId: string;
 }
 
+// One line's chosen source. Warehouse lines carry a warehouseId (IRM only — customer stock is issued
+// from where it's stored); engineer lines carry the van it comes from.
+export interface LineSourcePayload {
+  requestLineId: string;
+  sourceType: LineSourceType;
+  warehouseId?: string;
+  engineerId?: string;
+}
+
 export interface ApproveKitRequestPayload {
-  fulfillmentMode: FulfillmentMode;
-  // warehouse_issue mode: a pickup warehouse per IRM request line.
+  // Preferred: a source per line. Fully describes the fulfilment on its own.
+  lineSources?: LineSourcePayload[];
+  // Legacy request-level shorthand, still accepted by the API. "mixed" is a server-produced RESULT
+  // only, never a valid input, so it's excluded here to match the backend approve schema's enum.
+  fulfillmentMode?: "warehouse_issue" | "engineer_transfer";
   lineWarehouses?: KitLineWarehouse[];
-  // engineer_transfer mode: the source engineer.
   fromEngineerId?: string;
   decisionNote?: string;
 }
@@ -88,6 +107,13 @@ export interface ApproveKitRequestPayload {
 export interface EligibleHolder {
   engineerId: string;
   name: string;
+}
+
+// Van options for ONE request line — only engineers holding enough of THAT line, so the PM can
+// never pick a short source. An empty list just means no van has it; the warehouse still can.
+export interface LineHolders {
+  requestLineId: string;
+  holders: (EligibleHolder & { available: number })[];
 }
 
 export interface ListParams {
@@ -136,9 +162,9 @@ export function pendingKitRequestCount(jobId?: string): Promise<number> {
   return api<{ count: number }>(`/job-kit-requests/pending-count${qs({ jobId })}`).then((r) => r.count);
 }
 
-// Engineers who hold ALL of a request's stock-tracked items (transfer source picker).
-export function eligibleKitHolders(id: string): Promise<EligibleHolder[]> {
-  return api<{ holders: EligibleHolder[] }>(`/job-kit-requests/${id}/eligible-holders`).then((r) => r.holders);
+// Van options PER LINE — powers the per-line source picker in the approve modal.
+export function kitLineHolders(id: string): Promise<LineHolders[]> {
+  return api<{ lines: LineHolders[] }>(`/job-kit-requests/${id}/line-holders`).then((r) => r.lines);
 }
 
 // ── Item search (for the FE request composer's "add item" search-select) ───────────────────────
