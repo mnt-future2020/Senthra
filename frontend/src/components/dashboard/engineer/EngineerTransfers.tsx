@@ -17,13 +17,15 @@ import {
 
 import * as transferSvc from "@/services/engineerTransfer.service";
 import { useDashboard } from "@/hooks/useDashboard";
-import { useGoodsSocket } from "@/hooks/useGoodsSocket";
+import { subscribe } from "@/lib/socket";
 import {
   EmptyState,
   fmtDateTime,
   PortalHeader,
   TableCardSkeleton,
 } from "@/components/dashboard/portal/portalUi";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { Modal } from "@/components/ui/Modal";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { inputCls, labelCls, primaryBtn, secondaryBtn } from "@/components/ui/styles";
@@ -242,8 +244,7 @@ function DeclineModal({
   const [reason, setReason] = React.useState("");
   const [busy, setBusy] = React.useState(false);
 
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const submit = async () => {
     setBusy(true);
     try {
       await transferSvc.declineTransfer(transfer.id, reason.trim() || undefined);
@@ -256,31 +257,40 @@ function DeclineModal({
     }
   };
 
+  const footer = (
+    <>
+      <button type="button" onClick={onCancel} disabled={busy} className={secondaryBtn}>Cancel</button>
+      <button
+        type="button"
+        onClick={() => submit()}
+        disabled={busy}
+        className="flex items-center gap-2 rounded-xl bg-[var(--neg)] px-4 py-2.5 text-xs font-extrabold text-white disabled:opacity-60"
+      >
+        {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />} Decline
+      </button>
+    </>
+  );
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-sm rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-6 shadow-xl">
-        <h3 className="mb-1 text-sm font-extrabold text-[var(--ink)]">Decline transfer</h3>
-        <p className="mb-4 text-xs text-[var(--muted)]">{transfer.code} — from {transfer.fromEngineerName}</p>
-        <form onSubmit={submit} className="space-y-3">
-          <div>
-            <label className={labelCls}>Reason (optional)</label>
-            <textarea
-              rows={3}
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              placeholder="Why are you declining?"
-              className={`${inputCls} resize-none`}
-            />
-          </div>
-          <div className="flex gap-2 justify-end">
-            <button type="button" onClick={onCancel} className={secondaryBtn}>Cancel</button>
-            <button type="submit" disabled={busy} className="flex items-center gap-2 rounded-xl bg-[var(--neg)] px-4 py-2.5 text-xs font-extrabold text-white disabled:opacity-60">
-              {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />} Decline
-            </button>
-          </div>
-        </form>
+    <Modal
+      open
+      onClose={busy ? () => {} : onCancel}
+      title="Decline transfer"
+      subtitle={`${transfer.code} — from ${transfer.fromEngineerName}`}
+      size="sm"
+      footer={footer}
+    >
+      <div>
+        <label className={labelCls}>Reason (optional)</label>
+        <textarea
+          rows={3}
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          placeholder="Why are you declining?"
+          className={`${inputCls} resize-none`}
+        />
       </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -300,6 +310,9 @@ function TransferRow({
   const [busy, setBusy] = React.useState(false);
   const [declining, setDeclining] = React.useState(false);
   const [signing, setSigning] = React.useState(false);
+  // Both approve (accepts custody of another engineer's stock) and cancel (irreversible) go through a
+  // confirm step, matching the deliberate-action bar the rest of the transfer/field-stock flow holds.
+  const [confirm, setConfirm] = React.useState<null | "approve" | "cancel">(null);
 
   const approve = async () => {
     setBusy(true);
@@ -311,6 +324,7 @@ function TransferRow({
       pushToast(err instanceof Error ? err.message : "Approve failed.", "alert");
     } finally {
       setBusy(false);
+      setConfirm(null);
     }
   };
 
@@ -324,6 +338,7 @@ function TransferRow({
       pushToast(err instanceof Error ? err.message : "Cancel failed.", "alert");
     } finally {
       setBusy(false);
+      setConfirm(null);
     }
   };
 
@@ -356,6 +371,25 @@ function TransferRow({
           onCancel={() => setDeclining(false)}
         />
       )}
+      <ConfirmDialog
+        open={confirm === "approve"}
+        title="Approve this transfer?"
+        message="The requested stock moves to the other engineer once you approve."
+        confirmLabel="Approve transfer"
+        busy={busy}
+        onConfirm={approve}
+        onClose={() => setConfirm(null)}
+      />
+      <ConfirmDialog
+        open={confirm === "cancel"}
+        title="Cancel this transfer?"
+        message={`Transfer ${transfer.code} will be cancelled. This can't be undone.`}
+        confirmLabel="Cancel transfer"
+        danger
+        busy={busy}
+        onConfirm={cancel}
+        onClose={() => setConfirm(null)}
+      />
       <tr className="border-b border-[var(--border)] last:border-0">
         <td className="px-4 py-3">
           <div className="font-mono text-xs font-bold text-[var(--ink)]">{transfer.code}</div>
@@ -396,7 +430,7 @@ function TransferRow({
               <>
                 <button
                   type="button"
-                  onClick={approve}
+                  onClick={() => setConfirm("approve")}
                   disabled={busy}
                   className="flex items-center gap-1 rounded-lg bg-[var(--accent)] px-2.5 py-1.5 text-[11px] font-bold text-white disabled:opacity-60"
                 >
@@ -417,7 +451,7 @@ function TransferRow({
             {role === "outgoing" && transfer.status === "pending" && (
               <button
                 type="button"
-                onClick={cancel}
+                onClick={() => setConfirm("cancel")}
                 disabled={busy}
                 className="flex items-center gap-1 rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-[11px] font-bold text-[var(--muted)] hover:text-[var(--neg)] disabled:opacity-60"
               >
@@ -532,6 +566,7 @@ function TransferList({ role }: { role: "incoming" | "outgoing" }) {
 
   const [paged, setPaged] = React.useState<PagedTransfers | null>(null);
   const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
   const [refreshKey, setRefreshKey] = React.useState(0);
   const [searchInput, setSearchInput] = React.useState(search);
   // Re-seed the box when ?q changes outside typing (browser back/forward). Adjusting state during
@@ -543,7 +578,9 @@ function TransferList({ role }: { role: "incoming" | "outgoing" }) {
   }
 
   const reload = React.useCallback(() => setRefreshKey((k) => k + 1), []);
-  useGoodsSocket(reload);
+  // Only the transfer event is relevant here — subscribe narrowly instead of via useGoodsSocket, so an
+  // unrelated warehouse issue/return anywhere doesn't trigger a full paged refetch of this list.
+  React.useEffect(() => subscribe(["engineer:transfer_updated"], reload), [reload]);
 
   const patchParams = React.useCallback(
     (updates: Record<string, string | null>, resetPage = false) => {
@@ -579,9 +616,11 @@ function TransferList({ role }: { role: "incoming" | "outgoing" }) {
           page,
           pageSize: 20,
         });
-        if (active) setPaged(r);
-      } catch {
-        if (active) setPaged({ transfers: [], total: 0, page: 1, pageSize: 20, totalPages: 0 });
+        if (active) { setPaged(r); setError(null); }
+      } catch (err) {
+        // A load failure gets its OWN state — never render it as an empty inbox (which reads as
+        // "nothing here" and hides the failure), matching EngineerJobs / EngineerVanStock.
+        if (active) setError(err instanceof Error ? err.message : "Could not load your transfers.");
       } finally {
         if (active) setLoading(false);
       }
@@ -612,8 +651,8 @@ function TransferList({ role }: { role: "incoming" | "outgoing" }) {
       ))}
 
       {/* Toolbar — search + status filter + sort */}
-      <div className="flex shrink-0 flex-col gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-xs sm:flex-row sm:items-center">
-        <div className="relative w-full sm:max-w-xs">
+      <div className="flex shrink-0 flex-col gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-xs lg:flex-row lg:items-center">
+        <div className="relative w-full lg:max-w-xs">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--faint)]" />
           <input
             type="text"
@@ -654,6 +693,8 @@ function TransferList({ role }: { role: "incoming" | "outgoing" }) {
           cells={["h-3 w-16", "h-3 w-24", "h-3 w-32", "h-3 w-16", "h-3 w-20"]}
           minWidth={480}
         />
+      ) : error ? (
+        <div className="flex flex-1 items-center justify-center p-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</div>
       ) : data.length === 0 ? (
         <EmptyState
           icon={ArrowRightLeft}

@@ -148,6 +148,21 @@ describe("startJobForEngineer", () => {
     expect(mockStartIfAccepted).toHaveBeenCalledWith(JOB_ID, ENG_ID);
   });
 
+  it("returns the job ENRICHED with goods tallies (so the Complete form can cap declared usage)", async () => {
+    // The started job has a collected kit line — the response must carry issued/remaining, not 0s,
+    // or the engineer's Complete form (which caps "used" at `remaining`) is unusable after Start.
+    const startedWithKit = { ...inProgressJob, kitLines: [{ id: "k1", lineType: "irm", irmItemId: "f".repeat(24), qty: 5, warehouse: null }] };
+    mockFindById.mockResolvedValueOnce(baseJob);
+    mockStartIfAccepted.mockResolvedValue(startedWithKit);
+    (goodsManagementService.getJobKitTallies as ReturnType<typeof vi.fn>).mockResolvedValue({ k1: { issued: 5, used: 0, returned: 0, remaining: 5 } });
+    (goodsManagementService.getGoodsStatus as ReturnType<typeof vi.fn>).mockResolvedValue("issued");
+    (transferRepo.findVanSourcesByKitLines as ReturnType<typeof vi.fn>).mockResolvedValue(new Map());
+
+    const result = await startJobForEngineer(JOB_ID, ENG_ID, { email: "wm@x.com" } as never);
+    expect(result.kitLines[0]).toMatchObject({ issued: 5, remaining: 5 });
+    expect(result.goodsStatus).toBe("issued");
+  });
+
   it("throws 403 if the caller is not the assigned engineer", async () => {
     mockFindById.mockResolvedValue({ ...baseJob, assignedEngineerId: OTHER_ENG });
     await expect(startJobForEngineer(JOB_ID, ENG_ID, { email: "wm@x.com" } as never)).rejects.toThrow(/not assigned|isn't assigned/i);

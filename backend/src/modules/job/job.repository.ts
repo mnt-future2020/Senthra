@@ -41,6 +41,20 @@ const withRelations = {
 
 export type JobWithRelations = Prisma.JobGetPayload<{ include: typeof withRelations }>;
 
+// LIST projection — the same header relations as withRelations but WITHOUT the kit lines (each of
+// which carries an irmItem join + a full warehouse address block). List views render only header
+// fields, so shipping kit lines per row is pure waste; the detail path keeps withRelations. toPublic
+// tolerates the missing kitLines (defaults to []).
+const listRelations = {
+  customer: { select: customerSelect },
+  project: { select: projectSelect },
+  site: { select: siteSelect },
+  supplier: { select: supplierSelect },
+  assignedEngineer: { select: engineerSelect },
+} satisfies Prisma.JobInclude;
+
+export type JobListRow = Prisma.JobGetPayload<{ include: typeof listRelations }>;
+
 // --- the kit-line row shape the service builds for create / replace --------------------------
 export interface JobKitLineRow {
   lineType: string;
@@ -189,18 +203,26 @@ export interface EngineerJobFilters {
   search?: string;
 }
 function buildEngineerWhere(engineerId: string, filters: EngineerJobFilters): Prisma.JobWhereInput {
-  return {
-    assignedEngineerId: engineerId,
-    deletedAt: null,
-    ...(filters.status && { status: filters.status }),
-    ...(filters.search && {
-      OR: [
-        { jobNumber: { contains: escapeRegex(filters.search), mode: "insensitive" } },
-        { name: { contains: escapeRegex(filters.search), mode: "insensitive" } },
-        { customerName: { contains: escapeRegex(filters.search), mode: "insensitive" } },
-      ],
-    }),
-  };
+  const where: Prisma.JobWhereInput = { assignedEngineerId: engineerId, deletedAt: null };
+  if (filters.status === "overdue") {
+    // "Overdue" is a DERIVED pseudo-status (never stored): an active job whose completion date has
+    // passed. Same definition as the dashboard overview's overdue count (active + completionDate <
+    // start of today, UTC) so the filter and the "N jobs past the completion date" card agree exactly.
+    const now = new Date();
+    const startToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    where.status = { in: ["assigned", "accepted", "in_progress"] };
+    where.completionDate = { lt: startToday };
+  } else if (filters.status) {
+    where.status = filters.status;
+  }
+  if (filters.search) {
+    where.OR = [
+      { jobNumber: { contains: escapeRegex(filters.search), mode: "insensitive" } },
+      { name: { contains: escapeRegex(filters.search), mode: "insensitive" } },
+      { customerName: { contains: escapeRegex(filters.search), mode: "insensitive" } },
+    ];
+  }
+  return where;
 }
 export function findManyByEngineer(
   engineerId: string,
@@ -210,6 +232,27 @@ export function findManyByEngineer(
   sort?: string,
 ): Promise<JobWithRelations[]> {
   return prisma.job.findMany({ where: buildEngineerWhere(engineerId, filters), include: withRelations, orderBy: orderBy(sort), skip, take });
+}
+// List variant — the engineer's jobs list renders only header fields, so it uses the kit-line-free
+// LIST projection (no per-row irmItem/warehouse-address hydration). Same where/order/paging as above.
+export function findManyByEngineerList(
+  engineerId: string,
+  filters: EngineerJobFilters = {},
+  skip = 0,
+  take = 20,
+  sort?: string,
+): Promise<JobListRow[]> {
+  return prisma.job.findMany({ where: buildEngineerWhere(engineerId, filters), include: listRelations, orderBy: orderBy(sort), skip, take });
+}
+// The engineer's ACTIVE jobs (assigned / accepted / in_progress) as a slim, kit-line-free set — the
+// single bounded query the dashboard overview derives its counts, due-maths and "next up" list from
+// (replacing three paged withRelations fetches that hydrated up to 300 jobs with all their kit lines).
+export function findActiveSummaryByEngineer(engineerId: string): Promise<JobListRow[]> {
+  return prisma.job.findMany({
+    where: { assignedEngineerId: engineerId, deletedAt: null, status: { in: ["assigned", "accepted", "in_progress"] } },
+    include: listRelations,
+    orderBy: { createdAt: "desc" },
+  });
 }
 export function countByEngineer(engineerId: string, filters: EngineerJobFilters = {}): Promise<number> {
   return prisma.job.count({ where: buildEngineerWhere(engineerId, filters) });

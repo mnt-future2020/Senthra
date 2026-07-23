@@ -2,6 +2,8 @@ import type { Request } from "express";
 
 import * as engineerService from "./engineer.service.js";
 import type { CompleteJobInput, RejectJobInput } from "#modules/job/job.validation.js";
+import { movementFiltersFrom } from "#modules/inventory/movement.service.js";
+import { decodeCursor } from "#modules/inventory/movement.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
 import { forbidden } from "../../utils/http-error.js";
@@ -76,6 +78,14 @@ export const getOwnMiscStock = asyncHandler(async (req, res) => {
 
 // GET /engineer/movements — the engineer's own stock movement history (van company + customer ledgers,
 // cursor-paginated). Scoped to the signed-in engineer; ?cursor&limit&dateFrom&dateTo&ownership&type.
+// Query parsing happens here (mirrors inventory.controller.listMovements) so the service takes typed args.
 export const getOwnMovements = asyncHandler(async (req, res) => {
-  res.json(await engineerService.getOwnMovements(ownId(req), req.query as Record<string, unknown>));
+  res.json(
+    await engineerService.getOwnMovements(
+      ownId(req),
+      movementFiltersFrom(req.query),
+      decodeCursor(queryStr(req.query.cursor)),
+      queryInt(req.query.limit),
+    ),
+  );
 });

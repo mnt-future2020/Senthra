@@ -4,9 +4,12 @@ import * as React from "react";
 import { ArrowLeftRight, CheckCircle2, MapPin, PackagePlus, Truck, XCircle, PlayCircle, ClipboardCheck } from "lucide-react";
 
 import * as engineerService from "@/services/engineer.service";
+import { isStaleStateError } from "@/lib/api";
 import { useAuth } from "@/hooks/useAuth";
+import { useDashboard } from "@/hooks/useDashboard";
+import { useJobSocket } from "@/hooks/useJobSocket";
+import { useGoodsSocket } from "@/hooks/useGoodsSocket";
 import { EngineerKitRequests } from "./EngineerKitRequests";
-import { Notice } from "@/components/ui/Notice";
 import { ghostBtn, primaryBtn } from "@/components/ui/styles";
 import { fmtDate, fmtDateTime, JobStatusChip, PortalHeader, TableCard } from "@/components/dashboard/portal/portalUi";
 import { GoodsStatusChip } from "@/components/dashboard/jobs/jobStatus";
@@ -14,7 +17,6 @@ import { crossWarehouseReturnNote, kitLineSourceSplit } from "@/components/dashb
 import { FormError, FormPageSkeleton } from "@/components/ui/FormScaffold";
 import type { Job, JobKitLine, JobKitWarehouse } from "@/types/job";
 import { WarehousePickupModal } from "./WarehousePickupModal";
-import type { Msg } from "@/components/ui/types";
 import type { UsedLinePayload } from "@/types/goodsManagement";
 
 // Engineer Portal — single assigned job. Loads the engineer's own job by id, shows the
@@ -63,10 +65,10 @@ interface UsedRow {
 
 export function EngineerJobDetail({ id }: { id: string }) {
   const { can } = useAuth();
+  const { pushToast } = useDashboard();
   const [job, setJob] = React.useState<Job | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
-  const [msg, setMsg] = React.useState<Msg>(null);
   const [accepting, setAccepting] = React.useState(false);
   const [rejecting, setRejecting] = React.useState(false);
   const [rejectMode, setRejectMode] = React.useState(false);
@@ -98,15 +100,36 @@ export function EngineerJobDetail({ id }: { id: string }) {
     };
   }, [id]);
 
+  // Live-refresh the job so the kit tallies + the "Start work" gate never go stale: when the
+  // warehouse issues/returns this job's kit (goods:*) or the planner edits/cancels/reassigns it
+  // (job:*), refetch server truth. Skipped while one of this page's own mutations is in flight (that
+  // action already replaces state from its response), so a socket refetch can't race it.
+  const busyRef = React.useRef(busy);
+  React.useEffect(() => { busyRef.current = busy; });
+  const reloadJob = React.useCallback(() => {
+    if (busyRef.current) return;
+    engineerService
+      .getOwnJob(id)
+      .then((j) => setJob(j))
+      // This is a background socket-triggered refetch, not a user action. Only a genuine stale-state
+      // error (404/409 — the planner reassigned or cancelled the job out from under this engineer) is
+      // worth interrupting them for; a transient network blip is swallowed, leaving the current job on
+      // screen until the next event or navigation recovers it (no scary toast over a job that's fine).
+      .catch((e) => {
+        if (isStaleStateError(e)) pushToast("This job is no longer available — it may have been reassigned or cancelled.", "alert");
+      });
+  }, [id, pushToast]);
+  useJobSocket(reloadJob);
+  useGoodsSocket(reloadJob);
+
   const onAccept = async () => {
     setAccepting(true);
-    setMsg(null);
     try {
       const updated = await engineerService.acceptOwnJob(id);
       setJob(updated); // replace with server truth (status now "accepted")
-      setMsg({ type: "success", text: "Job accepted." });
+      pushToast("Job accepted.");
     } catch (err) {
-      setMsg({ type: "error", text: err instanceof Error ? err.message : "Could not accept this job." });
+      pushToast(err instanceof Error ? err.message : "Could not accept this job.", "alert");
     } finally {
       setAccepting(false);
     }
@@ -114,15 +137,14 @@ export function EngineerJobDetail({ id }: { id: string }) {
 
   const onReject = async () => {
     setRejecting(true);
-    setMsg(null);
     try {
       const updated = await engineerService.rejectOwnJob(id, rejectReason.trim() || undefined);
       setJob(updated); // status now "rejected"
       setRejectMode(false);
       setRejectReason("");
-      setMsg({ type: "success", text: "Job rejected. The project manager has been notified." });
+      pushToast("Job rejected. The project manager has been notified.");
     } catch (err) {
-      setMsg({ type: "error", text: err instanceof Error ? err.message : "Could not reject this job." });
+      pushToast(err instanceof Error ? err.message : "Could not reject this job.", "alert");
     } finally {
       setRejecting(false);
     }
@@ -130,13 +152,12 @@ export function EngineerJobDetail({ id }: { id: string }) {
 
   const onStart = async () => {
     setStarting(true);
-    setMsg(null);
     try {
       const updated = await engineerService.startOwnJob(id);
       setJob(updated); // status now "in_progress"
-      setMsg({ type: "success", text: "Job started. You are now on site." });
+      pushToast("Job started. You are now on site.");
     } catch (err) {
-      setMsg({ type: "error", text: err instanceof Error ? err.message : "Could not start this job." });
+      pushToast(err instanceof Error ? err.message : "Could not start this job.", "alert");
     } finally {
       setStarting(false);
     }
@@ -163,7 +184,6 @@ export function EngineerJobDetail({ id }: { id: string }) {
 
   const onComplete = async () => {
     setCompleting(true);
-    setMsg(null);
     try {
       const usedLines: UsedLinePayload[] = usedRows
         .map((r) => ({ ...r, qty: Math.min(r.qty, r.held) })) // never declare more than is held
@@ -181,9 +201,9 @@ export function EngineerJobDetail({ id }: { id: string }) {
       });
       setJob(updated); // status now "completed"
       setCompleteMode(false);
-      setMsg({ type: "success", text: "Job marked as complete. Well done!" });
+      pushToast("Job marked as complete. Well done!");
     } catch (err) {
-      setMsg({ type: "error", text: err instanceof Error ? err.message : "Could not complete this job." });
+      pushToast(err instanceof Error ? err.message : "Could not complete this job.", "alert");
     } finally {
       setCompleting(false);
     }
@@ -268,7 +288,6 @@ export function EngineerJobDetail({ id }: { id: string }) {
           )
         }
       />
-      {msg && <Notice msg={msg} />}
 
       {canAccept && rejectMode && (
         <Card title="Reject this job">

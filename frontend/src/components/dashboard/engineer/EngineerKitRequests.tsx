@@ -7,10 +7,12 @@ import { Check, Loader2, PackagePlus, Plus, Search, Trash2 } from "lucide-react"
 import * as kitRequestService from "@/services/jobKitRequest.service";
 import type { KitItemCustomerStockOption, KitItemOption, KitRequest, KitRequestLinePayload } from "@/services/jobKitRequest.service";
 import { subscribe } from "@/lib/socket";
+import { useDashboard } from "@/hooks/useDashboard";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Modal } from "@/components/ui/Modal";
 import { Notice } from "@/components/ui/Notice";
 import { inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
-import { fmtDate } from "@/components/dashboard/portal/portalUi";
+import { EmptyState, fmtDate } from "@/components/dashboard/portal/portalUi";
 import type { Job } from "@/types/job";
 import type { Msg } from "@/components/ui/types";
 
@@ -64,15 +66,18 @@ export function KitLineChips({ lines }: { lines: KitRequest["lines"] }) {
 // `locked` = the job's goods are reconciled: the request history stays visible but no new request
 // can be raised — the button is replaced with a note saying why.
 export function EngineerKitRequests({ job, locked, open, onOpenChange }: { job: Job; locked: boolean; open: boolean; onOpenChange: (open: boolean) => void }) {
+  const { pushToast } = useDashboard();
   const [requests, setRequests] = React.useState<KitRequest[] | null>(null);
-  const [msg, setMsg] = React.useState<Msg>(null);
+  const [error, setError] = React.useState<string | null>(null);
   const [cancellingId, setCancellingId] = React.useState<string | null>(null);
+  const [confirmId, setConfirmId] = React.useState<string | null>(null);
 
   const load = React.useCallback(() => {
     kitRequestService
       .listMyKitRequests({ jobId: job.id, pageSize: 50 })
-      .then((r) => setRequests(r.requests))
-      .catch(() => setRequests([]));
+      .then((r) => { setRequests(r.requests); setError(null); })
+      // A load failure gets its own state — never render it as "no requests yet" (which hides the failure).
+      .catch((err) => { setRequests([]); setError(err instanceof Error ? err.message : "Could not load your kit requests."); });
   }, [job.id]);
 
   React.useEffect(() => load(), [load]);
@@ -81,14 +86,15 @@ export function EngineerKitRequests({ job, locked, open, onOpenChange }: { job: 
 
   const onCancel = async (id: string) => {
     setCancellingId(id);
-    setMsg(null);
     try {
       await kitRequestService.cancelKitRequest(id);
+      pushToast("Kit request cancelled.");
       load();
     } catch (err) {
-      setMsg({ type: "error", text: err instanceof Error ? err.message : "Could not cancel the request." });
+      pushToast(err instanceof Error ? err.message : "Could not cancel the request.", "alert");
     } finally {
       setCancellingId(null);
+      setConfirmId(null);
     }
   };
 
@@ -114,12 +120,16 @@ export function EngineerKitRequests({ job, locked, open, onOpenChange }: { job: 
         )}
       </div>
 
-      {msg && <div className="mb-3"><Notice msg={msg} /></div>}
-
-      {requests === null ? (
-        <p className="text-sm text-[var(--muted)]">Loading requests…</p>
+      {error ? (
+        <p className="py-6 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>
+      ) : requests === null ? (
+        <div className="space-y-2" aria-hidden>
+          {[0, 1].map((i) => (
+            <div key={i} className="h-16 animate-pulse rounded-xl border border-[var(--border)] bg-[var(--surface-2)]" />
+          ))}
+        </div>
       ) : requests.length === 0 ? (
-        <p className="text-sm text-[var(--muted)]">No kit requests on this job yet.</p>
+        <EmptyState icon={PackagePlus} title="No kit requests yet" hint="Need more kit? Use “Request items” above and it’ll show here." />
       ) : (
         <ul className="space-y-2">
           {requests.map((r) => (
@@ -155,7 +165,7 @@ export function EngineerKitRequests({ job, locked, open, onOpenChange }: { job: 
                   )}
                 </div>
                 {r.status === "pending" && (
-                  <button type="button" onClick={() => onCancel(r.id)} disabled={cancellingId === r.id} className="shrink-0 rounded-lg border border-[var(--border)] px-2.5 py-1 text-[11px] font-bold text-[var(--ink)] hover:bg-[var(--surface)] disabled:opacity-60">
+                  <button type="button" onClick={() => setConfirmId(r.id)} disabled={cancellingId === r.id} className="shrink-0 rounded-lg border border-[var(--border)] px-2.5 py-1 text-[11px] font-bold text-[var(--ink)] hover:bg-[var(--surface)] disabled:opacity-60">
                     {cancellingId === r.id ? "…" : "Cancel"}
                   </button>
                 )}
@@ -165,11 +175,22 @@ export function EngineerKitRequests({ job, locked, open, onOpenChange }: { job: 
         </ul>
       )}
 
+      <ConfirmDialog
+        open={confirmId !== null}
+        title="Cancel this kit request?"
+        message="The planner will no longer see this request. This can't be undone."
+        confirmLabel="Cancel request"
+        danger
+        busy={cancellingId !== null}
+        onConfirm={() => confirmId && onCancel(confirmId)}
+        onClose={() => setConfirmId(null)}
+      />
+
       {open && !locked && (
         <RequestModal
           job={job}
           onClose={() => onOpenChange(false)}
-          onSent={() => { onOpenChange(false); setMsg({ type: "success", text: "Request sent to the planner." }); load(); }}
+          onSent={() => { onOpenChange(false); pushToast("Request sent to the planner."); load(); }}
         />
       )}
     </section>

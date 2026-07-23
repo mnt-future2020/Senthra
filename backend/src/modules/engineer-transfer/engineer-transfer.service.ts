@@ -358,6 +358,11 @@ export async function listMine(engineerId: string, params: { role?: "incoming" |
   };
 }
 
+// Count of completed transfers awaiting the engineer's receipt signature — Engineer dashboard attention row.
+export function countAwaitingSignature(engineerId: string): Promise<number> {
+  return transferRepo.countAwaitingSignature(engineerId);
+}
+
 // ---- listAll (admin / oversight) -------------------------------------------------------------
 
 export async function listAll(params: { status?: string; engineerId?: string; ownership?: string; sort?: string; search?: string; page?: number; pageSize?: number }, _actor: AuditActor): Promise<PagedTransfers> {
