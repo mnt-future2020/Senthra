@@ -2264,3 +2264,18 @@ model Counter {
   seq       Int      @default(0) // last value handed out
   updatedAt DateTime @updatedAt
 }
+
+// Push-notification device tokens (Firebase Cloud Messaging). One row per device
+// per signed-in user. The FCM token is globally unique — a device belongs to one
+// user at a time, so re-registering it under a new user MOVES the row (upsert on
+// token). No FK, like Session: `userId` points at the User collection by id.
+model DeviceToken {
+  id         String   @id @default(auto()) @map("_id") @db.ObjectId
+  token      String   @unique // FCM registration token
+  userId     String   @db.ObjectId // the staff user this device is signed in as
+  platform   String   @default("android") // android | ios
+  createdAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+
+  @@index([userId])
+}

@@ -12,6 +12,7 @@ import * as userRepo from "#modules/user/user.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { sendTemplatedEmail } from "#modules/email/email.service.js";
+import { notify } from "#modules/notification/notification.service.js";
 import { roleGrants } from "#modules/role/permissions.js";
 import { emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
 import { conflict, forbidden, notFound, badRequest } from "../../utils/http-error.js";
@@ -536,7 +537,10 @@ export async function createJob(input: CreateJobInput, actor?: AuditActor): Prom
   );
 
   const job = toPublic(created);
-  if (job.assignedEngineerId) emitToUser(job.assignedEngineerId, "job:new", job); // engineer's portal list
+  if (job.assignedEngineerId) {
+    emitToUser(job.assignedEngineerId, "job:new", job); // engineer's portal list
+    notify(job.assignedEngineerId, { title: "New job assigned", body: `${job.jobNumber} · ${job.name}`, data: { type: "job", jobId: job.id } });
+  }
   emitToRoom(OFFICE_JOBS_ROOM, "job:new", job); // every office Jobs-list watcher
   audit.record({ actor, action: "job.created", targetType: "job", targetId: created.id, targetLabel: created.jobNumber });
   notifyAssignedEngineer(job);
@@ -783,7 +787,10 @@ export async function updateJob(id: string, input: UpdateJobInput, actor?: Audit
     // linger (stale, now-unowned) in their list/detail. job:deleted drops it off their surface.
     const prevEngineerId = existing.assignedEngineerId;
     if (prevEngineerId && prevEngineerId !== job.assignedEngineerId) emitToUser(prevEngineerId, "job:deleted", job);
-    if (job.assignedEngineerId) emitToUser(job.assignedEngineerId, "job:new", job);
+    if (job.assignedEngineerId) {
+      emitToUser(job.assignedEngineerId, "job:new", job);
+      notify(job.assignedEngineerId, { title: "New job assigned", body: `${job.jobNumber} · ${job.name}`, data: { type: "job", jobId: job.id } });
+    }
     emitToRoom(OFFICE_JOBS_ROOM, "job:new", job);
     audit.record({
       actor,
@@ -948,7 +955,10 @@ export async function assignJob(id: string, engineerId: string, actor?: AuditAct
   });
 
   const job = toPublic(updated);
-  if (job.assignedEngineerId) emitToUser(job.assignedEngineerId, "job:new", job);
+  if (job.assignedEngineerId) {
+    emitToUser(job.assignedEngineerId, "job:new", job);
+    notify(job.assignedEngineerId, { title: "New job assigned", body: `${job.jobNumber} · ${job.name}`, data: { type: "job", jobId: job.id } });
+  }
   emitToRoom(OFFICE_JOBS_ROOM, "job:new", job);
   audit.record({
     actor,
@@ -973,11 +983,16 @@ export async function cancelJob(id: string, reason: string | undefined, actor?: 
     updatedBy: actor?.email ?? null,
   });
   audit.record({ actor, action: "job.cancelled", targetType: "job", targetId: id, targetLabel: updated.jobNumber });
-  // A cancel can land on a job the engineer has already accepted / started, so notify them (their
-  // list + open detail refresh to the cancelled state) as well as every office Jobs-list watcher.
+  // A cancel can land on a job the engineer has already accepted / started, so refresh their list +
+  // open detail (they could otherwise drive to a dead job) and push them a notification, plus every
+  // office Jobs-list watcher. job:updated is the event both web (useJobSocket) and the mobile jobs list
+  // live-refresh on — mobile also listens for job:cancelled, but job:updated already covers it.
   const pub = toPublic(updated);
-  if (pub.assignedEngineerId) emitToUser(pub.assignedEngineerId, "job:updated", pub);
-  emitToRoom(OFFICE_JOBS_ROOM, "job:updated", pub);
+  if (pub.assignedEngineerId) {
+    emitToUser(pub.assignedEngineerId, "job:updated", pub);
+    notify(pub.assignedEngineerId, { title: "Job cancelled", body: `${pub.jobNumber} — ${pub.name} was cancelled.`, data: { type: "job", jobId: pub.id } });
+  }
+  emitToRoom(OFFICE_JOBS_ROOM, "job:updated", pub); // office Jobs-list watchers
   return pub;
 }
 
