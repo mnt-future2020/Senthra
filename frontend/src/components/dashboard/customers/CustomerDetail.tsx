@@ -704,7 +704,7 @@ function ProjectsSection({ customer, caps, pushToast }: SectionProps) {
               </td>
               <td className="px-3 py-2 text-[var(--muted)]">
                 {project.startDate || project.endDate
-                  ? `${fmtDate(project.startDate)} â†’ ${fmtDate(project.endDate)}`
+                  ? `${fmtDate(project.startDate)} → ${fmtDate(project.endDate)}`
                   : "—"}
               </td>
               <td className="px-3 py-2"><StatusChip value={project.status} /></td>
