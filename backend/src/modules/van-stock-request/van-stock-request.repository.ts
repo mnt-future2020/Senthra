@@ -217,7 +217,11 @@ export interface ListParams {
 export async function listRequests(params: ListParams = {}): Promise<{ requests: RequestWithLines[]; total: number }> {
   const { status, type, engineerId, priority, createdVia, search, sort, page = 1, pageSize = 20, warehouseId, warehouseScope } = params;
   const and: Prisma.VanStockRequestWhereInput[] = [{ deletedAt: null }];
-  if (status) and.push({ status });
+  // "collectible" is a composite the Engineer dashboard links to: the two states an engineer still has
+  // stock to physically pick up in (approved + partially_fulfilled). It mirrors countCollectibleRestocks
+  // so the "Field stock to collect" card's number and its filtered list agree. Any other value is exact.
+  if (status === "collectible") and.push({ status: { in: ["approved", "partially_fulfilled"] } });
+  else if (status) and.push({ status });
   if (type) and.push({ type });
   if (engineerId) and.push({ engineerId });
   if (priority) and.push({ priority });
@@ -496,4 +500,12 @@ export async function pendingWorklist(warehouseScope?: string[]): Promise<Array<
     createdAt: r.createdAt,
     targetWarehouseCode: r.warehouseCode ?? r.preferredWarehouseCode,
   }));
+}
+
+// Restocks the engineer still has to physically collect: approved or partially fulfilled.
+// Returns are excluded — the warehouse scans those in; only restocks are collected by the engineer.
+export function countCollectibleRestocks(engineerId: string): Promise<number> {
+  return prisma.vanStockRequest.count({
+    where: { engineerId, type: "restock", deletedAt: null, status: { in: ["approved", "partially_fulfilled"] } },
+  });
 }

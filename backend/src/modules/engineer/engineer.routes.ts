@@ -7,7 +7,8 @@ import { validateBody } from "../../middleware/validate.middleware.js";
 import { completeJobSchema, rejectJobSchema } from "#modules/job/job.validation.js";
 
 // The engineer self-service portal API. Staff-only (permission-gated, like every other staff route);
-// every handler scopes to the signed-in user's own id. Read-only in Phase 1.
+// every handler scopes to the signed-in user's own id. Reads (dashboard/stock/jobs/movements) plus the
+// job write actions (accept/reject/start/complete), which delegate to the job service's status machine.
 const router = Router();
 
 router.use(requireAuth);

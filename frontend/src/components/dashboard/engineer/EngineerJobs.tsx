@@ -24,6 +24,8 @@ const STATUS_OPTIONS = [
   { value: "assigned", label: "Assigned" },
   { value: "accepted", label: "Accepted" },
   { value: "in_progress", label: "In progress" },
+  // "Overdue" is not a stored status — the backend derives it (active job, completion date passed).
+  { value: "overdue", label: "Overdue" },
   { value: "completed", label: "Completed" },
   { value: "rejected", label: "Rejected" },
   { value: "cancelled", label: "Cancelled" },
@@ -110,8 +112,8 @@ export function EngineerJobs() {
       <PortalHeader title="Jobs" subtitle="Your assigned jobs." />
 
       {/* Toolbar — search + status filter + sort (same pattern as the Transfers page) */}
-      <div className="flex shrink-0 flex-col gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-xs sm:flex-row sm:items-center">
-        <div className="relative w-full sm:max-w-xs">
+      <div className="flex shrink-0 flex-col gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-xs lg:flex-row lg:items-center">
+        <div className="relative w-full lg:max-w-xs">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--faint)]" />
           <input
             type="text"

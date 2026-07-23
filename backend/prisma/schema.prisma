@@ -2118,6 +2118,15 @@ model Job {
   @@index([siteId])
   @@index([assignedEngineerId])
   @@index([supplierId])
+  // Engineer-portal queries always filter on assignedEngineerId + (status | createdAt): the jobs list
+  // (assignedEngineerId + deletedAt, sorted by createdAt) and the dashboard's active-jobs read
+  // (assignedEngineerId + status). Mongo uses one index per query, so without these compounds each
+  // falls back to scanning the engineer's whole job set in memory. Mirrors the compound every other
+  // engineer-scoped model already has (VanStockRequest, JobKitRequest, EngineerStockTransaction).
+  @@index([assignedEngineerId, status])
+  @@index([assignedEngineerId, createdAt])
+  // The admin dashboard's dueBreakdown filters active status + completionDate — give it a compound too.
+  @@index([status, completionDate])
 }
 
 // A kit line on a Job — what the engineer needs to take/use. lineType selects the source

@@ -819,6 +819,11 @@ export function countPending(actor: AuditActor): Promise<number> {
   return vsrRepo.countPending(warehouseScopeFilter(actor));
 }
 
+// Count of the engineer's restocks awaiting collection — for the Engineer dashboard "Field stock to collect" card.
+export function countCollectible(engineerId: string): Promise<number> {
+  return vsrRepo.countCollectibleRestocks(engineerId);
+}
+
 // Accepts a db id OR a code ("VSR-0030") — the reviewer workspace deep-links by code, so a shared URL
 // is readable. Resolution happens BEFORE any access check; every gate below runs on the resolved
 // request, so which key opened it grants nothing.

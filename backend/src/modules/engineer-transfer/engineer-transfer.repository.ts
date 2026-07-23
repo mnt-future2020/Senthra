@@ -218,6 +218,14 @@ function engineerWhere(engineerId: string, role: "incoming" | "outgoing" | "all"
   return { AND: and };
 }
 
+// Delivered transfers the engineer received that still require their signature:
+// outgoing (engineer is the recipient) + completed + requireSignature + not yet acknowledged.
+export function countAwaitingSignature(engineerId: string): Promise<number> {
+  return prisma.engineerStockTransfer.count({
+    where: { AND: [engineerWhere(engineerId, "outgoing", "completed"), { requireSignature: true, acknowledgedAt: null }] },
+  });
+}
+
 function transferOrderBy(sort?: string): Prisma.EngineerStockTransferOrderByWithRelationInput {
   return sort === "oldest" ? { createdAt: "asc" } : { createdAt: "desc" };
 }

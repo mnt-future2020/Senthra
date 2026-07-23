@@ -52,6 +52,9 @@ function StaleChip() {
 const STATUS_OPTIONS = [
   { value: "", label: "All statuses" },
   { value: "pending", label: "Pending" },
+  // Composite of approved + partially_fulfilled — the two states with stock still to pick up. Backed by
+  // the repository's "collectible" shortcut; the dashboard's "Field stock to collect" card links here.
+  { value: "collectible", label: "Ready to collect" },
   { value: "approved", label: "Approved" },
   { value: "partially_fulfilled", label: "Partially fulfilled" },
   { value: "fulfilled", label: "Fulfilled" },

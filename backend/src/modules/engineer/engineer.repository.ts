@@ -2,9 +2,10 @@ import { Prisma } from "@prisma/client";
 
 import { prisma } from "../../lib/prisma.js";
 
-// Read-only data access for the Engineer Portal. It READS the shared engineer-stock primitives
-// (EngineerStockBalance / EngineerStockTransaction, keyed by engineerId = User.id) — the WRITE path
-// stays solely in the Goods Out module. Every query is scoped to one engineerId by the caller.
+// Data access for the Engineer Portal. It READS the shared engineer-stock primitives
+// (EngineerStockBalance / EngineerStockTransaction, keyed by engineerId = User.id) — those balances
+// are WRITTEN by the goods-management / engineer-stock modules, never here. Every query is scoped to
+// one engineerId by the caller.
 
 const irmItemSelect = { id: true, code: true, name: true, baseUnit: true } satisfies Prisma.IrmItemSelect;
 

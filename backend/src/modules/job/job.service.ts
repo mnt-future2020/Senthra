@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 
 import * as jobRepo from "./job.repository.js";
-import type { JobWithRelations, JobKitLineRow } from "./job.repository.js";
+import type { JobWithRelations, JobListRow, JobKitLineRow } from "./job.repository.js";
 import { withTransaction } from "../../lib/prisma.js";
 import * as customerRepo from "#modules/customer/customer.repository.js";
 import * as supplierRepo from "#modules/supplier/supplier.repository.js";
@@ -165,7 +165,10 @@ const trimToNull = (v: string | null | undefined): string | null => {
 };
 const iso = (d: Date | null | undefined): string | null => (d ? d.toISOString() : null);
 
-function toPublic(j: JobWithRelations): PublicJob {
+// Accepts a full detail row OR a LIST row (no kit lines). List callers get kitLines: [] — the list
+// UIs render only header fields, so this is intentional, not a missing include.
+function toPublic(j: JobWithRelations | JobListRow): PublicJob {
+  const kitLines: JobWithRelations["kitLines"] = "kitLines" in j ? j.kitLines : [];
   const eng = j.assignedEngineer;
   return {
     id: j.id,
@@ -209,7 +212,7 @@ function toPublic(j: JobWithRelations): PublicJob {
     plannerPhone: j.plannerPhone,
     notes: j.notes,
     attachments: j.attachments ?? [],
-    kitLines: j.kitLines.map((l) => ({
+    kitLines: kitLines.map((l) => ({
       id: l.id,
       lineType: l.lineType,
       seCode: l.seCode,
@@ -780,6 +783,10 @@ export async function updateJob(id: string, input: UpdateJobInput, actor?: Audit
   const job = toPublic(result);
   // A re-assignment via PATCH fires the same realtime + notification as assignJob.
   if (reassigned) {
+    // The engineer who LOST the job isn't in OFFICE_JOBS_ROOM — without a personal emit it would
+    // linger (stale, now-unowned) in their list/detail. job:deleted drops it off their surface.
+    const prevEngineerId = existing.assignedEngineerId;
+    if (prevEngineerId && prevEngineerId !== job.assignedEngineerId) emitToUser(prevEngineerId, "job:deleted", job);
     if (job.assignedEngineerId) {
       emitToUser(job.assignedEngineerId, "job:new", job);
       notify(job.assignedEngineerId, { title: "New job assigned", body: `${job.jobNumber} · ${job.name}`, data: { type: "job", jobId: job.id } });
@@ -794,6 +801,11 @@ export async function updateJob(id: string, input: UpdateJobInput, actor?: Audit
       metadata: { engineerId: job.assignedEngineerId },
     });
     notifyAssignedEngineer(job);
+  } else {
+    // A plain header/kit edit (reschedule, address, kit-line change) must reach the assigned
+    // engineer's open list/detail and every office watcher — dual-emit like the status transitions.
+    if (job.assignedEngineerId) emitToUser(job.assignedEngineerId, "job:updated", job);
+    emitToRoom(OFFICE_JOBS_ROOM, "job:updated", job);
   }
   return job;
 }
@@ -971,14 +983,16 @@ export async function cancelJob(id: string, reason: string | undefined, actor?: 
     updatedBy: actor?.email ?? null,
   });
   audit.record({ actor, action: "job.cancelled", targetType: "job", targetId: id, targetLabel: updated.jobNumber });
+  // A cancel can land on a job the engineer has already accepted / started, so refresh their list +
+  // open detail (they could otherwise drive to a dead job) and push them a notification, plus every
+  // office Jobs-list watcher. job:updated is the event both web (useJobSocket) and the mobile jobs list
+  // live-refresh on — mobile also listens for job:cancelled, but job:updated already covers it.
   const pub = toPublic(updated);
-  // Alert the engineer holding this job that it's been cancelled — otherwise they
-  // could drive to a dead job. Only fires when the job was assigned to someone.
   if (pub.assignedEngineerId) {
-    emitToUser(pub.assignedEngineerId, "job:cancelled", pub);
+    emitToUser(pub.assignedEngineerId, "job:updated", pub);
     notify(pub.assignedEngineerId, { title: "Job cancelled", body: `${pub.jobNumber} — ${pub.name} was cancelled.`, data: { type: "job", jobId: pub.id } });
   }
-  emitToRoom(OFFICE_JOBS_ROOM, "job:cancelled", pub); // office Jobs-list watchers
+  emitToRoom(OFFICE_JOBS_ROOM, "job:updated", pub); // office Jobs-list watchers
   return pub;
 }
 
@@ -994,7 +1008,11 @@ export async function deleteJob(id: string, actor?: AuditActor): Promise<void> {
     throw conflict(`A ${existing.status.replace("_", " ")} job can't be deleted — cancel it instead.`);
   }
   await jobRepo.softDelete(id);
-  emitToRoom(OFFICE_JOBS_ROOM, "job:deleted", toPublic(existing));
+  // Dual-emit (same contract as job:new): the assigned engineer isn't in OFFICE_JOBS_ROOM, so a
+  // room-only emit would leave a now-deleted job sitting in their list (and 404 on click).
+  const pub = toPublic(existing);
+  if (existing.assignedEngineerId) emitToUser(existing.assignedEngineerId, "job:deleted", pub);
+  emitToRoom(OFFICE_JOBS_ROOM, "job:deleted", pub);
   audit.record({ actor, action: "job.deleted", targetType: "job", targetId: id, targetLabel: existing.jobNumber });
 }
 
@@ -1012,8 +1030,17 @@ export async function listJobsForEngineer(engineerId: string, params: ListEngine
   const filters = { status: params.status, search: params.search };
   const total = await jobRepo.countByEngineer(engineerId, filters);
   const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
-  const rows = await jobRepo.findManyByEngineer(engineerId, filters, skip, pageSize, params.sort);
+  // LIST projection (no kit lines) — the engineer's list renders only header fields.
+  const rows = await jobRepo.findManyByEngineerList(engineerId, filters, skip, pageSize, params.sort);
   return { jobs: rows.map(toPublic), total, page, pageSize, totalPages };
+}
+
+// The engineer's ACTIVE jobs (assigned / accepted / in_progress) as slim public rows — one bounded,
+// kit-line-free query the dashboard overview derives all its numbers from. Not paged: the active set
+// is small by nature (the unbounded history is completed/cancelled, which this excludes).
+export async function listActiveJobsForEngineer(engineerId: string): Promise<PublicJob[]> {
+  const rows = await jobRepo.findActiveSummaryByEngineer(engineerId);
+  return rows.map(toPublic);
 }
 
 export async function getJobForEngineer(engineerId: string, jobId: string): Promise<PublicJob> {
@@ -1109,7 +1136,9 @@ export async function startJobForEngineer(jobId: string, engineerId: string, act
   const updated = await jobRepo.startIfAccepted(jobId, engineerId);
   if (!updated) throw conflict("This job can't be started right now. Refresh and try again.");
 
-  const pub = toPublic(updated);
+  // Enrich with goods tallies (issued/used/returned/remaining) — the engineer's Complete form reads
+  // `remaining` to cap declared usage, so a bare toPublic (all tallies 0) would leave it unusable.
+  const pub = await withGoodsTallies(toPublic(updated));
   emitToUser(engineerId, "job:updated", pub);
   emitToRoom(OFFICE_JOBS_ROOM, "job:updated", pub);
   audit.record({ actor, action: "job.started", targetType: "job", targetId: jobId, targetLabel: job.jobNumber });
@@ -1136,7 +1165,9 @@ export async function completeJobForEngineer(jobId: string, engineerId: string, 
   await goodsManagementService.recordConsumeAndComplete(job, engineerId, input.workSummary ?? null, used, actorEmail);
 
   const updated = await jobRepo.findById(jobId);
-  const pub = toPublic(updated!);
+  // Enrich with the post-consume tallies so the returned job (and the office/engineer refetch) reflect
+  // the used/remaining state, consistent with getJobForEngineer.
+  const pub = await withGoodsTallies(toPublic(updated!));
   emitToUser(engineerId, "job:updated", pub);
   emitToRoom(OFFICE_JOBS_ROOM, "job:updated", pub);
   audit.record({ actor, action: "job.completed", targetType: "job", targetId: jobId, targetLabel: job.jobNumber });
