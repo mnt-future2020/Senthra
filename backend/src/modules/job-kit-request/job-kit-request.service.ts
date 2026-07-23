@@ -12,6 +12,7 @@ import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as transferRepo from "#modules/engineer-transfer/engineer-transfer.repository.js";
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
+import { notify } from "#modules/notification/notification.service.js";
 import { emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
 import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
 import * as kitRequestRepo from "./job-kit-request.repository.js";
@@ -456,6 +457,7 @@ export async function approve(id: string, input: ApproveKitRequestInput, actor: 
 
     audit.record({ actor, action: "job_kit_request.approved", targetType: "job", targetId: job.id, targetLabel: req.code, metadata: { fulfillmentMode: resolvedMode, transferIds, jobNumber: job.jobNumber } });
     emitUpdate(req.requestedByEngineerId, job.id, { id, code: req.code, status: "approved" });
+    notify(req.requestedByEngineerId, { title: "Kit request approved", body: `Your kit request ${req.code} for ${job.jobNumber} was approved.`, data: { type: "job", jobId: job.id } });
     return toPublic(finalized);
   } catch (e) {
     // Roll the status back to pending so the PM can retry. The grow + transfer are checkpointed on the
@@ -479,6 +481,7 @@ export async function decline(id: string, input: DeclineKitRequestInput, actor: 
 
   audit.record({ actor, action: "job_kit_request.declined", targetType: "job", targetId: req.jobId, targetLabel: req.code, metadata: { jobNumber: req.jobNumber, decisionNote: input.decisionNote } });
   emitUpdate(req.requestedByEngineerId, req.jobId, { id, code: req.code, status: "declined" });
+  notify(req.requestedByEngineerId, { title: "Kit request declined", body: `Your kit request ${req.code} was declined.${input.decisionNote ? ` ${input.decisionNote}` : ""}`, data: { type: "job", jobId: req.jobId } });
   return toPublic(updated!);
 }
 

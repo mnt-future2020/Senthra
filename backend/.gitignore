@@ -32,3 +32,6 @@ dev.log
 _inspect.mjs
 _scratch.*
 *.scratch.*
+
+# Firebase service-account key — never commit
+firebase-service-account*.json

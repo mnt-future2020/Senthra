@@ -31,6 +31,13 @@ const envSchema = z.object({
   CLOUDINARY_API_KEY: z.string().optional(),
   CLOUDINARY_API_SECRET: z.string().optional(),
 
+  // Firebase Cloud Messaging service-account (push notifications to the engineer
+  // app). Optional — push is disabled until all three are set. The private key is
+  // stored with literal \n escapes; the FCM lib un-escapes them at init.
+  FIREBASE_PROJECT_ID: z.string().optional(),
+  FIREBASE_CLIENT_EMAIL: z.string().optional(),
+  FIREBASE_PRIVATE_KEY: z.string().optional(),
+
   // Initial admin seeded on first startup (optional — seed is skipped if unset).
   ADMIN_EMAIL: z.email().optional(),
   ADMIN_PASSWORD: z.string().min(1).optional(),

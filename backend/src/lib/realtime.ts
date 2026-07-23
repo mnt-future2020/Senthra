@@ -58,12 +58,21 @@ interface SocketAuth {
 type AuthedSocket = Socket & { data: { auth?: SocketAuth } };
 
 // Read the SAME httpOnly access cookie the REST API uses, off the raw handshake
-// header (cookie-parser does not run for websocket upgrades).
+// header (cookie-parser does not run for websocket upgrades). Native clients (the
+// mobile app) can't rely on a browser cookie jar, so — mirroring the REST
+// middleware's cookie-first-then-Bearer order — fall back to the socket.io
+// handshake `auth.token` payload, then an Authorization header.
 function readAccessToken(socket: Socket): string | undefined {
   const raw = socket.handshake.headers.cookie;
-  if (!raw) return undefined;
-  const cookies = parseCookie(raw);
-  return cookies[ACCESS_COOKIE];
+  if (raw) {
+    const fromCookie = parseCookie(raw)[ACCESS_COOKIE];
+    if (fromCookie) return fromCookie;
+  }
+  const authToken = (socket.handshake.auth as Record<string, unknown> | undefined)?.token;
+  if (typeof authToken === "string" && authToken) return authToken;
+  const header = socket.handshake.headers.authorization;
+  if (header?.startsWith("Bearer ")) return header.slice("Bearer ".length);
+  return undefined;
 }
 
 // Socket auth middleware — mirrors requireAuth: verify the access token, then

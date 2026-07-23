@@ -15,6 +15,7 @@ import * as audit from "#modules/audit/audit.service.js";
 import * as goodsManagementRepo from "./goods-management.repository.js";
 import type { CloseReconcileInput, PostMovementInput, RestoreDamagedInput, ScanLookupInput } from "./goods-management.validation.js";
 import { withTransaction } from "../../lib/prisma.js";
+import { notify } from "#modules/notification/notification.service.js";
 import { emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
 
 export interface ScanMatch {
@@ -611,6 +612,7 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
   // Realtime: notify the engineer + all office staff watching the jobs list.
   const issuePayload = { jobId: job.id, movementId: created.id, code: created.code, direction: "issue" };
   emitToUser(job.assignedEngineerId!, "goods:issued", issuePayload);
+  notify(job.assignedEngineerId!, { title: "Kit ready to collect", body: `Stock for ${job.jobNumber} has been issued — collect it from the warehouse.`, data: { type: "job", jobId: job.id } });
   emitToRoom(OFFICE_JOBS_ROOM, "goods:updated", issuePayload);
 
   return toPublic(created);

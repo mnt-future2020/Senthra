@@ -12,6 +12,7 @@ import * as userRepo from "#modules/user/user.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { sendTemplatedEmail } from "#modules/email/email.service.js";
+import { notify } from "#modules/notification/notification.service.js";
 import { roleGrants } from "#modules/role/permissions.js";
 import { emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
 import { conflict, forbidden, notFound, badRequest } from "../../utils/http-error.js";
@@ -533,7 +534,10 @@ export async function createJob(input: CreateJobInput, actor?: AuditActor): Prom
   );
 
   const job = toPublic(created);
-  if (job.assignedEngineerId) emitToUser(job.assignedEngineerId, "job:new", job); // engineer's portal list
+  if (job.assignedEngineerId) {
+    emitToUser(job.assignedEngineerId, "job:new", job); // engineer's portal list
+    notify(job.assignedEngineerId, { title: "New job assigned", body: `${job.jobNumber} · ${job.name}`, data: { type: "job", jobId: job.id } });
+  }
   emitToRoom(OFFICE_JOBS_ROOM, "job:new", job); // every office Jobs-list watcher
   audit.record({ actor, action: "job.created", targetType: "job", targetId: created.id, targetLabel: created.jobNumber });
   notifyAssignedEngineer(job);
@@ -776,7 +780,10 @@ export async function updateJob(id: string, input: UpdateJobInput, actor?: Audit
   const job = toPublic(result);
   // A re-assignment via PATCH fires the same realtime + notification as assignJob.
   if (reassigned) {
-    if (job.assignedEngineerId) emitToUser(job.assignedEngineerId, "job:new", job);
+    if (job.assignedEngineerId) {
+      emitToUser(job.assignedEngineerId, "job:new", job);
+      notify(job.assignedEngineerId, { title: "New job assigned", body: `${job.jobNumber} · ${job.name}`, data: { type: "job", jobId: job.id } });
+    }
     emitToRoom(OFFICE_JOBS_ROOM, "job:new", job);
     audit.record({
       actor,
@@ -936,7 +943,10 @@ export async function assignJob(id: string, engineerId: string, actor?: AuditAct
   });
 
   const job = toPublic(updated);
-  if (job.assignedEngineerId) emitToUser(job.assignedEngineerId, "job:new", job);
+  if (job.assignedEngineerId) {
+    emitToUser(job.assignedEngineerId, "job:new", job);
+    notify(job.assignedEngineerId, { title: "New job assigned", body: `${job.jobNumber} · ${job.name}`, data: { type: "job", jobId: job.id } });
+  }
   emitToRoom(OFFICE_JOBS_ROOM, "job:new", job);
   audit.record({
     actor,
@@ -961,7 +971,15 @@ export async function cancelJob(id: string, reason: string | undefined, actor?: 
     updatedBy: actor?.email ?? null,
   });
   audit.record({ actor, action: "job.cancelled", targetType: "job", targetId: id, targetLabel: updated.jobNumber });
-  return toPublic(updated);
+  const pub = toPublic(updated);
+  // Alert the engineer holding this job that it's been cancelled — otherwise they
+  // could drive to a dead job. Only fires when the job was assigned to someone.
+  if (pub.assignedEngineerId) {
+    emitToUser(pub.assignedEngineerId, "job:cancelled", pub);
+    notify(pub.assignedEngineerId, { title: "Job cancelled", body: `${pub.jobNumber} — ${pub.name} was cancelled.`, data: { type: "job", jobId: pub.id } });
+  }
+  emitToRoom(OFFICE_JOBS_ROOM, "job:cancelled", pub); // office Jobs-list watchers
+  return pub;
 }
 
 // Deletable until the engineer has engaged with it: draft / assigned / rejected / cancelled. Once

@@ -47,6 +47,7 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.2",
+    "firebase-admin": "^14.2.0",
     "google-auth-library": "^10.6.2",
     "helmet": "^8.2.0",
     "jsonwebtoken": "^9.0.3",
