@@ -1,6 +1,7 @@
 import type { Prisma } from "@prisma/client";
 
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
+import { notify } from "#modules/notification/notification.service.js";
 import { emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
@@ -270,6 +271,8 @@ export async function createJobTransfer(
     metadata: { fromEngineerId: fromEng.id, toEngineerId: toEng.id, jobId: params.jobId, lineCount: lines.length },
   });
   emitBoth(fromEng.id, toEng.id, { id: transfer.id, code: transfer.code, status: transfer.status });
+  // Notify the HOLDER — they must approve/decline giving stock from their van.
+  notify(fromEng.id, { title: "Stock requested from your van", body: `${transfer.toEngineerName} requested stock (${transfer.code}) — approve or decline it.`, data: { type: "transfer", transferId: transfer.id } });
 
   return toPublic(transfer);
 }
@@ -339,6 +342,8 @@ export async function createTransfer(input: CreateTransferInput, actor: AuditAct
   });
 
   emitBoth(fromEng.id, toEng.id, { id: transfer.id, code: transfer.code, status: transfer.status });
+  // Notify the HOLDER — they must approve/decline giving stock from their van.
+  notify(fromEng.id, { title: "Stock requested from your van", body: `${transfer.toEngineerName} requested stock (${transfer.code}) — approve or decline it.`, data: { type: "transfer", transferId: transfer.id } });
 
   return toPublic(transfer);
 }
@@ -468,6 +473,12 @@ export async function approve(id: string, actor: AuditActor): Promise<PublicTran
     metadata: { approvedBy: approverEmail },
   });
   emitBoth(completed.fromEngineerId, completed.toEngineerId, { id: completed.id, code: completed.code, status: completed.status });
+  // Notify the RECIPIENT — their request was approved; stock is on its way.
+  notify(completed.toEngineerId, {
+    title: "Transfer approved",
+    body: `${completed.fromEngineerName} approved your stock request (${completed.code}).${completed.requireSignature ? " Sign for it on delivery." : ""}`,
+    data: { type: "transfer", transferId: completed.id },
+  });
 
   return toPublic(completed);
 }
@@ -497,6 +508,8 @@ export async function decline(id: string, reason: string | undefined, actor: Aud
     metadata: { declinedBy, reason },
   });
   emitBoth(declined.fromEngineerId, declined.toEngineerId, { id: declined.id, code: declined.code, status: declined.status });
+  // Notify the RECIPIENT — their request was declined.
+  notify(declined.toEngineerId, { title: "Transfer declined", body: `${declined.fromEngineerName} declined your stock request (${declined.code}).`, data: { type: "transfer", transferId: declined.id } });
 
   return toPublic(declined);
 }
@@ -525,6 +538,8 @@ export async function cancel(id: string, actor: AuditActor): Promise<PublicTrans
     metadata: { cancelledBy: actor.email },
   });
   emitBoth(cancelled.fromEngineerId, cancelled.toEngineerId, { id: cancelled.id, code: cancelled.code, status: cancelled.status });
+  // Notify the HOLDER — the request they were asked to act on was withdrawn.
+  notify(cancelled.fromEngineerId, { title: "Transfer request cancelled", body: `The stock request ${cancelled.code} was cancelled — no action needed.`, data: { type: "transfer", transferId: cancelled.id } });
 
   return toPublic(cancelled);
 }
@@ -548,6 +563,12 @@ export async function override(id: string, actor: AuditActor): Promise<PublicTra
     metadata: { overriddenBy: approverEmail },
   });
   emitBoth(completed.fromEngineerId, completed.toEngineerId, { id: completed.id, code: completed.code, status: completed.status });
+  // Admin force-completed — tell the recipient their stock request is done.
+  notify(completed.toEngineerId, {
+    title: "Transfer completed",
+    body: `Your stock request ${completed.code} was completed.${completed.requireSignature ? " Sign for it on delivery." : ""}`,
+    data: { type: "transfer", transferId: completed.id },
+  });
 
   return toPublic(completed);
 }

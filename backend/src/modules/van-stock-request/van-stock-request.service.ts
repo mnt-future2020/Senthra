@@ -10,6 +10,7 @@ import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import * as userRepo from "#modules/user/user.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
+import { notify } from "#modules/notification/notification.service.js";
 import { emitToRoom, emitToUser, VAN_STOCK_REVIEWERS_ROOM } from "../../lib/realtime.js";
 import { assertWarehouseAccess, getAccessibleWarehouseIds, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
@@ -485,6 +486,7 @@ export async function walkIn(input: WalkInInput, actor: AuditActor): Promise<Pub
   );
   audit.record({ actor, action: "van_stock_request.walk_in_created", targetType: "van_stock_request", targetId: req.id, targetLabel: req.code, metadata: { engineerId: engineer.id, warehouseId: wh.id } });
   emitUpdate(engineer.id, { id: req.id, code: req.code, status: req.status, type: req.type });
+  notify(engineer.id, { title: "Field stock ready", body: `Pre-approved stock ${req.code} is ready for you at the counter.`, data: { type: "vanstock", requestId: req.id } });
   return toPublic(req, new Date(), warehouseScopeFilter(actor));
 }
 
@@ -573,6 +575,7 @@ export async function approve(id: string, input: ApproveVanStockRequestInput, ac
 
   audit.record({ actor, action: "van_stock_request.approved", targetType: "van_stock_request", targetId: id, targetLabel: req.code, metadata: { warehouseId: wh.id, decisionNote: input.decisionNote ?? null, lineApprovals: lineApprovals.map((l) => ({ lineId: l.lineId, approvedQty: l.approvedQty, sourceWarehouseId: l.sourceWarehouseId })) } });
   emitUpdate(req.engineerId, { id, code: req.code, status: "approved", type: req.type });
+  notify(req.engineerId, { title: "Restock approved", body: `Your field stock request ${req.code} was approved — collect it from the warehouse.`, data: { type: "vanstock", requestId: id } });
   return toPublic(updated, new Date(), warehouseScopeFilter(actor));
 }
 
@@ -597,6 +600,7 @@ export async function decline(id: string, input: DeclineVanStockRequestInput, ac
 
   audit.record({ actor, action: "van_stock_request.declined", targetType: "van_stock_request", targetId: id, targetLabel: req.code, metadata: { decisionNote: input.decisionNote } });
   emitUpdate(req.engineerId, { id, code: req.code, status: "declined", type: req.type });
+  notify(req.engineerId, { title: "Field stock declined", body: `Your field stock request ${req.code} was declined.`, data: { type: "vanstock", requestId: id } });
   return toPublic(updated!, new Date(), warehouseScopeFilter(actor)); // reviewer action
 }
 
@@ -642,6 +646,7 @@ export async function closeShort(id: string, input: CloseShortInput, actor: Audi
   const { request: updated } = await vsrRepo.closeShortLines(id, targets.map((l) => l.id), input.note, actor.email ?? "");
   audit.record({ actor, action: "van_stock_request.closed_short", targetType: "van_stock_request", targetId: id, targetLabel: req.code, metadata: { note: input.note, lineIds: targets.map((l) => l.id), warehouseIds: [...new Set(targets.map((l) => l.sourceWarehouseId))] } });
   emitUpdate(req.engineerId, { id, code: req.code, status: updated.status, type: req.type });
+  notify(req.engineerId, { title: "Request closed short", body: `Request ${req.code} was closed — the remaining items were written off.`, data: { type: "vanstock", requestId: id } });
   return toPublic(updated, new Date(), scope);
 }
 
@@ -778,6 +783,11 @@ export async function fulfil(id: string, input: FulfilVanStockRequestInput, acto
 
   audit.record({ actor, action: "van_stock_request.fulfilment_posted", targetType: "van_stock_request", targetId: id, targetLabel: req.code, metadata: { entries: entries.map((e) => ({ item: e.itemName, qty: e.qty, condition: e.condition, sourceWarehouseId: entryWarehouses.get(e.lineId) ?? null })) } });
   emitUpdate(req.engineerId, { id, code: req.code, status: updated.status, type: req.type });
+  notify(req.engineerId, {
+    title: req.type === "return" ? "Return received" : "Stock issued to your van",
+    body: req.type === "return" ? `Your return ${req.code} was scanned in at the warehouse.` : `Items from ${req.code} were scanned out to your van.`,
+    data: { type: "vanstock", requestId: id },
+  });
   return toPublic(updated, new Date(), scope);
 }
 

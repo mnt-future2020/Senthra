@@ -19,6 +19,7 @@ import irmTypeRoutes from "#modules/irm-type/irm-type.routes.js";
 import jobRoutes from "#modules/job/job.routes.js";
 import jobKitRequestRoutes from "#modules/job-kit-request/job-kit-request.routes.js";
 import jobTitleRoutes from "#modules/jobTitle/jobTitle.routes.js";
+import notificationRoutes from "#modules/notification/notification.routes.js";
 import purchaseOrderRoutes from "#modules/purchase-order/purchase-order.routes.js";
 import purchaseRequestRoutes from "#modules/purchase-request/purchase-request.routes.js";
 import roleRoutes from "#modules/role/role.routes.js";
@@ -77,5 +78,7 @@ router.use("/engineer-transfers", engineerTransferRoutes);
 router.use("/job-kit-requests", jobKitRequestRoutes);
 // Non-job engineer van restock/return requests (raise / review / scan-fulfil).
 router.use("/van-stock-requests", vanStockRequestRoutes);
+
+router.use("/notifications", notificationRoutes);
 
 export default router;
