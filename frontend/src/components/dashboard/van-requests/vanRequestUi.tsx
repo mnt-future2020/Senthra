@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Check, Loader2, MapPin, Plus, Search, Trash2 } from "lucide-react";
+import { Check, ExternalLink, Loader2, MapPin, Plus, Search, Trash2 } from "lucide-react";
 
 import * as vanStockSvc from "@/services/vanStockRequest.service";
 import type { VanStockFulfilment, VanStockItemOption, VanStockLine, VanStockRequest } from "@/services/vanStockRequest.service";
@@ -228,6 +228,37 @@ export function VanStockPostings({ fulfilments, type }: { fulfilments: VanStockF
   );
 }
 
+// The photos the engineer attached when raising a request, as a row of clickable THUMBNAILS (open
+// full-size in a new tab) — shared by the engineer's own list and the reviewer's detail so both read
+// the same. Replaces a bare "#1 #2" link list nobody recognised as clickable: a preview the eye lands
+// on is the point of an attachment. Attachments are image uploads (Cloudinary), so a thumbnail is safe.
+export function VanStockAttachments({ urls, className }: { urls: string[]; className?: string }) {
+  if (urls.length === 0) return null;
+  return (
+    <div className={className}>
+      <p className="mb-1 text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">Attachments ({urls.length})</p>
+      <div className="flex flex-wrap gap-2">
+        {urls.map((url, i) => (
+          <a
+            key={url}
+            href={url}
+            target="_blank"
+            rel="noreferrer"
+            title={`Open attachment ${i + 1} in a new tab`}
+            className="group relative block h-16 w-16 shrink-0 overflow-hidden rounded-lg border border-[var(--border)] transition-all hover:border-[var(--accent)]"
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={url} alt={`Attachment ${i + 1}`} className="h-full w-full object-cover" />
+            <span className="absolute inset-0 flex items-center justify-center opacity-0 transition-all group-hover:bg-black/40 group-hover:opacity-100">
+              <ExternalLink className="h-4 w-4 text-white" />
+            </span>
+          </a>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function warehouseCaption(r: WarehouseCaptionReq, variant: "reviewer" | "engineer" = "reviewer"): string | null {
   const withCode = (name: string | null, code: string | null) => (name ? (code ? `${name} (${code})` : name) : null);
   if (r.type === "return") {
@@ -290,6 +321,7 @@ export function VanStockCartTable({
   onQty,
   onRemove,
   shelfByItem,
+  shelfLabel = "On shelf there",
   emptyText = "No items added yet.",
 }: {
   cart: VanStockCartItem[];
@@ -297,6 +329,9 @@ export function VanStockCartTable({
   onRemove: (irmItemId: string) => void;
   // Restock only: on-hand at the SELECTED collect-from warehouse (advisory).
   shelfByItem?: Map<string, number>;
+  // Wording for the on-hand line — "On shelf there" reads for the engineer's collect-from warehouse;
+  // the walk-in composer passes "In stock" (the item's on-hand at the issuing counter).
+  shelfLabel?: string;
   emptyText?: string;
 }) {
   if (cart.length === 0) return <p className="text-xs text-[var(--muted)]">{emptyText}</p>;
@@ -318,12 +353,14 @@ export function VanStockCartTable({
                 <td className="px-3 py-2">
                   <span className="font-semibold text-[var(--ink)]">{c.name}</span>
                   {c.code && <div className="mt-0.5"><CopyableCode code={c.code} /></div>}
-                  {typeof c.maxQty === "number" && <div className="text-[10px] text-[var(--faint)]">Holding {c.maxQty}</div>}
+                  {/* "Holding N" (returns cap) is redundant when a shelf figure is shown — the shelf line
+                      already states the number and colours it — so only render it when there's no shelf. */}
+                  {typeof c.maxQty === "number" && typeof shelf !== "number" && <div className="text-[10px] text-[var(--faint)]">Holding {c.maxQty}</div>}
                   {typeof shelf === "number" && (
                     <div className={`text-[10px] font-semibold ${shelf >= c.qty ? "text-[var(--pos)]" : shelf > 0 ? "text-amber-600" : "text-[var(--neg)]"}`}>
-                      On shelf there: {shelf}
+                      {shelfLabel}: {shelf}
                       {shelf < c.qty && shelf > 0 && " — less than you're asking"}
-                      {shelf === 0 && " — out of stock at that warehouse"}
+                      {shelf === 0 && " — out of stock"}
                     </div>
                   )}
                 </td>
@@ -356,20 +393,37 @@ export function VanStockCartTable({
   );
 }
 
-// Debounced catalogue item-search — shared by the engineer composer and the reviewer walk-in issue
-// (the /item-search endpoint serves both perms). A monotonic reqId guards against out-of-order
-// responses. `excludeIds` greys out already-added items.
+// A search hit carrying OPTIONAL warehouse stock context — the engineer composer's plain catalogue hit
+// has neither field; the walk-in composer's (warehouse-scoped) hit carries both.
+export type SearchItemOption = VanStockItemOption & { quantityOnHand?: number; reorderLevel?: number | null };
+
+// Debounced catalogue item-search — shared by the engineer composer and the reviewer walk-in issue.
+// A monotonic reqId guards against out-of-order responses. `excludeIds` greys out already-added items.
+//
+// Two modes, chosen by `warehouseId`:
+//   • absent  → engineer composer: warehouse-independent catalogue search (/requestable-item-search),
+//               each hit annotated with the item's TOTAL on-hand across warehouses. An item out of
+//               stock everywhere still shows — but disabled/"out of stock", non-selectable — since no
+//               warehouse could ever fulfil it. No default list — an empty box shows nothing until the
+//               engineer types.
+//   • present → walk-in composer: warehouse-scoped. With NO query it shows a BROWSE list of everything
+//               this warehouse holds (on-hand > 0), so the counter can pick straight off the shelf
+//               without typing; typing then searches the whole catalogue, annotating each hit with THIS
+//               warehouse's on-hand and disabling anything out of stock. The authoritative block still
+//               lives on the server (walkIn) — this is the UX layer over it.
 export function VanStockItemSearch({
   excludeIds,
   onAddItem,
   placeholder = "Search the catalogue…",
+  warehouseId,
 }: {
   excludeIds: Set<string>;
-  onAddItem: (it: VanStockItemOption) => void;
+  onAddItem: (it: SearchItemOption) => void;
   placeholder?: string;
+  warehouseId?: string;
 }) {
   const [search, setSearch] = React.useState("");
-  const [results, setResults] = React.useState<VanStockItemOption[]>([]);
+  const [results, setResults] = React.useState<SearchItemOption[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [touched, setTouched] = React.useState(false);
   const [failed, setFailed] = React.useState(false);
@@ -378,31 +432,58 @@ export function VanStockItemSearch({
 
   React.useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
 
+  // One fetch for both the default browse list (empty q, walk-in mode) and typed search. A monotonic
+  // reqId drops out-of-order responses. Engineer mode with an empty q resolves to an empty list (no
+  // default browse); walk-in mode with an empty q returns the warehouse's on-hand items.
+  const fetchItems = React.useCallback(async (q: string) => {
+    const myId = ++reqId.current;
+    setLoading(true);
+    setTouched(true);
+    setFailed(false);
+    try {
+      const items: SearchItemOption[] = warehouseId
+        ? await vanStockSvc.searchWalkInItems(warehouseId, q)
+        : q
+          ? await vanStockSvc.searchRequestableItems(q)
+          : [];
+      if (myId !== reqId.current) return;
+      setResults(items);
+    } catch (e) {
+      if (myId !== reqId.current) return;
+      console.error("Field stock item search failed:", e);
+      setResults([]);
+      setFailed(true);
+    } finally {
+      if (myId === reqId.current) setLoading(false);
+    }
+  }, [warehouseId]);
+
+  // Walk-in mode: load the default browse list once the warehouse is known, so the dropdown is useful
+  // before the reviewer types anything. Deferred a tick so the fetch's setState doesn't fire
+  // synchronously inside the effect (which would cascade a render — react-hooks set-state-in-effect).
+  React.useEffect(() => {
+    if (!warehouseId) return;
+    const t = setTimeout(() => { void fetchItems(""); }, 0);
+    return () => clearTimeout(t);
+  }, [warehouseId, fetchItems]);
+
   const run = (v: string) => {
     setSearch(v);
     if (timer.current) clearTimeout(timer.current);
     const q = v.trim();
-    reqId.current++;
-    if (!q) { setResults([]); setTouched(false); setFailed(false); return; }
-    timer.current = setTimeout(async () => {
-      const myId = ++reqId.current;
-      setLoading(true);
-      setTouched(true);
-      setFailed(false);
-      try {
-        const items = await vanStockSvc.searchVanStockItems(q);
-        if (myId !== reqId.current) return;
-        setResults(items);
-      } catch (e) {
-        if (myId !== reqId.current) return;
-        console.error("Field stock item search failed:", e);
-        setResults([]);
-        setFailed(true);
-      } finally {
-        if (myId === reqId.current) setLoading(false);
-      }
-    }, 300);
+    // Engineer mode with an empty box shows nothing; walk-in mode falls back to the browse list.
+    if (!q && !warehouseId) { reqId.current++; setResults([]); setTouched(false); setFailed(false); return; }
+    timer.current = setTimeout(() => { void fetchItems(q); }, 300);
   };
+
+  const browsing = !!warehouseId && search.trim().length === 0;
+  // Walk-in search only ever returns stock this warehouse holds, so an empty result there means "not on
+  // this shelf", not "no such item". The engineer's catalogue search keeps the catalogue wording.
+  const noResultsText = warehouseId
+    ? browsing
+      ? "This warehouse has no stock to hand out yet."
+      : "No matching stock at this warehouse."
+    : "No matching item in the catalogue.";
 
   return (
     <div className="space-y-2">
@@ -413,19 +494,31 @@ export function VanStockItemSearch({
       </div>
 
       {touched && !loading && failed && <p className="text-xs font-semibold text-[var(--neg)]">Couldn&apos;t run the search just now. Check your connection and try again.</p>}
-      {touched && !loading && !failed && results.length === 0 && <p className="text-xs text-[var(--muted)]">No matching item in the catalogue.</p>}
+      {touched && !loading && !failed && results.length === 0 && (
+        <p className="text-xs text-[var(--muted)]">{noResultsText}</p>
+      )}
 
       {results.length > 0 && (
         <div className="max-h-56 space-y-1.5 overflow-auto">
           {results.map((it) => {
+            // Out of stock at THIS warehouse — walk-in can't issue it, so it's pickable in name only.
+            const outOfStock = typeof it.quantityOnHand === "number" && it.quantityOnHand <= 0;
             const added = excludeIds.has(it.irmItemId);
+            const disabled = added || outOfStock;
             return (
-              <button key={it.irmItemId} type="button" disabled={added} onClick={() => onAddItem(it)} className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left transition-all ${added ? "cursor-default border-[var(--border)] bg-[var(--surface-2)] opacity-60" : "border-[var(--border)] bg-[var(--surface-2)] hover:border-[var(--accent)]"}`}>
+              <button key={it.irmItemId} type="button" disabled={disabled} onClick={() => onAddItem(it)} title={outOfStock ? "Out of stock at this warehouse" : undefined} className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left transition-all ${disabled ? "cursor-default border-[var(--border)] bg-[var(--surface-2)] opacity-60" : "border-[var(--border)] bg-[var(--surface-2)] hover:border-[var(--accent)]"}`}>
                 <span className="min-w-0">
                   <span className="block truncate text-sm font-semibold text-[var(--ink)]">{it.name}</span>
                   {it.code && <span className="block truncate font-mono text-[11px] text-[var(--muted)]">{it.code}</span>}
                 </span>
-                {added ? <Check className="h-4 w-4 shrink-0 text-[var(--pos)]" /> : <Plus className="h-4 w-4 shrink-0 text-[var(--accent)]" />}
+                <span className="flex shrink-0 items-center gap-2">
+                  {typeof it.quantityOnHand === "number" && (
+                    <span className={`text-[11px] font-semibold tabular-nums ${it.quantityOnHand <= 0 ? "text-[var(--neg)]" : "text-[var(--muted)]"}`}>
+                      {it.quantityOnHand <= 0 ? "Out of stock" : `${it.quantityOnHand} in stock`}
+                    </span>
+                  )}
+                  {added ? <Check className="h-4 w-4 shrink-0 text-[var(--pos)]" /> : !outOfStock && <Plus className="h-4 w-4 shrink-0 text-[var(--accent)]" />}
+                </span>
               </button>
             );
           })}

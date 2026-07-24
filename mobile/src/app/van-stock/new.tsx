@@ -5,10 +5,10 @@ import {
   createVanStockRequest,
   getVanStockAvailability,
   myOpenLineItems,
-  searchVanStockItems,
+  searchRequestableItems,
   uploadVanStockAttachment,
 } from "@/services/vanStock.service";
-import type { WarehouseAvailability } from "@/services/vanStock.service";
+import type { RequestableItemOption, WarehouseAvailability } from "@/services/vanStock.service";
 import { useLoad } from "@/lib/useLoad";
 import { useDebouncedCallback } from "@/lib/useDebounced";
 import { useToast } from "@/lib/toast";
@@ -43,7 +43,7 @@ export default function NewVanStockScreen() {
   const router = useRouter();
   const toast = useToast();
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState<VanStockItemOption[]>([]);
+  const [results, setResults] = useState<RequestableItemOption[]>([]);
   const [searching, setSearching] = useState(false);
   const [lines, setLines] = useState<DraftLine[]>([]);
   const [warehouseId, setWarehouseId] = useState<string | null>(null);
@@ -68,7 +68,7 @@ export default function NewVanStockScreen() {
     const seq = ++searchSeq.current;
     setSearching(true);
     try {
-      const found = await searchVanStockItems(q.trim());
+      const found = await searchRequestableItems(q.trim());
       if (seq === searchSeq.current) setResults(found);
     } catch {
       if (seq === searchSeq.current) setResults([]);
@@ -189,16 +189,32 @@ export default function NewVanStockScreen() {
         autoCapitalize="none"
       />
       {searching ? <Text style={s.hint}>Searching…</Text> : null}
-      {results.map((item) => (
-        <Card key={item.irmItemId} onPress={() => addItem(item)}>
-          <Text style={s.lineName}>{item.name}</Text>
-          <Text style={s.meta}>
-            {item.code}
-            {item.sku ? ` · ${item.sku}` : ""}
-            {item.uom ? ` · ${item.uom}` : ""}
-          </Text>
-        </Card>
-      ))}
+      {results.map((item) => {
+        // Out of stock at EVERY warehouse — no warehouse can fulfil it, so show it (the engineer sees
+        // the item exists) but don't let it be added. Mirrors the web restock composer.
+        const outOfStock = item.quantityOnHand <= 0;
+        return (
+          <Card
+            key={item.irmItemId}
+            onPress={outOfStock ? undefined : () => addItem(item)}
+            style={outOfStock ? s.oosCard : undefined}
+          >
+            <View style={s.lineRow}>
+              <View style={s.lineMain}>
+                <Text style={s.lineName}>{item.name}</Text>
+                <Text style={s.meta}>
+                  {item.code}
+                  {item.sku ? ` · ${item.sku}` : ""}
+                  {item.uom ? ` · ${item.uom}` : ""}
+                </Text>
+              </View>
+              <Text style={[s.meta, { fontWeight: "700", color: outOfStock ? colors.danger : colors.success }]}>
+                {outOfStock ? "Out of stock" : `${item.quantityOnHand} in stock`}
+              </Text>
+            </View>
+          </Card>
+        );
+      })}
 
       <SectionTitle>Selected items ({lines.length})</SectionTitle>
       {duplicates.length > 0 ? (
@@ -316,6 +332,7 @@ const s = StyleSheet.create({
   meta: { fontSize: 12, color: colors.muted },
   lineRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 },
   lineMain: { flex: 1, gap: 2 },
+  oosCard: { opacity: 0.55 },
   warnCard: { borderColor: colors.warn, backgroundColor: colors.warnSoft },
   warnText: { fontSize: 13, color: colors.warn },
   inputLabel: { fontSize: 13, fontWeight: "600", color: colors.muted },

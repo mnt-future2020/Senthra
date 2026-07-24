@@ -14,7 +14,7 @@ import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { primaryBtn, secondaryBtn } from "@/components/ui/styles";
 import { EmptyState, fmtDateTime, PortalHeader } from "@/components/dashboard/portal/portalUi";
-import { singlePickup, VanRequestItemsSummary, VanRequestLinesTable, VanRequestListSkeleton, VanStockPostings, VanStockWalkInBadge, warehouseCaption } from "@/components/dashboard/van-requests/vanRequestUi";
+import { singlePickup, VanRequestItemsSummary, VanRequestLinesTable, VanRequestListSkeleton, VanStockAttachments, VanStockPostings, VanStockWalkInBadge, warehouseCaption } from "@/components/dashboard/van-requests/vanRequestUi";
 import { WarehousePickupModal } from "./WarehousePickupModal";
 import type { Msg } from "@/components/ui/types";
 
@@ -311,15 +311,8 @@ export function EngineerVanStock() {
                     {r.status === "declined" && r.decisionNote && <p className="mt-0.5 text-[11px] text-[var(--neg)]">Declined: {r.decisionNote}</p>}
                     {r.completionType === "closed_short" && r.closeShortNote && <p className="mt-0.5 text-[11px] text-[var(--muted)]">Closed short: {r.closeShortNote}</p>}
                     {/* Photos the engineer attached when raising it — they uploaded these, so they should
-                        be able to check what the warehouse is looking at. */}
-                    {r.attachments.length > 0 && (
-                      <p className="mt-1 text-[11px] text-[var(--muted)]">
-                        <span className="font-bold text-[var(--faint)]">Attachments:</span>{" "}
-                        {r.attachments.map((url, i) => (
-                          <a key={url} href={url} target="_blank" rel="noreferrer" className="mr-2 font-semibold text-[var(--accent)] hover:underline">#{i + 1}</a>
-                        ))}
-                      </p>
-                    )}
+                        be able to check what the warehouse is looking at. Thumbnails, not bare "#1" links. */}
+                    <VanStockAttachments urls={r.attachments} className="mt-2" />
                     {/* What actually moved. On a RETURN this is the only place the engineer can see a
                         damaged split — the warehouse can take 5 back as "3 good + 2 damaged", and without
                         this their van balance simply drops with no record of why. */}

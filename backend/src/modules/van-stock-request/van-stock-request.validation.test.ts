@@ -71,31 +71,40 @@ describe("fulfilVanStockRequestSchema", () => {
     const good = { lineId: oid, qty: 5, condition: "good", scannedCode: "IRM-0002" };
     const damagedBad = { lineId: oid, qty: 5, condition: "damaged", scannedCode: "IRM-0002" };
     const damagedOk = { ...damagedBad, damagePhotoUrl: "https://res.cloudinary.com/x/d.jpg", damageReason: "crushed" };
-    expect(fulfilVanStockRequestSchema.safeParse({ entries: [good] }).success).toBe(true);
-    expect(fulfilVanStockRequestSchema.safeParse({ entries: [damagedBad] }).success).toBe(false);
-    expect(fulfilVanStockRequestSchema.safeParse({ entries: [damagedOk] }).success).toBe(true);
+    expect(fulfilVanStockRequestSchema.safeParse({ warehouseId: oid, entries: [good] }).success).toBe(true);
+    expect(fulfilVanStockRequestSchema.safeParse({ warehouseId: oid, entries: [damagedBad] }).success).toBe(false);
+    expect(fulfilVanStockRequestSchema.safeParse({ warehouseId: oid, entries: [damagedOk] }).success).toBe(true);
+  });
+  // The issuing warehouse (the tab) is required — the service uses it to enforce a line is only posted
+  // out of the warehouse it's sourced to (even for an admin).
+  it("requires a warehouseId", () => {
+    expect(fulfilVanStockRequestSchema.safeParse({ entries: [{ lineId: oid, qty: 1, condition: "good", scannedCode: "IRM-0002" }] }).success).toBe(false);
+    expect(fulfilVanStockRequestSchema.safeParse({ warehouseId: "nope", entries: [{ lineId: oid, qty: 1, condition: "good", scannedCode: "IRM-0002" }] }).success).toBe(false);
   });
   it("rejects an empty posting", () => {
-    expect(fulfilVanStockRequestSchema.safeParse({ entries: [] }).success).toBe(false);
+    expect(fulfilVanStockRequestSchema.safeParse({ warehouseId: oid, entries: [] }).success).toBe(false);
   });
   // Scan-only posting (mirrors Goods Management): an entry with no scannedCode is stock nobody read off
   // the item, so the API must refuse it — the UI having no manual-add button is not the enforcement.
   it("rejects an entry with no scannedCode", () => {
-    expect(fulfilVanStockRequestSchema.safeParse({ entries: [{ lineId: oid, qty: 1, condition: "good" }] }).success).toBe(false);
+    expect(fulfilVanStockRequestSchema.safeParse({ warehouseId: oid, entries: [{ lineId: oid, qty: 1, condition: "good" }] }).success).toBe(false);
   });
   it("rejects a blank/whitespace scannedCode", () => {
-    expect(fulfilVanStockRequestSchema.safeParse({ entries: [{ lineId: oid, qty: 1, condition: "good", scannedCode: "   " }] }).success).toBe(false);
+    expect(fulfilVanStockRequestSchema.safeParse({ warehouseId: oid, entries: [{ lineId: oid, qty: 1, condition: "good", scannedCode: "   " }] }).success).toBe(false);
   });
   // An item with no printed barcode is still scannable by its IRM code (lookup resolves code|barcode|sku).
   it("accepts an IRM code as the scanned value", () => {
-    expect(fulfilVanStockRequestSchema.safeParse({ entries: [{ lineId: oid, qty: 1, condition: "good", scannedCode: "IRM-0002" }] }).success).toBe(true);
+    expect(fulfilVanStockRequestSchema.safeParse({ warehouseId: oid, entries: [{ lineId: oid, qty: 1, condition: "good", scannedCode: "IRM-0002" }] }).success).toBe(true);
   });
 });
 
 describe("closeShortSchema", () => {
-  it("requires a note", () => {
+  it("requires a note AND the warehouseId being closed short from", () => {
     expect(closeShortSchema.safeParse({}).success).toBe(false);
-    expect(closeShortSchema.safeParse({ note: "supplier discontinued" }).success).toBe(true);
+    expect(closeShortSchema.safeParse({ warehouseId: oid, note: "supplier discontinued" }).success).toBe(true);
+    // note without warehouseId is rejected — the service uses warehouseId to scope the write-off to one tab.
+    expect(closeShortSchema.safeParse({ note: "supplier discontinued" }).success).toBe(false);
+    expect(closeShortSchema.safeParse({ warehouseId: "nope", note: "x" }).success).toBe(false);
   });
 });
 

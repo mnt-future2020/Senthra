@@ -4,14 +4,14 @@ import * as React from "react";
 import { ArrowLeft, Loader2, PackagePlus } from "lucide-react";
 
 import * as vanStockSvc from "@/services/vanStockRequest.service";
-import type { VanStockItemOption, VanStockPriority } from "@/services/vanStockRequest.service";
+import type { VanStockPriority } from "@/services/vanStockRequest.service";
 import { listEngineerOptions } from "@/services/warehouse.service";
 import { FormAsideCard, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { Notice } from "@/components/ui/Notice";
 import { Select } from "@/components/ui/Select";
 import { inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import type { Msg } from "@/components/ui/types";
-import { VanStockCartTable, VanStockItemSearch, type VanStockCartItem } from "./vanRequestUi";
+import { VanStockCartTable, VanStockItemSearch, type SearchItemOption, type VanStockCartItem } from "./vanRequestUi";
 
 // Counter issue: the reviewer builds a PRE-APPROVED request for an engineer standing in front of them,
 // then scan-fulfils it. Mirrors the engineer's own composer (same FormSection shell, same shared item
@@ -56,11 +56,41 @@ export function WalkInIssue({
       .catch(() => setEngineers([]));
   }, []);
 
+  // On-hand + reorder level at THIS warehouse for every item added, captured from the search hit that
+  // added it (the walk-in search annotates each hit). Drives the cart's on-hand line, the per-item qty
+  // cap, and the reorder advisory below. Keyed by item id; cart-scoped reads ignore stale keys.
+  const [stockById, setStockById] = React.useState<Record<string, { onHand: number; reorderLevel: number | null }>>({});
+
   const excludeIds = React.useMemo(() => new Set(cart.map((c) => c.irmItemId)), [cart]);
-  const addItem = (it: VanStockItemOption) =>
-    setCart((c) => (c.some((x) => x.irmItemId === it.irmItemId) ? c : [...c, { irmItemId: it.irmItemId, name: it.name, code: it.code, qty: 1 }]));
+  const addItem = (it: SearchItemOption) => {
+    setCart((c) => (c.some((x) => x.irmItemId === it.irmItemId) ? c : [...c, { irmItemId: it.irmItemId, name: it.name, code: it.code, qty: 1, maxQty: it.quantityOnHand }]));
+    if (typeof it.quantityOnHand === "number") {
+      setStockById((m) => ({ ...m, [it.irmItemId]: { onHand: it.quantityOnHand as number, reorderLevel: it.reorderLevel ?? null } }));
+    }
+  };
   const setQty = (id: string, qty: number) => setCart((c) => c.map((x) => (x.irmItemId === id ? { ...x, qty } : x)));
   const remove = (id: string) => setCart((c) => c.filter((x) => x.irmItemId !== id));
+
+  // On-hand at this counter per cart item — feeds the cart's coloured "In stock: N" line.
+  const shelfByItem = React.useMemo(() => {
+    const m = new Map<string, number>();
+    for (const c of cart) { const s = stockById[c.irmItemId]; if (s) m.set(c.irmItemId, s.onHand); }
+    return m;
+  }, [cart, stockById]);
+
+  // ADVISORY only (never blocks): items whose on-hand AFTER this issue would sit at/below the item's
+  // reorder level. Reorder level is a planning threshold that should trigger a reorder — not stop an
+  // issue — so this is a soft heads-up, not a guard. Only items with a positive reorder policy count.
+  const reorderWarnings = React.useMemo(
+    () =>
+      cart.flatMap((c) => {
+        const s = stockById[c.irmItemId];
+        if (!s || s.reorderLevel == null || s.reorderLevel <= 0) return [];
+        const after = s.onHand - c.qty;
+        return after <= s.reorderLevel ? [{ id: c.irmItemId, name: c.name, after, reorderLevel: s.reorderLevel }] : [];
+      }),
+    [cart, stockById],
+  );
 
   const totalQty = cart.reduce((s, c) => s + c.qty, 0);
   const engineerName = engineers.find((e) => e.id === engineerId)?.name;
@@ -119,12 +149,22 @@ export function WalkInIssue({
       <div className="min-h-0 flex-1 overflow-y-auto pb-6 pt-4">
         <div className="grid gap-6 lg:grid-cols-3">
           <div className="space-y-6 lg:col-span-2">
-            <FormSection title="Add items" description="Search the catalogue for the stock being handed over.">
-              <VanStockItemSearch excludeIds={excludeIds} onAddItem={addItem} placeholder="Search the catalogue…" />
+            <FormSection title="Add items" description="Search this warehouse's stock being handed over — only items on the shelf here can be issued.">
+              <VanStockItemSearch excludeIds={excludeIds} onAddItem={addItem} warehouseId={warehouse.id} placeholder="Search this warehouse's stock…" />
             </FormSection>
 
-            <FormSection title={`Selected items${cart.length ? ` (${cart.length})` : ""}`} description="Set the quantity for each item.">
-              <VanStockCartTable cart={cart} onQty={setQty} onRemove={remove} />
+            <FormSection title={`Selected items${cart.length ? ` (${cart.length})` : ""}`} description="Set the quantity for each item — capped at what's on the shelf here.">
+              <VanStockCartTable cart={cart} onQty={setQty} onRemove={remove} shelfByItem={shelfByItem} shelfLabel="In stock" />
+              {reorderWarnings.length > 0 && (
+                <div className="mt-3 rounded-xl bg-amber-500/10 px-3.5 py-2.5 text-xs font-semibold text-amber-700 dark:text-amber-400">
+                  Heads up — issuing this leaves stock at or below the reorder level:
+                  <ul className="mt-1 list-disc pl-4 font-medium">
+                    {reorderWarnings.map((w) => (
+                      <li key={w.id}>{w.name}: {w.after} left (reorder at {w.reorderLevel})</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </FormSection>
 
             <FormSection title="Who & why" description="The engineer receives this stock onto their van the moment it's scanned out.">

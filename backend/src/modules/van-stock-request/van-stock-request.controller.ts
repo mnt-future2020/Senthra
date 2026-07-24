@@ -46,6 +46,16 @@ export const itemSearch = asyncHandler(async (req, res) => {
   res.json({ items: await vsrService.searchItems(queryStr(req.query.q) ?? "") });
 });
 
+// GET /van-stock-requests/warehouse-item-search?warehouseId=&q=  (walk-in composer — on-hand annotated)
+export const warehouseItemSearch = asyncHandler(async (req, res) => {
+  res.json({ items: await vsrService.searchWarehouseItems(actorFrom(req), queryStr(req.query.warehouseId) ?? "", queryStr(req.query.q) ?? "") });
+});
+
+// GET /van-stock-requests/requestable-item-search?q=  (engineer composer — only items in stock somewhere)
+export const requestableItemSearch = asyncHandler(async (req, res) => {
+  res.json({ items: await vsrService.searchRequestableItems(queryStr(req.query.q) ?? "") });
+});
+
 // GET /van-stock-requests/warehouses-lite  (active warehouses for the composer pickers)
 export const warehousesLite = asyncHandler(async (_req, res) => {
   res.json({ warehouses: await vsrService.listWarehousesLite() });

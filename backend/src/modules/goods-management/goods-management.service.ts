@@ -126,6 +126,35 @@ export async function getJobKitTallies(jobId: string): Promise<Record<string, Ki
   return out;
 }
 
+// Total qty an engineer still holds AGAINST active jobs, per IRM item: issued (warehouse OR van-
+// attributed) − used (incl. lost write-offs) − returned, summed over every goods-active job assigned to
+// them. This is the slice of their van holding that must go back through the job's Close & Reconcile —
+// so the field-stock RETURN flow subtracts it, and an engineer can never hand job stock back outside its
+// job (which would strand it). Reuses kitLineSplit — the exact movement math Goods Management shows as
+// "held" — so this figure can never drift from the job side. Customer stock is a separate pool (its own
+// holdings), never field-returnable, so it isn't considered here.
+export async function jobCommittedByEngineer(engineerId: string): Promise<Map<string, number>> {
+  const committed = new Map<string, number>();
+  const jobs = await jobRepo.findActiveByEngineerWithKitLines(engineerId);
+  if (jobs.length === 0) return committed;
+  const movesByJob = new Map<string, Awaited<ReturnType<typeof goodsManagementRepo.findMovementsByJobs>>>();
+  for (const m of await goodsManagementRepo.findMovementsByJobs(jobs.map((j) => j.id))) {
+    const list = movesByJob.get(m.jobId);
+    if (list) list.push(m);
+    else movesByJob.set(m.jobId, [m]);
+  }
+  for (const job of jobs) {
+    const moves = movesByJob.get(job.id) ?? [];
+    for (const kit of job.kitLines ?? []) {
+      if (kit.lineType !== "irm" || !kit.irmItemId) continue;
+      const { issued, used, returned } = kitLineSplit(moves, kit.id);
+      const held = Math.max(0, issued - used - returned);
+      if (held > 0) committed.set(kit.irmItemId, (committed.get(kit.irmItemId) ?? 0) + held);
+    }
+  }
+  return committed;
+}
+
 // Current goods-lifecycle status for a job ("not_issued" if no stock has moved yet). The job module
 // uses this to lock the kit list once stock has been issued (changing it would orphan movements).
 export async function getGoodsStatus(jobId: string): Promise<string> {

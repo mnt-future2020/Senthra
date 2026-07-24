@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { belongsToWarehouses, lineDone, lineRemaining, linesAllDone } from "./van-stock-request.repository.js";
-import { assertRequestAccess, computeProgress, isReviewer, isStale, pickCloseShortLines, requestAccessWarehouseIds, requestDoneAfter, resolveFulfilWarehouses, resolveLineApprovals, STALE_ACTIVE_DAYS, STALE_PENDING_DAYS, toPublic } from "./van-stock-request.service.js";
+import { assertRequestAccess, assertWalkInAvailability, computeProgress, isReviewer, isStale, pickCloseShortLines, requestAccessWarehouseIds, requestDoneAfter, resolveFulfilWarehouses, resolveLineApprovals, STALE_ACTIVE_DAYS, STALE_PENDING_DAYS, toPublic } from "./van-stock-request.service.js";
 import type { RequestWithLines } from "./van-stock-request.repository.js";
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -277,6 +277,25 @@ describe("resolveLineApprovals (approve sourcing + hard-block)", () => {
   });
 });
 
+describe("assertWalkInAvailability (walk-in availability hard-block)", () => {
+  const lines = [
+    { irmItemId: "I1", itemName: "Fibre Panel", requestedQty: 2 },
+    { irmItemId: "I2", itemName: "CAT6", requestedQty: 1 },
+  ];
+  it("passes when every line's on-hand covers the requested qty", () => {
+    const onHand = new Map([["I1", 2], ["I2", 5]]);
+    expect(() => assertWalkInAvailability(lines, "London Logistics Hub", onHand)).not.toThrow();
+  });
+  it("throws naming the short item + warehouse when on-hand is below requested", () => {
+    const onHand = new Map([["I1", 1], ["I2", 5]]);
+    expect(() => assertWalkInAvailability(lines, "London Logistics Hub", onHand)).toThrow(/Fibre Panel.*only 1.*London Logistics Hub/);
+  });
+  it("treats a missing (unstocked) item balance as 0 on-hand", () => {
+    const onHand = new Map([["I2", 5]]); // I1 absent ⇒ 0 on-hand
+    expect(() => assertWalkInAvailability(lines, "London Logistics Hub", onHand)).toThrow(/Fibre Panel.*only 0/);
+  });
+});
+
 describe("resolveFulfilWarehouses (split fulfil)", () => {
   const lines = [
     { id: "L1", irmItemId: "I1", itemName: "Ties", sourceWarehouseId: "W1", sourceWarehouseName: "Warehouse 1" },
@@ -309,22 +328,23 @@ describe("per-warehouse close-short", () => {
     { id: "L1", approvedQty: 2, requestedQty: 2, fulfilledQty: 0, closedShortQty: null, sourceWarehouseId: "W1", itemName: "Ties" },
     { id: "L2", approvedQty: 2, requestedQty: 2, fulfilledQty: 2, closedShortQty: null, sourceWarehouseId: "W2", itemName: "CAT6" },
   ];
-  it("picks only the actor's own outstanding lines", () => {
-    const picked = pickCloseShortLines(lines, ["W1"]);
-    expect(picked.map((l) => l.id)).toEqual(["L1"]); // L2 is W2 + already fulfilled
+  it("picks only the acting warehouse's own outstanding lines", () => {
+    const picked = pickCloseShortLines(lines, "W1");
+    expect(picked.map((l) => l.id)).toEqual(["L1"]); // W1's outstanding line
   });
-  it("unrestricted actor (admin) picks all outstanding lines", () => {
-    const picked = pickCloseShortLines(lines, undefined);
-    expect(picked.map((l) => l.id)).toEqual(["L1"]); // L2 already fully fulfilled ⇒ not outstanding
+  // Scoped to ONE warehouse (the tab) — even an admin closing short from W1's tab never touches W2's
+  // lines on a split request, and vice-versa. This is the per-tab consistency with scan/fulfil.
+  it("never picks another warehouse's lines (per-tab scope, admins included)", () => {
+    expect(pickCloseShortLines(lines, "W2").map((l) => l.id)).toEqual([]); // L2 is W2 but already fulfilled
+    expect(pickCloseShortLines(lines, "W1").map((l) => l.id)).toEqual(["L1"]); // W1 only
   });
   // Guards the switch to the canonical lineDone(): it (correctly) reports an UNAPPROVED line as NOT
   // done, where the old inline copy said done. An unapproved line must still never be close-short-able
-  // — it's held out by the null-source guard (a source is stamped only at approval), and closeShort()
-  // additionally requires status partially_fulfilled, which is post-approval. Belt and braces.
+  // — it's held out by the source-warehouse match (a source is stamped only at approval), and
+  // closeShort() additionally requires status partially_fulfilled, which is post-approval. Belt and braces.
   it("never picks an unapproved line (approvedQty null ⇒ no source yet)", () => {
     const pending = [{ id: "L9", approvedQty: null, requestedQty: 4, fulfilledQty: 0, closedShortQty: null, sourceWarehouseId: null, itemName: "Unapproved" }];
-    expect(pickCloseShortLines(pending, undefined)).toEqual([]);
-    expect(pickCloseShortLines(pending, ["W1"])).toEqual([]);
+    expect(pickCloseShortLines(pending, "W1")).toEqual([]);
   });
   it("request done once L1 is written off and L2 already fulfilled", () => {
     const after = lines.map((l) => (l.id === "L1" ? { ...l, closedShortQty: 2 } : l));

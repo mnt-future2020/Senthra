@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ArrowLeft, Camera, Check, Loader2, PackageCheck, Trash2, X } from "lucide-react";
+import { ArrowLeft, Camera, Check, CheckCircle2, ImageUp, Loader2, PackageCheck, Trash2, X } from "lucide-react";
 
 import * as vanStockSvc from "@/services/vanStockRequest.service";
 import type { FulfilEntryPayload, VanStockRequest, WarehouseAvailability } from "@/services/vanStockRequest.service";
@@ -13,12 +13,13 @@ import { CopyableCode } from "@/components/ui/CopyableCode";
 import { Modal } from "@/components/ui/Modal";
 import { Notice } from "@/components/ui/Notice";
 import { Select } from "@/components/ui/Select";
+import { QtyStepper } from "@/components/ui/QtyStepper";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { dangerBtn, inputCls, labelCls, primaryBtn, secondaryBtn } from "@/components/ui/styles";
 import { fmtDateTime } from "@/components/dashboard/portal/portalUi";
 import { ScannerInput } from "@/components/dashboard/goods-management/ScannerInput";
 import { VanStockStatusChip } from "@/components/dashboard/engineer/EngineerVanStock";
-import { VanStockPostings, VanStockWalkInBadge } from "./vanRequestUi";
+import { VanStockAttachments, VanStockPostings, VanStockWalkInBadge } from "./vanRequestUi";
 import type { Msg } from "@/components/ui/types";
 
 // Review + fulfil panel for one van stock request. Three zones by state:
@@ -34,6 +35,7 @@ interface FulfilRow {
   lineId: string;
   itemName: string;
   scannedCode: string;
+  uom: string | null; // unit label shown next to the qty stepper (e.g. "Box")
   goodQty: number;
   damagedQty: number; // returns only
   remainingQty: number;
@@ -90,7 +92,7 @@ function DetailSkeleton() {
 // One request's review workspace — fills the warehouse tab in place of the queue (see
 // VanRequestsWorkspace). `idOrCode` is normally the code from the URL; the backend's getOne takes
 // either, so an old `?vReq=<objectId>` link still resolves.
-export function VanRequestDetail({ idOrCode, warehouseName, onClose }: { idOrCode: string; warehouseName: string; onClose: () => void }) {
+export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, onClose }: { idOrCode: string; warehouseName: string; currentWarehouseId: string; onClose: () => void }) {
   const { pushToast } = useDashboard();
   const [req, setReq] = React.useState<VanStockRequest | null>(null);
   // TOAST vs `msg`, and the split is about whether the user would SEE it, not severity:
@@ -348,10 +350,12 @@ export function VanRequestDetail({ idOrCode, warehouseName, onClose }: { idOrCod
     setScanning(true);
     setMsg(null);
     try {
-      const result = await vanStockSvc.vanStockScanLookup(req.id, code);
+      const result = await vanStockSvc.vanStockScanLookup(req.id, currentWarehouseId, code);
       const line = req.lines.find((l) => l.id === result.lineId);
-      if (!line || !line.isMine) {
-        pushToast(`"${result.itemName}" is fulfilled by another warehouse.`, "alert");
+      // Only issue lines sourced to THIS warehouse tab — even an admin (isMine everywhere) must scan a
+      // line out of the warehouse it's sourced from, not whichever tab they happen to be viewing.
+      if (!line || !line.isMine || line.sourceWarehouseId !== currentWarehouseId) {
+        pushToast(`"${result.itemName}" is issued from ${line?.sourceWarehouseName ?? "another warehouse"} — open that warehouse's queue to scan it.`, "alert");
         return;
       }
       // Nothing left to move — say so here rather than staging a line the server would reject on Post.
@@ -362,7 +366,7 @@ export function VanRequestDetail({ idOrCode, warehouseName, onClose }: { idOrCod
       // This scan's lookup is the freshest truth for both numbers: a split-fulfilment sibling may have
       // posted against this line since it was staged, so a row's snapshot can be stale. Refresh the row
       // from it on every bump, or the qty box keeps offering a cap the server will reject at Post.
-      const fresh = { remainingQty: line.remainingQty, available: result.available };
+      const fresh = { remainingQty: line.remainingQty, available: result.available, uom: result.uom };
       const cap = entryCap(fresh);
       // Read the CART through the ref, not the closure: `scanning` gates only the network window, so a
       // scan gun firing again before React commits the previous bump would re-read a stale `entries`
@@ -479,7 +483,7 @@ export function VanRequestDetail({ idOrCode, warehouseName, onClose }: { idOrCod
         }
         return out;
       });
-      await vanStockSvc.fulfilVanStockRequest(req.id, payload);
+      await vanStockSvc.fulfilVanStockRequest(req.id, currentWarehouseId, payload);
       pushToast(req.type === "return" ? "Return received — balances updated." : "Stock issued — balances updated.", "success");
       load();
     } catch (err) {
@@ -495,7 +499,7 @@ export function VanRequestDetail({ idOrCode, warehouseName, onClose }: { idOrCod
     setBusyBoth(true);
     setMsg(null);
     try {
-      await vanStockSvc.closeVanStockShort(req.id, closeShortNote.trim());
+      await vanStockSvc.closeVanStockShort(req.id, currentWarehouseId, closeShortNote.trim());
       pushToast("Closed short — remaining quantity written off.", "success");
       setCloseShortOpen(false);
       load();
@@ -509,14 +513,13 @@ export function VanRequestDetail({ idOrCode, warehouseName, onClose }: { idOrCod
   // A row whose good+damaged both sit at 0 moves nothing, so it can't be posted (GM's postLineCount gate).
   const canPost = entries.length > 0 && entries.every((e) => rowTotal(e) > 0);
 
-  // Only lines this warehouse owns (isMine, server-computed) are scan-able; others are read-only context.
-  const openLines = (req?.lines ?? []).filter((l) => l.remainingQty > 0 && l.isMine);
-  const otherLines = (req?.lines ?? []).filter((l) => l.remainingQty > 0 && !l.isMine);
-  // This reviewer's own part is settled (every own-line fulfilled or closed short) — even though the
-  // REQUEST is still partially_fulfilled because OTHER warehouses' lines are open. When that's true we
-  // hide this warehouse's scan box + Close-short (there's nothing left for them to act on) and show a
-  // "waiting for other warehouses" state instead, so we never render a control that would only error.
-  const myPartDone = !!req?.myProgress?.allMineDone;
+  // Scan-able HERE = lines sourced to the warehouse whose tab we're in (currentWarehouseId) AND owned by
+  // the actor (isMine, server-computed). The source-warehouse match is the key: a warehouse's stock is
+  // issued from THAT warehouse's own tab, never another's. This scopes an admin — who "owns" every line
+  // via isMine — to the warehouse they're actually viewing, exactly like a scoped manager would be. Any
+  // other outstanding line is read-only context pointing at its own source (go issue it from there).
+  const openLines = (req?.lines ?? []).filter((l) => l.remainingQty > 0 && l.isMine && l.sourceWarehouseId === currentWarehouseId);
+  const otherLines = (req?.lines ?? []).filter((l) => l.remainingQty > 0 && !(l.isMine && l.sourceWarehouseId === currentWarehouseId));
 
   return (
     // Fills WarehouseDetail's `fill` box: pinned header, ONE scrolling body. The reviewer keeps the
@@ -563,11 +566,15 @@ export function VanRequestDetail({ idOrCode, warehouseName, onClose }: { idOrCod
             {req.priority !== "normal" && <span className="inline-flex items-center rounded-full border border-red-500/30 bg-red-500/10 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-red-600">{req.priority}</span>}
             {/* Per-warehouse progress ("your part is done" even while the request is still partial
                 overall) rides with the other status chips — it's one short fact, and a full-width band
-                of its own just to say "0/4 done" reads as a second, emptier card. */}
-            {req.myProgress && req.myProgress.lines > 0 && (
+                of its own just to say "0/4 done" reads as a second, emptier card.
+                ONLY on a SPLIT (this actor owns a strict subset of the lines — `progress.lines >
+                myProgress.lines`): that's the sole case where "my part" can differ from the overall
+                status. On a single-warehouse request every line is mine, so "your part complete" would
+                just echo the "Fulfilled" chip — pure noise — and is suppressed. */}
+            {req.myProgress && req.myProgress.lines > 0 && req.progress.lines > req.myProgress.lines && (
               <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider ${req.myProgress.allMineDone ? "border-[var(--pos)]/30 bg-[var(--pos)]/10 text-[var(--pos)]" : "border-[var(--border)] bg-[var(--surface-2)] text-[var(--muted)]"}`}>
                 {req.myProgress.allMineDone ? "✓ Your part complete" : `Your lines ${req.myProgress.linesDone}/${req.myProgress.lines}`}
-                {req.progress.lines > req.myProgress.lines && <span className="ml-1 font-bold normal-case text-[var(--faint)]">· overall {req.progress.linesDone}/{req.progress.lines}</span>}
+                <span className="ml-1 font-bold normal-case text-[var(--faint)]">· overall {req.progress.linesDone}/{req.progress.lines}</span>
               </span>
             )}
             <span className="ml-auto text-[11px] text-[var(--faint)]">{fmtDateTime(req.createdAt)}</span>
@@ -578,14 +585,7 @@ export function VanRequestDetail({ idOrCode, warehouseName, onClose }: { idOrCod
             {req.notes && <p className="mt-1 text-xs text-[var(--muted)]"><span className="font-bold text-[var(--faint)]">Notes:</span> {req.notes}</p>}
             {req.decisionNote && <p className="mt-1 text-xs text-[var(--muted)]"><span className="font-bold text-[var(--faint)]">Review note:</span> {req.decisionNote}</p>}
             {req.closeShortNote && <p className="mt-1 text-xs text-[var(--muted)]"><span className="font-bold text-[var(--faint)]">Closed short:</span> {req.closeShortNote}</p>}
-            {req.attachments.length > 0 && (
-              <p className="mt-1 text-xs text-[var(--muted)]">
-                <span className="font-bold text-[var(--faint)]">Attachments:</span>{" "}
-                {req.attachments.map((url, i) => (
-                  <a key={url} href={url} target="_blank" rel="noreferrer" className="mr-2 font-semibold text-[var(--accent)] hover:underline">#{i + 1}</a>
-                ))}
-              </p>
-            )}
+            <VanStockAttachments urls={req.attachments} className="mt-2" />
           </div>
 
           {/* Duplicate context sits ABOVE the lines — the reviewer must weigh "has he already asked for
@@ -720,7 +720,9 @@ export function VanRequestDetail({ idOrCode, warehouseName, onClose }: { idOrCod
                         ) : (
                           l.sourceWarehouseCode ?? l.sourceWarehouseName ?? "—"
                         )}
-                        {l.isMine && l.approvedQty !== 0 && <span className="ml-1 rounded bg-[var(--accent)]/10 px-1 text-[9px] font-bold uppercase text-[var(--accent)]">Yours</span>}
+                        {/* "Yours" = sourced to the warehouse tab you're viewing (scan it here), not
+                            merely in the actor's scope — else an admin sees every line as "Yours". */}
+                        {l.isMine && l.sourceWarehouseId === currentWarehouseId && l.approvedQty !== 0 && <span className="ml-1 rounded bg-[var(--accent)]/10 px-1 text-[9px] font-bold uppercase text-[var(--accent)]">Yours</span>}
                       </td>
                     ) : null}
                     <td className="px-4 py-3 text-[var(--muted)]">{l.fulfilledQty}</td>
@@ -760,10 +762,11 @@ export function VanRequestDetail({ idOrCode, warehouseName, onClose }: { idOrCod
             </div>
           )}
 
-          {/* This warehouse is done but the request is still open elsewhere — no scan box, just context. */}
-          {isFulfilZone && myPartDone && otherLines.length > 0 && (
+          {/* Nothing for THIS warehouse to issue (its lines are done, or it never owned any) while the
+              request is still open elsewhere — no scan box, just context pointing at each line's source. */}
+          {isFulfilZone && openLines.length === 0 && otherLines.length > 0 && (
             <div className="rounded-xl border border-dashed border-[var(--border)] bg-[var(--surface-2)] p-3">
-              <p className="text-xs font-bold text-[var(--faint)]">Waiting on other warehouses</p>
+              <p className="text-xs font-bold text-[var(--faint)]">Issued from other warehouses — open each warehouse&apos;s queue to scan it</p>
               <div className="mt-1.5 space-y-0.5">
                 {otherLines.map((l) => (
                   <p key={l.id} className="text-[11px] text-[var(--muted)]">
@@ -774,8 +777,8 @@ export function VanRequestDetail({ idOrCode, warehouseName, onClose }: { idOrCod
             </div>
           )}
 
-          {/* ── Fulfil zone ──────────────────────────────────────────────────── */}
-          {isFulfilZone && !myPartDone && (
+          {/* ── Fulfil zone ── only when THIS warehouse has lines to issue ────── */}
+          {isFulfilZone && openLines.length > 0 && (
             <div className="space-y-3 rounded-xl border border-[var(--border)] p-3">
               <p className="text-xs font-bold text-[var(--faint)]">{req.type === "return" ? "Scan the returned stock in" : "Scan the stock out"}</p>
               <ScannerInput onCode={onScan} disabled={busy || scanning} placeholder={req.type === "return" ? "Scan or type an IRM code / barcode to receive…" : "Scan or type an IRM code / barcode to issue…"} />
@@ -814,101 +817,116 @@ export function VanRequestDetail({ idOrCode, warehouseName, onClose }: { idOrCod
               )}
 
               {entries.length > 0 && (
-                <div className="space-y-2">
+                <div className="space-y-3">
                   {entries.map((e) => (
-                    <div key={e.lineId} className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3">
-                      <div className="flex flex-wrap items-center gap-3">
-                        <div className="min-w-0 flex-1">
-                          <p className="text-sm font-semibold text-[var(--ink)]">{e.itemName}</p>
-                          <p className="text-[11px] text-[var(--faint)]">
+                    // Mirrors goods-management/JobScanPanel's scanned-line card so the two scan surfaces
+                    // read as one system: name + counts on the left, a compact ± stepper on the right.
+                    <div key={e.lineId} className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="font-bold text-[var(--ink)]">{e.itemName}</p>
+                          <p className="text-xs text-[var(--muted)]">
                             {e.remainingQty} left on request{e.available !== null ? ` · ${e.available} ${req.type === "return" ? "on the van" : "on the shelf"}` : ""}
                             {req.type === "return" && rowTotal(e) > 0 && <span className="ml-1 font-semibold text-[var(--ink)]">· returning {rowTotal(e)}</span>}
                           </p>
                         </div>
-                        {req.type === "return" ? (
-                          // Split the line across both pools in ONE posting (3 good + 2 damaged). Each box
-                          // clamps to the cap MINUS the other half, so the total can never exceed what the
-                          // request owes / the van holds.
-                          <>
-                            <div>
-                              <label className={`${labelCls} text-[var(--pos)]`} htmlFor={`good-${e.lineId}`}>Good</label>
-                              <input
-                                id={`good-${e.lineId}`}
-                                type="number"
-                                min={0}
-                                max={entryCap(e) - e.damagedQty}
-                                step={1}
-                                value={e.goodQty}
-                                onChange={(ev) => setPortion(e.lineId, "goodQty", Number(ev.target.value))}
-                                className={`${inputCls} w-20 py-1.5 text-right`}
-                              />
-                            </div>
-                            <div>
-                              <label className={`${labelCls} text-[var(--neg)]`} htmlFor={`dmg-${e.lineId}`}>Damaged</label>
-                              <input
-                                id={`dmg-${e.lineId}`}
-                                type="number"
+                        <div className="flex shrink-0 items-center gap-1">
+                          {/* Restock issues good stock only — a single stepper in the header. It never
+                              goes to 0 (remove the row instead), so it floors at 1. Returns move their
+                              good/damaged steppers below the header. */}
+                          {req.type !== "return" && (
+                            <QtyStepper
+                              value={e.goodQty}
+                              min={1}
+                              max={entryCap(e)}
+                              uom={e.uom}
+                              ariaLabel={`Quantity for ${e.itemName}`}
+                              onChange={(v) => setEntry(e.lineId, { goodQty: Math.min(entryCap(e), Math.max(1, Math.floor(v || 1))) })}
+                            />
+                          )}
+                          <button type="button" onClick={() => removeEntry(e.lineId)} aria-label={`Remove ${e.itemName}`} className="ml-2 flex h-7 w-7 items-center justify-center rounded-lg text-[var(--faint)] transition-all hover:text-[var(--neg)]">
+                            <X className="h-4 w-4" />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Return-only: split the line across both pools in ONE posting (3 good + 2 damaged).
+                          Each stepper clamps to the cap MINUS the other half (setPortion), so the total can
+                          never exceed what the request owes / the van holds. Mirrors goods-management/
+                          JobScanPanel's return card — Good row, then a Damaged box that owns its own qty
+                          AND (when > 0) the red-accented photo + reason evidence nested inside it. */}
+                      {req.type === "return" && (
+                        <div className="mt-3 space-y-2">
+                          {/* Good portion */}
+                          <div className="flex items-center justify-between gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2">
+                            <span className="flex items-center gap-1.5 text-xs font-bold text-[var(--pos)]">
+                              <CheckCircle2 className="h-4 w-4" /> Good
+                            </span>
+                            <QtyStepper
+                              value={e.goodQty}
+                              min={0}
+                              max={entryCap(e) - e.damagedQty}
+                              uom={e.uom}
+                              ariaLabel={`Good quantity for ${e.itemName}`}
+                              onChange={(v) => setPortion(e.lineId, "goodQty", v)}
+                            />
+                          </div>
+
+                          {/* Damaged portion — box owns the qty header AND the evidence block below it */}
+                          <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2">
+                            <div className="flex items-center justify-between gap-3">
+                              <span className="flex items-center gap-1.5 text-xs font-bold text-[var(--neg)]">
+                                <Trash2 className="h-4 w-4" /> Damaged
+                              </span>
+                              <QtyStepper
+                                value={e.damagedQty}
                                 min={0}
                                 max={entryCap(e) - e.goodQty}
-                                step={1}
-                                value={e.damagedQty}
-                                onChange={(ev) => setPortion(e.lineId, "damagedQty", Number(ev.target.value))}
-                                className={`${inputCls} w-20 py-1.5 text-right`}
+                                uom={e.uom}
+                                ariaLabel={`Damaged quantity for ${e.itemName}`}
+                                onChange={(v) => setPortion(e.lineId, "damagedQty", v)}
                               />
                             </div>
-                          </>
-                        ) : (
-                          // Restock issues good stock only — no damaged leg, and never 0 (remove the row
-                          // instead), so it floors at 1 rather than going through setPortion.
-                          <input
-                            type="number"
-                            min={1}
-                            max={entryCap(e)}
-                            step={1}
-                            value={e.goodQty}
-                            aria-label={`Quantity for ${e.itemName}`}
-                            onChange={(ev) => setEntry(e.lineId, { goodQty: Math.min(entryCap(e), Math.max(1, Math.floor(Number(ev.target.value) || 1))) })}
-                            className={`${inputCls} w-24 py-1.5 text-right`}
-                          />
-                        )}
-                        <button type="button" onClick={() => removeEntry(e.lineId)} aria-label={`Remove ${e.itemName}`} className="rounded-lg border border-[var(--border)] p-1.5 text-[var(--muted)] transition-all hover:border-[var(--neg)] hover:text-[var(--neg)]">
-                          <X className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                      {/* Evidence is demanded by the DAMAGED portion, whatever the good portion is — a
-                          3-good + 2-damaged row still needs a photo + reason for those 2 written-off units. */}
-                      {e.damagedQty > 0 && (
-                        <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                          <div>
-                            <label className={labelCls}>Damage photo <span className="text-[var(--neg)]">*</span></label>
-                            {e.damagePhotoDataUrl ? (
-                              <div className="flex items-center gap-2">
-                                {/* eslint-disable-next-line @next/next/no-img-element */}
-                                <img src={e.damagePhotoDataUrl} alt="Damage preview" className="h-16 w-24 rounded-lg border border-[var(--border)] object-cover" />
-                                {e.uploading ? (
-                                  <span className="flex items-center gap-1 text-[11px] text-[var(--muted)]">
-                                    <Loader2 className="h-3.5 w-3.5 animate-spin" /> Uploading…
-                                  </span>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    onClick={() => setEntry(e.lineId, { damagePhotoDataUrl: undefined, damagePhotoUrl: undefined })}
-                                    className="flex items-center gap-1 text-[11px] font-bold text-[var(--neg)] hover:underline"
-                                  >
-                                    <Trash2 className="h-3.5 w-3.5" /> Remove
-                                  </button>
-                                )}
+
+                            {/* Evidence is demanded by the DAMAGED portion, whatever the good portion is — a
+                                3-good + 2-damaged row still needs a photo + reason for those 2 written-off units. */}
+                            {e.damagedQty > 0 && (
+                              <div className="mt-2 ml-1 space-y-2 border-l-2 border-[var(--neg)] pl-3">
+                                {/* Photo */}
+                                <div>
+                                  <p className="mb-1 text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">Damage photo <span className="text-[var(--neg)]">*</span></p>
+                                  {e.damagePhotoDataUrl ? (
+                                    <div className="flex items-center gap-2">
+                                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                                      <img src={e.damagePhotoDataUrl} alt="Damage preview" className="h-16 w-24 rounded-lg border border-[var(--border)] object-cover" />
+                                      {e.uploading ? (
+                                        <span className="flex items-center gap-1 text-[11px] text-[var(--muted)]">
+                                          <Loader2 className="h-3.5 w-3.5 animate-spin" /> Uploading…
+                                        </span>
+                                      ) : (
+                                        <button
+                                          type="button"
+                                          onClick={() => setEntry(e.lineId, { damagePhotoDataUrl: undefined, damagePhotoUrl: undefined })}
+                                          className="flex items-center gap-1 text-[11px] font-bold text-[var(--neg)] hover:underline"
+                                        >
+                                          <Trash2 className="h-3.5 w-3.5" /> Remove
+                                        </button>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-[11px] font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)]">
+                                      <Camera className="h-3.5 w-3.5" /> <ImageUp className="h-3.5 w-3.5" /> Attach photo
+                                      <input type="file" accept="image/*" capture="environment" className="hidden" onChange={(ev) => onDamagePhoto(e.lineId, ev.target.files?.[0] ?? null)} />
+                                    </label>
+                                  )}
+                                </div>
+                                {/* Reason */}
+                                <div>
+                                  <label className="mb-1 block text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]" htmlFor={`reason-${e.lineId}`}>Damage reason <span className="text-[var(--neg)]">*</span></label>
+                                  <input id={`reason-${e.lineId}`} type="text" value={e.damageReason ?? ""} onChange={(ev) => setEntry(e.lineId, { damageReason: ev.target.value })} maxLength={2000} placeholder="Describe the damage…" className={inputCls} />
+                                </div>
                               </div>
-                            ) : (
-                              <label className={`${secondaryBtn} cursor-pointer`}>
-                                <Camera className="h-3.5 w-3.5" /> Add photo
-                                <input type="file" accept="image/*" capture="environment" className="hidden" onChange={(ev) => onDamagePhoto(e.lineId, ev.target.files?.[0] ?? null)} />
-                              </label>
                             )}
-                          </div>
-                          <div>
-                            <label className={labelCls}>Damage reason <span className="text-[var(--neg)]">*</span></label>
-                            <input value={e.damageReason ?? ""} onChange={(ev) => setEntry(e.lineId, { damageReason: ev.target.value })} maxLength={2000} placeholder="e.g. Crushed in transit." className={inputCls} />
                           </div>
                         </div>
                       )}

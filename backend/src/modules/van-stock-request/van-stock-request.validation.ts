@@ -93,11 +93,18 @@ const fulfilEntrySchema = z
   });
 
 export const fulfilVanStockRequestSchema = z.object({
+  // The single warehouse this posting issues FROM (restock) / receives INTO (return) — the tab the
+  // reviewer is acting in. Every entry's line must be sourced to it; the service enforces that even for
+  // an admin, so a line is only ever posted out of the warehouse it belongs to.
+  warehouseId: objectId,
   entries: z.array(fulfilEntrySchema).min(1, "Scan at least one item.").max(200),
 });
 export type FulfilVanStockRequestInput = z.infer<typeof fulfilVanStockRequestSchema>;
 
 export const closeShortSchema = z.object({
+  // The warehouse tab the reviewer is closing short FROM — only its own outstanding lines are written
+  // off (enforced in the service), so an admin can't write off another warehouse's lines from one tab.
+  warehouseId: objectId,
   note: z.string().trim().min(1, "Say why the remaining quantity won't be fulfilled.").max(2000),
 });
 export type CloseShortInput = z.infer<typeof closeShortSchema>;
@@ -114,6 +121,9 @@ export type WalkInInput = z.infer<typeof walkInSchema>;
 
 export const scanLookupSchema = z.object({
   requestId: objectId,
+  // The warehouse tab the scan is happening in — the line must be sourced to it (enforced in the
+  // service), so a scan only ever resolves against the warehouse it's meant to be issued from.
+  warehouseId: objectId,
   code: z.string().trim().min(1).max(200),
 });
 export type ScanLookupInput = z.infer<typeof scanLookupSchema>;

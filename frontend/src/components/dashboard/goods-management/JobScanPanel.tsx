@@ -15,7 +15,6 @@ import {
   ClipboardList,
   ImageUp,
   Loader2,
-  Minus,
   PackageMinus,
   PackagePlus,
   Plus,
@@ -33,6 +32,7 @@ import type {
   ScanMatch,
 } from "@/types/goodsManagement";
 import { inputCls, primaryBtn, secondaryBtn } from "@/components/ui/styles";
+import { QtyStepper } from "@/components/ui/QtyStepper";
 
 // ── Local types ───────────────────────────────────────────────────────────────
 
@@ -63,54 +63,6 @@ function lineKey(match: ScanMatch) {
 // Total being returned for a line = good + damaged.
 function returnTotal(l: ScanLine) {
   return l.goodQty + l.damagedQty;
-}
-
-// ── Reusable qty stepper (− / number / +) ──────────────────────────────────────
-function QtyStepper({
-  value,
-  min,
-  max,
-  onChange,
-  uom,
-}: {
-  value: number;
-  min: number;
-  max: number;
-  onChange: (next: number) => void; // parent is responsible for clamping
-  uom?: string | null;
-}) {
-  return (
-    <div className="flex shrink-0 items-center gap-1">
-      <button
-        type="button"
-        onClick={() => onChange(value - 1)}
-        disabled={value <= min}
-        className="flex h-7 w-7 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface-2)] text-[var(--ink)] transition-all hover:border-[var(--accent)] disabled:opacity-40"
-      >
-        <Minus className="h-3.5 w-3.5" />
-      </button>
-      <input
-        type="number"
-        min={min}
-        max={max}
-        value={value}
-        onChange={(e) => {
-          const v = parseInt(e.target.value, 10);
-          if (!Number.isNaN(v)) onChange(v);
-        }}
-        className="w-16 rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-2 py-1 text-center text-sm font-bold text-[var(--ink)] outline-none focus:border-[var(--accent)]"
-      />
-      <button
-        type="button"
-        onClick={() => onChange(value + 1)}
-        disabled={value >= max}
-        className="flex h-7 w-7 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface-2)] text-[var(--ink)] transition-all hover:border-[var(--accent)] disabled:opacity-40"
-      >
-        <Plus className="h-3.5 w-3.5" />
-      </button>
-      {uom ? <span className="ml-1 text-xs text-[var(--faint)]">{uom}</span> : null}
-    </div>
-  );
 }
 
 // ── Panel ─────────────────────────────────────────────────────────────────────

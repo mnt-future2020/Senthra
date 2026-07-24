@@ -197,6 +197,24 @@ export function searchVanStockItems(q: string): Promise<VanStockItemOption[]> {
   return api<{ items: VanStockItemOption[] }>(`/van-stock-requests/item-search?q=${encodeURIComponent(q)}`).then((r) => r.items);
 }
 
+// Engineer restock composer: catalogue search annotated with each item's TOTAL on-hand across active
+// warehouses. Items out of stock everywhere (quantityOnHand 0) come back too — the composer shows them
+// disabled/"out of stock" rather than hiding them — so the engineer can't raise a request for stock no
+// warehouse holds (which would only fail at scan-out) yet still sees the item exists.
+export function searchRequestableItems(q: string): Promise<WalkInItemOption[]> {
+  return api<{ items: WalkInItemOption[] }>(`/van-stock-requests/requestable-item-search?q=${encodeURIComponent(q)}`).then((r) => r.items);
+}
+
+// Walk-in composer search: catalogue hits annotated with THIS warehouse's live on-hand + reorder level,
+// so the counter only picks stock the shelf can actually issue (and sees when an issue dips reorder).
+export interface WalkInItemOption extends VanStockItemOption {
+  quantityOnHand: number;
+  reorderLevel: number | null;
+}
+export function searchWalkInItems(warehouseId: string, q: string): Promise<WalkInItemOption[]> {
+  return api<{ items: WalkInItemOption[] }>(`/van-stock-requests/warehouse-item-search?warehouseId=${encodeURIComponent(warehouseId)}&q=${encodeURIComponent(q)}`).then((r) => r.items);
+}
+
 export function listWarehousesLite(): Promise<WarehouseLite[]> {
   return api<{ warehouses: WarehouseLite[] }>("/van-stock-requests/warehouses-lite").then((r) => r.warehouses);
 }
@@ -250,16 +268,20 @@ export function declineVanStockRequest(id: string, decisionNote: string): Promis
   return api<{ request: VanStockRequest }>(`/van-stock-requests/${id}/decline`, { method: "POST", body: { decisionNote } }).then((r) => r.request);
 }
 
-export function vanStockScanLookup(requestId: string, code: string): Promise<ScanLookupResult> {
-  return api<{ result: ScanLookupResult }>("/van-stock-requests/scan-lookup", { method: "POST", body: { requestId, code } }).then((r) => r.result);
+// warehouseId = the warehouse tab the scan/post is happening in. The backend enforces every line is
+// sourced to it, so a line is only ever issued from the warehouse it belongs to — even for an admin.
+export function vanStockScanLookup(requestId: string, warehouseId: string, code: string): Promise<ScanLookupResult> {
+  return api<{ result: ScanLookupResult }>("/van-stock-requests/scan-lookup", { method: "POST", body: { requestId, warehouseId, code } }).then((r) => r.result);
 }
 
-export function fulfilVanStockRequest(id: string, entries: FulfilEntryPayload[]): Promise<VanStockRequest> {
-  return api<{ request: VanStockRequest }>(`/van-stock-requests/${id}/fulfil`, { method: "POST", body: { entries } }).then((r) => r.request);
+export function fulfilVanStockRequest(id: string, warehouseId: string, entries: FulfilEntryPayload[]): Promise<VanStockRequest> {
+  return api<{ request: VanStockRequest }>(`/van-stock-requests/${id}/fulfil`, { method: "POST", body: { warehouseId, entries } }).then((r) => r.request);
 }
 
-export function closeVanStockShort(id: string, note: string): Promise<VanStockRequest> {
-  return api<{ request: VanStockRequest }>(`/van-stock-requests/${id}/close-short`, { method: "POST", body: { note } }).then((r) => r.request);
+// warehouseId = the warehouse tab being closed short from; the backend writes off only THAT warehouse's
+// outstanding lines (even for an admin), consistent with the scan/fulfil per-tab scoping.
+export function closeVanStockShort(id: string, warehouseId: string, note: string): Promise<VanStockRequest> {
+  return api<{ request: VanStockRequest }>(`/van-stock-requests/${id}/close-short`, { method: "POST", body: { warehouseId, note } }).then((r) => r.request);
 }
 
 export function createVanStockWalkIn(payload: { engineerId: string; warehouseId: string; reason: string; priority?: VanStockPriority; notes?: string; lines: VanStockLinePayload[] }): Promise<VanStockRequest> {

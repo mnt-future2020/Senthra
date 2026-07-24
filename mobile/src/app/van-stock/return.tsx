@@ -109,8 +109,10 @@ export default function ReturnVanStockScreen() {
                 <Text style={s.lineName} numberOfLines={2}>
                   {h.name}
                 </Text>
+                {/* Free-to-return qty = van holding MINUS stock committed to active jobs (that goes
+                    back via the job's Close & Reconcile, not here). */}
                 <Text style={s.meta}>
-                  {h.code} · holding {h.quantityOnHand}
+                  {h.code} · {h.quantityOnHand} free to return
                 </Text>
               </View>
               <Stepper

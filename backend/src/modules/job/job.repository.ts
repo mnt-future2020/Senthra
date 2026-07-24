@@ -194,6 +194,19 @@ export function findActiveWithKitLines(excludeJobId?: string): Promise<JobWithRe
   });
 }
 
+// Jobs assigned to one engineer that may still have stock out with them — the goods-active statuses,
+// with kit lines. Powers "how much is this engineer holding against jobs" (the field-stock RETURN flow
+// subtracts it so job stock can't be handed back outside the job). Statuses mirror
+// findActiveForGoodsManagement — goods are only issued once accepted/in progress; a reconciled or older
+// job's movements net to 0 and contribute nothing.
+export function findActiveByEngineerWithKitLines(engineerId: string): Promise<JobWithRelations[]> {
+  return prisma.job.findMany({
+    where: { deletedAt: null, assignedEngineerId: engineerId, status: { in: ["accepted", "in_progress", "completed"] } },
+    include: withRelations,
+    orderBy: { createdAt: "asc" },
+  });
+}
+
 // --- engineer-scoped reads (engineer portal) -------------------------------------------------
 // Jobs assigned to one engineer, filtered + PAGED (an engineer accumulates hundreds of completed
 // jobs over time — never return the unbounded set). Scoped on assignedEngineerId so an engineer can

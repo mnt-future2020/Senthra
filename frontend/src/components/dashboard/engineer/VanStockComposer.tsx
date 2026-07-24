@@ -365,7 +365,7 @@ export function ReturnComposerPage() {
 
       <div className="grid gap-6 lg:grid-cols-3">
         <div className="space-y-6 lg:col-span-2">
-          <FormSection title="Pick from your stock" description="You can only return what you're currently holding.">
+          <FormSection title="Pick from your stock" description="Only your free field stock — anything issued for a job goes back when you complete that job, not here.">
             {holdings === null ? (
               <div className="space-y-1.5" aria-hidden>
                 {[0, 1, 2].map((i) => (
@@ -390,7 +390,9 @@ export function ReturnComposerPage() {
                     <button key={h.irmItemId} type="button" disabled={added} onClick={() => add(h)} className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left transition-all ${added ? "cursor-default border-[var(--border)] bg-[var(--surface-2)] opacity-60" : "border-[var(--border)] bg-[var(--surface-2)] hover:border-[var(--accent)]"}`}>
                       <span className="min-w-0">
                         <span className="block truncate text-sm font-semibold text-[var(--ink)]">{h.name}</span>
-                        <span className="block truncate font-mono text-[11px] text-[var(--muted)]">{h.code} · holding {h.quantityOnHand}</span>
+                        {/* Free-to-return qty = van holding MINUS stock committed to active jobs (that
+                            goes back via the job's Close & Reconcile, not here). */}
+                        <span className="block truncate font-mono text-[11px] text-[var(--muted)]">{h.code} · {h.quantityOnHand} free to return</span>
                       </span>
                       {added ? <Check className="h-4 w-4 shrink-0 text-[var(--pos)]" /> : <Plus className="h-4 w-4 shrink-0 text-[var(--accent)]" />}
                     </button>

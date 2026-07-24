@@ -31,6 +31,10 @@ router.get("/mine/open-lines", requirePermission(ENGINEER), ctrl.openLines);
 router.get("/my-holdings", requirePermission(ENGINEER), ctrl.myHoldings);
 // Item search serves BOTH composers: the engineer's restock modal and the reviewer's walk-in modal.
 router.get("/item-search", requireAnyPermission(ENGINEER, REVIEW), ctrl.itemSearch);
+// Walk-in composer only (reviewer): same catalogue search but annotated with THIS warehouse's on-hand.
+router.get("/warehouse-item-search", requirePermission(REVIEW), ctrl.warehouseItemSearch);
+// Engineer composer only: catalogue search narrowed to items in stock at SOME active warehouse.
+router.get("/requestable-item-search", requirePermission(ENGINEER), ctrl.requestableItemSearch);
 router.get("/warehouses-lite", requirePermission(ENGINEER), ctrl.warehousesLite);
 // Serves BOTH the engineer's restock composer and the reviewer's approval UI (per-line source picker).
 router.get("/availability", requireAnyPermission(ENGINEER, REVIEW), ctrl.availability);

@@ -71,7 +71,7 @@ export function VanRequestsWorkspace({ warehouse }: { warehouse: { id: string; n
   );
 
   if (openCode) {
-    return <VanRequestDetail key={openCode} idOrCode={openCode} warehouseName={warehouse.name} onClose={close} />;
+    return <VanRequestDetail key={openCode} idOrCode={openCode} warehouseName={warehouse.name} currentWarehouseId={warehouse.id} onClose={close} />;
   }
   if (composing) {
     return <WalkInIssue warehouse={warehouse} onClose={close} onCreated={onCreated} />;

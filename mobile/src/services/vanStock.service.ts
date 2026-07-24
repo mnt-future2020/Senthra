@@ -60,6 +60,23 @@ export function searchVanStockItems(q: string): Promise<VanStockItemOption[]> {
   ).then((r) => r.items);
 }
 
+/** A restock-search hit annotated with the item's TOTAL on-hand across active warehouses. */
+export interface RequestableItemOption extends VanStockItemOption {
+  quantityOnHand: number;
+  reorderLevel: number | null;
+}
+
+/**
+ * Restock composer search: catalogue hits annotated with each item's total on-hand across warehouses.
+ * An item out of stock everywhere comes back with quantityOnHand 0 (shown disabled, not offered) — so
+ * the engineer can't raise a request for stock no warehouse holds, which would only fail at scan-out.
+ */
+export function searchRequestableItems(q: string): Promise<RequestableItemOption[]> {
+  return api<{ items: RequestableItemOption[] }>(
+    `/van-stock-requests/requestable-item-search?q=${encodeURIComponent(q)}`,
+  ).then((r) => r.items);
+}
+
 /** The engineer's current van holdings (return composer source list). */
 export function myHoldings(): Promise<HoldingOption[]> {
   return api<{ holdings: HoldingOption[] }>("/van-stock-requests/my-holdings").then(

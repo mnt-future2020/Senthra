@@ -2,6 +2,7 @@ import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import * as engineerStockRepo from "#modules/engineer-stock/engineer-stock.repository.js";
 import * as goodsManagementRepo from "#modules/goods-management/goods-management.repository.js";
+import { jobCommittedByEngineer } from "#modules/goods-management/goods-management.service.js";
 import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
 import * as inventoryService from "#modules/inventory/inventory.service.js";
 import * as irmRepo from "#modules/irm/irm.repository.js";
@@ -200,13 +201,15 @@ export function computeProgress(lines: LineForProgress[], scope: string[] | unde
   return { progress, myProgress: { warehouseIds, ...agg(mine), allMineDone: mine.length > 0 && mine.every(lineIsDone) } };
 }
 
-// Lines the acting warehouse may write off on close-short: its own source, still outstanding (not
-// yet fulfilled/excluded/closed). scope undefined = unrestricted (admin) — every outstanding line.
-export function pickCloseShortLines<T extends LineForProgress & { id: string }>(lines: T[], scope: string[] | undefined): T[] {
+// Lines the warehouse being acted FROM may write off on close-short: sourced to THAT one warehouse
+// (the tab the reviewer is in) and still outstanding (not yet fulfilled/excluded/closed). Scoped to a
+// single warehouseId — even an admin closes short only the warehouse they're viewing, never another
+// warehouse's lines on a split request. Mirrors the scan/fulfil per-tab scoping; the caller asserts the
+// actor may act for `warehouseId` (assertWarehouseAccess) before this runs.
+export function pickCloseShortLines<T extends LineForProgress & { id: string }>(lines: T[], warehouseId: string): T[] {
   return lines.filter((l) => {
     if (lineIsDone(l)) return false; // already fulfilled / excluded / fully closed-short
-    if (l.sourceWarehouseId === null) return false;
-    return scope === undefined || scope.includes(l.sourceWarehouseId);
+    return l.sourceWarehouseId === warehouseId; // this warehouse's own outstanding line only
   });
 }
 // The whole request is done (→ fulfilled) once every line is fulfilled / excluded / closed-short.
@@ -389,13 +392,23 @@ export async function create(input: CreateVanStockRequestInput, actor: AuditActo
     warehouseId = wh.id;
     warehouseName = wh.name;
     warehouseCode = wh.code ?? null;
-    // Advisory on-hand check — the binding guard runs at posting time inside the tx. One batched read
-    // of the engineer's whole holding set (vs a per-line query) keeps create off N sequential round-trips.
-    const balances = new Map((await engineerStockRepo.findEngineerBalances(engineerId)).map((b) => [b.irmItemId, b.quantityOnHand]));
+    // Free-stock guard: only the FREE portion of the van holding — global on-hand MINUS stock committed
+    // to active jobs — may be field-returned; job stock goes back through the job's Close & Reconcile,
+    // never here (else it'd be stranded). This runs at CREATE (and mirrors the composer's my-holdings
+    // display); it is advisory. The binding guard at posting time is the tx zero-floor on RAW on-hand
+    // (upsertEngineerBalanceTx), which prevents over-draining below zero but does NOT re-subtract the
+    // job-committed split — so a create→(new job issue)→fulfil race can't corrupt balances, and any
+    // resulting job shortfall self-heals as a job_lost write-off at that job's reconcile. Both reads
+    // (whole holding set + all job commitments) are batched to keep create off N round-trips.
+    const [balanceRows, committed] = await Promise.all([
+      engineerStockRepo.findEngineerBalances(engineerId),
+      jobCommittedByEngineer(engineerId),
+    ]);
+    const balances = new Map(balanceRows.map((b) => [b.irmItemId, b.quantityOnHand]));
     for (const l of lines) {
-      const onHand = balances.get(l.irmItemId) ?? 0;
-      if (onHand < l.requestedQty) {
-        throw badRequest(`You only hold ${onHand} of "${l.itemName}" — you can't offer ${l.requestedQty} back.`);
+      const free = Math.max(0, (balances.get(l.irmItemId) ?? 0) - (committed.get(l.irmItemId) ?? 0));
+      if (free < l.requestedQty) {
+        throw badRequest(`You only have ${free} of "${l.itemName}" free to return — the rest is committed to a job (return it through that job).`);
       }
     }
   } else {
@@ -444,6 +457,27 @@ export async function create(input: CreateVanStockRequestInput, actor: AuditActo
 
 // ── walk-in (reviewer creates pre-approved for an engineer at the counter) ──────────────────────
 
+// Walk-in availability hard-block (pure + injectable, mirroring resolveLineApprovals' second pass).
+// A walk-in opens ALREADY-approved and is scanned out immediately, so every line must be fulfillable
+// from THIS warehouse right now. Unlike the engineer-request path — which is guarded at approve() —
+// NOTHING else checks a walk-in's stock before the scan-out ledger write. Without this the counter
+// composes a pre-approved request it can never scan, then hits the raw zero-floor error
+// ("Insufficient stock: this movement would take on-hand below zero") at the gun. Advisory UI caps
+// help, but on-hand is live (another posting can drain it between compose and submit) so the block
+// MUST be authoritative here, not just client-side.
+export function assertWalkInAvailability(
+  lines: Array<{ irmItemId: string; itemName: string; requestedQty: number }>,
+  warehouseName: string,
+  onHandByItem: Map<string, number>,
+): void {
+  for (const l of lines) {
+    const have = onHandByItem.get(l.irmItemId) ?? 0;
+    if (have < l.requestedQty) {
+      throw badRequest(`"${l.itemName}": only ${have} in stock at ${warehouseName} — adjust the quantity.`);
+    }
+  }
+}
+
 export async function walkIn(input: WalkInInput, actor: AuditActor): Promise<PublicVanStockRequest> {
   const engineer = await userRepo.findById(input.engineerId);
   if (!engineer) throw notFound("Engineer not found.");
@@ -459,6 +493,12 @@ export async function walkIn(input: WalkInInput, actor: AuditActor): Promise<Pub
   assertWarehouseAccess(actor, wh.id);
 
   const lines = await resolveLines(input.lines);
+  // Authoritative availability gate — this warehouse must physically hold every line NOW (see
+  // assertWalkInAvailability). One batched balance read over the request's items keeps it off N
+  // round-trips; the map defaults a missing (item, warehouse) balance to 0 on-hand.
+  const balances = await inventoryRepo.findBalancesByItemsAndWarehouses(lines.map((l) => l.irmItemId), [wh.id]);
+  assertWalkInAvailability(lines, wh.name, new Map(balances.map((b) => [b.irmItemId, b.quantityOnHand])));
+
   const data: CreateRequestData = {
     code: "",
     type: "restock",
@@ -636,18 +676,21 @@ export async function closeShort(id: string, input: CloseShortInput, actor: Audi
   // Gate BEFORE the status check — otherwise the 409s ("already fulfilled", "no outstanding lines")
   // disclose another warehouse's request existence + lifecycle state to an out-of-scope reviewer.
   assertRequestAccess(actor, req);
+  // Scoped to ONE warehouse (the tab) — the actor must hold it, and only ITS lines are written off,
+  // even for an admin. Mirrors the scan/fulfil warehouseId enforcement so the per-tab model is
+  // consistent on this destructive path too.
+  assertWarehouseAccess(actor, input.warehouseId);
   if (req.status !== "partially_fulfilled") throw conflict("Only a partially fulfilled request can be closed short.");
-  // Per-warehouse: the actor writes off only its OWN outstanding lines. The request finishes only
+  // Per-warehouse: this warehouse writes off only its OWN outstanding lines. The request finishes only
   // once every line across every warehouse is done (see repo closeShortLines status recompute).
-  const scope = warehouseScopeFilter(actor);
-  const targets = pickCloseShortLines(req.lines, scope);
-  if (targets.length === 0) throw conflict("You have no outstanding lines to close short on this request.");
+  const targets = pickCloseShortLines(req.lines, input.warehouseId);
+  if (targets.length === 0) throw conflict("This warehouse has no outstanding lines to close short on this request.");
 
   const { request: updated } = await vsrRepo.closeShortLines(id, targets.map((l) => l.id), input.note, actor.email ?? "");
   audit.record({ actor, action: "van_stock_request.closed_short", targetType: "van_stock_request", targetId: id, targetLabel: req.code, metadata: { note: input.note, lineIds: targets.map((l) => l.id), warehouseIds: [...new Set(targets.map((l) => l.sourceWarehouseId))] } });
   emitUpdate(req.engineerId, { id, code: req.code, status: updated.status, type: req.type });
   notify(req.engineerId, { title: "Request closed short", body: `Request ${req.code} was closed — the remaining items were written off.`, data: { type: "vanstock", requestId: id } });
-  return toPublic(updated, new Date(), scope);
+  return toPublic(updated, new Date(), warehouseScopeFilter(actor));
 }
 
 // ── scan-lookup (reviewer; spec §7 barcode rules) ───────────────────────────────────────────────
@@ -668,6 +711,8 @@ export async function scanLookup(input: ScanLookupInput, actor: AuditActor): Pro
   // been matched, so without this an out-of-scope reviewer could tell "isn't on this request" from
   // "already fully fulfilled" and enumerate another warehouse's request contents.
   assertRequestAccess(actor, req);
+  // The scan is scoped to ONE warehouse tab — the actor must hold it (admin: always).
+  assertWarehouseAccess(actor, input.warehouseId);
 
   const item = await irmService.findActiveByCodeOrBarcode(input.code);
   if (!item) throw badRequest("No active catalogue item matches that code.");
@@ -675,6 +720,12 @@ export async function scanLookup(input: ScanLookupInput, actor: AuditActor): Pro
 
   const line = req.lines.find((l) => l.irmItemId === item.id);
   if (!line) throw badRequest(`"${item.name}" isn't on this request.`);
+  // The scanned line must be sourced to the warehouse tab the scan is happening in. Enforced even for an
+  // admin (unrestricted scope) — a line is only ever issued from the warehouse it belongs to, not
+  // whichever tab was opened. (Unsourced/null falls through to the per-type conflict below.)
+  if (line.sourceWarehouseId && line.sourceWarehouseId !== input.warehouseId) {
+    throw badRequest(`"${item.name}" is issued from ${line.sourceWarehouseName ?? "another warehouse"} — scan it from that warehouse.`);
+  }
   const remainingQty = vsrRepo.lineRemaining(line); // canonical: subtracts fulfilled AND closed-short
   if (remainingQty <= 0) throw badRequest(`"${item.name}" is already fully fulfilled on this request.`);
 
@@ -734,11 +785,22 @@ export async function fulfil(id: string, input: FulfilVanStockRequestInput, acto
   if (req.type === "restock" && input.entries.some((e) => e.condition === "damaged")) {
     throw badRequest("Damaged condition only applies to returns.");
   }
+  // This posting is scoped to ONE warehouse (the tab the reviewer is in) — the actor must hold it.
+  assertWarehouseAccess(actor, input.warehouseId);
 
   // Resolve each entry to its line's source warehouse + enforce per-entry access (authoritative —
   // a split restock's lines may be owned by different warehouses; the actor only fulfils theirs).
   const scope = warehouseScopeFilter(actor);
   const entryWarehouses = new Map(resolveFulfilWarehouses(req.lines, input.entries, scope).map((r) => [r.lineId, r.warehouseId]));
+  // Every entry must issue from the ONE warehouse this posting is scoped to. Enforced even for an admin
+  // (scope undefined, so resolveFulfilWarehouses waves everything through): a line is only posted out of
+  // the warehouse it's sourced to, never from whichever tab was opened. Mirrors the scan-lookup guard.
+  for (const [lineId, whId] of entryWarehouses) {
+    if (whId !== input.warehouseId) {
+      const line = req.lines.find((l) => l.id === lineId);
+      throw badRequest(`"${line?.itemName ?? "An item"}" is issued from ${line?.sourceWarehouseName ?? "another warehouse"} — post it from that warehouse.`);
+    }
+  }
 
   const byLine = new Map(req.lines.map((l) => [l.id, l]));
   const entries: FulfilEntry[] = input.entries.map((e) => {
@@ -858,10 +920,17 @@ export interface HoldingOption {
   quantityOnHand: number;
 }
 export async function myHoldings(engineerId: string): Promise<HoldingOption[]> {
-  const rows = await engineerStockRepo.findEngineerBalances(engineerId);
+  // Show only the FREE (field) portion: global van holding MINUS what's committed to active jobs. Job
+  // stock returns via the job's Close & Reconcile, so it must never appear as field-returnable here — an
+  // item wholly committed to a job drops out (free 0). Same subtraction the create guard enforces.
+  const [rows, committed] = await Promise.all([
+    engineerStockRepo.findEngineerBalances(engineerId),
+    jobCommittedByEngineer(engineerId),
+  ]);
   return rows
     .filter((b) => !b.irmItem.trackSerialNumbers && !b.irmItem.trackBatchNumbers)
-    .map((b) => ({ irmItemId: b.irmItemId, code: b.irmItem.code, name: b.irmItem.name, uom: b.irmItem.baseUnit ?? null, quantityOnHand: b.quantityOnHand }));
+    .map((b) => ({ irmItemId: b.irmItemId, code: b.irmItem.code, name: b.irmItem.name, uom: b.irmItem.baseUnit ?? null, quantityOnHand: Math.max(0, b.quantityOnHand - (committed.get(b.irmItemId) ?? 0)) }))
+    .filter((h) => h.quantityOnHand > 0);
 }
 
 // IRM catalogue search for the restock composer (active, non-serial/batch; capped; blank ⇒ empty).
@@ -879,6 +948,86 @@ export async function searchItems(q: string): Promise<VanStockItemOption[]> {
   return rows
     .filter((r) => !r.trackSerialNumbers && !r.trackBatchNumbers)
     .map((r) => ({ irmItemId: r.id, code: r.code, name: r.name, sku: r.sku ?? null, uom: r.baseUnit ?? null }));
+}
+
+// Catalogue search for the ENGINEER's restock composer. Warehouse-independent — the engineer picks a
+// collect-from warehouse later and the reviewer confirms it — so every hit is annotated with the item's
+// TOTAL on-hand across all active warehouses (network-wide availability). An item that is out of stock
+// EVERYWHERE (total 0) can never be fulfilled by anyone — the reviewer's approve() availability hard-
+// block rejects it from any source, so requesting it only rots in the queue and finally surfaces as a
+// raw scan-time "below zero" error. Rather than hide it (the engineer wouldn't know why their item
+// vanished), it's returned WITH quantityOnHand: 0 so the composer can show it disabled/"out of stock",
+// non-selectable. Per-warehouse guidance (which warehouse has how many) still comes from availability()
+// once items are added, and the reviewer re-checks authoritatively at approve.
+export async function searchRequestableItems(q: string): Promise<WarehouseItemOption[]> {
+  const term = (q ?? "").trim();
+  if (term.length < 1) return [];
+  const rows = (await irmRepo.findMany({ search: term, status: "active" }, 0, 20, "name")).filter((r) => !r.trackSerialNumbers && !r.trackBatchNumbers);
+  if (rows.length === 0) return [];
+  const warehouses = await warehouseRepo.findMany({ status: "active" }, 0, 200);
+  const balances = await inventoryRepo.findBalancesByItemsAndWarehouses(rows.map((r) => r.id), warehouses.map((w) => w.id));
+  const totalByItem = new Map<string, number>();
+  for (const b of balances) totalByItem.set(b.irmItemId, (totalByItem.get(b.irmItemId) ?? 0) + b.quantityOnHand);
+  return rows.map((r) => ({
+    irmItemId: r.id,
+    code: r.code,
+    name: r.name,
+    sku: r.sku ?? null,
+    uom: r.baseUnit ?? null,
+    quantityOnHand: totalByItem.get(r.id) ?? 0, // network-wide total; 0 ⇒ shown disabled in the composer
+    reorderLevel: r.reorderLevel ?? null,
+  }));
+}
+
+// Warehouse-scoped catalogue search for the WALK-IN composer. A walk-in is issued at ONE counter and
+// scanned out immediately, so — unlike the engineer's warehouse-independent restock composer — the
+// search only ever surfaces stock THIS warehouse can actually hand out: every hit is annotated with
+// that warehouse's live on-hand (and reorder level), and an item the warehouse doesn't physically hold
+// (no balance row, or depleted to 0) is dropped entirely rather than shown disabled — the counter has
+// no use for it. quantityOnHand mirrors what the scan-out ledger guards on (raw on-hand, not
+// on-hand−reserved), so the figure the reviewer sees is exactly the one that would block at the gun.
+// Access is gated on the actor owning the warehouse — a scoped reviewer can't probe another's shelf.
+export interface WarehouseItemOption {
+  irmItemId: string;
+  code: string;
+  name: string;
+  sku: string | null;
+  uom: string | null;
+  quantityOnHand: number;
+  reorderLevel: number | null; // GLOBAL IRM policy threshold — advisory only, never blocks issuance
+}
+const WALK_IN_BROWSE_LIMIT = 50;
+export async function searchWarehouseItems(actor: AuditActor, warehouseId: string, q: string): Promise<WarehouseItemOption[]> {
+  assertWarehouseAccess(actor, warehouseId);
+  const term = (q ?? "").trim();
+  if (term.length < 1) {
+    // No query yet → BROWSE list: everything this warehouse physically holds (on-hand > 0), so the
+    // counter can pick straight off the shelf without typing. Active + non-serial/batch, name-sorted, capped.
+    const balances = await inventoryRepo.findInStockBalancesByWarehouse(warehouseId, WALK_IN_BROWSE_LIMIT);
+    return balances
+      .filter((b) => !b.irmItem.trackSerialNumbers && !b.irmItem.trackBatchNumbers)
+      .map((b) => ({ irmItemId: b.irmItemId, code: b.irmItem.code, name: b.irmItem.name, sku: b.irmItem.sku ?? null, uom: b.irmItem.baseUnit ?? null, quantityOnHand: b.quantityOnHand, reorderLevel: b.irmItem.reorderLevel ?? null }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+  // Typed search spans the catalogue (matches code/name/sku), then is narrowed to what THIS warehouse
+  // actually holds: an item with no balance row here, or one depleted to 0, is dropped — a walk-in can
+  // only hand out stock on the shelf. (This is why an item like a fibre panel that was never stocked at
+  // this counter no longer appears as a phantom "out of stock" row.)
+  const rows = (await irmRepo.findMany({ search: term, status: "active" }, 0, 20, "name")).filter((r) => !r.trackSerialNumbers && !r.trackBatchNumbers);
+  if (rows.length === 0) return [];
+  const balances = await inventoryRepo.findBalancesByItemsAndWarehouses(rows.map((r) => r.id), [warehouseId]);
+  const onHand = new Map(balances.map((b) => [b.irmItemId, b.quantityOnHand]));
+  return rows
+    .map((r) => ({
+      irmItemId: r.id,
+      code: r.code,
+      name: r.name,
+      sku: r.sku ?? null,
+      uom: r.baseUnit ?? null,
+      quantityOnHand: onHand.get(r.id) ?? 0,
+      reorderLevel: r.reorderLevel ?? null,
+    }))
+    .filter((it) => it.quantityOnHand > 0);
 }
 
 // Active warehouses for the composer's preference picker (engineers hold no warehouse.view).

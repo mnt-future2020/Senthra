@@ -95,6 +95,20 @@ export function findBalancesByItemsAndWarehouses(irmItemIds: string[], warehouse
   if (irmItemIds.length === 0 || warehouseIds.length === 0) return Promise.resolve([]);
   return prisma.inventoryBalance.findMany({ where: { irmItemId: { in: irmItemIds }, warehouseId: { in: warehouseIds } } });
 }
+// In-stock (on-hand > 0) balances at ONE warehouse for a live, non-deleted item — powers the walk-in
+// composer's default browse list (what the counter can hand out WITHOUT typing a search). Item
+// relation included so the caller has code/name/reorder policy in one query; capped by `take`.
+export function findInStockBalancesByWarehouse(warehouseId: string, take: number): Promise<InventoryBalanceWithRelations[]> {
+  return prisma.inventoryBalance.findMany({
+    // Exclude serial/batch-tracked items IN THE QUERY (not just in the caller) so `take` applies AFTER
+    // they're filtered out — otherwise a warehouse whose most-recent balances are serial/batch could
+    // return a short/empty browse list even with plenty of issuable non-serial stock on the shelf.
+    where: { warehouseId, quantityOnHand: { gt: 0 }, irmItem: { is: { deletedAt: null, status: "active", trackSerialNumbers: false, trackBatchNumbers: false } } },
+    include: withBalanceRelations,
+    orderBy: { updatedAt: "desc" },
+    take,
+  });
+}
 export function findBalancePairWithRelations(irmItemId: string, warehouseId: string): Promise<InventoryBalanceWithRelations | null> {
   return prisma.inventoryBalance.findUnique({ where: { irmItemId_warehouseId: { irmItemId, warehouseId } }, include: withBalanceRelations });
 }
