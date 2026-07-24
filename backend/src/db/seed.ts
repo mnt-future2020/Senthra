@@ -13,7 +13,7 @@ import * as userRepo from "#modules/user/user.repository.js";
 import * as warehouseTypeRepo from "#modules/warehouse-type/warehouse-type.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as settingsRepo from "#modules/settings/settings.repository.js";
-import { LEGACY_PERMISSION_EXPANSION, PERMISSION_KEYS, customerCompatAdditions } from "#modules/role/permissions.js";
+import { LEGACY_PERMISSION_EXPANSION, PERMISSION_KEYS, WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS, customerCompatAdditions } from "#modules/role/permissions.js";
 import { DEFAULT_EMAIL_TEMPLATES } from "#modules/email/emailTemplate.defaults.js";
 import { renderBodyToHtml } from "../utils/email-html.js";
 import { hashPassword } from "../utils/password.js";
@@ -172,6 +172,17 @@ const WAREHOUSE_MANAGER_PERMISSIONS = [
   "purchase_orders.view",
   "purchase_orders.create",
   "purchase_orders.edit",
+  // Warehouse-side customer consignment intake: receive a customer's stock into an assigned
+  // warehouse, then fill in the entry + generate its barcode (see the constant's own doc for the
+  // exact scope). Without these the Incoming stock → Customer and Inventory → Customer tabs 403
+  // and the required Category field on the receive form can't be populated. Backfilled below via
+  // the existing Warehouse Manager backfill block, which reads this same array.
+  ...WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS,
+  // Read the audit trail — powers the warehouse detail's "Audit trail" tab. SAFE to grant a
+  // warehouse-scoped role because the /audit endpoints scope every read (list, facets, export) to
+  // the caller's assigned warehouses (see audit.service warehouseScope): a manager sees only their
+  // warehouses' history, never users/roles/customers or other warehouses. Backfilled below.
+  "audit.view",
 ];
 
 const SEED_ROLES: {

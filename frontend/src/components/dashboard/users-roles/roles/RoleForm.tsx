@@ -8,42 +8,13 @@ import * as roleService from "@/services/role.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import { reachabilityWarnings } from "@/lib/roleReachability";
+import { applyImplied } from "@/lib/permissionImplications";
 import type { PermissionGroup, Role } from "@/types/role";
 import { inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { PermissionMatrix } from "./PermissionMatrix";
 
 const ROLES_LIST = "/dashboard/users?tab=roles";
-
-// The "view" action's key for a group (e.g. "users.view"), if it has one.
-const viewKeyOf = (group: PermissionGroup): string | undefined =>
-  group.permissions.find((p) => p.action === "View")?.key;
-
-// The customer sub-entity groups — mirrors the backend CUSTOMER_CHILD_GROUPS. Holding
-// any permission in one of these implies customers.view (you can't manage a customer's
-// projects, catalogue, sites, portal login or stock requests without seeing the customer).
-const CUSTOMER_CHILD_GROUPS = new Set([
-  "customer_projects",
-  "customer_stock",
-  "customer_sites",
-  "customer_portal",
-  "stock_requests",
-]);
-
-// Coerce a permission set to its implied closure, mirroring the backend's
-// applyImpliedPermissions so the matrix always shows exactly what will be saved: any
-// non-view action implies its group's "View", and any customer sub-entity grant implies
-// customers.view. Keeps the Customers → View checkbox in sync without a page reload.
-const applyImplied = (perms: string[], groups: PermissionGroup[]): string[] => {
-  const set = new Set(perms);
-  for (const group of groups) {
-    const viewKey = viewKeyOf(group);
-    if (!viewKey) continue;
-    if (group.permissions.some((p) => p.key !== viewKey && set.has(p.key))) set.add(viewKey);
-  }
-  if ([...set].some((k) => CUSTOMER_CHILD_GROUPS.has(k.split(".")[0]))) set.add("customers.view");
-  return [...set];
-};
 
 // Full-page Add/Edit role form: full-width two-column layout with a roomy
 // permission matrix (scales as new modules add groups) and a live summary aside.
@@ -54,6 +25,10 @@ export function RoleForm({ mode, role }: { mode: "create" | "edit"; role?: Role 
 
   const isSystem = Boolean(role?.isSystem);
   const isFullAccess = role?.key === "super_admin" || (role?.permissions ?? []).includes("*");
+  // A warehouse-scoped role isn't forced the global customers.view just for holding a customer-child
+  // permission (e.g. stock_requests.* on the Warehouse Manager) — mirrors the backend. New roles
+  // are never warehouse-scoped, so this is only ever true when editing an existing scoped role.
+  const isWarehouseScoped = role?.isWarehouseScoped === true;
 
   const [name, setName] = React.useState(role?.name ?? "");
   const [description, setDescription] = React.useState(role?.description ?? "");
@@ -89,7 +64,8 @@ export function RoleForm({ mode, role }: { mode: "create" | "edit"; role?: Role 
 
   // Apply any matrix change (single toggle, row all/none, category bulk) and coerce the
   // result to its implied closure so the matrix mirrors exactly what the server stores.
-  const onPermissionsChange = (next: string[]) => setPermissions(applyImplied(next, groups));
+  const onPermissionsChange = (next: string[]) =>
+    setPermissions(applyImplied(next, groups, isWarehouseScoped));
 
   const permsChanged =
     [...permissions].sort().join(",") !== [...(role?.permissions ?? [])].sort().join(",");

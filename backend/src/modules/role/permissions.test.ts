@@ -7,6 +7,7 @@ import {
   PERMISSION_CATEGORIES,
   PERMISSION_GROUPS,
   PERMISSION_KEYS,
+  WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS,
   applyImpliedPermissions,
   customerCompatAdditions,
   escalationViolations,
@@ -159,6 +160,50 @@ describe("applyImpliedPermissions — customer cross-group implication", () => {
   });
 });
 
+describe("applyImpliedPermissions — warehouse-scoped roles: only stock_requests skips customers.view", () => {
+  it("does NOT auto-add customers.view for a warehouse-scoped role holding ONLY stock_requests.*", () => {
+    // stock_requests is the warehouse receive flow — it works without the global customer
+    // directory, so a warehouse manager holding only it is not forced customers.view. The crux.
+    const result = applyImpliedPermissions(["stock_requests.complete"], true);
+    expect(result).not.toContain("customers.view");
+  });
+
+  it("still applies the intra-group view implication for a warehouse-scoped role", () => {
+    // Only the customer CROSS-group implication is affected; "manage implies its own view" stays.
+    expect(applyImpliedPermissions(["stock_requests.complete"], true)).toContain("stock_requests.view");
+  });
+
+  it("PRESERVES an explicitly-granted customers.view for a warehouse-scoped role", () => {
+    // The skip only removes the SILENT add — a deliberate grant must survive.
+    const result = applyImpliedPermissions(["stock_requests.complete", "customers.view"], true);
+    expect(result).toContain("customers.view");
+  });
+
+  it("still auto-adds customers.view for a NON-warehouse-scoped role (unchanged default)", () => {
+    expect(applyImpliedPermissions(["stock_requests.complete"], false)).toContain("customers.view");
+  });
+
+  it("defaults to non-scoped when the flag is omitted (existing callers unaffected)", () => {
+    expect(applyImpliedPermissions(["stock_requests.complete"])).toContain("customers.view");
+  });
+
+  // The refinement: a customer-PAGE child group (projects/sites/portal/customer_stock) is NOT
+  // exempt even for a scoped role, because it is unusable without customers.view — forcing the
+  // view keeps the grant coherent instead of leaving a dead permission.
+  it("STILL adds customers.view for a customer-page group on a warehouse-scoped role", () => {
+    expect(applyImpliedPermissions(["customer_projects.view"], true)).toContain("customers.view");
+    expect(applyImpliedPermissions(["customer_sites.view"], true)).toContain("customers.view");
+    expect(applyImpliedPermissions(["customer_portal.view"], true)).toContain("customers.view");
+    expect(applyImpliedPermissions(["customer_stock.edit"], true)).toContain("customers.view");
+  });
+
+  it("adds customers.view when a scoped role mixes stock_requests with a customer-page group", () => {
+    // stock_requests alone would be exempt, but the non-exempt customer_projects pulls the view in.
+    const result = applyImpliedPermissions(["stock_requests.complete", "customer_projects.view"], true);
+    expect(result).toContain("customers.view");
+  });
+});
+
 describe("customerCompatAdditions (additive backward-compat)", () => {
   it("backfills child views for a customers.view holder", () => {
     const additions = customerCompatAdditions(["customers.view"]);
@@ -188,6 +233,41 @@ describe("customerCompatAdditions (additive backward-compat)", () => {
     for (const keys of Object.values(CUSTOMER_COMPAT_BACKFILL)) {
       for (const key of keys) expect(PERMISSION_KEYS).toContain(key);
     }
+  });
+});
+
+describe("WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS (warehouse-side consignment intake)", () => {
+  it("is exactly the two warehouse-side receive keys", () => {
+    // The full warehouse-side flow — see the Incoming stock → Customer pool and the Inventory
+    // → Customer pool, receive an assignment, then fill the entry, read the category master and
+    // print its barcode — needs only these two. Pin them so the set can't silently grow.
+    expect([...WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS].sort()).toEqual([
+      "stock_requests.complete",
+      "stock_requests.view",
+    ]);
+  });
+
+  it("names only real catalogue keys", () => {
+    for (const key of WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS) {
+      expect(PERMISSION_KEYS).toContain(key);
+    }
+  });
+
+  it("excludes the office review-queue keys (approve/reject stay a reviewer's job)", () => {
+    expect(WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS).not.toContain("stock_requests.approve");
+    expect(WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS).not.toContain("stock_requests.reject");
+  });
+
+  it("excludes the broad customer_stock.* keys (entry routes accept stock_requests.* instead)", () => {
+    for (const key of WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS) {
+      expect(key.startsWith("customer_stock.")).toBe(false);
+    }
+  });
+
+  it("admits the category master read guard (so the receive form's picker fills)", () => {
+    // Mirror of CATEGORY_LIST_READERS in category.routes.ts: the receive form's category picker
+    // must load for anyone holding these keys, or the required Category field is unpickable.
+    expect(WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS).toContain("stock_requests.complete");
   });
 });
 

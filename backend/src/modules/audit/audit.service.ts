@@ -2,6 +2,7 @@ import type { Prisma } from "@prisma/client";
 
 import * as auditLogRepo from "./audit.repository.js";
 import type { AuditListFilters } from "./audit.repository.js";
+import { getAccessibleWarehouseIds } from "../../lib/warehouse-access.js";
 
 // Actor is snapshotted (id + email) so an entry stays meaningful even if that
 // account is later renamed or removed.
@@ -152,9 +153,18 @@ function toPublic(row: {
   };
 }
 
-export async function listAuditLogs(params: ListAuditParams = {}): Promise<PagedAuditLogs> {
+// The audit read surface (list / facets / export) is scoped by the caller's warehouse access.
+// A warehouse-scoped actor (a warehouse manager) sees ONLY audit entries for their assigned
+// warehouses; an unrestricted actor (admin / non-scoped role, or no actor) sees everything.
+// `getAccessibleWarehouseIds` returns the assigned set or `null` when unrestricted — normalize
+// that to the repo's `scopeWarehouseIds` (`string[]` = restrict, `undefined` = no limit).
+function warehouseScope(actor?: AuditActor): string[] | undefined {
+  return getAccessibleWarehouseIds(actor) ?? undefined;
+}
+
+export async function listAuditLogs(params: ListAuditParams = {}, actor?: AuditActor): Promise<PagedAuditLogs> {
   const pageSize = Math.min(Math.max(Math.trunc(params.pageSize ?? 25), 1), 100);
-  const filters = normalizeFilters(params);
+  const filters: AuditListFilters = { ...normalizeFilters(params), scopeWarehouseIds: warehouseScope(actor) };
   const total = await auditLogRepo.count(filters);
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const page = Math.min(Math.max(Math.trunc(params.page ?? 1), 1), totalPages);
@@ -170,11 +180,12 @@ export interface AuditFacets {
   targetTypes: string[];
 }
 
-export async function listFacets(): Promise<AuditFacets> {
+export async function listFacets(actor?: AuditActor): Promise<AuditFacets> {
+  const scope = warehouseScope(actor);
   const [actions, actorTypes, targetTypes] = await Promise.all([
-    auditLogRepo.distinctActions(),
-    auditLogRepo.distinctActorTypes(),
-    auditLogRepo.distinctTargetTypes(),
+    auditLogRepo.distinctActions(scope),
+    auditLogRepo.distinctActorTypes(scope),
+    auditLogRepo.distinctTargetTypes(scope),
   ]);
   return { actions, actorTypes, targetTypes };
 }
@@ -198,8 +209,8 @@ export interface AuditCsvResult {
 
 // Serialize the filtered entries to a CSV string. Reuses the SAME filter
 // normalization as listAuditLogs. `capped` is true when the result hit the cap.
-export async function exportAuditCsv(params: ListAuditParams = {}): Promise<AuditCsvResult> {
-  const filters = normalizeFilters(params);
+export async function exportAuditCsv(params: ListAuditParams = {}, actor?: AuditActor): Promise<AuditCsvResult> {
+  const filters: AuditListFilters = { ...normalizeFilters(params), scopeWarehouseIds: warehouseScope(actor) };
   const rows = await auditLogRepo.findForExport(filters, AUDIT_EXPORT_MAX);
   const header = [
     "When (UTC)",

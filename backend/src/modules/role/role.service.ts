@@ -171,7 +171,10 @@ export async function updateRole(
         `Unknown permission${unknown.length === 1 ? "" : "s"}: ${unknown.join(", ")}.`,
       );
     }
-    const valid = applyImpliedPermissions(sanitized);
+    // Pass the role's warehouse-scope flag so a warehouse-scoped role (e.g. Warehouse Manager)
+    // isn't silently forced the global customers.view just for holding stock_requests.* — see
+    // applyImpliedPermissions. An admin can still grant it deliberately (it's in `sanitized`).
+    const valid = applyImpliedPermissions(sanitized, role.isWarehouseScoped === true);
     const escalated = escalationViolations(valid, actor?.permissions ?? []);
     if (escalated.length) {
       throw forbidden(`You can't grant permissions you don't have: ${escalated.join(", ")}.`);

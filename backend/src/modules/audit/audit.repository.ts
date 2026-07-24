@@ -17,9 +17,17 @@ export interface AuditListFilters {
   targetId?: string;
   from?: Date;
   to?: Date;
+  /** Warehouse SECURITY scope. When set (a warehouse-scoped actor), the result is hard-limited to
+   *  warehouse-target entries for exactly these warehouse ids — this OVERRIDES any client-supplied
+   *  targetType/targetId so a crafted query can't widen the view, and an empty array matches nothing.
+   *  Absent (an unrestricted actor: admin / non-scoped role) applies no such limit. Set by the service
+   *  from the principal's assigned warehouses; never from client input. */
+  scopeWarehouseIds?: string[];
 }
 
-function buildWhere(filters: AuditListFilters): Prisma.AuditLogWhereInput {
+// Exported so the warehouse-scope override can be unit-tested directly (it's a security boundary,
+// not a convenience filter). Building the Prisma `where` is the single place the scope is enforced.
+export function buildAuditWhere(filters: AuditListFilters): Prisma.AuditLogWhereInput {
   const where: Prisma.AuditLogWhereInput = {};
   // Exact `action` wins over the prefix exclusion (they're never usefully combined; a specific
   // action filter already scopes tighter than "everything except a prefix").
@@ -42,7 +50,20 @@ function buildWhere(filters: AuditListFilters): Prisma.AuditLogWhereInput {
       { action: { contains: q, mode: "insensitive" } },
     ];
   }
+  // Warehouse scope LAST so it overrides any client targetType/targetId above. AND-composed with
+  // the search OR by Prisma (top-level keys are ANDed), so a scoped search stays inside the scope.
+  if (filters.scopeWarehouseIds) {
+    where.targetType = "warehouse";
+    where.targetId = { in: filters.scopeWarehouseIds };
+  }
   return where;
+}
+
+// Same scope, reduced to the `where` used by the distinct-value (facet) queries. Empty/absent
+// scope → no constraint (the facets span the whole log, for an unrestricted actor).
+function facetScopeWhere(scopeWarehouseIds?: string[]): Prisma.AuditLogWhereInput | undefined {
+  if (!scopeWarehouseIds) return undefined;
+  return { targetType: "warehouse", targetId: { in: scopeWarehouseIds } };
 }
 
 export function create(data: Prisma.AuditLogCreateInput): Promise<AuditLog> {
@@ -56,7 +77,7 @@ export function findMany(
   take = 25,
 ): Promise<AuditLog[]> {
   return prisma.auditLog.findMany({
-    where: buildWhere(filters),
+    where: buildAuditWhere(filters),
     orderBy: { createdAt: "desc" },
     skip,
     take,
@@ -64,7 +85,7 @@ export function findMany(
 }
 
 export function count(filters: AuditListFilters = {}): Promise<number> {
-  return prisma.auditLog.count({ where: buildWhere(filters) });
+  return prisma.auditLog.count({ where: buildAuditWhere(filters) });
 }
 
 // All matching entries up to `take` (the export cap), newest first. A single
@@ -76,16 +97,19 @@ export function findForExport(
   take = 50_000,
 ): Promise<AuditLog[]> {
   return prisma.auditLog.findMany({
-    where: buildWhere(filters),
+    where: buildAuditWhere(filters),
     orderBy: { createdAt: "desc" },
     take,
   });
 }
 
 // Distinct action keys present in the log, ascending — feeds the UI's action
-// filter dropdown so it only offers values that actually exist.
-export async function distinctActions(): Promise<string[]> {
+// filter dropdown so it only offers values that actually exist. `scopeWarehouseIds`
+// (a warehouse-scoped actor) limits the facet to that actor's visible slice, so the
+// dropdown never reveals actions from warehouses/domains they can't see.
+export async function distinctActions(scopeWarehouseIds?: string[]): Promise<string[]> {
   const rows = await prisma.auditLog.findMany({
+    where: facetScopeWhere(scopeWarehouseIds),
     distinct: ["action"],
     select: { action: true },
     orderBy: { action: "asc" },
@@ -95,9 +119,10 @@ export async function distinctActions(): Promise<string[]> {
 
 // Distinct actor types actually present (admin | user | customer | system). The
 // UI offers only these, so a value no event ever produces (e.g. "system" until
-// system-generated events exist) never shows as a dead filter option.
-export async function distinctActorTypes(): Promise<string[]> {
+// system-generated events exist) never shows as a dead filter option. Scoped as above.
+export async function distinctActorTypes(scopeWarehouseIds?: string[]): Promise<string[]> {
   const rows = await prisma.auditLog.findMany({
+    where: facetScopeWhere(scopeWarehouseIds),
     distinct: ["actorType"],
     select: { actorType: true },
     orderBy: { actorType: "asc" },
@@ -107,10 +132,11 @@ export async function distinctActorTypes(): Promise<string[]> {
 
 // Distinct target types present (customer | role | user | email_template | …),
 // nulls excluded — feeds the "domain" filter so entries can be narrowed by which
-// entity they concern.
-export async function distinctTargetTypes(): Promise<string[]> {
+// entity they concern. A warehouse scope collapses this to just "warehouse".
+export async function distinctTargetTypes(scopeWarehouseIds?: string[]): Promise<string[]> {
+  const scope = facetScopeWhere(scopeWarehouseIds);
   const rows = await prisma.auditLog.findMany({
-    where: { targetType: { not: null } },
+    where: scope ?? { targetType: { not: null } },
     distinct: ["targetType"],
     select: { targetType: true },
     orderBy: { targetType: "asc" },

@@ -456,6 +456,26 @@ export function roleGrants(permissions: string[], permission: string): boolean {
   return permissions.includes(ALL_PERMISSIONS) || permissions.includes(permission);
 }
 
+// The warehouse manager's slice of the customer-consignment flow. A customer's own stock is
+// shipped to one of our warehouses; the warehouse manager RECEIVES it and prepares it for
+// storage. That whole warehouse-side flow — see the pending stock in Incoming stock → Customer
+// and the received stock in Inventory → Customer, receive an assignment, then fill in the
+// entry's details, read the category master for its picker and print its barcode — is covered by
+// exactly these two keys:
+//   • stock_requests.view     — surfaces the customer pool at the warehouse (pending + received)
+//   • stock_requests.complete — performs the receive, and authorises editing the entry,
+//                               generating its barcode, and reading the category list
+// Deliberately NOT stock_requests.approve / .reject — that is the office review queue, a
+// PM/reviewer's job, done from the customer record, not the warehouse. Deliberately NOT the
+// broad customer_stock.* keys — every /stock-entries route accepts stock_requests.* as an
+// alternative, so the manager never needs the customer-inventory management keys. Every action
+// stays scoped to the manager's assigned warehouses by the warehouse-access layer. Seeded onto
+// the warehouse_manager role and backfilled idempotently in db/seed.ts.
+export const WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS = [
+  "stock_requests.view",
+  "stock_requests.complete",
+];
+
 // The customer sub-entity groups. Each is a slice of a single customer record, so
 // holding ANY permission in one of them implies being able to see the parent
 // customer (`customers.view`) — you can't manage a customer's projects, stock,
@@ -468,6 +488,16 @@ export const CUSTOMER_CHILD_GROUPS = new Set([
   "stock_requests",
 ]);
 
+// The customer-child groups whose endpoints work WAREHOUSE-SIDE — i.e. usable without the global
+// `customers.view` directory. Only `stock_requests` (the warehouse receive flow: incoming customer
+// pool, receive, fill the entry, print the barcode) qualifies today. A warehouse-scoped role may
+// hold these standalone, so they don't pull in `customers.view`. EVERY other customer-child group
+// (projects / sites / portal / customer_stock) is customer-detail-page only and stays coupled to
+// `customers.view` even for a scoped role — otherwise the grant would be a dead permission (the
+// customer page is unreachable without the view). If a future group gains a warehouse-side surface,
+// add it here.
+export const WAREHOUSE_SIDE_CUSTOMER_CHILD_GROUPS = new Set(["stock_requests"]);
+
 // Enforce the "manage implies view" invariant: if a permission set grants any action
 // in a module (create / edit / delete / manage), it also gets that module's `view`
 // permission — you can't act on what you can't see. Keeps roles coherent on the
@@ -475,7 +505,17 @@ export const CUSTOMER_CHILD_GROUPS = new Set([
 // created via the API). It also adds the cross-group implication above: any customer
 // sub-entity grant pulls in `customers.view`. "*" already implies everything, so it's
 // returned untouched.
-export function applyImpliedPermissions(permissions: string[]): string[] {
+//
+// `isWarehouseScoped` (the role's own flag) narrows the customer cross-group add: a warehouse
+// manager holds stock_requests.* to receive customer stock at their assigned warehouse, and
+// `customers.view` is the GLOBAL, un-warehouse-scoped customer directory — forcing it on would
+// silently widen a scoped role to the entire customer book. So for a scoped role only the
+// warehouse-side groups (WAREHOUSE_SIDE_CUSTOMER_CHILD_GROUPS) are exempt from pulling in
+// customers.view. Every OTHER customer-child group is customer-page-only and STILL pulls it in even
+// for a scoped role — otherwise the grant would be a dead permission (unreachable without the view).
+// The intra-group "manage implies view" always applies (they keep e.g. stock_requests.view). This
+// function only ever ADDS, so an admin who deliberately grants `customers.view` still keeps it.
+export function applyImpliedPermissions(permissions: string[], isWarehouseScoped = false): string[] {
   if (permissions.includes(ALL_PERMISSIONS)) return [...permissions];
   const set = new Set(permissions);
   for (const group of PERMISSION_GROUPS) {
@@ -484,10 +524,14 @@ export function applyImpliedPermissions(permissions: string[]): string[] {
     const hasNonView = group.permissions.some((p) => p.key !== viewKey && set.has(p.key));
     if (hasNonView) set.add(viewKey);
   }
-  // Cross-group: any customer sub-entity permission implies seeing the customer.
-  const needsCustomerView = [...set].some((key) =>
-    CUSTOMER_CHILD_GROUPS.has(key.split(".")[0]),
-  );
+  // Cross-group: any customer sub-entity permission implies seeing the customer — except that a
+  // warehouse-scoped role is exempted for the warehouse-side groups (see the constant above).
+  const needsCustomerView = [...set].some((key) => {
+    const group = key.split(".")[0];
+    if (!CUSTOMER_CHILD_GROUPS.has(group)) return false;
+    if (isWarehouseScoped && WAREHOUSE_SIDE_CUSTOMER_CHILD_GROUPS.has(group)) return false;
+    return true;
+  });
   if (needsCustomerView) set.add("customers.view");
   return [...set];
 }

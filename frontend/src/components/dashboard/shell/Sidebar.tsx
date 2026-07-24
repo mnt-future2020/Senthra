@@ -30,6 +30,7 @@ import { useBranding } from "@/hooks/useBranding";
 import { useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import { BrandMark } from "@/components/branding/BrandMark";
 import { optimizeCloudinaryUrl } from "@/lib/utils";
+import { isAdminNavItemVisible } from "@/lib/nav";
 
 type NavItem = {
   href: string;
@@ -37,6 +38,9 @@ type NavItem = {
   icon: React.ElementType;
   // Visible if the principal holds ANY of these permissions (admin holds all).
   perms: string[];
+  // Hide from a warehouse-scoped role even when they hold the perm (global page whose
+  // warehouse-scoped equivalent lives elsewhere — see lib/nav.ts).
+  hideForWarehouseScoped?: boolean;
 };
 
 const NAV: NavItem[] = [
@@ -72,10 +76,15 @@ const NAV: NavItem[] = [
     perms: ["settings.view", "email_templates.view", "categories.view"],
   },
   {
+    // The GLOBAL audit page. A warehouse-scoped manager holds `audit.view` for the warehouse
+    // detail's "Audit trail" tab (their warehouses only), but this system-wide page is not their
+    // surface — hide it for them. The endpoint is warehouse-scoped regardless (audit.service), so
+    // this is a UX/nav decision, not a security one.
     href: "/dashboard/audit",
     label: "Audit Log",
     icon: ScrollText,
     perms: ["audit.view"],
+    hideForWarehouseScoped: true,
   },
 ];
 
@@ -127,14 +136,11 @@ export function Sidebar({
 
   const isCustomer = principal?.type === "customer";
 
-  // Staff admin nav, permission-filtered. (The GLOBAL "GRN" entry used to be hidden here for
-  // warehouse-scoped roles; it is now commented out of NAV entirely — receiving lives in the
-  // Warehouse detail and on the PO — so that special case is gone.)
-  const adminNav = NAV.filter((item) => {
-    // perms: [] = always-visible (e.g. the Dashboard landing); otherwise show if the actor holds ANY.
-    if (item.perms.length > 0 && !item.perms.some((p) => can(p))) return false;
-    return true;
-  });
+  // Staff admin nav, permission-filtered. A warehouse-scoped role additionally has global-only
+  // pages hidden (e.g. Audit Log — its warehouse-scoped view is the warehouse detail's Audit trail
+  // tab). See lib/nav.ts for the rule.
+  const isWarehouseScoped = principal?.type === "user" && principal.isWarehouseScoped === true;
+  const adminNav = NAV.filter((item) => isAdminNavItemVisible(item, can, isWarehouseScoped));
 
   // Engineer-portal access is for STAFF users (principal.type === "user") who hold the engineer
   // dashboard permission. Keyed on the user type (not on adminNav being empty) so a mixed-role staff
