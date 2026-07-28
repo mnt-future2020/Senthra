@@ -574,3 +574,26 @@ export async function requireActiveIrmItems(itemIds: string[]): Promise<Map<stri
 export function findActiveByCodeOrBarcode(code: string): Promise<IrmItemWithRelations | null> {
   return irmRepo.findActiveByCodeOrBarcode(code);
 }
+
+// Reorder-workbench seam: each item's primary supplier (id/name/status + effective lead time) keyed
+// by item id, one query for many items. Lead time prefers the item-supplier link's value over the
+// supplier's general one (the link is the more specific quote). Items with no primary are absent.
+export interface PrimarySupplierRef {
+  id: string;
+  name: string;
+  status: string;
+  leadTimeDays: number | null;
+}
+export async function primarySuppliersForItems(irmItemIds: string[]): Promise<Map<string, PrimarySupplierRef>> {
+  const links = await irmRepo.findPrimarySupplierLinks(irmItemIds);
+  const map = new Map<string, PrimarySupplierRef>();
+  for (const l of links) {
+    map.set(l.irmItemId, {
+      id: l.supplier.id,
+      name: l.supplier.name,
+      status: l.supplier.status ?? "active",
+      leadTimeDays: l.leadTimeDays ?? l.supplier.leadTimeDays ?? null,
+    });
+  }
+  return map;
+}

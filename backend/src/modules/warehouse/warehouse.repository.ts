@@ -6,35 +6,13 @@ import { escapeRegex } from "../../utils/search.js";
 // Data-access layer for the Warehouse master. The ONLY place Prisma is touched for
 // warehouses. Soft-deleted warehouses (deletedAt set) are excluded from normal reads.
 
-// The manager fields surfaced on a warehouse read (a thin slice of User — never the
-// whole record). jobTitle + role.name drive the "Name — Role" dropdown label.
-const managerSelect = {
-  id: true,
-  firstName: true,
-  lastName: true,
-  email: true,
-  status: true,
-  jobTitle: true,
-  role: { select: { name: true } },
-} satisfies Prisma.UserSelect;
-
+// NOTE: a warehouse has no manager column. Who manages it is derived from the user→warehouse
+// assignments made under Users & Roles — see userWarehouseRepo.listManagersForWarehouses.
 export type WarehouseWithRelations = Warehouse & {
-  manager:
-    | {
-        id: string;
-        firstName: string;
-        lastName: string;
-        email: string;
-        status: string;
-        jobTitle: string | null;
-        role: { name: string } | null;
-      }
-    | null;
   warehouseType: { id: string; name: string } | null;
 };
 
 const withRelations = {
-  manager: { select: managerSelect },
   warehouseType: { select: { id: true, name: true } },
 } satisfies Prisma.WarehouseInclude;
 
@@ -123,9 +101,9 @@ export function findActiveByIds(ids: string[]): Promise<{ id: string }[]> {
   });
 }
 
-// Lean active-warehouse options for a picker (id/code/name only), code-sorted. Mirrors
-// findManagerOptions — a trimmed list instead of paging the full warehouse records. `ids` scopes
-// the result to a warehouse-scoped user's assigned set (undefined = unrestricted).
+// Lean active-warehouse options for a picker (id/code/name only), code-sorted. A trimmed list
+// instead of paging the full warehouse records. `ids` scopes the result to a warehouse-scoped
+// user's assigned set (undefined = unrestricted).
 export function findOptions(ids?: string[]): Promise<{ id: string; code: string; name: string }[]> {
   const where: Prisma.WarehouseWhereInput = { status: "active", deletedAt: null };
   if (ids !== undefined) where.id = { in: ids };
@@ -136,9 +114,9 @@ export function findOptions(ids?: string[]): Promise<{ id: string; code: string;
   });
 }
 
-// Unchecked update input so the service can set the scalar `managerUserId` FK
-// directly (clear with null / assign an id) instead of going through relation
-// connect/disconnect — simpler and avoids disconnect-on-null edge cases.
+// Unchecked update input so the service can set scalar FKs (e.g. `typeId`) directly
+// instead of going through relation connect/disconnect — simpler and avoids
+// disconnect-on-null edge cases.
 export function update(id: string, data: Prisma.WarehouseUncheckedUpdateInput): Promise<WarehouseWithRelations> {
   return prisma.warehouse.update({ where: { id }, data, include: withRelations });
 }
@@ -156,36 +134,10 @@ export function unsetDefaultExcept(exceptId: string): Promise<Prisma.BatchPayloa
   });
 }
 
-// Active, non-deleted staff users for the manager picker (minimal slice, name-sorted).
-// jobTitle + role.name feed the "Name — Role" dropdown label.
-export function findManagerOptions(): Promise<
-  {
-    id: string;
-    firstName: string;
-    lastName: string;
-    email: string;
-    jobTitle: string | null;
-    role: { name: string } | null;
-  }[]
-> {
-  return prisma.user.findMany({
-    where: { status: "active", deletedAt: null },
-    select: {
-      id: true,
-      firstName: true,
-      lastName: true,
-      email: true,
-      jobTitle: true,
-      role: { select: { name: true } },
-    },
-    orderBy: [{ firstName: "asc" }, { lastName: "asc" }],
-  });
-}
-
 // Active, non-deleted FIELD ENGINEERS for the job/dispatch engineer picker — only users whose role
-// grants the field-operations stock-holding capability (canHoldStock). Same minimal slice/sort as
-// findManagerOptions; the role filter is what keeps admins / finance / warehouse managers out of the
-// "assign an engineer" dropdowns. Mirrors the canHoldStock gate the job services enforce.
+// grants the field-operations stock-holding capability (canHoldStock). Minimal slice, name-sorted;
+// the role filter is what keeps admins / finance / warehouse managers out of the "assign an
+// engineer" dropdowns. Mirrors the canHoldStock gate the job services enforce.
 export function findEngineerOptions(): Promise<
   {
     id: string;

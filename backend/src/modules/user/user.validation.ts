@@ -1,6 +1,17 @@
 import { z } from "zod";
 
-import { emailField, isValidPhone, optionalPhoneField } from "../../utils/validation.js";
+import {
+  addYearsIso,
+  earliestClientToday,
+  emailField,
+  isCalendarDate,
+  isValidPhone,
+  latestClientToday,
+  optionalIsoDateField,
+  optionalPhoneField,
+  yearsBetween,
+} from "../../utils/validation.js";
+import { postcodeField as ukPostcode } from "../../utils/postcode.js";
 
 const statusEnum = z.enum(["active", "inactive", "suspended"]);
 const genderEnum = z.enum(["male", "female", "other", "unspecified"]);
@@ -19,12 +30,78 @@ const signatureImage = z
   .regex(/^data:image\/(png|jpe?g);base64,/i, "Signature must be a PNG or JPG image.")
   .max(MAX_IMAGE_DATA_URI_CHARS, "Signature is too large (max ~2 MB).");
 
-// A date as an ISO / "YYYY-MM-DD" string. An empty string is allowed and the
-// service treats it as "clear"; any non-empty value must be a parseable date.
-const dateField = z
-  .string()
-  .trim()
-  .refine((v) => v === "" || !Number.isNaN(Date.parse(v)), "Enter a valid date.");
+// ---------------------------------------------------------------------------
+// Staff date policy — mirrored in the front-end's lib/validation.ts. Both sides
+// MUST agree: the client validates for instant feedback, the server is the only
+// thing an API call can't skip. If you change a bound here, change it there.
+// ---------------------------------------------------------------------------
+
+// 16 is the UK school-leaving / lawful-employment age, so it never blocks a real
+// hire (apprentices included) while still catching a mistyped birth year.
+export const MIN_STAFF_AGE = 16;
+// An upper bound on age rather than a hardcoded earliest year: "before 1900"
+// quietly becomes wrong as time passes, "older than 120" does not.
+export const MAX_STAFF_AGE = 120;
+// A confirmed hire can be recorded before they start, but a start date years out
+// is a typo.
+export const MAX_JOINING_YEARS_AHEAD = 1;
+
+// Date of birth is optional (an empty string clears it), but any value given must
+// be a real calendar date describing a plausibly-aged living person.
+//
+// Each bound is measured against the most permissive day a legitimate client could
+// be calling "today" (see TZ_DAY_SKEW) — the browser validates on ITS local date,
+// and a server rejecting what the user's own calendar accepted is a bug the user
+// can neither understand nor act on.
+const dateOfBirthField = optionalIsoDateField("date of birth").superRefine((v, ctx) => {
+  if (v === "") return;
+  if (v > latestClientToday()) {
+    ctx.addIssue({ code: "custom", message: "Date of birth can't be in the future." });
+    return;
+  }
+  // Old enough: judged against the latest "today" (most generous).
+  if (yearsBetween(v, latestClientToday()) < MIN_STAFF_AGE) {
+    ctx.addIssue({ code: "custom", message: `Staff must be at least ${MIN_STAFF_AGE} years old.` });
+    return;
+  }
+  // Not implausibly old: judged against the earliest "today" (also most generous).
+  if (yearsBetween(v, earliestClientToday()) > MAX_STAFF_AGE) {
+    ctx.addIssue({ code: "custom", message: "Enter a valid date of birth — that's over 120 years ago." });
+  }
+});
+
+// Shared bound-checking for date of joining, used by both the optional (update)
+// and required (create) variants.
+function checkDateOfJoining(v: string, ctx: z.RefinementCtx): void {
+  if (v > addYearsIso(latestClientToday(), MAX_JOINING_YEARS_AHEAD)) {
+    ctx.addIssue({ code: "custom", message: "Date of joining can't be more than a year in the future." });
+  }
+}
+
+const dateOfJoiningField = optionalIsoDateField("date of joining").superRefine((v, ctx) => {
+  if (v === "") return;
+  checkDateOfJoining(v, ctx);
+});
+
+// The cross-field rule: nobody joined before their 16th birthday. Subsumes the
+// weaker "born after they joined" check. Exported because the update path has to
+// apply it against whichever half is still in the database — see user.service.ts.
+export function joiningPrecedesMinAge(dobIso: string, joiningIso: string): boolean {
+  return joiningIso < addYearsIso(dobIso, MIN_STAFF_AGE);
+}
+
+export const JOINING_BEFORE_MIN_AGE_MESSAGE = `Date of joining is before this person turned ${MIN_STAFF_AGE}. Check both dates.`;
+
+// Applies the cross-field rule when a payload carries BOTH dates. A schema can
+// only see what was submitted, so the update path re-checks in the service.
+function refineDatePair(d: { dateOfBirth?: string; dateOfJoining?: string }, ctx: z.RefinementCtx): void {
+  const dob = d.dateOfBirth;
+  const joining = d.dateOfJoining;
+  if (!dob || !joining) return;
+  if (joiningPrecedesMinAge(dob, joining)) {
+    ctx.addIssue({ code: "custom", path: ["dateOfJoining"], message: JOINING_BEFORE_MIN_AGE_MESSAGE });
+  }
+}
 
 // An optional <select> sends "" when nothing is chosen / when cleared. We accept
 // it alongside the real values; the service maps "" to null ("not specified").
@@ -49,15 +126,16 @@ const sharedProfileFields = {
   // Employment
   jobTitle: z.string().trim().max(80).optional(),
   department: z.string().trim().max(80).optional(),
-  dateOfJoining: dateField.optional(),
+  dateOfJoining: dateOfJoiningField.optional(),
   // Personal
   gender: optionalGender,
-  dateOfBirth: dateField.optional(),
+  dateOfBirth: dateOfBirthField.optional(),
   // Address (UK)
   addressLine1: z.string().trim().max(120).optional(),
   addressLine2: z.string().trim().max(120).optional(),
   city: z.string().trim().max(80).optional(),
-  postcode: z.string().trim().max(12).optional(),
+  // Validates AND normalises to canonical form ("ls14dy" → "LS1 4DY") — see utils/postcode.ts.
+  postcode: ukPostcode().optional(),
 };
 
 export const createUserSchema = z.object({
@@ -96,10 +174,11 @@ export const createUserSchema = z.object({
     .string({ error: "Date of joining is required." })
     .trim()
     .min(1, "Date of joining is required.")
-    .refine((v) => !Number.isNaN(Date.parse(v)), "Enter a valid date."),
+    .refine(isCalendarDate, "Enter a valid date of joining as a real calendar date.")
+    .superRefine(checkDateOfJoining),
   // Optional here; required (≥1, active) for warehouse-scoped roles — enforced in the service.
   warehouseIds: warehouseIdsField,
-});
+}).superRefine(refineDatePair);
 export type CreateUserInput = z.infer<typeof createUserSchema>;
 
 export const updateUserSchema = z.object({
@@ -112,7 +191,7 @@ export const updateUserSchema = z.object({
   // Synced (add/remove/keep) only for warehouse-scoped roles; omitted = leave assignments untouched.
   warehouseIds: warehouseIdsField,
   ...sharedProfileFields,
-});
+}).superRefine(refineDatePair);
 export type UpdateUserInput = z.infer<typeof updateUserSchema>;
 
 export const updateUserStatusSchema = z.object({
@@ -138,6 +217,7 @@ export const updateMyProfileSchema = z.object({
   addressLine1: z.string().trim().max(120).optional(),
   addressLine2: z.string().trim().max(120).optional(),
   city: z.string().trim().max(80).optional(),
-  postcode: z.string().trim().max(12).optional(),
+  // Validates AND normalises to canonical form ("ls14dy" → "LS1 4DY") — see utils/postcode.ts.
+  postcode: ukPostcode().optional(),
 });
 export type UpdateMyProfileInput = z.infer<typeof updateMyProfileSchema>;

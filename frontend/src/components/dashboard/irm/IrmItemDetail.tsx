@@ -20,6 +20,7 @@ import type { StockPosition } from "@/types/stock-position";
 
 type PushToast = (msg: string, type?: "success" | "info" | "alert") => void;
 import { Pagination } from "@/components/ui/Pagination";
+import { NoStaffAssigned, StaffChip } from "@/components/ui/StaffChip";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { DetailHeader } from "@/components/ui/DetailHeader";
 import { actionLabel, actionTone, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
@@ -266,12 +267,11 @@ function Overview({
           <div className="col-span-2">
             <Field label="Internal owner">
               {i.owner ? (
-                <div>
-                  <span className="font-semibold">{i.owner.name}</span>
-                  {i.owner.jobTitle && <span className="ml-1.5 text-xs font-normal text-[var(--muted)]">· {i.owner.jobTitle}</span>}
+                <div className="mt-2">
+                  <StaffChip staff={i.owner} />
                 </div>
               ) : (
-                <span className="text-[var(--faint)]">No owner assigned</span>
+                <NoStaffAssigned label="No owner assigned" />
               )}
             </Field>
           </div>

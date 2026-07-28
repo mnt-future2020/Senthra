@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { postcodeField as ukPostcode } from "../../utils/postcode.js";
+
 // A network port is empty (clear it), or an integer 1–65535. Accepts the value
 // as a string (from a form input) or a number. Used by both the settings patch
 // and the test-email payload.
@@ -89,7 +91,8 @@ export const updateSettingsSchema = z.object({
   companyAddressLine2: z.string().max(200).optional(),
   companyCity: z.string().max(100).optional(),
   companyCounty: z.string().max(100).optional(),
-  companyPostcode: z.string().max(16).optional(),
+  // Validates AND normalises to canonical form ("ls14dy" → "LS1 4DY") — see utils/postcode.ts.
+  companyPostcode: ukPostcode().optional(),
   companyCountry: z.string().max(80).optional(),
   companyPhone: z.string().max(40).optional(),
   // Empty string allowed (clears it); a non-empty value must be a valid email / URL.

@@ -373,7 +373,7 @@ export function WarehousesView() {
                 <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
                   <th className="px-4 py-3">Code</th>
                   <th className="px-4 py-3">Warehouse</th>
-                  <th className="px-4 py-3">Manager</th>
+                  <th className="px-4 py-3" title="Assigned under Users & Roles">Manager</th>
                   <th className="px-4 py-3">City</th>
                   <th className="px-4 py-3">Contact</th>
                   <th className="px-4 py-3">Status</th>
@@ -401,7 +401,21 @@ export function WarehousesView() {
                       </div>
                       <div className="text-[11px] text-[var(--faint)]">{w.type?.name ?? "—"}</div>
                     </td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{w.manager?.name ?? "—"}</td>
+                    {/* Derived from the Users & Roles assignments — first name, then a +N overflow. */}
+                    <td className="px-4 py-3 text-[var(--muted)]">
+                      {w.managers.length ? (
+                        <>
+                          {w.managers[0].name}
+                          {w.managers.length > 1 && (
+                            <span className="ml-1 text-[11px] text-[var(--faint)]">
+                              +{w.managers.length - 1}
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-[var(--muted)]">{w.city ?? "—"}</td>
                     <td className="px-4 py-3 text-[var(--muted)]">{w.contactPerson ?? "—"}</td>
                     <td className="px-4 py-3">

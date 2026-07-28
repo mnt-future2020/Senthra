@@ -2,7 +2,15 @@ import type { Prisma, InventoryTransaction, StockTransfer } from "@prisma/client
 
 import * as inventoryRepo from "./inventory.repository.js";
 import type { InventoryBalanceWithRelations } from "./inventory.repository.js";
+import { computeReorderMath, REORDER_REASON_RANK, type ReorderReason } from "./reorder.js";
 import * as poService from "#modules/purchase-order/purchase-order.service.js";
+// REPO import (not the service) so purchase-request.service can consume getReorderSuggestions for
+// its generate-time revalidation without a service↔service import cycle.
+import * as prfRepo from "#modules/purchase-request/purchase-request.repository.js";
+// LEAF import (repositories only, never a service) — the same cross-job planned-demand number the
+// Warehouse Demand board uses. goods-management.service imports THIS service, so importing its leaf
+// (not the service) is what keeps the graph cycle-free.
+import { getOpenDemand } from "#modules/goods-management/demand.js";
 import * as grnRepo from "#modules/goods-in/goods-in.repository.js";
 import * as warehouseService from "#modules/warehouse/warehouse.service.js";
 import * as irmService from "#modules/irm/irm.service.js";
@@ -281,6 +289,188 @@ export async function getInventory(balanceId: string, actor?: AuditActor): Promi
   const dto = toBalanceDTO(b);
   const incoming = await poService.incomingForItemWarehouse(b.irmItemId, b.warehouseId);
   return { ...dto, incoming, outgoing: b.quantityReserved };
+}
+
+// ── Reorder workbench (suggestions read) ──────────────────────────────────────────────────────
+// Per Item × Warehouse: what should be bought, netted against reservations, incoming open POs and
+// open PRFs. Only pairs with an existing InventoryBalance are evaluated (no cartesian noise), only
+// ACTIVE, inventory-tracked items, and only rows that are at least physically low. Actionable rows
+// (covered=false) carry a suggested qty; "covered" rows (physically low but already covered by the
+// pipeline) are returned too for the workbench's optional "show covered" view. Sorted worst-first:
+// actionable before covered, critical before the rest, then by reason.
+export interface PublicReorderSuggestion {
+  irmItemId: string;
+  itemCode: string;
+  itemName: string;
+  sku: string | null;
+  baseUnit: string | null;
+  categoryId: string | null;
+  categoryName: string | null;
+  warehouseId: string;
+  warehouseName: string;
+  warehouseCode: string;
+  onHand: number;
+  reserved: number;
+  available: number;
+  incoming: number;
+  openPrf: number;
+  plannedDemand: number;
+  projected: number;
+  reorderLevel: number | null;
+  target: number;
+  packSize: number | null;
+  suggestedQty: number;
+  reason: ReorderReason;
+  covered: boolean;
+  critical: boolean;
+  unitCostPence: number;
+  // Transfer-eligibility flags for the workbench's "Create Transfer" shortcut (the move endpoint
+  // rejects serial/batch-tracked items, so the button hides for them).
+  trackSerialNumbers: boolean;
+  trackBatchNumbers: boolean;
+  primarySupplier: { id: string; name: string; status: string; leadTimeDays: number | null } | null;
+}
+
+export interface ReorderSuggestionsResult {
+  suggestions: PublicReorderSuggestion[];
+  calculatedAt: string;
+}
+
+export async function getReorderSuggestions(actor?: AuditActor): Promise<ReorderSuggestionsResult> {
+  const [balances, incomingMap, openPrfMap, demandMap] = await Promise.all([
+    inventoryRepo.findAllBalances({ warehouseIds: warehouseScopeFilter(actor), reorderManagedOnly: true }),
+    poService.incomingByItemWarehouse(),
+    prfRepo.openQuantitiesByItemWarehouse(),
+    getOpenDemand(),
+  ]);
+  // Planned job demand (unissued kit remainders) per item|warehouse — irm entries only (customer-stock
+  // demand draws consignment, not company inventory).
+  const plannedByKey = new Map<string, number>();
+  for (const d of demandMap.values()) {
+    if (!d.irmItemId || !d.warehouseId) continue;
+    const key = `${d.irmItemId}|${d.warehouseId}`;
+    plannedByKey.set(key, (plannedByKey.get(key) ?? 0) + d.demand);
+  }
+
+  type Draft = Omit<PublicReorderSuggestion, "primarySupplier">;
+  const drafts: Draft[] = [];
+  for (const b of balances) {
+    // Never suggest buying items that aren't stock-managed or are inactive in the catalogue.
+    if (!b.irmItem.trackInventory || (b.irmItem.status ?? "active") !== "active") continue;
+    const key = `${b.irmItemId}|${b.warehouseId}`;
+    const math = computeReorderMath({
+      onHand: b.quantityOnHand,
+      reserved: b.quantityReserved,
+      incoming: incomingMap.get(key) ?? 0,
+      openPrf: openPrfMap.get(key) ?? 0,
+      plannedDemand: plannedByKey.get(key) ?? 0,
+      reorderLevel: b.irmItem.reorderLevel,
+      criticalLevel: b.irmItem.criticalLevel,
+      reorderQuantity: b.irmItem.reorderQuantity,
+      maximumStock: b.irmItem.maximumStock,
+      packSize: b.irmItem.packSize,
+    });
+    if (!math) continue;
+    drafts.push({
+      irmItemId: b.irmItemId,
+      itemCode: b.irmItem.code,
+      itemName: b.irmItem.name,
+      sku: b.irmItem.sku,
+      baseUnit: b.irmItem.baseUnit,
+      categoryId: b.irmItem.irmCategory?.id ?? null,
+      categoryName: b.irmItem.irmCategory?.name ?? null,
+      warehouseId: b.warehouseId,
+      warehouseName: b.warehouse.name,
+      warehouseCode: b.warehouse.code,
+      onHand: b.quantityOnHand,
+      reserved: b.quantityReserved,
+      available: math.available,
+      incoming: incomingMap.get(key) ?? 0,
+      openPrf: openPrfMap.get(key) ?? 0,
+      plannedDemand: plannedByKey.get(key) ?? 0,
+      projected: math.projected,
+      reorderLevel: b.irmItem.reorderLevel,
+      target: math.target,
+      packSize: b.irmItem.packSize,
+      suggestedQty: math.suggestedQty,
+      reason: math.reason,
+      covered: math.covered,
+      critical: math.critical,
+      unitCostPence: b.irmItem.standardCostPence ?? 0,
+      trackSerialNumbers: b.irmItem.trackSerialNumbers,
+      trackBatchNumbers: b.irmItem.trackBatchNumbers,
+    });
+  }
+
+  // Primary suppliers — fetched only for the surfaced items, in one query.
+  const supplierMap = await irmService.primarySuppliersForItems([...new Set(drafts.map((d) => d.irmItemId))]);
+  const rank = (b: boolean) => (b ? 0 : 1); // true sorts first
+  const suggestions: PublicReorderSuggestion[] = drafts
+    .map((d) => ({ ...d, primarySupplier: supplierMap.get(d.irmItemId) ?? null }))
+    .sort(
+      (a, b) =>
+        rank(!a.covered) - rank(!b.covered) || // actionable rows before covered (informational) rows
+        rank(a.critical) - rank(b.critical) || // then critical first
+        REORDER_REASON_RANK[a.reason] - REORDER_REASON_RANK[b.reason] ||
+        a.warehouseName.localeCompare(b.warehouseName) ||
+        a.itemName.localeCompare(b.itemName),
+    );
+  return { suggestions, calculatedAt: new Date().toISOString() };
+}
+
+// ── Reorder SUMMARY (dashboard card) ───────────────────────────────────────────────────────────
+// The dashboard needs three counts, but deriving them requires the full suggestion maths: four
+// aggregate reads (all in-scope balances + every open PO line + every open PRF line + all active-job
+// kit demand) and an in-memory pass over the result. That cost is fine for the workbench — an
+// operator opens it deliberately — but the dashboard is fetched on EVERY page load by every user
+// holding inventory.view, which turns a routine GET into a repeated full-catalogue aggregation that
+// gets worse as the catalogue grows. Every other card in dashboard.service is a cheap repo count;
+// this one was the outlier.
+//
+// A short TTL memo, keyed by the caller's warehouse scope (the only input the maths depends on),
+// collapses that to one computation per window regardless of how many dashboards are open. The card
+// is a pulse figure like the counts beside it, so seconds of staleness are immaterial.
+//
+// The workbench read and the generate-time revalidation deliberately do NOT go through here — both
+// call getReorderSuggestions directly and stay live, because generate must re-net against PRFs
+// raised seconds ago.
+const REORDER_SUMMARY_TTL_MS = 30_000;
+
+export interface ReorderSummary {
+  count: number;
+  criticalCount: number;
+  supplierGaps: number;
+}
+
+const reorderSummaryCache = new Map<string, { at: number; value: ReorderSummary }>();
+
+// Exported for tests and for any future write path that wants the card to refresh immediately.
+export function invalidateReorderSummary(): void {
+  reorderSummaryCache.clear();
+}
+
+export async function getReorderSummary(actor?: AuditActor): Promise<ReorderSummary> {
+  const scope = warehouseScopeFilter(actor);
+  // undefined scope = unrestricted; otherwise the sorted id set IS the cache identity, so two users
+  // with the same assignments share one computation and a user with different assignments never
+  // reads another scope's numbers.
+  const key = scope === undefined ? "*" : `w:${[...scope].sort().join(",")}`;
+  const now = Date.now();
+  const hit = reorderSummaryCache.get(key);
+  if (hit && now - hit.at < REORDER_SUMMARY_TTL_MS) return hit.value;
+
+  const { suggestions } = await getReorderSuggestions(actor);
+  const actionable = suggestions.filter((s) => !s.covered);
+  const value: ReorderSummary = {
+    count: actionable.length,
+    criticalCount: actionable.filter((s) => s.critical).length,
+    supplierGaps: actionable.filter((s) => !s.primarySupplier || s.primarySupplier.status !== "active").length,
+  };
+  // Distinct scope keys are bounded by the number of distinct warehouse-assignment sets (small), but
+  // drop expired entries so a long-lived process can't accumulate keys for roles that no longer exist.
+  for (const [k, v] of reorderSummaryCache) if (now - v.at >= REORDER_SUMMARY_TTL_MS) reorderSummaryCache.delete(k);
+  reorderSummaryCache.set(key, { at: now, value });
+  return value;
 }
 
 export interface PagedTransactions {

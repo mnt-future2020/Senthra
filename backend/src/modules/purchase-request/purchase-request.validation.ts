@@ -63,6 +63,36 @@ const itemsField = z
   .min(1, "Add at least one item.")
   .refine(noDupItems, { message: "Each item can only be added once." });
 
+// ── Reorder-workbench generation ──────────────────────────────────────────────
+// The confirmed workbench rows. The service re-validates and CAPS each row against the LIVE
+// suggestions before creating anything (stale/concurrency guard), so quantity here is a request,
+// not an entitlement. itemName/warehouseName are display-only echoes used to label rows the
+// revalidation skips (they never reach the database). No duplicate item × warehouse pair —
+// a PRF line is unique per item and each pair maps to exactly one row.
+const reorderRowSchema = z.object({
+  irmItemId: z.string().regex(OBJECT_ID_RE, "Select an item."),
+  warehouseId: z.string().regex(OBJECT_ID_RE, "Select a warehouse."),
+  supplierId: z.string().regex(OBJECT_ID_RE, "Select a supplier."),
+  quantity: z.coerce.number({ error: "Quantity is required." }).int("Use a whole number.").min(1).max(10_000_000),
+  itemName: z.string().trim().max(200).optional(),
+  warehouseName: z.string().trim().max(200).optional(),
+});
+export const generateReorderSchema = z.object({
+  rows: z
+    .array(reorderRowSchema)
+    .min(1, "Select at least one row.")
+    .max(200, "Generate at most 200 rows at a time.")
+    .refine(
+      (rows) => new Set(rows.map((r) => `${r.irmItemId}|${r.warehouseId}`)).size === rows.length,
+      { message: "Each item × warehouse can only be selected once." },
+    ),
+  requiredByDate: z.preprocess(
+    emptyToUndef,
+    z.string().refine((v) => !Number.isNaN(Date.parse(v)), "Enter a valid required-by date.").optional(),
+  ),
+});
+export type GenerateReorderInput = z.infer<typeof generateReorderSchema>;
+
 // Quote validity can't precede the quote date (when both are present).
 const quoteDatesOk = (d: { quoteDate?: string | null; quoteValidUntil?: string | null }) => {
   if (!d.quoteDate || !d.quoteValidUntil) return true;

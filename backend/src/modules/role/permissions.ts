@@ -11,11 +11,30 @@
 // enforce its keys on the module's routes — the role-editor matrix renders
 // straight from PERMISSION_GROUPS, so no UI change is needed.
 
+// A capability a ROLE either has or doesn't — a flag on the Role model, not a permission.
+// Capabilities answer "what kind of role is this?", permissions answer "what may it do?".
+//
+//   field_ops → Role.canHoldStock — its users may hold van stock, be assigned jobs, and use the
+//               Engineer Portal (web + mobile). Already enforced everywhere else in the system
+//               (job assignment, van-stock requests, engineer transfers); tagging the Engineer
+//               Portal permission group with it closes the last gap, where the portal keys could
+//               be granted to a role that can never actually do field work.
+export type RoleCapability = "field_ops";
+
+// What a role is capable of, as the permission layer sees it. Built from the Role row.
+export interface RoleCapabilities {
+  field_ops: boolean;
+}
+
 // One assignable permission (a single action within a module group).
 export interface PermissionAction {
   key: string; // e.g. "users.create"
   action: string; // column label in the matrix, e.g. "Create"
   description: string;
+  // Other catalog keys this action can't function without. Granting it always grants these too
+  // (transitively) — see PERMISSION_PREREQUISITES. Use it for a dependency the group's `baseKey`
+  // doesn't already express, e.g. accepting a job needs the job LIST, not just the portal.
+  requires?: string[];
 }
 
 // A module group of related permissions (one row-block in the matrix).
@@ -25,6 +44,15 @@ export interface PermissionGroup {
   description: string;
   category: string; // display category, e.g. "Customers" — groups sections in the role-editor matrix
   parent?: string; // module key of the parent group, for visual nesting (e.g. customer sub-entities under "customers")
+  // A ROLE CAPABILITY this whole group requires. Capabilities are properties of the role itself
+  // (flags on the Role model), not permissions — so a group tagged here can only be granted to a
+  // role that has the capability. Absent → grantable to any role.
+  capability?: RoleCapability;
+  // The group's BASE ACCESS key — the one permission every other action in the group depends on.
+  // Defaults to the action labelled "View", which covers every CRUD-shaped module. Set it
+  // explicitly when the group's entry point isn't called "View" (e.g. the Engineer Portal, whose
+  // base is "Dashboard"), otherwise the group silently opts out of the implied-permission closure.
+  baseKey?: string;
   permissions: PermissionAction[];
 }
 
@@ -352,15 +380,32 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     description:
       "The field engineer's read-only self-service portal — their own held IRM stock, dispatches received, recent activity and profile.",
     category: "Engineer Portal",
+    // FIELD ROLES ONLY. The portal exists to run field work — hold van stock, take assigned jobs,
+    // restock, transfer. A role without the field-operations capability can hold none of that
+    // (job assignment, van-stock and transfers all reject it), so granting these keys to e.g. a
+    // helpdesk role produced access that could never do anything. Enforced on the ROLE-WRITE path
+    // (createRole/updateRole) and by the startup repair — request authorization itself still reads
+    // the role's stored permissions, which this keeps honest.
+    capability: "field_ops",
+    // Base access is the PORTAL ITSELF, not an action labelled "View". Each portal route is guarded
+    // on its own key (EngineerGuard takes a `perm` prop), but the whole engineer nav block is hidden
+    // unless `engineer.dashboard.view` is held (frontend Sidebar) and the mobile app refuses to open
+    // without it — so a grant without the base is reachable only by typing a URL. Declaring the base
+    // explicitly is what opts this group INTO the implied-permission closure; before it existed the
+    // whole group was skipped by the `action === "View"` lookup and a role could be saved holding,
+    // say, `engineer.jobs.accept` with no portal to open and no job list to open it from.
+    baseKey: "engineer.dashboard.view",
     permissions: [
       { key: "engineer.dashboard.view", action: "Dashboard", description: "Access the engineer portal — own stock summary, dispatches received and recent activity." },
       { key: "engineer.inventory.view", action: "Inventory", description: "View own held IRM stock." },
       { key: "engineer.jobs.view", action: "Jobs", description: "View jobs assigned to them and a job's details." },
-      { key: "engineer.jobs.accept", action: "Accept job", description: "Accept a job assigned to them." },
-      { key: "engineer.jobs.reject", action: "Reject job", description: "Decline a job assigned to them (with a reason)." },
-      { key: "engineer.jobs.start", action: "Start job", description: "Mark an accepted job in-progress (start work on site)." },
-      { key: "engineer.jobs.complete", action: "Complete job", description: "Mark a job completed, declaring used quantities + a work summary." },
-      { key: "engineer.jobs.request_kit", action: "Request kit", description: "Request additional kit for an assigned job (extra or new items) for the planner to review." },
+      // Every per-job action is driven from the job list / job detail screen, so each one needs
+      // `engineer.jobs.view` on top of the portal base (which it pulls in transitively).
+      { key: "engineer.jobs.accept", action: "Accept job", description: "Accept a job assigned to them.", requires: ["engineer.jobs.view"] },
+      { key: "engineer.jobs.reject", action: "Reject job", description: "Decline a job assigned to them (with a reason).", requires: ["engineer.jobs.view"] },
+      { key: "engineer.jobs.start", action: "Start job", description: "Mark an accepted job in-progress (start work on site).", requires: ["engineer.jobs.view"] },
+      { key: "engineer.jobs.complete", action: "Complete job", description: "Mark a job completed, declaring used quantities + a work summary.", requires: ["engineer.jobs.view"] },
+      { key: "engineer.jobs.request_kit", action: "Request kit", description: "Request additional kit for an assigned job (extra or new items) for the planner to review.", requires: ["engineer.jobs.view"] },
       // RESERVED (not yet enforced by any route): self-profile editing currently flows through the
       // shared `/users/me` endpoints, which only require authentication — no engineer-specific
       // permission is checked. This key is registered + seeded ahead of a future engineer-only
@@ -430,6 +475,54 @@ export const PERMISSION_KEYS: string[] = PERMISSIONS.map((p) => p.key);
 // Wildcard: a role holding this grants every permission (the super-admin role).
 export const ALL_PERMISSIONS = "*";
 
+// --- Permission dependencies -------------------------------------------------------------------
+//
+// A permission is only useful if everything it depends on is held too. Those dependencies are
+// declared IN THE CATALOG (a group's `baseKey`, an action's `requires`) rather than inferred from
+// naming, so a group whose entry point isn't spelled "View" can't silently opt out. The role editor
+// derives its behaviour from the same declarations it fetches from this catalog, so these rules are
+// written once, here. (The client still hand-copies ONE rule the catalog can't express — the
+// customers.view cross-group implication, which depends on the role's own warehouse-scope flag
+// rather than on a permission. See frontend lib/permissionImplications.ts.)
+
+// The group's base-access key: an explicit `baseKey`, else the action labelled "View".
+export function baseKeyOf(group: PermissionGroup): string | undefined {
+  return group.baseKey ?? group.permissions.find((p) => p.action === "View")?.key;
+}
+
+// key → the keys it can't function without (direct edges only; use closePrerequisites for the
+// transitive set). Built from both sources: every non-base action depends on its group's base,
+// plus whatever the action declares in `requires`.
+export const PERMISSION_PREREQUISITES: ReadonlyMap<string, readonly string[]> = (() => {
+  const map = new Map<string, string[]>();
+  for (const group of PERMISSION_GROUPS) {
+    const base = baseKeyOf(group);
+    for (const permission of group.permissions) {
+      const edges = new Set(permission.requires ?? []);
+      if (base && permission.key !== base) edges.add(base);
+      edges.delete(permission.key); // a permission never depends on itself
+      if (edges.size > 0) map.set(permission.key, [...edges]);
+    }
+  }
+  return map;
+})();
+
+// Expand a permission set to include every prerequisite, transitively. Only ever ADDS, is
+// idempotent, and terminates even if the catalog ever declared a dependency cycle (a key is
+// queued only the first time it's added).
+export function closePrerequisites(keys: Iterable<string>): string[] {
+  const set = new Set(keys);
+  const queue = [...set];
+  while (queue.length > 0) {
+    for (const dependency of PERMISSION_PREREQUISITES.get(queue.pop()!) ?? []) {
+      if (set.has(dependency)) continue;
+      set.add(dependency);
+      queue.push(dependency);
+    }
+  }
+  return [...set];
+}
+
 // Validate + dedupe an incoming permission list against the catalog. "*" is
 // accepted (full access). Returns the cleaned valid keys and any unknown ones so
 // the caller can reject the request.
@@ -454,6 +547,47 @@ export function sanitizePermissions(input: string[]): {
 // Does a permission set grant a specific permission? "*" grants everything.
 export function roleGrants(permissions: string[], permission: string): boolean {
   return permissions.includes(ALL_PERMISSIONS) || permissions.includes(permission);
+}
+
+// --- Role capabilities -------------------------------------------------------------------------
+
+// key → the capability its group requires (only keys in a tagged group appear here).
+export const PERMISSION_CAPABILITY: ReadonlyMap<string, RoleCapability> = (() => {
+  const map = new Map<string, RoleCapability>();
+  for (const group of PERMISSION_GROUPS) {
+    if (!group.capability) continue;
+    for (const permission of group.permissions) map.set(permission.key, group.capability);
+  }
+  return map;
+})();
+
+// NOTE: the catalog endpoint deliberately returns EVERY group, including capability-tagged ones,
+// and each group carries its `capability` tag. The role editor filters client-side against the
+// role being edited — it has to, because the "create role" page has no saved role to filter
+// against yet and the capability toggle flips live. This function is the authority regardless:
+// whatever the client sends is filtered here before it is stored.
+
+// Split a permission set into what this role may actually hold and what it may not.
+//
+// STRIP, don't reject. Removing a permission a role can never use is a privilege REDUCTION, so it
+// is always safe and it self-heals data written before the capability existed. Rejecting would be
+// worse than useless: a legacy role holding an ungrantable key could never be saved again — an
+// admin trying to fix it would be refused on every attempt, including the attempt to remove it.
+// (The opposite direction — silently ADDING permissions during a migration — is not safe, which is
+// why nothing here ever grants.) "*" is the super-admin wildcard and is left untouched.
+export function splitByCapability(
+  permissions: string[],
+  capabilities: RoleCapabilities,
+): { kept: string[]; removed: string[] } {
+  if (permissions.includes(ALL_PERMISSIONS)) return { kept: [...permissions], removed: [] };
+  const kept: string[] = [];
+  const removed: string[] = [];
+  for (const key of permissions) {
+    const required = PERMISSION_CAPABILITY.get(key);
+    if (required && !capabilities[required]) removed.push(key);
+    else kept.push(key);
+  }
+  return { kept, removed };
 }
 
 // The warehouse manager's slice of the customer-consignment flow. A customer's own stock is
@@ -498,13 +632,15 @@ export const CUSTOMER_CHILD_GROUPS = new Set([
 // add it here.
 export const WAREHOUSE_SIDE_CUSTOMER_CHILD_GROUPS = new Set(["stock_requests"]);
 
-// Enforce the "manage implies view" invariant: if a permission set grants any action
-// in a module (create / edit / delete / manage), it also gets that module's `view`
-// permission — you can't act on what you can't see. Keeps roles coherent on the
-// server no matter how they were submitted (so an edit-without-view role can't be
-// created via the API). It also adds the cross-group implication above: any customer
-// sub-entity grant pulls in `customers.view`. "*" already implies everything, so it's
-// returned untouched.
+// Close a permission set over everything it DEPENDS ON: each granted action pulls in its group's
+// base access and any explicit `requires`, transitively (see PERMISSION_PREREQUISITES). For a
+// conventional CRUD module that is exactly the old "manage implies view" rule — you can't act on
+// what you can't see — but it is no longer limited to an action named "View", so a group whose
+// entry point is called something else (the Engineer Portal's is "Dashboard") is covered too.
+// Keeps roles coherent on the server no matter how they were submitted, so an
+// action-without-its-prerequisite role can't be created via the API. It also adds the cross-group
+// implication above: any customer sub-entity grant pulls in `customers.view`. "*" already implies
+// everything, so it's returned untouched.
 //
 // `isWarehouseScoped` (the role's own flag) narrows the customer cross-group add: a warehouse
 // manager holds stock_requests.* to receive customer stock at their assigned warehouse, and
@@ -513,17 +649,11 @@ export const WAREHOUSE_SIDE_CUSTOMER_CHILD_GROUPS = new Set(["stock_requests"]);
 // warehouse-side groups (WAREHOUSE_SIDE_CUSTOMER_CHILD_GROUPS) are exempt from pulling in
 // customers.view. Every OTHER customer-child group is customer-page-only and STILL pulls it in even
 // for a scoped role — otherwise the grant would be a dead permission (unreachable without the view).
-// The intra-group "manage implies view" always applies (they keep e.g. stock_requests.view). This
+// The intra-group prerequisite closure always applies (they keep e.g. stock_requests.view). This
 // function only ever ADDS, so an admin who deliberately grants `customers.view` still keeps it.
 export function applyImpliedPermissions(permissions: string[], isWarehouseScoped = false): string[] {
   if (permissions.includes(ALL_PERMISSIONS)) return [...permissions];
-  const set = new Set(permissions);
-  for (const group of PERMISSION_GROUPS) {
-    const viewKey = group.permissions.find((p) => p.action === "View")?.key;
-    if (!viewKey) continue;
-    const hasNonView = group.permissions.some((p) => p.key !== viewKey && set.has(p.key));
-    if (hasNonView) set.add(viewKey);
-  }
+  const set = new Set(closePrerequisites(permissions));
   // Cross-group: any customer sub-entity permission implies seeing the customer — except that a
   // warehouse-scoped role is exempted for the warehouse-side groups (see the constant above).
   const needsCustomerView = [...set].some((key) => {
@@ -532,8 +662,11 @@ export function applyImpliedPermissions(permissions: string[], isWarehouseScoped
     if (isWarehouseScoped && WAREHOUSE_SIDE_CUSTOMER_CHILD_GROUPS.has(group)) return false;
     return true;
   });
-  if (needsCustomerView) set.add("customers.view");
-  return [...set];
+  if (!needsCustomerView) return [...set];
+  set.add("customers.view");
+  // Re-close so anything customers.view itself depends on comes along (nothing today, but this
+  // keeps the rule composable if the customers group ever gains a base of its own).
+  return closePrerequisites(set);
 }
 
 // No-escalation guard. Returns the permissions in `requested` that `actorPermissions`

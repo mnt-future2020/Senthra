@@ -112,7 +112,7 @@ function HeaderLogo() {
 }
 
 export default function TabsLayout() {
-  const { principal, loading, logout } = useAuth();
+  const { principal, loading, logout, can } = useAuth();
   usePushNotifications();
 
   if (loading) return <LoadingView />;
@@ -128,6 +128,23 @@ export default function TabsLayout() {
         <Text style={s.blockedText}>
           This app is for field engineers. Please use the Senthra web dashboard for
           {principal.type === "customer" ? " the customer portal." : " admin access."}
+        </Text>
+        <Button title="Sign out" variant="secondary" onPress={() => void logout()} />
+      </View>
+    );
+  }
+  // Being staff isn't enough — this app IS the Engineer Portal, so it needs the portal's base
+  // permission, exactly like the web's EngineerGuard. Without this check any staff account
+  // (helpdesk, finance, HR) reached the tabs and got a shell where every request 403s, which
+  // reads as a broken app rather than "not for you". The backend was never at risk; this is
+  // about showing the right thing.
+  if (!can("engineer.dashboard.view")) {
+    return (
+      <View style={s.blocked}>
+        <Text style={s.blockedTitle}>No engineer access</Text>
+        <Text style={s.blockedText}>
+          Your role does not include the Engineer Portal. Ask an administrator to assign you a
+          field-operations role, or use the Senthra web dashboard.
         </Text>
         <Button title="Sign out" variant="secondary" onPress={() => void logout()} />
       </View>

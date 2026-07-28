@@ -31,6 +31,9 @@ vi.mock("#modules/job/job.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/supplier/supplier.service.js", () => ({ requireActiveSupplier: vi.fn() }));
 vi.mock("#modules/warehouse/warehouse.service.js", () => ({ requireActiveWarehouse: vi.fn() }));
 vi.mock("#modules/irm/irm.service.js", () => ({ requireActiveIrmItem: vi.fn(), requireActiveIrmItems: vi.fn() }));
+// The reorder generation revalidates against the LIVE workbench read; mocking it also cuts the
+// heavy inventory-service import graph out of this unit-test module.
+vi.mock("#modules/inventory/inventory.service.js", () => ({ getReorderSuggestions: vi.fn() }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn() }));
 vi.mock("../../lib/cloudinary.js", () => ({ uploadFileToCloudinary: vi.fn() }));
@@ -57,6 +60,7 @@ import * as irmService from "#modules/irm/irm.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import { emitToRoom, PURCHASE_ORDER_WATCHERS_ROOM, PURCHASE_REQUEST_WATCHERS_ROOM } from "../../lib/realtime.js";
 import * as prfEmail from "./purchase-request.email.js";
+import * as inventoryService from "#modules/inventory/inventory.service.js";
 import {
   approvePurchaseRequest,
   cancelPurchaseRequest,
@@ -65,6 +69,7 @@ import {
   createPurchaseRequest,
   deletePurchaseRequest,
   duplicatePurchaseRequest,
+  generateReorderPrfs,
   getPurchaseRequest,
   rejectPurchaseRequest,
   reopenPurchaseRequest,
@@ -164,6 +169,7 @@ const mockReqIrms = irmService.requireActiveIrmItems as ReturnType<typeof vi.fn>
 const irmRow = (id: string) => ({ id, name: "CAT6", sku: "C6", baseUnit: "Each", vatRatePercent: 20 });
 const mockAudit = audit.record as ReturnType<typeof vi.fn>;
 const auditActions = () => mockAudit.mock.calls.map((c) => c[0].action);
+const mockSuggestions = inventoryService.getReorderSuggestions as ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -587,5 +593,144 @@ describe("duplicate-as-revision (price-revision workflow, post-conversion)", () 
     mockFindById.mockResolvedValue(prfRow({ status: "approved" }));
     await expect(duplicatePurchaseRequest(PRF_ID)).rejects.toThrow(/only a converted/i);
     expect(mockCreateWithCode).not.toHaveBeenCalled();
+  });
+});
+
+describe("generateReorderPrfs — Reorder-workbench generation", () => {
+  const WH_ID_2 = "e".repeat(24);
+
+  // A live workbench suggestion row, as getReorderSuggestions returns it.
+  const suggestion = (over: Record<string, unknown> = {}) => ({
+    irmItemId: IRM_ID,
+    itemCode: "IRM-0001",
+    itemName: "CAT6",
+    sku: "C6",
+    baseUnit: "Each",
+    warehouseId: WH_ID,
+    warehouseName: "Leeds",
+    warehouseCode: "WH-0001",
+    onHand: 5,
+    reserved: 0,
+    available: 5,
+    incoming: 0,
+    openPrf: 0,
+    projected: 5,
+    reorderLevel: 20,
+    target: 100,
+    packSize: null,
+    suggestedQty: 95,
+    reason: "below_reorder",
+    unitCostPence: 500,
+    primarySupplier: { id: SUP_ID, name: "Acme", status: "active", leadTimeDays: 7 },
+    ...over,
+  });
+  const live = (rows: unknown[]) => mockSuggestions.mockResolvedValue({ suggestions: rows, calculatedAt: new Date().toISOString() });
+  const row = (over: Record<string, unknown> = {}) => ({ irmItemId: IRM_ID, warehouseId: WH_ID, supplierId: SUP_ID, quantity: 95, ...over });
+
+  beforeEach(() => {
+    mockCreateWithCode.mockImplementation((header: Record<string, unknown>) => Promise.resolve(prfRow({ ...header, items: [] })));
+  });
+
+  it("groups rows for the same supplier × warehouse into ONE draft PRF with reorder provenance", async () => {
+    live([suggestion(), suggestion({ irmItemId: IRM_ID_2, itemName: "Patch Panel", suggestedQty: 20, unitCostPence: 1000 })]);
+    const result = await generateReorderPrfs({
+      rows: [row(), row({ irmItemId: IRM_ID_2, quantity: 20 })],
+    } as Parameters<typeof generateReorderPrfs>[0]);
+
+    expect(mockCreateWithCode).toHaveBeenCalledTimes(1);
+    const [header, lines] = mockCreateWithCode.mock.calls[0];
+    expect(header).toMatchObject({ supplierId: SUP_ID, warehouseId: WH_ID, status: "draft", sourceType: "reorder" });
+    expect(header.justification).toMatch(/reorder workbench/i);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatchObject({ irmItemId: IRM_ID, quantity: 95, unitPricePence: 500 });
+    expect(result.created).toHaveLength(1);
+    expect(result.created[0]).toMatchObject({ code: "PRF-0001", supplierName: "Acme", warehouseName: "Leeds", lineCount: 2 });
+    expect(result.skipped).toHaveLength(0);
+    expect(result.adjusted).toHaveLength(0);
+    expect(auditActions()).toContain("purchase_request.created");
+  });
+
+  it("creates one PRF per warehouse — a PRF never spans warehouses", async () => {
+    live([suggestion(), suggestion({ irmItemId: IRM_ID_2, warehouseId: WH_ID_2, warehouseName: "Manchester", suggestedQty: 20 })]);
+    const result = await generateReorderPrfs({
+      rows: [row(), row({ irmItemId: IRM_ID_2, warehouseId: WH_ID_2, quantity: 20 })],
+    } as Parameters<typeof generateReorderPrfs>[0]);
+    expect(mockCreateWithCode).toHaveBeenCalledTimes(2);
+    expect(result.created).toHaveLength(2);
+    const warehouses = mockCreateWithCode.mock.calls.map((c) => c[0].warehouseId);
+    expect(warehouses).toEqual(expect.arrayContaining([WH_ID, WH_ID_2]));
+  });
+
+  it("SKIPS a row the live revalidation no longer triggers (stale list / concurrent generate)", async () => {
+    live([]); // nothing needs reordering any more
+    const result = await generateReorderPrfs({
+      rows: [row({ itemName: "CAT6", warehouseName: "Leeds" })],
+    } as Parameters<typeof generateReorderPrfs>[0]);
+    expect(mockCreateWithCode).not.toHaveBeenCalled();
+    expect(result.created).toHaveLength(0);
+    expect(result.skipped).toHaveLength(1);
+    expect(result.skipped[0]).toMatchObject({ irmItemId: IRM_ID, itemName: "CAT6" });
+    expect(result.skipped[0].reason).toMatch(/no longer requires reordering/i);
+  });
+
+  it("CAPS a quantity above the live need and reports it in `adjusted` — never silently", async () => {
+    live([suggestion({ suggestedQty: 40 })]);
+    const result = await generateReorderPrfs({
+      rows: [row({ quantity: 100 })],
+    } as Parameters<typeof generateReorderPrfs>[0]);
+    const [, lines] = mockCreateWithCode.mock.calls[0];
+    expect(lines[0].quantity).toBe(40);
+    expect(result.adjusted).toHaveLength(1);
+    expect(result.adjusted[0]).toMatchObject({ requestedQty: 100, finalQty: 40, itemName: "CAT6" });
+  });
+
+  it("defaults required-by to today + the group's longest supplier lead time (fallback 14 days)", async () => {
+    live([suggestion({ primarySupplier: { id: SUP_ID, name: "Acme", status: "active", leadTimeDays: 7 } })]);
+    await generateReorderPrfs({ rows: [row()] } as Parameters<typeof generateReorderPrfs>[0]);
+    const requiredBy = mockCreateWithCode.mock.calls[0][0].requiredByDate as Date;
+    const days = (requiredBy.getTime() - Date.now()) / 86_400_000;
+    expect(days).toBeGreaterThan(6.9);
+    expect(days).toBeLessThan(7.1);
+
+    vi.clearAllMocks();
+    mockReqSupplier.mockResolvedValue({ name: "Acme" });
+    mockReqWarehouse.mockResolvedValue({ id: WH_ID });
+    mockReqIrms.mockImplementation((ids: string[]) => Promise.resolve(new Map(ids.map((id) => [id, irmRow(id)]))));
+    mockCreateWithCode.mockImplementation((header: Record<string, unknown>) => Promise.resolve(prfRow({ ...header, items: [] })));
+    live([suggestion({ primarySupplier: null })]);
+    await generateReorderPrfs({ rows: [row()] } as Parameters<typeof generateReorderPrfs>[0]);
+    const fallback = mockCreateWithCode.mock.calls[0][0].requiredByDate as Date;
+    const fallbackDays = (fallback.getTime() - Date.now()) / 86_400_000;
+    expect(fallbackDays).toBeGreaterThan(13.9);
+    expect(fallbackDays).toBeLessThan(14.1);
+  });
+
+  it("SKIPS a group whose supplier/warehouse went inactive without aborting the other groups", async () => {
+    live([
+      suggestion(),
+      suggestion({ irmItemId: IRM_ID_2, warehouseId: WH_ID_2, warehouseName: "Manchester", suggestedQty: 20 }),
+    ]);
+    // First group's supplier lookup fails (deactivated since the list was calculated); second succeeds.
+    mockReqSupplier
+      .mockRejectedValueOnce(new Error("Selected supplier is inactive and can't be used."))
+      .mockResolvedValue({ name: "Acme" });
+    const result = await generateReorderPrfs({
+      rows: [
+        row({ itemName: "CAT6", warehouseName: "Leeds" }),
+        row({ irmItemId: IRM_ID_2, warehouseId: WH_ID_2, quantity: 20 }),
+      ],
+    } as Parameters<typeof generateReorderPrfs>[0]);
+    expect(mockCreateWithCode).toHaveBeenCalledTimes(1); // only the healthy group
+    expect(result.created).toHaveLength(1);
+    expect(result.skipped).toHaveLength(1);
+    expect(result.skipped[0]).toMatchObject({ irmItemId: IRM_ID });
+    expect(result.skipped[0].reason).toMatch(/inactive/i);
+  });
+
+  it("uses an explicit required-by override for every generated PRF", async () => {
+    live([suggestion()]);
+    await generateReorderPrfs({ rows: [row()], requiredByDate: "2026-09-30" } as Parameters<typeof generateReorderPrfs>[0]);
+    const requiredBy = mockCreateWithCode.mock.calls[0][0].requiredByDate as Date;
+    expect(requiredBy.toISOString().slice(0, 10)).toBe("2026-09-30");
   });
 });

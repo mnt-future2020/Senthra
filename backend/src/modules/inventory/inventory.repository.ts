@@ -18,7 +18,14 @@ const irmItemSelect = {
   sku: true,
   baseUnit: true,
   status: true,
+  // Full reorder policy — the Reorder workbench computes suggestions from these; the extra ints are
+  // negligible on the list payloads that share this select.
   reorderLevel: true,
+  criticalLevel: true,
+  minimumStock: true,
+  reorderQuantity: true,
+  maximumStock: true,
+  packSize: true,
   standardCostPence: true,
   currency: true,
   trackSerialNumbers: true,
@@ -45,11 +52,20 @@ export interface InventoryListFilters {
   // Warehouse-access scope: undefined = unrestricted; otherwise constrain to exactly these ids
   // (ANDed with any single `warehouseId` filter — the actor may never see beyond their assigned set).
   warehouseIds?: string[];
+  // Reorder workbench only: keep just the rows the reorder maths can ever surface — stock-managed,
+  // catalogue-active items. The service discards exactly these rows in JS anyway, so pushing the
+  // predicate into the query is behaviour-identical (both fields are non-null with DB defaults) and
+  // stops an unfiltered read of the whole item × warehouse cross-product.
+  reorderManagedOnly?: boolean;
 }
 
 function buildBalanceWhere(filters: InventoryListFilters): Prisma.InventoryBalanceWhereInput {
   const irmItemFilter: Prisma.IrmItemWhereInput = { deletedAt: null };
   if (filters.irmCategoryId) irmItemFilter.irmCategoryId = filters.irmCategoryId;
+  if (filters.reorderManagedOnly) {
+    irmItemFilter.trackInventory = true;
+    irmItemFilter.status = "active";
+  }
   if (filters.search) {
     const term = escapeRegex(filters.search);
     irmItemFilter.OR = [

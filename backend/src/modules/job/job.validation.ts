@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { postcodeField as ukPostcode } from "../../utils/postcode.js";
+
 // Job (field-work) validation. Job number / status / snapshots / timestamps are SYSTEM-owned and
 // never accepted from the client. lineType/priority/installerType/jobType are validated here (the
 // schema has no Prisma enums — the unions live as `as const` arrays + zod, the DB stores plain
@@ -101,7 +103,8 @@ const sharedHeader = {
   addressLine2: z.string().trim().max(300).optional(),
   city: z.string().trim().max(120).optional(),
   county: z.string().trim().max(120).optional(),
-  postcode: z.string().trim().max(20).optional(),
+  // Validates AND normalises to canonical form ("ls14dy" → "LS1 4DY") — see utils/postcode.ts.
+  postcode: ukPostcode().optional(),
   country: z.string().trim().max(120).optional(),
   floor: z.string().trim().max(60).optional(),
   suite: z.string().trim().max(60).optional(),

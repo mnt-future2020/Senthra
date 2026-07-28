@@ -7,6 +7,7 @@ vi.mock("#modules/purchase-request/purchase-request.repository.js", () => ({
 }));
 vi.mock("#modules/purchase-order/purchase-order.repository.js", () => ({
   openSummary: vi.fn(async () => ({ count: 2, valuePence: 1000 })),
+  expectedDeliveries: vi.fn(async () => ({ dueThisWeek: 3, overdue: 1 })),
   pipelineCounts: vi.fn(async () => []),
   issuedSpendSince: vi.fn(async () => []),
   createdSince: vi.fn(async () => []),
@@ -27,6 +28,13 @@ vi.mock("#modules/van-stock-request/van-stock-request.repository.js", () => ({
 }));
 vi.mock("#modules/inventory/inventory.repository.js", () => ({
   lowStockCounts: vi.fn(async () => ({ count: 5, criticalCount: 2 })),
+}));
+// The Reorder-needed card takes the inventory service's scope-keyed summary (the reorder maths is
+// far too heavy to run per dashboard load — see getReorderSummary); mocking it also keeps the heavy
+// inventory-service import graph out of this unit test. The derivation of these three numbers from
+// the raw suggestions is covered in inventory/reorder-summary.test.ts.
+vi.mock("#modules/inventory/inventory.service.js", () => ({
+  getReorderSummary: vi.fn(async () => ({ count: 2, criticalCount: 1, supplierGaps: 1 })),
 }));
 vi.mock("#modules/audit/audit.repository.js", () => ({ findMany: vi.fn(async () => []) }));
 vi.mock("#modules/goods-in/goods-in.repository.js", () => ({
@@ -67,6 +75,9 @@ describe("buildDashboardSummary", () => {
     expect(summary.cards.activeJobs?.overdueCount).toBe(3);
     expect(summary.cards.activeJobs?.dueThisWeekCount).toBe(2);
     expect(summary.cards.lowStock?.count).toBe(5);
+    // Passed straight through from the inventory service's summary.
+    expect(summary.cards.reorderNeeded).toEqual({ count: 2, criticalCount: 1, supplierGaps: 1 });
+    expect(summary.cards.expectedThisWeek).toEqual({ dueThisWeek: 3, overdue: 1 });
     // 2 completed GRNs mocked: one today (inside the 7-day pulse), one 20 days ago (outside).
     expect(summary.cards.goodsReceived?.count).toBe(1);
     expect(summary.cards.goodsReceived?.weeklyReceived).toHaveLength(8);

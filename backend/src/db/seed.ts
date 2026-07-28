@@ -13,7 +13,7 @@ import * as userRepo from "#modules/user/user.repository.js";
 import * as warehouseTypeRepo from "#modules/warehouse-type/warehouse-type.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as settingsRepo from "#modules/settings/settings.repository.js";
-import { LEGACY_PERMISSION_EXPANSION, PERMISSION_KEYS, WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS, customerCompatAdditions } from "#modules/role/permissions.js";
+import { LEGACY_PERMISSION_EXPANSION, PERMISSION_KEYS, WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS, customerCompatAdditions, splitByCapability } from "#modules/role/permissions.js";
 import { DEFAULT_EMAIL_TEMPLATES } from "#modules/email/emailTemplate.defaults.js";
 import { renderBodyToHtml } from "../utils/email-html.js";
 import { hashPassword } from "../utils/password.js";
@@ -233,26 +233,42 @@ export async function seedDatabase(): Promise<void> {
     console.log(`Seeded ${SEED_ROLES.length} roles.`);
   }
 
-  // Backfill the field-operations capability idempotently (covers DBs seeded before
-  // `canHoldStock` existed). Only grants it to the known field-ops role keys, and only
-  // when not already set — never revokes an admin's manual grant.
+  // Backfill the field-operations capability for DBs seeded before `canHoldStock` existed.
+  //
+  // The trigger is EVIDENCE, not the stored flag: a field-ops role that still holds Engineer Portal
+  // permissions was demonstrably working as a field role before the capability existed, so it keeps
+  // working. Do NOT key this on `canHoldStock` being null/falsy — `@default(false)` stamps new rows
+  // (see the schema comment), so "unset" is not a reliable signal, and any falsy check would re-grant
+  // the capability to a role a super-admin had deliberately revoked. A revoke strips the portal keys,
+  // so the evidence disappears with it and this block correctly leaves the role alone.
   {
     let granted = 0;
     for (const role of await roleRepo.findMany()) {
-      if (FIELD_OPS_ROLE_KEYS.includes(role.key) && !role.canHoldStock) {
-        await roleRepo.update(role.id, { canHoldStock: true });
-        granted++;
-      }
+      if (!FIELD_OPS_ROLE_KEYS.includes(role.key) || role.canHoldStock === true) continue;
+      if (!ENGINEER_PORTAL_PERMISSIONS.some((p) => role.permissions.includes(p))) continue;
+      await roleRepo.update(role.id, { canHoldStock: true });
+      granted++;
     }
     if (granted > 0) console.log(`Granted stock-holding capability to ${granted} field-operations role(s).`);
   }
 
-  // Backfill Engineer Portal access to field-operations roles idempotently (so roles seeded before
-  // the portal shipped gain it). Additive + never revokes; skips "*" roles (they already cover it).
+  // Backfill Engineer Portal access to field-operations roles (so roles seeded before the portal
+  // shipped gain it, and so a key ADDED to ENGINEER_PORTAL_PERMISSIONS later reaches existing
+  // installs). Skips "*" roles — they already cover it.
+  //
+  // Deliberately still a TOP-UP, matching the eight sibling blocks below: this is the delivery
+  // channel every new engineer permission has used (see the commits that added engineer.jobs.start,
+  // .request_kit, .transfer and .van_stock.request), and gating it on "holds none of them" would
+  // silently strand the next one on every already-seeded install.
+  //
+  // The one guard added with the editable capability: the role must actually HOLD the capability.
+  // Without it, revoking "Field role" — which strips these keys — would hand them straight back on
+  // the next restart.
   {
     let granted = 0;
     for (const role of await roleRepo.findMany()) {
       if (!FIELD_OPS_ROLE_KEYS.includes(role.key) || role.permissions.includes("*")) continue;
+      if (!role.canHoldStock) continue;
       const missing = ENGINEER_PORTAL_PERMISSIONS.filter((p) => !role.permissions.includes(p));
       if (missing.length) {
         await roleRepo.update(role.id, { permissions: [...role.permissions, ...missing] });
@@ -260,6 +276,33 @@ export async function seedDatabase(): Promise<void> {
       }
     }
     if (granted > 0) console.log(`Granted Engineer Portal access to ${granted} field-operations role(s).`);
+  }
+
+  // Repair roles holding CAPABILITY-GATED permissions they can't use — today the Engineer Portal
+  // keys (which need `canHoldStock`) on a role that isn't field-operations. Those grants were
+  // possible before the capability rule existed and did nothing: job assignment, van stock and
+  // transfers all refuse a non-field role, so the portal opened onto an empty, erroring shell.
+  //
+  // Safe to run automatically because it only ever REMOVES. The mirror-image migration — silently
+  // ADDING permissions to existing roles — is deliberately not done anywhere, since that would
+  // hand out access nobody asked for. Runs AFTER the canHoldStock backfill above so a genuine
+  // field role has its capability before its permissions are judged against it.
+  {
+    let repaired = 0;
+    for (const role of await roleRepo.findMany()) {
+      const { kept, removed } = splitByCapability(role.permissions, {
+        field_ops: Boolean(role.canHoldStock),
+      });
+      if (removed.length === 0) continue;
+      await roleRepo.update(role.id, { permissions: { set: kept } });
+      repaired++;
+      console.log(
+        `Removed ${removed.length} unusable permission(s) from role "${role.key}": ${removed.join(", ")}`,
+      );
+    }
+    if (repaired > 0) {
+      console.log(`Repaired ${repaired} role(s) holding permissions their capabilities don't allow.`);
+    }
   }
 
   // Backfill the warehouse-scoping capability idempotently (covers DBs seeded before

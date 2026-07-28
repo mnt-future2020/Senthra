@@ -22,8 +22,8 @@ export interface PagedWarehouses {
   totalPages: number;
 }
 
-// Create + update payload. `managerUserId` sends "" to clear the manager; the other
-// optional fields send "" to clear. Geolocation + code are never sent (server-owned).
+// Create + update payload. Optional fields send "" to clear. Geolocation, code and the derived
+// managers are never sent (server-owned; managers come from the user's assigned warehouses).
 export interface WarehousePayload {
   name?: string;
   description?: string;
@@ -41,7 +41,6 @@ export interface WarehousePayload {
   operatingHours?: string;
   timezone?: string;
   notes?: string;
-  managerUserId?: string;
   status?: WarehouseStatus;
 }
 
@@ -98,11 +97,6 @@ export function deleteWarehouse(id: string): Promise<void> {
   return api(`/warehouses/${id}`, { method: "DELETE" }).then(() => {
     listCache.clear();
   });
-}
-
-// Active staff users for the manager dropdown.
-export function listManagerOptions(): Promise<WarehouseManager[]> {
-  return api<{ managers: WarehouseManager[] }>("/warehouses/manager-options").then((r) => r.managers);
 }
 
 // Active field engineers (canHoldStock roles) for the "assign an engineer" dropdowns on jobs.

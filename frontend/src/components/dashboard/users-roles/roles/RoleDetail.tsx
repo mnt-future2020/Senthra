@@ -6,6 +6,7 @@ import { Pencil, ShieldCheck } from "lucide-react";
 
 import * as roleService from "@/services/role.service";
 import { useAuth } from "@/hooks/useAuth";
+import { grantableGroups } from "@/lib/permissionImplications";
 import type { PermissionGroup, Role } from "@/types/role";
 import { FormAsideCard, FormPageHeader, FormSection } from "@/components/ui/FormScaffold";
 import { PermissionMatrix } from "./PermissionMatrix";
@@ -58,12 +59,26 @@ export function RoleDetail({ role }: { role: Role }) {
   const manageable = Boolean(admin) || role.permissions.every((p) => can(p));
   const editable = role.isSystem ? Boolean(admin) : can("roles.edit") && manageable;
 
-  const grantedByGroup = groups
+  // Show only the modules this role is capable of holding, matching the editor — otherwise a
+  // non-field role's page lists an all-zero Engineer Portal section it can never be granted.
+  const visibleGroups = React.useMemo(
+    () => grantableGroups(groups, { field_ops: role.canHoldStock }),
+    [groups, role.canHoldStock],
+  );
+
+  const grantedByGroup = visibleGroups
     .map((g) => ({
       label: g.label,
       actions: g.permissions.filter((p) => role.permissions.includes(p.key)),
     }))
     .filter((g) => g.actions.length > 0);
+
+  // Count what the page actually SHOWS, not the raw stored array. A role saved before a capability
+  // was declared can still hold keys its capability no longer covers (the same incoherent state
+  // RoleForm strips through `effectivePermissions`); those keys are filtered out of `visibleGroups`,
+  // so counting `role.permissions` here would advertise permissions with no matching chip anywhere
+  // on the page.
+  const grantedCount = grantedByGroup.reduce((n, g) => n + g.actions.length, 0);
 
   return (
     <div className="flex h-full flex-col gap-6">
@@ -94,6 +109,9 @@ export function RoleDetail({ role }: { role: Role }) {
                 <Field label="Name" value={role.name} />
                 <Field label="Type" value={role.isSystem ? "System (built-in)" : "Custom"} />
                 <Field label="Users" value={String(role.userCount)} />
+                {/* Surfaced because it explains why the Engineer Portal section is or isn't listed
+                    below — without it the module simply appears missing. */}
+                <Field label="Field role" value={role.canHoldStock ? "Yes" : "No"} />
                 <Field label="Key" value={role.key} />
                 <div className="sm:col-span-2">
                   <Field label="Description" value={role.description} />
@@ -139,11 +157,11 @@ export function RoleDetail({ role }: { role: Role }) {
                     </div>
                   ))}
                 </div>
-              ) : groups.length === 0 ? (
+              ) : visibleGroups.length === 0 ? (
                 <p className="px-1 text-xs text-[var(--faint)]">No permissions available.</p>
               ) : (
                 <PermissionMatrix
-                  groups={groups}
+                  groups={visibleGroups}
                   categories={categories}
                   granted={role.permissions}
                 />
@@ -162,7 +180,7 @@ export function RoleDetail({ role }: { role: Role }) {
               ) : (
                 <>
                   <p className="mt-1 text-xs text-[var(--muted)]">
-                    {role.permissions.length} permission{role.permissions.length === 1 ? "" : "s"} across{" "}
+                    {grantedCount} permission{grantedCount === 1 ? "" : "s"} across{" "}
                     {grantedByGroup.length} module{grantedByGroup.length === 1 ? "" : "s"}
                   </p>
                   {grantedByGroup.length > 0 ? (

@@ -244,6 +244,29 @@ export function incomingLinesForItemWarehouse(irmItemId: string, warehouseId: st
   });
 }
 
+// Reorder-workbench READ seam: ALL outstanding open-PO lines in one query (the bulk sibling of the
+// single-pair read above). warehouseId + status live on the PARENT PurchaseOrder, so this is a
+// findMany + relation-select the caller reduces in memory — Mongo groupBy can't cross the relation.
+//
+// The status set is the FULL open pipeline (draft → partially_received), NOT just the issued/en-route
+// stages the inventory-detail "Incoming" uses. A PRF that is converted drops out of the PRF netting
+// and the new PO lands in `draft`; if reorder counted only `sent`+, that quantity would be invisible
+// through the whole PO-approval window and the workbench would re-suggest buying it (double-order).
+// fully_received/closed are excluded — that stock has already landed in on-hand via the GRN.
+export function openIncomingLines() {
+  return prisma.purchaseOrderItem.findMany({
+    where: {
+      purchaseOrder: {
+        is: {
+          status: { in: ["draft", "pending_approval", "approved", "pm_review", "sent", "supplier_accepted", "partially_received"] },
+          deletedAt: null,
+        },
+      },
+    },
+    select: { irmItemId: true, quantity: true, receivedQuantity: true, purchaseOrder: { select: { warehouseId: true } } },
+  });
+}
+
 // --- supplier procurement summary (the supplier detail "Procurement" tab) --------------------
 // Status → count map plus total spend (received/closed orders only). Deliberately no
 // lead-time / on-time metrics yet — computable later from sentAt/confirmedDeliveryDate/GRN
@@ -466,6 +489,32 @@ function whereWarehouse(warehouseIds?: string[]) {
 
 /** Open PO count + committed value (pence). The count is a workload metric (drafts included);
  *  the value is financial, so drafts — not yet approved commitments — are excluded from the sum. */
+/** Dashboard "Expected this week": open receivable POs due within 7 days vs already overdue. */
+export async function expectedDeliveries(now: Date, warehouseIds?: string[]): Promise<{ dueThisWeek: number; overdue: number }> {
+  const soon = new Date(now.getTime() + 7 * 86_400_000);
+  // The supplier-confirmed date is authoritative for planning (updatable after the supplier commits);
+  // fall back to the expected date when it isn't set yet. Because the effective date can be EITHER
+  // column, we can't filter by date in the where clause — the open-receivable set is small, so we
+  // fetch it and split in memory. A row with neither date is "no ETA" and simply doesn't count.
+  const rows = await prisma.purchaseOrder.findMany({
+    where: {
+      deletedAt: null,
+      status: { in: ["sent", "supplier_accepted", "partially_received"] },
+      ...whereWarehouse(warehouseIds),
+    },
+    select: { expectedDeliveryDate: true, confirmedDeliveryDate: true },
+  });
+  let dueThisWeek = 0;
+  let overdue = 0;
+  for (const r of rows) {
+    const eta = r.confirmedDeliveryDate ?? r.expectedDeliveryDate;
+    if (!eta || eta > soon) continue;
+    if (eta < now) overdue++;
+    else dueThisWeek++;
+  }
+  return { dueThisWeek, overdue };
+}
+
 export async function openSummary(warehouseIds?: string[]): Promise<{ count: number; valuePence: number }> {
   const scoped = { deletedAt: null, ...whereWarehouse(warehouseIds) };
   const [count, agg] = await Promise.all([

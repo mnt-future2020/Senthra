@@ -4,6 +4,7 @@ import * as React from "react";
 import { Loader2, Search } from "lucide-react";
 
 import * as geoService from "@/services/geo.service";
+import { formatUkPostcode } from "@/lib/validation";
 import { inputCls, labelCls } from "./styles";
 import { RequiredMark } from "./FormScaffold";
 
@@ -53,7 +54,10 @@ export function PostcodeField({
   const autofilledRef = React.useRef<{ city: string; county: string } | null>(null);
 
   const handleChange = (next: string) => {
-    onChange(next);
+    // Uppercase live — postcodes are always displayed in caps and this is length-preserving,
+    // so the caret never jumps. The space is NOT inserted here: doing that mid-typing would
+    // shift the caret under the user. Canonical spacing is applied on blur instead.
+    onChange(next.toUpperCase());
     setLookupMsg(null);
     const af = autofilledRef.current;
     if (af) {
@@ -61,6 +65,14 @@ export function PostcodeField({
       setCounty?.((c) => (c === af.county ? "" : c));
       autofilledRef.current = null;
     }
+  };
+
+  // Finish the job once the user leaves the field: "LS14DY" → "LS1 4DY". Calls onChange
+  // DIRECTLY rather than going through handleChange — this is a reformat of the same postcode,
+  // not an edit, so it must not discard a City/County that was just auto-filled from it.
+  const handleBlur = () => {
+    const formatted = formatUkPostcode(value);
+    if (formatted !== value) onChange(formatted);
   };
 
   const findAddress = async () => {
@@ -78,6 +90,11 @@ export function PostcodeField({
         setLookupMsg("Couldn't find that postcode — enter the address manually.");
         return;
       }
+      // A confirmed postcode is worth normalising immediately (not just on blur) — the user
+      // has proof it's real. Direct onChange: this is a reformat, not an edit, so it must not
+      // wipe the City/County being filled in on the next lines.
+      const formatted = formatUkPostcode(code);
+      if (formatted !== value) onChange(formatted);
       const filledCity = result.city ?? "";
       const filledCounty = result.county ?? "";
       if (result.city) setCity(result.city);
@@ -110,8 +127,14 @@ export function PostcodeField({
           className={`${inputCls} min-w-0 flex-1`}
           value={value}
           onChange={(e) => handleChange(e.target.value)}
+          onBlur={handleBlur}
           placeholder="e.g. LS1 4DY"
           maxLength={12}
+          autoComplete="postal-code"
+          // Mobile keyboards: start in caps and stop autocorrect "fixing" a postcode.
+          autoCapitalize="characters"
+          autoCorrect="off"
+          spellCheck={false}
           aria-invalid={Boolean(error)}
         />
         <button

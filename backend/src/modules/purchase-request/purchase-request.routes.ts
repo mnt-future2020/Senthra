@@ -6,6 +6,7 @@ import { writeLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import {
   createPurchaseRequestSchema,
+  generateReorderSchema,
   prfAttachmentSchema,
   prfCancelSchema,
   prfRejectSchema,
@@ -26,6 +27,14 @@ router.post(
   writeLimiter,
   validateBody(createPurchaseRequestSchema),
   prfController.createPurchaseRequest,
+);
+// Reorder-workbench generation — creates DRAFT PRFs, so the same permission as a manual create.
+router.post(
+  "/generate-reorder",
+  requirePermission("purchase_requests.create"),
+  writeLimiter,
+  validateBody(generateReorderSchema),
+  prfController.generateReorderPrfs,
 );
 router.patch(
   "/:id",

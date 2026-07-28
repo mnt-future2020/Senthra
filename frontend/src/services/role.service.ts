@@ -8,6 +8,9 @@ export interface RolePayload {
   name: string;
   description?: string;
   permissions?: string[];
+  // Field-operations capability. The backend accepts it only from a full-access ("*") actor and
+  // only when the value actually changes, so send it only when the toggle is available.
+  canHoldStock?: boolean;
 }
 
 // Stale-while-revalidate cache (module-level, survives route navigation) so a view

@@ -73,9 +73,14 @@ export async function geocodePostcode(
   return { latitude: d.latitude, longitude: d.longitude };
 }
 
-// Canonical postcode key: uppercase, all whitespace removed. postcodes.io accepts a
+// Canonical postcode KEY: uppercase, all whitespace removed. postcodes.io accepts a
 // postcode with or without the internal space, so this collapses "LS1 4DY"/"ls14dy"
 // to one key for de-duping lookups and indexing the result map.
+//
+// NOT the form to store or display — that's `formatUkPostcode` in utils/postcode.ts, which
+// keeps the canonical single space ("LS1 4DY"). The two are deliberately different: this one
+// is a comparison key, that one is the value a user reads. Storing this one would undo the
+// normalisation the validation schemas apply.
 export function canonicalPostcode(postcode: string): string {
   return postcode.trim().toUpperCase().replace(/\s+/g, "");
 }

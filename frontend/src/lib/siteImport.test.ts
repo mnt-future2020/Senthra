@@ -48,6 +48,13 @@ describe("validateRow", () => {
     expect(validateRow(mapColumns({ name: "A", contactNumber: "7700900123" })).ok).toBe(false);
     expect(validateRow(mapColumns({ name: "A", contactNumber: "+44 7700 900123" })).ok).toBe(true);
   });
+  // The server normalises what it stores; the preview must show the SAME thing, or the user
+  // approves "ls14dy" and a different string lands in the DB.
+  it("emits the canonical postcode, however the spreadsheet spelled it", () => {
+    const r = validateRow(mapColumns({ name: "A", postcode: "ls14dy" }));
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.postcode).toBe("LS1 4DY");
+  });
 });
 
 describe("dedupeKey", () => {

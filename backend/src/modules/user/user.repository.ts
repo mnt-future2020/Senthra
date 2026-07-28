@@ -304,6 +304,19 @@ export function countByRole(roleId: string): Promise<number> {
   return prisma.user.count({ where: { roleId, deletedAt: null } });
 }
 
+// Ids of the live users holding a role. Used by the role-capability guard, which has to ask a
+// question about the role's HOLDERS (do any still have van stock?) rather than about the role.
+// `includeDeleted` exists for the stock-safety guards: a soft-deleted user's van stock is still on
+// the books and still needs a holder that CAN hold it, so a guard asking "would this strand stock?"
+// must see them. Excluding them would let the hazard through via delete-then-revoke.
+export async function findIdsByRole(roleId: string, opts: { includeDeleted?: boolean } = {}): Promise<string[]> {
+  const rows = await prisma.user.findMany({
+    where: opts.includeDeleted ? { roleId } : { roleId, deletedAt: null },
+    select: { id: true },
+  });
+  return rows.map((r) => r.id);
+}
+
 // Active user counts grouped by role, as a { roleId: count } map. One query for
 // the whole roles list (avoids an N+1 of per-role counts).
 export async function countByRoleMap(): Promise<Record<string, number>> {

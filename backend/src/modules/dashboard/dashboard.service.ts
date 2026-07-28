@@ -7,6 +7,9 @@ import * as jobRepo from "#modules/job/job.repository.js";
 import * as kitRepo from "#modules/job-kit-request/job-kit-request.repository.js";
 import * as vsrRepo from "#modules/van-stock-request/van-stock-request.repository.js";
 import * as invRepo from "#modules/inventory/inventory.repository.js";
+// The Reorder-needed card reuses the workbench's OWN read (same netting, same scoping) — the
+// dashboard number and the workbench list can never disagree.
+import * as inventoryService from "#modules/inventory/inventory.service.js";
 import * as auditRepo from "#modules/audit/audit.repository.js";
 import * as grnRepo from "#modules/goods-in/goods-in.repository.js";
 import * as gmRepo from "#modules/goods-management/goods-management.repository.js";
@@ -163,6 +166,10 @@ export async function buildDashboardSummary(
       };
     }),
     section("lowStock", canInv, async () => invRepo.lowStockCounts(scope)),
+    // Scope-keyed + short-TTL inside the inventory service: the reorder maths is far heavier than a
+    // repo count, and this card is fetched on every dashboard load. See getReorderSummary.
+    section("reorderNeeded", canInv, async () => inventoryService.getReorderSummary(actor)),
+    section("expectedThisWeek", canPo, async () => poRepo.expectedDeliveries(now, scope)),
     section("goodsReceived", canGrn, async () => {
       // One read covers both figures: the 8-week spark and the 7-day pulse count.
       const rows = await grnRepo.completedReceiptsSince(sparkSince, scope);
@@ -251,6 +258,8 @@ export async function buildDashboardSummary(
   if (values.openPos) cards.openPos = values.openPos as DashboardCards["openPos"];
   if (values.activeJobs) cards.activeJobs = values.activeJobs as DashboardCards["activeJobs"];
   if (values.lowStock) cards.lowStock = values.lowStock as DashboardCards["lowStock"];
+  if (values.reorderNeeded) cards.reorderNeeded = values.reorderNeeded as DashboardCards["reorderNeeded"];
+  if (values.expectedThisWeek) cards.expectedThisWeek = values.expectedThisWeek as DashboardCards["expectedThisWeek"];
   if (values.goodsReceived) cards.goodsReceived = values.goodsReceived as DashboardCards["goodsReceived"];
   if (values.overdueHoldings) cards.overdueHoldings = values.overdueHoldings as DashboardCards["overdueHoldings"];
 

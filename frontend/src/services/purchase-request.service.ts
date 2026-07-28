@@ -144,6 +144,32 @@ export function convertPurchaseRequest(id: string): Promise<PrfConvertResult> {
 // Duplicate a converted PRF as a prefilled draft revision (the price-revision workflow).
 export const duplicatePurchaseRequest = (id: string) => action(id, "duplicate");
 
+// --- Reorder-workbench generation -------------------------------------------
+// The server revalidates every row against LIVE suggestions before creating anything, so the result
+// reports what was actually created, what was skipped (stale/covered) and any capped quantities.
+export interface ReorderGenerateRow {
+  irmItemId: string;
+  warehouseId: string;
+  supplierId: string;
+  quantity: number;
+  itemName?: string; // display echo — labels a skipped row in the result
+  warehouseName?: string;
+}
+export interface GenerateReorderResult {
+  created: { id: string; code: string; supplierName: string; warehouseName: string; lineCount: number; totalPence: number }[];
+  skipped: { irmItemId: string; itemName: string; warehouseName: string; reason: string }[];
+  adjusted: { irmItemId: string; itemName: string; warehouseName: string; requestedQty: number; finalQty: number }[];
+}
+export function generateReorderPrfs(rows: ReorderGenerateRow[], requiredByDate?: string): Promise<GenerateReorderResult> {
+  return api<GenerateReorderResult>("/purchase-requests/generate-reorder", {
+    method: "POST",
+    body: { rows, ...(requiredByDate ? { requiredByDate } : {}) },
+  }).then((r) => {
+    listCache.clear(); // new draft PRFs exist — any cached PRF list is stale
+    return r;
+  });
+}
+
 // --- attachments ------------------------------------------------------------
 // A longer timeout than the 20s default: the request base64-uploads the file to Cloudinary
 // server-side, a network round-trip that can legitimately take longer than a plain JSON call

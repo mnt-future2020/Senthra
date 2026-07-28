@@ -21,6 +21,15 @@ export interface LowStockCard {
   count: number;
   criticalCount: number;
 }
+export interface ReorderNeededCard {
+  count: number;
+  criticalCount: number;
+  supplierGaps: number;
+}
+export interface ExpectedThisWeekCard {
+  dueThisWeek: number;
+  overdue: number;
+}
 export interface GoodsReceivedCard {
   count: number;
   weeklyReceived: number[];
@@ -63,6 +72,8 @@ export interface DashboardSummary {
     openPos?: OpenPosCard;
     activeJobs?: ActiveJobsCard;
     lowStock?: LowStockCard;
+    reorderNeeded?: ReorderNeededCard;
+    expectedThisWeek?: ExpectedThisWeekCard;
     goodsReceived?: GoodsReceivedCard;
     overdueHoldings?: OverdueHoldingsCard;
   };

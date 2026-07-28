@@ -24,7 +24,7 @@ import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as roleRepo from "#modules/role/role.repository.js";
 import * as engineerStockRepo from "#modules/engineer-stock/engineer-stock.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
-import { setUserStatus, updateUser } from "./user.service.js";
+import { deleteUser, setUserStatus, updateUser } from "./user.service.js";
 
 const USER_ID = "a".repeat(24);
 
@@ -84,6 +84,59 @@ beforeEach(() => {
   mockSync.mockResolvedValue({ added: [], removed: [] });
 });
 
+// The schema can only see what a request actually submitted. An edit touching ONE
+// date has to be checked against the other half still in the database, or a user
+// could be given a birth date that contradicts their stored joining date.
+describe("updateUser — date-pair check across a partial patch", () => {
+  const BORN = new Date("2000-06-01T00:00:00Z");
+  const JOINED = new Date("2016-06-01T00:00:00Z"); // exactly their 16th birthday
+
+  it("rejects a birth date that puts the STORED joining date before age 16", async () => {
+    mockFindById.mockResolvedValue(userRow({ dateOfJoining: JOINED, dateOfBirth: BORN }));
+    await expect(updateUser(USER_ID, { dateOfBirth: "2005-06-01" })).rejects.toThrow(
+      /before this person turned 16/i,
+    );
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it("rejects a joining date that precedes the STORED birth date by less than 16 years", async () => {
+    mockFindById.mockResolvedValue(userRow({ dateOfBirth: BORN, dateOfJoining: JOINED }));
+    await expect(updateUser(USER_ID, { dateOfJoining: "2015-06-01" })).rejects.toThrow(
+      /before this person turned 16/i,
+    );
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it("allows a patch that keeps the pair consistent", async () => {
+    mockFindById.mockResolvedValue(userRow({ dateOfBirth: BORN, dateOfJoining: JOINED }));
+    await expect(updateUser(USER_ID, { dateOfBirth: "1990-01-01" })).resolves.toBeTruthy();
+    expect(mockUpdate).toHaveBeenCalled();
+  });
+
+  it("does not fire when the patch CLEARS the other date", async () => {
+    mockFindById.mockResolvedValue(userRow({ dateOfBirth: BORN, dateOfJoining: JOINED }));
+    await expect(
+      updateUser(USER_ID, { dateOfBirth: "2005-06-01", dateOfJoining: "" }),
+    ).resolves.toBeTruthy();
+  });
+
+  it("does not fire when the record has no counterpart date stored", async () => {
+    mockFindById.mockResolvedValue(userRow({ dateOfBirth: null, dateOfJoining: null }));
+    await expect(updateUser(USER_ID, { dateOfBirth: "2005-06-01" })).resolves.toBeTruthy();
+  });
+
+  // Deliberate and agreed: the rule is authoritative, so legacy data that already
+  // violates it must be corrected rather than quietly carried forward. The cost is
+  // that an unrelated edit to such a record surfaces the error.
+  it("blocks even an unrelated edit when the STORED pair is already inconsistent", async () => {
+    // Legacy data written before this rule existed: joined at 10.
+    mockFindById.mockResolvedValue(userRow({ dateOfBirth: BORN, dateOfJoining: new Date("2010-06-01T00:00:00Z") }));
+    await expect(updateUser(USER_ID, { firstName: "Renamed" })).rejects.toThrow(
+      /before this person turned 16/i,
+    );
+  });
+});
+
 describe("setUserStatus — held-stock deactivation guard", () => {
   it("blocks deactivation when the user still holds field stock", async () => {
     mockFindById.mockResolvedValue(userRow({ status: "active" }));
@@ -129,6 +182,52 @@ describe("updateUser — held-stock deactivation guard", () => {
     mockHeld.mockResolvedValue(0);
     const r = await updateUser(USER_ID, { status: "inactive" });
     expect(r.status).toBe("inactive");
+  });
+});
+
+describe("updateUser — held-stock guard on ROLE REASSIGNMENT", () => {
+  // Same hazard as deactivation: every route that could move van stock back refuses a role that
+  // can't hold stock, so moving a stock-holding engineer onto a non-field role strands it. This
+  // path previously only checked escalation.
+  const FIELD_ROLE = { id: "r".repeat(24), key: "field_engineer", name: "Field Engineer", permissions: [], canHoldStock: true };
+  const OFFICE_ROLE = { id: "o".repeat(24), key: "helpdesk", name: "Helpdesk", permissions: [], canHoldStock: false };
+
+  it("blocks moving a stock-holding engineer onto a non-field role", async () => {
+    mockFindById.mockResolvedValue(userRow({ role: FIELD_ROLE, roleId: FIELD_ROLE.id }));
+    mockRoleFindById.mockResolvedValue(OFFICE_ROLE);
+    mockHeld.mockResolvedValue(2);
+    await expect(updateUser(USER_ID, { roleId: OFFICE_ROLE.id })).rejects.toThrow(
+      /still holds field stock/i,
+    );
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it("blocks clearing the role entirely while the user holds stock", async () => {
+    mockFindById.mockResolvedValue(userRow({ role: FIELD_ROLE, roleId: FIELD_ROLE.id }));
+    mockHeld.mockResolvedValue(1);
+    await expect(updateUser(USER_ID, { roleId: "" })).rejects.toThrow(/still holds field stock/i);
+  });
+
+  it("allows the move once the stock is returned", async () => {
+    mockFindById.mockResolvedValue(userRow({ role: FIELD_ROLE, roleId: FIELD_ROLE.id }));
+    mockRoleFindById.mockResolvedValue(OFFICE_ROLE);
+    mockHeld.mockResolvedValue(0);
+    await expect(updateUser(USER_ID, { roleId: OFFICE_ROLE.id })).resolves.toBeTruthy();
+  });
+
+  it("allows a field role → field role move even while holding stock", async () => {
+    const OTHER_FIELD = { ...FIELD_ROLE, id: "f".repeat(24), key: "senior_engineer" };
+    mockFindById.mockResolvedValue(userRow({ role: FIELD_ROLE, roleId: FIELD_ROLE.id }));
+    mockRoleFindById.mockResolvedValue(OTHER_FIELD);
+    mockHeld.mockResolvedValue(5);
+    await expect(updateUser(USER_ID, { roleId: OTHER_FIELD.id })).resolves.toBeTruthy();
+  });
+
+  it("does not run the check for a user who was never on a field role", async () => {
+    mockFindById.mockResolvedValue(userRow({ role: OFFICE_ROLE, roleId: OFFICE_ROLE.id }));
+    mockRoleFindById.mockResolvedValue(FIELD_ROLE);
+    mockHeld.mockResolvedValue(9);
+    await expect(updateUser(USER_ID, { roleId: FIELD_ROLE.id })).resolves.toBeTruthy();
   });
 });
 
@@ -202,5 +301,31 @@ describe("updateUser — warehouse assignments (warehouse-scoped role)", () => {
     await updateUser(USER_ID, { roleId: plainRole.id });
     expect(mockSync).not.toHaveBeenCalled();
     expect(mockClearForUser).not.toHaveBeenCalled();
+  });
+});
+
+// Deleting a stock-holding engineer strands their van stock exactly like deactivating them does:
+// every route that could move it back resolves the holder and refuses a deleted one. This was also
+// the bypass around the role-capability guard — delete the holder, then revoke the capability and
+// the guard sees no live holders and reports safe.
+describe("deleteUser — stock guard", () => {
+  const mockSoftDelete = userRepo.softDelete as ReturnType<typeof vi.fn>;
+
+  it("refuses to delete a user who still holds field stock", async () => {
+    mockFindById.mockResolvedValue(userRow());
+    mockHeld.mockResolvedValue(3);
+
+    await expect(deleteUser(USER_ID)).rejects.toThrow(/still holds stock/i);
+    expect(mockSoftDelete).not.toHaveBeenCalled();
+    expect(auditActions()).not.toContain("user.deleted");
+  });
+
+  it("deletes a user holding nothing", async () => {
+    mockFindById.mockResolvedValue(userRow());
+    mockHeld.mockResolvedValue(0);
+
+    await deleteUser(USER_ID);
+    expect(mockSoftDelete).toHaveBeenCalledWith(USER_ID);
+    expect(auditActions()).toContain("user.deleted");
   });
 });

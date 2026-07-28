@@ -20,6 +20,20 @@ export interface LowStockCard {
   count: number;
   criticalCount: number;
 }
+export interface ReorderNeededCard {
+  /** Actionable Reorder-workbench rows (netted vs reservations, incoming POs, open PRFs, planned job demand). */
+  count: number;
+  /** Actionable rows at/below the item's critical level (or projected negative). */
+  criticalCount: number;
+  /** Actionable rows blocked from generation — no active primary supplier on the item. */
+  supplierGaps: number;
+}
+export interface ExpectedThisWeekCard {
+  /** Open receivable POs whose expected delivery falls within the next 7 days. */
+  dueThisWeek: number;
+  /** Open receivable POs whose expected delivery date has already passed. */
+  overdue: number;
+}
 export interface GoodsReceivedCard {
   /** Completed GRNs received in the last 7 days. */
   count: number;
@@ -67,6 +81,8 @@ export interface DashboardCards {
   openPos?: OpenPosCard;
   activeJobs?: ActiveJobsCard;
   lowStock?: LowStockCard;
+  reorderNeeded?: ReorderNeededCard;
+  expectedThisWeek?: ExpectedThisWeekCard;
   goodsReceived?: GoodsReceivedCard;
   overdueHoldings?: OverdueHoldingsCard;
 }
