@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { AlertCircle, AlertTriangle, HardHat, Loader2, ShieldCheck } from "lucide-react";
+import { AlertCircle, AlertTriangle, Loader2, ShieldCheck } from "lucide-react";
 
 import * as roleService from "@/services/role.service";
 import { useAuth } from "@/hooks/useAuth";
@@ -308,10 +308,7 @@ export function RoleForm({ mode, role }: { mode: "create" | "edit"; role?: Role 
               <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3.5 py-3">
                 <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0">
-                      <p className="flex items-center gap-1.5 text-sm font-bold text-[var(--ink)]">
-                        <HardHat className="h-4 w-4 shrink-0 text-[var(--muted)]" />
-                        Field role
-                      </p>
+                      <p className="text-sm font-bold text-[var(--ink)]">Field role</p>
                       <p className="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">
                         Its users can hold van stock, be assigned jobs, and use the Engineer Portal
                         (web + mobile). Turn this on to offer the Engineer Portal permissions below.

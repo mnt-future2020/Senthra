@@ -6,9 +6,11 @@ import { AlertCircle, Loader2, Trash2, Upload } from "lucide-react";
 
 import * as userService from "@/services/user.service";
 import { listWarehouseOptions, type WarehouseOption } from "@/services/warehouse.service";
+import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
+import { canAssignRole } from "@/lib/roleAssignable";
 import type { Role } from "@/types/role";
 import type { User, UserStatus } from "@/types/user";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
@@ -155,6 +157,7 @@ export function UserForm({
   const router = useRouter();
   const guard = useNavigationGuard();
   const { pushToast } = useDashboard();
+  const { can } = useAuth();
 
   const [firstName, setFirstName] = React.useState(user?.firstName ?? "");
   const [lastName, setLastName] = React.useState(user?.lastName ?? "");
@@ -197,6 +200,24 @@ export function UserForm({
   // Detected via the role's flag — NOT its display name — so future scoped roles work automatically.
   const selectedRole = roles.find((r) => r.id === roleId) ?? null;
   const isWarehouseScoped = Boolean(selectedRole?.isWarehouseScoped);
+
+  // Role options, with anything this actor can't hand out shown DISABLED rather than hidden —
+  // mirrors the server's assertCanAssignRole so a delegate isn't offered an option the API will
+  // reject after they've filled in the whole form. Disabled (not hidden) because a missing option
+  // reads as "that role doesn't exist"; greyed-out plus the note below says "not yours to give".
+  //
+  // The user's CURRENT role is always left enabled: on edit, an actor who couldn't newly assign it
+  // must still be able to save the rest of the form without silently changing their role.
+  const roleOptions = React.useMemo(
+    () =>
+      roles.map((r) => ({
+        value: r.id,
+        label: r.name,
+        disabled: r.id !== user?.role?.id && !canAssignRole(r.permissions, can),
+      })),
+    [roles, user?.role?.id, can],
+  );
+  const hasUnassignableRole = roleOptions.some((o) => o.disabled);
   const initialWarehouseIds = (user?.warehouses ?? []).map((w) => w.id);
   const sameIds = (a: string[], b: string[]) =>
     a.length === b.length && [...a].sort().join(",") === [...b].sort().join(",");
@@ -344,7 +365,13 @@ export function UserForm({
           lastName: lastName.trim(),
           email: email.trim(),
           phone: phone.trim(),
-          roleId: roleId || null,
+          // Send the role ONLY when it actually changed. The server treats ANY submitted roleId as
+          // a role-change request and runs its escalation guard on it, so echoing back an unchanged
+          // role makes an ordinary edit (phone, address, job title) fail with 403 for any actor who
+          // couldn't newly assign that role. A System Admin editing a Field Engineer hit exactly
+          // this: field roles carry engineer.* keys a System Admin doesn't hold, so every save was
+          // rejected even though nothing about the role was being touched.
+          roleId: roleId === (user.role?.id ?? "") ? undefined : roleId || null,
           status,
           gender,
           dateOfBirth,
@@ -587,13 +614,18 @@ export function UserForm({
                     setRoleId(v);
                     clearError("roleId");
                   }}
-                  options={roles.map((r) => ({ value: r.id, label: r.name }))}
+                  options={roleOptions}
                   placeholder="Select a role…"
                   ariaLabel="Role"
                   required
                   invalid={Boolean(errors.roleId)}
-                  describedBy={errors.roleId ? "roleId-error" : undefined}
+                  describedBy={errors.roleId ? "roleId-error" : hasUnassignableRole ? "roleId-hint" : undefined}
                 />
+                {hasUnassignableRole && !errors.roleId && (
+                  <p id="roleId-hint" className="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">
+                    Greyed-out roles grant permissions you don&apos;t hold — a super-admin has to assign those.
+                  </p>
+                )}
                 <FieldError id="roleId-error" message={errors.roleId} />
               </div>
               {/* Assigned Warehouses — shown only for a warehouse-scoped role (e.g. Warehouse Manager).
