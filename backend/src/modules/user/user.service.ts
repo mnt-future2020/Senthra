@@ -8,6 +8,7 @@ import { assertEmailNamespaceFree } from "#modules/auth/email-namespace.js";
 import { ALL_PERMISSIONS } from "#modules/role/permissions.js";
 import * as userRepo from "./user.repository.js";
 import type { UserWithRole } from "./user.repository.js";
+import { JOINING_BEFORE_MIN_AGE_MESSAGE, joiningPrecedesMinAge } from "./user.validation.js";
 import * as userWarehouseRepo from "./user-warehouse.repository.js";
 import type { AssignedWarehouse } from "./user-warehouse.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
@@ -116,6 +117,28 @@ function trimToNull(v?: string | null): string | null {
 function dateOrNull(v?: string | null): Date | null {
   const t = typeof v === "string" ? v.trim() : "";
   return t.length ? new Date(t) : null;
+}
+
+// A stored Date → the "YYYY-MM-DD" the validation helpers compare on.
+const storedDateToIso = (d: Date | null | undefined): string | null =>
+  d ? d.toISOString().slice(0, 10) : null;
+
+// Resolve a date field's value AFTER the patch is applied: the submitted value
+// when the patch carries one ("" meaning cleared), otherwise what's on record.
+function effectiveDate(patched: string | undefined, stored: Date | null | undefined): string | null {
+  if (typeof patched === "string") return patched.trim() || null;
+  return storedDateToIso(stored);
+}
+
+// The "joined before turning 16" rule across a PARTIAL update. The schema already
+// catches a payload carrying both dates, but an edit that touches only one has to
+// be checked against the half still in the database — otherwise you could set a
+// valid-looking birth date that contradicts the joining date already stored.
+function assertDatePairConsistent(input: UpdateUserInput, user: UserWithRole): void {
+  const dob = effectiveDate(input.dateOfBirth, user.dateOfBirth);
+  const joining = effectiveDate(input.dateOfJoining, user.dateOfJoining);
+  if (!dob || !joining) return;
+  if (joiningPrecedesMinAge(dob, joining)) throw badRequest(JOINING_BEFORE_MIN_AGE_MESSAGE);
 }
 
 const isoOrNull = (d: Date | null): string | null => (d ? d.toISOString() : null);
@@ -488,6 +511,25 @@ async function assertNotHoldingStock(userId: string): Promise<void> {
   }
 }
 
+// Moving a stock-holding engineer OFF a field-operations role strands their van stock in exactly the
+// way deactivating them would: every route that could move it back (engineer transfer, van-stock
+// return, job issue) refuses a role that can't hold stock. Same hazard, same block — this closes the
+// reassignment path, which previously only checked escalation. Role changes that KEEP the capability
+// (field role → field role) are unaffected.
+async function assertRoleChangeKeepsStockHoldable(
+  user: { id: string; role?: { canHoldStock?: boolean | null } | null },
+  nextRole: { canHoldStock?: boolean | null } | null,
+): Promise<void> {
+  if (user.role?.canHoldStock !== true) return; // wasn't a field role — nothing to strand
+  if (nextRole?.canHoldStock === true) return; // still a field role
+  const held = await engineerStockRepo.countEngineerHeldStock(user.id);
+  if (held > 0) {
+    throw conflict(
+      "This staff member still holds field stock. Return or transfer their stock before moving them off a field-operations role.",
+    );
+  }
+}
+
 export async function updateUser(
   id: string,
   input: UpdateUserInput,
@@ -495,6 +537,7 @@ export async function updateUser(
 ): Promise<PublicUser> {
   const user = await userRepo.findById(id);
   if (!user) throw notFound("User not found.");
+  assertDatePairConsistent(input, user);
 
   const data: Prisma.UserUpdateInput = {};
   if (typeof input.firstName === "string" && input.firstName.trim()) {
@@ -540,12 +583,15 @@ export async function updateUser(
   let effectiveRole: { isWarehouseScoped?: boolean | null; permissions: string[] } | null = user.role;
   if (input.roleId !== undefined) {
     if (!input.roleId) {
+      // Losing the role entirely also loses the stock-holding capability.
+      await assertRoleChangeKeepsStockHoldable(user, null);
       data.role = { disconnect: true };
       effectiveRole = null;
     } else {
       const role = await roleRepo.findById(input.roleId);
       if (!role) throw badRequest("Selected role does not exist.");
       assertCanAssignRole(role.permissions, actor);
+      await assertRoleChangeKeepsStockHoldable(user, role);
       data.role = { connect: { id: role.id } };
       effectiveRole = role;
     }
@@ -618,6 +664,11 @@ export async function setUserStatus(
 export async function deleteUser(id: string, actor?: AuditActor): Promise<void> {
   const user = await userRepo.findById(id);
   if (!user) throw notFound("User not found.");
+  // Same guard as deactivate/suspend and the role-capability revoke: deleting a stock-holding
+  // engineer strands their van stock just as thoroughly, because every route that could move it back
+  // resolves the holder and refuses a deleted one. This was the one path into that state that had no
+  // check, which also made the role-capability guard bypassable (delete the holder, then revoke).
+  await assertNotHoldingStock(id);
   await userRepo.softDelete(id);
   audit.record({
     actor,

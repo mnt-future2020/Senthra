@@ -1,13 +1,12 @@
 import { z } from "zod";
 
 import { emailField, optionalPhoneField as phoneField } from "../../utils/validation.js";
+import { postcodeField as ukPostcode } from "../../utils/postcode.js";
 
 const statusEnum = z.enum(["active", "inactive"]);
 
 // Lenient website check: empty, a bare domain, or a full URL (http/https).
 const WEBSITE_RE = /^(https?:\/\/)?[\w-]+(\.[\w-]+)+([/?#].*)?$/i;
-// Standard UK postcode shape, e.g. "EC1A 1BB", "M1 1AE".
-const UK_POSTCODE_RE = /^[A-Za-z]{1,2}\d[A-Za-z\d]?\s*\d[A-Za-z]{2}$/;
 
 // An empty/blank string from an unselected <select> or cleared <input> becomes
 // `undefined`, so it doesn't trip an enum / format / number check downstream.
@@ -20,12 +19,8 @@ const websiteField = z
   .refine((v) => v === "" || WEBSITE_RE.test(v), "Enter a valid website (e.g. example.com).")
   .optional();
 
-const postcodeField = z
-  .string()
-  .trim()
-  .max(12)
-  .refine((v) => v === "" || UK_POSTCODE_RE.test(v), "Enter a valid UK postcode (e.g. EC1A 1BB).")
-  .optional();
+// Validates AND normalises to canonical form ("ls14dy" → "LS1 4DY") — see utils/postcode.ts.
+const postcodeField = ukPostcode().optional();
 
 // Units of measure (UK telecom field-services stock). Kept in lockstep with the
 // frontend stock item modal list.

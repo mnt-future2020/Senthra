@@ -19,7 +19,17 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { TempPasswordModal } from "@/components/ui/TempPasswordModal";
 import { PostcodeField } from "@/components/ui/PostcodeField";
-import { EMAIL_RE, UK_POSTCODE_RE, isPhone } from "@/lib/validation";
+import {
+  EMAIL_RE,
+  UK_POSTCODE_RE,
+  earliestDobIso,
+  isPhone,
+  latestDobIso,
+  latestJoiningIso,
+  todayIso,
+  validateDateOfBirth,
+  validateDateOfJoining,
+} from "@/lib/validation";
 import { MAX_IMAGE_BYTES, readFileAsDataUrl } from "@/lib/image";
 import { DepartmentCombobox } from "@/components/dashboard/users-roles/departments/DepartmentCombobox";
 import { JobTitleCombobox } from "@/components/dashboard/users-roles/job-titles/JobTitleCombobox";
@@ -28,6 +38,37 @@ const USERS_LIST = "/dashboard/users";
 
 // An ISO timestamp → the "YYYY-MM-DD" a <input type="date"> expects (or "").
 const toDateInput = (iso: string | null | undefined): string => (iso ? iso.slice(0, 10) : "");
+
+type DateBounds = { dobMin: string; dobMax: string; joiningMax: string };
+
+// min/max for the two date pickers, so the native calendar can't even scroll to a
+// year the form would reject. These derive from "today", which the server (UTC)
+// and the browser (local time) can disagree on either side of midnight — so they
+// are read through useSyncExternalStore with a null server snapshot: SSR emits no
+// min/max attribute, the client fills them in, and hydration always matches.
+//
+// The snapshot must be referentially stable or React re-renders forever, hence the
+// cache keyed on the current day.
+let boundsCache: { day: string; value: DateBounds } | null = null;
+
+function clientDateBounds(): DateBounds {
+  const day = todayIso();
+  if (!boundsCache || boundsCache.day !== day) {
+    boundsCache = {
+      day,
+      value: {
+        dobMin: earliestDobIso(day),
+        dobMax: latestDobIso(day),
+        joiningMax: latestJoiningIso(day),
+      },
+    };
+  }
+  return boundsCache.value;
+}
+
+const serverDateBounds = (): DateBounds | null => null;
+// The bounds only change at midnight; nothing to subscribe to.
+const subscribeNever = () => () => {};
 
 function validateUserForm(v: {
   firstName: string;
@@ -71,14 +112,16 @@ function validateUserForm(v: {
   }
   if (!v.jobTitle.trim()) errs.jobTitle = "Job title is required.";
   if (!v.department.trim()) errs.department = "Department is required.";
-  if (!v.dateOfJoining) errs.dateOfJoining = "Date of joining is required.";
 
-  if (v.dateOfBirth) {
-    const dob = new Date(v.dateOfBirth);
-    if (Number.isNaN(dob.getTime())) errs.dateOfBirth = "Enter a valid date.";
-    else if (dob.getTime() > Date.now()) errs.dateOfBirth = "Date of birth can't be in the future.";
-    else if (dob.getFullYear() < 1900) errs.dateOfBirth = "Enter a valid date of birth.";
-  }
+  // Dates: rules live in lib/validation.ts so they stay in lockstep with the server.
+  const dobError = validateDateOfBirth(v.dateOfBirth);
+  if (dobError) errs.dateOfBirth = dobError;
+
+  const joiningError = validateDateOfJoining(v.dateOfJoining, {
+    required: true,
+    dateOfBirth: v.dateOfBirth,
+  });
+  if (joiningError) errs.dateOfJoining = joiningError;
 
   if (v.postcode.trim() && !UK_POSTCODE_RE.test(v.postcode.trim())) {
     errs.postcode = "Enter a valid UK postcode (e.g. EC1A 1BB).";
@@ -144,6 +187,12 @@ export function UserForm({
   const [tempPw, setTempPw] = React.useState<{ email: string; password: string } | null>(null);
   const fileRef = React.useRef<HTMLInputElement>(null);
 
+  // Bounds that stop the native date picker from even reaching an invalid year.
+  // The server renders with a null snapshot so the min/max attributes are absent
+  // from the SSR markup, and the real bounds arrive on the client — see the note
+  // above clientDateBounds.
+  const dateBounds = React.useSyncExternalStore(subscribeNever, clientDateBounds, serverDateBounds);
+
   // Whether the chosen role is warehouse-scoped (drives the conditional "Assigned Warehouses" field).
   // Detected via the role's flag — NOT its display name — so future scoped roles work automatically.
   const selectedRole = roles.find((r) => r.id === roleId) ?? null;
@@ -201,6 +250,24 @@ export function UserForm({
       if (!prev[name]) return prev;
       const next = { ...prev };
       delete next[name];
+      return next;
+    });
+
+  // The "joined before turning 16" message lives on the joining field but depends
+  // on the birth date, so editing the birth date has to RE-EVALUATE it, not just
+  // clear it — clearing outright would also wipe an unrelated "Date of joining is
+  // required." and leave the field looking valid when it isn't.
+  const revalidateJoining = (nextDob: string) =>
+    setErrors((prev) => {
+      if (!prev.dateOfJoining) return prev;
+      const message = validateDateOfJoining(dateOfJoining, {
+        required: true,
+        dateOfBirth: nextDob,
+      });
+      if (message === prev.dateOfJoining) return prev;
+      const next = { ...prev };
+      if (message) next.dateOfJoining = message;
+      else delete next.dateOfJoining;
       return next;
     });
 
@@ -339,7 +406,15 @@ export function UserForm({
         actions={actions}
       />
 
-      <form id="user-form" onSubmit={submit} className="grid gap-6 lg:grid-cols-3">
+      {/*
+        noValidate: validateUserForm covers every field the browser would check
+        (type="email", the required selects, and the date inputs' min/max), and it
+        explains WHY — "Staff must be at least 16 years old" beats the native
+        "Value must be 2010-07-27 or earlier". Without this the form shows a native
+        tooltip for some fields and our styled FieldError for others, and native
+        validation blocks submit before our handler ever runs.
+      */}
+      <form id="user-form" onSubmit={submit} noValidate className="grid gap-6 lg:grid-cols-3">
         {/* Main column */}
         <div className="space-y-6 lg:col-span-2">
           <FormSection title="Identity" description="Who this person is and how to reach them.">
@@ -435,9 +510,12 @@ export function UserForm({
                   type="date"
                   className={inputCls}
                   value={dateOfBirth}
+                  min={dateBounds?.dobMin}
+                  max={dateBounds?.dobMax}
                   onChange={(e) => {
                     setDateOfBirth(e.target.value);
                     clearError("dateOfBirth");
+                    revalidateJoining(e.target.value);
                   }}
                   aria-invalid={Boolean(errors.dateOfBirth)}
                   aria-describedby={errors.dateOfBirth ? "dateOfBirth-error" : undefined}
@@ -490,6 +568,7 @@ export function UserForm({
                   type="date"
                   className={inputCls}
                   value={dateOfJoining}
+                  max={dateBounds?.joiningMax}
                   onChange={(e) => {
                     setDateOfJoining(e.target.value);
                     clearError("dateOfJoining");

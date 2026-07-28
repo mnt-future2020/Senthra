@@ -10,6 +10,7 @@ import * as poService from "@/services/purchase-order.service";
 import * as prfService from "@/services/purchase-request.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
+import { NoStaffAssigned, StaffChip } from "@/components/ui/StaffChip";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { DetailHeader } from "@/components/ui/DetailHeader";
 import { Pagination } from "@/components/ui/Pagination";
@@ -270,19 +271,11 @@ function Overview({ s }: { s: Supplier }) {
       <Card title="Management">
         <Field label="Internal owner">
           {s.owner ? (
-            <div>
-              <div className="font-semibold">
-                {s.owner.name}
-                {s.owner.jobTitle && (
-                  <span className="ml-1.5 text-xs font-normal text-[var(--muted)]">· {s.owner.jobTitle}</span>
-                )}
-              </div>
-              <a className="text-xs text-[var(--accent)] hover:underline" href={`mailto:${s.owner.email}`}>
-                {s.owner.email}
-              </a>
+            <div className="mt-2">
+              <StaffChip staff={s.owner} />
             </div>
           ) : (
-            <span className="text-[var(--faint)]">No owner assigned</span>
+            <NoStaffAssigned label="No owner assigned" />
           )}
         </Field>
       </Card>

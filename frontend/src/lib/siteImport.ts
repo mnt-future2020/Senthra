@@ -1,4 +1,4 @@
-import { UK_POSTCODE_RE, isPhone } from "@/lib/validation";
+import { UK_POSTCODE_RE, formatUkPostcode, isPhone } from "@/lib/validation";
 import type { SitePayload } from "@/services/customer.service";
 
 // One raw spreadsheet row (header → cell), as produced by SheetJS sheet_to_json.
@@ -88,7 +88,9 @@ export function validateRow(
       addressLine2: draft.addressLine2 || undefined,
       city: draft.city || undefined,
       county: draft.county || undefined,
-      postcode: draft.postcode.trim() || undefined,
+      // Canonical form, matching what the server will store — so the preview the user
+      // approves is exactly what lands in the DB (and dedupe compares like for like).
+      postcode: formatUkPostcode(draft.postcode) || undefined,
       country: draft.country || undefined,
       contactPerson: draft.contactPerson || undefined,
       contactNumber: draft.contactNumber || undefined,

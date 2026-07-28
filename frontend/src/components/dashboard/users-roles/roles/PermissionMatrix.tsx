@@ -4,6 +4,12 @@ import * as React from "react";
 import { ChevronDown, Search, X } from "lucide-react";
 
 import type { PermissionGroup } from "@/types/role";
+import {
+  baseKeyOf,
+  grantWithPrerequisites,
+  keysOf,
+  revokeWithDependents,
+} from "@/lib/permissionImplications";
 import { inputCls } from "@/components/ui/styles";
 
 // Shared permission catalog renderer for the role editor and the read-only role
@@ -16,66 +22,72 @@ import { inputCls } from "@/components/ui/styles";
 // already applied); omit it for a read-only view.
 
 interface PermissionMatrixProps {
-  groups: PermissionGroup[];
+  groups: PermissionGroup[]; // the groups to RENDER (may be filtered, e.g. by role capability)
   categories: string[]; // ordered category names (drives section order)
   granted: string[]; // currently-granted permission keys
+  // The FULL catalog, for dependency math only. Kept separate from `groups` because a `requires`
+  // edge may point at a group the caller has filtered out of the display — resolving dependencies
+  // against the filtered list would silently skip that edge. Defaults to `groups`.
+  catalog?: PermissionGroup[];
   onChange?: (next: string[]) => void; // omit → read-only
 }
 
 const FALLBACK_CATEGORY = "General";
 
-// "View" action key of a group, if present.
-const viewKeyOf = (g: PermissionGroup): string | undefined =>
-  g.permissions.find((p) => p.action === "View")?.key;
+// --- Permission-set math -------------------------------------------------------------------
+//
+// Every mutation below routes through the shared dependency engine in lib/permissionImplications,
+// which derives what depends on what from the catalog itself (`baseKey` / `requires`) rather than
+// from the action's label. Ticking a chip therefore always brings its prerequisites, and un-ticking
+// one always takes its dependents — so the matrix can never produce a set the server would have to
+// silently repair, whatever a group happens to call its entry point.
+//
+// `catalog` is the FULL group list (not just the section being edited) because a dependency may
+// cross groups.
 
-// Every permission key in a group.
-const keysOf = (g: PermissionGroup): string[] => g.permissions.map((p) => p.key);
-
-// --- Permission-set math (kept here so single + bulk toggles stay coherent) ---
-
-// Toggle one action: enabling any action also enables the group's View; disabling
-// View clears the whole group (you can't act on what you can't see).
-function toggleOne(granted: string[], group: PermissionGroup, key: string): string[] {
-  const set = new Set(granted);
-  const viewKey = viewKeyOf(group);
-  if (!set.has(key)) {
-    set.add(key);
-    if (viewKey) set.add(viewKey);
-    return [...set];
-  }
-  if (viewKey && key === viewKey) {
-    for (const k of keysOf(group)) set.delete(k);
-    return [...set];
-  }
-  set.delete(key);
-  return [...set];
+// Toggle one action: on → grant it plus everything it needs; off → revoke it plus everything that
+// needed it (un-ticking a module's base access still clears that whole module).
+function toggleOne(
+  granted: string[],
+  catalog: PermissionGroup[],
+  key: string,
+  isOn: boolean,
+): string[] {
+  return isOn
+    ? revokeWithDependents(granted, catalog, [key])
+    : grantWithPrerequisites(granted, catalog, [key]);
 }
 
 // Grant or clear every action in a single group (the row "All / None" toggle).
-function setGroup(granted: string[], group: PermissionGroup, grant: boolean): string[] {
-  const set = new Set(granted);
-  for (const k of keysOf(group)) {
-    if (grant) set.add(k);
-    else set.delete(k);
-  }
-  return [...set];
+function setGroup(
+  granted: string[],
+  catalog: PermissionGroup[],
+  group: PermissionGroup,
+  grant: boolean,
+): string[] {
+  return grant
+    ? grantWithPrerequisites(granted, catalog, keysOf(group))
+    : revokeWithDependents(granted, catalog, keysOf(group));
 }
 
-// Grant just the View of each group in the list (category "Grant view").
-function grantViews(granted: string[], groups: PermissionGroup[]): string[] {
-  const set = new Set(granted);
-  for (const g of groups) {
-    const v = viewKeyOf(g);
-    if (v) set.add(v);
-  }
-  return [...set];
+// Grant just the base access of each group in the list (category "Grant view") — for most modules
+// that's its "View", for the Engineer Portal it's "Dashboard".
+function grantViews(
+  granted: string[],
+  catalog: PermissionGroup[],
+  groups: PermissionGroup[],
+): string[] {
+  const bases = groups.map(baseKeyOf).filter((k): k is string => Boolean(k));
+  return grantWithPrerequisites(granted, catalog, bases);
 }
 
 // Clear every action of every group in the list (category "Clear").
-function clearGroups(granted: string[], groups: PermissionGroup[]): string[] {
-  const set = new Set(granted);
-  for (const g of groups) for (const k of keysOf(g)) set.delete(k);
-  return [...set];
+function clearGroups(
+  granted: string[],
+  catalog: PermissionGroup[],
+  groups: PermissionGroup[],
+): string[] {
+  return revokeWithDependents(granted, catalog, groups.flatMap(keysOf));
 }
 
 // min-h-[36px] on pointer-coarse devices keeps chips comfortably tappable without
@@ -87,8 +99,16 @@ const chipOffEditable =
   "border-[var(--border)] text-[var(--muted)] hover:border-[var(--border-2)] hover:text-[var(--ink)]";
 const chipOffReadonly = "border-[var(--border)] text-[var(--faint)] opacity-60";
 
-export function PermissionMatrix({ groups, categories, granted, onChange }: PermissionMatrixProps) {
+export function PermissionMatrix({
+  groups,
+  categories,
+  granted,
+  catalog,
+  onChange,
+}: PermissionMatrixProps) {
   const readOnly = !onChange;
+  // Dependency math always runs against the full catalog; only rendering uses `groups`.
+  const deps = catalog ?? groups;
   const grantedSet = React.useMemo(() => new Set(granted), [granted]);
   const [query, setQuery] = React.useState("");
   const q = query.trim().toLowerCase();
@@ -205,7 +225,7 @@ export function PermissionMatrix({ groups, categories, granted, onChange }: Perm
                   <div className="flex shrink-0 items-center gap-3 text-[11px] font-bold">
                     <button
                       type="button"
-                      onClick={() => onChange!(grantViews(granted, gs))}
+                      onClick={() => onChange!(grantViews(granted, deps, gs))}
                       className="text-[var(--accent)] transition-opacity hover:opacity-70"
                     >
                       Grant view
@@ -213,7 +233,7 @@ export function PermissionMatrix({ groups, categories, granted, onChange }: Perm
                     {grantedCount > 0 && (
                       <button
                         type="button"
-                        onClick={() => onChange!(clearGroups(granted, gs))}
+                        onClick={() => onChange!(clearGroups(granted, deps, gs))}
                         className="text-[var(--muted)] transition-colors hover:text-[var(--ink)]"
                       >
                         Clear
@@ -266,7 +286,7 @@ export function PermissionMatrix({ groups, categories, granted, onChange }: Perm
                               <button
                                 type="button"
                                 key={p.key}
-                                onClick={() => onChange!(toggleOne(granted, group, p.key))}
+                                onClick={() => onChange!(toggleOne(granted, deps, p.key, checked))}
                                 title={p.description}
                                 aria-pressed={checked}
                                 className={`${chipBase} ${checked ? chipOn : chipOffEditable}`}
@@ -278,7 +298,7 @@ export function PermissionMatrix({ groups, categories, granted, onChange }: Perm
                           {!readOnly && (
                             <button
                               type="button"
-                              onClick={() => onChange!(setGroup(granted, group, !allOn))}
+                              onClick={() => onChange!(setGroup(granted, deps, group, !allOn))}
                               title={allOn ? "Clear this module" : "Grant all actions"}
                               className={`${chipBase} border-dashed ${
                                 allOn

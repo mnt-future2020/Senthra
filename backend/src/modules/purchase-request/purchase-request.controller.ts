@@ -4,6 +4,7 @@ import { asyncHandler } from "../../utils/async-handler.js";
 import { param, queryInt, queryStr } from "../../utils/request.js";
 import type {
   CreatePurchaseRequestInput,
+  GenerateReorderInput,
   PrfAttachmentInput,
   PrfCancelInput,
   PrfRejectInput,
@@ -37,6 +38,13 @@ export const getPurchaseRequest = asyncHandler(async (req, res) => {
 export const createPurchaseRequest = asyncHandler(async (req, res) => {
   const purchaseRequest = await prfService.createPurchaseRequest(req.body as CreatePurchaseRequestInput, actorFrom(req));
   res.status(201).json({ purchaseRequest });
+});
+
+// POST /purchase-requests/generate-reorder — Reorder-workbench generation: confirmed rows in,
+// draft PRFs (grouped supplier × warehouse) + skipped/adjusted report out.
+export const generateReorderPrfs = asyncHandler(async (req, res) => {
+  const result = await prfService.generateReorderPrfs(req.body as GenerateReorderInput, actorFrom(req));
+  res.status(201).json(result);
 });
 
 // PATCH /purchase-requests/:id  (draft only)

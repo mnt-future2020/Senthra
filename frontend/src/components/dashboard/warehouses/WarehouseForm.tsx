@@ -8,7 +8,7 @@ import * as warehouseService from "@/services/warehouse.service";
 import { listWarehouseTypes, createWarehouseType } from "@/services/warehouse-type.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
-import type { Warehouse, WarehouseManager } from "@/types/warehouse";
+import type { Warehouse } from "@/types/warehouse";
 import type { WarehouseType } from "@/types/warehouse-type";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import { firstActiveId } from "@/lib/utils";
@@ -66,23 +66,17 @@ export function WarehouseForm({ mode, warehouse }: { mode: "create" | "edit"; wa
   const [operatingHours, setOperatingHours] = React.useState(o?.operatingHours ?? "");
   const [timezone, setTimezone] = React.useState(o?.timezone ?? "Europe/London");
   const [notes, setNotes] = React.useState(o?.notes ?? "");
-  const [managerUserId, setManagerUserId] = React.useState(o?.managerUserId ?? "");
   const [status, setStatus] = React.useState<"active" | "inactive">(o?.status ?? "active");
 
-  const [managers, setManagers] = React.useState<WarehouseManager[]>([]);
   const [types, setTypes] = React.useState<WarehouseType[]>([]);
   const [saving, setSaving] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [errors, setErrors] = React.useState<Record<string, string>>({});
 
-  // Load the active-user list (manager picker) + the warehouse-type master (type picker).
+  // Load the warehouse-type master (type picker).
   React.useEffect(() => {
     let active = true;
-    warehouseService.listManagerOptions().then(
-      (m) => active && setManagers(m),
-      () => {},
-    );
     listWarehouseTypes().then(
       (t) => {
         if (!active) return;
@@ -100,7 +94,7 @@ export function WarehouseForm({ mode, warehouse }: { mode: "create" | "edit"; wa
   }, [mode]);
 
   // Only ACTIVE types are selectable, but keep the warehouse's current type visible even
-  // if it's since been deactivated, so an edit doesn't silently drop it (mirrors manager).
+  // if it's since been deactivated, so an edit doesn't silently drop it.
   const typeOptions = React.useMemo(() => {
     const activeTypes = types.filter((t) => t.status === "active");
     if (o?.type && !activeTypes.some((t) => t.id === o.type!.id)) {
@@ -109,16 +103,10 @@ export function WarehouseForm({ mode, warehouse }: { mode: "create" | "edit"; wa
     return activeTypes;
   }, [types, o]);
 
-  // Keep a deactivated manager visible on edit (same reasoning as types).
-  const managerOptions = React.useMemo(() => {
-    if (o?.manager && !managers.some((m) => m.id === o.manager!.id)) {
-      return [
-        { id: o.manager.id, name: `${o.manager.name} (inactive)`, email: o.manager.email, jobTitle: o.manager.jobTitle },
-        ...managers,
-      ];
-    }
-    return managers;
-  }, [managers, o]);
+  // The manager the Contact section offers to copy in. Edit-only: a warehouse has no assignments
+  // until it exists. When several are assigned we offer the first (assignment order) and name them
+  // on the button, so it's never ambiguous whose details get copied.
+  const copyManager = mode === "edit" ? (o?.managers[0] ?? null) : null;
 
   // On create the Type is auto-preselected to the first active option, so the baseline
   // must hold that same default — otherwise the preselect alone would read as a user edit.
@@ -141,7 +129,6 @@ export function WarehouseForm({ mode, warehouse }: { mode: "create" | "edit"; wa
       operatingHours !== (o?.operatingHours ?? "") ||
       timezone !== (o?.timezone ?? "Europe/London") ||
       notes !== (o?.notes ?? "") ||
-      managerUserId !== (o?.managerUserId ?? "") ||
       status !== (o?.status ?? "active"));
 
   useReportDirty("warehouse-form", isDirty);
@@ -223,7 +210,6 @@ export function WarehouseForm({ mode, warehouse }: { mode: "create" | "edit"; wa
           operatingHours: operatingHours.trim() || undefined,
           timezone,
           notes: notes.trim() || undefined,
-          managerUserId: managerUserId || undefined,
           status,
         });
         setSaved(true);
@@ -249,7 +235,6 @@ export function WarehouseForm({ mode, warehouse }: { mode: "create" | "edit"; wa
           operatingHours: operatingHours.trim(),
           timezone,
           notes: notes.trim(),
-          managerUserId, // "" clears the manager
           status,
         });
         setSaved(true);
@@ -451,7 +436,36 @@ export function WarehouseForm({ mode, warehouse }: { mode: "create" | "edit"; wa
             </div>
           </FormSection>
 
-          <FormSection title="Contact" description="Primary contact details for this warehouse.">
+          <FormSection
+            title="Contact"
+            description="Who suppliers, couriers and collecting engineers reach at this site."
+          >
+            {/* The site contact is its OWN data — it isn't always a system user (a goods-in desk, a
+                security gate, a 3PL contact), and it must not silently change when staff change. So
+                this copies the manager in once instead of deriving from them. */}
+            {copyManager && (
+              <div className="mb-4 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setContactPerson(copyManager.name);
+                    setContactEmail(copyManager.email);
+                    if (copyManager.phone) setContactPhone(copyManager.phone);
+                    clearError("contactEmail");
+                    clearError("contactPhone");
+                    pushToast(
+                      copyManager.phone
+                        ? `Copied ${copyManager.name}'s details.`
+                        : `Copied ${copyManager.name}'s details — no phone on their profile.`,
+                      "info",
+                    );
+                  }}
+                  className="text-[11px] font-bold text-[var(--accent)] hover:underline"
+                >
+                  Copy from {copyManager.name}
+                </button>
+              </div>
+            )}
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className={labelCls}>Contact person</label>
@@ -529,24 +543,6 @@ export function WarehouseForm({ mode, warehouse }: { mode: "create" | "edit"; wa
             </div>
           </FormSection>
 
-          <FormSection title="Warehouse Management" description="The staff member who manages this warehouse.">
-            <div>
-              <label className={labelCls}>Warehouse manager</label>
-              <Select
-                value={managerUserId}
-                onChange={(v) => setManagerUserId(v)}
-                ariaLabel="Warehouse manager"
-                placeholder="— No manager assigned —"
-                options={managerOptions.map((m) => ({
-                  value: m.id,
-                  label: m.jobTitle ? `${m.name} — ${m.jobTitle}` : m.name,
-                }))}
-              />
-              <p className="mt-1.5 text-[11px] text-[var(--faint)]">
-                Optional — you can assign or change this at any time.
-              </p>
-            </div>
-          </FormSection>
         </div>
 
         <aside className="lg:sticky lg:top-6 lg:self-start">
@@ -561,6 +557,27 @@ export function WarehouseForm({ mode, warehouse }: { mode: "create" | "edit"; wa
                 <div className="mt-1">
                   <StatusBadge status={status as UserStatus} />
                 </div>
+              </div>
+              {/* Managers are NOT editable here — they're whoever is assigned this warehouse under
+                  Users & Roles, so there is one source of truth for who runs a warehouse. */}
+              <div>
+                <p className="text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
+                  {(o?.managers.length ?? 0) > 1 ? "Managers" : "Manager"}
+                </p>
+                {mode === "edit" && o?.managers.length ? (
+                  <ul className="mt-1 space-y-0.5">
+                    {o.managers.map((m) => (
+                      <li key={m.id} className="text-[var(--ink)]">
+                        {m.name}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="mt-1 text-[var(--faint)]">None assigned</p>
+                )}
+                <p className="mt-1 text-[11px] text-[var(--faint)]">
+                  Set under Users &amp; Roles — assign this warehouse to a staff member there.
+                </p>
               </div>
               <div className="flex items-start gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/40 px-3 py-2.5 text-[11px] text-[var(--muted)]">
                 <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--accent)]" />

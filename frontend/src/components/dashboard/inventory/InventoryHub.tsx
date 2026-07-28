@@ -8,6 +8,7 @@ import { InventoryView } from "./InventoryView";
 import { MovementsTable } from "./MovementsTable";
 import { StockPositionTable } from "./StockPositionTable";
 import { EngineersOverview } from "./EngineersOverview";
+import { ReorderWorkbench } from "./ReorderWorkbench";
 import { SummaryCards } from "./SummaryCards";
 import { AdjustStockForm } from "./AdjustStockForm";
 import { CustomerTransferForm } from "./CustomerTransferForm";
@@ -19,7 +20,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { useGoodsSocket } from "@/hooks/useGoodsSocket";
 import type { StockPosition } from "@/types/stock-position";
 
-type Lens = "all" | "company" | "customer" | "engineer" | "damaged" | "movements";
+type Lens = "all" | "company" | "customer" | "engineer" | "damaged" | "movements" | "reorder";
 type IrmSubTab = "stock" | "catalogue";
 
 const TABS: { id: Lens; label: string }[] = [
@@ -29,6 +30,7 @@ const TABS: { id: Lens; label: string }[] = [
   { id: "engineer", label: "Engineer" },
   { id: "damaged", label: "Damaged" },
   { id: "movements", label: "Movements" },
+  { id: "reorder", label: "Reorder" },
 ];
 
 // A form that takes over the content area, with its own header + close + scroll.
@@ -260,6 +262,11 @@ export function InventoryHub() {
                 : undefined
             }
           />
+        ) : lens === "reorder" ? (
+          // Deliberately NOT keyed on refreshKey: a goods-socket event would remount the workbench
+          // and wipe the user's in-progress selection. Freshness is handled by its own Refresh
+          // button + the server-side revalidation at generate time (stale rows are skipped/capped).
+          <ReorderWorkbench />
         ) : lens === "engineer" ? (
           <EngineersOverview key={`engineer-${refreshKey}`} />
         ) : lens === "damaged" ? (

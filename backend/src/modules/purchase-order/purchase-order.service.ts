@@ -1183,3 +1183,17 @@ export async function incomingForItemWarehouse(irmItemId: string, warehouseId: s
   const lines = await poRepo.incomingLinesForItemWarehouse(irmItemId, warehouseId);
   return lines.reduce((sum, l) => sum + Math.max(0, l.quantity - l.receivedQuantity), 0);
 }
+
+// Bulk sibling for the Reorder workbench: outstanding open-PO quantity for EVERY item × warehouse in
+// one query, keyed "irmItemId|warehouseId". Pure read; the single-pair seam above stays untouched.
+export async function incomingByItemWarehouse(): Promise<Map<string, number>> {
+  const lines = await poRepo.openIncomingLines();
+  const map = new Map<string, number>();
+  for (const l of lines) {
+    const remaining = Math.max(0, l.quantity - l.receivedQuantity);
+    if (remaining === 0) continue;
+    const key = `${l.irmItemId}|${l.purchaseOrder.warehouseId}`;
+    map.set(key, (map.get(key) ?? 0) + remaining);
+  }
+  return map;
+}

@@ -29,6 +29,11 @@ export const listInventory = asyncHandler(async (req, res) => {
   );
 });
 
+// GET /inventory/reorder-suggestions — the Reorder workbench read (per item × warehouse, netted).
+export const getReorderSuggestions = asyncHandler(async (req, res) => {
+  res.json(await inventoryService.getReorderSuggestions(actorFrom(req)));
+});
+
 // GET /inventory/export.csv?... (same filters as the list)
 export const exportInventoryCsv = asyncHandler(async (req, res) => {
   const { search, warehouse, category, status } = req.query;

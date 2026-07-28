@@ -21,11 +21,6 @@ export const listWarehouses = asyncHandler(async (req, res) => {
   res.json(result);
 });
 
-// GET /warehouses/manager-options — active staff users for the manager picker.
-export const listManagerOptions = asyncHandler(async (_req, res) => {
-  res.json({ managers: await warehouseService.listManagerOptions() });
-});
-
 // GET /warehouses/engineer-options — active FIELD ENGINEERS (canHoldStock roles) for the
 // "assign an engineer" pickers on jobs and dispatches.
 export const listEngineerOptions = asyncHandler(async (_req, res) => {

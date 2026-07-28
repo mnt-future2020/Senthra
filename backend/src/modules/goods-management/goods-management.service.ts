@@ -13,6 +13,7 @@ import * as transferRepo from "#modules/engineer-transfer/engineer-transfer.repo
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import * as goodsManagementRepo from "./goods-management.repository.js";
+import { getOpenDemand } from "./demand.js";
 import type { CloseReconcileInput, PostMovementInput, RestoreDamagedInput, ScanLookupInput } from "./goods-management.validation.js";
 import { withTransaction } from "../../lib/prisma.js";
 import { notify } from "#modules/notification/notification.service.js";
@@ -170,67 +171,12 @@ export async function getGoodsStatusByJobs(jobIds: string[]): Promise<Map<string
 }
 
 // ── Open demand (cross-job stock commitments) ───────────────────────────────────────────────────
-// "Open demand" = stock that ACTIVE jobs have planned but NOT yet issued. Issued stock has already
-// left the warehouse (on-hand reflects it), so demand = Σ max(0, planned − grossIssued) over the kit
-// lines of jobs whose goods aren't fully issued. This is the missing piece the per-job qty cap can't
-// see: it lets the planner (and the warehouse demand board) work off TRUE free stock across ALL jobs,
-// not just one — so the same units can't be silently promised to two jobs.
-export interface DemandEntry {
-  irmItemId: string | null;
-  customerStockEntryId: string | null;
-  warehouseId: string | null;
-  itemName: string;
-  warehouseName: string | null;
-  demand: number;
-}
-
-// Keyed by item+warehouse (irm) / entry (customer). excludeJobId drops the job being edited.
-export async function getOpenDemand(excludeJobId?: string): Promise<Map<string, DemandEntry>> {
-  const jobs = await jobRepo.findActiveWithKitLines(excludeJobId);
-  const out = new Map<string, DemandEntry>();
-  if (jobs.length === 0) return out;
-
-  const ids = jobs.map((j) => j.id);
-  const [summaries, movements] = await Promise.all([
-    goodsManagementRepo.getSummariesByJobs(ids),
-    goodsManagementRepo.findMovementsByJobs(ids),
-  ]);
-  const goodsStatusOf = new Map(summaries.map((s) => [s.jobId, s.goodsStatus]));
-  // Gross issued (issue movements only) per kit line — the part already drawn from the warehouse.
-  const issuedByLine = new Map<string, number>();
-  for (const m of movements) {
-    if (m.status !== "posted" || m.direction !== "issue") continue;
-    for (const l of m.items) {
-      if (l.jobKitLineId) issuedByLine.set(l.jobKitLineId, (issuedByLine.get(l.jobKitLineId) ?? 0) + l.qty);
-    }
-  }
-
-  for (const job of jobs) {
-    const gs = goodsStatusOf.get(job.id) ?? "not_issued";
-    // Once goods are fully issued/returned/reconciled there's no future warehouse draw left.
-    if (gs === "issued" || gs === "awaiting_return" || gs === "reconciled") continue;
-    for (const kl of job.kitLines ?? []) {
-      if (kl.lineType === "misc") continue; // misc isn't stock-tracked
-      const demand = Math.max(0, kl.qty - (issuedByLine.get(kl.id) ?? 0));
-      if (demand <= 0) continue;
-      // Key by item + warehouse for BOTH sources (customer stock too) so the per-warehouse demand
-      // board attributes each line to its own warehouse — never collapses two warehouses' demand onto
-      // whichever kit line happened to land in the map first.
-      const key = kl.irmItemId ? `irm|${kl.irmItemId}|${kl.warehouseId}` : `cse|${kl.customerStockEntryId}|${kl.warehouseId}`;
-      const e = out.get(key);
-      if (e) e.demand += demand;
-      else out.set(key, {
-        irmItemId: kl.irmItemId ?? null,
-        customerStockEntryId: kl.customerStockEntryId ?? null,
-        warehouseId: kl.warehouseId ?? null,
-        itemName: kl.itemName,
-        warehouseName: kl.warehouseName ?? null,
-        demand,
-      });
-    }
-  }
-  return out;
-}
+// MOVED to ./demand.ts — a leaf module (repo imports only), so the Reorder workbench in
+// inventory.service can consume the SAME calculation without a service↔service import cycle
+// (this service already imports inventory.service). Re-exported here so existing callers
+// (controller, tests, the Demand board below) keep their import path.
+export { getOpenDemand } from "./demand.js";
+export type { DemandEntry } from "./demand.js";
 
 export interface WarehouseDemandRow {
   source: "irm" | "customer";

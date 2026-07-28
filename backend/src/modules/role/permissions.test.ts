@@ -6,9 +6,14 @@ import {
   LEGACY_PERMISSION_EXPANSION,
   PERMISSION_CATEGORIES,
   PERMISSION_GROUPS,
+  PERMISSION_CAPABILITY,
   PERMISSION_KEYS,
+  PERMISSION_PREREQUISITES,
   WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS,
   applyImpliedPermissions,
+  baseKeyOf,
+  closePrerequisites,
+  splitByCapability,
   customerCompatAdditions,
   escalationViolations,
   roleGrants,
@@ -77,6 +82,178 @@ describe("applyImpliedPermissions (manage implies view)", () => {
   });
   it("leaves '*' untouched", () => {
     expect(applyImpliedPermissions(["*"])).toEqual(["*"]);
+  });
+});
+
+describe("permission dependencies — catalog integrity", () => {
+  // THE INVARIANT THAT WAS MISSING. Every multi-action group must declare a base-access key,
+  // either implicitly (an action labelled "View") or explicitly (`baseKey`). Without one the
+  // group opts out of the implied closure entirely and roles can be saved holding an action with
+  // nothing to reach it from — exactly what happened to the Engineer Portal group.
+  it("every multi-action group resolves a base-access key", () => {
+    for (const group of PERMISSION_GROUPS) {
+      if (group.permissions.length < 2) continue; // single-action group has nothing to depend on
+      expect(baseKeyOf(group), `group "${group.key}" has no base-access key`).toBeTruthy();
+    }
+  });
+
+  it("every resolved base key belongs to its own group", () => {
+    for (const group of PERMISSION_GROUPS) {
+      const base = baseKeyOf(group);
+      if (!base) continue;
+      expect(
+        group.permissions.map((p) => p.key),
+        `base key "${base}" is not a permission of group "${group.key}"`,
+      ).toContain(base);
+    }
+  });
+
+  it("every declared `requires` names a real catalog key", () => {
+    for (const group of PERMISSION_GROUPS) {
+      for (const permission of group.permissions) {
+        for (const required of permission.requires ?? []) {
+          expect(PERMISSION_KEYS, `dangling requires on ${permission.key}`).toContain(required);
+        }
+      }
+    }
+  });
+
+  it("no permission depends on itself", () => {
+    for (const [key, deps] of PERMISSION_PREREQUISITES) expect(deps).not.toContain(key);
+  });
+
+  it("the dependency graph is acyclic (closure terminates for every key)", () => {
+    for (const key of PERMISSION_KEYS) {
+      const closed = closePrerequisites([key]);
+      // A cycle would mean a key reachable from its own prerequisites.
+      for (const dep of PERMISSION_PREREQUISITES.get(key) ?? []) {
+        expect(closePrerequisites([dep]), `cycle through ${key}`).not.toContain(key);
+      }
+      expect(closed).toContain(key);
+    }
+  });
+
+  it("closePrerequisites is idempotent", () => {
+    const once = closePrerequisites(["engineer.jobs.accept", "users.delete"]);
+    expect([...closePrerequisites(once)].sort()).toEqual([...once].sort());
+  });
+});
+
+describe("applyImpliedPermissions — Engineer Portal (base is 'Dashboard', not 'View')", () => {
+  // The regression this whole model exists for: the group has no action named "View", so the old
+  // `action === "View"` lookup skipped it and every engineer grant stayed orphaned.
+  it("a per-job action pulls in the job list AND the portal base", () => {
+    const result = applyImpliedPermissions(["engineer.jobs.accept"]);
+    expect(result).toContain("engineer.jobs.view"); // explicit `requires`
+    expect(result).toContain("engineer.dashboard.view"); // transitively, via the group base
+  });
+
+  it("a non-job portal action pulls in the portal base", () => {
+    expect(applyImpliedPermissions(["engineer.van_stock.request"])).toContain(
+      "engineer.dashboard.view",
+    );
+    expect(applyImpliedPermissions(["engineer.transfer"])).toContain("engineer.dashboard.view");
+    expect(applyImpliedPermissions(["engineer.inventory.view"])).toContain(
+      "engineer.dashboard.view",
+    );
+  });
+
+  it("reproduces the reported bad save as a coherent set", () => {
+    // Saved on the "helpdesk" role via the editor: Accept job + Start job + Settings, with no
+    // Dashboard and no Jobs — the role could reach nothing. The closure now repairs it on write.
+    const result = applyImpliedPermissions([
+      "engineer.jobs.accept",
+      "engineer.jobs.start",
+      "engineer.settings.edit",
+    ]);
+    expect(result).toContain("engineer.dashboard.view");
+    expect(result).toContain("engineer.jobs.view");
+  });
+
+  it("leaves a base-only grant unchanged", () => {
+    expect(applyImpliedPermissions(["engineer.dashboard.view"])).toEqual([
+      "engineer.dashboard.view",
+    ]);
+  });
+
+  it("does not leak engineer keys into an unrelated grant", () => {
+    const result = applyImpliedPermissions(["users.create"]);
+    expect(result.some((k) => k.startsWith("engineer."))).toBe(false);
+  });
+
+  it("keeps the admin-side Engineer Stock Transfers group independent of the portal", () => {
+    // engineer_stock is a different group (Inventory category) with its own "View" — granting it
+    // must NOT drag in the engineer portal.
+    const result = applyImpliedPermissions(["engineer_stock.transfer"]);
+    expect(result).toContain("engineer_stock.view");
+    expect(result).not.toContain("engineer.dashboard.view");
+  });
+});
+
+describe("role capabilities — the Engineer Portal is field-roles-only", () => {
+  const FIELD = { field_ops: true };
+  const NOT_FIELD = { field_ops: false };
+
+  it("tags every Engineer Portal key with the field_ops capability", () => {
+    const engineer = PERMISSION_GROUPS.find((g) => g.key === "engineer")!;
+    for (const permission of engineer.permissions) {
+      expect(PERMISSION_CAPABILITY.get(permission.key)).toBe("field_ops");
+    }
+  });
+
+  it("leaves the admin-side Engineer Stock Transfers group ungated", () => {
+    // engineer_stock is office oversight of transfers — a warehouse/ops role holds it, so it must
+    // NOT require the field capability.
+    expect(PERMISSION_CAPABILITY.get("engineer_stock.view")).toBeUndefined();
+    expect(PERMISSION_CAPABILITY.get("engineer_stock.transfer")).toBeUndefined();
+  });
+
+  it("every capability-tagged key belongs to a real catalog key", () => {
+    for (const key of PERMISSION_CAPABILITY.keys()) expect(PERMISSION_KEYS).toContain(key);
+  });
+
+  it("keeps Engineer Portal keys for a field role", () => {
+    const { kept, removed } = splitByCapability(
+      ["engineer.dashboard.view", "engineer.jobs.view", "users.view"],
+      FIELD,
+    );
+    expect(removed).toEqual([]);
+    expect(kept).toContain("engineer.dashboard.view");
+  });
+
+  it("strips Engineer Portal keys from a NON-field role, keeping everything else", () => {
+    // The reported case: helpdesk holding engineer keys it can never use.
+    const { kept, removed } = splitByCapability(
+      ["users.view", "engineer.dashboard.view", "engineer.jobs.accept", "audit.view"],
+      NOT_FIELD,
+    );
+    expect(kept).toEqual(["users.view", "audit.view"]);
+    expect(removed).toEqual(["engineer.dashboard.view", "engineer.jobs.accept"]);
+  });
+
+  it("never ADDS a permission — output is always a subset of the input", () => {
+    // The safety property the seed repair depends on: stripping can only reduce privilege.
+    const input = ["users.view", "engineer.transfer", "customers.view"];
+    for (const caps of [FIELD, NOT_FIELD]) {
+      const { kept } = splitByCapability(input, caps);
+      for (const key of kept) expect(input).toContain(key);
+    }
+  });
+
+  it("leaves the '*' super-admin wildcard untouched", () => {
+    const { kept, removed } = splitByCapability(["*"], NOT_FIELD);
+    expect(kept).toEqual(["*"]);
+    expect(removed).toEqual([]);
+  });
+
+  it("is idempotent", () => {
+    const once = splitByCapability(["users.view", "engineer.jobs.accept"], NOT_FIELD).kept;
+    expect(splitByCapability(once, NOT_FIELD).kept).toEqual(once);
+  });
+
+  it("does not touch a role with no capability-gated keys at all", () => {
+    const input = ["users.view", "users.create", "settings.manage"];
+    expect(splitByCapability(input, NOT_FIELD)).toEqual({ kept: input, removed: [] });
   });
 });
 

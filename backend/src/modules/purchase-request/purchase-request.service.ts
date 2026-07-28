@@ -9,6 +9,9 @@ import * as jobRepo from "#modules/job/job.repository.js";
 import * as supplierService from "#modules/supplier/supplier.service.js";
 import * as warehouseService from "#modules/warehouse/warehouse.service.js";
 import * as irmService from "#modules/irm/irm.service.js";
+// Safe one-way edge: inventory.service reaches back only to purchase-request.REPOSITORY (never this
+// service), so consuming its live reorder suggestions here cannot create an import cycle.
+import * as inventoryService from "#modules/inventory/inventory.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
@@ -21,6 +24,7 @@ import { paginate } from "../../utils/pagination.js";
 import { diffProcurementChanges } from "../../utils/procurement-diff.js";
 import type {
   CreatePurchaseRequestInput,
+  GenerateReorderInput,
   PrfAttachmentInput,
   PrfLineInput,
   UpdatePurchaseRequestInput,
@@ -775,6 +779,185 @@ export async function duplicatePurchaseRequest(id: string, actor?: AuditActor): 
   // A duplicate is a brand-new draft PRF — a watcher's board must show it like any other create.
   emitPrfUpdated(created);
   return toPublic(created);
+}
+
+// ── Reorder-workbench generation (draft PRFs, grouped supplier × warehouse) ──────────────────
+export interface ReorderGeneratedPrf {
+  id: string;
+  code: string;
+  supplierName: string;
+  warehouseName: string;
+  lineCount: number;
+  totalPence: number;
+}
+export interface ReorderSkippedRow {
+  irmItemId: string;
+  itemName: string;
+  warehouseName: string;
+  reason: string;
+}
+export interface ReorderAdjustedRow {
+  irmItemId: string;
+  itemName: string;
+  warehouseName: string;
+  requestedQty: number;
+  finalQty: number;
+}
+export interface GenerateReorderResult {
+  created: ReorderGeneratedPrf[];
+  skipped: ReorderSkippedRow[];
+  adjusted: ReorderAdjustedRow[];
+}
+
+// Serialises the read-then-create window below. The revalidation only prevents a double-buy if a
+// concurrent caller's draft PRFs ALREADY EXIST when we recompute — two operators pressing Generate
+// at the same moment would otherwise both read the pre-PRF position and both raise a request for the
+// same need. Chaining every call makes the recompute-then-create sequence atomic.
+//
+// Scope: this is an in-process lock, which closes the window for the single always-on server this
+// deploys to — not across horizontally-scaled instances. Cross-instance would need a DB-level lock.
+// The blast radius is bounded either way: these are DRAFTS entering the normal submit → approve →
+// convert pipeline, so an approver still sees a duplicate before any money is committed.
+let reorderGenerateChain: Promise<void> = Promise.resolve();
+function withReorderGenerateLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = reorderGenerateChain.then(fn);
+  // The chain itself must never reject, or one failed generate would poison every later caller.
+  reorderGenerateChain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+// Turn confirmed workbench rows into DRAFT PRFs — one per supplier × warehouse — that flow through
+// the EXISTING submit → approve → convert pipeline (no parallel workflow). Before creating anything
+// the LIVE suggestions are recomputed with the same maths + actor scoping as the workbench read:
+//   • a selected row that no longer triggers is SKIPPED with a reason (stock moved, a GRN landed, or
+//     a concurrent user just generated — their open draft PRFs are part of the netting, and the lock
+//     above is what guarantees those drafts are visible to this recompute);
+//   • a quantity above the live need is CAPPED and reported in `adjusted` (never silently changed).
+// Prices prefill from IrmItem.standardCostPence (an estimate — the draft stays fully editable);
+// required-by defaults to today + the group's longest primary-supplier lead time (fallback 14 days).
+export function generateReorderPrfs(input: GenerateReorderInput, actor?: AuditActor): Promise<GenerateReorderResult> {
+  return withReorderGenerateLock(() => runGenerateReorderPrfs(input, actor));
+}
+
+async function runGenerateReorderPrfs(input: GenerateReorderInput, actor?: AuditActor): Promise<GenerateReorderResult> {
+  const { suggestions } = await inventoryService.getReorderSuggestions(actor);
+  // Only ACTIONABLE rows are orderable. "Covered" rows (physically low but already covered by the
+  // on-order pipeline) carry suggestedQty 0 — exclude them so a stray covered row is treated as "no
+  // longer requires reordering" (skipped) rather than generating a zero-qty line.
+  const liveByKey = new Map(suggestions.filter((s) => !s.covered).map((s) => [`${s.irmItemId}|${s.warehouseId}`, s]));
+
+  type LiveSuggestion = (typeof suggestions)[number];
+  type Survivor = { supplierId: string; warehouseId: string; irmItemId: string; quantity: number; live: LiveSuggestion };
+  const skipped: ReorderSkippedRow[] = [];
+  const adjusted: ReorderAdjustedRow[] = [];
+  const survivors: Survivor[] = [];
+
+  for (const row of input.rows) {
+    assertWarehouseAccess(actor, row.warehouseId);
+    const live = liveByKey.get(`${row.irmItemId}|${row.warehouseId}`);
+    if (!live) {
+      skipped.push({
+        irmItemId: row.irmItemId,
+        itemName: row.itemName?.trim() || "Item",
+        warehouseName: row.warehouseName?.trim() || "warehouse",
+        reason: "No longer requires reordering — stock or open requests changed since the list was calculated.",
+      });
+      continue;
+    }
+    const quantity = Math.min(row.quantity, live.suggestedQty);
+    if (quantity !== row.quantity) {
+      adjusted.push({
+        irmItemId: row.irmItemId,
+        itemName: live.itemName,
+        warehouseName: live.warehouseName,
+        requestedQty: row.quantity,
+        finalQty: quantity,
+      });
+    }
+    survivors.push({ supplierId: row.supplierId, warehouseId: row.warehouseId, irmItemId: row.irmItemId, quantity, live });
+  }
+
+  // One draft PRF per supplier × warehouse (a PRF carries exactly one warehouse, matching the PO rule).
+  const groups = new Map<string, Survivor[]>();
+  for (const s of survivors) {
+    const key = `${s.supplierId}|${s.warehouseId}`;
+    const group = groups.get(key);
+    if (group) group.push(s);
+    else groups.set(key, [s]);
+  }
+
+  // Validate every group's supplier + warehouse BEFORE creating anything, so a supplier/warehouse that
+  // went inactive between the workbench read and now skips just its own group with a reason — rather
+  // than aborting the batch after some draft PRFs were already committed (partial state).
+  const plans: { group: Survivor[]; supplierName: string }[] = [];
+  for (const group of groups.values()) {
+    const { supplierId, warehouseId } = group[0];
+    try {
+      const supplier = await supplierService.requireActiveSupplier(supplierId);
+      await warehouseService.requireActiveWarehouse(warehouseId);
+      plans.push({ group, supplierName: supplier.name });
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : "Supplier or warehouse is no longer available.";
+      for (const s of group) {
+        skipped.push({ irmItemId: s.irmItemId, itemName: s.live.itemName, warehouseName: s.live.warehouseName, reason });
+      }
+    }
+  }
+
+  const created: ReorderGeneratedPrf[] = [];
+  const actorLabel = actor?.email ?? null;
+  for (const { group, supplierName } of plans) {
+    const { supplierId, warehouseId } = group[0];
+    const lineRows = await buildLineRows(
+      group.map((s) => ({ irmItemId: s.irmItemId, quantity: s.quantity, unitPricePence: s.live.unitCostPence })),
+    );
+    const totals = computeTotals(lineRows);
+
+    const leads = group
+      .map((s) => s.live.primarySupplier?.leadTimeDays)
+      .filter((n): n is number => n != null && n > 0);
+    const leadDays = leads.length > 0 ? Math.max(...leads) : 14;
+    const requiredByDate = input.requiredByDate ? new Date(input.requiredByDate) : new Date(Date.now() + leadDays * 86_400_000);
+
+    const prf = await prfRepo.createWithCode(
+      {
+        supplierId,
+        supplierName,
+        warehouseId,
+        sourceType: "reorder", // provenance: raised by the Reorder workbench (system-owned, never client-set)
+        status: "draft",
+        requiredByDate,
+        justification: "Raised from the Reorder workbench (stock at or below reorder level).",
+        currency: "GBP",
+        ...totals,
+        createdBy: actorLabel,
+        updatedBy: actorLabel,
+      },
+      lineRows,
+    );
+    audit.record({
+      actor,
+      action: "purchase_request.created",
+      targetType: "purchase_request",
+      targetId: prf.id,
+      targetLabel: prf.code,
+      metadata: { source: "reorder" },
+    });
+    emitPrfUpdated(prf);
+    created.push({
+      id: prf.id,
+      code: prf.code,
+      supplierName,
+      warehouseName: group[0].live.warehouseName,
+      lineCount: lineRows.length,
+      totalPence: totals.grandTotalPence,
+    });
+  }
+
+  return { created, skipped, adjusted };
 }
 
 // ── Attachments (draft-only — a PRF is editable ONLY in draft, attachments included) ─────────

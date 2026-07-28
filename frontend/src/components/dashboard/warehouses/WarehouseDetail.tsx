@@ -11,6 +11,7 @@ import { Select } from "@/components/ui/Select";
 import { Pagination } from "@/components/ui/Pagination";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
+import { NoStaffAssigned, StaffChip } from "@/components/ui/StaffChip";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { DetailHeader } from "@/components/ui/DetailHeader";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -218,6 +219,8 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 function Overview({ w }: { w: Warehouse }) {
+  const { can } = useAuth();
+  const canViewUsers = can("users.view");
   const addressLines = [w.addressLine1, w.addressLine2, w.city, w.county, w.postcode, w.country]
     .map((l) => l?.trim())
     .filter(Boolean);
@@ -275,26 +278,30 @@ function Overview({ w }: { w: Warehouse }) {
 
       <Card title="Management">
         <div className="space-y-3">
-          <Field label="Warehouse manager">
-            {w.manager ? (
-              <div>
-                <div className="font-semibold">
-                  {w.manager.name}
-                  {w.manager.jobTitle && (
-                    <span className="ml-1.5 text-xs font-normal text-[var(--muted)]">
-                      · {w.manager.jobTitle}
-                    </span>
-                  )}
-                </div>
-                <a className="text-xs text-[var(--accent)] hover:underline" href={`mailto:${w.manager.email}`}>
-                  {w.manager.email}
-                </a>
+          {/* DERIVED, read-only: the staff assigned this warehouse under Users & Roles. There is no
+              manager field on a warehouse — the assignment that grants access IS the assignment. */}
+          <Field
+            label={w.managers.length > 1 ? `Warehouse managers (${w.managers.length})` : "Warehouse manager"}
+          >
+            {w.managers.length ? (
+              <div className="mt-2 space-y-3">
+                {w.managers.map((m) => (
+                  <StaffChip
+                    key={m.id}
+                    staff={m}
+                    href={canViewUsers ? `/dashboard/users/${m.id}` : undefined}
+                  />
+                ))}
               </div>
             ) : (
-              <span className="text-[var(--faint)]">No manager assigned</span>
+              <NoStaffAssigned label="No manager assigned" />
             )}
           </Field>
-          {w.description && <Field label="Description">{w.description}</Field>}
+          <Field label="Description">{w.description}</Field>
+          {/* Card footer — always shown, otherwise there's no clue this is set somewhere else. */}
+          <p className="border-t border-[var(--border)] pt-3 text-[11px] text-[var(--faint)]">
+            Managers are the staff assigned this warehouse under Users &amp; Roles.
+          </p>
         </div>
       </Card>
 

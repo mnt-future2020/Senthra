@@ -37,8 +37,13 @@ export function TransferForm() {
 
   const [irmItemId, setIrmItemId] = React.useState(params.get("item") ?? "");
   const [fromWarehouseId, setFromWarehouseId] = React.useState(params.get("from") ?? "");
-  const [toWarehouseId, setToWarehouseId] = React.useState("");
-  const [quantity, setQuantity] = React.useState("");
+  // ?to= / ?qty= complete the Reorder workbench's "Create Transfer" prefill — the user still reviews
+  // everything (live availability re-checks below) and submits; nothing moves automatically.
+  const [toWarehouseId, setToWarehouseId] = React.useState(params.get("to") ?? "");
+  const [quantity, setQuantity] = React.useState(() => {
+    const q = params.get("qty") ?? "";
+    return /^\d+$/.test(q) && Number(q) > 0 ? q : "";
+  });
   const [movementDate, setMovementDate] = React.useState(today());
   const [referenceNumber, setReferenceNumber] = React.useState("");
   const [description, setDescription] = React.useState("");

@@ -9,12 +9,23 @@ export interface WarehouseTypeRef {
   name: string;
 }
 
-// The manager as surfaced on a warehouse (resolved from the staff User).
+// A staff user in a picker (the engineer dropdowns) — id + label only.
 export interface WarehouseManager {
   id: string;
   name: string;
   email: string;
   jobTitle: string | null; // designation or role name — for the "Name — Role" label
+}
+
+// A warehouse's manager, derived from the Users & Roles assignment. Adds the name parts +
+// profile image so the detail page renders the standard staff avatar chip.
+export interface WarehouseManagerRef extends WarehouseManager {
+  firstName: string;
+  lastName: string;
+  // Only so the form can OFFER to copy the manager into the warehouse's own contact fields — the
+  // site contact (what suppliers, couriers and collecting engineers see) stays separate data.
+  phone: string | null;
+  profileImageUrl: string | null;
 }
 
 export interface Warehouse {
@@ -43,9 +54,9 @@ export interface Warehouse {
   operatingHours: string | null;
   timezone: string | null;
   notes: string | null;
-  // Manager.
-  managerUserId: string | null;
-  manager: WarehouseManager | null;
+  // Managers — DERIVED, read-only. The staff assigned to this warehouse under Users & Roles
+  // (warehouse-scoped roles only), NOT a field on the warehouse. Empty when nobody is assigned.
+  managers: WarehouseManagerRef[];
   status: WarehouseStatus;
   // Stock rollups — 0 until the inventory ledger lands.
   totalStockItems: number;

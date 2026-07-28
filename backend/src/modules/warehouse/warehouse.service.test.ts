@@ -8,7 +8,9 @@ vi.mock("./warehouse.repository.js", () => ({
   unsetDefaultExcept: vi.fn(),
   softDelete: vi.fn(),
 }));
-vi.mock("#modules/user/user.repository.js", () => ({ findById: vi.fn() }));
+vi.mock("#modules/user/user-warehouse.repository.js", () => ({
+  listManagersForWarehouses: vi.fn().mockResolvedValue([]),
+}));
 vi.mock("#modules/warehouse-type/warehouse-type.service.js", () => ({
   requireActiveWarehouseType: vi.fn(),
 }));
@@ -22,15 +24,13 @@ vi.mock("#modules/goods-in/goods-in.repository.js", () => ({ countByWarehouse: v
 vi.mock("#modules/inventory/inventory.repository.js", () => ({ countBalancesWithStockByWarehouse: vi.fn().mockResolvedValue(0) }));
 
 import * as warehouseRepo from "./warehouse.repository.js";
-import * as userRepo from "#modules/user/user.repository.js";
+import * as userWarehouseRepo from "#modules/user/user-warehouse.repository.js";
 import * as warehouseTypeService from "#modules/warehouse-type/warehouse-type.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import { deleteWarehouse, updateWarehouse } from "./warehouse.service.js";
 
 const WH_ID = "f".repeat(24);
-const ACTIVE_MGR = "a".repeat(24);
-const INACTIVE_MGR = "b".repeat(24);
-const NEW_ACTIVE_MGR = "c".repeat(24);
+const MGR_ID = "a".repeat(24);
 const TYPE_ID = "d".repeat(24);
 const NEW_TYPE_ID = "e".repeat(24);
 
@@ -57,8 +57,6 @@ function whRow(over: Record<string, unknown> = {}) {
     operatingHours: null,
     timezone: "Europe/London",
     notes: null,
-    managerUserId: null,
-    manager: null,
     status: "active",
     deletedAt: null,
     createdBy: null,
@@ -72,7 +70,7 @@ function whRow(over: Record<string, unknown> = {}) {
 const mockFindById = warehouseRepo.findById as ReturnType<typeof vi.fn>;
 const mockUpdate = warehouseRepo.update as ReturnType<typeof vi.fn>;
 const mockSoftDelete = warehouseRepo.softDelete as ReturnType<typeof vi.fn>;
-const mockUserFindById = userRepo.findById as ReturnType<typeof vi.fn>;
+const mockListManagers = userWarehouseRepo.listManagersForWarehouses as ReturnType<typeof vi.fn>;
 const mockRequireType = warehouseTypeService.requireActiveWarehouseType as ReturnType<typeof vi.fn>;
 const mockAudit = audit.record as ReturnType<typeof vi.fn>;
 
@@ -80,57 +78,60 @@ const auditActions = () => mockAudit.mock.calls.map((c) => c[0].action);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockListManagers.mockResolvedValue([]);
   mockUpdate.mockImplementation((_id: string, data: Record<string, unknown>) =>
     Promise.resolve(whRow(data)),
   );
 });
 
-describe("updateWarehouse — manager change handling", () => {
-  it("edits other fields when the existing manager is INACTIVE — no error, manager untouched", async () => {
-    mockFindById.mockResolvedValue(
-      whRow({
-        managerUserId: INACTIVE_MGR,
-        manager: { id: INACTIVE_MGR, firstName: "Ina", lastName: "Ctive", email: "ina@x.com", status: "inactive", jobTitle: null, role: null },
-      }),
-    );
-    await expect(
-      updateWarehouse(WH_ID, { name: "Leeds Depot 2", managerUserId: INACTIVE_MGR }),
-    ).resolves.toMatchObject({ name: "Leeds Depot 2" });
-    expect(mockUserFindById).not.toHaveBeenCalled();
+// Managers are DERIVED from the Users & Roles warehouse assignments — a warehouse has no manager
+// column and the warehouse form can never write one.
+describe("updateWarehouse — derived managers", () => {
+  it("surfaces the assigned staff as the warehouse's managers", async () => {
+    mockFindById.mockResolvedValue(whRow());
+    mockListManagers.mockResolvedValue([
+      {
+        warehouseId: WH_ID,
+        user: {
+          id: MGR_ID,
+          firstName: "Ada",
+          lastName: "Keys",
+          email: "ada@x.com",
+          phone: "0113 496 0000",
+          jobTitle: null,
+          profileImageUrl: null,
+          role: { name: "Warehouse Manager" },
+        },
+      },
+    ]);
+    const updated = await updateWarehouse(WH_ID, { name: "Leeds Depot 2" });
+    expect(mockListManagers).toHaveBeenCalledWith([WH_ID]);
+    // Falls back to the role name when the user has no jobTitle, and carries the name parts +
+    // image the avatar chip needs.
+    expect(updated.managers).toEqual([
+      {
+        id: MGR_ID,
+        name: "Ada Keys",
+        firstName: "Ada",
+        lastName: "Keys",
+        email: "ada@x.com",
+        phone: "0113 496 0000",
+        jobTitle: "Warehouse Manager",
+        profileImageUrl: null,
+      },
+    ]);
+  });
+
+  it("reports no managers when nobody is assigned — never an error", async () => {
+    mockFindById.mockResolvedValue(whRow());
+    await expect(updateWarehouse(WH_ID, { name: "Renamed" })).resolves.toMatchObject({ managers: [] });
+  });
+
+  it("ignores a manager id smuggled into the update payload", async () => {
+    mockFindById.mockResolvedValue(whRow());
+    await updateWarehouse(WH_ID, { name: "Renamed", managerUserId: MGR_ID } as never);
     expect("managerUserId" in mockUpdate.mock.calls[0][1]).toBe(false);
-    expect(auditActions()).toContain("warehouse.updated");
-  });
-
-  it("changes an inactive manager to a different ACTIVE manager → manager_assigned", async () => {
-    mockFindById.mockResolvedValue(whRow({ managerUserId: INACTIVE_MGR }));
-    mockUserFindById.mockResolvedValue({ id: NEW_ACTIVE_MGR, status: "active" });
-    await expect(updateWarehouse(WH_ID, { managerUserId: NEW_ACTIVE_MGR })).resolves.toBeTruthy();
-    expect(mockUpdate.mock.calls[0][1].managerUserId).toBe(NEW_ACTIVE_MGR);
-    expect(auditActions()).toContain("warehouse.manager_assigned");
-  });
-
-  it("clears the manager via the scalar FK → manager_removed", async () => {
-    mockFindById.mockResolvedValue(whRow({ managerUserId: ACTIVE_MGR }));
-    await expect(updateWarehouse(WH_ID, { managerUserId: null })).resolves.toBeTruthy();
-    expect(mockUserFindById).not.toHaveBeenCalled();
-    expect(mockUpdate.mock.calls[0][1].managerUserId).toBeNull();
-    expect(auditActions()).toContain("warehouse.manager_removed");
-  });
-
-  it("edits a warehouse that has NO manager — succeeds, manager untouched", async () => {
-    mockFindById.mockResolvedValue(whRow({ managerUserId: null }));
-    await expect(updateWarehouse(WH_ID, { name: "Renamed", managerUserId: null })).resolves.toBeTruthy();
-    expect(mockUserFindById).not.toHaveBeenCalled();
-    expect("managerUserId" in mockUpdate.mock.calls[0][1]).toBe(false);
-  });
-
-  it("rejects assigning an INACTIVE manager", async () => {
-    mockFindById.mockResolvedValue(whRow({ managerUserId: null }));
-    mockUserFindById.mockResolvedValue({ id: INACTIVE_MGR, status: "inactive" });
-    await expect(updateWarehouse(WH_ID, { managerUserId: INACTIVE_MGR })).rejects.toThrow(
-      /not an active user/i,
-    );
-    expect(mockUpdate).not.toHaveBeenCalled();
+    expect(auditActions()).not.toContain("warehouse.manager_assigned");
   });
 });
 

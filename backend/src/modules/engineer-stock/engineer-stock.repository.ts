@@ -65,3 +65,12 @@ export function countEngineerStockWithStockByIrmItem(irmItemId: string): Promise
 export function countEngineerHeldStock(engineerId: string): Promise<number> {
   return prisma.engineerStockBalance.count({ where: { engineerId, quantityOnHand: { gt: 0 } } });
 }
+// The same question across a group of engineers, in one query. Used to block revoking a ROLE's
+// field-operations capability while any of its holders still has stock on the van — the role-level
+// mirror of the per-user deactivation guard.
+export function countHeldStockForEngineers(engineerIds: string[]): Promise<number> {
+  if (engineerIds.length === 0) return Promise.resolve(0);
+  return prisma.engineerStockBalance.count({
+    where: { engineerId: { in: engineerIds }, quantityOnHand: { gt: 0 } },
+  });
+}

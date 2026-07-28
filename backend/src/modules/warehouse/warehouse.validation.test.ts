@@ -32,7 +32,6 @@ describe("createWarehouseSchema — required fields", () => {
       operatingHours: "Mon–Fri 08:00–18:00",
       timezone: "Europe/London",
       notes: "Back gate access only",
-      managerUserId: "b".repeat(24),
       status: "active",
     });
     expect(r.success).toBe(true);
@@ -89,14 +88,16 @@ describe("createWarehouseSchema — required fields", () => {
     );
   });
 
-  it("rejects a manager id that isn't a 24-hex ObjectId", () => {
-    expect(createWarehouseSchema.safeParse({ ...valid(), managerUserId: "123" }).success).toBe(false);
+  it("accepts a blank contact email (clears)", () => {
+    expect(createWarehouseSchema.safeParse({ ...valid(), contactEmail: "" }).success).toBe(true);
   });
 
-  it("normalizes a blank manager id to null and accepts a blank contact email (clears)", () => {
-    const r = createWarehouseSchema.safeParse({ ...valid(), managerUserId: "", contactEmail: "" });
+  // Managers come from the Users & Roles assignment, never from the warehouse payload — a smuggled
+  // manager id must be stripped, not stored.
+  it("strips a manager id from the payload", () => {
+    const r = createWarehouseSchema.safeParse({ ...valid(), managerUserId: "b".repeat(24) });
     expect(r.success).toBe(true);
-    if (r.success) expect(r.data.managerUserId).toBeNull();
+    if (r.success) expect("managerUserId" in r.data).toBe(false);
   });
 });
 

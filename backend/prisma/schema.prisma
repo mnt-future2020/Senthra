@@ -212,10 +212,11 @@ model Warehouse {
   timezone       String? @default("Europe/London")
   notes          String?
 
-  // Primary manager — an active staff user. Optional: assignable after creation
-  // (Create → Assign Manager → Activate).
-  managerUserId String? @db.ObjectId
-  manager       User?   @relation(fields: [managerUserId], references: [id])
+  // NOTE: there is deliberately NO manager column. A warehouse's managers are DERIVED from
+  // `userAssignments` below (the "Assigned warehouses" an admin sets on a user under Users &
+  // Roles, for warehouse-scoped roles). One source of truth: the thing that grants access IS
+  // the thing that names the manager. A separate manager field on the warehouse duplicated it
+  // and granted nothing, so it was removed.
 
   status String @default("active") // active | inactive
 
@@ -255,7 +256,6 @@ model Warehouse {
   updatedAt DateTime @updatedAt
 
   @@index([status])
-  @@index([managerUserId])
   @@index([typeId])
 }
 
@@ -1691,8 +1691,6 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // Warehouses this user is the primary manager of (back-relation; no DB column).
-  managedWarehouses Warehouse[]
   // Explicit warehouse assignments (for warehouse-scoped roles). Rows PERSIST across role changes —
   // only removed on permanent user delete or explicit admin un-assignment (back-relation).
   warehouseAssignments UserWarehouseAssignment[]

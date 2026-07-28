@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { EMAIL_RE, optionalPhoneField } from "../../utils/validation.js";
+import { postcodeField as ukPostcode } from "../../utils/postcode.js";
 
 // Warehouse master-data validation. Geolocation is NOT accepted from the client — the
 // service derives latitude/longitude from the postcode (postcodes.io). Code is
@@ -11,7 +12,6 @@ import { EMAIL_RE, optionalPhoneField } from "../../utils/validation.js";
 // be non-empty, so a required field can never be blanked once set.
 
 const statusEnum = z.enum(["active", "inactive"]);
-const UK_POSTCODE_RE = /^[A-Za-z]{1,2}\d[A-Za-z\d]?\s*\d[A-Za-z]{2}$/;
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 
 // UK-only inventory system → a single-country allow-list. UK postcode validation +
@@ -33,13 +33,6 @@ const contactEmailField = z
   .refine((v) => v === "" || EMAIL_RE.test(v), "Enter a valid email.")
   .optional();
 
-// A reference to a staff user (the manager), validated against the active user list in
-// the service. Three states: omitted (no change), null / "" (clear it), or a valid id.
-const managerIdField = z.preprocess(
-  (v) => (typeof v === "string" && v.trim() === "" ? null : v),
-  z.string().regex(OBJECT_ID_RE, "Select a valid manager.").nullable().optional(),
-);
-
 const timezoneField = z.preprocess(emptyToUndef, z.enum(TIMEZONE_OPTIONS).optional());
 // typeId for UPDATE (optional — only changes when provided). Create requires it (below).
 const optionalTypeIdField = z.preprocess(
@@ -58,19 +51,9 @@ const addressLine1Update = z.string().trim().min(1, "Address line 1 can't be emp
 const cityCreate = z.string({ error: "City is required." }).trim().min(1, "City is required.").max(80);
 const cityUpdate = z.string().trim().min(1, "City can't be empty.").max(80).optional();
 
-const postcodeCreate = z
-  .string({ error: "Postcode is required." })
-  .trim()
-  .min(1, "Postcode is required.")
-  .max(12)
-  .refine((v) => UK_POSTCODE_RE.test(v), "Enter a valid UK postcode (e.g. EC1A 1BB).");
-const postcodeUpdate = z
-  .string()
-  .trim()
-  .min(1, "Postcode is required.")
-  .max(12)
-  .refine((v) => UK_POSTCODE_RE.test(v), "Enter a valid UK postcode (e.g. EC1A 1BB).")
-  .optional();
+// Validates AND normalises to canonical form ("ls14dy" → "LS1 4DY") — see utils/postcode.ts.
+const postcodeCreate = ukPostcode({ required: true });
+const postcodeUpdate = ukPostcode({ required: true }).optional();
 
 const countryCreate = z.enum(COUNTRY_OPTIONS, { error: "Country is required." });
 const countryUpdate = z.preprocess(emptyToUndef, z.enum(COUNTRY_OPTIONS).optional());
@@ -95,7 +78,8 @@ const sharedWarehouseFields = {
   operatingHours: z.string().trim().max(200).optional(),
   timezone: timezoneField,
   notes: z.string().trim().max(2000).optional(),
-  managerUserId: managerIdField,
+  // NOTE: no manager field. Who manages a warehouse is set under Users & Roles (the user's
+  // "Assigned warehouses") and derived on read — never written from the warehouse form.
   status: statusEnum.optional(),
 };
 

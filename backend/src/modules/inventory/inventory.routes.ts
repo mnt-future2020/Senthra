@@ -14,6 +14,8 @@ router.use(requireAuth);
 router.get("/", requirePermission("inventory.view"), inventoryController.listInventory);
 router.get("/export.csv", requirePermission("inventory.export"), inventoryController.exportInventoryCsv);
 router.get("/availability", requirePermission("inventory.view"), inventoryController.getAvailability);
+// Reorder workbench: netted per-item×warehouse buy suggestions (warehouse-scoped in the service).
+router.get("/reorder-suggestions", requirePermission("inventory.view"), inventoryController.getReorderSuggestions);
 
 // Movement history + the only write (warehouse → warehouse transfer).
 router.get("/transfers", requirePermission("inventory.history"), inventoryController.listTransfers);

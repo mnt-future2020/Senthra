@@ -313,6 +313,20 @@ async function fastForwardCounter(): Promise<void> {
   await prisma.counter.upsert({ where: { key: IRM_COUNTER_KEY }, create: { key: IRM_COUNTER_KEY, seq: max }, update: { seq: max } });
 }
 
+// Reorder-workbench seam: each item's PRIMARY supplier link (if any) in ONE query, for many items.
+// The supplier row is included so the caller gets name/status/lead-time without a second lookup.
+export function findPrimarySupplierLinks(irmItemIds: string[]) {
+  if (irmItemIds.length === 0) return Promise.resolve([]);
+  return prisma.irmItemSupplier.findMany({
+    where: { irmItemId: { in: irmItemIds }, isPrimary: true, supplier: { is: { deletedAt: null } } },
+    select: {
+      irmItemId: true,
+      leadTimeDays: true,
+      supplier: { select: { id: true, name: true, status: true, leadTimeDays: true } },
+    },
+  });
+}
+
 // Create an item with a freshly-allocated, collision-safe code (suppliers added separately).
 // `prefix` is the configured display prefix (e.g. "IRM"); the number comes from the fixed counter.
 export async function createWithCode(

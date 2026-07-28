@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { EMAIL_RE, optionalPhoneField } from "../../utils/validation.js";
+import { postcodeField as ukPostcode } from "../../utils/postcode.js";
 
 // Supplier master-data validation. Code is auto-allocated (SUP-0001). Type references the
 // SupplierType master (typeId). No geolocation — suppliers aren't geocoded.
@@ -10,7 +11,6 @@ import { EMAIL_RE, optionalPhoneField } from "../../utils/validation.js";
 // non-empty, so a required field can never be blanked once set.
 
 const statusEnum = z.enum(["active", "inactive"]);
-const UK_POSTCODE_RE = /^[A-Za-z]{1,2}\d[A-Za-z\d]?\s*\d[A-Za-z]{2}$/;
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 // Lenient website check: empty, a bare domain, or a full URL (http/https).
 const WEBSITE_RE = /^(https?:\/\/)?[\w-]+(\.[\w-]+)+([/?#].*)?$/i;
@@ -100,19 +100,9 @@ const addressLine1Update = z
 const cityCreate = z.string({ error: "City is required." }).trim().min(1, "City is required.").max(80);
 const cityUpdate = z.string().trim().min(1, "City can't be empty.").max(80).optional();
 
-const postcodeCreate = z
-  .string({ error: "Postcode is required." })
-  .trim()
-  .min(1, "Postcode is required.")
-  .max(12)
-  .refine((v) => UK_POSTCODE_RE.test(v), "Enter a valid UK postcode (e.g. EC1A 1BB).");
-const postcodeUpdate = z
-  .string()
-  .trim()
-  .min(1, "Postcode is required.")
-  .max(12)
-  .refine((v) => UK_POSTCODE_RE.test(v), "Enter a valid UK postcode (e.g. EC1A 1BB).")
-  .optional();
+// Validates AND normalises to canonical form ("ls14dy" → "LS1 4DY") — see utils/postcode.ts.
+const postcodeCreate = ukPostcode({ required: true });
+const postcodeUpdate = ukPostcode({ required: true }).optional();
 
 const countryCreate = z.enum(COUNTRY_OPTIONS, { error: "Country is required." });
 const countryUpdate = z.preprocess(emptyToUndef, z.enum(COUNTRY_OPTIONS).optional());

@@ -280,6 +280,24 @@ export async function createWithCode(
   throw new Error("Could not allocate a unique purchase-request code.");
 }
 
+// --- Reorder-workbench READ seam --------------------------------------------------------------
+// Quantity already sitting on OPEN (draft/submitted/approved) PRFs per item × warehouse, keyed
+// "irmItemId|warehouseId". Converted/cancelled PRFs don't count (converted stock shows up as
+// incoming on the generated PO instead — counting both would double-net). warehouseId + status live
+// on the PARENT PurchaseRequest, so this is a findMany + relation-select reduced in memory.
+export async function openQuantitiesByItemWarehouse(): Promise<Map<string, number>> {
+  const lines = await prisma.purchaseRequestItem.findMany({
+    where: { purchaseRequest: { is: { status: { in: ["draft", "submitted", "approved"] }, deletedAt: null } } },
+    select: { irmItemId: true, quantity: true, purchaseRequest: { select: { warehouseId: true } } },
+  });
+  const map = new Map<string, number>();
+  for (const l of lines) {
+    const key = `${l.irmItemId}|${l.purchaseRequest.warehouseId}`;
+    map.set(key, (map.get(key) ?? 0) + l.quantity);
+  }
+  return map;
+}
+
 // --- Dashboard read-models — not a generic reporting API (read-only; warehouse-scoped where applicable) ---
 
 /** Count of PRFs awaiting Finance review. */

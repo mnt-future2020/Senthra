@@ -115,7 +115,7 @@ export function OverviewView() {
   const errorSig = errors && errors.length > 0 ? [...errors].sort().join(",") : null;
   const showErrors = errorSig !== null && errorSig !== dismissedErrorSig;
   const hasCards = Boolean(
-    cards.pendingPrfs || cards.openPos || cards.activeJobs || cards.lowStock || cards.goodsReceived || cards.overdueHoldings,
+    cards.pendingPrfs || cards.openPos || cards.activeJobs || cards.lowStock || cards.reorderNeeded || cards.expectedThisWeek || cards.goodsReceived || cards.overdueHoldings,
   );
   const hasCharts = Boolean(charts.spendTrend || charts.poPipeline);
   const nothingVisible = !hasCards && !hasCharts && !worklist && !activity;
@@ -210,6 +210,41 @@ export function OverviewView() {
               href="/dashboard/inventory?status=low_stock"
             />
           ) : null}
+          {cards.reorderNeeded ? (
+            <StatCard
+              title="Reorder Needed"
+              count={cards.reorderNeeded.count}
+              secondary={
+                cards.reorderNeeded.count === 0 ? (
+                  "Nothing to buy — pipeline covers demand"
+                ) : (
+                  <>
+                    {cards.reorderNeeded.criticalCount > 0 ? (
+                      <span className="font-semibold text-[var(--neg)]">{cards.reorderNeeded.criticalCount} critical</span>
+                    ) : null}
+                    {cards.reorderNeeded.criticalCount > 0 && cards.reorderNeeded.supplierGaps > 0 ? " · " : null}
+                    {cards.reorderNeeded.supplierGaps > 0 ? `${cards.reorderNeeded.supplierGaps} missing supplier` : null}
+                    {cards.reorderNeeded.criticalCount === 0 && cards.reorderNeeded.supplierGaps === 0 ? "Open the workbench to review" : null}
+                  </>
+                )
+              }
+              href="/dashboard/inventory?tab=reorder"
+            />
+          ) : null}
+          {cards.expectedThisWeek ? (
+            <StatCard
+              title="Expected This Week"
+              count={cards.expectedThisWeek.dueThisWeek}
+              secondary={
+                cards.expectedThisWeek.overdue > 0 ? (
+                  <span className="font-semibold text-[var(--neg)]">{cards.expectedThisWeek.overdue} overdue — chase the supplier</span>
+                ) : (
+                  "Open POs due in the next 7 days"
+                )
+              }
+              href="/dashboard/purchase-orders?status=sent"
+            />
+          ) : null}
           {cards.goodsReceived ? (
             <StatCard
               title="Goods Received"
@@ -268,7 +303,7 @@ function OverviewSkeleton() {
     <div className="flex animate-pulse flex-col gap-5">
       <div className="h-8 w-40 rounded bg-[var(--surface-2)]" />
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {Array.from({ length: 6 }).map((_, i) => (
+        {Array.from({ length: 8 }).map((_, i) => (
           <div key={i} className={`h-28 ${block}`} style={rad} />
         ))}
       </div>

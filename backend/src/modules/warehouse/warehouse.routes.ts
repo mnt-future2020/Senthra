@@ -14,16 +14,9 @@ const router = Router();
 
 router.use(requireAuth);
 
-// Static route BEFORE the /:id param route so it isn't captured as an id. The manager
-// picker is needed by anyone who can view/create/edit a warehouse.
-router.get(
-  "/manager-options",
-  requireAnyPermission("warehouse.view", "warehouse.create", "warehouse.edit"),
-  warehouseController.listManagerOptions,
-);
-
 // Field-engineer picker (canHoldStock roles only) for the job "assign an engineer" dropdowns.
-// Available to whoever can create/edit/assign a job.
+// Available to whoever can create/edit/assign a job. Static route BEFORE the /:id param route so
+// it isn't captured as an id.
 router.get(
   "/engineer-options",
   requireAnyPermission(

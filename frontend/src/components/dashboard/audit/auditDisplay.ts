@@ -19,6 +19,8 @@ const VERB_TONE: Record<string, ActionTone> = {
   // negative, default change as an update.
   activated: "create",
   deactivated: "delete",
+  // HISTORICAL: warehouses no longer carry a manager field (managers are derived from the Users &
+  // Roles assignments), but existing audit rows still use these actions and must keep rendering.
   manager_assigned: "create",
   manager_removed: "delete",
   default_changed: "update",

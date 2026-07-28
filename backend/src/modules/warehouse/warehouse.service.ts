@@ -3,7 +3,7 @@ import type { Prisma } from "@prisma/client";
 import * as warehouseRepo from "./warehouse.repository.js";
 import type { WarehouseWithRelations } from "./warehouse.repository.js";
 import * as warehouseTypeService from "#modules/warehouse-type/warehouse-type.service.js";
-import * as userRepo from "#modules/user/user.repository.js";
+import * as userWarehouseRepo from "#modules/user/user-warehouse.repository.js";
 import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import * as prfRepo from "#modules/purchase-request/purchase-request.repository.js";
 import * as grnRepo from "#modules/goods-in/goods-in.repository.js";
@@ -19,12 +19,25 @@ import type { CreateWarehouseInput, UpdateWarehouseInput } from "./warehouse.val
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 const STATUSES = ["active", "inactive"] as const;
 
-// A manager as surfaced on a warehouse (resolved live from the User record).
+// A staff user in a picker (the engineer dropdowns) — id + label only.
 export interface PublicWarehouseManager {
   id: string;
   name: string;
   email: string;
   jobTitle: string | null; // designation or role name — for the "Name — Role" dropdown
+}
+
+// A warehouse's manager, DERIVED from the Users & Roles assignment. Carries the name parts +
+// profile image on top of the picker shape so the UI can render the standard staff avatar chip
+// and link through to the user's page.
+export interface PublicWarehouseManagerRef extends PublicWarehouseManager {
+  firstName: string;
+  lastName: string;
+  // The warehouse's own contact fields are separate data (they go to suppliers, couriers and the
+  // engineers collecting a kit — a site contact isn't always a system user). This is here purely so
+  // the form can OFFER to copy the manager's details into them; nothing derives from it.
+  phone: string | null;
+  profileImageUrl: string | null;
 }
 
 // The warehouse's operational type (resolved from the WarehouseType master).
@@ -59,9 +72,10 @@ export interface PublicWarehouse {
   operatingHours: string | null;
   timezone: string | null;
   notes: string | null;
-  // Manager.
-  managerUserId: string | null;
-  manager: PublicWarehouseManager | null;
+  // Managers — DERIVED, read-only. The staff assigned to this warehouse under Users & Roles
+  // (warehouse-scoped roles only). Never set from the warehouse form; empty when nobody is
+  // assigned. See userWarehouseRepo.listManagersForWarehouses.
+  managers: PublicWarehouseManagerRef[];
   status: string;
   // Stock rollups — ZERO until the inventory ledger module is built (master-data only).
   // Surfaced now so the list columns + future wiring stay stable.
@@ -82,17 +96,38 @@ export interface PagedWarehouses {
   totalPages: number;
 }
 
-function toManager(m: WarehouseWithRelations["manager"]): PublicWarehouseManager | null {
-  if (!m) return null;
+function toManager(u: userWarehouseRepo.WarehouseManagerAssignment["user"]): PublicWarehouseManagerRef {
   return {
-    id: m.id,
-    name: `${m.firstName} ${m.lastName}`.trim() || m.email,
-    email: m.email,
-    jobTitle: m.jobTitle ?? m.role?.name ?? null,
+    id: u.id,
+    name: `${u.firstName} ${u.lastName}`.trim() || u.email,
+    firstName: u.firstName,
+    lastName: u.lastName,
+    email: u.email,
+    phone: u.phone,
+    jobTitle: u.jobTitle ?? u.role?.name ?? null,
+    profileImageUrl: u.profileImageUrl,
   };
 }
 
-function toPublic(w: WarehouseWithRelations): PublicWarehouse {
+// Managers per warehouse id, in assignment order. One query for the whole page (never per row).
+async function managersByWarehouse(warehouseIds: string[]): Promise<Map<string, PublicWarehouseManagerRef[]>> {
+  const rows = await userWarehouseRepo.listManagersForWarehouses(warehouseIds);
+  const byWarehouse = new Map<string, PublicWarehouseManagerRef[]>();
+  for (const row of rows) {
+    const list = byWarehouse.get(row.warehouseId);
+    if (list) list.push(toManager(row.user));
+    else byWarehouse.set(row.warehouseId, [toManager(row.user)]);
+  }
+  return byWarehouse;
+}
+
+// Resolve the derived managers for a SINGLE warehouse (create/update/get responses).
+async function withManagers(w: WarehouseWithRelations): Promise<PublicWarehouse> {
+  const byWarehouse = await managersByWarehouse([w.id]);
+  return toPublic(w, byWarehouse.get(w.id) ?? []);
+}
+
+function toPublic(w: WarehouseWithRelations, managers: PublicWarehouseManagerRef[]): PublicWarehouse {
   return {
     id: w.id,
     code: w.code,
@@ -115,8 +150,7 @@ function toPublic(w: WarehouseWithRelations): PublicWarehouse {
     operatingHours: w.operatingHours,
     timezone: w.timezone,
     notes: w.notes,
-    managerUserId: w.managerUserId,
-    manager: toManager(w.manager),
+    managers,
     status: w.status ?? "active",
     totalStockItems: 0,
     totalStockQuantity: 0,
@@ -132,18 +166,7 @@ const trimToNull = (v: string | null | undefined): string | null => {
   return t ? t : null;
 };
 
-// Resolve + validate the optional manager. Returns the user id to store (or null).
-// Throws if the id doesn't point to an active staff user.
-async function resolveManager(managerUserId: string | null | undefined): Promise<string | null> {
-  const id = managerUserId?.trim();
-  if (!id) return null;
-  const user = await userRepo.findById(id); // excludes soft-deleted
-  if (!user) throw badRequest("Selected manager no longer exists.");
-  if (user.status !== "active") throw badRequest("Selected manager is not an active user.");
-  return user.id;
-}
-
-// Common scalar columns from create input (name/type/manager/default/coords set by the
+// Common scalar columns from create input (name/type/default/coords set by the
 // caller). Country defaults to United Kingdom; timezone to Europe/London.
 function warehouseColumns(input: CreateWarehouseInput) {
   return {
@@ -186,7 +209,14 @@ export async function listWarehouses(
   const total = await warehouseRepo.count(filters);
   const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
   const rows = await warehouseRepo.findMany(filters, skip, pageSize, params.sort);
-  return { warehouses: rows.map(toPublic), total, page, pageSize, totalPages };
+  const managers = await managersByWarehouse(rows.map((r) => r.id));
+  return {
+    warehouses: rows.map((r) => toPublic(r, managers.get(r.id) ?? [])),
+    total,
+    page,
+    pageSize,
+    totalPages,
+  };
 }
 
 // Resolve by database id (24-hex) or warehouse code (so pages can route by the code). Enforces
@@ -198,7 +228,7 @@ export async function getWarehouse(idOrCode: string, actor?: AuditActor): Promis
     : await warehouseRepo.findByCode(idOrCode);
   if (!w) throw notFound("Warehouse not found.");
   assertWarehouseAccess(actor, w.id);
-  return toPublic(w);
+  return withManagers(w);
 }
 
 export async function createWarehouse(
@@ -210,7 +240,6 @@ export async function createWarehouse(
 
   // Type is required + must be an active WarehouseType.
   await warehouseTypeService.requireActiveWarehouseType(input.typeId);
-  const managerUserId = await resolveManager(input.managerUserId);
   const coords = await geocodePostcode(input.postcode);
   const actorLabel = actor?.email ?? null;
 
@@ -221,7 +250,6 @@ export async function createWarehouse(
     latitude: coords?.latitude ?? null,
     longitude: coords?.longitude ?? null,
     warehouseType: { connect: { id: input.typeId } },
-    ...(managerUserId ? { manager: { connect: { id: managerUserId } } } : {}),
     createdBy: actorLabel,
     updatedBy: actorLabel,
   });
@@ -241,7 +269,7 @@ export async function createWarehouse(
     targetId: created.id,
     targetLabel: `${created.name} (${created.code})`,
   });
-  return toPublic(created);
+  return withManagers(created);
 }
 
 export async function updateWarehouse(
@@ -260,7 +288,7 @@ export async function updateWarehouse(
     throw conflict("Select another default warehouse first.");
   }
 
-  // Unchecked input lets us set the scalar `typeId` / `managerUserId` FKs directly.
+  // Unchecked input lets us set the scalar `typeId` FK directly.
   const data: Prisma.WarehouseUncheckedUpdateInput = {};
   if (typeof input.name === "string" && input.name.trim()) data.name = input.name.trim();
   if (input.description !== undefined) data.description = trimToNull(input.description);
@@ -295,14 +323,6 @@ export async function updateWarehouse(
 
   // --- granular events derived from old → new transitions -------------------
   const events: string[] = [];
-
-  // Manager: only touch the relationship when it ACTUALLY changes (so editing other
-  // fields still works after a manager was deactivated). Clear via the scalar FK.
-  if (input.managerUserId !== undefined && input.managerUserId !== existing.managerUserId) {
-    const resolved = input.managerUserId === null ? null : await resolveManager(input.managerUserId);
-    data.managerUserId = resolved;
-    events.push(resolved ? "warehouse.manager_assigned" : "warehouse.manager_removed");
-  }
 
   // Default: setting this warehouse as the default is its own event.
   if (input.isDefault !== undefined) {
@@ -347,7 +367,7 @@ export async function updateWarehouse(
   for (const action of events.length ? events : ["warehouse.updated"]) {
     audit.record({ actor, action, targetType: "warehouse", targetId: id, targetLabel: label });
   }
-  return toPublic(updated);
+  return withManagers(updated);
 }
 
 // A future dependency-checker: returns how many records of a given kind reference this
@@ -401,7 +421,7 @@ export async function deleteWarehouse(id: string, actor?: AuditActor): Promise<v
 }
 
 // Active warehouses for a picker (id/code/name only) — e.g. the user form's "Assigned Warehouses"
-// multi-select. Lean by design (mirrors listManagerOptions): never pages the full warehouse records.
+// multi-select. Lean by design: never pages the full warehouse records.
 export interface PublicWarehouseOption {
   id: string;
   code: string;
@@ -413,19 +433,8 @@ export async function listWarehouseOptions(actor?: AuditActor): Promise<PublicWa
   return warehouseRepo.findOptions(warehouseScopeFilter(actor));
 }
 
-// Active staff users for the manager dropdown (id + display name + email + job title).
-export async function listManagerOptions(): Promise<PublicWarehouseManager[]> {
-  const users = await warehouseRepo.findManagerOptions();
-  return users.map((u) => ({
-    id: u.id,
-    name: `${u.firstName} ${u.lastName}`.trim() || u.email,
-    email: u.email,
-    jobTitle: u.jobTitle ?? u.role?.name ?? null,
-  }));
-}
-
 // Active FIELD ENGINEERS (canHoldStock roles) for the "assign an engineer" dropdowns on jobs and
-// dispatches — same shape as listManagerOptions but role-filtered so only assignable engineers show.
+// dispatches — role-filtered so only assignable engineers show.
 export async function listEngineerOptions(): Promise<PublicWarehouseManager[]> {
   const users = await warehouseRepo.findEngineerOptions();
   return users.map((u) => ({

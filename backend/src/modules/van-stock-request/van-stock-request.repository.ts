@@ -254,6 +254,21 @@ export async function findOpenLineItems(engineerId: string, type: string): Promi
   return rows.flatMap((r) => r.lines.map((l) => ({ irmItemId: l.irmItemId, code: r.code })));
 }
 
+// How many requests are still in flight for a group of engineers — pending, approved, or partly
+// fulfilled. An approved-but-unscanned restock credits the engineer's van when the warehouse
+// finally scans it out, so a role that loses the field capability while one is open would end up
+// holding stock it can never return. Used by the role-capability guard.
+export function countOpenForEngineers(engineerIds: string[]): Promise<number> {
+  if (engineerIds.length === 0) return Promise.resolve(0);
+  return prisma.vanStockRequest.count({
+    where: {
+      engineerId: { in: engineerIds },
+      deletedAt: null,
+      status: { in: ["pending", "approved", "partially_fulfilled"] },
+    },
+  });
+}
+
 // ---- Atomic transitions ------------------------------------------------------------------------
 
 export interface ApprovalPatch {

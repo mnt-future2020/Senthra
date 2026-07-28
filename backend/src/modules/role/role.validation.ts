@@ -28,6 +28,10 @@ const permissionsField = z
   .max(MAX_PERMISSIONS, "Too many permissions.")
   .optional();
 
+// Field-operations capability (Role.canHoldStock). A capability, not a permission — the service
+// additionally restricts CHANGING it to a full-access ("*") actor.
+const canHoldStockField = z.boolean().optional();
+
 export const createRoleSchema = z.object({
   name: z
     .string({ error: "Role name is required." })
@@ -36,6 +40,7 @@ export const createRoleSchema = z.object({
     .max(60),
   description: z.string().trim().max(300).optional(),
   permissions: permissionsField,
+  canHoldStock: canHoldStockField,
 });
 export type CreateRoleInput = z.infer<typeof createRoleSchema>;
 
@@ -43,5 +48,6 @@ export const updateRoleSchema = z.object({
   name: z.string().trim().min(1, "Role name can't be empty.").max(60).optional(),
   description: z.string().trim().max(300).optional(),
   permissions: permissionsField,
+  canHoldStock: canHoldStockField,
 });
 export type UpdateRoleInput = z.infer<typeof updateRoleSchema>;

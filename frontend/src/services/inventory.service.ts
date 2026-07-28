@@ -129,6 +129,48 @@ export function listItemWarehouseStock(irmItemId: string): Promise<InventoryBala
   return api<PagedInventory>(`/inventory${listQs({ irmItem: irmItemId, pageSize: 200 })}`).then((r) => r.inventory);
 }
 
+// ── Reorder workbench ─────────────────────────────────────────────────────────
+// Netted per-item×warehouse buy suggestions. Server-computed and server-scoped; uncached so the
+// "Last calculated" timestamp is always honest.
+export type ReorderReason = "negative_stock" | "out_of_stock" | "below_reorder" | "planned_demand";
+export interface ReorderSuggestion {
+  irmItemId: string;
+  itemCode: string;
+  itemName: string;
+  sku: string | null;
+  baseUnit: string | null;
+  categoryId: string | null;
+  categoryName: string | null;
+  warehouseId: string;
+  warehouseName: string;
+  warehouseCode: string;
+  onHand: number;
+  reserved: number;
+  available: number;
+  incoming: number;
+  openPrf: number;
+  plannedDemand: number; // active jobs' planned-but-unissued kit qty drawing from this warehouse
+  projected: number;
+  reorderLevel: number | null;
+  target: number;
+  packSize: number | null;
+  suggestedQty: number;
+  reason: ReorderReason;
+  covered: boolean;
+  critical: boolean;
+  unitCostPence: number;
+  trackSerialNumbers: boolean;
+  trackBatchNumbers: boolean;
+  primarySupplier: { id: string; name: string; status: string; leadTimeDays: number | null } | null;
+}
+export interface ReorderSuggestionsResult {
+  suggestions: ReorderSuggestion[];
+  calculatedAt: string;
+}
+export function getReorderSuggestions(): Promise<ReorderSuggestionsResult> {
+  return api<ReorderSuggestionsResult>("/inventory/reorder-suggestions");
+}
+
 export function listTransfers(params: TransferListParams = {}): Promise<PagedTransfers> {
   return api<PagedTransfers>(`/inventory/transfers${transferQs(params)}`);
 }

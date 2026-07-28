@@ -12,6 +12,56 @@ export interface AssignedWarehouse {
   name: string;
 }
 
+// The staff slice surfaced as a warehouse's manager (a thin slice of User — never the whole
+// record). jobTitle + role.name drive the "Name · Role" label; the name parts + image let the UI
+// render the same avatar chip as every other staff listing.
+const managerUserSelect = {
+  id: true,
+  firstName: true,
+  lastName: true,
+  email: true,
+  phone: true,
+  jobTitle: true,
+  profileImageUrl: true,
+  role: { select: { name: true } },
+} satisfies Prisma.UserSelect;
+
+export interface WarehouseManagerAssignment {
+  warehouseId: string;
+  user: {
+    id: string;
+    firstName: string;
+    lastName: string;
+    email: string;
+    phone: string | null;
+    jobTitle: string | null;
+    profileImageUrl: string | null;
+    role: { name: string } | null;
+  };
+}
+
+// The people who manage the given warehouses — the SINGLE source of truth for "who runs this
+// warehouse", derived from the assignments an admin makes under Users & Roles (there is no
+// manager field on the Warehouse record).
+//
+// The user filter is what makes this correct: assignment rows PERSIST across role changes (see the
+// note at the top), so a user moved off a warehouse-scoped role — or deactivated — would otherwise
+// keep showing up as a manager forever. Only an ACTIVE, non-deleted user on a warehouse-scoped role
+// actually manages a warehouse today.
+export function listManagersForWarehouses(warehouseIds: string[]): Promise<WarehouseManagerAssignment[]> {
+  if (!warehouseIds.length) return Promise.resolve([]);
+  return prisma.userWarehouseAssignment.findMany({
+    where: {
+      warehouseId: { in: warehouseIds },
+      user: {
+        is: { status: "active", deletedAt: null, role: { is: { isWarehouseScoped: true } } },
+      },
+    },
+    select: { warehouseId: true, user: { select: managerUserSelect } },
+    orderBy: { assignedAt: "asc" },
+  });
+}
+
 // Just the assigned warehouse ids (for populating the principal's accessible-warehouse set).
 export function listWarehouseIds(userId: string): Promise<string[]> {
   if (!userId) return Promise.resolve([]);

@@ -4,6 +4,7 @@ import * as React from "react";
 import { AlertTriangle, Loader2, RefreshCw, Upload, UserRound } from "lucide-react";
 
 import * as userService from "@/services/user.service";
+import { PostcodeField } from "@/components/ui/PostcodeField";
 import { MAX_IMAGE_BYTES, readFileAsDataUrl } from "@/lib/image";
 import { optimizeCloudinaryUrl } from "@/lib/utils";
 import type { User } from "@/types/user";
@@ -101,6 +102,10 @@ export function ProfileEditCard() {
   };
 
   const set = (k: keyof Form, v: string) => setForm((f) => ({ ...f, [k]: v }));
+  // PostcodeField drives City through a React state setter (so it can fill it and later undo
+  // its own fill); this adapts one key of the single `form` object into that shape.
+  const setField = (k: keyof Form): React.Dispatch<React.SetStateAction<string>> =>
+    (v) => setForm((f) => ({ ...f, [k]: typeof v === "function" ? v(f[k]) : v }));
   const previewUrl = removeImage ? null : newImage ?? (currentAvatar ? optimizeCloudinaryUrl(currentAvatar) : null);
 
   if (loading) return <ProfileEditSkeleton />;
@@ -166,10 +171,14 @@ export function ProfileEditCard() {
             <span className="text-xs font-bold text-[var(--ink)]">Address line 2</span>
             <input className={inputCls} value={form.addressLine2} onChange={(e) => set("addressLine2", e.target.value)} />
           </label>
-          <label className="space-y-1">
-            <span className="text-xs font-bold text-[var(--ink)]">Postcode</span>
-            <input className={inputCls} value={form.postcode} onChange={(e) => set("postcode", e.target.value)} />
-          </label>
+          {/* Shared field: same validation, canonical "LS1 4DY" formatting and postcode lookup
+              as every other address form, instead of a bare text input. */}
+          <PostcodeField
+            value={form.postcode}
+            onChange={(v) => set("postcode", v)}
+            setCity={setField("city")}
+            required={false}
+          />
         </div>
 
         {msg && (
