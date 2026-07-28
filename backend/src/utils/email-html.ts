@@ -122,6 +122,83 @@ export function buildEmailHeaderRow(
           </tr>`;
 }
 
+// Tokens whose value is a secret the recipient has to copy by hand. A line holding
+// one of these ALONE (optionally behind a "Label:") is lifted out of the prose into
+// a credential card, so the value sits on its own selectable line.
+const CREDENTIAL_TOKENS = new Set(["temporaryPassword"]);
+
+// Tokens that aren't secret but belong WITH the credentials when they sit right
+// beside them (so "Email: … / Temporary password: …" reads as one block). On their
+// own, elsewhere in a message, they stay ordinary prose. `mailto` marks a value we
+// wrap in our own anchor — otherwise Gmail auto-links the address and restyles it
+// as blue underlined text inside the card.
+const COMPANION_TOKENS = new Map<string, { mailto: boolean }>([["email", { mailto: true }]]);
+
+// Monospace so ambiguous glyphs stay distinguishable and the value reads as data.
+const MONO = "ui-monospace,SFMono-Regular,'SF Mono',Menlo,Consolas,'Liberation Mono',monospace";
+
+// A whole line that is `Label: {{token}}` or a bare `{{token}}` — nothing else on it.
+const CREDENTIAL_LINE = /^(?:([^:{}]{1,60}?)\s*:\s*)?\{\{\s*([\w.]+)\s*\}\}$/;
+
+interface CredentialField {
+  // The label the admin typed, printed above the value ("" when the line was a
+  // bare token). Detection is by token, never by this text, so renaming or
+  // translating the label can't break the card.
+  label: string;
+  token: string;
+  secret: boolean;
+  mailto: boolean;
+}
+
+function matchCredentialLine(line: string): CredentialField | null {
+  const m = CREDENTIAL_LINE.exec(line.trim());
+  if (!m) return null;
+  const token = m[2];
+  const companion = COMPANION_TOKENS.get(token);
+  const secret = CREDENTIAL_TOKENS.has(token);
+  if (!secret && !companion) return null;
+  return {
+    label: (m[1] ?? "").trim(),
+    token,
+    secret,
+    mailto: companion?.mailto ?? false,
+  };
+}
+
+// The value element: the token and NOTHING else, so a triple-click (desktop) or
+// long-press (mobile) selects exactly the credential. `user-select:all` upgrades
+// that to a single click in clients that honour it; the rest fall back to the
+// line selection above. Email can't run JavaScript, so a copy button isn't possible.
+function credentialValue(f: CredentialField): string {
+  const size = f.secret ? "18px" : "15px";
+  const weight = f.secret ? "700" : "500";
+  const spacing = f.secret ? "letter-spacing:0.5px;" : "";
+  const style =
+    `font-family:${MONO};font-size:${size};font-weight:${weight};${spacing}` +
+    `color:#1a1a2e;word-break:break-all;-webkit-user-select:all;user-select:all;`;
+  const token = `{{${f.token}}}`;
+  const inner = f.mailto
+    ? `<a href="mailto:${token}" style="color:#1a1a2e;text-decoration:none;">${token}</a>`
+    : token;
+  return `<div style="${style}">${inner}</div>`;
+}
+
+// One bordered block holding a run of credential lines.
+function credentialCard(fields: CredentialField[]): string {
+  const rows = fields.map((f, i) => {
+    const divider = i === 0 ? "" : "border-top:1px solid #e6e6f0;";
+    const label = f.label
+      ? `<div style="font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#8a8aa3;margin:0 0 6px;">${escapeHtml(f.label)}</div>`
+      : "";
+    return `<tr>
+                  <td style="padding:14px 18px;${divider}">${label}${credentialValue(f)}</td>
+                </tr>`;
+  });
+  return `<table class="credential-card" role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 16px;background:#f7f7fb;border:1px solid #e3e3ee;border-radius:10px;">
+${rows.join("\n")}
+                </table>`;
+}
+
 // Format one (already paragraph-split) block of the message into inline HTML.
 function formatParagraph(paragraph: string): string {
   let html = escapeHtml(paragraph);
@@ -131,6 +208,14 @@ function formatParagraph(paragraph: string): string {
     const token = `{{${name}}}`;
     return `<a href="${token}" style="${LINK_STYLE}">${token}</a>`;
   });
+
+  // A credential used mid-sentence can't get its own card, but it still renders as
+  // a distinct monospace run so the value never blends into the prose.
+  html = html.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (match, name: string) =>
+    CREDENTIAL_TOKENS.has(name)
+      ? `<span style="font-family:${MONO};font-weight:700;-webkit-user-select:all;user-select:all;">{{${name}}}</span>`
+      : match,
+  );
 
   // Make literal URLs the admin typed clickable.
   html = html.replace(
@@ -143,6 +228,54 @@ function formatParagraph(paragraph: string): string {
   return `<p style="${P_STYLE}">${html}</p>`;
 }
 
+// Render one paragraph, splitting off any run of credential lines into its own card.
+function renderParagraph(paragraph: string): string {
+  const lines = paragraph.split("\n");
+  const fields = lines.map(matchCredentialLine);
+
+  // Fast path: no secret anywhere in this paragraph → plain prose, byte-for-byte
+  // what this renderer produced before credential cards existed.
+  if (!fields.some((f) => f?.secret)) return formatParagraph(paragraph);
+
+  // A run of companion-only lines isn't a credential block — demote it back to prose.
+  for (let i = 0; i < fields.length; ) {
+    if (!fields[i]) {
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j < fields.length && fields[j]) j++;
+    if (!fields.slice(i, j).some((f) => f?.secret)) fields.fill(null, i, j);
+    i = j;
+  }
+
+  const out: string[] = [];
+  let prose: string[] = [];
+  let card: CredentialField[] = [];
+  const flushProse = () => {
+    if (prose.length > 0) out.push(formatParagraph(prose.join("\n")));
+    prose = [];
+  };
+  const flushCard = () => {
+    if (card.length > 0) out.push(credentialCard(card));
+    card = [];
+  };
+
+  fields.forEach((field, i) => {
+    if (field) {
+      flushProse();
+      card.push(field);
+    } else {
+      flushCard();
+      prose.push(lines[i]);
+    }
+  });
+  flushProse();
+  flushCard();
+
+  return out.join("\n");
+}
+
 // Render a plain-text message into the branded HTML email. Blank lines separate
 // paragraphs; single newlines become <br>.
 export function renderBodyToHtml(message: string): string {
@@ -152,6 +285,6 @@ export function renderBodyToHtml(message: string): string {
     .split(/\n\s*\n/)
     .filter((p) => p.length > 0);
 
-  const body = paragraphs.map(formatParagraph).join("\n");
+  const body = paragraphs.map(renderParagraph).join("\n");
   return frame(body);
 }
