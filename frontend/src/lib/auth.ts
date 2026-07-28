@@ -21,11 +21,11 @@ export function principalCan(principal: Principal | null, permission: string): b
 // now redirects into the inventory.view-gated Inventory Hub, so it isn't an
 // independent landing.)
 export const DASHBOARD_SECTIONS: { path: string; anyOf: string[] }[] = [
-  // Settings admits categories.view too — the Categories master lives as a Settings section (see the
-  // Sidebar + settings page gate), so a categories-only role must land somewhere real.
-  { path: "/dashboard/settings", anyOf: ["settings.view", "email_templates.view", "categories.view"] },
+  { path: "/dashboard/settings", anyOf: ["settings.view", "email_templates.view"] },
   { path: "/dashboard/users", anyOf: ["users.view", "roles.view"] },
-  { path: "/dashboard/customers", anyOf: ["customers.view"] },
+  // Customers admits categories.view too — the customer stock-category master is a tab here (it used
+  // to be a Settings section), so a categories-only role must still land somewhere real.
+  { path: "/dashboard/customers", anyOf: ["customers.view", "categories.view"] },
   { path: "/dashboard/jobs", anyOf: ["jobs.view"] },
   { path: "/dashboard/warehouses", anyOf: ["warehouse.view"] },
   { path: "/dashboard/suppliers", anyOf: ["suppliers.view"] },

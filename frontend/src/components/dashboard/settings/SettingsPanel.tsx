@@ -2,10 +2,9 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ShieldCheck, Palette, Plug, Mail, MailCheck, Paintbrush, Tag, Building2, ArrowRightLeft } from "lucide-react";
+import { ShieldCheck, Palette, Plug, Mail, MailCheck, Paintbrush, Building2, ArrowRightLeft } from "lucide-react";
 
 import { AccountSection } from "./account/AccountSection";
-import { CategoriesView } from "./categories/CategoriesView";
 import { SecuritySection } from "./account/SecuritySection";
 import { BrandingSection } from "./branding/BrandingSection";
 import { CompanyProfileSection } from "./company/CompanyProfileSection";
@@ -30,8 +29,7 @@ const NAV: {
   requires:
     | "admin"
     | "settings.view"
-    | "email_templates.view"
-    | "categories.view";
+    | "email_templates.view";
 }[] = [
   { id: "account", label: "Account & Security", icon: ShieldCheck, desc: "Email & password", requires: "admin" },
   { id: "company", label: "Company", icon: Building2, desc: "Legal details & regional", requires: "settings.view" },
@@ -40,7 +38,6 @@ const NAV: {
   { id: "integrations", label: "Integrations", icon: Plug, desc: "Google Sign-In", requires: "settings.view" },
   { id: "email", label: "Email", icon: Mail, desc: "SMTP & delivery", requires: "settings.view" },
   { id: "email-templates", label: "Email Templates", icon: MailCheck, desc: "Customize sent emails", requires: "email_templates.view" },
-  { id: "categories", label: "Categories", icon: Tag, desc: "Stock category list", requires: "categories.view" },
   { id: "operations", label: "Operations", icon: ArrowRightLeft, desc: "Transfers & workflow", requires: "settings.view" },
 ];
 
@@ -146,7 +143,6 @@ export function SettingsPanel(appearance: AppearanceProps) {
           )}
           {activeSection === "email" && <EmailSection />}
           {activeSection === "email-templates" && <EmailTemplatesSection />}
-          {activeSection === "categories" && <CategoriesView />}
           {activeSection === "operations" && <OperationsSection />}
         </div>
       </div>

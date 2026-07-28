@@ -1,14 +1,16 @@
 import { Suspense } from "react";
 
-import { CustomersView } from "@/components/dashboard/customers/CustomersView";
+import { CustomersPanel } from "@/components/dashboard/customers/CustomersPanel";
 import { PermissionGate } from "@/components/auth/PermissionGate";
 
 export default function CustomersPage() {
   return (
-    <PermissionGate anyOf={["customers.view"]}>
-      {/* Suspense satisfies useSearchParams during prerender. */}
+    // categories.view admits the Categories tab on its own: the customer stock-category master
+    // lives here now, so a role holding only that permission must still be able to reach it.
+    <PermissionGate anyOf={["customers.view", "categories.view"]}>
+      {/* Suspense satisfies useSearchParams (the ?tab= seed) during prerender. */}
       <Suspense>
-        <CustomersView />
+        <CustomersPanel />
       </Suspense>
     </PermissionGate>
   );

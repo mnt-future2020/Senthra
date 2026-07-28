@@ -16,9 +16,15 @@ import { Pagination } from "@/components/ui/Pagination";
 
 const PAGE_SIZE = 12;
 
-// Settings → Categories: the global stock-category master list. Stock entries pick
-// a category from here; an in-use category can't be deleted (the API guards it).
-export function CategoriesView() {
+// Customers → Categories: the master list that classifies CUSTOMER-submitted stock entries.
+// An in-use category can't be deleted (the API guards it).
+//
+// This is NOT the IRM catalogue's classification — that's the separate IRM Categories master under
+// the Inventory Hub. Naming them both "categories" has caused real confusion, so every label here
+// says "customer stock". It lives in the Customers module (not Settings) because that's where the
+// convention puts domain master-data: beside the module that owns it, like Warehouses → Types and
+// Suppliers → Types.
+export function CustomerCategoriesView() {
   const { pushToast } = useDashboard();
   const { can } = useAuth();
   const canCreate = can("categories.create");
@@ -33,8 +39,8 @@ export function CategoriesView() {
   const sort = (searchParams.get("sort") as "newest" | "oldest" | "name") ?? "name";
   const page = Math.max(1, Number(searchParams.get("page")) || 1);
 
-  // Preserves all existing params (incl. ?section for the panel) and uses the
-  // current pathname. Filter changes reset to page 1 unless resetPage=false.
+  // Preserves all existing params (incl. the panel's ?tab) and uses the current
+  // pathname. Filter changes reset to page 1 unless resetPage=false.
   const patch = (updates: Record<string, string | null>, resetPage = true) => {
     const params = new URLSearchParams(window.location.search);
     for (const [k, v] of Object.entries(updates)) {
@@ -45,7 +51,7 @@ export function CategoriesView() {
     router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
   };
 
-  // Seed from the SWR cache so returning to this section renders instantly.
+  // Seed from the SWR cache so returning to this tab renders instantly.
   const [categories, setCategories] = React.useState<Category[]>(
     () => categoryService.getCachedCategories() ?? [],
   );
@@ -201,9 +207,10 @@ export function CategoriesView() {
       <div className="shrink-0 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
-            <h3 className="text-sm font-extrabold text-[var(--ink)]">Categories</h3>
+            <h3 className="text-sm font-extrabold text-[var(--ink)]">Customer Stock Categories</h3>
             <p className="text-xs text-[var(--muted)]">
-              The global stock-category list. Stock entries pick a category from here.
+              Classifies stock customers submit to us. Not the IRM catalogue — that has its own
+              categories under Inventory.
             </p>
           </div>
           <div className="flex items-center gap-2">

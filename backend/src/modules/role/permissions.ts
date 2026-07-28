@@ -204,14 +204,20 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
   },
   {
     key: "categories",
-    label: "Categories",
-    description: "The global stock-category master list used to tag stock entries and IRM items.",
+    label: "Customer Stock Categories",
+    // NOTE: this master classifies CUSTOMER-submitted stock entries only — it is the `Category`
+    // model, whose sole relation is CustomerStockEntry. Our own IRM catalogue uses the separate
+    // `IrmCategory` master (the "IRM Categories" group below). The description used to claim this
+    // one tagged "IRM items" too, which was simply untrue and invited admins to grant it expecting
+    // control over the IRM catalogue. The permission KEYS stay `categories.*` — renaming them would
+    // orphan the grants on every existing role for no functional gain.
+    description: "The category master used to classify customer-submitted stock entries (separate from IRM categories).",
     category: "Inventory",
     permissions: [
-      { key: "categories.view", action: "View", description: "View stock categories." },
-      { key: "categories.create", action: "Create", description: "Add new stock categories." },
-      { key: "categories.edit", action: "Edit", description: "Edit stock categories." },
-      { key: "categories.delete", action: "Delete", description: "Delete stock categories." },
+      { key: "categories.view", action: "View", description: "View customer stock categories." },
+      { key: "categories.create", action: "Create", description: "Add new customer stock categories." },
+      { key: "categories.edit", action: "Edit", description: "Edit customer stock categories." },
+      { key: "categories.delete", action: "Delete", description: "Delete customer stock categories." },
     ],
   },
   {

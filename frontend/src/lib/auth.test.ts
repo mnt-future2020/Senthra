@@ -47,8 +47,11 @@ describe("firstDashboardPath", () => {
   it("a settings-only user lands on Settings", () => {
     expect(firstDashboardPath(makeUser(["settings.view"]))).toBe("/dashboard/settings");
   });
-  it("a categories-only user lands on Settings (Categories is a Settings section)", () => {
-    expect(firstDashboardPath(makeUser(["categories.view"]))).toBe("/dashboard/settings");
+  it("a categories-only user lands on Customers (the stock-category master is a tab there)", () => {
+    // It used to land on Settings. The master moved into the Customers module with the rest of the
+    // domain master-data, so the landing followed it — a categories-only role must still land on a
+    // page that actually renders something for them.
+    expect(firstDashboardPath(makeUser(["categories.view"]))).toBe("/dashboard/customers");
   });
   it("a jobs-only user lands on Jobs (e.g. the Project Manager role)", () => {
     expect(firstDashboardPath(makeUser(["jobs.view"]))).toBe("/dashboard/jobs");

@@ -29,6 +29,11 @@ interface ReachabilityRule {
 //  - goods_management → Goods Management tab in a Warehouse's detail page, and the Inventory
 //                        Hub's Damaged lens (reachable via warehouse.view or inventory.view)
 const RULES: readonly ReachabilityRule[] = [
+  // NOTE: customer stock categories (`categories.*`) are deliberately NOT listed. That master is a
+  // tab in the Customers module like the others, but `categories.view` also opens the Customers nav
+  // item and is a valid landing on its own (see Sidebar NAV + auth.ts DASHBOARD_SECTIONS), so a
+  // categories-only role reaches its screen without needing customers.view. Warning about it would
+  // be false advice.
   { group: "warehouse_types", label: "Warehouse Types", hosts: ["warehouse.view"], hostLabel: "Warehouses" },
   { group: "supplier_types", label: "Supplier Types", hosts: ["suppliers.view"], hostLabel: "Suppliers" },
   { group: "irm_types", label: "IRM Types", hosts: ["inventory.view"], hostLabel: "Warehouse Inventory" },

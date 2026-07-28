@@ -43,12 +43,19 @@ type NavItem = {
   hideForWarehouseScoped?: boolean;
 };
 
-const NAV: NavItem[] = [
+// Exported for Sidebar.nav.test.ts, which asserts this stays in lockstep with auth.ts's
+// DASHBOARD_SECTIONS — a nav item whose perms disagree with its page's landing/gate produces
+// either a dead link or a page the user lands on but can never navigate back to.
+export const NAV: NavItem[] = [
   // Overview landing — visible to every staff member (perms: [] = always show). Kept out of the
   // "pure engineer" detection below so an engineer-only user still routes to their portal.
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, perms: [] },
   { href: "/dashboard/users", label: "Users & Roles", icon: UserCog, perms: ["users.view", "roles.view"] },
-  { href: "/dashboard/customers", label: "Customers", icon: Building2, perms: ["customers.view"] },
+  // categories.view surfaces this item on its own: the customer stock-category master is a tab in
+  // the Customers module, so a role holding only that permission still has a real page here. It is
+  // the one master-data perm that opens its host module's nav — the others (warehouse/supplier/IRM
+  // types) genuinely have nothing to show without their module's own View.
+  { href: "/dashboard/customers", label: "Customers", icon: Building2, perms: ["customers.view", "categories.view"] },
   { href: "/dashboard/jobs", label: "Jobs", icon: ClipboardList, perms: ["jobs.view"] },
   { href: "/dashboard/warehouses", label: "Warehouses", icon: Warehouse, perms: ["warehouse.view"] },
   { href: "/dashboard/suppliers", label: "Suppliers", icon: Truck, perms: ["suppliers.view"] },
@@ -68,12 +75,14 @@ const NAV: NavItem[] = [
   { href: "/dashboard/inventory", label: "Inventory", icon: Boxes, perms: ["inventory.view"] },
   {
     // Only the perms that map to a real Settings section (see SettingsPanel). Master-data view perms
-    // (warehouse/supplier/IRM types + IRM categories) belong to their own modules' tabs, so they must
-    // NOT surface Settings here — otherwise the user opens an empty Settings page.
+    // (warehouse/supplier/IRM types + IRM categories, and customer stock categories) belong to their
+    // own modules' tabs, so they must NOT surface Settings here — otherwise the user opens an empty
+    // Settings page. `categories.view` was the last one still listed; its screen moved to the
+    // Customers module, so leaving it here produced exactly that dead link.
     href: "/dashboard/settings",
     label: "Settings",
     icon: Settings,
-    perms: ["settings.view", "email_templates.view", "categories.view"],
+    perms: ["settings.view", "email_templates.view"],
   },
   {
     // The GLOBAL audit page. A warehouse-scoped manager holds `audit.view` for the warehouse

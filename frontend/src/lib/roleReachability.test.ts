@@ -21,10 +21,24 @@ describe("reachabilityWarnings", () => {
     expect(labels(["irm_categories.view"])).toEqual(["IRM Categories"]);
   });
 
+  it("never warns about customer stock categories — that screen is reachable on its own", () => {
+    // `categories.view` opens the Customers nav item and is a valid landing by itself, unlike the
+    // other masters. Warning "also grant Customers View" would be false advice.
+    expect(reachabilityWarnings(["categories.view"])).toEqual([]);
+    expect(reachabilityWarnings(["categories.create", "categories.delete"])).toEqual([]);
+  });
+
   it("clears the warning once the host View is granted", () => {
     expect(reachabilityWarnings(["warehouse_types.view", "warehouse.view"])).toEqual([]);
     expect(reachabilityWarnings(["supplier_types.view", "suppliers.view"])).toEqual([]);
     expect(reachabilityWarnings(["irm_types.view", "inventory.view"])).toEqual([]);
+  });
+
+  it("keeps customer categories distinct from the IRM catalogue's own categories", () => {
+    // Two different masters. Granting the customer one must never satisfy the IRM rule — the
+    // `categories` / `irm_categories` prefixes are easy to conflate.
+    expect(labels(["irm_categories.view", "customers.view"])).toEqual(["IRM Categories"]);
+    expect(labels(["irm_categories.view", "categories.view"])).toEqual(["IRM Categories"]);
   });
 
   it("reports several unreachable groups at once", () => {
