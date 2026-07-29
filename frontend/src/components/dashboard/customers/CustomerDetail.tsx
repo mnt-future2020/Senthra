@@ -33,9 +33,19 @@ import { useDashboard } from "@/hooks/useDashboard";
 import { Select } from "@/components/ui/Select";
 import { FormPageHeader, FormSection } from "@/components/ui/FormScaffold";
 import { Avatar } from "@/components/ui/Avatar";
+import { DetailHeader } from "@/components/ui/DetailHeader";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
-import { ghostBtn, primaryBtn } from "@/components/ui/styles";
+import { ghostBtn, inputCls, primaryBtn } from "@/components/ui/styles";
+import { searchStockEntries } from "@/lib/stockEntrySearch";
+import {
+  EMPTY_SUBMISSION_FILTERS,
+  effectiveSubmissionFilters,
+  filterSubmissions,
+  hasActiveSubmissionFilter,
+  submissionStatusOptions,
+  type SubmissionFilters,
+} from "./stockSubmissionFilter";
 import { Pagination } from "@/components/ui/Pagination";
 import { TempPasswordModal } from "@/components/ui/TempPasswordModal";
 import { ProjectModal } from "./ProjectModal";
@@ -257,17 +267,27 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
         />
       </div>
 
-      {/* Company card */}
-      <div className="flex shrink-0 flex-wrap items-center gap-4 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs">
-        <Avatar url={customer.logoUrl} firstName={customer.name || "?"} lastName="" size={56} />
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <h1 className="truncate text-lg font-extrabold tracking-tight text-[var(--ink)]">
-              {customer.name}
-            </h1>
-            <StatusBadge status={customer.status as UserStatus} />
-          </div>
-          <p className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-[var(--muted)]">
+      {/* Company card — the shared DetailHeader, so it collapses to one compact line like every
+          other detail page (Warehouse, Supplier, Job, PO, PRF, GRN, IRM item, Inventory). This was
+          the one detail page still hand-rolling its own header, and so the only one whose card you
+          could not collapse to get more rows of the tab below on screen. The choice persists in
+          localStorage under this storageKey, shared across all customers. */}
+      <DetailHeader
+        storageKey="customer-detail"
+        title={customer.name}
+        badges={<StatusBadge status={customer.status as UserStatus} />}
+        // Shrinks with the header — a fixed 56px logo would have pinned the collapsed card to its
+        // expanded height and defeated the point.
+        avatar={(collapsed) => (
+          <Avatar
+            url={customer.logoUrl}
+            firstName={customer.name || "?"}
+            lastName=""
+            size={collapsed ? 28 : 56}
+          />
+        )}
+        meta={
+          <>
             <span className="font-mono">{customer.customerCode}</span>
             {customer.industry && <span>{customer.industry}</span>}
             {websiteHref && (
@@ -281,9 +301,9 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
                 {customer.website}
               </a>
             )}
-          </p>
-        </div>
-      </div>
+          </>
+        }
+      />
 
       {/* Tabs — URL-driven (?tab=), like the Users & Roles panel. */}
       <div className="flex shrink-0 gap-1 overflow-x-auto rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-1">
@@ -678,16 +698,17 @@ function ProjectsSection({ customer, caps, pushToast }: SectionProps) {
   };
 
   return (
-    <FormSection title="Projects" description="The customer's projects (used when creating jobs).">
-      <SectionToolbar
-        canEdit={caps.create}
-        addLabel="Add project"
-        onAdd={() => {
-          setEditing(null);
-          setOpen(true);
-        }}
-      />
-
+    <FormSection
+      title="Projects"
+      description="The customer's projects (used when creating jobs)."
+      action={
+        caps.create && (
+          <button type="button" onClick={() => { setEditing(null); setOpen(true); }} className={primaryBtn}>
+            <Plus className="h-4 w-4" /> Add project
+          </button>
+        )
+      }
+    >
       {paged === null ? (
         <Empty>Loading projects…</Empty>
       ) : projects.length === 0 ? (
@@ -752,6 +773,7 @@ function ProjectsSection({ customer, caps, pushToast }: SectionProps) {
 
 // --- Inventory tab (received stock entries) ----------------------------------
 const STOCK_PAGE_SIZE = 20;
+const SUBMISSION_PAGE_SIZE = 20;
 
 function StockEntriesTab({
   customer,
@@ -772,6 +794,9 @@ function StockEntriesTab({
   // --- URL-persisted status filter ("stock_filter") --------------------------
   const searchParams = useSearchParams();
   const stockFilter = (searchParams.get("stock_filter") ?? "") as "" | "active" | "draft";
+  // Text search, matched in memory against the already-loaded list (same helper the warehouse's
+  // Customer-pool table uses, so both agree on what a match means). URL-persisted like the filter.
+  const stockSearch = searchParams.get("stock_q") ?? "";
 
   const patch = React.useCallback(
     (updates: Record<string, string>) => {
@@ -822,7 +847,7 @@ function StockEntriesTab({
   // Wrapping in useMemo prevents React Compiler from bailing on
   // "Existing memoization could not be preserved".
   const { pageEntries, entryCount, totalPages } = React.useMemo(() => {
-    const all = entries ?? [];
+    const all = searchStockEntries(entries ?? [], stockSearch);
     const count = all.length;
     const pages = Math.max(1, Math.ceil(count / STOCK_PAGE_SIZE));
     const safePage = Math.min(page, pages);
@@ -832,7 +857,7 @@ function StockEntriesTab({
       entryCount: count,
       totalPages: pages,
     };
-  }, [entries, page]);
+  }, [entries, page, stockSearch]);
 
   return (
     <div className="flex h-full flex-col gap-4">
@@ -885,6 +910,16 @@ function StockEntriesTab({
           ) : (
             <>
               <div className="flex shrink-0 flex-wrap items-center gap-2">
+                <div className="relative w-full sm:max-w-[16rem]">
+                  <SearchIcon className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
+                  <input
+                    value={stockSearch}
+                    onChange={(e) => patch({ stock_q: e.target.value, stockPage: "" })}
+                    placeholder="Search item, SKU, barcode…"
+                    aria-label="Search stock entries"
+                    className={`${inputCls} pl-9`}
+                  />
+                </div>
                 <Select
                   size="sm"
                   value={stockFilter}
@@ -910,13 +945,30 @@ function StockEntriesTab({
                 )}
               </div>
 
-              {entries.length === 0 ? (
+              {/* Keyed off the FILTERED count, not the raw list: a search that matches nothing used
+                  to fall through and render a table with no rows in it. The copy separates "there
+                  is nothing here" from "your search hides it" so the latter never reads as the
+                  former. */}
+              {entryCount === 0 ? (
                 <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
                   <Boxes className="h-7 w-7 text-[var(--faint)]" />
                   <p className="text-sm font-semibold text-[var(--ink)]">No stock entries</p>
                   <p className="text-xs text-[var(--muted)]">
-                    {stockFilter ? `No ${stockFilter} entries found.` : "Received stock for this customer will appear here."}
+                    {stockSearch.trim()
+                      ? `Nothing matches “${stockSearch.trim()}”${stockFilter ? ` in ${stockFilter} entries` : ""}.`
+                      : stockFilter
+                        ? `No ${stockFilter} entries found.`
+                        : "Received stock for this customer will appear here."}
                   </p>
+                  {(stockSearch.trim() || stockFilter) && (
+                    <button
+                      type="button"
+                      onClick={() => patch({ stock_q: "", stock_filter: "", stockPage: "" })}
+                      className={`${ghostBtn} mt-1`}
+                    >
+                      Clear filters
+                    </button>
+                  )}
                 </div>
               ) : (
                 <>
@@ -1022,6 +1074,32 @@ function StockSubmissionsTab({
   const [assignReq, setAssignReq] = React.useState<StockRequest | null>(null);
   const [showCreate, setShowCreate] = React.useState(false);
 
+  // Search / status / page. Submissions accumulate for the life of the account and this is the only
+  // admin-side surface for reviewing them, so the whole list was previously rendered at once.
+  const [filters, setFilters] = React.useState<SubmissionFilters>(EMPTY_SUBMISSION_FILTERS);
+  const [page, setPage] = React.useState(1);
+  const patchFilters = (next: Partial<SubmissionFilters>) => {
+    setFilters((prev) => ({ ...prev, ...next }));
+    setPage(1); // a narrower list makes the old page number meaningless
+  };
+
+  const allSubmissions = customer.stockRequests;
+  const statusOptions = React.useMemo(() => submissionStatusOptions(allSubmissions), [allSubmissions]);
+  // A status whose last row was just approved away would otherwise strand the tab on an empty list.
+  const effective = React.useMemo(
+    () => effectiveSubmissionFilters(filters, statusOptions),
+    [filters, statusOptions],
+  );
+  const matched = React.useMemo(
+    () => filterSubmissions(allSubmissions, effective),
+    [allSubmissions, effective],
+  );
+  const totalPages = Math.max(1, Math.ceil(matched.length / SUBMISSION_PAGE_SIZE));
+  // Clamped, not stored: approving the last row on the last page shrinks the list under the cursor.
+  const safePage = Math.min(page, totalPages);
+  const pageRows = matched.slice((safePage - 1) * SUBMISSION_PAGE_SIZE, safePage * SUBMISSION_PAGE_SIZE);
+  const anyFilter = hasActiveSubmissionFilter(effective);
+
   const onCreated = (created: StockRequest) => {
     onChange((p) => ({ ...p, stockRequests: [created, ...p.stockRequests] }));
     setShowCreate(false);
@@ -1078,34 +1156,84 @@ function StockSubmissionsTab({
 
   return (
     <div className="space-y-6">
-      {stockReq.approve && (
-        <div className="flex items-center justify-end">
-          <button
-            type="button"
-            onClick={() => setShowCreate(true)}
-            className={primaryBtn}
-          >
-            <Plus className="h-4 w-4" /> New submission
-          </button>
+      {/* ONE toolbar row: filters left, the create action right. They used to be two rows, which
+          left a band of dead space beside the filters. `ml-auto` on the button parks it at the
+          right edge whether or not the filters are there — so the empty-list case (button only)
+          still lines up without a second rule. */}
+      {(stockReq.approve || allSubmissions.length > 0) && (
+        <div className="flex flex-wrap items-center gap-2">
+          {allSubmissions.length > 0 && (
+            <>
+              <div className="relative w-full sm:max-w-[16rem]">
+                <SearchIcon className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
+                <input
+                  value={filters.search}
+                  onChange={(e) => patchFilters({ search: e.target.value })}
+                  placeholder="Search submissions…"
+                  aria-label="Search stock submissions"
+                  className={`${inputCls} pl-9`}
+                />
+              </div>
+              {/* `effective`, so a status whose rows are gone reads as "All" instead of blank. */}
+              <Select
+                size="sm"
+                value={effective.status}
+                onChange={(v) => patchFilters({ status: v })}
+                options={statusOptions}
+                ariaLabel="Filter submissions by status"
+              />
+              {anyFilter && (
+                <button
+                  type="button"
+                  onClick={() => { setFilters(EMPTY_SUBMISSION_FILTERS); setPage(1); }}
+                  className={ghostBtn}
+                >
+                  Clear
+                </button>
+              )}
+            </>
+          )}
+          {stockReq.approve && (
+            <button
+              type="button"
+              onClick={() => setShowCreate(true)}
+              className={`${primaryBtn} ml-auto`}
+            >
+              <Plus className="h-4 w-4" /> New submission
+            </button>
+          )}
         </div>
       )}
 
-      {customer.stockRequests.length === 0 ? (
+      {matched.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
           <ClipboardList className="h-7 w-7 text-[var(--faint)]" />
-          <p className="text-sm font-semibold text-[var(--ink)]">No stock submissions</p>
-          <p className="text-xs text-[var(--muted)]">
-            Stock the customer submits from their portal — or that you add on their behalf — appears here for review.
+          <p className="text-sm font-semibold text-[var(--ink)]">
+            {anyFilter ? "No matching submissions" : "No stock submissions"}
           </p>
+          <p className="text-xs text-[var(--muted)]">
+            {anyFilter
+              ? `${allSubmissions.length} submission${allSubmissions.length === 1 ? "" : "s"} here, none match these filters.`
+              : "Stock the customer submits from their portal — or that you add on their behalf — appears here for review."}
+          </p>
+          {anyFilter && (
+            <button
+              type="button"
+              onClick={() => { setFilters(EMPTY_SUBMISSION_FILTERS); setPage(1); }}
+              className={`${ghostBtn} mt-1`}
+            >
+              Clear filters
+            </button>
+          )}
         </div>
       ) : (
         <div className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)]">
           <div className="flex items-center gap-2 border-b border-[var(--border)] px-3 py-2 text-[11px] font-bold uppercase tracking-wider text-[var(--muted)]">
             <ClipboardList className="h-3.5 w-3.5" />
-            Stock submissions ({customer.stockRequests.length})
+            Stock submissions ({matched.length}{anyFilter ? ` of ${allSubmissions.length}` : ""})
           </div>
           <div className="divide-y divide-[var(--border)]">
-            {customer.stockRequests.map((req) => (
+            {pageRows.map((req) => (
               <div key={req.id} className="px-3 py-2.5">
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div className="min-w-0">
@@ -1232,6 +1360,17 @@ function StockSubmissionsTab({
               </div>
             ))}
           </div>
+          {totalPages > 1 && (
+            <div className="border-t border-[var(--border)] px-3 py-2">
+              <Pagination
+                page={safePage}
+                totalPages={totalPages}
+                total={matched.length}
+                label="submissions"
+                onPage={setPage}
+              />
+            </div>
+          )}
         </div>
       )}
 
@@ -1319,25 +1458,29 @@ function SitesSection({ customer, caps, pushToast }: SectionProps) {
   };
 
   return (
-    <FormSection title="Sites" description="Delivery / installation locations.">
-      {caps.create && (
-        <div className="mb-3 flex justify-end gap-2">
-          <button type="button" onClick={() => setImporting(true)} className={ghostBtn}>
-            <Upload className="h-4 w-4" /> Import sites
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setEditing(null);
-              setOpen(true);
-            }}
-            className={primaryBtn}
-          >
-            <Plus className="h-4 w-4" /> Add site
-          </button>
-        </div>
-      )}
-
+    <FormSection
+      title="Sites"
+      description="Delivery / installation locations."
+      action={
+        caps.create && (
+          <>
+            <button type="button" onClick={() => setImporting(true)} className={ghostBtn}>
+              <Upload className="h-4 w-4" /> Import sites
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setEditing(null);
+                setOpen(true);
+              }}
+              className={primaryBtn}
+            >
+              <Plus className="h-4 w-4" /> Add site
+            </button>
+          </>
+        )
+      }
+    >
       {/* Search — server-side (a bulk-imported customer can have thousands of sites). */}
       <div className="relative mb-3 w-full sm:max-w-xs">
         <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--faint)]" />
@@ -1613,25 +1756,6 @@ function PortalLoginSection({
 }
 
 // --- shared section UI ------------------------------------------------------
-
-function SectionToolbar({
-  canEdit,
-  addLabel,
-  onAdd,
-}: {
-  canEdit: boolean;
-  addLabel: string;
-  onAdd: () => void;
-}) {
-  if (!canEdit) return null;
-  return (
-    <div className="mb-3 flex justify-end">
-      <button type="button" onClick={onAdd} className={primaryBtn}>
-        <Plus className="h-4 w-4" /> {addLabel}
-      </button>
-    </div>
-  );
-}
 
 function TableShell({
   head,

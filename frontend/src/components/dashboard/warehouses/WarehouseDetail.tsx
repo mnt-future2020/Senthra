@@ -10,6 +10,7 @@ import * as auditService from "@/services/audit.service";
 import { Select } from "@/components/ui/Select";
 import { Pagination } from "@/components/ui/Pagination";
 import { inputCls, secondaryBtn } from "@/components/ui/styles";
+import { searchStockEntries } from "@/lib/stockEntrySearch";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { NoStaffAssigned, StaffChip } from "@/components/ui/StaffChip";
@@ -35,7 +36,7 @@ import { VanRequestsWorkspace } from "@/components/dashboard/van-requests/VanReq
 import { DemandTab } from "@/components/dashboard/goods-management/DemandTab";
 import { DamagedStockView } from "@/components/dashboard/goods-management/DamagedStockView";
 import { ExpectedDeliveries } from "./ExpectedDeliveries";
-import type { AuditEntry } from "@/types/audit";
+import type { PagedAuditLogs } from "@/types/audit";
 import type { CustomerStockEntry, PendingStockItem } from "@/types/customer";
 import type { Warehouse } from "@/types/warehouse";
 import type { UserStatus } from "@/types/user";
@@ -459,6 +460,8 @@ function IncomingTab({
 
 // Matches Expected deliveries' PAGE_SIZE so both Incoming-stock pools page identically.
 const INCOMING_PAGE_SIZE = 20;
+// Matches the audit page size every other detail page uses (SupplierDetail, IrmItemDetail, …).
+const AUDIT_PAGE_SIZE = 20;
 
 function IncomingStock({
   warehouseId,
@@ -836,6 +839,9 @@ function WarehouseStockEntries({
 }) {
   const searchParams = useSearchParams();
   const stockFilter = (searchParams.get("stockFilter") ?? "") as "" | "draft" | "active";
+  // Text search lives in the URL like the status filter, so a filtered view is shareable and
+  // survives a refresh. Matched in memory — the list arrives in one call (see `load`).
+  const stockSearch = searchParams.get("stockSearch") ?? "";
   const page = Math.max(1, Number(searchParams.get("stockPage")) || 1);
 
   const patch = React.useCallback(
@@ -873,7 +879,7 @@ function WarehouseStockEntries({
   React.useEffect(() => { load(); }, [load]);
 
   const { visibleEntries, pageSlice, totalPages } = React.useMemo(() => {
-    const all = entries ?? [];
+    const all = searchStockEntries(entries ?? [], stockSearch);
     const total = all.length;
     const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
     const safePage = Math.min(page, pages);
@@ -883,7 +889,7 @@ function WarehouseStockEntries({
       pageSlice: all.slice(start, start + PAGE_SIZE),
       totalPages: pages,
     };
-  }, [entries, page]);
+  }, [entries, page, stockSearch]);
 
   if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
   if (entries === null) {
@@ -892,24 +898,51 @@ function WarehouseStockEntries({
 
   return (
     <div className="flex h-full flex-col gap-3">
-      {/* Status filter */}
-      <div className="flex shrink-0 items-center gap-2">
-        <Select
-          size="sm"
-          value={stockFilter}
-          onChange={(v) => { patch({ stockFilter: v || null }); }}
-          options={STOCK_FILTER_OPTIONS}
-          ariaLabel="Filter by status"
-        />
+      {/* Search + status filter */}
+      <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
+        <div className="relative w-full sm:max-w-xs">
+          <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
+          <input
+            value={stockSearch}
+            onChange={(e) => patch({ stockSearch: e.target.value || null })}
+            placeholder="Search item, SKU, barcode…"
+            aria-label="Search customer stock entries"
+            className={`${inputCls} pl-9`}
+          />
+        </div>
+        <div className="sm:ml-auto">
+          <Select
+            size="sm"
+            value={stockFilter}
+            onChange={(v) => { patch({ stockFilter: v || null }); }}
+            options={STOCK_FILTER_OPTIONS}
+            ariaLabel="Filter by status"
+          />
+        </div>
       </div>
 
       {visibleEntries.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
           <Boxes className="h-7 w-7 text-[var(--faint)]" />
           <p className="text-sm font-semibold text-[var(--ink)]">No stock entries</p>
+          {/* Distinguish "nothing here" from "your filters hide it" — otherwise a search that
+              misses reads as an empty warehouse. */}
           <p className="text-xs text-[var(--muted)]">
-            {stockFilter ? `No ${stockFilter} entries found.` : "Customer stock received at this warehouse will appear here."}
+            {stockSearch.trim()
+              ? `Nothing matches “${stockSearch.trim()}”${stockFilter ? ` in ${stockFilter} entries` : ""}.`
+              : stockFilter
+                ? `No ${stockFilter} entries found.`
+                : "Customer stock received at this warehouse will appear here."}
           </p>
+          {(stockSearch.trim() || stockFilter) && (
+            <button
+              type="button"
+              onClick={() => patch({ stockSearch: null, stockFilter: null })}
+              className={`${secondaryBtn} mt-1`}
+            >
+              Clear filters
+            </button>
+          )}
         </div>
       ) : (
         <>
@@ -1013,28 +1046,51 @@ function Placeholder({ icon: Icon, title, body }: { icon: React.ElementType; tit
 
 // Warehouse-specific audit history. The API filters by targetType; we narrow to this
 // warehouse's id client-side (a single warehouse's history is small).
+// This used to ask for the newest 100 events of targetType "warehouse" ACROSS EVERY WAREHOUSE and
+// then keep the ones matching this id in the browser. With more than a handful of active warehouses
+// that window rarely contained many of this one's events — and on a busy estate it could contain
+// none at all, so the tab read "No activity yet" for a warehouse with a full history. Worse, there
+// was no way to page further back, so the missing events were simply unreachable.
+//
+// Scoped server-side by targetId and paginated, matching every other detail page's audit tab
+// (SupplierDetail, IrmItemDetail, GoodsReceiptDetail, PurchaseRequestDetail). The page lives in
+// ?auditPage= so it survives a refresh and doesn't collide with the other tabs' params.
 function AuditTrail({ warehouseId }: { warehouseId: string }) {
-  const [entries, setEntries] = React.useState<AuditEntry[] | null>(null);
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const page = Math.max(1, Number(searchParams.get("auditPage")) || 1);
+  const patchPage = React.useCallback(
+    (next: number | null) => {
+      const params = new URLSearchParams(window.location.search);
+      if (next && next > 1) params.set("auditPage", String(next)); else params.delete("auditPage");
+      router.replace(`${window.location.pathname}?${params.toString()}`, { scroll: false });
+    },
+    [router],
+  );
+  const [result, setResult] = React.useState<PagedAuditLogs | null>(null);
   const [error, setError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
-    let active = true;
+    const controller = new AbortController();
     auditService
-      .listAuditLogs({ targetType: "warehouse", pageSize: 100 })
+      .listAuditLogs({ targetType: "warehouse", targetId: warehouseId, page, pageSize: AUDIT_PAGE_SIZE })
       .then((res) => {
-        if (active) setEntries(res.entries.filter((e) => e.targetId === warehouseId));
+        if (controller.signal.aborted) return;
+        setError(null); // a later page succeeding must clear an earlier page's failure
+        setResult(res);
       })
       .catch((e) => {
-        if (active) setError(e instanceof Error ? e.message : "Could not load the audit trail.");
+        if (!controller.signal.aborted) setError(e instanceof Error ? e.message : "Could not load the audit trail.");
       });
     return () => {
-      active = false;
+      controller.abort();
+      setResult(null);
     };
-  }, [warehouseId]);
+  }, [warehouseId, page]);
 
   if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
-  if (entries === null) return <AuditTrailSkeleton />;
-  if (entries.length === 0) {
+  if (result === null) return <AuditTrailSkeleton />;
+  if (result.total === 0) {
     return (
       <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
         <ScrollText className="h-7 w-7 text-[var(--faint)]" />
@@ -1045,24 +1101,33 @@ function AuditTrail({ warehouseId }: { warehouseId: string }) {
   }
 
   return (
-    <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
-      <ul className="divide-y divide-[var(--border)]">
-        {entries.map((e) => (
-          <li key={e.id} className="flex items-center justify-between gap-3 px-4 py-3">
-            <div className="flex items-center gap-3">
-              <span
-                className={`inline-block shrink-0 rounded-full px-2.5 py-1 text-[11px] font-bold ${TONE_CLASSES[actionTone(e.action)]}`}
-              >
-                {actionLabel(e.action)}
+    <div className="flex flex-col gap-3">
+      <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+        <ul className="divide-y divide-[var(--border)]">
+          {result.entries.map((e) => (
+            <li key={e.id} className="flex items-center justify-between gap-3 px-4 py-3">
+              <div className="flex items-center gap-3">
+                <span
+                  className={`inline-block shrink-0 rounded-full px-2.5 py-1 text-[11px] font-bold ${TONE_CLASSES[actionTone(e.action)]}`}
+                >
+                  {actionLabel(e.action)}
+                </span>
+                <span className="text-xs text-[var(--muted)]">{e.actorEmail ?? "system"}</span>
+              </div>
+              <span className="shrink-0 text-[11px] text-[var(--faint)]" title={new Date(e.createdAt).toLocaleString("en-GB")}>
+                {relativeTime(e.createdAt)}
               </span>
-              <span className="text-xs text-[var(--muted)]">{e.actorEmail ?? "system"}</span>
-            </div>
-            <span className="shrink-0 text-[11px] text-[var(--faint)]" title={new Date(e.createdAt).toLocaleString("en-GB")}>
-              {relativeTime(e.createdAt)}
-            </span>
-          </li>
-        ))}
-      </ul>
+            </li>
+          ))}
+        </ul>
+      </div>
+      <Pagination
+        page={Math.min(result.page, result.totalPages)}
+        totalPages={result.totalPages}
+        total={result.total}
+        label="entries"
+        onPage={(n) => patchPage(n)}
+      />
     </div>
   );
 }

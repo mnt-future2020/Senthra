@@ -50,11 +50,23 @@ export function buildAuditWhere(filters: AuditListFilters): Prisma.AuditLogWhere
       { action: { contains: q, mode: "insensitive" } },
     ];
   }
-  // Warehouse scope LAST so it overrides any client targetType/targetId above. AND-composed with
-  // the search OR by Prisma (top-level keys are ANDed), so a scoped search stays inside the scope.
+  // Warehouse scope LAST so a client can never widen past it. AND-composed with the search OR by
+  // Prisma (top-level keys are ANDed), so a scoped search stays inside the scope.
+  //
+  // A client `targetId` is INTERSECTED with the scope, not discarded. Discarding it silently turned
+  // "this ONE warehouse's history" into "every warehouse I'm assigned to" — and because targetType
+  // is forced to "warehouse" anyway, the caller got back plausible-looking warehouse entries and had
+  // no way to tell its filter had been ignored (the warehouse detail page's Activity tab read as
+  // that warehouse's history while listing its siblings' too). Intersecting keeps the boundary
+  // intact in BOTH directions: an id inside the set narrows to exactly it, and an id outside the set
+  // — or a crafted non-warehouse target — narrows to nothing rather than falling back to the set.
   if (filters.scopeWarehouseIds) {
     where.targetType = "warehouse";
-    where.targetId = { in: filters.scopeWarehouseIds };
+    where.targetId = {
+      in: filters.targetId
+        ? filters.scopeWarehouseIds.filter((id) => id === filters.targetId)
+        : filters.scopeWarehouseIds,
+    };
   }
   return where;
 }

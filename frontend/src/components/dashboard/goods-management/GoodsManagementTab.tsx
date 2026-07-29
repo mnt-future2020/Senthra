@@ -301,7 +301,7 @@ export function GoodsManagementTab({
       </div>
 
       {/* Overdue section */}
-      {section === "overdue" && <OverdueHoldingsView days={14} />}
+      {section === "overdue" && <OverdueHoldingsView days={14} warehouseId={warehouseId} />}
 
       {/* Queue / Closed sections */}
       {showsTable && (

@@ -49,7 +49,11 @@ function fmtDate(iso: string): string {
   });
 }
 
-export function OverdueHoldingsView({ days = 14 }: { days?: number }) {
+// `warehouseId` scopes the list to issues made FROM that warehouse. The Goods Management tab is a
+// per-warehouse surface and its other sections are already scoped — this one wasn't, so standing in
+// Warehouse A's tab listed Warehouse B's overdue jobs as if they were A's. Optional so a
+// company-wide mount still works.
+export function OverdueHoldingsView({ days = 14, warehouseId }: { days?: number; warehouseId?: string }) {
   const { pushToast } = useDashboard();
   const [rows, setRows] = React.useState<OverdueRow[] | null>(null);
   const [error, setError] = React.useState<string | null>(null);
@@ -63,7 +67,7 @@ export function OverdueHoldingsView({ days = 14 }: { days?: number }) {
   React.useEffect(() => {
     let active = true;
     gmService
-      .listOverdue(days)
+      .listOverdue(days, warehouseId)
       .then((data) => {
         if (!active) return;
         setError(null);
@@ -78,7 +82,7 @@ export function OverdueHoldingsView({ days = 14 }: { days?: number }) {
     return () => {
       active = false;
     };
-  }, [days, tick]);
+  }, [days, warehouseId, tick]);
 
   const handleWriteOff = async (row: OverdueRow) => {
     setConfirmWriteOff(null);

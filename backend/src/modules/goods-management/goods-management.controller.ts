@@ -1,7 +1,7 @@
 import * as service from "./goods-management.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
-import { param, queryInt } from "../../utils/request.js";
+import { param, queryInt, queryStr } from "../../utils/request.js";
 import type { CloseReconcileInput, PostMovementInput, RestoreDamagedInput, ScanLookupInput, UploadDamagePhotoInput } from "./goods-management.validation.js";
 import { badRequest } from "../../utils/http-error.js";
 
@@ -60,11 +60,47 @@ export const listDamaged = asyncHandler(async (req, res) => {
   res.json({ damaged: await service.listDamaged({ warehouseId, customerId }, actorFrom(req)) });
 });
 
+// GET /goods-management/damaged/history — every damage report + restore behind ONE damaged row.
+// Addressed by the balance's natural key rather than its id, so the caller can drill in straight
+// from a list row without a second lookup. Validated here (a query string has no body schema):
+// ownerType decides WHICH id is the required one, and sending the wrong one would silently match a
+// different balance's key — so a mismatch is rejected rather than quietly answered.
+export const getDamagedHistory = asyncHandler(async (req, res) => {
+  const warehouseId = queryStr(req.query["warehouseId"])?.trim();
+  const ownerType = queryStr(req.query["ownerType"])?.trim();
+  const irmItemId = queryStr(req.query["irmItemId"])?.trim() || null;
+  const customerStockEntryId = queryStr(req.query["customerStockEntryId"])?.trim() || null;
+
+  if (!warehouseId) throw badRequest("warehouseId is required.");
+  if (ownerType !== "company" && ownerType !== "customer") {
+    throw badRequest("ownerType must be 'company' or 'customer'.");
+  }
+  if (ownerType === "company" && !irmItemId) throw badRequest("irmItemId is required for company-owned stock.");
+  if (ownerType === "customer" && !customerStockEntryId) {
+    throw badRequest("customerStockEntryId is required for customer-owned stock.");
+  }
+
+  res.json(
+    await service.getDamagedHistory(
+      {
+        warehouseId,
+        ownerType,
+        // Force the key's unused socket to null. A company row is keyed with customerStockEntryId
+        // null (and vice versa), so passing both would match nothing at all.
+        irmItemId: ownerType === "company" ? irmItemId : null,
+        customerStockEntryId: ownerType === "customer" ? customerStockEntryId : null,
+      },
+      actorFrom(req),
+    ),
+  );
+});
+
 export const listOverdue = asyncHandler(async (req, res) => {
   const rawDays = req.query["days"];
   const days = rawDays !== undefined ? Number(rawDays) : 14;
   if (!Number.isFinite(days) || days < 1) throw badRequest("days must be a positive integer.");
-  res.json({ overdue: await service.listOverdue(actorFrom(req), days) });
+  const warehouseId = queryStr(req.query["warehouseId"])?.trim() || undefined;
+  res.json({ overdue: await service.listOverdue(actorFrom(req), days, warehouseId) });
 });
 
 // POST /goods-management/damage-photo — upload a damage photo data URI to Cloudinary; returns { url }.

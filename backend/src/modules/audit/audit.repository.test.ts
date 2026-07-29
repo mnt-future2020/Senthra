@@ -5,8 +5,12 @@ import { buildAuditWhere } from "./audit.repository.js";
 // The warehouse scope is a SECURITY boundary, not a convenience filter: a warehouse-scoped
 // actor (a warehouse manager) may read audit entries ONLY for the warehouses they're assigned
 // to. That means the scope must (a) constrain to targetType "warehouse", (b) restrict targetId
-// to the assigned set, and (c) OVERRIDE any client-supplied targetType/targetId so a crafted
-// query string can't widen the view. These tests pin all three.
+// to the assigned set, and (c) never let a client-supplied targetType/targetId widen the view.
+//
+// (c) is an INTERSECTION, not a blanket override: a client targetId narrows within the scope and
+// can never escape it. A blanket override satisfies "can't widen past the scope" but breaks the
+// other half — a request for one warehouse quietly answered with all of them. These tests pin both
+// directions.
 
 describe("buildAuditWhere — warehouse scope", () => {
   it("with no scope leaves client target filters untouched", () => {
@@ -28,7 +32,34 @@ describe("buildAuditWhere — warehouse scope", () => {
       scopeWarehouseIds: ["w1"],
     });
     expect(where.targetType).toBe("warehouse");
-    expect(where.targetId).toEqual({ in: ["w1"] });
+    // Matches NOTHING rather than falling back to the whole scope: the requested target isn't in
+    // the set, so intersecting it leaves nothing. Strictly narrower than the scope either way.
+    expect(where.targetId).toEqual({ in: [] });
+  });
+
+  // A scoped actor asking for ONE of their own warehouses must get exactly that warehouse. The scope
+  // used to REPLACE the requested targetId, so a per-warehouse screen (the Warehouse detail page's
+  // Activity tab) silently received every warehouse the actor was assigned to — indistinguishable
+  // from the right answer, because the entries were all warehouse entries.
+  it("INTERSECTS a targetId inside the scope instead of widening it back to the whole set", () => {
+    const where = buildAuditWhere({ targetType: "warehouse", targetId: "w2", scopeWarehouseIds: ["w1", "w2", "w3"] });
+    expect(where.targetType).toBe("warehouse");
+    expect(where.targetId).toEqual({ in: ["w2"] });
+  });
+
+  it("narrows a targetId OUTSIDE the scope to nothing (never to the scope)", () => {
+    const where = buildAuditWhere({ targetType: "warehouse", targetId: "w9", scopeWarehouseIds: ["w1", "w2"] });
+    expect(where.targetId).toEqual({ in: [] });
+  });
+
+  it("still returns the whole scope when no targetId is asked for", () => {
+    const where = buildAuditWhere({ targetType: "warehouse", scopeWarehouseIds: ["w1", "w2"] });
+    expect(where.targetId).toEqual({ in: ["w1", "w2"] });
+  });
+
+  it("an unrestricted actor's targetId is honoured verbatim", () => {
+    const where = buildAuditWhere({ targetType: "warehouse", targetId: "w2" });
+    expect(where.targetId).toBe("w2");
   });
 
   it("an empty scope matches nothing (a user with zero assigned warehouses sees no audit)", () => {

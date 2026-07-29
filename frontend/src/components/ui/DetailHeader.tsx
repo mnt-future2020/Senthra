@@ -3,6 +3,8 @@
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
 
+import { usePersistedCollapse } from "@/hooks/usePersistedCollapse";
+
 // Reusable detail-page header card — the title + status badges + meta line + right-aligned actions
 // block that every detail page (Warehouse, Supplier, IRM item, Inventory, GRN…) had copy-pasted with
 // identical markup. Centralising it removes that duplication and adds one shared capability: the whole
@@ -23,41 +25,18 @@ export interface DetailHeaderProps {
   badges?: React.ReactNode;
   meta?: React.ReactNode;
   actions?: React.ReactNode;
+  // Optional logo/avatar shown left of the title (Customer is the one record kind that carries one).
+  // It receives the current collapsed state so it can shrink with the rest of the header instead of
+  // pinning the card to its expanded height — the whole point of collapsing.
+  avatar?: (collapsed: boolean) => React.ReactNode;
   // Distinct key per detail-page KIND (not per record) so all warehouses share one remembered state.
   storageKey: string;
 }
 
-function readStoredCollapse(storageKey: string): boolean {
-  if (typeof window === "undefined") return false;
-  try {
-    return window.localStorage.getItem(`detailHeader:${storageKey}:collapsed`) === "1";
-  } catch {
-    return false; // localStorage blocked (private mode / policy) — just stay expanded, non-fatal
-  }
-}
-
-function usePersistedCollapse(storageKey: string): [boolean, () => void] {
-  // Lazy initialiser reads the persisted preference once, on the client, at mount — no effect (which the
-  // "no setState in effect" lint rule forbids) and no hydration mismatch: the parent detail pages are all
-  // client components that render after their data loads, so there is no server-rendered header to diverge
-  // from. `typeof window` keeps the initialiser safe if ever evaluated during SSR (returns false → expanded).
-  const [collapsed, setCollapsed] = React.useState(() => readStoredCollapse(storageKey));
-  const toggle = React.useCallback(() => {
-    setCollapsed((c) => {
-      const next = !c;
-      try {
-        window.localStorage.setItem(`detailHeader:${storageKey}:collapsed`, next ? "1" : "0");
-      } catch {
-        /* best-effort persistence */
-      }
-      return next;
-    });
-  }, [storageKey]);
-  return [collapsed, toggle];
-}
-
-export function DetailHeader({ title, badges, meta, actions, storageKey }: DetailHeaderProps) {
-  const [isCollapsed, toggle] = usePersistedCollapse(storageKey);
+export function DetailHeader({ title, badges, meta, actions, avatar, storageKey }: DetailHeaderProps) {
+  // The `detailHeader:` prefix is part of the STORED key and must stay — dropping it when this moved
+  // to the shared hook would have silently reset every user's remembered choice.
+  const [isCollapsed, toggle] = usePersistedCollapse(`detailHeader:${storageKey}`);
 
   return (
     <div
@@ -74,6 +53,7 @@ export function DetailHeader({ title, badges, meta, actions, storageKey }: Detai
         >
           <ChevronDown className={`h-4 w-4 transition-transform ${isCollapsed ? "-rotate-90" : ""}`} />
         </button>
+        {avatar && <div className="shrink-0">{avatar(isCollapsed)}</div>}
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <h1 className={`truncate font-extrabold tracking-tight text-[var(--ink)] ${isCollapsed ? "text-base" : "text-xl"}`}>{title}</h1>

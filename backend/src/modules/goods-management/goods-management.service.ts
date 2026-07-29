@@ -1506,6 +1506,92 @@ export async function listDamaged(
   return rows;
 }
 
+// ── Damaged history (drill-down behind one damaged row) ───────────────────────────────────────
+// The damaged LIST can only ever surface the latest reason + photo per balance, because a balance
+// is an aggregate — quantity only, no reason, no photo (see the DamagedStockBalance model). Every
+// report's own reason and photo live on its DamagedStockTransaction row, which is append-only and
+// never overwritten. This is the read path that makes those earlier reports reachable: without it,
+// an item damaged twice showed report #2's evidence next to a quantity of 2 and report #1's reason
+// and photo could not be retrieved from any screen — even though the system REQUIRES both to be
+// captured before a damaged return can be posted.
+export interface DamagedHistoryEntry {
+  id: string;
+  date: string; // ISO
+  type: "write_off" | "restore"; // derived from the sign of quantityDelta
+  quantityDelta: number; // + damaged reported, − restored to usable
+  balanceAfter: number;
+  reason: string;
+  notes: string | null;
+  photoUrl: string | null;
+  sourceType: string;
+  sourceCode: string | null;
+  actor: string | null;
+}
+
+export interface DamagedHistoryResult {
+  warehouseId: string;
+  ownerType: string;
+  irmItemId: string | null;
+  customerStockEntryId: string | null;
+  itemName: string;
+  quantity: number; // the balance's CURRENT quantity
+  entries: DamagedHistoryEntry[];
+  truncated: boolean; // true = the cap was hit and older entries exist beyond `entries`
+}
+
+// Defensive ceiling only — one item at one warehouse realistically has single-digit reports. If it
+// is ever hit the result says so, so the UI can tell the user rather than quietly showing a partial
+// history (a silent truncation on an evidence trail is worse than no history at all).
+const DAMAGED_HISTORY_CAP = 200;
+
+export async function getDamagedHistory(
+  input: { warehouseId: string; ownerType: string; irmItemId: string | null; customerStockEntryId: string | null },
+  actor?: AuditActor,
+): Promise<DamagedHistoryResult> {
+  // Same guard every other warehouse-keyed read in this service uses: a warehouse-scoped manager
+  // may only drill into a warehouse they are actually assigned to.
+  assertWarehouseAccess(actor, input.warehouseId);
+
+  const key = {
+    warehouseId: input.warehouseId,
+    ownerType: input.ownerType,
+    irmItemId: input.irmItemId,
+    customerStockEntryId: input.customerStockEntryId,
+  };
+
+  // The balance is the anchor: it proves the row exists and carries the item-name snapshot + the
+  // current quantity the entries should reconcile to.
+  const balance = await goodsManagementRepo.findDamagedBalance(key);
+  if (!balance) throw notFound("Damaged stock balance not found for the given item and warehouse.");
+
+  // Ask for one MORE than the cap so a full page can be distinguished from an exactly-full one.
+  const rows = await goodsManagementRepo.findDamagedTxnsByKey(key, DAMAGED_HISTORY_CAP + 1);
+  const truncated = rows.length > DAMAGED_HISTORY_CAP;
+
+  return {
+    warehouseId: balance.warehouseId,
+    ownerType: balance.ownerType,
+    irmItemId: balance.irmItemId,
+    customerStockEntryId: balance.customerStockEntryId,
+    itemName: balance.itemName,
+    quantity: balance.quantity,
+    truncated,
+    entries: rows.slice(0, DAMAGED_HISTORY_CAP).map((t) => ({
+      id: t.id,
+      date: t.createdAt.toISOString(),
+      type: t.quantityDelta < 0 ? "restore" : "write_off",
+      quantityDelta: t.quantityDelta,
+      balanceAfter: t.balanceAfter,
+      reason: t.reason,
+      notes: t.notes,
+      photoUrl: t.photoUrl,
+      sourceType: t.sourceType,
+      sourceCode: t.sourceCode,
+      actor: t.createdBy,
+    })),
+  };
+}
+
 // ── Overdue holdings ──────────────────────────────────────────────────────────────────────────
 // Issue movements older than `days` whose job's engineer still holds stock
 // (goodsStatus !== "reconciled").
@@ -1521,9 +1607,13 @@ export interface OverdueRow {
   lines: { source: string; irmItemId: string | null; customerStockEntryId: string | null; itemName: string; qty: number }[];
 }
 
-export async function listOverdue(actor?: AuditActor, days = 14): Promise<OverdueRow[]> {
+// `warehouseId` scopes the read to one warehouse's issues. The per-warehouse Goods Management tab
+// passes it; without it the tab showed every warehouse the actor could reach, so an admin standing
+// in Warehouse A's tab was chasing Warehouse B's overdue jobs. The actor's own warehouse-access
+// check below still applies on top — this narrows WHAT is asked for, it does not widen access.
+export async function listOverdue(actor?: AuditActor, days = 14, warehouseId?: string): Promise<OverdueRow[]> {
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-  const movements = await goodsManagementRepo.findRecentMovementsForOverdue(cutoff);
+  const movements = await goodsManagementRepo.findRecentMovementsForOverdue(cutoff, warehouseId);
 
   // Group by job, filter to jobs not yet reconciled.
   const seenJobIds = new Set<string>();
@@ -1838,6 +1928,13 @@ export async function restoreDamaged(input: RestoreDamagedInput, actor?: AuditAc
   const actorEmail = actor?.email ?? null;
   const irmItemId = input.irmItemId ?? null;
   const customerStockEntryId = input.customerStockEntryId ?? null;
+
+  // A restore WRITES: it moves units out of the damaged pool and credits usable stock at this
+  // warehouse. The balance is addressed by its natural key (warehouse + item), not by an id the
+  // caller could only have obtained from a permitted read — so without this guard a
+  // warehouse-scoped manager could restore stock into a warehouse they are not assigned to. Every
+  // other warehouse-keyed write in this service asserts access; this one was missing it.
+  assertWarehouseAccess(actor, input.warehouseId);
 
   // Load the damaged balance by natural key.
   const balance = await goodsManagementRepo.findDamagedBalance({

@@ -2,6 +2,8 @@
 
 // ImageLightbox — full-screen in-app image preview (portal to <body>). Used to view damage photos
 // etc. WITHOUT navigating to the raw Cloudinary URL. Closes on backdrop click, the X, or Escape.
+// Safe to open ON TOP of a <Modal>: it sits at z-[60] above the modal's z-50 and swallows Escape so
+// only the photo closes, leaving the modal beneath it open (see the keydown effect).
 
 import * as React from "react";
 import { createPortal } from "react-dom";
@@ -20,10 +22,26 @@ export function ImageLightbox({
 }) {
   React.useEffect(() => {
     const prev = document.activeElement as HTMLElement | null;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    document.addEventListener("keydown", onKey);
+    // Escape is handled in the CAPTURE phase and stopped there, because this lightbox can open on
+    // top of a <Modal> (the damaged-stock history opens a photo from inside its modal) and both
+    // listen for Escape on `document`.
+    //
+    // stopImmediatePropagation would NOT fix that: same-element listeners fire in REGISTRATION
+    // order, and the Modal — mounted first — would already have closed underneath us before this
+    // handler ever ran, dumping the user back to the table instead of just dismissing the photo.
+    // Capturing runs ahead of every bubble-phase listener on `document` regardless of mount order,
+    // so the topmost overlay consumes the key, which is what a stacked dialog should do.
+    //
+    // Scoped to Escape on purpose — Tab still reaches the Modal so its focus trap keeps working.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      onClose();
+    };
+    document.addEventListener("keydown", onKey, true);
     return () => {
-      document.removeEventListener("keydown", onKey);
+      // The capture flag is part of the listener's identity — removing without it is a no-op leak.
+      document.removeEventListener("keydown", onKey, true);
       if (prev && document.contains(prev)) prev.focus();
     };
   }, [onClose]);

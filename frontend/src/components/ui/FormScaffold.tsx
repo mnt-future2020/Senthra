@@ -48,6 +48,7 @@ export function FormSection({
   title,
   description,
   invalid,
+  action,
   children,
 }: {
   title: React.ReactNode;
@@ -55,6 +56,10 @@ export function FormSection({
   // When true, the section shows a red ring — flags a section-level requirement (e.g. a barcode that
   // must be generated before activating) the same way a field error is flagged.
   invalid?: boolean;
+  // Section-level action(s) — rendered on the RIGHT of the title row. Sections used to put their
+  // "Add …" button in a right-aligned row of its own below the heading, which left an empty band
+  // across the width of the card. Pairing it with the title uses the space that was already there.
+  action?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
@@ -62,9 +67,12 @@ export function FormSection({
       className={`border bg-[var(--surface)] p-5 shadow-xs sm:p-6 ${invalid ? "border-[var(--neg)]" : "border-[var(--border)]"}`}
       style={{ borderRadius: "var(--radius)" }}
     >
-      <div className="mb-5">
-        <h2 className="text-sm font-extrabold text-[var(--ink)]">{title}</h2>
-        {description && <p className="mt-0.5 text-xs text-[var(--muted)]">{description}</p>}
+      <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-sm font-extrabold text-[var(--ink)]">{title}</h2>
+          {description && <p className="mt-0.5 text-xs text-[var(--muted)]">{description}</p>}
+        </div>
+        {action && <div className="flex shrink-0 flex-wrap items-center gap-2">{action}</div>}
       </div>
       {children}
     </section>

@@ -1575,13 +1575,13 @@ model DamagedStockTransaction {
   customerStockEntryId String? @db.ObjectId
   customerId           String? @db.ObjectId
 
-  quantityDelta Int // + report damaged (write-off only in v1)
+  quantityDelta Int // + report damaged, − restored back to usable
   reason        String
   notes         String?
   photoUrl      String?
-  sourceType    String // goods_management_return
+  sourceType    String // goods_management_return | van_stock_return | damaged_restore
   sourceId      String   @db.ObjectId
-  sourceCode    String? // GM-0001
+  sourceCode    String? // GM-0001 / VSR-0001
   balanceAfter  Int
   createdBy     String?
   createdAt     DateTime @default(now())
@@ -1589,6 +1589,14 @@ model DamagedStockTransaction {
   @@index([warehouseId])
   @@index([customerId])
   @@index([sourceType, sourceId])
+  // The BALANCE's natural key + time. Both ledger reads walk exactly these fields in newest-first
+  // order — the damaged list's latest-reason/photo lookup (findLatestDamagedTxnsByBalances) and the
+  // per-row history drill-down (findDamagedTxnsByKey). Without it only `warehouseId` was indexed, so
+  // both seeked on the warehouse and then filtered + SORTED IN MEMORY; on a warehouse with a long
+  // damage history that is a growing scan, and a large enough in-memory sort eventually trips
+  // MongoDB's 32 MB sort ceiling and fails the request outright. createdAt is last so the index
+  // serves the ordering as well as the match.
+  @@index([warehouseId, ownerType, irmItemId, customerStockEntryId, createdAt])
 }
 
 // Per-job goods status (one row per Job). Derived tallies are computed from movement lines.

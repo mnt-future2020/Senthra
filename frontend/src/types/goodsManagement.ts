@@ -173,8 +173,38 @@ export interface DamagedRow {
   itemName: string;
   quantity: number;
   updatedAt: string;
+  // The LATEST report's reason/photo only — a damaged row is an aggregate, so an item damaged more
+  // than once shows the most recent evidence next to the running total. Every earlier report's own
+  // reason and photo come from the history drill-down below.
   reason: string | null;
   photoUrl: string | null;
+}
+
+// ── Damaged history (drill-down behind one damaged row) ───────────────────────
+
+export interface DamagedHistoryEntry {
+  id: string;
+  date: string;
+  type: "write_off" | "restore";
+  quantityDelta: number; // + damaged reported, − restored to usable
+  balanceAfter: number;
+  reason: string;
+  notes: string | null;
+  photoUrl: string | null;
+  sourceType: string;
+  sourceCode: string | null;
+  actor: string | null;
+}
+
+export interface DamagedHistory {
+  warehouseId: string;
+  ownerType: "company" | "customer";
+  irmItemId: string | null;
+  customerStockEntryId: string | null;
+  itemName: string;
+  quantity: number;
+  entries: DamagedHistoryEntry[];
+  truncated: boolean; // true = older entries exist beyond the ones returned
 }
 
 // ── Overdue holdings ──────────────────────────────────────────────────────────

@@ -503,8 +503,59 @@ export function findCompanyDamagedByIrmItem(irmItemId: string): Promise<DamagedB
   });
 }
 
+// EVERY damaged-ledger row for ONE balance's natural key, newest first — the drill-down behind a
+// damaged row. The list view can only ever show the LATEST reason/photo per balance (see
+// findLatestDamagedTxnsByBalances), so without this the reason and photo captured on every EARLIER
+// report were stored but unreachable from any screen. Ordered by (createdAt, id) desc so
+// same-millisecond rows still come back in a stable, deterministic order.
+//
+// Deliberately unpaginated: this is one item at one warehouse, so the row count is the number of
+// times that item was damaged there — single digits in practice. `take` caps it defensively so a
+// pathological key can never stream an unbounded result set into memory; the service reports when
+// the cap was hit rather than silently truncating.
+export function findDamagedTxnsByKey(
+  key: { warehouseId: string; ownerType: string; irmItemId: string | null; customerStockEntryId: string | null },
+  take: number,
+): Promise<DamagedStockTransaction[]> {
+  return prisma.damagedStockTransaction.findMany({
+    where: {
+      warehouseId: key.warehouseId,
+      ownerType: key.ownerType,
+      irmItemId: key.irmItemId,
+      customerStockEntryId: key.customerStockEntryId,
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take,
+  });
+}
+
+// Thresholds for the self-measurement in findLatestDamagedTxnsByBalances below. Deliberately quiet
+// in normal operation: at realistic damage volume a call reads tens of rows in single-digit
+// milliseconds, so nothing is logged and the log stays useful. Crossing either line is the EVIDENCE
+// that the accepted ceiling documented on that function has actually been reached.
+const DAMAGED_LOOKUP_ROWS_WARN = 2_000; // ledger rows read in one call
+const DAMAGED_LOOKUP_MS_WARN = 500; // wall-clock for the single query
+
 /** Returns the most-recent DamagedStockTransaction for each balance row, keyed by balanceId.
  *  We match on warehouseId + ownerType + irmItemId + customerStockEntryId (the natural key).
+ *
+ *  KNOWN, ACCEPTED CEILING — read before changing. This reads EVERY ledger row belonging to the
+ *  balances it is given and reduces in memory to one value each, so the rows it READS grow with the
+ *  damage history forever while the rows it RETURNS stay constant (one per list row). It is indexed
+ *  (warehouseId, ownerType, irmItemId, customerStockEntryId, createdAt) so this is a seek, not a
+ *  scan — but the index bounds the cost per row, not the row count.
+ *
+ *  DO NOT "fix" this with a plain `take`. The query orders by createdAt across ALL balances at once,
+ *  so a global limit can come back holding only the busiest item's rows and leave every OTHER row's
+ *  reason column silently BLANK — wrong data that looks right, which is worse than a slow query.
+ *  Server-side pagination is also ruled out: the damaged list's search filters the full set
+ *  client-side. The only correct fix is denormalising latestReason/latestPhotoUrl onto
+ *  DamagedStockBalance, written where the quantity is written — which touches the damage WRITE path
+ *  in four places plus a backfill for existing rows.
+ *
+ *  That fix is deliberately NOT done on prediction. The call measures itself instead and stays
+ *  silent until the numbers say otherwise; when the warning below starts recurring in production
+ *  logs, that is the trigger to implement the denormalised design.
  */
 export async function findLatestDamagedTxnsByBalances(
   balances: Pick<DamagedBalanceWithWarehouse, "id" | "warehouseId" | "ownerType" | "irmItemId" | "customerStockEntryId">[],
@@ -514,6 +565,7 @@ export async function findLatestDamagedTxnsByBalances(
 
   // Fetch the latest transaction per natural key via a single query, then pick the max.
   // We fetch all matching transactions (in practice each balance has few txns) and reduce in-memory.
+  const startedAt = Date.now();
   const txns = await prisma.damagedStockTransaction.findMany({
     where: {
       OR: balances.map((b) => ({
@@ -526,6 +578,19 @@ export async function findLatestDamagedTxnsByBalances(
     select: { warehouseId: true, ownerType: true, irmItemId: true, customerStockEntryId: true, reason: true, photoUrl: true, createdAt: true },
     orderBy: { createdAt: "desc" },
   });
+  const durationMs = Date.now() - startedAt;
+
+  // Amplification = rows READ per row RETURNED. This is the number that actually argues for
+  // denormalising (a 1× call wastes nothing; a 15× call throws away 14 rows out of every 15), so it
+  // is logged alongside the raw counts rather than left to be inferred from them.
+  if (txns.length >= DAMAGED_LOOKUP_ROWS_WARN || durationMs >= DAMAGED_LOOKUP_MS_WARN) {
+    const amplification = (txns.length / balances.length).toFixed(1);
+    console.warn(
+      `[damaged-stock] latest-txn lookup read ${txns.length} ledger row(s) in ${durationMs}ms to enrich ` +
+        `${balances.length} damaged row(s) (${amplification}x amplification). If this recurs, denormalise ` +
+        `latestReason/latestPhotoUrl onto DamagedStockBalance — see the note on this function.`,
+    );
+  }
 
   // Build a lookup: natural-key → latest txn seen (since query is desc, first hit wins).
   const seen = new Set<string>();
@@ -549,9 +614,18 @@ export async function findLatestDamagedTxnsByBalances(
 }
 
 // --- overdue holdings (jobs whose stock is still out > N days) --------------------------------
-export function findRecentMovementsForOverdue(cutoff: Date) {
+// `warehouseId` narrows to the issues made FROM one warehouse — the Goods Management tab is a
+// per-warehouse surface, so its Overdue section must not report another warehouse's holdings.
+// Omitted (the Inventory Hub's company-wide read) returns every warehouse's.
+export function findRecentMovementsForOverdue(cutoff: Date, warehouseId?: string) {
   return prisma.jobStockMovement.findMany({
-    where: { direction: "issue", status: "posted", deletedAt: null, createdAt: { lt: cutoff } },
+    where: {
+      direction: "issue",
+      status: "posted",
+      deletedAt: null,
+      createdAt: { lt: cutoff },
+      ...(warehouseId ? { warehouseId } : {}),
+    },
     include: withRelations,
     orderBy: { createdAt: "asc" },
   });

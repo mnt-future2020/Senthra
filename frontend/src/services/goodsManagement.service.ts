@@ -6,6 +6,7 @@ import type {
   JobGoodsDetail,
   PublicMovement,
   DamagedRow,
+  DamagedHistory,
   OverdueRow,
   PostMovementPayload,
   CloseReconcilePayload,
@@ -109,6 +110,29 @@ export function listDamaged(params: ListDamagedParams = {}): Promise<DamagedRow[
   return api<{ damaged: DamagedRow[] }>(`/goods-management/damaged${qs ? `?${qs}` : ""}`).then((r) => r.damaged);
 }
 
+/**
+ * Every damage report + restore behind ONE damaged row, newest first — each with its OWN reason and
+ * photo. The list row can only carry the latest of each (the balance it comes from stores a quantity
+ * and nothing else), so this is the only way to reach the evidence captured on earlier reports.
+ *
+ * Addressed by the row's natural key, not its id: pass the SAME ownerType/irmItemId/
+ * customerStockEntryId the row carries. The backend rejects a company row sent without an irmItemId
+ * (and a customer row without a customerStockEntryId) rather than answering for the wrong balance.
+ */
+export function getDamagedHistory(row: {
+  warehouseId: string;
+  ownerType: "company" | "customer";
+  irmItemId: string | null;
+  customerStockEntryId: string | null;
+}): Promise<DamagedHistory> {
+  const sp = new URLSearchParams({ warehouseId: row.warehouseId, ownerType: row.ownerType });
+  if (row.ownerType === "company" && row.irmItemId) sp.set("irmItemId", row.irmItemId);
+  if (row.ownerType === "customer" && row.customerStockEntryId) {
+    sp.set("customerStockEntryId", row.customerStockEntryId);
+  }
+  return api<DamagedHistory>(`/goods-management/damaged/history?${sp.toString()}`);
+}
+
 // ── Damage-photo upload ───────────────────────────────────────────────────────
 
 /**
@@ -128,9 +152,14 @@ export function uploadDamagePhoto(dataUri: string): Promise<string> {
  * List overdue-holding rows: issue movements older than `days` (default 14) whose job's stock
  * has not yet been reconciled. Used in the GoodsManagementTab overdue section.
  */
-export function listOverdue(days?: number): Promise<OverdueRow[]> {
-  const qs = days != null ? `?days=${days}` : "";
-  return api<{ overdue: OverdueRow[] }>(`/goods-management/overdue${qs}`).then((r) => r.overdue);
+export function listOverdue(days?: number, warehouseId?: string): Promise<OverdueRow[]> {
+  const params = new URLSearchParams();
+  if (days != null) params.set("days", String(days));
+  // Scopes to one warehouse's issues — the Goods Management tab is per-warehouse. Omit for the
+  // company-wide read.
+  if (warehouseId) params.set("warehouseId", warehouseId);
+  const qs = params.toString();
+  return api<{ overdue: OverdueRow[] }>(`/goods-management/overdue${qs ? `?${qs}` : ""}`).then((r) => r.overdue);
 }
 
 /**

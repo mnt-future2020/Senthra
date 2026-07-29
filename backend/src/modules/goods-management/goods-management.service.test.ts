@@ -7,7 +7,7 @@ vi.mock("./goods-management.repository.js", () => ({
   upsertCustomerHoldingTx: vi.fn(), findCustomerHoldingTx: vi.fn(), insertCustomerHoldingTxnTx: vi.fn(), findCustomerHoldingsByEngineer: vi.fn(),
   adjustCustomerStockEntryQtyTx: vi.fn(), findCustomerStockEntryById: vi.fn(), findCustomerStockEntriesByIds: vi.fn(), findCustomerStockEntryByBarcode: vi.fn(),
   upsertDamagedBalanceTx: vi.fn(), insertDamagedTxnTx: vi.fn(), findDamagedByWarehouse: vi.fn(), findDamagedByCustomer: vi.fn(), findAllDamaged: vi.fn(), findRecentMovementsForOverdue: vi.fn(), findCustomerHolding: vi.fn(),
-  findLatestDamagedTxnsByBalances: vi.fn(),
+  findLatestDamagedTxnsByBalances: vi.fn(), findDamagedBalance: vi.fn(), findDamagedTxnsByKey: vi.fn(),
 }));
 vi.mock("#modules/job/job.repository.js", () => ({ findById: vi.fn(), findActiveForGoodsManagement: vi.fn(), findActiveWithKitLines: vi.fn(), completeIfInProgressTx: vi.fn() }));
 vi.mock("#modules/irm/irm.service.js", () => ({ requireActiveIrmItem: vi.fn(), findActiveByCodeOrBarcode: vi.fn() }));
@@ -1346,6 +1346,126 @@ describe("listDamaged", () => {
   });
 });
 
+// ── getDamagedHistory ────────────────────────────────────────────────────────────────────────
+import { getDamagedHistory } from "./goods-management.service.js";
+
+const mockFindDamagedBalance = repo.findDamagedBalance as ReturnType<typeof vi.fn>;
+const mockFindDamagedTxnsByKey = repo.findDamagedTxnsByKey as ReturnType<typeof vi.fn>;
+
+const COMPANY_KEY = { warehouseId: WH_ID, ownerType: "company", irmItemId: IRM_ID, customerStockEntryId: null };
+const txn = (over: Record<string, unknown> = {}) => ({
+  id: "t1", createdAt: new Date("2026-07-21T10:00:00Z"), quantityDelta: 1, balanceAfter: 1,
+  reason: "Crushed in transit", notes: null, photoUrl: "https://cdn/p1.jpg",
+  sourceType: "goods_management_return", sourceCode: "GM-0001", createdBy: "wh@x.com", ...over,
+});
+
+describe("getDamagedHistory", () => {
+  beforeEach(() => {
+    mockFindDamagedBalance.mockResolvedValue({
+      id: "dmg1", warehouseId: WH_ID, ownerType: "company", irmItemId: IRM_ID,
+      customerStockEntryId: null, itemName: "CAT6", quantity: 2,
+    });
+    mockFindDamagedTxnsByKey.mockResolvedValue([txn()]);
+  });
+
+  it("returns EVERY report — not just the latest, which is the whole point of the drill-down", async () => {
+    // Two reports for the SAME item: the list row can only show reason #2 next to a quantity of 2,
+    // so report #1's reason and photo must come back here or they are unreachable in the product.
+    mockFindDamagedTxnsByKey.mockResolvedValue([
+      txn({ id: "t2", reason: "Water damage", photoUrl: "https://cdn/p2.jpg", balanceAfter: 2 }),
+      txn({ id: "t1", reason: "Crushed in transit", photoUrl: "https://cdn/p1.jpg", balanceAfter: 1 }),
+    ]);
+    const res = await getDamagedHistory(COMPANY_KEY);
+    expect(res.entries).toHaveLength(2);
+    expect(res.entries.map((e) => e.reason)).toEqual(["Water damage", "Crushed in transit"]);
+    expect(res.entries.map((e) => e.photoUrl)).toEqual(["https://cdn/p2.jpg", "https://cdn/p1.jpg"]);
+    expect(res.quantity).toBe(2); // the balance total the entries reconcile to
+  });
+
+  it("derives the entry type from the sign of quantityDelta", async () => {
+    mockFindDamagedTxnsByKey.mockResolvedValue([
+      txn({ id: "t2", quantityDelta: -1, reason: "restore", balanceAfter: 0 }),
+      txn({ id: "t1", quantityDelta: 2, balanceAfter: 1 }),
+    ]);
+    const res = await getDamagedHistory(COMPANY_KEY);
+    expect(res.entries.map((e) => e.type)).toEqual(["restore", "write_off"]);
+  });
+
+  it("404s when no damaged balance exists for the key", async () => {
+    mockFindDamagedBalance.mockResolvedValue(null);
+    await expect(getDamagedHistory(COMPANY_KEY)).rejects.toMatchObject({ status: 404 });
+    expect(mockFindDamagedTxnsByKey).not.toHaveBeenCalled();
+  });
+
+  it("403s for a warehouse-scoped actor drilling into a warehouse they aren't assigned", async () => {
+    const actor = { type: "user" as const, email: "wm@x.com", assignedWarehouseIds: ["other".padEnd(24, "0")] };
+    await expect(getDamagedHistory(COMPANY_KEY, actor)).rejects.toMatchObject({ status: 403 });
+    // Guard runs BEFORE any read — a 403 must not leak whether the balance even exists.
+    expect(mockFindDamagedBalance).not.toHaveBeenCalled();
+  });
+
+  it("allows a warehouse-scoped actor for a warehouse they ARE assigned", async () => {
+    const actor = { type: "user" as const, email: "wm@x.com", assignedWarehouseIds: [WH_ID] };
+    const res = await getDamagedHistory(COMPANY_KEY, actor);
+    expect(res.entries).toHaveLength(1);
+  });
+
+  it("reports truncation instead of silently dropping older entries", async () => {
+    // The repo is asked for cap+1 so a full page is distinguishable; 201 rows ⇒ 200 shown + flag.
+    mockFindDamagedTxnsByKey.mockResolvedValue(Array.from({ length: 201 }, (_, i) => txn({ id: `t${i}` })));
+    const res = await getDamagedHistory(COMPANY_KEY);
+    expect(res.entries).toHaveLength(200);
+    expect(res.truncated).toBe(true);
+  });
+
+  it("is not truncated at exactly the cap", async () => {
+    mockFindDamagedTxnsByKey.mockResolvedValue(Array.from({ length: 200 }, (_, i) => txn({ id: `t${i}` })));
+    const res = await getDamagedHistory(COMPANY_KEY);
+    expect(res.entries).toHaveLength(200);
+    expect(res.truncated).toBe(false);
+  });
+
+  it("queries with the customer socket for customer-owned damage", async () => {
+    const key = { warehouseId: WH_ID, ownerType: "customer", irmItemId: null, customerStockEntryId: CSE_ID };
+    mockFindDamagedBalance.mockResolvedValue({
+      id: "dmg2", warehouseId: WH_ID, ownerType: "customer", irmItemId: null,
+      customerStockEntryId: CSE_ID, itemName: "SFP-LX", quantity: 1,
+    });
+    await getDamagedHistory(key);
+    expect(mockFindDamagedTxnsByKey).toHaveBeenCalledWith(
+      expect.objectContaining({ ownerType: "customer", customerStockEntryId: CSE_ID, irmItemId: null }),
+      expect.any(Number),
+    );
+  });
+
+  it("exposes no cost or value fields", async () => {
+    const res = await getDamagedHistory(COMPANY_KEY);
+    for (const e of res.entries) {
+      expect(Object.keys(e)).not.toContain("cost");
+      expect(Object.keys(e)).not.toContain("value");
+    }
+  });
+});
+
+// ── restoreDamaged — warehouse scoping ───────────────────────────────────────────────────────
+import { restoreDamaged } from "./goods-management.service.js";
+
+describe("restoreDamaged (warehouse scoping)", () => {
+  it("403s for a warehouse-scoped actor restoring into a warehouse they aren't assigned", async () => {
+    // A restore WRITES: it takes units out of the damaged pool and credits usable stock at that
+    // warehouse. The balance is addressed by its natural key, not by an id the caller could only
+    // have got from a permitted read — so the guard is the only thing stopping a scoped manager
+    // from crediting stock into someone else's warehouse. It was missing until this was added.
+    mockFindDamagedBalance.mockClear();
+    const actor = { type: "user" as const, email: "wm@x.com", assignedWarehouseIds: ["other".padEnd(24, "0")] };
+    await expect(
+      restoreDamaged({ warehouseId: WH_ID, ownerType: "company", irmItemId: IRM_ID, quantity: 1, notes: "n" }, actor),
+    ).rejects.toMatchObject({ status: 403 });
+    // Rejected before ANY read or write — nothing about the other warehouse's stock is disclosed.
+    expect(mockFindDamagedBalance).not.toHaveBeenCalled();
+  });
+});
+
 // ── listOverdue ──────────────────────────────────────────────────────────────────────────────
 import { listOverdue } from "./goods-management.service.js";
 
@@ -1384,6 +1504,19 @@ describe("listOverdue", () => {
     });
     expect(rows[0].lines).toHaveLength(1);
     expect(rows[0].lines[0]).toMatchObject({ source: "irm", irmItemId: IRM_ID, qty: 5 });
+  });
+
+  // The Goods Management tab is per-warehouse and its other sections are scoped, but this one asked
+  // for every warehouse the actor could reach — so Warehouse A's tab listed Warehouse B's overdue
+  // jobs. Scoping happens in the QUERY, not after the fact.
+  it("scopes the query to one warehouse when given a warehouseId", async () => {
+    await listOverdue(undefined, 14, "wh-A");
+    expect(mockFindRecentMovementsForOverdue).toHaveBeenCalledWith(expect.any(Date), "wh-A");
+  });
+
+  it("asks for every warehouse when no warehouseId is given (the company-wide read)", async () => {
+    await listOverdue();
+    expect(mockFindRecentMovementsForOverdue).toHaveBeenCalledWith(expect.any(Date), undefined);
   });
 
   it("excludes jobs that are already reconciled", async () => {
