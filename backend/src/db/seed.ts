@@ -13,7 +13,7 @@ import * as userRepo from "#modules/user/user.repository.js";
 import * as warehouseTypeRepo from "#modules/warehouse-type/warehouse-type.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as settingsRepo from "#modules/settings/settings.repository.js";
-import { LEGACY_PERMISSION_EXPANSION, PERMISSION_KEYS, WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS, customerCompatAdditions, splitByCapability } from "#modules/role/permissions.js";
+import { JOB_OFFICE_PERMISSIONS, LEGACY_PERMISSION_EXPANSION, PERMISSION_KEYS, SYSTEM_ADMIN_PERMISSIONS, WAREHOUSE_MANAGER_PERMISSIONS, customerCompatAdditions, splitByCapability } from "#modules/role/permissions.js";
 import { DEFAULT_EMAIL_TEMPLATES } from "#modules/email/emailTemplate.defaults.js";
 import { renderBodyToHtml } from "../utils/email-html.js";
 import { hashPassword } from "../utils/password.js";
@@ -65,19 +65,6 @@ const ENGINEER_PORTAL_PERMISSIONS = [
 const ENGINEER_STOCK_ADMIN_PERMISSIONS = [
   "engineer_stock.view",
   "engineer_stock.transfer",
-];
-
-// Office-side Job module permissions for roles that create/assign/track job packs (the
-// project_manager is the natural owner). Seeded on project_manager + backfilled idempotently.
-const JOB_OFFICE_PERMISSIONS = [
-  "jobs.view",
-  "jobs.create",
-  "jobs.edit",
-  "jobs.assign",
-  "jobs.cancel",
-  "jobs.delete",
-  // Review field-engineer additional-kit requests (approve → grow kit + open fulfilment; or decline).
-  "jobs.kit_request.review",
 ];
 
 // Goods Management permissions for warehouse-side roles (issue/receive/reconcile). Seeded on the
@@ -148,42 +135,10 @@ const PM_PROCUREMENT_PERMISSIONS = [
 // idempotently on every startup. The warehouse-access layer turns the flag into real enforcement.
 const WAREHOUSE_SCOPED_ROLE_KEYS = ["warehouse_manager"];
 
-// Operational permissions that make the Warehouse Manager role usable end-to-end. EVERY one stays
-// scoped to the user's assigned warehouses by the warehouse-access layer (a WM never gets global
-// reach). Mapped to the real permission keys: "transaction/movement view" = inventory.view +
-// inventory.history; "transfer / move stock" = inventory.move; "add stock" = inventory.adjust;
-// "PO update" = purchase_orders.edit. Seeded on warehouse_manager + backfilled idempotently below.
-const WAREHOUSE_MANAGER_PERMISSIONS = [
-  "warehouse.view",
-  "warehouse.edit",
-  "warehouse_types.view",
-  "inventory.view",
-  "inventory.history",
-  "inventory.adjust",
-  "inventory.move",
-  // Day-to-day receiving: a manager creates, corrects, completes (posts stock) and cancels a mistaken
-  // DRAFT goods receipt for their assigned warehouse. `cancel` is state-machine-limited to drafts (a
-  // completed GRN is terminal); `delete` is intentionally withheld — deletion isn't a warehouse op.
-  "goods_in.view",
-  "goods_in.create",
-  "goods_in.edit",
-  "goods_in.complete",
-  "goods_in.cancel",
-  "purchase_orders.view",
-  "purchase_orders.create",
-  "purchase_orders.edit",
-  // Warehouse-side customer consignment intake: receive a customer's stock into an assigned
-  // warehouse, then fill in the entry + generate its barcode (see the constant's own doc for the
-  // exact scope). Without these the Incoming stock → Customer and Inventory → Customer tabs 403
-  // and the required Category field on the receive form can't be populated. Backfilled below via
-  // the existing Warehouse Manager backfill block, which reads this same array.
-  ...WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS,
-  // Read the audit trail — powers the warehouse detail's "Audit trail" tab. SAFE to grant a
-  // warehouse-scoped role because the /audit endpoints scope every read (list, facets, export) to
-  // the caller's assigned warehouses (see audit.service warehouseScope): a manager sees only their
-  // warehouses' history, never users/roles/customers or other warehouses. Backfilled below.
-  "audit.view",
-];
+// The Warehouse Manager's operational permissions live with the permission catalog
+// (WAREHOUSE_MANAGER_PERMISSIONS in modules/role/permissions.ts) alongside the design rationale for
+// what the role deliberately does NOT get — notably that purchase orders are read-only here. Seeded
+// on warehouse_manager below + backfilled idempotently from that same array.
 
 const SEED_ROLES: {
   key: string;
@@ -195,7 +150,7 @@ const SEED_ROLES: {
   isWarehouseScoped?: boolean;
 }[] = [
   { key: "super_admin", name: "Super Admin", description: "Full system owner. Manages users, roles and all settings.", sortOrder: 0, permissions: ["*"] },
-  { key: "system_admin", name: "System Admin", description: "IT / HR administrator who creates and manages user accounts and customers.", sortOrder: 1, permissions: ["users.view", "users.create", "users.edit", "users.delete", "roles.view", "customers.view", "customers.create", "customers.edit", "customers.delete", "warehouse.view", "warehouse.create", "warehouse.edit", "warehouse.delete", "warehouse_types.view", "warehouse_types.create", "warehouse_types.edit", "warehouse_types.delete", "categories.view", "categories.create", "categories.edit", "categories.delete", "suppliers.view", "suppliers.create", "suppliers.edit", "suppliers.delete", "supplier_types.view", "supplier_types.create", "supplier_types.edit", "supplier_types.delete", "irm.view", "irm.create", "irm.edit", "irm.delete", "irm_types.view", "irm_types.create", "irm_types.edit", "irm_types.delete", "irm_categories.view", "irm_categories.create", "irm_categories.edit", "irm_categories.delete", "purchase_requests.view", "purchase_requests.create", "purchase_requests.edit", "purchase_requests.delete", "purchase_requests.submit", "purchase_requests.approve", "purchase_requests.convert", "purchase_requests.cancel", "purchase_orders.view", "purchase_orders.create", "purchase_orders.edit", "purchase_orders.delete", "purchase_orders.submit", "purchase_orders.approve", "purchase_orders.assign_pm", "purchase_orders.send", "purchase_orders.acknowledge", "purchase_orders.cancel", "purchase_orders.close", "goods_in.view", "goods_in.create", "goods_in.edit", "goods_in.delete", "goods_in.complete", "goods_in.cancel", "inventory.view", "inventory.move", "inventory.history", "inventory.export", "inventory.adjust", "inventory.stock_take", "jobs.view", "jobs.create", "jobs.edit", "jobs.assign", "jobs.cancel", "jobs.delete", ...ENGINEER_STOCK_ADMIN_PERMISSIONS] },
+  { key: "system_admin", name: "System Admin", description: "IT / HR administrator who creates and manages user accounts and customers.", sortOrder: 1, permissions: [...SYSTEM_ADMIN_PERMISSIONS, ...ENGINEER_STOCK_ADMIN_PERMISSIONS] },
   { key: "project_manager", name: "Project Manager", description: "Creates job packs, authorises dispatch and tracks projects.", sortOrder: 2, permissions: [...JOB_OFFICE_PERMISSIONS, ...PM_PROCUREMENT_PERMISSIONS] },
   { key: "project_coordinator", name: "Project Coordinator", description: "Supports project managers with day-to-day coordination.", sortOrder: 3, permissions: [] },
   { key: "warehouse_manager", name: "Warehouse Manager", description: "Receives goods, scans stock in/out and manages a warehouse.", sortOrder: 4, permissions: [...WAREHOUSE_MANAGER_PERMISSIONS, ...GOODS_MANAGEMENT_PERMISSIONS, ...VAN_STOCK_REQUEST_PERMISSIONS, ...ENGINEER_STOCK_ADMIN_PERMISSIONS], isWarehouseScoped: true },
@@ -429,6 +384,38 @@ export async function seedDatabase(): Promise<void> {
     }
   }
 
+  // One-time REVOKE (runs EXACTLY once, ever): an earlier build seeded the warehouse_manager with
+  // the PO-authoring keys (create/edit). The client's PO flow is Finance-owned end to end — the
+  // warehouse enters only when the goods arrive — so the role is READ-ONLY on purchase orders (the
+  // full rationale lives with WAREHOUSE_MANAGER_PERMISSIONS). `purchase_orders.view` is deliberately
+  // NOT revoked: Goods In needs it to list the receivable POs to receive against. Gated behind a
+  // persisted Counter flag so it fires once and then NEVER runs again — an admin who later
+  // deliberately re-grants those keys via the role editor keeps them (a boot-time re-strip would
+  // silently undo their intent). Idempotent by construction — the flag makes re-runs a no-op.
+  {
+    const FLAG = "migration:wm-po-authoring-revoke";
+    const already = await prisma.counter.findUnique({ where: { key: FLAG } });
+    if (!already) {
+      const REVOKE_FROM_WM = ["purchase_orders.create", "purchase_orders.edit"];
+      const wm = (await roleRepo.findMany()).find((r) => r.key === "warehouse_manager");
+      if (wm && !wm.permissions.includes("*")) {
+        const kept = wm.permissions.filter((p) => !REVOKE_FROM_WM.includes(p));
+        if (kept.length !== wm.permissions.length) {
+          await roleRepo.update(wm.id, { permissions: { set: kept } });
+          console.log(`Revoked PO-authoring permissions from warehouse_manager (now Finance-owned).`);
+        }
+      }
+      // Mark the migration done regardless of whether a role needed changing, so it never re-runs.
+      // Guard the unique key against a concurrent boot (two replicas seeding one DB): the loser's
+      // create hits P2002 — swallow it (the flag exists either way). Mirrors ensurePoCounter.
+      try {
+        await prisma.counter.create({ data: { key: FLAG, seq: 1 } });
+      } catch (e) {
+        if (!(e && typeof e === "object" && "code" in e && (e as { code?: string }).code === "P2002")) throw e;
+      }
+    }
+  }
+
   // Backfill admin-side engineer stock transfer permissions onto system_admin and warehouse_manager
   // idempotently (covers DBs seeded before the engineer-transfer module shipped). super_admin already
   // holds "*" and is skipped. Also seeded directly into the base role literals above for fresh DBs.
@@ -625,30 +612,10 @@ export async function seedDatabase(): Promise<void> {
   const existingRoles = await roleRepo.findMany();
   const systemAdmin = existingRoles.find((r) => r.key === "system_admin");
   if (systemAdmin && !systemAdmin.permissions.includes("*")) {
-    // Every built-in grant system_admin should hold (customers, warehouses + types, and
-    // the global stock-category master). One read, one update — only missing keys added.
-    const wanted = [
-      "customers.view", "customers.create", "customers.edit", "customers.delete",
-      "warehouse.view", "warehouse.create", "warehouse.edit", "warehouse.delete",
-      "warehouse_types.view", "warehouse_types.create", "warehouse_types.edit", "warehouse_types.delete",
-      "categories.view", "categories.create", "categories.edit", "categories.delete",
-      "suppliers.view", "suppliers.create", "suppliers.edit", "suppliers.delete",
-      "supplier_types.view", "supplier_types.create", "supplier_types.edit", "supplier_types.delete",
-      "irm.view", "irm.create", "irm.edit", "irm.delete", "irm.barcode.manage",
-      "irm_types.view", "irm_types.create", "irm_types.edit", "irm_types.delete",
-      "irm_categories.view", "irm_categories.create", "irm_categories.edit", "irm_categories.delete",
-      "purchase_requests.view", "purchase_requests.create", "purchase_requests.edit", "purchase_requests.delete",
-      "purchase_requests.submit", "purchase_requests.approve", "purchase_requests.convert", "purchase_requests.cancel",
-      "purchase_orders.view", "purchase_orders.create", "purchase_orders.edit", "purchase_orders.delete",
-      "purchase_orders.submit", "purchase_orders.approve", "purchase_orders.assign_pm", "purchase_orders.send",
-      "purchase_orders.acknowledge", "purchase_orders.cancel", "purchase_orders.close",
-      "goods_in.view", "goods_in.create", "goods_in.edit", "goods_in.delete", "goods_in.complete", "goods_in.cancel",
-      "inventory.view", "inventory.move", "inventory.history", "inventory.export", "inventory.adjust", "inventory.stock_take",
-      "jobs.view", "jobs.create", "jobs.edit", "jobs.assign", "jobs.cancel", "jobs.delete",
-      "goods_management.view", "goods_management.issue", "goods_management.receive_return", "goods_management.reconcile",
-      "engineer.jobs.start", "engineer.jobs.complete",
-    ];
-    const missing = wanted.filter((p) => !systemAdmin.permissions.includes(p));
+    // Reads the SAME array the fresh-DB literal above uses, so an old install and a new one end up
+    // with an identical system_admin. This list used to be hand-maintained separately and had
+    // drifted — see SYSTEM_ADMIN_PERMISSIONS for what that cost. One read, one update; additive.
+    const missing = SYSTEM_ADMIN_PERMISSIONS.filter((p) => !systemAdmin.permissions.includes(p));
     if (missing.length) {
       await roleRepo.update(systemAdmin.id, {
         permissions: { set: [...systemAdmin.permissions, ...missing] },

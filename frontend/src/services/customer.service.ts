@@ -431,6 +431,9 @@ export interface ReceiveStockPayload {
 export interface ReceiveStockResult {
   assignment: WarehouseAssignment;
   stockEntryId: string;
+  // "draft" = the entry still needs product details (category + barcode) before it can go active.
+  // "active" = this receipt topped up an entry the warehouse manager already completed.
+  stockEntryStatus: "draft" | "active";
 }
 
 export function receiveStockAssignment(

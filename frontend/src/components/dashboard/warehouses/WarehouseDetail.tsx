@@ -2,13 +2,14 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Activity, Boxes, Eye, Loader2, MapPin, Pencil, Power, ScrollText } from "lucide-react";
+import { Activity, Boxes, Eye, Loader2, MapPin, Pencil, Power, Printer, ScrollText, Search } from "lucide-react";
 
 import * as warehouseService from "@/services/warehouse.service";
 import * as customerService from "@/services/customer.service";
 import * as auditService from "@/services/audit.service";
 import { Select } from "@/components/ui/Select";
 import { Pagination } from "@/components/ui/Pagination";
+import { inputCls, secondaryBtn } from "@/components/ui/styles";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { NoStaffAssigned, StaffChip } from "@/components/ui/StaffChip";
@@ -18,6 +19,15 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { actionLabel, actionTone, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
 import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
 import { ReceiveStockModal } from "@/components/dashboard/customers/ReceiveStockModal";
+import {
+  EMPTY_FILTERS,
+  customerFilterOptions,
+  effectiveFilters,
+  filterPendingStock,
+  hasActiveFilter,
+  statusFilterOptions,
+  type PendingStockFilters,
+} from "./incomingStockFilter";
 import { InventoryView } from "@/components/dashboard/inventory/InventoryView";
 import { GoodsReceiptsView } from "@/components/dashboard/goods-in/GoodsReceiptsView";
 import { GoodsManagementTab } from "@/components/dashboard/goods-management/GoodsManagementTab";
@@ -26,7 +36,7 @@ import { DemandTab } from "@/components/dashboard/goods-management/DemandTab";
 import { DamagedStockView } from "@/components/dashboard/goods-management/DamagedStockView";
 import { ExpectedDeliveries } from "./ExpectedDeliveries";
 import type { AuditEntry } from "@/types/audit";
-import type { CustomerStockEntry, PendingStockItem, WarehouseAssignment } from "@/types/customer";
+import type { CustomerStockEntry, PendingStockItem } from "@/types/customer";
 import type { Warehouse } from "@/types/warehouse";
 import type { UserStatus } from "@/types/user";
 
@@ -461,9 +471,22 @@ function IncomingStock({
   const [items, setItems] = React.useState<PendingStockItem[] | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [receiveTarget, setReceiveTarget] = React.useState<PendingStockItem | null>(null);
-  // Client-side paging, matching the Company (GRN) pool's Expected deliveries: the whole
-  // worklist is already loaded in one call, so this only slices what's rendered.
+  // The last top-up onto an ALREADY-ACTIVE entry, so the label shortcut below can point at it.
+  // Only ever set when we deliberately DIDN'T navigate — a draft receipt lands on the entry page,
+  // where the printer already is.
+  const [lastTopUp, setLastTopUp] = React.useState<{ entryId: string; itemName: string; quantity: number } | null>(null);
+  // Client-side paging AND filtering, matching the Company (GRN) pool's Expected deliveries: the
+  // whole worklist is already loaded in one call, so this only slices what's rendered.
   const [page, setPage] = React.useState(1);
+  const [filters, setFilters] = React.useState<PendingStockFilters>(EMPTY_FILTERS);
+
+  // Any filter change restarts at page 1. Without it, filtering while on page 3 leaves you staring
+  // at a blank slice of a now-shorter list (the clamp below would rescue it, but only after a
+  // confusing frame — and landing mid-list is wrong anyway).
+  const patchFilters = (next: Partial<PendingStockFilters>) => {
+    setFilters((prev) => ({ ...prev, ...next }));
+    setPage(1);
+  };
 
   const load = React.useCallback(() => {
     customerService
@@ -474,7 +497,12 @@ function IncomingStock({
 
   React.useEffect(() => { load(); }, [load]);
 
-  const onReceived = (updated: WarehouseAssignment, stockEntryId: string) => {
+  const onReceived = ({ assignment: updated, stockEntryId, stockEntryStatus }: customerService.ReceiveStockResult) => {
+    // Captured before the modal closes — the receipt's OWN quantity is the running total minus what
+    // had already been booked, and that (not the entry's lifetime total) is how many stickers the
+    // units on the loading bay need.
+    const justReceived = Math.max(0, updated.receivedQuantity - (receiveTarget?.receivedQuantity ?? 0));
+    const itemName = receiveTarget?.itemName ?? "";
     setReceiveTarget(null);
     pushToast(
       updated.status === "received"
@@ -482,25 +510,48 @@ function IncomingStock({
         : `Received ${updated.receivedQuantity}/${updated.quantity} at ${updated.warehouseName}.`,
       "success",
     );
-    // Jump straight into the just-received draft entry (warehouse context) so the WM can fill the
-    // product details, generate the barcode + print the label, and activate — no hunting for it in the
-    // Inventory tab. A PARTIAL receipt tops up the SAME entry, so this opens it either way. The
-    // Incoming list re-loads when the WM navigates back. Falls back to a refresh if the id is missing.
-    if (stockEntryId) {
+    // Jump into the entry ONLY while it's still a draft, so the WM can fill the product details,
+    // generate the barcode + print the label, and activate — no hunting for it in the Inventory tab.
+    //
+    // A partial receipt tops up the SAME entry, so once that entry is active every later receipt used
+    // to re-open a form the WM had already completed and dropped them out of the Incoming list they
+    // were working through. Nothing on that page is actionable for an active entry (quantity is
+    // read-only, "Set during receive"), so it was pure detour. Active entries now stay put and the
+    // list reloads, which is also what happens when the id is missing.
+    if (stockEntryId && stockEntryStatus === "draft") {
       router.push(`/dashboard/stock-entries/${stockEntryId}?from=warehouse`);
     } else {
+      // Staying put keeps the queue in front of the manager, but the units that just arrived still
+      // need stickers and the entry page is where the printer lives. Nothing on THIS row links
+      // there (a pending assignment carries no entry id until it's received), so surface the one we
+      // were just handed, pre-loading the copy count with this receipt's quantity.
+      if (stockEntryId) setLastTopUp({ entryId: stockEntryId, itemName, quantity: justReceived });
       load();
     }
   };
 
-  const total = items?.length ?? 0;
+  const allRows = React.useMemo(() => items ?? [], [items]);
+  // Menu options come from the UNFILTERED worklist, so the counts don't shuffle as you narrow down
+  // and a customer never disappears from the menu just because the search hid their rows.
+  const customerOptions = React.useMemo(() => customerFilterOptions(allRows), [allRows]);
+  const statusOptions = React.useMemo(() => statusFilterOptions(allRows), [allRows]);
+  // Receiving a customer's last row deletes their option out from under the stored pick. Resolve
+  // what's actually in effect so the table and the menus agree — see effectiveFilters.
+  const effective = React.useMemo(
+    () => effectiveFilters(filters, customerOptions, statusOptions),
+    [filters, customerOptions, statusOptions],
+  );
+  const rows = React.useMemo(() => filterPendingStock(allRows, effective), [allRows, effective]);
+  const filtered = hasActiveFilter(effective);
+
+  const total = rows.length;
   const totalPages = Math.max(1, Math.ceil(total / INCOMING_PAGE_SIZE));
   // Clamp rather than store a corrected page: receiving the last row on the last page shrinks the
   // list, and a stale out-of-range `page` would otherwise render an empty table.
   const safePage = Math.min(page, totalPages);
   const pageRows = React.useMemo(
-    () => (items ?? []).slice((safePage - 1) * INCOMING_PAGE_SIZE, safePage * INCOMING_PAGE_SIZE),
-    [items, safePage],
+    () => rows.slice((safePage - 1) * INCOMING_PAGE_SIZE, safePage * INCOMING_PAGE_SIZE),
+    [rows, safePage],
   );
 
   if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
@@ -517,6 +568,91 @@ function IncomingStock({
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-4">
+      {/* Label shortcut for the receipt just booked. Dismissible, and replaced by the next receipt —
+          it's a prompt for the stock currently on the bay, not a log. `copies` is carried so the
+          entry page opens ready to print exactly what arrived. */}
+      {lastTopUp && (
+        <div className="flex flex-col gap-3 rounded-xl border border-[var(--pos)]/30 bg-[var(--pos)]/10 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-xs leading-relaxed text-[var(--ink)]">
+            <span className="font-bold">Received {lastTopUp.quantity} × {lastTopUp.itemName}.</span>{" "}
+            Print labels for them if the stock isn&apos;t tagged yet.
+          </p>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={() =>
+                router.push(`/dashboard/stock-entries/${lastTopUp.entryId}?from=warehouse&copies=${lastTopUp.quantity}`)
+              }
+              className={secondaryBtn}
+            >
+              <Printer className="h-3.5 w-3.5" />
+              Print labels
+            </button>
+            <button
+              type="button"
+              onClick={() => setLastTopUp(null)}
+              aria-label="Dismiss"
+              className="rounded-lg px-2 py-1 text-xs font-bold text-[var(--muted)] hover:text-[var(--ink)]"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Toolbar. Rendered only once there IS data — an empty warehouse gets the empty state alone,
+          not controls with nothing to control. Search covers item + customer name + code; the two
+          menus narrow by customer and by how far along the receipt is. */}
+      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 sm:flex-row sm:items-center">
+        <div className="relative w-full sm:max-w-xs">
+          <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
+          <input
+            value={filters.search}
+            onChange={(e) => patchFilters({ search: e.target.value })}
+            placeholder="Search item or customer…"
+            aria-label="Search incoming customer stock"
+            className={`${inputCls} pl-9`}
+          />
+        </div>
+        <div className="flex flex-wrap items-center gap-2 sm:ml-auto">
+          {/* `effective`, not `filters` — a pick whose option has gone shows as "All" rather than
+              leaving the trigger blank while the table quietly ignores it. */}
+          <Select
+            value={effective.customerCode}
+            onChange={(v) => patchFilters({ customerCode: v })}
+            options={customerOptions}
+            ariaLabel="Filter by customer"
+            size="sm"
+          />
+          <Select
+            value={effective.status}
+            onChange={(v) => patchFilters({ status: v })}
+            options={statusOptions}
+            ariaLabel="Filter by status"
+            size="sm"
+          />
+          {filtered && (
+            <button type="button" onClick={() => { setFilters(EMPTY_FILTERS); setPage(1); }} className={secondaryBtn}>
+              Clear
+            </button>
+          )}
+        </div>
+      </div>
+
+      {rows.length === 0 ? (
+        // Distinct from "No incoming stock": there IS work here, the filters just hide it. Saying
+        // otherwise reads as "this warehouse is clear" and sends the WM away.
+        <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
+          <Search className="h-7 w-7 text-[var(--faint)]" />
+          <p className="text-sm font-semibold text-[var(--ink)]">No matching stock</p>
+          <p className="text-xs text-[var(--muted)]">
+            {allRows.length} incoming item{allRows.length === 1 ? "" : "s"} here, none match these filters.
+          </p>
+          <button type="button" onClick={() => { setFilters(EMPTY_FILTERS); setPage(1); }} className={`${secondaryBtn} mt-1`}>
+            Clear filters
+          </button>
+        </div>
+      ) : (
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
         <div className="min-h-0 flex-1 overflow-auto">
         <table className="w-full text-left text-sm" style={{ minWidth: 700 }}>
@@ -575,10 +711,13 @@ function IncomingStock({
         </table>
         </div>
       </div>
+      )}
 
-      <div className="shrink-0">
-        <Pagination page={safePage} totalPages={totalPages} total={total} label="items" onPage={setPage} />
-      </div>
+      {rows.length > 0 && (
+        <div className="shrink-0">
+          <Pagination page={safePage} totalPages={totalPages} total={total} label="items" onPage={setPage} />
+        </div>
+      )}
 
       {receiveTarget && (
         <ReceiveStockModal

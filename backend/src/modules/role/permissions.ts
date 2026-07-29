@@ -616,6 +616,141 @@ export const WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS = [
   "stock_requests.complete",
 ];
 
+// The full Warehouse Manager seed bundle — everything the role needs to run a warehouse
+// end-to-end, and nothing beyond it. EVERY key stays scoped to the user's assigned warehouses by
+// the warehouse-access layer (a WM never gets global reach). Seeded onto the warehouse_manager
+// role and backfilled idempotently in db/seed.ts, which reads this same array.
+//
+// Mapped from the client's operational wording to the real permission keys:
+//   "transaction / movement view" → inventory.view + inventory.history
+//   "transfer / move stock"       → inventory.move
+//   "add stock"                   → inventory.adjust
+//
+// PURCHASE ORDERS ARE READ-ONLY HERE. The client's PO flow is Finance-owned from end to end —
+// supplier quotation → PRF → Finance review → Finance generates the PO → routed to a PM who emails
+// it to the supplier. The warehouse enters only at the BOTTOM of that flow, when the goods arrive.
+// So the role holds `purchase_orders.view` and neither create nor edit:
+//   • `.view` is REQUIRED — the Goods In form lists the receivable POs (sent / supplier_accepted /
+//     partially_received) to receive against, and the warehouse's expected-deliveries panel is
+//     gated on it. Without it there is nothing to book a delivery against.
+//   • `.create` would raise a PO with no PRF behind it. That also misses the PRF fast-path in
+//     purchase-order.service (draft + purchaseRequestId → approved), so the order strands in
+//     `draft`: no seeded role holds `purchase_orders.submit` to push it forward.
+//   • `.edit` only ever reaches a DRAFT purchase order (plus PO attachments), and a warehouse never
+//     sees a draft. Delivery paperwork belongs on the goods receipt via `goods_in.edit`.
+//
+// `irm.view` is NOT optional. Every warehouse item picker is built from GET /irm — Add Stock,
+// Adjust Stock, Transfer and the movement feed — and each of those swallows the rejection, so
+// without it the dropdowns render silently EMPTY with no error shown. The Goods In form also reads
+// the catalogue for each line's serial/batch tracking flags, so a 403 there means serial and batch
+// numbers are silently never captured on receive.
+export const WAREHOUSE_MANAGER_PERMISSIONS = [
+  "warehouse.view",
+  "warehouse.edit",
+  "warehouse_types.view",
+  "inventory.view",
+  "inventory.history",
+  "inventory.adjust",
+  "inventory.move",
+  // Read the item catalogue — powers every item picker and the GRN's serial/batch flags (above).
+  "irm.view",
+  // Day-to-day receiving: a manager creates, corrects, completes (posts stock) and cancels a mistaken
+  // DRAFT goods receipt for their assigned warehouse. `cancel` is state-machine-limited to drafts (a
+  // completed GRN is terminal); `delete` is intentionally withheld — deletion isn't a warehouse op.
+  "goods_in.view",
+  "goods_in.create",
+  "goods_in.edit",
+  "goods_in.complete",
+  "goods_in.cancel",
+  // Read-only: the receivable-PO list behind Goods In + the expected-deliveries panel (above).
+  "purchase_orders.view",
+  // Warehouse-side customer consignment intake: receive a customer's stock into an assigned
+  // warehouse, then fill in the entry + generate its barcode (see the constant's own doc for the
+  // exact scope). Without these the Incoming stock → Customer and Inventory → Customer tabs 403
+  // and the required Category field on the receive form can't be populated.
+  ...WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS,
+  // Read the audit trail — powers the warehouse detail's "Audit trail" tab. SAFE to grant a
+  // warehouse-scoped role because the /audit endpoints scope every read (list, facets, export) to
+  // the caller's assigned warehouses (see audit.service warehouseScope): a manager sees only their
+  // warehouses' history, never users/roles/customers or other warehouses.
+  "audit.view",
+];
+
+// The office-side Job module bundle — for roles that create, assign and track job packs (the
+// project_manager is the natural owner). Seeded on project_manager and backfilled idempotently in
+// db/seed.ts, which reads this same array.
+//
+// The four READ keys below are not optional extras: a job pack is built for a customer, at one of
+// that customer's sites, out of stock held in a warehouse — so the wizard cannot be completed
+// without them. Every picker in JobForm swallows its rejection, so a missing read shows up as a
+// silently EMPTY dropdown rather than an error, which is why they are pinned by test:
+//   • customers.view    — the customer picker AND the site/project pickers (all three list routes
+//                         gate on customers.view, not the granular child keys). `customerId` is a
+//                         REQUIRED field on job create, so without this the form can never save.
+//   • customer_stock.view — kit lines drawn from the customer's OWN consignment stock
+//                         (the /stock-entries read accepts customer_stock.view or stock_requests.view).
+//   • inventory.view    — per-warehouse balances behind the kit picker's warehouse dropdown, the
+//                         availability check at selection time, and the jobs-demand panel. Also
+//                         needed by the kit-request REVIEW modal's warehouse cards.
+// Granting customers.view additionally pulls the customer-child `.view` keys in via
+// CUSTOMER_COMPAT_BACKFILL — correct and harmless for a planner who works off the customer record.
+export const JOB_OFFICE_PERMISSIONS = [
+  "jobs.view",
+  "jobs.create",
+  "jobs.edit",
+  "jobs.assign",
+  "jobs.cancel",
+  "jobs.delete",
+  // Review field-engineer additional-kit requests (approve → grow kit + open fulfilment; or decline).
+  "jobs.kit_request.review",
+  // Reads the job wizard + kit-request review cannot function without (see above).
+  "customers.view",
+  "customer_stock.view",
+  "inventory.view",
+];
+
+// The System Admin bundle — the IT/HR administrator who creates user accounts and owns the master
+// data (customers, warehouses, suppliers, the IRM catalogue and its types/categories). Role
+// MANAGEMENT stays with the super-admin: this role gets `roles.view` only.
+//
+// SINGLE SOURCE OF TRUTH. db/seed.ts uses this array in BOTH places it seeds the role — the fresh-DB
+// SEED_ROLES literal and the already-seeded-DB backfill. Those two lists were previously maintained
+// by hand and had drifted apart, so a new install produced a WEAKER system_admin than an old one
+// (the backfill alone carried irm.barcode.manage and the goods_management keys). Keep them unified:
+// edit this array, never one call site.
+//
+// NOTHING CAPABILITY-TAGGED MAY APPEAR HERE. The drifted backfill also granted `engineer.jobs.start`
+// and `engineer.jobs.complete`, which belong to the field_ops-only Engineer Portal group. A system
+// admin holds no field-ops capability, so the startup capability repair STRIPPED them on every boot
+// and the backfill RE-ADDED them moments later — two pointless writes and two contradictory log
+// lines on every single restart, forever. They are gone; the repair now self-heals any DB that
+// still has them, with no revoke migration needed. A test pins the invariant.
+export const SYSTEM_ADMIN_PERMISSIONS = [
+  "users.view", "users.create", "users.edit", "users.delete",
+  // Read-only on roles — creating and editing roles is the super-admin's alone.
+  "roles.view",
+  "customers.view", "customers.create", "customers.edit", "customers.delete",
+  "warehouse.view", "warehouse.create", "warehouse.edit", "warehouse.delete",
+  "warehouse_types.view", "warehouse_types.create", "warehouse_types.edit", "warehouse_types.delete",
+  "categories.view", "categories.create", "categories.edit", "categories.delete",
+  "suppliers.view", "suppliers.create", "suppliers.edit", "suppliers.delete",
+  "supplier_types.view", "supplier_types.create", "supplier_types.edit", "supplier_types.delete",
+  // `barcode.manage` belongs with the catalogue it owns — without it this role can create an IRM
+  // item but not generate or print its barcode.
+  "irm.view", "irm.create", "irm.edit", "irm.delete", "irm.barcode.manage",
+  "irm_types.view", "irm_types.create", "irm_types.edit", "irm_types.delete",
+  "irm_categories.view", "irm_categories.create", "irm_categories.edit", "irm_categories.delete",
+  "purchase_requests.view", "purchase_requests.create", "purchase_requests.edit", "purchase_requests.delete",
+  "purchase_requests.submit", "purchase_requests.approve", "purchase_requests.convert", "purchase_requests.cancel",
+  "purchase_orders.view", "purchase_orders.create", "purchase_orders.edit", "purchase_orders.delete",
+  "purchase_orders.submit", "purchase_orders.approve", "purchase_orders.assign_pm", "purchase_orders.send",
+  "purchase_orders.acknowledge", "purchase_orders.cancel", "purchase_orders.close",
+  "goods_in.view", "goods_in.create", "goods_in.edit", "goods_in.delete", "goods_in.complete", "goods_in.cancel",
+  "inventory.view", "inventory.move", "inventory.history", "inventory.export", "inventory.adjust", "inventory.stock_take",
+  "jobs.view", "jobs.create", "jobs.edit", "jobs.assign", "jobs.cancel", "jobs.delete",
+  "goods_management.view", "goods_management.issue", "goods_management.receive_return", "goods_management.reconcile",
+];
+
 // The customer sub-entity groups. Each is a slice of a single customer record, so
 // holding ANY permission in one of them implies being able to see the parent
 // customer (`customers.view`) — you can't manage a customer's projects, stock,

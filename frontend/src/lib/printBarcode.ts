@@ -86,3 +86,15 @@ export function printLabels(label: BarcodeLabel & { copies?: number }): void {
 export function printSingleLabel(label: BarcodeLabel): void {
   printLabels({ ...label, copies: 1 });
 }
+
+// Read a copy count out of a URL query param — untrusted input, so anything that isn't a whole
+// number inside 1..MAX_LABEL_COPIES yields null and the caller falls back to its own default
+// rather than seeding the field with junk. Used by the stock-entry page, which the Incoming list
+// links to with ?copies= set to the quantity that just arrived.
+export function parseCopiesParam(raw: string | null | undefined): number | null {
+  if (raw == null || raw.trim() === "") return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n)) return null;
+  if (n < 1 || n > MAX_LABEL_COPIES) return null;
+  return n;
+}

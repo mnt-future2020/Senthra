@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ArrowLeft, Barcode, Loader2, Printer, Save } from "lucide-react";
+import { ArrowLeft, Barcode, CheckCircle2, Loader2, Printer, Save } from "lucide-react";
 
 import * as customerService from "@/services/customer.service";
 import { listCategories, getCachedCategories } from "@/services/category.service";
@@ -12,6 +12,7 @@ import { useReferenceData } from "@/hooks/useReferenceData";
 import { FormSection, FormAsideCard, RequiredMark } from "@/components/ui/FormScaffold";
 import { Select } from "@/components/ui/Select";
 import { inputCls, labelCls, primaryBtn, secondaryBtn, hintCls } from "@/components/ui/styles";
+import { printLabels, parseCopiesParam, MAX_LABEL_COPIES } from "@/lib/printBarcode";
 import type { CustomerStockEntry, StockEntryStatus } from "@/types/customer";
 import type { Category } from "@/types/category";
 
@@ -73,6 +74,17 @@ export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
 
   const [errors, setErrors] = React.useState<Record<string, string>>({});
   const [saving, setSaving] = React.useState(false);
+  // Set only by the draft → active transition in this session, so the "what now?" panel appears on
+  // the save that earned it and not every time someone opens an entry that happens to be active.
+  const [justActivated, setJustActivated] = React.useState(false);
+  // Print-only control — never part of the saved entry, so it must not mark the form dirty.
+  // Seeded from ?copies= when the Incoming list sends the warehouse manager here to label a top-up:
+  // they need stickers for the units that just arrived, not for the entry's whole running total.
+  // Anything out of range is ignored in favour of the blank default (= the entry quantity).
+  const [copies, setCopies] = React.useState(() => {
+    const seeded = parseCopiesParam(searchParams.get("copies"));
+    return seeded == null ? "" : String(seeded);
+  });
   const [generatingBarcode, setGeneratingBarcode] = React.useState(false);
 
   const clearError = (key: string) => setErrors((prev) => { const n = { ...prev }; delete n[key]; return n; });
@@ -131,6 +143,11 @@ export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
         highValue: entry.highValue,
       });
       setEntry(updated);
+      // Activation is the end of this entry's job, but NOT the end of the warehouse manager's: the
+      // label still has to be printed and stuck on the physical stock. So don't navigate away on
+      // save — that would yank them off the Print button. Surface the next step instead, plus a
+      // one-click way back to the queue they were working through.
+      if (isDraft && updated.status === "active") setJustActivated(true);
       pushToast(isDraft ? "Stock entry activated." : "Stock entry updated.", "success");
     } catch (err) {
       pushToast(err instanceof Error ? err.message : "Could not save.", "alert");
@@ -139,48 +156,24 @@ export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
     }
   };
 
-  // Print ONLY the barcode label (image + code) via a hidden iframe — not the whole page.
-  // Waits for the image to load before printing, then cleans up. No popup-blocker issues.
+  // One sticker per physical unit, so the copy count defaults to the quantity actually received.
+  // Blank means "track the quantity"; typing a number pins it (reprinting the three that smudged).
+  // Same control and the same shared printer the Goods Receipt form uses — this page used to carry
+  // its own 40-line iframe printer that could only ever produce a SINGLE label, which is wrong for
+  // an entry holding 50 units and was the one place in the app not using lib/printBarcode.
+  // Clamped to the print cap: `entry.quantity` is the entry's RUNNING TOTAL, so a line topped up
+  // past MAX_LABEL_COPIES over its life would otherwise default to a count the printer refuses,
+  // opening the panel with the button already disabled and nothing typed.
+  const defaultCopies = Math.min(MAX_LABEL_COPIES, Math.max(1, entry.quantity));
+  // Typed input goes through the SAME validator as the ?copies= URL param. It began as a separate
+  // inline check and drifted: the URL path rejected fractions, this one didn't, so "2.5" enabled a
+  // button reading "Print 2.5 labels" while printLabels floored it to 2 — the UI promising one
+  // count and the printer producing another, onto physical stock. One validator, no drift.
+  const copiesNum = copies.trim() === "" ? defaultCopies : parseCopiesParam(copies);
+  const copiesValid = copiesNum !== null;
   const printBarcodeLabel = () => {
-    if (!entry.barcodeDataUri) return;
-    const code = entry.barcode ?? "";
-    const iframe = document.createElement("iframe");
-    iframe.setAttribute("aria-hidden", "true");
-    iframe.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0;";
-    document.body.appendChild(iframe);
-    const doc = iframe.contentWindow?.document;
-    if (!doc) { iframe.remove(); return; }
-    doc.open();
-    // Print page sized to the physical label (50×30mm thermal sticker) so the page IS the
-    // label — no A4 white space. The barcode PNG already renders the human-readable code
-    // beneath the bars, so we print just the image scaled to fill the label (no duplicate
-    // code line). Adjust LABEL_W/LABEL_H if your label stock differs.
-    const LABEL_W = "50mm", LABEL_H = "30mm";
-    // @page margin:0 removes the browser's auto date/title/URL/page-number header & footer
-    // (they're only drawn in the page margin), so the label prints clean. The quiet-zone
-    // padding lives on the body instead.
-    doc.write(
-      `<!doctype html><html><head><title>${code}</title>` +
-        `<style>@page{size:${LABEL_W} ${LABEL_H};margin:0}html,body{margin:0;padding:0}` +
-        `body{display:flex;align-items:center;justify-content:center;min-height:${LABEL_H};padding:2mm;box-sizing:border-box}` +
-        `img{width:100%;height:auto;max-height:calc(${LABEL_H} - 4mm);object-fit:contain}</style></head>` +
-        `<body><img src="${entry.barcodeDataUri}" alt="${code}"/></body></html>`,
-    );
-    doc.close();
-    const win = iframe.contentWindow;
-    if (!win) { iframe.remove(); return; }
-    const run = () => {
-      win.focus();
-      win.print();
-      setTimeout(() => iframe.remove(), 500);
-    };
-    const img = doc.querySelector("img");
-    if (img && !img.complete) {
-      img.onload = run;
-      img.onerror = run;
-    } else {
-      run();
-    }
+    if (!entry.barcodeDataUri || copiesNum === null) return;
+    printLabels({ dataUri: entry.barcodeDataUri, code: entry.barcode ?? "", copies: copiesNum });
   };
 
   const isDraft = entry.status === "draft";
@@ -224,12 +217,45 @@ export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
         </div>
       </div>
 
+      {/* Post-activation next step. Deliberately NOT an auto-redirect: the label still has to be
+          printed and attached, and navigating away on save would skip that. `warehouseCode` gives a
+          deterministic link back to the queue rather than relying on history depth. */}
+      {justActivated && fromWarehouse && (
+        <div className="flex flex-col gap-3 rounded-xl border border-[var(--pos)]/30 bg-[var(--pos)]/10 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-start gap-2.5">
+            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-[var(--pos)]" />
+            <p className="text-xs leading-relaxed text-[var(--ink)]">
+              <span className="font-bold">Stock entry activated.</span>{" "}
+              Print the barcode label below and attach it to the physical stock.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => router.push(`/dashboard/warehouses/${entry.warehouseCode}?tab=incoming&pool=customer`)}
+            className={`${secondaryBtn} shrink-0`}
+          >
+            <ArrowLeft className="h-3.5 w-3.5" />
+            Back to Incoming stock
+          </button>
+        </div>
+      )}
+
       {/* Main grid */}
       <form id="entry-form" onSubmit={handleSave}>
         <div className="grid gap-6 lg:grid-cols-3">
           {/* Left: form fields */}
           <div className="space-y-6 lg:col-span-2">
-            <FormSection title="Product details" description="Fill in the mandatory fields to activate this stock entry.">
+            {/* The activation prompt is only true while the entry is a draft. Leaving it up on an
+                ACTIVE entry made a successful save look like a no-op — the status badge had flipped
+                and the button had changed to "Save", but the form still asked to activate. */}
+            <FormSection
+              title="Product details"
+              description={
+                isDraft
+                  ? "Fill in the mandatory fields to activate this stock entry."
+                  : "Product details for this stock entry. Quantity is set by receiving."
+              }
+            >
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="sm:col-span-2">
                   <label className={labelCls}>Item name<RequiredMark /></label>
@@ -316,11 +342,36 @@ export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
                   <span className="font-mono text-sm font-bold text-[var(--ink)]">{entry.barcode}</span>
                   {fromWarehouse && (
                     <>
-                      <button type="button" onClick={printBarcodeLabel} className={secondaryBtn}>
-                        <Printer className="h-3.5 w-3.5" />
-                        Print label
-                      </button>
-                      <p className={hintCls}>Print this barcode and attach it to the physical stock.</p>
+                      <div className="flex flex-wrap items-end justify-center gap-2">
+                        <div>
+                          <label htmlFor="label-copies" className={labelCls}>Copies</label>
+                          <input
+                            id="label-copies"
+                            type="number"
+                            min={1}
+                            max={MAX_LABEL_COPIES}
+                            value={copies}
+                            onChange={(e) => setCopies(e.target.value)}
+                            placeholder={String(defaultCopies)}
+                            aria-invalid={!copiesValid || undefined}
+                            className={`${inputCls} w-24 text-center`}
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={printBarcodeLabel}
+                          disabled={!copiesValid}
+                          className={secondaryBtn}
+                        >
+                          <Printer className="h-3.5 w-3.5" />
+                          Print {copiesValid ? copiesNum : ""} label{copiesValid && copiesNum === 1 ? "" : "s"}
+                        </button>
+                      </div>
+                      <p className={hintCls}>
+                        {copiesValid
+                          ? "One sticker per unit — attach them to the physical stock."
+                          : `Enter a whole number between 1 and ${MAX_LABEL_COPIES}.`}
+                      </p>
                     </>
                   )}
                 </div>

@@ -7,6 +7,7 @@ import { AlertTriangle, Check, ChevronDown, ListFilter, PackageCheck, Truck } fr
 
 import { Skeleton } from "@/components/ui/Skeleton";
 import { Pagination } from "@/components/ui/Pagination";
+import { secondaryBtn } from "@/components/ui/styles";
 import { listPurchaseOrders } from "@/services/purchase-order.service";
 import { useAuth } from "@/hooks/useAuth";
 import { PO_PRIORITY_LABELS, PoStatusBadge, formatDate } from "@/components/dashboard/purchase-orders/poStatus";
@@ -415,6 +416,13 @@ export function ExpectedDeliveries({
   // comes back, and the explicit "Show all" control still resets it for good.)
   const effectiveFilter: Filter = options.some((o) => o.key === filter) ? filter : "all";
 
+  // One reset used by both the toolbar's Clear and the filtered-empty row's "Show all", so the two
+  // can't drift apart.
+  const clearFilter = () => {
+    setFilter("all");
+    setPage(1);
+  };
+
   const { rows: pageRows, totalPages, matchCount } = React.useMemo(
     () => filterRows(rows ?? [], effectiveFilter, page),
     [rows, effectiveFilter, page],
@@ -451,8 +459,23 @@ export function ExpectedDeliveries({
 
   // Only offered when there's more than one thing to pick — with a single bucket the menu would
   // offer just "All", i.e. a control that can't change anything.
+  //
+  // The Clear button appears only while a bucket is actually in effect. Without it the only way
+  // back to the full worklist was to reopen the menu and pick "All" — fine, but two steps for the
+  // most common thing you do after filtering, and the Customer pool beside this one clears in a
+  // single click. Keyed off `effectiveFilter`, not `filter`, so it never offers to clear a pick
+  // that has already fallen back to "all" because its bucket emptied.
   const menu = options.length > 1
-    ? <FilterMenu options={options} value={effectiveFilter} onChange={(f) => { setFilter(f); setPage(1); }} />
+    ? (
+      <div className="flex items-center gap-2">
+        <FilterMenu options={options} value={effectiveFilter} onChange={(f) => { setFilter(f); setPage(1); }} />
+        {effectiveFilter !== "all" && (
+          <button type="button" onClick={clearFilter} className={secondaryBtn}>
+            Clear
+          </button>
+        )}
+      </div>
+    )
     : null;
 
   return (
@@ -527,7 +550,7 @@ export function ExpectedDeliveries({
                 <tr>
                   <td colSpan={6} className="px-4 py-10 text-center text-sm text-[var(--muted)]">
                     No deliveries in this view.{" "}
-                    <button type="button" onClick={() => { setFilter("all"); setPage(1); }} className="font-semibold text-[var(--accent)] hover:underline">
+                    <button type="button" onClick={clearFilter} className="font-semibold text-[var(--accent)] hover:underline">
                       Show all
                     </button>
                   </td>

@@ -1531,7 +1531,7 @@ export async function receiveStockAssignment(
   assignmentId: string,
   input: ReceiveStockInput,
   actor?: AuditActor,
-): Promise<{ assignment: PublicWarehouseAssignment; stockEntryId: string }> {
+): Promise<{ assignment: PublicWarehouseAssignment; stockEntryId: string; stockEntryStatus: string }> {
   const assignment = await customerRepo.findAssignmentById(assignmentId);
   if (!assignment) throw notFound("Assignment not found.");
   // Scope to the warehouse this assignment physically lives at.
@@ -1591,6 +1591,11 @@ export async function receiveStockAssignment(
       warehouse: assignment.warehouse,
     }),
     stockEntryId: stockEntry.id,
+    // "draft" = the entry still needs its product details (category + barcode) before it can go
+    // active; "active" = a top-up onto an entry the warehouse manager already completed. The caller
+    // uses this to decide whether opening the entry form is useful work or a detour — see the
+    // Incoming list's receive handler.
+    stockEntryStatus: stockEntry.status,
   };
 }
 

@@ -174,3 +174,40 @@ describe("receiveStockAssignment — stock-line resolution", () => {
     expect(repo.createStockEntry).not.toHaveBeenCalled();
   });
 });
+
+// The Incoming list sends the warehouse manager into the entry form only while there is something
+// to fill in. Reporting the wrong status here is what made every top-up receipt bounce the WM out
+// of the list and into a form they had already completed.
+describe("receiveStockAssignment — stockEntryStatus", () => {
+  it("reports draft for a brand-new entry (product details still needed)", async () => {
+    repo.findAssignmentById.mockResolvedValue(assignmentRow({ editedName: "New product" }));
+    repo.createStockEntry.mockResolvedValue({ id: "newEntry", status: "draft" } as never);
+
+    const res = await receiveStockAssignment(ASSIGN_ID, { receivedQuantity: 10 });
+
+    expect(res.stockEntryStatus).toBe("draft");
+  });
+
+  it("reports active when topping up an entry the manager already completed", async () => {
+    repo.findAssignmentById.mockResolvedValue(assignmentRow({ linkedStockEntryId: LINKED_ID }));
+    repo.findStockEntriesByAssignment.mockResolvedValue([{ id: "assignmentEntry" }] as never);
+    repo.addStockEntryQuantity.mockResolvedValue({ id: "assignmentEntry", status: "active" } as never);
+
+    const res = await receiveStockAssignment(ASSIGN_ID, { receivedQuantity: 10 });
+
+    expect(res.stockEntryStatus).toBe("active");
+  });
+
+  it("still reports draft when a re-receive lands on an entry left unfinished", async () => {
+    // The manager received once, abandoned the form, and came back. There IS still work to do, so
+    // the redirect must fire again — the fix keys on the entry's state, not on "is this the first
+    // receipt?".
+    repo.findAssignmentById.mockResolvedValue(assignmentRow({ linkedStockEntryId: LINKED_ID }));
+    repo.findStockEntriesByAssignment.mockResolvedValue([{ id: "assignmentEntry" }] as never);
+    repo.addStockEntryQuantity.mockResolvedValue({ id: "assignmentEntry", status: "draft" } as never);
+
+    const res = await receiveStockAssignment(ASSIGN_ID, { receivedQuantity: 10 });
+
+    expect(res.stockEntryStatus).toBe("draft");
+  });
+});

@@ -9,7 +9,10 @@ import {
   PERMISSION_CAPABILITY,
   PERMISSION_KEYS,
   PERMISSION_PREREQUISITES,
+  JOB_OFFICE_PERMISSIONS,
+  SYSTEM_ADMIN_PERMISSIONS,
   WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS,
+  WAREHOUSE_MANAGER_PERMISSIONS,
   applyImpliedPermissions,
   baseKeyOf,
   closePrerequisites,
@@ -445,6 +448,146 @@ describe("WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS (warehouse-side consignment intak
     // Mirror of CATEGORY_LIST_READERS in category.routes.ts: the receive form's category picker
     // must load for anyone holding these keys, or the required Category field is unpickable.
     expect(WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS).toContain("stock_requests.complete");
+  });
+});
+
+describe("WAREHOUSE_MANAGER_PERMISSIONS (the seeded warehouse-manager bundle)", () => {
+  it("names only real catalogue keys", () => {
+    for (const key of WAREHOUSE_MANAGER_PERMISSIONS) {
+      expect(PERMISSION_KEYS).toContain(key);
+    }
+  });
+
+  it("has no duplicates (the customer-consignment spread must not overlap)", () => {
+    expect(new Set(WAREHOUSE_MANAGER_PERMISSIONS).size).toBe(WAREHOUSE_MANAGER_PERMISSIONS.length);
+  });
+
+  it("includes the warehouse-side consignment intake keys", () => {
+    for (const key of WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS) {
+      expect(WAREHOUSE_MANAGER_PERMISSIONS).toContain(key);
+    }
+  });
+
+  it("includes irm.view — every item picker and the GRN's serial/batch flags read GET /irm", () => {
+    // Add Stock, Adjust Stock, Transfer and the movement feed all build their item list from
+    // listIrmItems() and SWALLOW the rejection, so dropping this key leaves the pickers silently
+    // empty; the Goods In form also reads it for each line's serial/batch tracking flags.
+    expect(WAREHOUSE_MANAGER_PERMISSIONS).toContain("irm.view");
+  });
+
+  it("is READ-ONLY on purchase orders (authoring is Finance's step in the client flow)", () => {
+    // The warehouse enters the PO flow only when goods arrive. `.view` must stay — Goods In lists
+    // the receivable POs to receive against, and the expected-deliveries panel is gated on it.
+    expect(WAREHOUSE_MANAGER_PERMISSIONS).toContain("purchase_orders.view");
+    expect(WAREHOUSE_MANAGER_PERMISSIONS).not.toContain("purchase_orders.create");
+    expect(WAREHOUSE_MANAGER_PERMISSIONS).not.toContain("purchase_orders.edit");
+  });
+
+  it("holds no purchase-request keys at all (the PRF is raised by Finance)", () => {
+    for (const key of WAREHOUSE_MANAGER_PERMISSIONS) {
+      expect(key.startsWith("purchase_requests.")).toBe(false);
+    }
+  });
+
+  it("withholds goods_in.delete — a warehouse cancels a draft receipt, it never deletes one", () => {
+    expect(WAREHOUSE_MANAGER_PERMISSIONS).toContain("goods_in.cancel");
+    expect(WAREHOUSE_MANAGER_PERMISSIONS).not.toContain("goods_in.delete");
+  });
+
+  it("carries every prerequisite it depends on (no key is granted without its base)", () => {
+    // closePrerequisites only ever ADDS; an empty delta proves the bundle is self-sufficient, so
+    // no seeded permission is dead on arrival for want of its group's base key.
+    const closed = closePrerequisites(WAREHOUSE_MANAGER_PERMISSIONS);
+    expect(closed.filter((k) => !WAREHOUSE_MANAGER_PERMISSIONS.includes(k))).toEqual([]);
+  });
+
+  it("stays warehouse-scoped: never pulls in the global customer directory", () => {
+    // A warehouse manager is warehouse-scoped, so stock_requests.* must NOT imply `customers.view`
+    // (the un-scoped, company-wide customer book). Mirrors WAREHOUSE_SIDE_CUSTOMER_CHILD_GROUPS.
+    expect(applyImpliedPermissions(WAREHOUSE_MANAGER_PERMISSIONS, true)).not.toContain("customers.view");
+  });
+});
+
+describe("JOB_OFFICE_PERMISSIONS (the seeded job-planner bundle)", () => {
+  it("names only real catalogue keys", () => {
+    for (const key of JOB_OFFICE_PERMISSIONS) {
+      expect(PERMISSION_KEYS).toContain(key);
+    }
+  });
+
+  it("has no duplicates", () => {
+    expect(new Set(JOB_OFFICE_PERMISSIONS).size).toBe(JOB_OFFICE_PERMISSIONS.length);
+  });
+
+  it("carries the reads the job wizard cannot be completed without", () => {
+    // `customerId` is REQUIRED on job create and its dropdown comes from listCustomers, so without
+    // customers.view the form can never be saved. inventory.view backs the kit picker's per-warehouse
+    // balances + availability check; customer_stock.view backs kit lines drawn from customer stock.
+    // Every one of those pickers swallows its rejection, so a missing read is a SILENT empty list.
+    expect(JOB_OFFICE_PERMISSIONS).toContain("customers.view");
+    expect(JOB_OFFICE_PERMISSIONS).toContain("customer_stock.view");
+    expect(JOB_OFFICE_PERMISSIONS).toContain("inventory.view");
+  });
+
+  it("can read the customer's sites and projects (same guard as the customer list)", () => {
+    // GET /customers/:id/sites and /projects both gate on customers.view — NOT the granular
+    // customer_sites.* / customer_projects.* keys. Pin it: the site picker is part of a job pack.
+    expect(JOB_OFFICE_PERMISSIONS).toContain("customers.view");
+  });
+
+  it("carries every prerequisite it depends on (no key is granted without its base)", () => {
+    const closed = closePrerequisites(JOB_OFFICE_PERMISSIONS);
+    expect(closed.filter((k) => !JOB_OFFICE_PERMISSIONS.includes(k))).toEqual([]);
+  });
+
+  it("holds nothing capability-tagged (a planner is an office role, not a field one)", () => {
+    const { removed } = splitByCapability([...JOB_OFFICE_PERMISSIONS], { field_ops: false });
+    expect(removed).toEqual([]);
+  });
+});
+
+describe("SYSTEM_ADMIN_PERMISSIONS (single source for both seed call sites)", () => {
+  it("names only real catalogue keys", () => {
+    for (const key of SYSTEM_ADMIN_PERMISSIONS) {
+      expect(PERMISSION_KEYS).toContain(key);
+    }
+  });
+
+  it("has no duplicates", () => {
+    expect(new Set(SYSTEM_ADMIN_PERMISSIONS).size).toBe(SYSTEM_ADMIN_PERMISSIONS.length);
+  });
+
+  it("holds NOTHING capability-tagged — this is what caused the boot-time flip-flop", () => {
+    // The drifted backfill granted engineer.jobs.start/complete, which live in the field_ops-only
+    // Engineer Portal group. A system admin has no field-ops capability, so the startup repair
+    // stripped them on every boot and the backfill re-added them seconds later — forever. If this
+    // fails, a capability-tagged key has crept back in and that churn is about to return.
+    const { removed } = splitByCapability([...SYSTEM_ADMIN_PERMISSIONS], { field_ops: false });
+    expect(removed).toEqual([]);
+  });
+
+  it("owns the IRM catalogue end-to-end, barcodes included", () => {
+    // Was present only in the backfill, so fresh installs got an admin that could create an item
+    // but never print its barcode.
+    for (const key of ["irm.view", "irm.create", "irm.edit", "irm.delete", "irm.barcode.manage"]) {
+      expect(SYSTEM_ADMIN_PERMISSIONS).toContain(key);
+    }
+  });
+
+  it("is read-only on roles — role management belongs to the super-admin alone", () => {
+    expect(SYSTEM_ADMIN_PERMISSIONS).toContain("roles.view");
+    for (const key of ["roles.create", "roles.edit", "roles.delete"]) {
+      expect(SYSTEM_ADMIN_PERMISSIONS).not.toContain(key);
+    }
+  });
+
+  it("never contains the '*' wildcard (that is the super-admin's alone)", () => {
+    expect(SYSTEM_ADMIN_PERMISSIONS).not.toContain(ALL_PERMISSIONS);
+  });
+
+  it("carries every prerequisite it depends on (no key is granted without its base)", () => {
+    const closed = closePrerequisites(SYSTEM_ADMIN_PERMISSIONS);
+    expect(closed.filter((k) => !SYSTEM_ADMIN_PERMISSIONS.includes(k))).toEqual([]);
   });
 });
 

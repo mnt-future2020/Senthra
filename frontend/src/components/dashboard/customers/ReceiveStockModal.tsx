@@ -19,7 +19,9 @@ export function ReceiveStockModal({
   assignment: WarehouseAssignment;
   itemName: string;
   onClose: () => void;
-  onSaved: (updated: WarehouseAssignment, stockEntryId: string) => void;
+  // The whole result, not just the id: the caller also needs the entry's status to decide whether
+  // sending the WM into the entry form is useful work or a pointless detour.
+  onSaved: (result: customerService.ReceiveStockResult) => void;
 }) {
   const remaining = assignment.quantity - assignment.receivedQuantity;
   const [quantity, setQuantity] = React.useState(String(remaining));
@@ -42,7 +44,7 @@ export function ReceiveStockModal({
         receivedQuantity: qty,
         notes: notes.trim() || undefined,
       });
-      onSaved(result.assignment, result.stockEntryId);
+      onSaved(result);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not record receipt.");
       setBusy(false);

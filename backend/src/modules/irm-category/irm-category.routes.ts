@@ -17,10 +17,15 @@ const router = Router();
 
 router.use(requireAuth);
 
-// Read by category-managers AND by the IRM item form's category picker.
+// Read by category-managers, by the IRM item form's category picker, and by the CATEGORY FILTER on
+// the inventory list / stock-position table. `irm.view` is admitted for that last one: the filter
+// swallows a rejection and just renders an empty dropdown, so a warehouse manager (who holds
+// irm.view but not irm_categories.view) silently lost the ability to filter their own stock by
+// category. It discloses nothing new — a category name is already visible on every item the holder
+// can list with irm.view.
 router.get(
   "/",
-  requireAnyPermission("irm_categories.view", "irm.create", "irm.edit"),
+  requireAnyPermission("irm_categories.view", "irm.view", "irm.create", "irm.edit"),
   irmCategoryController.listIrmCategories,
 );
 router.get(
