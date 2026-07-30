@@ -3,7 +3,12 @@ import { z } from "zod";
 // Goods Management validation. Codes/status/snapshots are SYSTEM-owned (never from the client).
 // direction issue/return are WM scan posts; consume is engineer-declared (handled in the job module).
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
-const emptyToUndef = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
+// "Not provided" arrives in three shapes from a JSON client: absent, "" (an untouched text input),
+// and null (an explicitly-inapplicable field — e.g. the damage report sends customerStockEntryId:
+// null on a COMPANY report, since a damaged balance is keyed with exactly one owner socket set).
+// All three must normalise to undefined before `.optional()` sees them, or null falls through and
+// fails with "expected string, received null" on a field the caller correctly left empty.
+const emptyToUndef = (v: unknown) => (v === null || (typeof v === "string" && v.trim() === "") ? undefined : v);
 const objectId = (label: string) => z.string({ error: `Select ${label}.` }).regex(OBJECT_ID_RE, `Select ${label}.`);
 const optionalObjectId = (label: string) => z.preprocess(emptyToUndef, z.string().regex(OBJECT_ID_RE, `Select ${label}.`).optional());
 
@@ -96,3 +101,41 @@ export const restoreDamagedSchema = z
     }
   });
 export type RestoreDamagedInput = z.infer<typeof restoreDamagedSchema>;
+
+// Report damage on stock ALREADY SITTING in a warehouse — the forklift-through-a-box case. Until
+// this existed the damaged pool could only be fed by a field return (a job return or a van return),
+// so damage discovered in our own racking had no correct home: operators reached for Adjust Stock →
+// "damage correction", which silently removed the units from inventory WITHOUT creating a damaged
+// row, a photo or an evidence trail. That reason has been retired from the adjust flow in favour of
+// this one (see STOCK_ADJUST_DOWN_REASONS).
+//
+// `reason` and `damagePhotoUrl` are REQUIRED, exactly as they are on a damaged return line
+// (movementLineSchema above). The damaged pool's whole purpose is retrievable evidence for a
+// supplier claim, an insurance claim or a customer dispute — an entry point that let either be
+// skipped would quietly hollow that out.
+export const reportDamageSchema = z
+  .object({
+    warehouseId: objectId("a warehouse"),
+    ownerType: z.enum(["company", "customer"], { error: "ownerType must be 'company' or 'customer'." }),
+    irmItemId: optionalObjectId("an IRM item"),
+    customerStockEntryId: optionalObjectId("a customer stock entry"),
+    quantity: z.coerce
+      .number({ error: "Quantity is required." })
+      .int("Use a whole number.")
+      .min(1, "Quantity must be at least 1.")
+      .max(1_000_000),
+    reason: z.string({ error: "Give a reason for the damage." }).trim().min(1, "Give a reason for the damage.").max(500),
+    damagePhotoUrl: z.string({ error: "Attach a photo of the damage." }).trim().min(1, "Attach a photo of the damage.").max(2000),
+    notes: z.string().trim().max(2000).optional(),
+  })
+  .superRefine((v, ctx) => {
+    // ownerType decides WHICH id is required — a damaged balance is keyed with exactly one of the
+    // two sockets set, so accepting the wrong one would silently target a different (or no) row.
+    if (v.ownerType === "company" && !v.irmItemId) {
+      ctx.addIssue({ code: "custom", path: ["irmItemId"], message: "Select an IRM item for company-owned stock." });
+    }
+    if (v.ownerType === "customer" && !v.customerStockEntryId) {
+      ctx.addIssue({ code: "custom", path: ["customerStockEntryId"], message: "Select a customer stock entry for customer-owned stock." });
+    }
+  });
+export type ReportDamageInput = z.infer<typeof reportDamageSchema>;

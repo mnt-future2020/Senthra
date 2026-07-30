@@ -358,7 +358,12 @@ export function ReorderWorkbench() {
   return (
     <div className="flex h-full flex-col gap-3">
       {/* Freshness + filters + generate */}
-      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:items-center">
+      {/* lg:flex-wrap is load-bearing — without it this becomes a single unwrappable row at lg and
+          above, and with a search box, four selects, two checkboxes, a timestamp and two buttons it
+          overflowed the card at 1024px: "Critical only" and "Show covered" were clipped off the
+          right edge with no way to reach them. Wrapping costs a second line; clipping costs the
+          control entirely. */}
+      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:flex-wrap lg:items-center">
         <div className="relative w-full lg:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search item, code or SKU…" className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]" />
@@ -382,13 +387,22 @@ export function ReorderWorkbench() {
           </label>
         )}
         <div className="flex items-center gap-2 lg:ml-auto">
-          {data && <span className="whitespace-nowrap text-[11px] text-[var(--faint)]">Last calculated {fmtTime(data.calculatedAt)}</span>}
-          <button type="button" onClick={refresh} disabled={loading} className="flex shrink-0 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)] disabled:opacity-60" title="Recalculate suggestions">
-            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} Refresh
+          {/* The timestamp and the Refresh label drop below xl. Both are the least load-bearing things
+              in this row — the timestamp is informational, and Refresh keeps its icon, title and
+              aria-label — so shedding them buys width for the controls that actually filter. */}
+          {data && <span className="hidden whitespace-nowrap text-[11px] text-[var(--faint)] xl:inline">Last calculated {fmtTime(data.calculatedAt)}</span>}
+          <button type="button" onClick={refresh} disabled={loading} aria-label="Refresh" className="flex shrink-0 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)] disabled:opacity-60" title={data ? `Recalculate suggestions — last calculated ${fmtTime(data.calculatedAt)}` : "Recalculate suggestions"}>
+            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} <span className="hidden xl:inline">Refresh</span>
           </button>
           {canGenerate && (
             <button type="button" onClick={() => { setRequiredBy(""); setConfirmOpen(true); }} disabled={chosen.length === 0} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 disabled:opacity-50">
-              <ClipboardList className="h-4 w-4" /> Generate Purchase Requests{chosen.length > 0 ? ` (${chosen.length})` : ""}
+              {/* The COUNT always shows — it's the feedback for what you've selected — but the long
+                  label shortens below xl. "Generate Purchase Requests (12)" is the single widest
+                  thing in this row. */}
+              <ClipboardList className="h-4 w-4" />{" "}
+              <span className="hidden xl:inline">Generate Purchase Requests</span>
+              <span className="xl:hidden">Generate</span>
+              {chosen.length > 0 ? ` (${chosen.length})` : ""}
             </button>
           )}
         </div>

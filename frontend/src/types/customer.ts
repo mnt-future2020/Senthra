@@ -69,7 +69,10 @@ export type StockRequestStatus =
   | "partially_received"
   | "completed";
 
-export type WarehouseAssignmentStatus = "pending" | "partially_received" | "received";
+// `closed_short` is terminal like `received`: the outstanding balance is never arriving, so the
+// assignment leaves the warehouse's Incoming queue. Kept distinct from `received` so "arrived in
+// full" stays reportable.
+export type WarehouseAssignmentStatus = "pending" | "partially_received" | "received" | "closed_short";
 
 export interface WarehouseAssignment {
   id: string;
@@ -82,6 +85,10 @@ export interface WarehouseAssignment {
   receivedBy: string | null;
   receivedAt: string | null;
   notes: string | null;
+  // Set only when status is "closed_short".
+  closureReason: string | null;
+  closedAt: string | null;
+  closedBy: string | null;
 }
 
 export interface StockRequest {
@@ -100,6 +107,52 @@ export interface StockRequest {
   adminResponse: string | null;
   reviewedAt: string | null;
   warehouseAssignments: WarehouseAssignment[];
+  createdAt: string;
+}
+
+// ── Portal (what the CUSTOMER sees about their own submission) ────────────────────────────────
+// A deliberate subset of the admin shapes above, mirroring the server's PortalStockRequest. The
+// staff emails that acted on the line (receivedBy / closedBy / reviewedBy) and the warehouse's
+// internal notes are not the customer's to read, so they never leave the server for this route.
+export interface PortalWarehouseAssignment {
+  warehouseName: string;
+  quantity: number;
+  receivedQuantity: number;
+  status: WarehouseAssignmentStatus;
+  closureReason: string | null;
+  closedAt: string | null;
+}
+
+// One of the customer's own consignment lines, as the portal receives it. Narrower than
+// CustomerStockEntry on two counts: `receivedBy` is warehouse staff, not theirs; and
+// serialized/serialNumber/highValue/thresholdQty/attributes are dead columns no form in the app
+// fills, so a portal screen built on them would render permanently empty rows.
+export interface PortalStockEntry {
+  id: string;
+  warehouseName: string;
+  warehouseCode: string;
+  itemName: string;
+  sku: string | null;
+  categoryName: string | null;
+  description: string | null;
+  uom: string | null;
+  quantity: number;
+  barcode: string | null;
+  status: StockEntryStatus;
+  receivedAt: string | null;
+  createdAt: string;
+}
+
+export interface PortalStockRequest {
+  id: string;
+  name: string;
+  editedName: string | null;
+  linkedStockEntryId: string | null;
+  quantity: number | null;
+  reason: string | null;
+  status: StockRequestStatus;
+  adminResponse: string | null;
+  warehouseAssignments: PortalWarehouseAssignment[];
   createdAt: string;
 }
 
@@ -186,7 +239,8 @@ export interface CustomerSummary {
 // (bulk import), so the detail tabs load them through the paged list endpoints instead.
 export interface Customer extends CustomerSummary {
   users: CustomerUser[];
-  stockRequests: StockRequest[]; // in-flight submissions (pending → partially_received)
+  // EVERY submission including completed / rejected — the tab defaults its own filter to open.
+  stockRequests: StockRequest[];
 }
 
 // What a logged-in customer sees about themselves (the portal).
@@ -215,10 +269,25 @@ export interface CustomerOverview {
     activeProjects: number;
     totalProjects: number;
     totalSites: number;
-    pendingRequests: number;
+    /** Submissions still needing something — pending | approved | assigned | partially_received. */
+    openRequests: number;
+    /** Stock entry ROWS (one per item × warehouse) — what My Stock lists. */
     stockEntries: number;
+    /** UNITS across those rows. The headline: "how much stock do you hold for me". */
+    stockUnits: number;
+    /** Units short-closed and never arriving. Usually 0 — the UI only shows it when it isn't. */
+    notReceivedUnits: number;
   };
-  recentRequests: StockRequest[];
+  /** Units per warehouse, biggest first. Empty when the customer has no stock with us. Carries the
+   *  id so a row can link to My Stock filtered to that warehouse. */
+  stockByWarehouse: {
+    warehouseId: string;
+    warehouseName: string;
+    warehouseCode: string;
+    units: number;
+    entries: number;
+  }[];
+  recentRequests: PortalStockRequest[];
 }
 
 // --- Flow 9 stock (read-only portal). Lit up by the backend feature flag; until

@@ -7,7 +7,6 @@ import { AlertTriangle, Check, ChevronDown, ListFilter, PackageCheck, Truck } fr
 
 import { Skeleton } from "@/components/ui/Skeleton";
 import { Pagination } from "@/components/ui/Pagination";
-import { secondaryBtn } from "@/components/ui/styles";
 import { listPurchaseOrders } from "@/services/purchase-order.service";
 import { useAuth } from "@/hooks/useAuth";
 import { PO_PRIORITY_LABELS, PoStatusBadge, formatDate } from "@/components/dashboard/purchase-orders/poStatus";
@@ -156,6 +155,14 @@ export function urgencyBadge(row: Pick<Row, "bucket" | "daysDiff">): string | nu
   if (row.bucket !== "overdue" || row.daysDiff == null) return null;
   return `${-row.daysDiff}d late`;
 }
+
+// Clear, sized to sit beside FilterMenu's trigger. Deliberately NOT the shared `toolbarBtn` — this
+// pool filters with a pill (`rounded-full`, `py-1.5`, 11px) rather than the search + `<Select
+// size="sm">` row the rest of the dashboard uses, and a `rounded-lg` button next to a pill reads as
+// two unrelated controls. Kept local: this is the only pill toolbar in the app, so there is nothing
+// yet to share it with. If a second one appears, promote both this and the trigger into styles.ts.
+const filterPillBtn =
+  "inline-flex items-center rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-3 py-1.5 text-[11px] font-bold text-[var(--muted)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)]";
 
 // Single-select bucket filter. A dropdown rather than a row of chips: chips needed a full row
 // of their own directly above the table, while the toolbar row above them sat half-empty — and the
@@ -470,7 +477,7 @@ export function ExpectedDeliveries({
       <div className="flex items-center gap-2">
         <FilterMenu options={options} value={effectiveFilter} onChange={(f) => { setFilter(f); setPage(1); }} />
         {effectiveFilter !== "all" && (
-          <button type="button" onClick={clearFilter} className={secondaryBtn}>
+          <button type="button" onClick={clearFilter} className={filterPillBtn}>
             Clear
           </button>
         )}

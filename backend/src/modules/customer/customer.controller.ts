@@ -1,4 +1,4 @@
-import type { Request } from "express";
+import type { Request, Response } from "express";
 
 import * as customerService from "./customer.service.js";
 import { actorFrom } from "../../utils/actor.js";
@@ -18,6 +18,7 @@ import type {
   StockRequestEditInput,
   StockRequestAssignInput,
   StockAssignmentReceiveInput,
+  StockAssignmentCloseShortInput,
   StockEntryUpdateInput,
   StockReviewInput,
   UpdateCustomerInput,
@@ -262,6 +263,16 @@ export const receiveStockAssignment = asyncHandler(async (req, res) => {
   res.json(result);
 });
 
+// POST /stock-assignments/:id/close-short — the outstanding balance is never arriving.
+export const closeStockAssignmentShort = asyncHandler(async (req, res) => {
+  const assignment = await customerService.closeAssignmentShort(
+    param(req, "id"),
+    req.body as StockAssignmentCloseShortInput,
+    actorFrom(req),
+  );
+  res.json({ assignment });
+});
+
 // GET /warehouses/:id/pending-stock — pending customer stock for a warehouse.
 export const getPendingStockForWarehouse = asyncHandler(async (req, res) => {
   const items = await customerService.getPendingStockForWarehouse(param(req, "id"), actorFrom(req));
@@ -371,6 +382,10 @@ const portalListParams = (req: Request) => ({
   search: queryStr(req.query.q),
   status: queryStr(req.query.status),
   sort: queryStr(req.query.sort),
+  // Stock lists only; ignored by the others. Never trusted as a scope — every portal query is already
+  // pinned to `customerId(req)` from the session, so an id for someone else's warehouse just matches
+  // none of this customer's rows.
+  warehouseId: queryStr(req.query.warehouseId),
   page: queryInt(req.query.page),
   pageSize: queryInt(req.query.pageSize),
 });
@@ -378,6 +393,35 @@ const portalListParams = (req: Request) => ({
 // GET /customer/stock-entries — the signed-in customer's received stock entries (paged).
 export const getOwnStockEntries = asyncHandler(async (req, res) => {
   res.json(await customerService.listCustomerStockEntriesPaged(customerId(req), portalListParams(req)));
+});
+
+// GET /customer/stock-warehouses — option list for My Stock's warehouse filter (only warehouses that
+// actually hold this customer's stock).
+export const getOwnStockWarehouses = asyncHandler(async (req, res) => {
+  res.json({ warehouses: await customerService.listOwnStockWarehouses(customerId(req)) });
+});
+
+// Send a CSV as a file download. Shared by both portal exports so the headers — and the UTF-8 BOM
+// Excel needs to read accented text correctly — can't be got right in one and forgotten in the other.
+function sendCsv(res: Response, filename: string, csv: string, capped: boolean): void {
+  const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}-${date}.csv"`);
+  if (capped) res.setHeader("X-Export-Capped", "true");
+  res.send("﻿" + csv);
+}
+
+// GET /customer/stock-entries/export.csv — the customer's stock, honouring the list's filters
+// (page/pageSize ignored: the export spans every matching row up to the cap).
+export const exportOwnStockCsv = asyncHandler(async (req, res) => {
+  const { csv, capped } = await customerService.exportOwnStockCsv(customerId(req), portalListParams(req));
+  sendCsv(res, "my-stock", csv, capped);
+});
+
+// GET /customer/stock-requests/export.csv — the customer's submissions, same contract.
+export const exportOwnStockRequestsCsv = asyncHandler(async (req, res) => {
+  const { csv, capped } = await customerService.exportOwnStockRequestsCsv(customerId(req), portalListParams(req));
+  sendCsv(res, "my-submissions", csv, capped);
 });
 
 // GET /customers/:id/sites — ADMIN: paged sites for the detail tab.

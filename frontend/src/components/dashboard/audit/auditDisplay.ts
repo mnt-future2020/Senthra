@@ -58,8 +58,15 @@ const VERB_TONE: Record<string, ActionTone> = {
   return_posted: "update",
   reconciled: "neutral",
   damaged_restored: "create",
+  // Its exact inverse — units leaving usable stock. Negative, so the pair reads as opposites in the
+  // trail instead of one being coloured and the other falling through to the default grey.
+  damage_reported: "delete",
   // Field Stock (VSR) — a posting moves stock; walk-in creates a pre-approved request; closing short
-  // is a neutral terminal (the remainder is written off, not an error); cancelling remainder is negative.
+  // is a neutral terminal (the shortfall is accepted and recorded, not an error); cancelling
+  // remainder is negative. `closed_short` is keyed on the verb alone, so customer consignment's
+  // `customer.stock_request.closed_short` lands here too — deliberately, since it means the same
+  // thing there (the delivery is finished, the missing units are simply not coming). Neither case is
+  // a write-off: nothing is drained from a ledger, the leg is just closed with a reason.
   fulfilment_posted: "update",
   walk_in_created: "create",
   closed_short: "neutral",

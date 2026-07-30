@@ -14,7 +14,9 @@ import {
   type StockItemOption,
   type StockItemValue,
 } from "@/components/dashboard/stock/StockItemPicker";
-import type { StockRequest } from "@/types/customer";
+// Portal-only (mounted from the customer's Stock Requests view), so the submitted row comes back in
+// the customer-facing shape — no staff emails, no internal warehouse notes.
+import type { PortalStockRequest } from "@/types/customer";
 
 // Portal: a customer user submits a stock REQUEST — an ask, not a catalogue write.
 // Item name and quantity are mandatory; notes are optional. The request is queued for
@@ -24,7 +26,7 @@ export function StockRequestModal({
   onSubmitted,
 }: {
   onClose: () => void;
-  onSubmitted: (request: StockRequest) => void;
+  onSubmitted: (request: PortalStockRequest) => void;
 }) {
   const [item, setItem] = React.useState<StockItemValue>({ entryId: null, name: "" });
   const [options, setOptions] = React.useState<StockItemOption[]>([]);

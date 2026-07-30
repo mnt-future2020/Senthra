@@ -7,6 +7,8 @@ import type {
   PublicMovement,
   DamagedRow,
   DamagedHistory,
+  ReportDamagePayload,
+  ReportDamageResult,
   OverdueRow,
   PostMovementPayload,
   CloseReconcilePayload,
@@ -131,6 +133,19 @@ export function getDamagedHistory(row: {
     sp.set("customerStockEntryId", row.customerStockEntryId);
   }
   return api<DamagedHistory>(`/goods-management/damaged/history?${sp.toString()}`);
+}
+
+/**
+ * Move units of stock already sitting in a warehouse into the damaged pool — the third writer,
+ * alongside a job return and a van return. Reason and photo are both mandatory server-side, so
+ * upload the photo first (uploadDamagePhoto) and pass the hosted URL it returns.
+ *
+ * Pass the SAME owner socket the row carries: `irmItemId` for company stock, `customerStockEntryId`
+ * for customer consignment. The backend nulls the other one regardless, since a damaged balance is
+ * keyed with exactly one of them set.
+ */
+export function reportDamage(payload: ReportDamagePayload): Promise<ReportDamageResult> {
+  return api<ReportDamageResult>("/goods-management/damaged/report", { method: "POST", body: payload });
 }
 
 // ── Damage-photo upload ───────────────────────────────────────────────────────

@@ -2,14 +2,16 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Activity, Boxes, Eye, Loader2, MapPin, Pencil, Power, Printer, ScrollText, Search } from "lucide-react";
+import { Activity, AlertTriangle, Boxes, Eye, Loader2, MapPin, Pencil, Power, Printer, ScrollText, Search } from "lucide-react";
 
 import * as warehouseService from "@/services/warehouse.service";
 import * as customerService from "@/services/customer.service";
 import * as auditService from "@/services/audit.service";
 import { Select } from "@/components/ui/Select";
 import { Pagination } from "@/components/ui/Pagination";
-import { inputCls, secondaryBtn } from "@/components/ui/styles";
+// toolbar* for the controls inside a filter row (search + Select + Clear, all one height);
+// secondaryBtn for the buttons that stand alone — the header action and the empty-state Clears.
+import { secondaryBtn, toolbarBtn, toolbarInputCls } from "@/components/ui/styles";
 import { searchStockEntries } from "@/lib/stockEntrySearch";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
@@ -19,7 +21,9 @@ import { DetailHeader } from "@/components/ui/DetailHeader";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { actionLabel, actionTone, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
 import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
+import { ReportDamageModal, type ReportDamageTarget } from "@/components/dashboard/goods-management/ReportDamageModal";
 import { ReceiveStockModal } from "@/components/dashboard/customers/ReceiveStockModal";
+import { CloseShortModal } from "@/components/dashboard/customers/CloseShortModal";
 import {
   EMPTY_FILTERS,
   customerFilterOptions,
@@ -222,9 +226,12 @@ function Card({ title, children }: { title: string; children: React.ReactNode })
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div>
+    // min-w-0 lets this grid cell shrink below its content (grid items default to min-width:auto,
+    // so a long unbroken value refuses to shrink and spills into the neighbouring column);
+    // wrap-break-word then lets that value actually break. Emails are the usual culprit.
+    <div className="min-w-0">
       <p className="text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">{label}</p>
-      <div className="mt-0.5 text-sm text-[var(--ink)]">{children || "—"}</div>
+      <div className="mt-0.5 text-sm wrap-break-word text-[var(--ink)]">{children || "—"}</div>
     </div>
   );
 }
@@ -474,6 +481,7 @@ function IncomingStock({
   const [items, setItems] = React.useState<PendingStockItem[] | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [receiveTarget, setReceiveTarget] = React.useState<PendingStockItem | null>(null);
+  const [closeTarget, setCloseTarget] = React.useState<PendingStockItem | null>(null);
   // The last top-up onto an ALREADY-ACTIVE entry, so the label shortcut below can point at it.
   // Only ever set when we deliberately DIDN'T navigate — a draft receipt lands on the entry page,
   // where the printer already is.
@@ -614,7 +622,7 @@ function IncomingStock({
             onChange={(e) => patchFilters({ search: e.target.value })}
             placeholder="Search item or customer…"
             aria-label="Search incoming customer stock"
-            className={`${inputCls} pl-9`}
+            className={`${toolbarInputCls} pl-9`}
           />
         </div>
         <div className="flex flex-wrap items-center gap-2 sm:ml-auto">
@@ -635,7 +643,7 @@ function IncomingStock({
             size="sm"
           />
           {filtered && (
-            <button type="button" onClick={() => { setFilters(EMPTY_FILTERS); setPage(1); }} className={secondaryBtn}>
+            <button type="button" onClick={() => { setFilters(EMPTY_FILTERS); setPage(1); }} className={toolbarBtn}>
               Clear
             </button>
           )}
@@ -698,13 +706,25 @@ function IncomingStock({
                   <td className="px-4 py-3 text-xs text-[var(--muted)]">{fmtDate(it.createdAt)}</td>
                   <td className="px-4 py-3">
                     {remaining > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => setReceiveTarget(it)}
-                        className="rounded-lg bg-[var(--pos)] px-2.5 py-1.5 text-[11px] font-bold text-white transition-all hover:opacity-90"
-                      >
-                        Receive
-                      </button>
+                      <div className="flex items-center justify-end gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setReceiveTarget(it)}
+                          className="rounded-lg bg-[var(--pos)] px-2.5 py-1.5 text-[11px] font-bold text-white transition-all hover:opacity-90"
+                        >
+                          Receive
+                        </button>
+                        {/* The way a delivery that will never complete leaves this queue. Secondary
+                            to Receive — closing short is the exception, receiving is the job. */}
+                        <button
+                          type="button"
+                          onClick={() => setCloseTarget(it)}
+                          title={`Close short — ${remaining} of ${it.quantity} not received`}
+                          className="rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-[11px] font-bold text-[var(--muted)] transition-all hover:border-[var(--neg)] hover:text-[var(--neg)]"
+                        >
+                          Close short
+                        </button>
+                      </div>
                     )}
                   </td>
                 </tr>
@@ -735,10 +755,57 @@ function IncomingStock({
             receivedBy: null,
             receivedAt: null,
             notes: null,
+            // A row in this queue is by definition open, so it carries no closure — the modal only
+            // reads quantity/received anyway.
+            closureReason: null,
+            closedAt: null,
+            closedBy: null,
           }}
           itemName={receiveTarget.itemName}
           onClose={() => setReceiveTarget(null)}
           onSaved={onReceived}
+        />
+      )}
+
+      {closeTarget && (
+        <CloseShortModal
+          assignment={{
+            id: closeTarget.assignmentId,
+            warehouseId: warehouseId,
+            warehouseName: closeTarget.warehouseName,
+            warehouseCode: closeTarget.warehouseCode,
+            quantity: closeTarget.quantity,
+            receivedQuantity: closeTarget.receivedQuantity,
+            status: closeTarget.status as "pending" | "partially_received" | "received" | "closed_short",
+            receivedBy: null,
+            receivedAt: null,
+            notes: null,
+            closureReason: null,
+            closedAt: null,
+            closedBy: null,
+          }}
+          itemName={closeTarget.itemName}
+          onClose={() => setCloseTarget(null)}
+          onClosed={(updated, outstanding) => {
+            const name = closeTarget.itemName;
+            setCloseTarget(null);
+            // BOTH figures come from `updated` — the row as the server left it — not from
+            // `closeTarget`, which is whatever the queue held when the modal opened. A receive
+            // landing in between doesn't block the close, it just moves receivedQuantity, and
+            // quoting the stale pair here would tell the user more was missing than really was.
+            // "not received", not "written off" — nothing left a ledger; see the note in
+            // CloseShortModal on why that word is reserved for the goods-management action. And
+            // "not received" rather than any of "short"/"never arrived"/"missing": it's the one
+            // phrase used for this quantity everywhere, including the customer's own portal, so a
+            // call about this delivery has both sides reading the same words.
+            pushToast(
+              `Closed short — ${outstanding} of ${updated.quantity} recorded as not received for "${name}".`,
+              "success",
+            );
+            // The row leaves the queue entirely (it reads only the open statuses), so a reload is
+            // the whole update — there is nothing left to keep in view.
+            load();
+          }}
         />
       )}
     </div>
@@ -804,9 +871,10 @@ function StockTab({
         </div>
       )}
       {active === "irm" ? (
-        // Embedded InventoryView manages its own natural height — give it a scrolling box
-        // (same contract as InventoryHub's IRM lens).
-        <div className="min-h-0 flex-1 overflow-auto">
+        // Bounded, non-scrolling box: InventoryView scrolls its own table body and keeps its filter
+        // row fixed (same contract as the other pools here). Scrolling it from the outside would
+        // carry the search and filters off-screen with the rows.
+        <div className="min-h-0 flex-1">
           <InventoryView warehouseId={warehouseId} embedded />
         </div>
       ) : active === "damaged" ? (
@@ -868,6 +936,11 @@ function WarehouseStockEntries({
 
   const [entries, setEntries] = React.useState<CustomerStockEntry[] | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  // "Report damage" on customer-owned stock. Same permission as the company pool — `inventory.adjust`
+  // already means "may reduce stock in this warehouse", which is exactly what a damage report does.
+  const { can } = useAuth();
+  const canReportDamage = can("inventory.adjust");
+  const [damageTarget, setDamageTarget] = React.useState<ReportDamageTarget | null>(null);
 
   const load = React.useCallback(() => {
     customerService
@@ -907,7 +980,7 @@ function WarehouseStockEntries({
             onChange={(e) => patch({ stockSearch: e.target.value || null })}
             placeholder="Search item, SKU, barcode…"
             aria-label="Search customer stock entries"
-            className={`${inputCls} pl-9`}
+            className={`${toolbarInputCls} pl-9`}
           />
         </div>
         <div className="sm:ml-auto">
@@ -1006,6 +1079,31 @@ function WarehouseStockEntries({
                         >
                           <Pencil className="h-4 w-4" />
                         </button>
+                        {/* Report damage on the CUSTOMER'S stock sitting in our racking. This is the
+                            liability case — it's their property in our warehouse — so the photo the
+                            modal demands is the evidence any dispute would turn on. Disabled at zero
+                            qty (nothing to damage) and on a draft entry (not yet received). */}
+                        {canReportDamage && (
+                          <button
+                            type="button"
+                            title="Report damage"
+                            disabled={e.quantity <= 0 || e.status !== "active"}
+                            onClick={(ev) => {
+                              ev.stopPropagation();
+                              setDamageTarget({
+                                warehouseId,
+                                ownerType: "customer",
+                                irmItemId: null,
+                                customerStockEntryId: e.id,
+                                itemName: e.itemName,
+                                available: e.quantity,
+                              });
+                            }}
+                            className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface-2)] text-[var(--ink)] transition-all hover:border-[var(--neg)] hover:text-[var(--neg)] disabled:opacity-40"
+                          >
+                            <AlertTriangle className="h-4 w-4" />
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -1025,6 +1123,14 @@ function WarehouseStockEntries({
           </div>
         </>
       )}
+
+      <ReportDamageModal
+        target={damageTarget}
+        onClose={() => setDamageTarget(null)}
+        // The entry's quantity dropped, so refetch this list. No cache to clear here — the customer
+        // stock list is fetched fresh on every load (unlike the IRM pool's SWR cache).
+        onReported={load}
+      />
     </div>
   );
 }

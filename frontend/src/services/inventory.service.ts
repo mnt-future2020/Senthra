@@ -1,7 +1,4 @@
-import axios from "axios";
-
-import { api } from "@/lib/api";
-import { env } from "@/lib/env";
+import { api, apiFile } from "@/lib/api";
 import { downloadBlob, filenameFromDisposition } from "@/lib/download";
 import { registerClientCache } from "@/lib/clientCache";
 import type { Availability, InventoryBalance, InventoryDetail, InventoryTransaction, PurchaseHistoryRow, StockTransfer } from "@/types/inventory";
@@ -97,6 +94,12 @@ const listCacheKey = (p: InventoryListParams): string =>
   `${p.page ?? 1}|${p.pageSize ?? ""}|${p.search ?? ""}|${p.warehouse ?? ""}|${p.category ?? ""}|${p.status ?? ""}`;
 
 export const getCachedInventory = (params: InventoryListParams = {}): PagedInventory | undefined => listCache.get(listCacheKey(params));
+
+// Every mutation in THIS module clears the cache inline (see listInventory's callers below). Damage
+// reporting is the exception: it changes on-hand balances but lives in goodsManagement.service, so
+// it has no reach into this module's private cache. Without clearing it, moving stock to damaged
+// would leave the old on-hand figure rendering from cache on the next visit to the list.
+export const clearInventoryListCache = (): void => listCache.clear();
 
 export function listInventory(params: InventoryListParams = {}): Promise<PagedInventory> {
   return api<PagedInventory>(`/inventory${listQs(params)}`).then((r) => {
@@ -219,8 +222,14 @@ export function addStock(payload: AddStockPayload): Promise<StockAdjustment> {
   });
 }
 
-// Downward stock correction (damage / shrinkage / miscount). Mirrors addStock pattern.
-export type AdjustStockReason = "damage_correction" | "shrinkage" | "miscount" | "other";
+// Downward stock correction (shrinkage / miscount). Mirrors addStock pattern.
+//
+// `damage_correction` is GONE, matching STOCK_ADJUST_DOWN_REASONS on the server: damage now has one
+// door, the warehouse damage report, which requires a photo and a reason and credits the damaged
+// pool. Leaving the value in this union would let a caller typecheck its way into a payload the
+// server rejects — and quietly re-open the second door this list was narrowed to close. Historical
+// adjustments still carry the old string; nothing reads them through this type.
+export type AdjustStockReason = "shrinkage" | "miscount" | "other";
 
 export interface AdjustStockPayload {
   irmItemId: string;
@@ -239,15 +248,16 @@ export function adjustStock(payload: AdjustStockPayload): Promise<StockAdjustmen
   });
 }
 
-// The CSV endpoint returns a file, not JSON, so it bypasses api() and makes a direct authenticated
-// blob request (mirrors the audit export). Returns whether the export was capped by the server.
+// The CSV endpoint returns a file, not JSON, so it uses apiFile() rather than api() — same client, so
+// the silent refresh-on-401 still applies (mirrors the audit export). Returns whether the export was
+// capped by the server; that flag rides on a header the API must expose via CORS.
 export async function exportInventoryCsv(params: InventoryListParams = {}): Promise<{ capped: boolean }> {
   const { page: _page, pageSize: _pageSize, ...filters } = params;
   void _page;
   void _pageSize;
-  const res = await axios.get(`${env.apiUrl}/inventory/export.csv${listQs(filters)}`, { withCredentials: true, responseType: "blob" });
+  const { blob, headers } = await apiFile(`/inventory/export.csv${listQs(filters)}`);
   const date = new Date().toISOString().slice(0, 10);
-  const filename = filenameFromDisposition(res.headers["content-disposition"] ?? null, `inventory-${date}.csv`);
-  downloadBlob(res.data as Blob, filename);
-  return { capped: String(res.headers["x-inventory-export-capped"] ?? "") === "true" };
+  const filename = filenameFromDisposition(headers["content-disposition"] ?? null, `inventory-${date}.csv`);
+  downloadBlob(blob, filename);
+  return { capped: String(headers["x-inventory-export-capped"] ?? "") === "true" };
 }

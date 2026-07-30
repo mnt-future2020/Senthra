@@ -1,4 +1,5 @@
-import { api } from "@/lib/api";
+import { api, apiFile } from "@/lib/api";
+import { downloadBlob, filenameFromDisposition } from "@/lib/download";
 import { registerClientCache } from "@/lib/clientCache";
 import type {
   BulkSiteResult,
@@ -13,6 +14,8 @@ import type {
   CustomerSummary,
   CustomerUser,
   PendingStockItem,
+  PortalStockEntry,
+  PortalStockRequest,
   ProjectStatus,
   StockRequest,
   StockRequestStatus,
@@ -446,6 +449,21 @@ export function receiveStockAssignment(
   );
 }
 
+/**
+ * Close a delivery whose outstanding balance will never arrive (customer shipped short, lost in
+ * transit, order rescoped). Terminal — the assignment leaves the warehouse's Incoming queue and
+ * can't be received into afterwards. `reason` is required and lands in the audit trail.
+ */
+export function closeStockAssignmentShort(
+  assignmentId: string,
+  reason: string,
+): Promise<WarehouseAssignment> {
+  return api<{ assignment: WarehouseAssignment }>(
+    `/stock-assignments/${assignmentId}/close-short`,
+    { method: "POST", body: { reason } },
+  ).then((r) => r.assignment);
+}
+
 // Pending customer stock items for a warehouse (the incoming queue).
 export function getPendingStockForWarehouse(warehouseId: string): Promise<PendingStockItem[]> {
   return api<{ items: PendingStockItem[] }>(
@@ -554,6 +572,8 @@ export interface PortalListParams {
   q?: string;
   status?: string;
   sort?: string;
+  /** Stock lists only — narrows to one warehouse, by id so a rename can't break a saved link. */
+  warehouseId?: string;
   page?: number;
   pageSize?: number;
 }
@@ -568,6 +588,7 @@ const portalQs = (p: PortalListParams): string => {
   if (p.q) qs.set("q", p.q);
   if (p.status) qs.set("status", p.status);
   if (p.sort) qs.set("sort", p.sort);
+  if (p.warehouseId) qs.set("warehouseId", p.warehouseId);
   if (p.page) qs.set("page", String(p.page));
   if (p.pageSize) qs.set("pageSize", String(p.pageSize));
   return qs.size ? `?${qs.toString()}` : "";
@@ -587,18 +608,72 @@ export function getOwnStock(): Promise<CustomerStock> {
   return api<{ stock: CustomerStock }>("/customer/stock").then((r) => r.stock);
 }
 
-export type PagedStockEntries = Paged & { entries: CustomerStockEntry[] };
+// PortalStockEntry, not CustomerStockEntry — this endpoint is the customer's own view and the
+// server sends the narrower row (no staff email, none of the dead tracking columns).
+export type PagedStockEntries = Paged & { entries: PortalStockEntry[] };
 export function getOwnStockEntries(params: PortalListParams = {}): Promise<PagedStockEntries> {
   return api<PagedStockEntries>(`/customer/stock-entries${portalQs(params)}`);
 }
 
-export type PagedStockRequests = Paged & { requests: StockRequest[] };
+/**
+ * Download the customer's stock as CSV, honouring the list's filters. Paging is dropped — the export
+ * is "everything matching what I'm looking at", not the page on screen. Same contract as the audit and
+ * inventory exports. `capped` is true when the server hit its row limit.
+ */
+export async function exportOwnStockCsv(params: PortalListParams = {}): Promise<{ capped: boolean }> {
+  return portalCsv("/customer/stock-entries/export.csv", params, "my-stock");
+}
+
+/** The same, for the customer's submissions — one row per warehouse leg. */
+export async function exportOwnStockRequestsCsv(params: PortalListParams = {}): Promise<{ capped: boolean }> {
+  return portalCsv("/customer/stock-requests/export.csv", params, "my-submissions");
+}
+
+// Shared by both: strip paging, fetch as a blob, hand the browser a download. Uses `apiFile` rather
+// than `api()` because that wrapper parses JSON, and rather than raw axios because `apiFile` keeps the
+// silent-refresh interceptor — otherwise an export fired just after the access token expired would
+// fail outright instead of refreshing and replaying. Cookies still scope the response to this customer.
+async function portalCsv(
+  path: string,
+  params: PortalListParams,
+  fallbackName: string,
+): Promise<{ capped: boolean }> {
+  const { page: _page, pageSize: _pageSize, ...filters } = params;
+  void _page;
+  void _pageSize;
+  const { blob, headers } = await apiFile(`${path}${portalQs(filters)}`);
+  const date = new Date().toISOString().slice(0, 10);
+  const filename = filenameFromDisposition(
+    headers["content-disposition"] ?? null,
+    `${fallbackName}-${date}.csv`,
+  );
+  downloadBlob(blob, filename);
+  // Reads as false unless `X-Export-Capped` is in the API's CORS exposedHeaders — the browser hides
+  // an unexposed header on a cross-origin response, which would silently pass a truncated export off
+  // as complete.
+  return { capped: String(headers["x-export-capped"] ?? "") === "true" };
+}
+
+/**
+ * The warehouses actually holding this customer's stock — the option list for My Stock's warehouse
+ * filter. Fetched once, independently of the list, so the options don't shrink as the customer filters.
+ */
+export function getOwnStockWarehouses(): Promise<{ id: string; name: string; code: string }[]> {
+  return api<{ warehouses: { id: string; name: string; code: string }[] }>(
+    "/customer/stock-warehouses",
+  ).then((r) => r.warehouses);
+}
+
+// PortalStockRequest, not StockRequest — the portal endpoints return the customer-safe subset (no
+// staff emails, no internal warehouse notes). Typing it that way here is what stops a portal
+// component reaching for a field the server has deliberately stopped sending.
+export type PagedStockRequests = Paged & { requests: PortalStockRequest[] };
 export function getOwnStockRequests(params: PortalListParams = {}): Promise<PagedStockRequests> {
   return api<PagedStockRequests>(`/customer/stock-requests${portalQs(params)}`);
 }
 
-export function submitStockRequest(payload: StockRequestPayload): Promise<StockRequest> {
-  return api<{ request: StockRequest }>("/customer/stock-requests", {
+export function submitStockRequest(payload: StockRequestPayload): Promise<PortalStockRequest> {
+  return api<{ request: PortalStockRequest }>("/customer/stock-requests", {
     method: "POST",
     body: payload,
   }).then((r) => r.request);

@@ -31,10 +31,27 @@ app.set("trust proxy", 1);
 // CORS policy below.
 app.use(helmetMiddleware({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
 
+// Response headers the browser is allowed to hand to the SPA. Anything outside the small CORS
+// safelist is stripped from a cross-origin response before JS can read it, and this API is ALWAYS
+// cross-origin from the dashboard (separate hosts in production, :3000 → :8000 in dev). Miss one
+// here and the failure is silent: a CSV download loses its filename, and every "export was
+// truncated" flag reads as false because the header carrying it never reaches the client — so the
+// user is handed a partial file believing it is complete. Add to this list the moment a controller
+// starts answering with a header the frontend needs to read.
+const EXPOSED_HEADERS = [
+  "Content-Disposition", // download filename, every CSV/PDF export
+  "X-Export-Capped", // customer portal: own stock + own submissions CSV
+  "X-Audit-Export-Capped",
+  "X-Inventory-Export-Capped",
+  "X-Movement-Export-Capped",
+  "X-Inventory-Export-Count",
+];
+
 app.use(
   cors({
     origin: env.FRONTEND_URL,
     credentials: true,
+    exposedHeaders: EXPOSED_HEADERS,
   }),
 );
 // Larger limit so base64 logo/favicon uploads fit in the JSON body.

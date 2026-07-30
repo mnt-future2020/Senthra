@@ -15,6 +15,7 @@ import {
   type StockPosition,
   type PositionFilters,
 } from "./stock-position.js";
+import { csvEscape } from "../../utils/csv.js";
 
 // Engineer display name from a balance's included `engineer` relation (falls back to email, then a
 // generic label). Single source of truth for the assemblers and the engineer-lens roll-up below.
@@ -176,14 +177,6 @@ export async function getItemJobs(irmItemId: string) {
 }
 
 // ── Task 18-BE: All-Inventory CSV ────────────────────────────────────────────────────────────────
-
-// Formula-injection-safe cell escaping — mirrors inventory.service.ts csvEscape exactly.
-// User-controlled values starting with =,+,-,@,tab,CR are prefixed with a single-quote,
-// then the cell is RFC-4180 quoted if it contains special characters.
-function csvEscape(value: string): string {
-  const safe = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
-  return /["\n,\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
-}
 
 export interface AllPositionsCsvResult {
   csv: string;

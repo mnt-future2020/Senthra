@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeftRight, Boxes, Download, Loader2, PackagePlus, Search } from "lucide-react";
+import { AlertTriangle, ArrowLeftRight, Boxes, Download, Loader2, PackagePlus, Search } from "lucide-react";
 
 import * as inventoryService from "@/services/inventory.service";
 import { listWarehouses, type PagedWarehouses } from "@/services/warehouse.service";
@@ -15,6 +15,8 @@ import { ListPageHeader } from "@/components/ui/ListPageHeader";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { ghostBtn } from "@/components/ui/styles";
+import { ReportDamageModal, type ReportDamageTarget } from "@/components/dashboard/goods-management/ReportDamageModal";
 import { INVENTORY_STATUS_LABELS, InventoryStatusBadge, formatDate, formatMoney } from "./inventoryStatus";
 import type { InventoryStatus } from "@/types/inventory";
 
@@ -63,6 +65,17 @@ export function InventoryView({ warehouseId, embedded }: { warehouseId?: string;
   const [exporting, setExporting] = React.useState(false);
   const [warehouses, setWarehouses] = React.useState<{ id: string; name: string; code: string }[]>([]);
   const [categories, setCategories] = React.useState<{ id: string; name: string }[]>([]);
+  // "Report damage" — the row whose modal is open, plus a counter that forces a refetch once the
+  // report lands (on-hand and available both drop).
+  const [damageTarget, setDamageTarget] = React.useState<ReportDamageTarget | null>(null);
+  const [reloadKey, setReloadKey] = React.useState(0);
+  // Damage is reported from the warehouse you're looking at — `warehouseId` is set only when this is
+  // embedded in a Warehouse detail page, and absent in the Inventory Hub, where this table spans
+  // every warehouse. Reporting a physical event (a crushed box, with a photo) off a cross-warehouse
+  // list is the wrong place for it, and a second entry point is a second set of guards to keep in
+  // step — the customer-stock equivalent had already drifted (`quantity` vs `available`, and only one
+  // of them checking the entry's status) within an hour of existing.
+  const canReportDamage = can("inventory.adjust") && Boolean(warehouseId);
 
   // Keep the warehouse filter in sync when this component is reused for a DIFFERENT warehouse via
   // client-side navigation (e.g. moving between Warehouse detail pages without unmounting). The
@@ -113,7 +126,7 @@ export function InventoryView({ warehouseId, embedded }: { warehouseId?: string;
       }
     })();
     return () => { active = false; };
-  }, [debounced, warehouse, category, status, page]);
+  }, [debounced, warehouse, category, status, page, reloadKey]);
 
   const rows = data?.inventory ?? [];
   const showSkeleton = loading && rows.length === 0;
@@ -132,7 +145,13 @@ export function InventoryView({ warehouseId, embedded }: { warehouseId?: string;
   };
 
   return (
-    <div className={embedded ? "flex flex-col gap-4" : "flex h-full flex-col gap-5"}>
+    // Always the dashboard's INLINE-SCROLL contract (bounded parent → card takes the remaining
+    // height, only the table body scrolls, sticky header row) — the same one StockPositionTable and
+    // DamagedStockView use. `embedded` used to switch this off and let the host scroll the whole
+    // component, which meant the search box and the warehouse/category/status filters scrolled away
+    // with the rows: you'd lose the controls exactly when a long list makes you want them.
+    // `embedded` now controls only whether the page header renders.
+    <div className={`flex h-full flex-col ${embedded ? "gap-4" : "gap-5"}`}>
       {!embedded && (
         <ListPageHeader
           title="Warehouse Inventory"
@@ -150,26 +169,32 @@ export function InventoryView({ warehouseId, embedded }: { warehouseId?: string;
         )}
         <Select size="sm" value={category} onChange={(v) => { setCategory(v); setPage(1); }} options={[{ value: "", label: "All categories" }, ...categories.map((c) => ({ value: c.id, label: c.name }))]} ariaLabel="Filter by category" />
         <Select size="sm" value={status} onChange={(v) => { setStatus(v as "" | InventoryStatus); setPage(1); }} options={[{ value: "", label: "All statuses" }, ...(Object.keys(INVENTORY_STATUS_LABELS) as InventoryStatus[]).map((s) => ({ value: s, label: INVENTORY_STATUS_LABELS[s] }))]} ariaLabel="Filter by stock status" />
+        {/* The three action labels collapse to icons below `xl`. At 1024px — a common laptop width,
+            and the one this row visibly broke at — search + three selects + three labelled buttons
+            don't fit, so the row wrapped to two lines and stole ~50px of table height permanently
+            (this panel is full-height, so nothing scrolls that cost away). Each button keeps its
+            `title` and gains an `aria-label`, so the icon-only state is still announced and hoverable
+            rather than a bare glyph. */}
         <div className="flex items-center gap-2 lg:ml-auto">
           {can("inventory.export") && (
-            <button onClick={onExport} disabled={exporting || rows.length === 0} className="flex shrink-0 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)] disabled:opacity-60" title="Export the filtered list to CSV">
-              {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />} Export CSV
+            <button onClick={onExport} disabled={exporting || rows.length === 0} aria-label="Export CSV" className="flex shrink-0 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)] disabled:opacity-60" title="Export the filtered list to CSV">
+              {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />} <span className="hidden xl:inline">Export CSV</span>
             </button>
           )}
           {can("inventory.adjust") && (
-            <button onClick={() => router.push(`/dashboard/inventory/add-stock${warehouseId ? `?warehouse=${warehouseId}` : ""}`)} className="flex shrink-0 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)]" title="Add existing / opening stock into a warehouse">
-              <PackagePlus className="h-4 w-4" /> Add Stock
+            <button aria-label="Add Stock" onClick={() => router.push(`/dashboard/inventory/add-stock${warehouseId ? `?warehouse=${warehouseId}` : ""}`)} className="flex shrink-0 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)]" title="Add existing / opening stock into a warehouse">
+              <PackagePlus className="h-4 w-4" /> <span className="hidden xl:inline">Add Stock</span>
             </button>
           )}
           {can("inventory.move") && (
-            <button onClick={() => router.push("/dashboard/inventory/move")} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90">
-              <ArrowLeftRight className="h-4 w-4" /> Move stock
+            <button onClick={() => router.push("/dashboard/inventory/move")} aria-label="Move stock" title="Move stock between warehouses" className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90">
+              <ArrowLeftRight className="h-4 w-4" /> <span className="hidden xl:inline">Move stock</span>
             </button>
           )}
         </div>
       </div>
 
-      <div className={`flex flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)] ${embedded ? "" : "min-h-0 flex-1"}`}>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
         {showSkeleton ? (
           <TableSkeleton />
         ) : error ? (
@@ -182,13 +207,16 @@ export function InventoryView({ warehouseId, embedded }: { warehouseId?: string;
           </div>
         ) : (
           <>
-            <div className={embedded ? "overflow-x-auto" : "min-h-0 flex-1 overflow-auto"}>
+            <div className="min-h-0 flex-1 overflow-auto">
               <table className="w-full min-w-[1040px] text-left text-sm">
-                <thead>
+                {/* Sticky so the column headings stay readable once the body scrolls — the same
+                    treatment StockPositionTable gives its header. */}
+                <thead className="sticky top-0 z-10 bg-[var(--surface)]">
                   <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
                     <th className="px-4 py-3">Item</th><th className="px-4 py-3">SKU</th><th className="px-4 py-3">Warehouse</th>
                     <th className="px-4 py-3">Category</th><th className="px-4 py-3 text-right">On hand</th><th className="px-4 py-3 text-right">Reserved</th>
                     <th className="px-4 py-3 text-right">Available</th><th className="px-4 py-3 text-right">Value</th><th className="px-4 py-3">Last movement</th><th className="px-4 py-3">Status</th>
+                    {canReportDamage && <th className="px-4 py-3"><span className="sr-only">Actions</span></th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -207,6 +235,35 @@ export function InventoryView({ warehouseId, embedded }: { warehouseId?: string;
                       <td className="px-4 py-3 text-right text-[var(--muted)]">{formatMoney(r.value, r.currency)}</td>
                       <td className="px-4 py-3 text-[var(--muted)]">{formatDate(r.lastMovementAt)}</td>
                       <td className="px-4 py-3"><InventoryStatusBadge status={r.status} /></td>
+                      {canReportDamage && (
+                        <td className="px-4 py-3">
+                          <div className="flex justify-end">
+                            <button
+                              type="button"
+                              // The whole ROW navigates to the item detail — without this the click
+                              // would open the modal and then immediately route away from it.
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setDamageTarget({
+                                  warehouseId: r.warehouseId,
+                                  ownerType: "company",
+                                  irmItemId: r.irmItemId,
+                                  customerStockEntryId: null,
+                                  itemName: r.itemName,
+                                  available: r.available,
+                                });
+                              }}
+                              // Nothing to damage at zero on-hand, and the server would reject it.
+                              disabled={r.available <= 0}
+                              className={ghostBtn}
+                              aria-label={`Report damage on ${r.itemName}`}
+                            >
+                              <AlertTriangle className="h-3.5 w-3.5" />
+                              Damage
+                            </button>
+                          </div>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -226,6 +283,18 @@ export function InventoryView({ warehouseId, embedded }: { warehouseId?: string;
           <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="records" onPage={setPage} />
         </div>
       )}
+
+      <ReportDamageModal
+        target={damageTarget}
+        onClose={() => setDamageTarget(null)}
+        onReported={() => {
+          // On-hand and available both dropped. Clear this module's stale-while-revalidate cache
+          // (the mutation lives in goodsManagement.service and can't reach it) before refetching,
+          // or the next render would serve the pre-damage figures straight back.
+          inventoryService.clearInventoryListCache();
+          setReloadKey((k) => k + 1);
+        }}
+      />
     </div>
   );
 }

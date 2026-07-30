@@ -35,11 +35,13 @@ import { FormPageHeader, FormSection } from "@/components/ui/FormScaffold";
 import { Avatar } from "@/components/ui/Avatar";
 import { DetailHeader } from "@/components/ui/DetailHeader";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { Skeleton } from "@/components/ui/Skeleton";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
-import { ghostBtn, inputCls, primaryBtn } from "@/components/ui/styles";
+import { primaryBtn, secondaryBtn, toolbarBtn, toolbarInputCls } from "@/components/ui/styles";
 import { searchStockEntries } from "@/lib/stockEntrySearch";
 import {
-  EMPTY_SUBMISSION_FILTERS,
+  ALL as ALL_SUBMISSION_STATUSES,
+  DEFAULT_SUBMISSION_FILTERS,
   effectiveSubmissionFilters,
   filterSubmissions,
   hasActiveSubmissionFilter,
@@ -323,9 +325,14 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
         ))}
       </div>
 
+      {/* Tabs that lay themselves out full-height (flex h-full → their own inner scroller) get a
+          BOUNDED box and no scrollbar of their own here; a second one would let the whole tab
+          scroll inside this box while its list scrolled inside that, giving two nested scrollbars
+          for one list. Card-style tabs keep scrolling as a page. Same split as WarehouseDetail's
+          `fill` flag — kept as a list rather than a tab-config field because only these two need it. */}
       <div
         className={`min-h-0 flex-1 ${
-          activeTab === "catalogue" ? "overflow-hidden" : "overflow-auto"
+          activeTab === "catalogue" || activeTab === "submissions" ? "overflow-hidden" : "overflow-auto"
         }`}
       >
         {activeTab === "overview" && <OverviewTab customer={customer} />}
@@ -579,7 +586,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   return (
     <div className="group min-w-0">
       <p className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-[var(--faint)]">{label}</p>
-      <div className="flex items-center gap-1.5 text-sm text-[var(--ink)]">{children}</div>
+      <div className="flex items-center gap-1.5 wrap-break-word text-sm text-[var(--ink)]">{children}</div>
     </div>
   );
 }
@@ -710,7 +717,7 @@ function ProjectsSection({ customer, caps, pushToast }: SectionProps) {
       }
     >
       {paged === null ? (
-        <Empty>Loading projects…</Empty>
+        <TableShellSkeleton head={["Code", "Project", "Dates", "Status", canWrite ? "" : null]} />
       ) : projects.length === 0 ? (
         <Empty>No projects yet.</Empty>
       ) : (
@@ -889,20 +896,22 @@ function StockEntriesTab({
           {error ? (
             <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>
           ) : entries === null ? (
-            /* Skeleton — mirrors the loaded table layout */
+            /* Skeleton — mirrors the loaded table layout. Uses the shared <Skeleton>, not raw
+               `animate-pulse` divs: that shimmers where this pulsed, so the same page showed two
+               different loading animations depending on which tab you opened. */
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
               <div className="border-b border-[var(--border)] px-4 py-3 shrink-0">
-                <div className="h-4 w-32 animate-pulse rounded bg-[var(--surface-2)]" />
+                <Skeleton className="h-4 w-32" />
               </div>
               <div className="divide-y divide-[var(--border)] min-h-0 flex-1 overflow-auto">
                 {Array.from({ length: 5 }).map((_, i) => (
                   <div key={i} className="flex items-center gap-4 px-4 py-3">
-                    <div className="h-4 w-40 animate-pulse rounded bg-[var(--surface-2)]" />
-                    <div className="h-4 w-28 animate-pulse rounded bg-[var(--surface-2)]" />
-                    <div className="h-4 w-20 animate-pulse rounded bg-[var(--surface-2)]" />
-                    <div className="h-4 w-10 animate-pulse rounded bg-[var(--surface-2)]" />
-                    <div className="h-4 w-24 animate-pulse rounded bg-[var(--surface-2)]" />
-                    <div className="ml-auto h-6 w-16 animate-pulse rounded-full bg-[var(--surface-2)]" />
+                    <Skeleton className="h-4 w-40" />
+                    <Skeleton className="h-4 w-28" />
+                    <Skeleton className="h-4 w-20" />
+                    <Skeleton className="h-4 w-10" />
+                    <Skeleton className="h-4 w-24" />
+                    <Skeleton className="ml-auto h-6 w-16 rounded-full" />
                   </div>
                 ))}
               </div>
@@ -917,7 +926,7 @@ function StockEntriesTab({
                     onChange={(e) => patch({ stock_q: e.target.value, stockPage: "" })}
                     placeholder="Search item, SKU, barcode…"
                     aria-label="Search stock entries"
-                    className={`${inputCls} pl-9`}
+                    className={`${toolbarInputCls} pl-9`}
                   />
                 </div>
                 <Select
@@ -964,7 +973,7 @@ function StockEntriesTab({
                     <button
                       type="button"
                       onClick={() => patch({ stock_q: "", stock_filter: "", stockPage: "" })}
-                      className={`${ghostBtn} mt-1`}
+                      className={`${secondaryBtn} mt-1`}
                     >
                       Clear filters
                     </button>
@@ -1076,7 +1085,7 @@ function StockSubmissionsTab({
 
   // Search / status / page. Submissions accumulate for the life of the account and this is the only
   // admin-side surface for reviewing them, so the whole list was previously rendered at once.
-  const [filters, setFilters] = React.useState<SubmissionFilters>(EMPTY_SUBMISSION_FILTERS);
+  const [filters, setFilters] = React.useState<SubmissionFilters>(DEFAULT_SUBMISSION_FILTERS);
   const [page, setPage] = React.useState(1);
   const patchFilters = (next: Partial<SubmissionFilters>) => {
     setFilters((prev) => ({ ...prev, ...next }));
@@ -1155,13 +1164,18 @@ function StockSubmissionsTab({
   };
 
   return (
-    <div className="space-y-6">
+    // Full-height inline scroll, like the Inventory tab next door: the toolbar and the list's own
+    // header stay put and ONLY the rows scroll. As a plain `space-y-6` block the whole tab scrolled
+    // inside the shell's viewport, so on a laptop the visible window onto the list was a few rows
+    // tall — with the search box and the paginator both scrolled out of reach of the rows they
+    // control. Submissions accumulate for the life of the account, so this is the tab that needs it.
+    <div className="flex h-full flex-col gap-4">
       {/* ONE toolbar row: filters left, the create action right. They used to be two rows, which
           left a band of dead space beside the filters. `ml-auto` on the button parks it at the
           right edge whether or not the filters are there — so the empty-list case (button only)
           still lines up without a second rule. */}
       {(stockReq.approve || allSubmissions.length > 0) && (
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
           {allSubmissions.length > 0 && (
             <>
               <div className="relative w-full sm:max-w-[16rem]">
@@ -1171,7 +1185,7 @@ function StockSubmissionsTab({
                   onChange={(e) => patchFilters({ search: e.target.value })}
                   placeholder="Search submissions…"
                   aria-label="Search stock submissions"
-                  className={`${inputCls} pl-9`}
+                  className={`${toolbarInputCls} pl-9`}
                 />
               </div>
               {/* `effective`, so a status whose rows are gone reads as "All" instead of blank. */}
@@ -1185,8 +1199,8 @@ function StockSubmissionsTab({
               {anyFilter && (
                 <button
                   type="button"
-                  onClick={() => { setFilters(EMPTY_SUBMISSION_FILTERS); setPage(1); }}
-                  className={ghostBtn}
+                  onClick={() => { setFilters(DEFAULT_SUBMISSION_FILTERS); setPage(1); }}
+                  className={toolbarBtn}
                 >
                   Clear
                 </button>
@@ -1206,33 +1220,50 @@ function StockSubmissionsTab({
       )}
 
       {matched.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
+        <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
           <ClipboardList className="h-7 w-7 text-[var(--faint)]" />
+          {/* THREE cases, not two. The default view is "Open", so an empty table can also mean
+              "nothing outstanding, but there IS history" — saying "No stock submissions" there
+              would flatly contradict the finished ones sitting one filter away. */}
           <p className="text-sm font-semibold text-[var(--ink)]">
-            {anyFilter ? "No matching submissions" : "No stock submissions"}
+            {anyFilter ? "No matching submissions" : allSubmissions.length > 0 ? "Nothing outstanding" : "No stock submissions"}
           </p>
           <p className="text-xs text-[var(--muted)]">
             {anyFilter
               ? `${allSubmissions.length} submission${allSubmissions.length === 1 ? "" : "s"} here, none match these filters.`
-              : "Stock the customer submits from their portal — or that you add on their behalf — appears here for review."}
+              : allSubmissions.length > 0
+                ? `All ${allSubmissions.length} submission${allSubmissions.length === 1 ? " is" : "s are"} finished — switch to “All statuses” to review them.`
+                : "Stock the customer submits from their portal — or that you add on their behalf — appears here for review."}
           </p>
-          {anyFilter && (
+          {anyFilter ? (
             <button
               type="button"
-              onClick={() => { setFilters(EMPTY_SUBMISSION_FILTERS); setPage(1); }}
-              className={`${ghostBtn} mt-1`}
+              onClick={() => { setFilters(DEFAULT_SUBMISSION_FILTERS); setPage(1); }}
+              className={`${secondaryBtn} mt-1`}
             >
               Clear filters
             </button>
+          ) : (
+            allSubmissions.length > 0 && (
+              // One click to the history rather than making the user find the menu.
+              <button
+                type="button"
+                onClick={() => { patchFilters({ status: ALL_SUBMISSION_STATUSES }); }}
+                className={`${secondaryBtn} mt-1`}
+              >
+                Show all submissions
+              </button>
+            )
           )}
         </div>
       ) : (
-        <div className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)]">
-          <div className="flex items-center gap-2 border-b border-[var(--border)] px-3 py-2 text-[11px] font-bold uppercase tracking-wider text-[var(--muted)]">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)]">
+          <div className="flex shrink-0 items-center gap-2 border-b border-[var(--border)] px-3 py-2 text-[11px] font-bold uppercase tracking-wider text-[var(--muted)]">
             <ClipboardList className="h-3.5 w-3.5" />
             Stock submissions ({matched.length}{anyFilter ? ` of ${allSubmissions.length}` : ""})
           </div>
-          <div className="divide-y divide-[var(--border)]">
+          {/* The ONLY scroller in the tab. */}
+          <div className="min-h-0 flex-1 divide-y divide-[var(--border)] overflow-auto">
             {pageRows.map((req) => (
               <div key={req.id} className="px-3 py-2.5">
                 <div className="flex flex-wrap items-start justify-between gap-2">
@@ -1250,9 +1281,17 @@ function StockSubmissionsTab({
                       <RequestStatusBadge status={req.status} />
                       {req.linkedStockEntryId && <TopUpBadge />}
                     </div>
-                    <div className="mt-0.5 text-[11px] text-[var(--faint)]">
-                      requested by {req.requestedByName ?? "a portal user"}
-                    </div>
+                    {/* Shown ONLY when we actually know who asked. The fallback used to read
+                        "requested by a portal user", which was wrong for the commonest case that
+                        lacks a name: a submission an admin raised on the customer's behalf, where
+                        the contact field is optional and often left blank. That attributed the
+                        request to a portal user who never made it — and on a provenance line, an
+                        invented attribution is worse than no line at all. */}
+                    {req.requestedByName && (
+                      <div className="mt-0.5 text-[11px] text-[var(--faint)]">
+                        requested by {req.requestedByName}
+                      </div>
+                    )}
                     {req.reason && (
                       <p className="mt-1 text-xs text-[var(--muted)]">
                         <span className="font-semibold text-[var(--faint)]">Reason:</span> {req.reason}
@@ -1339,11 +1378,14 @@ function StockSubmissionsTab({
                 {req.warehouseAssignments.length > 0 && (
                   <div className="mt-2 space-y-1">
                     {req.warehouseAssignments.map((a) => (
+                      // Column, not a `justify-between` row: the closure note below is a second
+                      // child, and as a flex ROW sibling it sat squeezed to the right of the
+                      // warehouse line instead of under it (with an `mt-1` that a row ignores).
                       <div
                         key={a.id}
-                        className="flex items-center justify-between rounded-lg bg-[var(--surface-2)] px-2.5 py-1.5 text-xs"
+                        className="rounded-lg bg-[var(--surface-2)] px-2.5 py-1.5 text-xs"
                       >
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           <span className="font-semibold text-[var(--ink)]">{a.warehouseName}</span>
                           {a.warehouseCode && (
                             <span className="font-mono text-[var(--faint)]">{a.warehouseCode}</span>
@@ -1353,6 +1395,21 @@ function StockSubmissionsTab({
                           </span>
                           <AssignmentStatusBadge status={a.status} />
                         </div>
+                        {/* The badge says the delivery was closed with stock outstanding, and the
+                            ratio above says what landed — but neither states the SHORTFALL, which
+                            is the figure a query about this line will be about. Spelled out rather
+                            than left as a subtraction across two numbers. The reason follows it:
+                            the number raises the question, the reason is the answer. */}
+                        {a.status === "closed_short" && a.quantity - a.receivedQuantity > 0 && (
+                          <p className="mt-1 text-[11px] leading-relaxed text-[var(--muted)]">
+                            {/* Same phrase the customer's own portal uses, so a call about this line
+                                has both sides reading the identical words off their screens. */}
+                            <span className="font-bold text-[var(--warn)]">
+                              {a.quantity - a.receivedQuantity} not received
+                            </span>
+                            {a.closureReason && <> — {a.closureReason}</>}
+                          </p>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -1361,7 +1418,9 @@ function StockSubmissionsTab({
             ))}
           </div>
           {totalPages > 1 && (
-            <div className="border-t border-[var(--border)] px-3 py-2">
+            // Pinned below the scroller, not trailing the last row — the control that changes the
+            // page shouldn't require paging through the rows to reach it.
+            <div className="shrink-0 border-t border-[var(--border)] px-3 py-2">
               <Pagination
                 page={safePage}
                 totalPages={totalPages}
@@ -1464,7 +1523,7 @@ function SitesSection({ customer, caps, pushToast }: SectionProps) {
       action={
         caps.create && (
           <>
-            <button type="button" onClick={() => setImporting(true)} className={ghostBtn}>
+            <button type="button" onClick={() => setImporting(true)} className={secondaryBtn}>
               <Upload className="h-4 w-4" /> Import sites
             </button>
             <button
@@ -1494,7 +1553,7 @@ function SitesSection({ customer, caps, pushToast }: SectionProps) {
       </div>
 
       {paged === null ? (
-        <Empty>Loading sites…</Empty>
+        <TableShellSkeleton head={["Code", "Site", "Postcode", "Contact", "Status", canWrite ? "" : null]} />
       ) : sites.length === 0 ? (
         <Empty>{search ? "No matching sites." : "No sites yet."}</Empty>
       ) : (
@@ -1784,6 +1843,33 @@ function TableShell({
   );
 }
 
+// First-load placeholder for a TableShell. Takes the SAME `head` the real table will render, so the
+// column count and the header row are already correct when the rows arrive and nothing jumps.
+//
+// Replaces the "Loading projects…" / "Loading sites…" one-liners these sections used to show. A line
+// of text is a different SHAPE from the table that follows it, so the card visibly resized on every
+// load — and it read as an empty state ("No projects yet." renders in exactly the same place, same
+// size, same colour) right up until the rows appeared. Skeletons are what the rest of the dashboard
+// uses for a first load; these two were the last list surfaces that didn't.
+function TableShellSkeleton({ head, rows = 3 }: { head: (string | null)[]; rows?: number }) {
+  const cols = head.filter((h) => h !== null).length;
+  // Varied widths per column so it reads as a table of content rather than a block of grey bars.
+  const widths = ["w-16", "w-40", "w-32", "w-14", "w-10"];
+  return (
+    <TableShell head={head}>
+      {Array.from({ length: rows }).map((_, r) => (
+        <tr key={r} className="border-b border-[var(--border)] last:border-0">
+          {Array.from({ length: cols }).map((_c, i) => (
+            <td key={i} className="px-3 py-2">
+              <Skeleton className={`h-4 ${widths[i % widths.length]}`} />
+            </td>
+          ))}
+        </tr>
+      ))}
+    </TableShell>
+  );
+}
+
 function Empty({ children }: { children: React.ReactNode }) {
   return <p className="text-sm text-[var(--muted)]">{children}</p>;
 }
@@ -1851,6 +1937,9 @@ const ASSIGN_STATUS_COLORS: Record<string, string> = {
   pending: "bg-amber-500/15 text-amber-600",
   partially_received: "bg-indigo-500/12 text-indigo-600",
   received: "bg-[var(--pos)]/12 text-[var(--pos)]",
+  // Terminal but NOT a success — muted rather than green. Without an entry here it fell through to
+  // the `pending` amber, which read as "still waiting" for a delivery that had already been closed.
+  closed_short: "bg-[var(--surface-2)] text-[var(--muted)]",
 };
 function AssignmentStatusBadge({ status }: { status: string }) {
   return (

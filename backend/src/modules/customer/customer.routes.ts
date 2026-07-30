@@ -22,6 +22,7 @@ import {
   stockRequestEditSchema,
   stockRequestAssignSchema,
   stockAssignmentReceiveSchema,
+  stockAssignmentCloseShortSchema,
   stockEntryUpdateSchema,
   stockReviewSchema,
   updateCustomerSchema,
@@ -238,8 +239,14 @@ portalRouter.get("/overview", customerController.getOwnOverview);
 portalRouter.get("/projects", customerController.getOwnProjects);
 portalRouter.get("/sites", customerController.getOwnSites);
 portalRouter.get("/stock", customerController.getOwnStock);
+// Each export sits directly under the list it mirrors: both read the SAME query params, so keeping
+// them adjacent is what stops a filter being added to one and missed on the other. (All literal
+// paths — no `:param` here for `export.csv` to be shadowed by, so declaration order is cosmetic.)
 portalRouter.get("/stock-entries", customerController.getOwnStockEntries);
+portalRouter.get("/stock-entries/export.csv", customerController.exportOwnStockCsv);
+portalRouter.get("/stock-warehouses", customerController.getOwnStockWarehouses);
 portalRouter.get("/stock-requests", customerController.getOwnStockRequests);
+portalRouter.get("/stock-requests/export.csv", customerController.exportOwnStockRequestsCsv);
 portalRouter.post(
   "/stock-requests",
   writeLimiter,
@@ -260,6 +267,16 @@ stockAssignmentRouter.post(
   writeLimiter,
   validateBody(stockAssignmentReceiveSchema),
   customerController.receiveStockAssignment,
+);
+
+// Same permission as receiving: closing a delivery short is the other way the SAME person finishes
+// the same line — it grants no reach beyond what receiving already does, so it needs no new key.
+stockAssignmentRouter.post(
+  "/:id/close-short",
+  requirePermission("stock_requests.complete"),
+  writeLimiter,
+  validateBody(stockAssignmentCloseShortSchema),
+  customerController.closeStockAssignmentShort,
 );
 
 // ----------------------------------------------------------------------------

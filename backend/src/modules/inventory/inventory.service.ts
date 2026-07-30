@@ -19,6 +19,7 @@ import type { AuditActor } from "#modules/audit/audit.service.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import type { AddStockInput, AdjustStockInput, CreateTransferInput } from "./inventory.validation.js";
+import { csvEscape } from "../../utils/csv.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 const EXPORT_MAX = 50_000;
@@ -718,14 +719,6 @@ export async function listTransfers(params: ListTransfersParams = {}, actor?: Au
   const page = clamp(params.page ?? 1, 1, totalPages);
   const rows = await inventoryRepo.findTransfers(filters, (page - 1) * pageSize, pageSize);
   return { transfers: rows.map(toTransferDTO), total, page, pageSize, totalPages };
-}
-
-// ── CSV export ────────────────────────────────────────────────────────────────────────────────
-// Formula-injection-safe cell escaping (mirrors the audit module): user-controlled values (item
-// names, SKUs) starting with =,+,-,@,tab,CR are neutralised, then RFC-4180 quoted.
-function csvEscape(value: string): string {
-  const safe = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
-  return /["\n,\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
 export interface InventoryCsvResult {

@@ -96,11 +96,14 @@ export function AuditEntryDrawer({
 
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="flex flex-col gap-0.5">
+    // The drawer is narrow and these values are raw record data — actor emails, ObjectIds, target
+    // labels — none of which contain break opportunities. Without wrap-break-word a single long id
+    // pushes the drawer's content past its own width.
+    <div className="flex min-w-0 flex-col gap-0.5">
       <dt className="text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
         {label}
       </dt>
-      <dd className="text-[var(--ink)]">{children}</dd>
+      <dd className="wrap-break-word text-[var(--ink)]">{children}</dd>
     </div>
   );
 }

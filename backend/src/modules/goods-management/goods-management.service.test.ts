@@ -1447,6 +1447,109 @@ describe("getDamagedHistory", () => {
   });
 });
 
+// ── reportWarehouseDamage (damage found on stock already in the warehouse) ────────────────────
+import { reportWarehouseDamage } from "./goods-management.service.js";
+
+// mockUpsertDamagedBalance / mockInsertDamagedTxn are already declared above (the postReturn block).
+const mockFindCustomerEntry = repo.findCustomerStockEntryById as ReturnType<typeof vi.fn>;
+const mockAdjustCustomerQty = repo.adjustCustomerStockEntryQtyTx as ReturnType<typeof vi.fn>;
+const mockUpsertInvBalance = inventoryRepo.upsertBalanceTx as ReturnType<typeof vi.fn>;
+const mockInsertInvTxn = inventoryRepo.insertTransactionTx as ReturnType<typeof vi.fn>;
+const mockWarehouseById = warehouseRepo.findById as ReturnType<typeof vi.fn>;
+const mockRequireIrm = irmService.requireActiveIrmItem as ReturnType<typeof vi.fn>;
+
+const COMPANY_DAMAGE = {
+  warehouseId: WH_ID, ownerType: "company" as const, irmItemId: IRM_ID, customerStockEntryId: undefined,
+  quantity: 2, reason: "Crushed by forklift", damagePhotoUrl: "https://cdn/dmg.jpg", notes: "aisle 3",
+};
+
+describe("reportWarehouseDamage", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockWarehouseById.mockResolvedValue({ id: WH_ID, name: "London Hub" });
+    mockRequireIrm.mockResolvedValue({ id: IRM_ID, name: "CAT6", trackSerialNumbers: false, trackBatchNumbers: false });
+    mockUpsertDamagedBalance.mockResolvedValue({ id: "dmg1", quantity: 5 });
+    mockUpsertInvBalance.mockResolvedValue({ quantityOnHand: 8 });
+    mockAdjustCustomerQty.mockResolvedValue({ quantity: 13 });
+    mockFindCustomerEntry.mockResolvedValue({
+      id: CSE_ID, warehouseId: WH_ID, itemName: "Router", customerId: "cust1", quantity: 15,
+    });
+  });
+
+  it("moves company stock OUT of inventory and INTO the damaged pool", async () => {
+    const res = await reportWarehouseDamage(COMPANY_DAMAGE);
+    // Usable stock decremented by the damaged quantity (negative delta).
+    expect(mockUpsertInvBalance).toHaveBeenCalledWith({}, IRM_ID, WH_ID, -2);
+    // Damaged pool credited by the same amount.
+    expect(mockUpsertDamagedBalance).toHaveBeenCalledWith({}, expect.objectContaining({ ownerType: "company", irmItemId: IRM_ID }), 2);
+    expect(res).toMatchObject({ quantityDamaged: 2, damagedBalanceAfter: 5, usableBalanceAfter: 8 });
+  });
+
+  it("writes the reason and photo to the damaged ledger — the evidence the pool exists for", async () => {
+    await reportWarehouseDamage(COMPANY_DAMAGE);
+    expect(mockInsertDamagedTxn).toHaveBeenCalledWith({}, expect.objectContaining({
+      quantityDelta: 2,
+      reason: "Crushed by forklift",
+      photoUrl: "https://cdn/dmg.jpg",
+      notes: "aisle 3",
+      sourceType: "warehouse_damage_report",
+      balanceAfter: 5,
+    }));
+  });
+
+  it("labels the inventory movement 'write_off' so the movement history reads correctly", async () => {
+    await reportWarehouseDamage(COMPANY_DAMAGE);
+    expect(mockInsertInvTxn).toHaveBeenCalledWith({}, expect.objectContaining({
+      quantityDelta: -2, type: "write_off", sourceType: "warehouse_damage_report",
+    }));
+  });
+
+  it("debits the customer's entry — NOT company inventory — for customer-owned stock", async () => {
+    const res = await reportWarehouseDamage({
+      ...COMPANY_DAMAGE, ownerType: "customer", irmItemId: undefined, customerStockEntryId: CSE_ID,
+    });
+    expect(mockAdjustCustomerQty).toHaveBeenCalledWith({}, CSE_ID, -2);
+    expect(mockUpsertInvBalance).not.toHaveBeenCalled(); // company inventory untouched
+    expect(res.usableBalanceAfter).toBe(13);
+  });
+
+  it("nulls the unused owner socket so the damaged row is keyed correctly", async () => {
+    // A company balance is stored with customerStockEntryId null (and vice versa) — carrying both
+    // would create a row neither the damaged list nor the history drill-down could ever match.
+    await reportWarehouseDamage({ ...COMPANY_DAMAGE, customerStockEntryId: CSE_ID });
+    expect(mockUpsertDamagedBalance).toHaveBeenCalledWith(
+      {}, expect.objectContaining({ irmItemId: IRM_ID, customerStockEntryId: null }), 2,
+    );
+  });
+
+  it("403s for a warehouse-scoped actor reporting into a warehouse they aren't assigned", async () => {
+    const actor = { type: "user" as const, email: "wm@x.com", assignedWarehouseIds: ["other".padEnd(24, "0")] };
+    await expect(reportWarehouseDamage(COMPANY_DAMAGE, actor)).rejects.toMatchObject({ status: 403 });
+    expect(mockUpsertDamagedBalance).not.toHaveBeenCalled(); // rejected before any write
+  });
+
+  it("refuses serial/batch-tracked items (the damaged pool is quantity-only)", async () => {
+    mockRequireIrm.mockResolvedValue({ id: IRM_ID, name: "Router", trackSerialNumbers: true, trackBatchNumbers: false });
+    await expect(reportWarehouseDamage(COMPANY_DAMAGE)).rejects.toMatchObject({ status: 409 });
+    expect(mockUpsertDamagedBalance).not.toHaveBeenCalled();
+  });
+
+  it("refuses customer stock that isn't held at this warehouse", async () => {
+    mockFindCustomerEntry.mockResolvedValue({ id: CSE_ID, warehouseId: "zzz".padEnd(24, "0"), itemName: "Router", customerId: "cust1" });
+    await expect(
+      reportWarehouseDamage({ ...COMPANY_DAMAGE, ownerType: "customer", irmItemId: undefined, customerStockEntryId: CSE_ID }),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(mockUpsertDamagedBalance).not.toHaveBeenCalled();
+  });
+
+  it("404s when the customer stock entry doesn't exist", async () => {
+    mockFindCustomerEntry.mockResolvedValue(null);
+    await expect(
+      reportWarehouseDamage({ ...COMPANY_DAMAGE, ownerType: "customer", irmItemId: undefined, customerStockEntryId: CSE_ID }),
+    ).rejects.toMatchObject({ status: 404 });
+  });
+});
+
 // ── restoreDamaged — warehouse scoping ───────────────────────────────────────────────────────
 import { restoreDamaged } from "./goods-management.service.js";
 

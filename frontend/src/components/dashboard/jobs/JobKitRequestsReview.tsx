@@ -12,6 +12,7 @@ import { useDashboard } from "@/hooks/useDashboard";
 import { Select } from "@/components/ui/Select";
 import { Modal } from "@/components/ui/Modal";
 import { inputCls } from "@/components/ui/styles";
+import { Skeleton } from "@/components/ui/Skeleton";
 import { KitLineChips, KitRequestStatusChip } from "@/components/dashboard/engineer/EngineerKitRequests";
 import { formatDate } from "./jobStatus";
 
@@ -68,7 +69,20 @@ export function JobKitRequestsReview({ jobId, assignedEngineerId, locked, onJobC
       )}
 
       {requests === null ? (
-        <p className="text-sm text-[var(--muted)]">Loading…</p>
+        // Card skeletons, not a "Loading…" line: the loaded state is a stack of request cards, so a
+        // one-line placeholder collapses the panel and then snaps open. Mirrors the card's own
+        // shell (rounded-xl, border, surface-2, p-3) so nothing shifts when the data lands.
+        <div className="space-y-2">
+          {Array.from({ length: 2 }).map((_, i) => (
+            <div key={i} className="space-y-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3">
+              <div className="flex items-center justify-between gap-3">
+                <Skeleton className="h-3 w-40" />
+                <Skeleton className="h-4 w-20 rounded-full" />
+              </div>
+              <Skeleton className="h-3 w-24" />
+            </div>
+          ))}
+        </div>
       ) : (
         <div className="space-y-2">
           {[...pending, ...history].map((r) => (

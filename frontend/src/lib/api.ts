@@ -141,11 +141,20 @@ export async function api<T = unknown>(
 }
 
 /**
- * Fetch a binary response (e.g. a generated PDF) as a Blob. Sends the auth cookies and shares the
- * silent-refresh interceptor, like `api()`. Uses a longer default timeout since document generation
- * (logo/signature fetch + render) can take a little longer than a JSON call.
+ * Fetch a binary response as a Blob TOGETHER WITH its response headers — for downloads whose
+ * filename (`Content-Disposition`) or truncation flag (`X-…-Export-Capped`) travels in a header
+ * rather than the body. `apiBlob` hands back only the body, so a caller needing those used to reach
+ * for raw axios and lost the silent-refresh interceptor with it: an export fired seconds after the
+ * access token expired failed outright instead of refreshing and replaying.
+ *
+ * Header keys are lower-cased by axios. Every name read here must also be listed in the API's CORS
+ * `exposedHeaders` (see backend `src/app.ts`) or the browser hides it on a cross-origin response and
+ * the value silently reads as absent.
  */
-export async function apiBlob(path: string, timeout = 60_000): Promise<Blob> {
+export async function apiFile(
+  path: string,
+  timeout = 60_000,
+): Promise<{ blob: Blob; headers: Record<string, string | undefined> }> {
   try {
     const res = await client.request<Blob>({
       url: path,
@@ -153,7 +162,7 @@ export async function apiBlob(path: string, timeout = 60_000): Promise<Blob> {
       responseType: "blob",
       timeout,
     });
-    return res.data;
+    return { blob: res.data, headers: res.headers as unknown as Record<string, string | undefined> };
   } catch (err) {
     if (axios.isAxiosError(err)) {
       if (err.code === "ECONNABORTED")
@@ -164,4 +173,13 @@ export async function apiBlob(path: string, timeout = 60_000): Promise<Blob> {
     }
     throw err;
   }
+}
+
+/**
+ * Fetch a binary response (e.g. a generated PDF) as a Blob. Sends the auth cookies and shares the
+ * silent-refresh interceptor, like `api()`. Uses a longer default timeout since document generation
+ * (logo/signature fetch + render) can take a little longer than a JSON call.
+ */
+export async function apiBlob(path: string, timeout = 60_000): Promise<Blob> {
+  return (await apiFile(path, timeout)).blob;
 }

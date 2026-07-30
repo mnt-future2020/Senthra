@@ -1,10 +1,7 @@
 // Typed wrappers around the backend /inventory aggregation endpoints.
 // Components call these, never api()/axios directly.
 
-import axios from "axios";
-
-import { api } from "@/lib/api";
-import { env } from "@/lib/env";
+import { api, apiFile } from "@/lib/api";
 import { downloadBlob, filenameFromDisposition } from "@/lib/download";
 import type { InventorySummary, MovementPage, PagedPositions, StockPosition } from "@/types/stock-position";
 
@@ -71,16 +68,15 @@ export async function exportPositionsCsv(
   void _page;
   void _pageSize;
   const s = qs(filters as Record<string, unknown>);
-  const res = await axios.get(
-    `${env.apiUrl}/inventory/positions/export.csv${s ? `?${s}` : ""}`,
-    { withCredentials: true, responseType: "blob" },
+  const { blob, headers } = await apiFile(
+    `/inventory/positions/export.csv${s ? `?${s}` : ""}`,
   );
   const date = new Date().toISOString().slice(0, 10);
   const filename = filenameFromDisposition(
-    res.headers["content-disposition"] ?? null,
+    headers["content-disposition"] ?? null,
     `stock-positions-${date}.csv`,
   );
-  downloadBlob(res.data as Blob, filename);
+  downloadBlob(blob, filename);
   // The positions export streams ALL matching rows — the backend only reports a row count
   // (X-Inventory-Export-Count), never a cap. So this export is never truncated. (The movements/
   // inventory exports DO cap and send an X-*-Export-Capped header — see exportMovementsCsv.)
@@ -112,18 +108,16 @@ export function listMovements(
   return api<MovementPage>(`/inventory/movements${s ? `?${s}` : ""}`);
 }
 
-// Download the SAME filtered movement history as CSV — bypasses api() for a direct authenticated blob
-// request (mirrors exportPositionsCsv). RBAC is enforced server-side (inventory.history + inventory.export).
+// Download the SAME filtered movement history as CSV — apiFile() rather than api() for a blob body,
+// keeping the shared client's silent refresh-on-401 (mirrors exportPositionsCsv). RBAC is enforced
+// server-side (inventory.history + inventory.export).
 export async function exportMovementsCsv(params: MovementFilters = {}): Promise<{ capped: boolean }> {
   const s = qs(params as Record<string, unknown>);
-  const res = await axios.get(`${env.apiUrl}/inventory/movements/export.csv${s ? `?${s}` : ""}`, {
-    withCredentials: true,
-    responseType: "blob",
-  });
+  const { blob, headers } = await apiFile(`/inventory/movements/export.csv${s ? `?${s}` : ""}`);
   const date = new Date().toISOString().slice(0, 10);
-  const filename = filenameFromDisposition(res.headers["content-disposition"] ?? null, `stock-movements-${date}.csv`);
-  downloadBlob(res.data as Blob, filename);
-  return { capped: String(res.headers["x-movement-export-capped"] ?? "") === "true" };
+  const filename = filenameFromDisposition(headers["content-disposition"] ?? null, `stock-movements-${date}.csv`);
+  downloadBlob(blob, filename);
+  return { capped: String(headers["x-movement-export-capped"] ?? "") === "true" };
 }
 
 // ── Item-level detail endpoints (Task 17) ────────────────────────────────────────────────────────

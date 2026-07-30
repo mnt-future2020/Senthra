@@ -199,7 +199,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       { key: "stock_requests.view", action: "View", description: "View customer stock requests." },
       { key: "stock_requests.approve", action: "Approve", description: "Approve a customer's stock request." },
       { key: "stock_requests.reject", action: "Reject", description: "Reject a customer's stock request." },
-      { key: "stock_requests.complete", action: "Complete", description: "Receive an approved request into the warehouse (posts the customer's stock)." },
+      { key: "stock_requests.complete", action: "Complete", description: "Finish an approved request at the warehouse — receive the stock, or close a leg short when the balance is never coming." },
     ],
   },
   {
@@ -604,7 +604,12 @@ export function splitByCapability(
 // exactly these two keys:
 //   • stock_requests.view     — surfaces the customer pool at the warehouse (pending + received)
 //   • stock_requests.complete — performs the receive, and authorises editing the entry,
-//                               generating its barcode, and reading the category list
+//                               generating its barcode, and reading the category list. ALSO closes a
+//                               leg SHORT — the other, terminal way of finishing the same line, for
+//                               when the balance is never coming. Same key on purpose: it reaches no
+//                               further than receiving already does, and whoever finishes a delivery
+//                               is who knows it came up short. Note it is not reversible, so holding
+//                               this key means being trusted to end a delivery, not only to post one.
 // Deliberately NOT stock_requests.approve / .reject — that is the office review queue, a
 // PM/reviewer's job, done from the customer record, not the warehouse. Deliberately NOT the
 // broad customer_stock.* keys — every /stock-entries route accepts stock_requests.* as an

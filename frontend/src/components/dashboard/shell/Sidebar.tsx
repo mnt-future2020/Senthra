@@ -17,7 +17,6 @@ import {
   FolderKanban,
   MapPin,
   ClipboardList,
-  BarChart3,
   Warehouse,
   Truck,
   Boxes,
@@ -106,7 +105,12 @@ const CUSTOMER_NAV: NavItem[] = [
   { href: "/dashboard/portal/sites", label: "Sites", icon: MapPin, perms: [] },
   { href: "/dashboard/stock", label: "My Stock", icon: Package, perms: [] },
   { href: "/dashboard/portal/requests", label: "Stock Submissions", icon: ClipboardList, perms: [] },
-  { href: "/dashboard/portal/reports", label: "Reports", icon: BarChart3, perms: [] },
+  // No "Reports" entry. It was a placeholder page promising stock/request/movement reports "once your
+  // inventory data is connected" — and one of those three can never arrive (customer stock has no
+  // transaction ledger). What the other two would have contained is now an Export CSV button on My
+  // Stock and Stock Submissions, which is also this app's existing convention (see the audit and
+  // inventory exports): the download carries the filters you already set, rather than making you
+  // re-specify them on a second screen.
   { href: "/dashboard/account", label: "Settings", icon: Settings, perms: [] },
 ];
 

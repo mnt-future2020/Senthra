@@ -166,37 +166,6 @@ export function EmptyState({
   );
 }
 
-// Honest placeholder for sections that depend on modules not built yet (inventory,
-// reporting). Used both as a full-page Reports stand-in and inline on the dashboard.
-export function ComingSoon({
-  icon: Icon,
-  title,
-  body,
-  compact,
-}: {
-  icon: React.ElementType;
-  title: string;
-  body: string;
-  compact?: boolean;
-}) {
-  return (
-    <div
-      className={`flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] text-center ${
-        compact ? "px-4 py-8" : "px-6 py-16"
-      }`}
-    >
-      <span className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--accent-10)] text-[var(--accent)]">
-        <Icon className="h-5 w-5" />
-      </span>
-      <p className="text-sm font-bold text-[var(--ink)]">{title}</p>
-      <p className="max-w-md text-xs text-[var(--muted)]">{body}</p>
-      <span className="mt-1 rounded-full bg-[var(--surface-2)] px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-[var(--faint)]">
-        Coming soon
-      </span>
-    </div>
-  );
-}
-
 // A read-only data table inside a surface card — the shared shell for the portal's
 // Projects / Sites / Stock Requests tables (header row + horizontal scroll).
 // `fill` switches the card to the dashboard's inline-scroll contract: the card takes the
@@ -285,3 +254,53 @@ export function StatCardSkeleton() {
     </div>
   );
 }
+
+// ── Read-only detail view ─────────────────────────────────────────────────────────────────────
+// The portal's lists are deliberately narrow: a handful of columns that stay readable on a phone.
+// That means every list drops fields the customer is entitled to see, and until these existed
+// there was nowhere to put them — the tables were the whole portal, with nothing clickable in it.
+//
+// A MODAL rather than a detail route, because the lists are server-paged with the page in the URL:
+// navigating away and back re-fetches and can land the customer on a different page than the row
+// they opened. A modal keeps the list exactly where it was underneath.
+
+/**
+ * One label/value pair. Renders an em dash for anything empty so a gap never reads as a bug.
+ *
+ * `hint` is for a value that needs explaining rather than just showing — where the fact alone would
+ * leave the customer with a question. Prefer it over styling the value to imply something (striking
+ * a superseded name, say): a label states what a value IS, so any formatting that contradicts the
+ * label just makes the pair unreadable. Say it in words instead.
+ */
+export function DetailRow({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: React.ReactNode;
+  hint?: string;
+}) {
+  const empty = value === null || value === undefined || value === "";
+  return (
+    // min-w-0 + break: DetailGrid puts these in a 2-column grid from `sm` up, and a grid item
+    // defaults to min-width:auto — so an unbreakable value (an email, a long reference) refuses to
+    // shrink and spills into the neighbouring column instead of wrapping inside its own.
+    <div className="flex min-w-0 flex-col gap-0.5 py-2">
+      <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--faint)]">{label}</span>
+      <span className={`wrap-break-word text-sm ${empty ? "text-[var(--faint)]" : "text-[var(--ink)]"}`}>
+        {empty ? "—" : value}
+      </span>
+      {hint && <span className="text-[11px] leading-snug text-[var(--muted)]">{hint}</span>}
+    </div>
+  );
+}
+
+/** Two columns from `sm` up, one on a phone. Wrap DetailRow children in this. */
+export function DetailGrid({ children }: { children: React.ReactNode }) {
+  return <div className="grid grid-cols-1 gap-x-6 divide-y divide-[var(--border)] sm:grid-cols-2 sm:divide-y-0">{children}</div>;
+}
+
+/** Makes a table row look and behave like something you can open — including via the keyboard. */
+export const clickableRowCls =
+  "cursor-pointer border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)] focus-visible:bg-[var(--surface-2)] focus-visible:outline-none";

@@ -145,9 +145,12 @@ function Card({ title, children }: { title: string; children: React.ReactNode })
 }
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div>
+    // min-w-0 lets this grid cell shrink below its content (grid items default to min-width:auto,
+    // so a long unbroken value refuses to shrink and spills into the neighbouring column);
+    // wrap-break-word then lets that value actually break. Emails are the usual culprit.
+    <div className="min-w-0">
       <p className="text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">{label}</p>
-      <div className="mt-0.5 text-sm text-[var(--ink)]">{children || "—"}</div>
+      <div className="mt-0.5 text-sm wrap-break-word text-[var(--ink)]">{children || "—"}</div>
     </div>
   );
 }

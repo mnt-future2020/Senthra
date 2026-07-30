@@ -8,6 +8,7 @@ import * as customerService from "@/services/customer.service";
 import { Notice } from "@/components/ui/Notice";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
+import { toolbarBtn, toolbarInputCls } from "@/components/ui/styles";
 import type { PagedCustomerSites } from "@/services/customer.service";
 import type { Msg } from "@/components/ui/types";
 
@@ -115,19 +116,30 @@ export function PortalSites() {
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             placeholder="Search name, code or postcode…"
-            className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
+            aria-label="Search your sites"
+            className={`${toolbarInputCls} pl-9`}
           />
         </div>
-        <Select
-          size="sm"
-          value={sortOldest ? "oldest" : "newest"}
-          onChange={(v) => patchParams({ sort: v === "oldest" ? "oldest" : null }, true)}
-          options={[
-            { value: "newest", label: "Newest first" },
-            { value: "oldest", label: "Oldest first" },
-          ]}
-          ariaLabel="Sort order"
-        />
+        <div className="flex flex-wrap items-center gap-2">
+          <Select
+            size="sm"
+            value={sortOldest ? "oldest" : "newest"}
+            onChange={(v) => patchParams({ sort: v === "oldest" ? "oldest" : null }, true)}
+            options={[
+              { value: "newest", label: "Newest first" },
+              { value: "oldest", label: "Oldest first" },
+            ]}
+            ariaLabel="Sort order"
+          />
+          {/* Clears the SEARCH, not the sort — same rule as every other portal list: Clear undoes
+              what is HIDING rows, and a sort order hides nothing. That's also why it appears only
+              when there's a search: a Clear button next to an unfiltered list does nothing. */}
+          {filtered && (
+            <button type="button" onClick={() => patchParams({ q: null }, true)} className={toolbarBtn}>
+              Clear
+            </button>
+          )}
+        </div>
       </div>
 
       {msg?.type === "error" ? null : loading ? (
@@ -145,7 +157,9 @@ export function PortalSites() {
               <tr key={s.id} className="border-b border-[var(--border)] align-top last:border-0">
                 <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{s.code ?? "—"}</td>
                 <td className="px-4 py-3 font-semibold text-[var(--ink)]">{s.name}</td>
-                <td className="px-4 py-3 text-[var(--muted)]">{[s.addressLine1, s.addressLine2, s.city, s.county].filter(Boolean).join(", ") || "—"}</td>
+                {/* `country` included — it was the one address part fetched and then dropped, which
+                    made an overseas site indistinguishable from a UK one at a glance. */}
+                <td className="px-4 py-3 text-[var(--muted)]">{[s.addressLine1, s.addressLine2, s.city, s.county, s.country].filter(Boolean).join(", ") || "—"}</td>
                 <td className="px-4 py-3 text-[var(--muted)]">{s.postcode ?? "—"}</td>
                 <td className="px-4 py-3 text-[var(--muted)]">
                   {s.contactPerson ? (

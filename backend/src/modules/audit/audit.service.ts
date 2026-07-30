@@ -3,6 +3,7 @@ import type { Prisma } from "@prisma/client";
 import * as auditLogRepo from "./audit.repository.js";
 import type { AuditListFilters } from "./audit.repository.js";
 import { getAccessibleWarehouseIds } from "../../lib/warehouse-access.js";
+import { csvEscape } from "../../utils/csv.js";
 
 // Actor is snapshotted (id + email) so an entry stays meaningful even if that
 // account is later renamed or removed.
@@ -188,17 +189,6 @@ export async function listFacets(actor?: AuditActor): Promise<AuditFacets> {
     auditLogRepo.distinctTargetTypes(scope),
   ]);
   return { actions, actorTypes, targetTypes };
-}
-
-// CSV cell escaping with spreadsheet formula-injection defense. The audit log
-// stores user-controlled values (customer names, emails, SKUs, target labels), so
-// a cell beginning with =, +, -, @, tab, or CR could be executed as a formula by
-// Excel/Sheets on open. Neutralize that by prefixing such a value with a single
-// quote, THEN apply RFC-4180 quoting (wrap + double any embedded quote) whenever
-// the value contains a quote, comma, or newline. No dependency needed.
-function csvEscape(value: string): string {
-  const safe = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
-  return /["\n,\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
 export interface AuditCsvResult {

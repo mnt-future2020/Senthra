@@ -65,7 +65,17 @@ export type AddStockInput = z.infer<typeof addStockSchema>;
 
 // Manual DOWNWARD correction (damage / shrinkage / miscount) — removes a positive magnitude of
 // EXISTING stock. Guarded server-side so it can never take available below zero. SYSTEM-owned codes.
-export const STOCK_ADJUST_DOWN_REASONS = ["damage_correction", "shrinkage", "miscount", "other"] as const;
+// NOTE: "damage_correction" was RETIRED from this list. It removed the units from inventory and
+// nothing else — no damaged-pool row, no photo, no reason text, so the damage never appeared in the
+// Damaged tab and no evidence survived for a claim or dispute. Worse, it was the form's default
+// selection, making the wrong door the path of least resistance. Damage now goes through
+// POST /goods-management/damaged/report (reportWarehouseDamage), which moves the units into the
+// damaged pool with a mandatory reason + photo. Two doors for one concept guarantees the records
+// diverge, so this one is closed.
+//
+// Historical StockAdjustment rows still hold "damage_correction" — reads are not enum-validated, so
+// they keep rendering. This list only governs NEW adjustments.
+export const STOCK_ADJUST_DOWN_REASONS = ["shrinkage", "miscount", "other"] as const;
 
 export const adjustStockSchema = z.object({
   irmItemId: z.string({ error: "Select an item." }).regex(OBJECT_ID_RE, "Select an item."),

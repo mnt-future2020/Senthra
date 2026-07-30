@@ -24,3 +24,23 @@ export const ghostBtn =
 // Cancel/Discard next to Save. Outline style so the primary stays the clear default.
 export const secondaryBtn =
   "flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-5 py-2.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-60";
+
+// ── List-toolbar controls ─────────────────────────────────────────────────────────────────────
+// The compact family that sits in a list/filter row: a search box, one or more `<Select size="sm">`,
+// and a Clear. All three MUST share `rounded-lg` + `py-2.5` + `text-xs` or the row looks ragged.
+//
+// This is deliberately NOT `inputCls` / `secondaryBtn`. Those belong to FORMS — `rounded-xl`,
+// `text-sm`, and `px-5` on the button — and dropping them into a toolbar leaves the search box and
+// the Clear visibly rounder and taller than the Select between them. The pattern was already
+// established by hand in CustomersView / UsersView; naming it here stops the next toolbar guessing.
+//
+// Not for the PILL toolbars (pool chips, the GRN bucket filter): those are `rounded-full px-3
+// py-1.5 text-[11px]` and a control from this family next to one of those is just as ragged.
+
+/** Search input for a list toolbar. Pair with `pl-9` when it carries a leading search icon. */
+export const toolbarInputCls =
+  "w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs text-[var(--ink)] outline-none transition-all placeholder:text-[var(--faint)] focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-60";
+
+/** Button sized to sit in a list toolbar beside a `<Select size="sm">` — e.g. Clear. */
+export const toolbarBtn =
+  "flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-60";

@@ -13,7 +13,11 @@ vi.mock("./customer.repository.js", () => ({
 }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 vi.mock("#modules/settings/settings.service.js", () => ({ getStockCodePrefix: vi.fn(async () => "CSE") }));
-vi.mock("../../lib/prisma.js", () => ({ prisma: {}, withTransaction: (fn: (tx: unknown) => unknown) => fn({}) }));
+vi.mock("../../lib/prisma.js", () => ({
+  prisma: {},
+  withTransaction: (fn: (tx: unknown) => unknown) => fn({}),
+  withTransactionRetry: (fn: (tx: unknown) => unknown) => fn({}),
+}));
 
 import * as customerRepo from "./customer.repository.js";
 import { generateStockEntryBarcode } from "./customer.service.js";

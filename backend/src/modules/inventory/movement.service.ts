@@ -20,6 +20,7 @@ import {
   type Movement,
   type MovementCursor,
 } from "./movement.js";
+import { csvEscape } from "../../utils/csv.js";
 
 export interface MovementFilters {
   dateFrom?: Date;
@@ -288,12 +289,6 @@ async function collectMovements(filters: MovementFilters, restrictTo?: LedgerKin
     cursor = decodeCursor(page.nextCursor);
     if (!cursor) return { rows, capped: false };
   }
-}
-
-// Formula-injection-safe cell escaping — mirrors aggregation.service / inventory.service csvEscape.
-function csvEscape(value: string): string {
-  const safe = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
-  return /["\n,\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 
 export interface MovementCsvResult {

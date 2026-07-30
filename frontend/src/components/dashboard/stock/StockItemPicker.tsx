@@ -4,14 +4,23 @@ import * as React from "react";
 import { Check, ChevronDown, PackagePlus, Plus } from "lucide-react";
 
 import { inputCls } from "@/components/ui/styles";
-import type { CustomerStockEntry } from "@/types/customer";
+import type { CustomerStockEntry, PortalStockEntry } from "@/types/customer";
+
+// Only the five fields the grouping reads, so this serves BOTH callers: the admin modal passes the
+// full CustomerStockEntry, the portal passes the narrower PortalStockEntry (which drops the staff
+// email and the app's dead tracking columns). Naming the fields rather than either concrete type
+// means neither shape can drift into being the one this function silently depends on.
+export type StockItemSource = Pick<
+  CustomerStockEntry & PortalStockEntry,
+  "id" | "itemName" | "sku" | "quantity" | "warehouseName"
+>;
 
 // Collapse the raw stock lines (one row per item × warehouse, plus partial-receive
 // history) into a deduped product list for the picker. Lines are grouped by item name +
 // SKU — the same identity the backend tops up — summing quantity and noting where it's
 // held. The representative `id` carries the link; the backend matches by name/sku, so any
 // line of the group works.
-export function toStockItemOptions(entries: CustomerStockEntry[]): StockItemOption[] {
+export function toStockItemOptions(entries: StockItemSource[]): StockItemOption[] {
   const groups = new Map<
     string,
     { id: string; name: string; qty: number; warehouses: Set<string> }

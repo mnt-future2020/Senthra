@@ -14,7 +14,7 @@ import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import * as goodsManagementRepo from "./goods-management.repository.js";
 import { getOpenDemand } from "./demand.js";
-import type { CloseReconcileInput, PostMovementInput, RestoreDamagedInput, ScanLookupInput } from "./goods-management.validation.js";
+import type { CloseReconcileInput, PostMovementInput, ReportDamageInput, RestoreDamagedInput, ScanLookupInput } from "./goods-management.validation.js";
 import { withTransaction } from "../../lib/prisma.js";
 import { notify } from "#modules/notification/notification.service.js";
 import { emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
@@ -1907,6 +1907,155 @@ export async function closeReconcile(
       ? { goodsStatus: updatedSummary.goodsStatus, workSummary: updatedSummary.workSummary, lastMovementAt: updatedSummary.lastMovementAt }
       : { goodsStatus: "reconciled", workSummary: null, lastMovementAt: null },
     unaccounted: [],
+  };
+}
+
+// ── Report damage on stock already in a warehouse ────────────────────────────────────────────
+// The EXACT INVERSE of restoreDamaged below: moves units out of usable stock and into the damaged
+// pool, in one atomic transaction. Company → InventoryBalance + InventoryTransaction("write_off");
+// customer → CustomerStockEntry.quantity. Both branches then credit DamagedStockBalance and append
+// a DamagedStockTransaction carrying the mandatory reason + photo.
+//
+// This is the third writer into the damaged pool, alongside a job return and a van return. Those
+// two only fire when stock comes back FROM the field, which left the commonest case — a box crushed
+// in our own racking, a leak overnight — with no correct action. Customer-owned consignment stock is
+// deliberately in scope: it sits in our warehouse as someone else's property, so damaging it is the
+// case with real liability attached and the one most needing a photo on file.
+//
+// The source document is the DamagedStockBalance row itself (`sourceId: dmgBal.id`), mirroring how
+// restoreDamaged references it — there is no separate header record for a damage report.
+const WAREHOUSE_DAMAGE_SOURCE_TYPE = "warehouse_damage_report";
+
+export interface ReportDamageResult {
+  warehouseId: string;
+  ownerType: string;
+  irmItemId: string | null;
+  customerStockEntryId: string | null;
+  quantityDamaged: number;
+  damagedBalanceAfter: number;
+  usableBalanceAfter: number;
+}
+
+export async function reportWarehouseDamage(input: ReportDamageInput, actor?: AuditActor): Promise<ReportDamageResult> {
+  const actorEmail = actor?.email ?? null;
+  const isCompany = input.ownerType === "company";
+  // Force the unused socket to null: a damaged balance is keyed with exactly one of the two set, so
+  // carrying both would create a row that neither the list nor the history could ever match.
+  const irmItemId = isCompany ? (input.irmItemId ?? null) : null;
+  const customerStockEntryId = isCompany ? null : (input.customerStockEntryId ?? null);
+
+  // This WRITES at this warehouse — same guard as every other warehouse-keyed write here.
+  assertWarehouseAccess(actor, input.warehouseId);
+
+  const warehouse = await warehouseRepo.findById(input.warehouseId);
+  if (!warehouse) throw notFound("Warehouse not found.");
+
+  let itemName: string;
+  let customerId: string | null = null;
+
+  if (isCompany) {
+    const item = await irmService.requireActiveIrmItem(irmItemId!);
+    // Same restriction the downward stock adjustment applies: writing off a serial- or batch-tracked
+    // unit has to name WHICH serial/batch, and the damaged pool is quantity-only. Allowing it here
+    // would silently decouple the serial register from the balance.
+    if (item.trackSerialNumbers || item.trackBatchNumbers) {
+      throw conflict("Serial- and batch-tracked items can't be reported damaged this way.");
+    }
+    itemName = item.name;
+  } else {
+    const entry = await goodsManagementRepo.findCustomerStockEntryById(customerStockEntryId!);
+    if (!entry) throw notFound("Customer stock entry not found.");
+    // The entry carries its own warehouse; reporting it damaged "at" a different one would credit a
+    // damaged row the entry's own location can never reconcile with.
+    if (entry.warehouseId !== input.warehouseId) {
+      throw conflict("That customer stock isn't held at this warehouse.");
+    }
+    itemName = entry.itemName;
+    customerId = entry.customerId;
+  }
+
+  let damagedBalanceAfter = 0;
+  let usableBalanceAfter = 0;
+  // Kept for the audit entry below, which addresses the damaged balance rather than the warehouse.
+  let damagedBalanceId = "";
+
+  await withTransaction(async (tx) => {
+    // 1. Credit the damaged pool FIRST — its row id is the source reference for both ledger rows.
+    const dmgBal = await goodsManagementRepo.upsertDamagedBalanceTx(
+      tx,
+      { warehouseId: input.warehouseId, ownerType: input.ownerType, irmItemId, customerStockEntryId, customerId, itemName },
+      input.quantity,
+    );
+    damagedBalanceAfter = dmgBal.quantity;
+    damagedBalanceId = dmgBal.id;
+
+    // 2. Take the units OUT of usable stock. Both helpers throw inside the transaction if this
+    //    would drive the holding below zero (upsertBalanceTx / adjustCustomerStockEntryQtyTx), so
+    //    an over-report rolls the damaged credit back too rather than inventing stock.
+    if (isCompany) {
+      const bal = await inventoryRepo.upsertBalanceTx(tx, irmItemId!, input.warehouseId, -input.quantity);
+      usableBalanceAfter = bal.quantityOnHand;
+      await inventoryRepo.insertTransactionTx(tx, {
+        irmItemId: irmItemId!,
+        warehouseId: input.warehouseId,
+        quantityDelta: -input.quantity,
+        type: "write_off", // already labelled "Marked Damaged" in the movement history
+        sourceType: WAREHOUSE_DAMAGE_SOURCE_TYPE,
+        sourceId: dmgBal.id,
+        sourceCode: null,
+        balanceAfter: usableBalanceAfter,
+        notes: input.notes ?? null,
+        createdBy: actorEmail,
+      });
+    } else {
+      const entry = await goodsManagementRepo.adjustCustomerStockEntryQtyTx(tx, customerStockEntryId!, -input.quantity);
+      usableBalanceAfter = entry.quantity;
+    }
+
+    // 3. The evidence row — reason + photo, same shape a field return writes.
+    await goodsManagementRepo.insertDamagedTxnTx(tx, {
+      warehouseId: input.warehouseId,
+      ownerType: input.ownerType,
+      irmItemId,
+      customerStockEntryId,
+      customerId,
+      quantityDelta: input.quantity,
+      reason: input.reason,
+      notes: input.notes ?? null,
+      photoUrl: input.damagePhotoUrl,
+      sourceType: WAREHOUSE_DAMAGE_SOURCE_TYPE,
+      sourceId: dmgBal.id,
+      sourceCode: null,
+      balanceAfter: dmgBal.quantity,
+      createdBy: actorEmail,
+    });
+  });
+
+  // Addressed and namespaced EXACTLY like `restoreDamaged` below, because they are the same event in
+  // opposite directions. Two things depended on getting this right:
+  //   - `goods_management.*`, not `inventory.*`. Every other action this module records is in its own
+  //     namespace; the odd one out is the one nobody thinks to search for.
+  //   - the damaged BALANCE as the target, not the warehouse. The audit trail is read by target, so
+  //     splitting a report and its restore across two target types means whichever screen you open
+  //     shows you half the story — units going damaged with no sign of the restore that reversed
+  //     them, or the reverse. The warehouse stays in `metadata`, where it's still queryable.
+  audit.record({
+    actor,
+    action: "goods_management.damage_reported",
+    targetType: "damaged_stock_balance",
+    targetId: damagedBalanceId,
+    targetLabel: `${itemName} · ${input.quantity} damaged @ ${warehouse.name}`,
+    metadata: { warehouseId: input.warehouseId, ownerType: input.ownerType, irmItemId, customerStockEntryId, customerId, quantity: input.quantity, reason: input.reason },
+  });
+
+  return {
+    warehouseId: input.warehouseId,
+    ownerType: input.ownerType,
+    irmItemId,
+    customerStockEntryId,
+    quantityDamaged: input.quantity,
+    damagedBalanceAfter,
+    usableBalanceAfter,
   };
 }
 

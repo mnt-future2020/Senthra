@@ -33,14 +33,32 @@ export type CustomerWithChildren = Customer & {
 
 const childInclude = {
   users: { orderBy: { fullName: "asc" } },
-  // In-flight submissions ride along on the admin detail (the Stock Submissions
-  // queue): everything still needing action or partway through receiving. Once a
-  // submission is fully received it becomes "completed" (and shows as a stock entry
-  // under Inventory); rejected ones are dismissed — both are excluded here.
+  // EVERY submission rides along on the admin detail — the Stock Submissions tab defaults its own
+  // filter to the open ones, so the queue still opens on work-to-do.
+  //
+  // This used to exclude `completed`/`rejected`. That was fine while a short delivery could never
+  // finish, but closing one short now completes its request, which made the submission (and the
+  // closure reason someone was required to type) vanish from the only screen that shows it. A record
+  // you can only reach through the audit log is not a record the reviewer can use.
+  //
+  // Unbounded per customer, like the open set already was. If submission volume ever grows the way
+  // sites did, this belongs on its own paged endpoint (see listCustomerSites) rather than the detail
+  // payload — the tab is already paginated client-side, so only this include would change.
   stockRequests: {
-    where: { status: { in: ["pending", "approved", "assigned", "partially_received"] } },
+    // Assignments keep CREATION order — that's a stable reading order for the warehouses under one
+    // submission, and it shouldn't reshuffle just because one of them was received.
     include: { warehouseAssignments: { include: { warehouse: { select: { id: true, name: true, code: true } } }, orderBy: { createdAt: "asc" } } },
-    orderBy: { createdAt: "desc" },
+    // LAST TOUCHED first, not last created. Sorting on createdAt meant acting on an older submission
+    // (receiving it, approving it, closing it short) left it sitting wherever it was first raised —
+    // so the thing you just did was the thing you then had to scroll to find, while the Audit Log
+    // showed it at the top.
+    //
+    // This only holds because every one of those actions WRITES the request row. `@updatedAt` covers
+    // the ones that change its status; the assignment-level actions that legitimately don't (a leg
+    // closed short having received nothing, with another warehouse still outstanding) go through
+    // `touchStockRequest` so they move the row anyway. Any new path that mutates an assignment must
+    // do the same, or its submission silently stops surfacing here.
+    orderBy: { updatedAt: "desc" },
   },
 } satisfies Prisma.CustomerInclude;
 
@@ -750,14 +768,53 @@ export function createStockRequest(
   });
 }
 
+// `status` accepts a single status OR the pseudo-status "open", which stands for the whole set that
+// still needs something to happen. Resolved HERE so the portal filter, the dashboard's "Open
+// submissions" count and the admin tab's "Open" option are all reading one definition — three places
+// each maintaining their own list of what counts as open is how they end up disagreeing.
+//
+// Search covers BOTH names: `editedName` is what the account team renamed it to and what the row
+// shows, `name` is what the customer typed and still remembers. Matching only one means searching for
+// your own wording finds nothing.
+// Submissions still needing something to happen. THE definition — the portal's `open` filter, the
+// dashboard's "Open submissions" count and the admin tab's "Open" option all resolve through here.
+export const OPEN_REQUEST_STATUSES: string[] = ["pending", "approved", "assigned", "partially_received"];
+
+export interface StockRequestFilters {
+  status?: string;
+  search?: string;
+}
+
+function stockRequestListWhere(customerId: string, filters: StockRequestFilters = {}): Prisma.CustomerStockRequestWhereInput {
+  const { status, search } = filters;
+  const q = search ? escapeRegex(search) : undefined;
+  return {
+    customerId,
+    ...(status === "open"
+      ? { status: { in: OPEN_REQUEST_STATUSES } }
+      : status
+        ? { status }
+        : {}),
+    ...(q && {
+      OR: [
+        { name: { contains: q, mode: "insensitive" } },
+        { editedName: { contains: q, mode: "insensitive" } },
+      ],
+    }),
+  };
+}
+
+// Filters as an OBJECT for the same reason as the stock-entry reads: this was
+// `(customerId, status, skip, take)` and search would have been a fifth positional behind two
+// numbers, which is how a search term ends up silently passed as a page offset.
 export function findStockRequestsByCustomer(
   customerId: string,
-  status?: string,
-  skip?: number,
-  take?: number,
+  filters: StockRequestFilters = {},
+  page?: { skip: number; take: number },
 ) {
+  const { skip, take } = page ?? {};
   return prisma.customerStockRequest.findMany({
-    where: { customerId, ...(status ? { status } : {}) },
+    where: stockRequestListWhere(customerId, filters),
     include: {
       warehouseAssignments: {
         include: { warehouse: { select: { id: true, name: true, code: true } } },
@@ -770,8 +827,10 @@ export function findStockRequestsByCustomer(
     ...(take !== undefined ? { take } : {}),
   });
 }
-export function countStockRequestsByCustomer(customerId: string, status?: string): Promise<number> {
-  return prisma.customerStockRequest.count({ where: { customerId, ...(status ? { status } : {}) } });
+// MUST take the same filters as the find above — counting a different set than you page through gives
+// a paginator that walks off the end of the list.
+export function countStockRequestsByCustomer(customerId: string, filters: StockRequestFilters = {}): Promise<number> {
+  return prisma.customerStockRequest.count({ where: stockRequestListWhere(customerId, filters) });
 }
 
 export function findStockRequestById(id: string): Promise<CustomerStockRequest | null> {
@@ -833,6 +892,27 @@ export function updateStockRequestStatus(id: string, status: string, client: Db 
   });
 }
 
+// Write the request WITHOUT changing it, purely to move `updatedAt`. Two jobs, both load-bearing:
+//
+//  1. ORDERING. The admin's Stock Submissions list sorts on `updatedAt` (see `childInclude`), so an
+//     action that legitimately leaves the status alone — closing one warehouse short having received
+//     nothing while another is still outstanding — would otherwise leave the row buried exactly where
+//     it was first raised, which is the problem that sort was introduced to fix.
+//  2. SERIALISATION. Every assignment-level write recomputes its parent through the one function that
+//     calls this, so the parent document becomes the single row all of a request's in-flight
+//     transactions touch. Mongo then aborts the loser with a write-conflict — retried a level up —
+//     instead of letting two transactions each derive a status from a snapshot that cannot see the
+//     other's uncommitted assignment write.
+//
+// `updatedAt` is set explicitly rather than left to `@updatedAt`: Prisma has nothing else to write
+// here, and an update with an empty `data` is not a contract worth resting either job on.
+export function touchStockRequest(id: string, client: Db = prisma): Promise<CustomerStockRequest> {
+  return client.customerStockRequest.update({
+    where: { id },
+    data: { updatedAt: new Date() },
+  });
+}
+
 export interface WarehouseAssignmentData {
   customerStockRequestId: string;
   warehouseId: string;
@@ -887,8 +967,35 @@ export async function updateAssignmentReceived(id: string, receivedQuantity: num
   const newTotal = totalReceivedSoFar + receivedQuantity;
   const status = newTotal >= assignedQty ? "received" : "partially_received";
   const res = await client.customerStockWarehouseAssignment.updateMany({
-    where: { id, receivedQuantity: totalReceivedSoFar },
+    // The status guard rides ALONGSIDE the receivedQuantity guard: the quantity alone can't catch a
+    // concurrent short-closure (that leaves receivedQuantity untouched), which would otherwise let a
+    // receipt land on an assignment someone had just closed and silently reopen it.
+    where: { id, receivedQuantity: totalReceivedSoFar, status: { in: OPEN_ASSIGNMENT_STATUSES } },
     data: { receivedQuantity: newTotal, status, receivedBy, receivedAt: new Date(), notes },
+  });
+  if (res.count === 0) return null;
+  return client.customerStockWarehouseAssignment.findUnique({
+    where: { id },
+    include: { warehouse: { select: { id: true, name: true, code: true } } },
+  });
+}
+
+// The two states an assignment can still be acted on from. Terminal states (`received`,
+// `closed_short`) are excluded, so both the receive and the short-close paths reject a stale write
+// at the DATABASE rather than trusting the status they read a moment earlier.
+// Not `as const` — Prisma's generated `in:` filter takes a mutable string[], and spreading a
+// readonly tuple at every call site to satisfy it is noise for no safety gained here.
+export const OPEN_ASSIGNMENT_STATUSES: string[] = ["pending", "partially_received"];
+
+// Short-close: the outstanding balance is never arriving. Only ever moves an OPEN assignment to the
+// terminal `closed_short`; `receivedQuantity` is deliberately left alone, because what did arrive is
+// already booked into stock and the rest was never stock to begin with (so there is nothing to write
+// off — unlike goods-management's reconcile). Returns null when the row was no longer open, which
+// the caller surfaces as a conflict.
+export async function closeAssignmentShort(id: string, reason: string, closedBy: string | null, client: Db = prisma) {
+  const res = await client.customerStockWarehouseAssignment.updateMany({
+    where: { id, status: { in: OPEN_ASSIGNMENT_STATUSES } },
+    data: { status: "closed_short", closureReason: reason, closedBy, closedAt: new Date() },
   });
   if (res.count === 0) return null;
   return client.customerStockWarehouseAssignment.findUnique({
@@ -1043,11 +1150,19 @@ export function findStockEntryById(id: string, client: Db = prisma) {
 // Shared where for a customer's stock-entry list — optional status + free-text search over the
 // fields the picker/list shows (item name, SKU, serial, barcode). `search` is escaped (the Mongo
 // `contains` gotcha) before it feeds any $regex.
-function stockEntryListWhere(customerId: string, status?: string, search?: string): Prisma.CustomerStockEntryWhereInput {
+function stockEntryListWhere(
+  customerId: string,
+  status?: string,
+  search?: string,
+  warehouseId?: string,
+): Prisma.CustomerStockEntryWhereInput {
   const q = search ? escapeRegex(search) : undefined;
   return {
     customerId,
     ...(status ? { status } : {}),
+    // Filtered by ID, not by warehouse NAME: a name is editable and non-unique, so a link built on one
+    // silently stops matching the day someone renames a site. The id is what the entry actually holds.
+    ...(warehouseId ? { warehouseId } : {}),
     ...(q && {
       OR: [
         { itemName: { contains: q, mode: "insensitive" } },
@@ -1059,9 +1174,24 @@ function stockEntryListWhere(customerId: string, status?: string, search?: strin
   };
 }
 
-export function findStockEntriesByCustomer(customerId: string, status?: string, skip?: number, take?: number, search?: string) {
+// Filters as an OBJECT, not more positionals. This had grown to `(customerId, status, skip, take,
+// search)` — five parameters, four optional, three of them strings — and adding a warehouse to that
+// signature is how someone eventually passes a search term into the warehouse slot and gets an empty
+// list with no error. Named fields also let a caller set only what it cares about.
+export interface StockEntryFilters {
+  status?: string;
+  search?: string;
+  warehouseId?: string;
+}
+
+export function findStockEntriesByCustomer(
+  customerId: string,
+  filters: StockEntryFilters = {},
+  page?: { skip: number; take: number },
+) {
+  const { skip, take } = page ?? {};
   return prisma.customerStockEntry.findMany({
-    where: stockEntryListWhere(customerId, status, search),
+    where: stockEntryListWhere(customerId, filters.status, filters.search, filters.warehouseId),
     // Drop the heavy base64 barcode image from list reads — list views only show the
     // short `barcode` string; the full image is fetched only on the single-entry detail.
     omit: { barcodeDataUri: true },
@@ -1077,10 +1207,100 @@ export function findStockEntriesByCustomer(customerId: string, status?: string, 
   });
 }
 
-// Count a customer's stock entries (optionally by status + search) — used for the portal dashboard
-// "Stock entries" stat and paged list without loading the (heavy, barcode-image-bearing) rows.
-export function countStockEntriesByCustomer(customerId: string, status?: string, search?: string): Promise<number> {
-  return prisma.customerStockEntry.count({ where: stockEntryListWhere(customerId, status, search) });
+// Count a customer's stock entries under the same filters — used for the portal dashboard "Stock
+// entries" stat and for paging the list without loading the (heavy, barcode-image-bearing) rows.
+// MUST take the identical filters as the find above, or the paginator counts a different set than it
+// pages and the last page comes back empty.
+export function countStockEntriesByCustomer(customerId: string, filters: StockEntryFilters = {}): Promise<number> {
+  return prisma.customerStockEntry.count({
+    where: stockEntryListWhere(customerId, filters.status, filters.search, filters.warehouseId),
+  });
+}
+
+// The warehouses actually holding this customer's stock — the option list for the portal's warehouse
+// filter. Derived from the stock itself rather than "every warehouse we operate", so the customer is
+// never offered a filter that can only return nothing.
+export async function findStockWarehousesByCustomer(
+  customerId: string,
+): Promise<{ id: string; name: string; code: string }[]> {
+  const groups = await prisma.customerStockEntry.groupBy({
+    by: ["warehouseId"],
+    where: { customerId },
+  });
+  const warehouses = await prisma.warehouse.findMany({
+    where: { id: { in: groups.map((g) => g.warehouseId) } },
+    select: { id: true, name: true, code: true },
+    orderBy: { name: "asc" },
+  });
+  return warehouses;
+}
+
+// --- portal dashboard aggregations -------------------------------------------
+// Default to COUNT/SUM/GROUP BY rather than "load the rows and add them up in JS": a customer's
+// consignment history grows without bound (that's why every portal list is server-paged), and an
+// overview that pulls it all into memory to produce four numbers gets slower every week it runs.
+//
+// Three of the four do exactly that. `sumNotReceivedUnitsByCustomer` is the documented exception —
+// its figure is a per-row subtraction no SUM can express, over a set that is small by nature; see the
+// note on the function itself.
+
+// Units the customer actually has with us, across every entry.
+//
+// DRAFT COUNTS. A draft entry is stock that has physically arrived and been booked in — it is only
+// "draft" because the warehouse manager hasn't finished its product details yet (see the note on
+// stockEntryStatus in the receive flow). Excluding it would under-report a customer's holding for
+// exactly as long as the paperwork lags the pallet, and it would disagree with My Stock, which lists
+// every entry regardless of status.
+export async function sumStockUnitsByCustomer(customerId: string): Promise<number> {
+  const agg = await prisma.customerStockEntry.aggregate({
+    where: { customerId },
+    _sum: { quantity: true },
+  });
+  // `_sum` is null when no rows matched — a customer with no stock has 0 units, not null.
+  return agg._sum.quantity ?? 0;
+}
+
+export interface WarehouseUnits {
+  warehouseId: string;
+  units: number;
+  entries: number;
+}
+
+// Where that stock is sitting. Returned unnamed — the caller joins warehouse names, because grouping
+// can't include a relation and the set here is at most the number of warehouses we operate.
+export async function groupStockUnitsByWarehouse(customerId: string): Promise<WarehouseUnits[]> {
+  const rows = await prisma.customerStockEntry.groupBy({
+    by: ["warehouseId"],
+    where: { customerId },
+    _sum: { quantity: true },
+    _count: { _all: true },
+  });
+  return rows.map((r) => ({
+    warehouseId: r.warehouseId,
+    units: r._sum.quantity ?? 0,
+    entries: r._count._all,
+  }));
+}
+
+// Counts the same set the `open` filter selects, through the same where-builder — so the dashboard's
+// number and the list it links to can never disagree about what "open" means.
+export function countOpenStockRequestsByCustomer(customerId: string): Promise<number> {
+  return countStockRequestsByCustomer(customerId, { status: "open" });
+}
+
+// Units the customer declared that are never coming — the total across every short-closed leg.
+//
+// Selects the two numbers and subtracts in JS rather than aggregating: the shortfall is
+// `quantity - receivedQuantity`, which no SUM can express, and `closed_short` legs are the exception
+// rather than the rule so the row set is small. Filtered through the parent request's customerId,
+// since an assignment belongs to a warehouse and only reaches the customer through its request.
+export async function sumNotReceivedUnitsByCustomer(customerId: string): Promise<number> {
+  const legs = await prisma.customerStockWarehouseAssignment.findMany({
+    where: { status: "closed_short", stockRequest: { customerId } },
+    select: { quantity: true, receivedQuantity: true },
+  });
+  // Clamped per leg: an over-received leg must not subtract from a genuine shortfall elsewhere.
+  return legs.reduce((sum, l) => sum + Math.max(0, l.quantity - l.receivedQuantity), 0);
 }
 
 export function findStockEntriesByWarehouse(warehouseId: string, status?: string) {

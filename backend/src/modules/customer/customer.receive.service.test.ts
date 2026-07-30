@@ -8,6 +8,7 @@ vi.mock("./customer.repository.js", () => ({
   updateAssignmentReceived: vi.fn(),
   findAssignmentsByRequest: vi.fn(),
   updateStockRequestStatus: vi.fn(),
+  touchStockRequest: vi.fn(),
   findStockEntriesByAssignment: vi.fn(),
   findStockEntryById: vi.fn(),
   findStockEntryForTopUp: vi.fn(),
@@ -15,12 +16,15 @@ vi.mock("./customer.repository.js", () => ({
   createStockEntry: vi.fn(),
 }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
-// The receive runs its writes inside withTransaction; run the callback synchronously with a stub
+// The receive runs its writes inside a transaction; run the callback synchronously with a stub
 // tx client (the repo is mocked, so the client is only threaded through as the last call arg).
+// Both wrappers are stubbed the same way — the retry only fires on a real Mongo write-conflict,
+// which a mocked repository can never raise.
 const TX = {};
 vi.mock("../../lib/prisma.js", () => ({
   prisma: {},
   withTransaction: (fn: (tx: unknown) => unknown) => fn(TX),
+  withTransactionRetry: (fn: (tx: unknown) => unknown) => fn(TX),
 }));
 
 import * as customerRepo from "./customer.repository.js";

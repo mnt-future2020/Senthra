@@ -12,14 +12,20 @@ import { useAuth } from "@/hooks/useAuth";
 import { inputCls, ghostBtn, labelCls, primaryBtn } from "@/components/ui/styles";
 import { FormAsideCard, FormSection } from "@/components/ui/FormScaffold";
 import { NumberInput } from "@/components/ui/NumberInput";
+import { clampQuantityInput } from "@/lib/quantity";
 import { Select } from "@/components/ui/Select";
 import { Notice } from "@/components/ui/Notice";
 import type { Availability } from "@/types/inventory";
 
 const today = () => new Date().toISOString().slice(0, 10);
 
+// "Damage correction" was REMOVED (and was the default, which made it the path of least resistance).
+// It only removed the units from stock — no damaged-pool row, no photo, no reason text — so damage
+// recorded this way never reached the Damaged tab and left no evidence for a claim or dispute.
+// Damage now has its own action ("Report damage" on an inventory row → ReportDamageModal), which
+// moves the units into the damaged pool with a mandatory reason and photo. Historical adjustments
+// keep their stored reason; this list only governs new ones.
 const REASONS: { value: AdjustStockReason; label: string }[] = [
-  { value: "damage_correction", label: "Damage correction" },
   { value: "shrinkage", label: "Shrinkage" },
   { value: "miscount", label: "Miscount" },
   { value: "other", label: "Other" },
@@ -55,7 +61,9 @@ export function AdjustStockForm({ onDone }: AdjustStockFormProps) {
   const [warehouseId, setWarehouseId] = React.useState("");
   const [quantity, setQuantity] = React.useState("");
   const [movementDate, setMovementDate] = React.useState(today());
-  const [reason, setReason] = React.useState<AdjustStockReason>("damage_correction");
+  // Was "damage_correction" — retired above, so the select would have opened on a value with no
+  // matching option and the backend would have rejected it on submit.
+  const [reason, setReason] = React.useState<AdjustStockReason>("miscount");
   const [referenceNumber, setReferenceNumber] = React.useState("");
   const [notes, setNotes] = React.useState("");
 
@@ -95,6 +103,50 @@ export function AdjustStockForm({ onDone }: AdjustStockFormProps) {
     };
   }, []);
 
+  // WHERE THIS ITEM ACTUALLY IS. Loaded as soon as an item is picked, so the warehouse dropdown can
+  // offer only the warehouses that hold it — with the quantity right in the label — instead of
+  // listing all eight and making the user discover "0 available" one at a time. Mirrors the job kit
+  // picker (JobKitRequestsReview), which already narrows its warehouse list this way.
+  //
+  // The result is STAMPED WITH THE ITEM IT BELONGS TO. That one field does three jobs: it tells us
+  // whether the answer on hand is for the item currently selected, it makes "still loading" a derived
+  // value (no extra state, so no synchronous setState in an effect body for the React-Compiler lint to
+  // reject), and it stops a late response for a previous item being read as the current one.
+  //
+  // `options: null` = the lookup FAILED for that item (fall back to the full warehouse list rather
+  // than block the form). `options: []` = loaded, and the item is held nowhere — a different state,
+  // and the one that gets its own message below.
+  const [loadedItemStock, setLoadedItemStock] = React.useState<
+    { itemId: string; options: { value: string; label: string }[] | null } | null
+  >(null);
+  React.useEffect(() => {
+    // No item picked → nothing to load. Nothing is cleared here either; the read-time guards below
+    // key off the stamp instead, so a stale result simply stops matching.
+    if (!irmItemId) return;
+    let active = true;
+    inventoryService.listItemWarehouseStock(irmItemId).then(
+      (rows) => {
+        if (!active) return;
+        setLoadedItemStock({
+          itemId: irmItemId,
+          options: rows
+            .filter((r) => r.available > 0)
+            .sort((a, b) => b.available - a.available) // most stock first — the likeliest target
+            .map((r) => ({
+              value: r.warehouseId,
+              label: `${r.warehouseName}${r.warehouseCode ? ` (${r.warehouseCode})` : ""} · ${r.available} available`,
+            })),
+        });
+      },
+      // Lookup failed (e.g. no inventory-read permission) — fall back to the unfiltered list rather
+      // than blocking the form. Same fallback the kit picker uses.
+      () => active && setLoadedItemStock({ itemId: irmItemId, options: null }),
+    );
+    return () => {
+      active = false;
+    };
+  }, [irmItemId]);
+
   // Live on-hand at the chosen item × warehouse — used to show new balance and guard qty ≤ available.
   React.useEffect(() => {
     let active = true;
@@ -115,12 +167,51 @@ export function AdjustStockForm({ onDone }: AdjustStockFormProps) {
     };
   }, [irmItemId, warehouseId]);
 
+  // Changing the item invalidates the warehouse: the one already picked may not hold the new item,
+  // and the dropdown is about to be re-filtered under it. Clear both so the user re-picks from the
+  // narrowed list rather than sitting on a stale pair that reads "0 available".
+  // Adjusted DURING RENDER — React's documented "reset state when a prop changes" pattern (the same
+  // one InventoryView uses); an effect would fire a second commit and trip the React-Compiler lint.
+  const [prevIrmItemId, setPrevIrmItemId] = React.useState(irmItemId);
+  if (irmItemId !== prevIrmItemId) {
+    setPrevIrmItemId(irmItemId);
+    setWarehouseId("");
+    setQuantity("");
+  }
+
   const selectedItem = items.find((i) => i.id === irmItemId) ?? null;
   const targetWh = warehouses.find((w) => w.id === warehouseId) ?? null;
+  // Read-time guards. `resolvedStock` is the loaded answer ONLY when its stamp matches the item on
+  // screen — otherwise we are either between items or still waiting, and must not read it.
+  const resolvedStock = loadedItemStock?.itemId === irmItemId ? loadedItemStock : null;
+  // In flight: an item is selected but no answer for THAT item has arrived. The warehouse dropdown is
+  // disabled for this window — while it was open, the list still showed all warehouses (the fallback),
+  // so a fast click could land on one holding no stock, then have the list narrow out from under it,
+  // leaving a selection the dropdown could no longer display (Select falls back to its placeholder)
+  // while the summary panel still named that warehouse.
+  const itemStockLoading = Boolean(irmItemId) && resolvedStock === null;
+  const itemStock = resolvedStock?.options ?? null;
+  // Only warehouses that actually hold this item, once we know. `itemStock === null` means we don't
+  // have an answer (not loaded, or the lookup 403'd) → show everything rather than block the form.
+  const warehouseOptions =
+    itemStock && itemStock.length > 0
+      ? itemStock
+      : warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }));
+  // Loaded, and the item is in no warehouse at all — there is nothing to adjust anywhere.
+  const itemHasNoStock = itemStock !== null && itemStock.length === 0;
   const qtyNum = Number(quantity);
   const available = availability?.available ?? null;
+  const overAvailable =
+    available !== null && Number.isInteger(qtyNum) && qtyNum > available;
+  // Projected balance, FLOORED AT ZERO. It used to render the raw `available - qty`, so asking to
+  // remove 4 from 0 showed "New balance −4" in red — a confident projection of a state the system
+  // will never allow (the submit is blocked, and the backend floors at zero regardless). Showing an
+  // impossible outcome as if it were about to happen is worse than showing nothing, so an
+  // over-removal now yields null here and the panel says why instead.
   const newBalance =
-    available !== null && Number.isInteger(qtyNum) && qtyNum > 0 ? available - qtyNum : null;
+    available !== null && Number.isInteger(qtyNum) && qtyNum > 0 && !overAvailable
+      ? available - qtyNum
+      : null;
 
   const locked = saving || Boolean(savedAdjustment);
   const quantityValid =
@@ -227,37 +318,77 @@ export function AdjustStockForm({ onDone }: AdjustStockFormProps) {
                     setWarehouseId(v);
                     clearError("warehouseId");
                   }}
-                  options={warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))}
-                  placeholder="— Select warehouse —"
+                  options={warehouseOptions}
+                  placeholder={
+                    itemStockLoading
+                      ? "— Checking stock… —"
+                      : itemHasNoStock
+                        ? "— No warehouse holds this item —"
+                        : "— Select warehouse —"
+                  }
                   ariaLabel="Warehouse"
                   invalid={Boolean(errors.warehouseId)}
-                  disabled={locked}
+                  // Held shut until we know where the item actually is, so a pick can't be made
+                  // against the unfiltered fallback list and then narrowed away underneath it.
+                  disabled={locked || itemHasNoStock || itemStockLoading}
                 />
                 <FieldError message={errors.warehouseId} />
+                {/* An item with stock nowhere is a dead end, so say it once, plainly, instead of
+                    leaving the user to try each warehouse and find 0 in every one. */}
+                {itemHasNoStock ? (
+                  <p className="mt-1.5 text-[11px] font-semibold text-[var(--neg)]">
+                    {selectedItem?.name ?? "This item"} has no stock in any warehouse — there is
+                    nothing to adjust.
+                  </p>
+                ) : (
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">
-                  {!irmItemId || !warehouseId
-                    ? "Pick item + warehouse to see current available."
-                    : available !== null
+                  {!irmItemId
+                    ? "Pick an item to see where it's held."
+                    : itemStockLoading
+                      ? "Checking where this item is held…"
+                      : !warehouseId
+                      ? "Only warehouses holding this item are listed."
+                      : available !== null
                       ? `${available} available${selectedItem?.baseUnit ? ` ${selectedItem.baseUnit}` : ""}.`
                       : "No stock of this item here."}
                 </p>
+                )}
               </div>
               <div>
                 <label className={labelCls}>Quantity to remove</label>
                 <NumberInput
                   className={inputCls}
                   min={1}
+                  max={available ?? undefined}
                   step={1}
                   value={quantity}
+                  // Clamp to what's actually on the shelf as the user types — the same helper the
+                  // damage modal uses. Before this, typing 4 against 0 available left "4" sitting in
+                  // the box with the submit greyed out and no way to find out why (see below).
+                  // `available` is null until both item and warehouse are picked; until then there is
+                  // no ceiling to clamp to, so the raw value passes through.
                   onChange={(e) => {
-                    setQuantity(e.target.value);
+                    const raw = e.target.value;
+                    const next = available === null ? raw : clampQuantityInput(raw, available);
+                    if (next === null) return; // junk keystroke — leave what's already typed alone
+                    setQuantity(next);
                     clearError("quantity");
                   }}
-                  aria-invalid={Boolean(errors.quantity)}
+                  aria-invalid={Boolean(errors.quantity) || overAvailable}
                   placeholder="e.g. 3"
                   disabled={locked}
                 />
                 <FieldError message={errors.quantity} />
+                {/* LIVE explanation. The submit button is disabled whenever qty > available, which
+                    means validate() — and therefore its "Cannot remove more than the available
+                    quantity" message — could never run: the only thing that could show the error was
+                    the very action the error prevented. This says it inline instead, the moment it
+                    becomes true. Reachable at all only when available is 0 (nothing to clamp to). */}
+                {overAvailable && !errors.quantity && (
+                  <p className="mt-1 text-[11px] font-semibold text-[var(--neg)]">
+                    Only {available} available{targetWh ? ` at ${targetWh.name}` : ""} — nothing to remove.
+                  </p>
+                )}
               </div>
               <div>
                 <label className={labelCls}>Reason</label>
@@ -297,7 +428,7 @@ export function AdjustStockForm({ onDone }: AdjustStockFormProps) {
                   value={referenceNumber}
                   onChange={(e) => setReferenceNumber(e.target.value)}
                   maxLength={60}
-                  placeholder="e.g. DAMAGE-2026-01"
+                  placeholder="e.g. STOCKTAKE-2026-01"
                   disabled={locked}
                 />
               </div>
@@ -344,10 +475,11 @@ export function AdjustStockForm({ onDone }: AdjustStockFormProps) {
               </div>
               <div className="flex justify-between gap-3">
                 <span className="text-[var(--muted)]">New balance</span>
-                <span
-                  className={`font-extrabold ${newBalance !== null && newBalance < 0 ? "text-rose-600" : "text-[var(--ink)]"}`}
-                >
-                  {newBalance !== null ? newBalance : "—"}
+                {/* Never renders a negative. An over-removal shows "Not possible" rather than the
+                    arithmetic result — the adjustment is blocked here and floored by the backend, so
+                    printing "−4" would be stating an outcome that cannot occur. */}
+                <span className={`font-extrabold ${overAvailable ? "text-[var(--neg)]" : "text-[var(--ink)]"}`}>
+                  {overAvailable ? "Not possible" : (newBalance ?? "—")}
                 </span>
               </div>
               <div className="mt-1 space-y-2.5 border-t border-[var(--border)] pt-3">
@@ -372,8 +504,17 @@ export function AdjustStockForm({ onDone }: AdjustStockFormProps) {
             <div className="space-y-1.5">
               <p className="font-bold text-[var(--ink)]">This action cannot be edited later.</p>
               <p>
-                Use <span className="font-semibold text-[var(--muted)]">Adjust</span> for damage,
-                shrinkage, or miscount corrections only. It creates an immutable downward ledger entry.
+                Use <span className="font-semibold text-[var(--muted)]">Adjust</span> for shrinkage
+                or miscount corrections only. It creates an immutable downward ledger entry.
+              </p>
+              {/* Damage was removed from this form's reasons — it left no damaged-pool row, no photo
+                  and no evidence. Point people at the action that does, or they will reach for
+                  "Other" here and recreate the exact bypass that change closed. */}
+              <p>
+                Damaged stock is <span className="font-semibold text-[var(--muted)]">not</span>{" "}
+                adjusted here — use <span className="font-semibold text-[var(--muted)]">Report damage</span>{" "}
+                on the item&apos;s row, which records the reason and a photo and moves the units into
+                the damaged pool.
               </p>
             </div>
           </div>

@@ -17,7 +17,10 @@ import { Modal } from "@/components/ui/Modal";
 import { Notice } from "@/components/ui/Notice";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { Pagination } from "@/components/ui/Pagination";
-import { ghostBtn, inputCls } from "@/components/ui/styles";
+// Three different jobs, three different styles: ghostBtn for the per-row History action (a small
+// inline action, its documented use); secondaryBtn for the empty-state Clear, which stands alone in
+// the centre of the panel rather than in a filter row; toolbarInputCls for the list search box.
+import { ghostBtn, secondaryBtn, toolbarInputCls } from "@/components/ui/styles";
 
 const PAGE_SIZE = 20;
 
@@ -205,7 +208,7 @@ export function DamagedStockView({
                         : "Damaged items returned from engineers will appear here."}
                     </p>
                     {search.trim() && (
-                      <button type="button" onClick={() => { setSearch(""); setPage(1); }} className={`${ghostBtn} mt-1`}>
+                      <button type="button" onClick={() => { setSearch(""); setPage(1); }} className={`${secondaryBtn} mt-1`}>
                         Clear search
                       </button>
                     )}
@@ -224,7 +227,12 @@ export function DamagedStockView({
                         className="block h-10 w-10 overflow-hidden rounded-lg border border-[var(--border)] transition-opacity hover:opacity-80"
                         aria-label="View latest damage photo"
                       >
-                        <Image src={row.photoUrl} alt="Damage photo" width={40} height={40} className="h-10 w-10 object-cover" unoptimized />
+                        {/* h-full w-full so the image fills the button's CONTENT box. Sizing it to
+                            the outer 40px instead left the width clamped to 38px by preflight's
+                            `img { max-width: 100% }` (the 1px border) while the height stayed 40 —
+                            one dimension modified, the other not, which is exactly what next/image
+                            warns about in dev. */}
+                        <Image src={row.photoUrl} alt="Damage photo" width={40} height={40} className="h-full w-full object-cover" unoptimized />
                       </button>
                     ) : (
                       <span className="text-xs text-[var(--faint)]">—</span>
@@ -271,7 +279,7 @@ export function DamagedStockView({
             onChange={(e) => { setSearch(e.target.value); setPage(1); }}
             placeholder="Search item, reason…"
             aria-label="Search damaged stock"
-            className={`${inputCls} pl-9`}
+            className={`${toolbarInputCls} pl-9`}
           />
         </div>
       )}
@@ -372,7 +380,8 @@ export function DamagedStockView({
                             className="h-20 w-20 shrink-0 overflow-hidden rounded-lg border border-[var(--border)] transition-opacity hover:opacity-80"
                             aria-label={`View the damage photo from ${fmtDateTime(e.date)}`}
                           >
-                            <Image src={e.photoUrl} alt="Damage photo" width={80} height={80} className="h-20 w-20 object-cover" unoptimized />
+                            {/* h-full w-full — same reason as the row thumbnail above. */}
+                            <Image src={e.photoUrl} alt="Damage photo" width={80} height={80} className="h-full w-full object-cover" unoptimized />
                           </button>
                         ) : (
                           <div className="flex h-20 w-20 shrink-0 items-center justify-center rounded-lg border border-dashed border-[var(--border)] text-[10px] text-[var(--faint)]">

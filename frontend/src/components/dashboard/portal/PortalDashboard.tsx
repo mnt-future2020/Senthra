@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { Boxes, ClipboardList, FolderKanban, MapPin, Activity, ArrowRight } from "lucide-react";
+import { Boxes, ClipboardList, FolderKanban, MapPin, ArrowRight, Warehouse } from "lucide-react";
 
 import * as customerService from "@/services/customer.service";
 import { Notice } from "@/components/ui/Notice";
@@ -11,7 +11,6 @@ import type { CustomerOverview } from "@/types/customer";
 import type { Msg } from "@/components/ui/types";
 
 import {
-  ComingSoon,
   fmtDate,
   HeaderCardSkeleton,
   PortalHeader,
@@ -19,10 +18,19 @@ import {
   StatCardSkeleton,
 } from "./portalUi";
 
-// Customer portal — Dashboard (the landing). A quick read on the things a customer
-// cares about: how many requests are awaiting review, how much work is in flight
-// (projects/sites), the size of their catalogue, and their most recent requests.
-// Cards that need the inventory module (stock movements) ship as honest placeholders.
+// Customer portal — Dashboard (the landing).
+//
+// Built around the question a consignment customer actually arrives with: how much of my stock do you
+// hold, where is it, and is anything wrong? So: UNITS on hand as the headline, the per-warehouse split
+// beside it, a reconciliation line when something was short-closed, and the recent submissions.
+//
+// It used to lead with "26 Stock entries" — a ROW count. Entries are one line per item × warehouse, so
+// that number answers "how many lines are in your list", which nobody asks. Units are the holding.
+//
+// There is no "recent stock movements" panel, and it isn't an oversight: customer stock at a warehouse
+// has no transaction ledger (a known, accepted gap — balances are correct, the per-move history simply
+// isn't recorded). The old placeholder promised it was "coming"; a dashboard should show what is true
+// now, so the space went to the warehouse split, which is real.
 export function PortalDashboard() {
   const [overview, setOverview] = React.useState<CustomerOverview | null>(null);
   const [loading, setLoading] = React.useState(true);
@@ -54,22 +62,35 @@ export function PortalDashboard() {
   if (msg) return <Notice msg={msg} />;
   if (!overview) return null;
 
-  const { customer, counts, recentRequests } = overview;
+  const { customer, counts, stockByWarehouse, recentRequests } = overview;
 
   return (
     <div className="space-y-6">
       <PortalHeader
         title={`Welcome, ${customer.name}`}
-        subtitle="An overview of your projects, sites, stock and requests."
+        subtitle="Your stock with us, and the submissions still in flight."
       />
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {/* Units first and accented — the holding, not the row count. `stockEntries` stays as the
+            sub-line because it's what the linked page lists, so the click is predictable. */}
+        <StatCard
+          icon={Boxes}
+          label="Units with us"
+          value={counts.stockUnits}
+          sub={`across ${counts.stockEntries} ${counts.stockEntries === 1 ? "entry" : "entries"}`}
+          href="/dashboard/stock"
+          accent
+        />
+        {/* Links to the list ALREADY FILTERED to open. `?status=open` resolves through the same
+            OPEN_REQUEST_STATUSES the count is computed from, so the number here and the row count
+            there always agree — and the customer isn't handed a figure they then have to hunt for. */}
         <StatCard
           icon={ClipboardList}
-          label="Pending stock submissions"
-          value={counts.pendingRequests}
-          href="/dashboard/portal/requests"
-          accent
+          label="Open submissions"
+          value={counts.openRequests}
+          sub="awaiting review or delivery"
+          href="/dashboard/portal/requests?status=open"
         />
         <StatCard
           icon={FolderKanban}
@@ -84,26 +105,120 @@ export function PortalDashboard() {
           value={counts.totalSites}
           href="/dashboard/portal/sites"
         />
-        <StatCard
-          icon={Boxes}
-          label="Stock entries"
-          value={counts.stockEntries}
-          href="/dashboard/stock"
-        />
       </div>
+
+      {/* Directly under the unit count it explains, and only when there is something to explain. */}
+      {counts.notReceivedUnits > 0 && <NotReceivedNote units={counts.notReceivedUnits} />}
 
       <div className="grid gap-4 lg:grid-cols-2">
         <RecentActivity requests={recentRequests} />
+        <StockByWarehouse rows={stockByWarehouse} total={counts.stockUnits} />
+      </div>
+    </div>
+  );
+}
 
-        <div className="space-y-2">
-          <h2 className="text-sm font-extrabold text-[var(--ink)]">Recent stock movements</h2>
-          <ComingSoon
-            icon={Activity}
-            title="Stock movements"
-            body="Once live inventory is connected, dispatches and deliveries to your sites will show up here."
-            compact
-          />
-        </div>
+// Reconciliation context for the unit count above, NOT an alert — and the distinction is the whole
+// design of this line.
+//
+// It began as an amber warning banner above the stat row, which was wrong three times over:
+//   - It never clears. The figure spans all history with no window and no dismissal, so it only ever
+//     grows. A permanent warning is alarm fatigue by construction — within weeks the customer stops
+//     reading the row it lives in, including whatever genuinely urgent thing lands there later.
+//   - Nothing is actionable. `closed_short` is terminal: the delivery is closed, the reason recorded,
+//     the account team already handled it. Warning chrome promises a task that does not exist.
+//   - It is usually the customer's OWN decision. The commonest reason is that they shipped fewer than
+//     they declared and cancelled the rest. Repeating that back to them in alarm colours, forever,
+//     misrepresents a normal business event as a problem.
+//
+// What the number is actually FOR is reconciliation: "your portal says you hold 648; I sent 729" —
+// this explains the gap. That belongs beside the holding, in the same voice as the holding. So: below
+// the stat row it annotates, no amber, no alert icon, wording that places it in the past. Still a
+// link, because a number the customer cannot trace is a number they have to phone about.
+function NotReceivedNote({ units }: { units: number }) {
+  return (
+    <Link
+      href="/dashboard/portal/requests"
+      className="group -mt-1 flex items-center gap-1.5 px-1 text-[11px] text-[var(--muted)] transition-colors hover:text-[var(--ink)]"
+    >
+      <span>
+        <span className="font-bold text-[var(--ink)]">
+          {units} {units === 1 ? "unit" : "units"} not received
+        </span>
+        {" "}on earlier submissions — see which, and why
+      </span>
+      <ArrowRight className="h-3 w-3 shrink-0 opacity-0 transition-opacity group-hover:opacity-100" />
+    </Link>
+  );
+}
+
+// Where the stock physically is. Replaces the old "movements coming soon" placeholder with the part
+// of that question we CAN answer from real balances — a customer planning a job needs to know which
+// warehouse holds their kit, and that is a live number, not a future feature.
+function StockByWarehouse({
+  rows,
+  total,
+}: {
+  rows: CustomerOverview["stockByWarehouse"];
+  total: number;
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-extrabold text-[var(--ink)]">Stock by warehouse</h2>
+        {rows.length > 0 && (
+          <Link href="/dashboard/stock" className="text-[11px] font-bold text-[var(--accent)] hover:opacity-80">
+            View all
+          </Link>
+        )}
+      </div>
+      <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+        {rows.length === 0 ? (
+          <p className="px-4 py-10 text-center text-xs text-[var(--muted)]">
+            No stock with us yet. Once a submission is received at a warehouse it will show up here.
+          </p>
+        ) : (
+          <ul className="divide-y divide-[var(--border)]">
+            {rows.map((r) => {
+              // Share of the whole holding, as a bar. `total` is the sum of these rows, so it can only
+              // be 0 when every row is 0 — guarded because that would otherwise divide by zero.
+              const pct = total > 0 ? Math.round((r.units / total) * 100) : 0;
+              return (
+                <li key={r.warehouseId}>
+                  {/* Straight through to this warehouse's stock. Without the link the panel raised the
+                      obvious question — "show me those 310" — and left the customer to find the page,
+                      then filter it themselves. By id, so a rename can't break it. */}
+                  <Link
+                    href={`/dashboard/stock?warehouseId=${encodeURIComponent(r.warehouseId)}`}
+                    className="group block px-4 py-3 transition-colors hover:bg-[var(--surface-2)]"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <Warehouse className="h-3.5 w-3.5 shrink-0 text-[var(--faint)]" />
+                        <span className="truncate text-sm font-semibold text-[var(--ink)]">{r.warehouseName}</span>
+                        <span className="shrink-0 font-mono text-[11px] text-[var(--faint)]">{r.warehouseCode}</span>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-2 text-right">
+                        <span>
+                          <span className="text-sm font-extrabold tabular-nums text-[var(--ink)]">{r.units}</span>
+                          <span className="ml-1 text-[11px] text-[var(--muted)]">
+                            {r.units === 1 ? "unit" : "units"}
+                          </span>
+                        </span>
+                        <ArrowRight className="h-3.5 w-3.5 text-[var(--faint)] opacity-0 transition-opacity group-hover:opacity-100" />
+                      </div>
+                    </div>
+                    {/* Decorative — the number beside it is the accessible value, so the bar is hidden
+                        from screen readers rather than announced as an unlabelled progress bar. */}
+                    <div aria-hidden className="mt-2 h-1 overflow-hidden rounded-full bg-[var(--surface-2)]">
+                      <div className="h-full rounded-full bg-[var(--accent)]/60" style={{ width: `${pct}%` }} />
+                    </div>
+                  </Link>
+                </li>
+              );
+            })}
+          </ul>
+        )}
       </div>
     </div>
   );
@@ -188,8 +303,11 @@ function RecentActivity({ requests }: { requests: CustomerOverview["recentReques
   );
 }
 
-// Layout-matched loading placeholder — header card + 4 stat cards + the two-column
-// activity / movements row, so the page doesn't shift when the overview arrives.
+// Layout-matched loading placeholder — header card + 4 stat cards + the two-column activity /
+// warehouse row, so the page doesn't shift when the overview arrives.
+//
+// No placeholder for the not-received line: most customers never have one, so reserving space for it
+// would shift the page down on every load and then collapse when the data says there is nothing there.
 function DashboardSkeleton() {
   return (
     <div className="space-y-6">
@@ -216,12 +334,19 @@ function DashboardSkeleton() {
             ))}
           </div>
         </div>
+        {/* Mirrors StockByWarehouse: title row, then name + units + the share bar under each. */}
         <div className="space-y-2">
-          <Skeleton className="h-4 w-40" />
-          <div className="flex flex-col items-center gap-2.5 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] px-4 py-8">
-            <Skeleton className="h-10 w-10 rounded-full" />
-            <Skeleton className="h-3 w-32" />
-            <Skeleton className="h-2.5 w-56 max-w-full" />
+          <Skeleton className="h-4 w-36" />
+          <div className="divide-y divide-[var(--border)] overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <div key={i} className="px-4 py-3">
+                <div className="flex items-center justify-between gap-3">
+                  <Skeleton className="h-3.5 w-44" />
+                  <Skeleton className="h-3.5 w-16" />
+                </div>
+                <Skeleton className="mt-2 h-1 w-full rounded-full" />
+              </div>
+            ))}
           </div>
         </div>
       </div>

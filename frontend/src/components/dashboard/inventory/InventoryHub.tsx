@@ -131,7 +131,15 @@ export function InventoryHub() {
 
   return (
     <div className="flex h-full flex-col gap-4">
-      <ListPageHeader title="Inventory Hub" subtitle="Everything the business is accountable for — by ownership and current location." />
+      {/* Collapsible here specifically: this page is laid out full-height with an internally-
+          scrolling table, so the header is pinned and costs its height on every screen. On a 1024px
+          laptop that matters — five stacked bands (this, the summary, the lens tabs, the sub-tabs and
+          the filter row) sit above the data. */}
+      <ListPageHeader
+        collapsible="inventoryHub"
+        title="Inventory Hub"
+        subtitle="Everything the business is accountable for — by ownership and current location."
+      />
 
       <SummaryCards key={`cards-${refreshKey}`} active={lens} onSelect={switchLens} />
 
@@ -240,7 +248,11 @@ export function InventoryHub() {
               <IrmPanel key={`catalogue-${refreshKey}`} embedded tab={irmCatActive} />
             </React.Suspense>
           ) : (
-            <div className="h-full overflow-auto">
+            <div className="h-full">
+              {/* Bounded, NOT scrolling: InventoryView scrolls its own table body and keeps its
+                  filter row fixed (the inline-scroll contract the other lenses use). An
+                  overflow-auto here would scroll the whole component instead, carrying the search
+                  and filters off-screen with the rows. */}
               <InventoryView key={`company-${refreshKey}`} embedded />
             </div>
           )

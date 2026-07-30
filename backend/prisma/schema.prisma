@@ -1579,9 +1579,9 @@ model DamagedStockTransaction {
   reason        String
   notes         String?
   photoUrl      String?
-  sourceType    String // goods_management_return | van_stock_return | damaged_restore
+  sourceType    String // goods_management_return | van_stock_return | warehouse_damage_report | damaged_restore
   sourceId      String   @db.ObjectId
-  sourceCode    String? // GM-0001 / VSR-0001
+  sourceCode    String? // GM-0001 / VSR-0001 — null for warehouse_damage_report (no parent document)
   balanceAfter  Int
   createdBy     String?
   createdAt     DateTime @default(now())
@@ -1945,11 +1945,25 @@ model CustomerStockWarehouseAssignment {
 
   quantity               Int     // how many assigned to this warehouse
   receivedQuantity       Int     @default(0) // how many actually received so far
-  status                 String  @default("pending") // pending | partially_received | received
+  // pending | partially_received | received | closed_short
+  //
+  // `received` means receivedQuantity reached quantity. `closed_short` is the OTHER terminal state:
+  // the balance is never coming (the customer shipped less than they declared, part was lost in
+  // transit, they rescoped the order…). Without it a short delivery sat in the warehouse's Incoming
+  // queue forever with a Receive button, and its parent request could never reach `completed`.
+  // Kept distinct from `received` on purpose — merging them would make "arrived in full" unreportable.
+  status                 String  @default("pending")
 
   receivedBy             String? // staff email that received the stock
   receivedAt             DateTime?
   notes                  String?
+
+  // Short-closure trail. `closureReason` is app-REQUIRED (zod) but DB-nullable, matching how
+  // CustomerStockRequest.reason is modelled — closing without saying why is the thing that makes a
+  // stalled delivery unanswerable months later.
+  closedAt               DateTime?
+  closureReason          String?
+  closedBy               String? // staff email that closed it short
 
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt

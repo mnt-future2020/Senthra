@@ -245,6 +245,17 @@ export const stockAssignmentReceiveSchema = z.object({
 });
 export type StockAssignmentReceiveInput = z.infer<typeof stockAssignmentReceiveSchema>;
 
+// Short-closing a delivery is a judgement call that ends the line permanently, so the reason is
+// REQUIRED — a bare `.min(1)` would let a single space through, hence the trim first.
+export const stockAssignmentCloseShortSchema = z.object({
+  reason: z
+    .string({ error: "A reason is required." })
+    .trim()
+    .min(3, "Give a short reason (at least 3 characters).")
+    .max(500, "Keep the reason under 500 characters."),
+});
+export type StockAssignmentCloseShortInput = z.infer<typeof stockAssignmentCloseShortSchema>;
+
 // --- customer stock entries (product details filled after warehouse receive) ---
 
 const objectIdField = z.string().trim().regex(/^[a-f0-9]{24}$/i, "Invalid ID.");

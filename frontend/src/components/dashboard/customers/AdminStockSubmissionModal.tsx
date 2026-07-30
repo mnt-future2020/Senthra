@@ -6,7 +6,7 @@ import { Loader2 } from "lucide-react";
 import * as customerService from "@/services/customer.service";
 import { Modal } from "@/components/ui/Modal";
 import { RequiredMark } from "@/components/ui/FormScaffold";
-import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
+import { ghostBtn, hintCls, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import { NumberInput } from "@/components/ui/NumberInput";
 import {
   StockItemPicker,
@@ -145,6 +145,9 @@ export function AdminStockSubmissionModal({
               placeholder="Customer contact (optional)"
               maxLength={160}
             />
+            {/* Says what happens if it's left blank. The submission row only shows a "requested by"
+                line when there's a name — it no longer guesses one. */}
+            <p className={hintCls}>Who asked for this. Left blank, the submission shows no requester.</p>
           </div>
           <div className="sm:col-span-2">
             <label className={labelCls}>Notes</label>

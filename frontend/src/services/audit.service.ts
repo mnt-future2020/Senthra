@@ -1,7 +1,4 @@
-import axios from "axios";
-
-import { api } from "@/lib/api";
-import { env } from "@/lib/env";
+import { api, apiFile } from "@/lib/api";
 import { downloadBlob, filenameFromDisposition } from "@/lib/download";
 import type { AuditFacets, PagedAuditLogs } from "@/types/audit";
 
@@ -45,10 +42,11 @@ export function listAuditFacets(): Promise<AuditFacets> {
   return api<AuditFacets>("/audit/facets");
 }
 
-// The CSV endpoint returns a file, not JSON, so it bypasses the api() wrapper and
-// makes a direct authenticated blob request. Note: this does NOT get the silent
-// refresh-on-401 that api() provides — acceptable since the user is already on an
-// authenticated page. Returns whether the export was capped (server truncated it).
+// The CSV endpoint returns a file, not JSON, so it goes through apiFile() rather than api() — same
+// axios client, so it keeps the silent refresh-on-401 (this used to be a raw axios call, which lost
+// it: an export fired seconds after the access token expired failed outright). Returns whether the
+// export was capped (server truncated it) — the flag rides on a response header, which only reaches
+// this code because it is listed in the API's CORS exposedHeaders.
 export async function exportAuditCsv(
   params: AuditListParams = {},
 ): Promise<{ capped: boolean }> {
@@ -56,16 +54,13 @@ export async function exportAuditCsv(
   const { page: _page, pageSize: _pageSize, ...filters } = params;
   void _page;
   void _pageSize;
-  const res = await axios.get(`${env.apiUrl}/audit/export.csv${qs(filters)}`, {
-    withCredentials: true,
-    responseType: "blob",
-  });
+  const { blob, headers } = await apiFile(`/audit/export.csv${qs(filters)}`);
   const date = new Date().toISOString().slice(0, 10);
   const filename = filenameFromDisposition(
-    res.headers["content-disposition"] ?? null,
+    headers["content-disposition"] ?? null,
     `audit-log-${date}.csv`,
   );
-  downloadBlob(res.data as Blob, filename);
-  const capped = String(res.headers["x-audit-export-capped"] ?? "") === "true";
+  downloadBlob(blob, filename);
+  const capped = String(headers["x-audit-export-capped"] ?? "") === "true";
   return { capped };
 }

@@ -16,7 +16,7 @@ import { issueResetEmail } from "#modules/auth/auth.service.js";
 import * as sessionService from "#modules/auth/session.service.js";
 import { getCustomerStock, type CustomerStock } from "./customer.stock.service.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
-import { withTransaction } from "../../lib/prisma.js";
+import { withTransactionRetry } from "../../lib/prisma.js";
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
 import { geocodePostcode, geocodePostcodesBulk, canonicalPostcode } from "../../lib/geocode.js";
 import { siteSchema } from "./customer.validation.js";
@@ -25,6 +25,7 @@ import { assertWarehouseAccess } from "../../lib/warehouse-access.js";
 import { generateTempPassword } from "../../utils/generate-password.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import { paginate } from "../../utils/pagination.js";
+import { toCsv } from "../../utils/csv.js";
 import { hashPassword } from "../../utils/password.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
@@ -126,6 +127,13 @@ export interface PublicWarehouseAssignment {
   receivedBy: string | null;
   receivedAt: string | null;
   notes: string | null;
+  // Present only on a `closed_short` assignment — the shortfall's explanation, surfaced so the
+  // warehouse and the customer can both see WHY a delivery was closed rather than just that it
+  // stopped. (Closed, not "written off": nothing leaves a ledger — the shortfall was never stock.
+  // "Write off" belongs to goods-management's job_lost drain, which really does move balances.)
+  closureReason: string | null;
+  closedAt: string | null;
+  closedBy: string | null;
 }
 
 export interface PublicStockRequest {
@@ -144,6 +152,38 @@ export interface PublicStockRequest {
   adminResponse: string | null;
   reviewedAt: string | null;
   warehouseAssignments: PublicWarehouseAssignment[];
+  createdAt: string;
+}
+
+// ── Portal (customer-facing) view of a submission ────────────────────────────────────────────
+// The portal is served the SAME rows as the admin dashboard, so every field left on the type
+// travelling to it is readable by the customer whether or not a component renders it. The admin
+// shapes above carry things that are ours and not theirs: the staff emails that acted on the line
+// (`receivedBy`, `closedBy`, `reviewedBy`) and the warehouse's internal `notes`. All of them were
+// already being sent to the portal, which renders none of them — a narrower type is what keeps
+// that accidental privacy from depending on nobody ever writing the component that shows them.
+export interface PortalWarehouseAssignment {
+  warehouseName: string;
+  quantity: number;
+  receivedQuantity: number;
+  status: string;
+  // Why a leg was closed with a balance still outstanding. This is the ONE part of a short-closure
+  // the customer genuinely needs: their submission reads "completed" while some of what they
+  // declared never arrived, and without this there is nothing anywhere that says so.
+  closureReason: string | null;
+  closedAt: string | null;
+}
+
+export interface PortalStockRequest {
+  id: string;
+  name: string;
+  editedName: string | null;
+  linkedStockEntryId: string | null;
+  quantity: number | null;
+  reason: string | null;
+  status: string;
+  adminResponse: string | null;
+  warehouseAssignments: PortalWarehouseAssignment[];
   createdAt: string;
 }
 
@@ -183,7 +223,9 @@ export interface PublicCustomerSummary {
 // thousands (bulk import), so the detail tabs read them through the paged list endpoints instead.
 export interface PublicCustomer extends PublicCustomerSummary {
   users: PublicCustomerUser[];
-  stockRequests: PublicStockRequest[]; // PENDING only (the admin review queue)
+  // EVERY submission, not just open ones — the Stock Submissions tab filters to open by default and
+  // needs the finished ones reachable (a short-closed delivery completes its request).
+  stockRequests: PublicStockRequest[];
 }
 
 // What a logged-in customer sees about THEMSELVES (their own profile). Never
@@ -278,7 +320,7 @@ function toCustomerUser(u: CustomerUser): PublicCustomerUser {
   };
 }
 
-function toWarehouseAssignment(a: { id: string; warehouseId: string; warehouse: { id: string; name: string; code: string }; quantity: number; receivedQuantity: number; status: string; receivedBy: string | null; receivedAt: Date | null; notes: string | null }): PublicWarehouseAssignment {
+function toWarehouseAssignment(a: { id: string; warehouseId: string; warehouse: { id: string; name: string; code: string }; quantity: number; receivedQuantity: number; status: string; receivedBy: string | null; receivedAt: Date | null; notes: string | null; closureReason?: string | null; closedAt?: Date | null; closedBy?: string | null }): PublicWarehouseAssignment {
   return {
     id: a.id,
     warehouseId: a.warehouseId,
@@ -290,6 +332,11 @@ function toWarehouseAssignment(a: { id: string; warehouseId: string; warehouse: 
     receivedBy: a.receivedBy,
     receivedAt: a.receivedAt ? a.receivedAt.toISOString() : null,
     notes: a.notes,
+    // Optional on the input so a caller mapping a partially-selected row still compiles; a row that
+    // was never closed simply reports null.
+    closureReason: a.closureReason ?? null,
+    closedAt: a.closedAt ? a.closedAt.toISOString() : null,
+    closedBy: a.closedBy ?? null,
   };
 }
 
@@ -311,6 +358,43 @@ function toStockRequest(r: StockRequestRow): PublicStockRequest {
     adminResponse: r.adminResponse,
     reviewedAt: r.reviewedAt ? r.reviewedAt.toISOString() : null,
     warehouseAssignments: (r.warehouseAssignments ?? []).map(toWarehouseAssignment),
+    createdAt: r.createdAt.toISOString(),
+  };
+}
+
+// The customer's own view of their submission. Built by NAMING the safe fields rather than deleting
+// the unsafe ones from the admin shape: a field added to PublicWarehouseAssignment later then has to
+// be added here deliberately to reach the portal, instead of arriving there by default.
+function toPortalWarehouseAssignment(a: {
+  warehouse: { name: string };
+  quantity: number;
+  receivedQuantity: number;
+  status: string;
+  closureReason?: string | null;
+  closedAt?: Date | null;
+}): PortalWarehouseAssignment {
+  return {
+    warehouseName: a.warehouse.name,
+    quantity: a.quantity,
+    receivedQuantity: a.receivedQuantity,
+    status: a.status,
+    closureReason: a.closureReason ?? null,
+    closedAt: a.closedAt ? a.closedAt.toISOString() : null,
+  };
+}
+
+function toPortalStockRequest(r: StockRequestRow): PortalStockRequest {
+  return {
+    id: r.id,
+    name: r.name,
+    editedName: r.editedName ?? null,
+    linkedStockEntryId: r.linkedStockEntryId ?? null,
+    quantity: r.quantity,
+    reason: r.reason,
+    status: r.status,
+    // `adminResponse` is written FOR the customer; `reviewedBy` (who wrote it) is not theirs.
+    adminResponse: r.adminResponse,
+    warehouseAssignments: (r.warehouseAssignments ?? []).map(toPortalWarehouseAssignment),
     createdAt: r.createdAt.toISOString(),
   };
 }
@@ -1191,11 +1275,14 @@ async function resolveStockRequestData(
 // authenticated customer; the requesting user is recorded. This is the ONE place a
 // portal user can write into the customer module — and even then it only queues a
 // request for admin review, never the stock or inventory itself.
+// PORTAL. Returns the customer-facing shape like the list above — the row is brand new so the
+// staff fields are all null anyway, but the portal's boundary is only meaningful if EVERY endpoint
+// behind it uses it.
 export async function submitStockRequest(
   customerId: string,
   requestedBy: { userId: string; name: string; email: string },
   input: StockRequestInput,
-): Promise<PublicStockRequest> {
+): Promise<PortalStockRequest> {
   const customer = await requireCustomer(customerId);
   const data = await resolveStockRequestData(customerId, input);
   const created = await customerRepo.createStockRequest(
@@ -1211,7 +1298,7 @@ export async function submitStockRequest(
     targetId: customer.id,
     targetLabel: `${customer.name} — ${data.name} ×${data.quantity}`,
   });
-  return toStockRequest(created);
+  return toPortalStockRequest(created);
 }
 
 // ADMIN: create a stock submission on behalf of a customer (e.g. taken over the
@@ -1242,22 +1329,28 @@ export interface PortalListParams {
   search?: string;
   status?: string;
   sort?: string;
+  /** Stock lists only — narrows to one warehouse. An id, so a rename can't break a saved link. */
+  warehouseId?: string;
   page?: number;
   pageSize?: number;
 }
 // PORTAL: the authenticated customer's own requests, PAGED (they accumulate forever).
+// PORTAL-only (see getOwnStockRequests) — hence the narrower row type. The admin's equivalent is
+// listStockRequests, which returns the full PublicStockRequest.
 export interface PagedStockRequests {
-  requests: PublicStockRequest[];
+  requests: PortalStockRequest[];
   total: number;
   page: number;
   pageSize: number;
   totalPages: number;
 }
 export async function getOwnStockRequests(customerId: string, params: PortalListParams = {}): Promise<PagedStockRequests> {
-  const total = await customerRepo.countStockRequestsByCustomer(customerId, params.status);
+  // ONE filters object for both reads — the count and the page must describe the same set.
+  const filters = { status: params.status, search: params.search };
+  const total = await customerRepo.countStockRequestsByCustomer(customerId, filters);
   const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
-  const requests = await customerRepo.findStockRequestsByCustomer(customerId, params.status, skip, pageSize);
-  return { requests: requests.map(toStockRequest), total, page, pageSize, totalPages };
+  const requests = await customerRepo.findStockRequestsByCustomer(customerId, filters, { skip, take: pageSize });
+  return { requests: requests.map(toPortalStockRequest), total, page, pageSize, totalPages };
 }
 
 // ADMIN: a customer's stock requests (optionally filtered by status).
@@ -1266,7 +1359,7 @@ export async function listStockRequests(
   status?: string,
 ): Promise<PublicStockRequest[]> {
   await requireCustomer(customerId);
-  const requests = await customerRepo.findStockRequestsByCustomer(customerId, status);
+  const requests = await customerRepo.findStockRequestsByCustomer(customerId, { status });
   return requests.map(toStockRequest);
 }
 
@@ -1527,6 +1620,102 @@ async function resolveReceivedStockEntry(
   }, tx);
 }
 
+// A request's status derived from ALL its assignments, in one place so the receive path and the
+// short-close path can never disagree about when a request is finished.
+//
+// `closed_short` counts as DONE, not as outstanding: the whole point is that nothing more is coming.
+// A request whose every assignment is terminal therefore reaches `completed` even if some arrived
+// short — "completed" here means "no receiving left to do", which is exactly true. Leaving it at
+// `partially_received` instead is what used to strand these requests permanently.
+async function recomputeRequestStatusTx(requestId: string, tx: Prisma.TransactionClient): Promise<void> {
+  const all = await customerRepo.findAssignmentsByRequest(requestId, tx);
+  const isTerminal = (s: string) => s === "received" || s === "closed_short";
+  const allDone = all.every((a) => isTerminal(a.status));
+  // "Partially received" must mean UNITS ACTUALLY ARRIVED, not merely that a leg is finished.
+  // Keying it off terminality instead let a request where one warehouse was closed short having
+  // received NOTHING (and another was still pending) report "Partially received" — a status the
+  // customer portal renders verbatim, telling someone stock had arrived when none had.
+  // Equivalent to the old status check on the receive path: `received`/`partially_received` both
+  // imply receivedQuantity > 0, so ordinary receipts behave exactly as before.
+  const anyReceived = all.some((a) => a.receivedQuantity > 0);
+
+  if (allDone) {
+    await customerRepo.updateStockRequestStatus(requestId, "completed", tx);
+  } else if (anyReceived) {
+    await customerRepo.updateStockRequestStatus(requestId, "partially_received", tx);
+  } else {
+    // Leave the STATUS where it is (e.g. `assigned`): a short-close with nothing received and other
+    // warehouses still outstanding has not moved the request forward at all. Still write the row,
+    // though — the request document has to be touched on EVERY path through here, both so the
+    // submission surfaces in the admin's last-touched ordering and so concurrent transactions on
+    // sibling assignments collide on it rather than silently deriving a status each from a snapshot
+    // that can't see the other. See `touchStockRequest`.
+    await customerRepo.touchStockRequest(requestId, tx);
+  }
+}
+
+export interface CloseAssignmentShortInput {
+  reason: string;
+}
+
+// Close an assignment whose outstanding balance will never arrive — the customer shipped less than
+// they declared, part was lost in transit, or they rescoped the order. Without this, a short
+// delivery sat in the warehouse's Incoming queue forever (the queue reads exactly the open statuses)
+// and its parent request could never complete.
+//
+// Deliberately does NOT touch stock: whatever arrived was already posted to the customer's stock
+// entry on receipt, and the shortfall was never our stock to write off.
+export async function closeAssignmentShort(
+  assignmentId: string,
+  input: CloseAssignmentShortInput,
+  actor?: AuditActor,
+): Promise<PublicWarehouseAssignment> {
+  const assignment = await customerRepo.findAssignmentById(assignmentId);
+  if (!assignment) throw notFound("Assignment not found.");
+  assertWarehouseAccess(actor, assignment.warehouseId);
+
+  // Read-time check for a clear message; the repository's status guard is what actually makes this
+  // safe against a concurrent receive.
+  if (assignment.status === "received") throw badRequest("This assignment is already fully received.");
+  if (assignment.status === "closed_short") throw badRequest("This assignment is already closed.");
+
+  const reason = trimToNull(input.reason);
+  if (!reason) throw badRequest("A reason is required to close this delivery short.");
+
+  // RETRYING, because `recomputeRequestStatusTx` makes every leg of a request write the same parent
+  // document: closing two warehouses of one submission at the same moment is a write-conflict by
+  // design. The loser replays from the rolled-back state, this time able to see that its sibling is
+  // terminal, and completes the request instead of leaving it one leg short forever. Replay is safe
+  // — the status guard below re-arms on rollback and the audit line is written after the commit.
+  const { updated } = await withTransactionRetry(async (tx) => {
+    const updated = await customerRepo.closeAssignmentShort(assignmentId, reason, actor?.email ?? null, tx);
+    // Lost the race with a receive that landed first — roll back rather than close over the top of it.
+    if (!updated) {
+      throw conflict("This assignment was just updated by someone else. Please refresh and try again.");
+    }
+    await recomputeRequestStatusTx(assignment.customerStockRequestId, tx);
+    return { updated };
+  });
+
+  // From `updated` (the post-write row), NOT the pre-transaction read. The repository guard pins the
+  // STATUS, which correctly lets a close proceed after a concurrent partial receipt — that receipt
+  // leaves the assignment open, and the remaining balance still isn't coming. But it moves
+  // receivedQuantity, so the figure read before the transaction is stale by exactly that amount and
+  // the audit line would understate what arrived. This label is the whole point of the feature; it
+  // has to be the number that is actually true at the moment of closing.
+  const outstanding = updated.quantity - updated.receivedQuantity;
+  audit.record({
+    actor,
+    action: "customer.stock_request.closed_short",
+    targetType: "customer_stock_assignment",
+    targetId: assignmentId,
+    // The shortfall and the reason are the two things anyone asking "where did the rest go?" needs.
+    targetLabel: `${assignment.stockRequest.editedName ?? assignment.stockRequest.name} — ${outstanding} of ${updated.quantity} not received at ${assignment.warehouse.name}: ${reason}`,
+  });
+
+  return toWarehouseAssignment({ ...updated, warehouse: assignment.warehouse });
+}
+
 export async function receiveStockAssignment(
   assignmentId: string,
   input: ReceiveStockInput,
@@ -1537,6 +1726,12 @@ export async function receiveStockAssignment(
   // Scope to the warehouse this assignment physically lives at.
   assertWarehouseAccess(actor, assignment.warehouseId);
   if (assignment.status === "received") throw badRequest("This assignment is already fully received.");
+  // Reopening a short-closed delivery by receiving into it would contradict the closure that was
+  // recorded (with a reason) and silently un-complete the parent request. If stock really does turn
+  // up later it belongs on a new assignment, not on the one someone signed off as finished.
+  if (assignment.status === "closed_short") {
+    throw badRequest("This assignment was closed short. Raise a new assignment if more stock arrives.");
+  }
 
   const remaining = assignment.quantity - assignment.receivedQuantity;
   if (input.receivedQuantity > remaining) {
@@ -1546,8 +1741,10 @@ export async function receiveStockAssignment(
   // All-or-nothing: the assignment counter bump, the parent request status, and the stock-entry
   // write must commit together. A crash between them would otherwise mark an assignment received
   // with no matching stock line (consigned units lost, and the status guard blocks a re-receive).
-  // Mirrors the transactional posting in goods-in/goods-out.
-  const { updated, stockEntry } = await withTransaction(async (tx) => {
+  // Mirrors the transactional posting in goods-in/goods-out. Retried for the same reason as the
+  // short-close above: two warehouses of one submission receiving at once collide on the parent
+  // request, and the loser has to replay to see the sibling before deciding the request's status.
+  const { updated, stockEntry } = await withTransactionRetry(async (tx) => {
     const updated = await customerRepo.updateAssignmentReceived(
       assignmentId,
       input.receivedQuantity,
@@ -1563,15 +1760,7 @@ export async function receiveStockAssignment(
       throw conflict("This assignment was just updated by someone else. Please refresh and try again.");
     }
 
-    const allAssignments = await customerRepo.findAssignmentsByRequest(assignment.customerStockRequestId, tx);
-    const allReceived = allAssignments.every((a) => a.status === "received");
-    const someReceived = allAssignments.some((a) => a.status === "received" || a.status === "partially_received");
-
-    if (allReceived) {
-      await customerRepo.updateStockRequestStatus(assignment.customerStockRequestId, "completed", tx);
-    } else if (someReceived) {
-      await customerRepo.updateStockRequestStatus(assignment.customerStockRequestId, "partially_received", tx);
-    }
+    await recomputeRequestStatusTx(assignment.customerStockRequestId, tx);
 
     const stockEntry = await resolveReceivedStockEntry(assignment, assignmentId, input.receivedQuantity, actor?.email ?? null, tx);
     return { updated, stockEntry };
@@ -1737,10 +1926,52 @@ export interface CustomerOverview {
     activeProjects: number;
     totalProjects: number;
     totalSites: number;
-    pendingRequests: number;
+    /** Submissions still needing something to happen — pending | approved | assigned | partially_received. */
+    openRequests: number;
+    /** Stock entry ROWS (one per item × warehouse). The link target, My Stock, lists exactly these. */
     stockEntries: number;
+    /** UNITS across those rows. The headline figure: a customer asks how much stock we hold, not how
+     *  many database rows hold it — 26 entries can be 26 units or 2,600. */
+    stockUnits: number;
+    /** Units declared on a submission that were short-closed and are never arriving. 0 for almost
+     *  every customer, which is why the UI only surfaces it when it isn't. */
+    notReceivedUnits: number;
   };
-  recentRequests: PublicStockRequest[];
+  /** Units per warehouse, biggest holding first. Empty when the customer has no stock with us.
+   *  Carries the id so the dashboard row can link straight to My Stock filtered to that warehouse. */
+  stockByWarehouse: {
+    warehouseId: string;
+    warehouseName: string;
+    warehouseCode: string;
+    units: number;
+    entries: number;
+  }[];
+  recentRequests: PortalStockRequest[];
+}
+
+// Turn the grouped-by-warehouseId rows into named, ordered holdings. Pure, and exported for its test.
+//
+// Two behaviours that matter and are easy to get wrong:
+//  - A warehouse that no longer resolves is DROPPED, not rendered with a blank name. Mongo has no
+//    foreign keys, so a deleted warehouse leaves entries pointing at nothing; a nameless row with a
+//    unit count on the customer's dashboard is worse than the row being absent.
+//  - Biggest holding FIRST. The grouping returns whatever order the database chose, and the question
+//    this panel answers is "where is most of my stock".
+export function shapeStockByWarehouse(
+  grouped: readonly { warehouseId: string; units: number; entries: number }[],
+  warehouses: readonly ({ id: string; name: string; code: string } | null)[],
+): CustomerOverview["stockByWarehouse"] {
+  const byId = new Map(
+    warehouses.filter((w): w is { id: string; name: string; code: string } => w !== null).map((w) => [w.id, w]),
+  );
+  return grouped
+    .flatMap((g) => {
+      const wh = byId.get(g.warehouseId);
+      return wh
+        ? [{ warehouseId: wh.id, warehouseName: wh.name, warehouseCode: wh.code, units: g.units, entries: g.entries }]
+        : [];
+    })
+    .sort((a, b) => b.units - a.units);
 }
 
 export async function getOwnOverview(customerId: string): Promise<CustomerOverview> {
@@ -1748,18 +1979,41 @@ export async function getOwnOverview(customerId: string): Promise<CustomerOvervi
   // the dedicated queries below, so there's no reason to hydrate the users / pending-request children.
   const c = await customerRepo.findById(customerId);
   if (!c) throw notFound("Customer not found.");
-  // Counts come from COUNT queries (never from loading the child sets — sites/projects can be
-  // bulk-imported in the thousands). Recent activity needs only the newest 5 requests.
-  const [recentRequests, pendingRequests, stockEntries, activeProjects, totalProjects, totalSites] = await Promise.all([
-    customerRepo.findStockRequestsByCustomer(customerId, undefined, 0, 5),
-    customerRepo.countStockRequestsByCustomer(customerId, "pending"),
+  // Counts come from COUNT/SUM/GROUP BY queries (never from loading the child sets — sites/projects
+  // can be bulk-imported in the thousands). Recent activity needs only the newest 5 requests.
+  const [
+    recentRequests,
+    openRequests,
+    stockEntries,
+    stockUnits,
+    unitsByWarehouse,
+    notReceivedUnits,
+    activeProjects,
+    totalProjects,
+    totalSites,
+  ] = await Promise.all([
+    customerRepo.findStockRequestsByCustomer(customerId, {}, { skip: 0, take: 5 }),
+    // OPEN, not just `pending`. "Pending" alone read as 0 for a customer with stock sitting approved
+    // and assigned but not yet received — work very much in flight, reported as nothing outstanding.
+    customerRepo.countOpenStockRequestsByCustomer(customerId),
     // Count ALL statuses (draft + active). This card links straight to "My Stock", which lists every
     // entry regardless of status, so the number must match what the customer sees when they click through.
     customerRepo.countStockEntriesByCustomer(customerId),
+    customerRepo.sumStockUnitsByCustomer(customerId),
+    customerRepo.groupStockUnitsByWarehouse(customerId),
+    customerRepo.sumNotReceivedUnitsByCustomer(customerId),
     customerRepo.countProjectsByCustomer(customerId, { status: "active" }),
     customerRepo.countProjectsByCustomer(customerId),
     customerRepo.countSitesByCustomer(customerId),
   ]);
+
+  // Only the warehouses actually holding this customer's stock are fetched — the grouping already
+  // narrowed it, so this is at most a handful of reads and usually one.
+  const warehouses = await Promise.all(
+    unitsByWarehouse.map((w) => warehouseRepo.findById(w.warehouseId)),
+  );
+  const stockByWarehouse = shapeStockByWarehouse(unitsByWarehouse, warehouses);
+
   return {
     customer: {
       id: c.id,
@@ -1772,10 +2026,16 @@ export async function getOwnOverview(customerId: string): Promise<CustomerOvervi
       activeProjects,
       totalProjects,
       totalSites,
-      pendingRequests,
+      openRequests,
       stockEntries,
+      stockUnits,
+      notReceivedUnits,
     },
-    recentRequests: recentRequests.map(toStockRequest),
+    stockByWarehouse,
+    // PORTAL mapper — this is the customer's own dashboard. Using the admin `toStockRequest` here sent
+    // them `reviewedBy` plus every assignment's `receivedBy`/`closedBy`: warehouse staff emails, on a
+    // payload nothing on the page renders.
+    recentRequests: recentRequests.map(toPortalStockRequest),
   };
 }
 
@@ -1810,6 +2070,52 @@ export interface PublicStockEntry {
   receivedBy: string | null;
   receivedAt: string | null;
   createdAt: string;
+}
+
+// PORTAL view of one of the customer's own consignment lines. Same reasoning as
+// PortalStockRequest: the portal is served the admin row unless something narrows it, so
+// `receivedBy` — the warehouse staff email that booked the stock in — was reaching the customer in
+// the My Stock payload. The list renders a received DATE, never the person, so nothing was visible;
+// it was in the response all the same.
+//
+// Also DROPPED because they are dead columns, not because they're sensitive: `serialized`,
+// `serialNumber`, `highValue`, `thresholdQty` and `attributes` are never collected by any form in
+// the app (see the NOTE on CustomerStockEntry in schema.prisma), so they are permanently
+// false/null. Sending them invites a UI that renders empty rows and looks broken.
+export interface PortalStockEntry {
+  id: string;
+  warehouseName: string;
+  warehouseCode: string;
+  itemName: string;
+  sku: string | null;
+  categoryName: string | null;
+  description: string | null;
+  uom: string | null;
+  quantity: number;
+  barcode: string | null;
+  status: string;
+  receivedAt: string | null;
+  createdAt: string;
+}
+
+function toPortalStockEntry(e: StockEntryRow): PortalStockEntry {
+  return {
+    id: e.id,
+    warehouseName: e.warehouse.name,
+    warehouseCode: e.warehouse.code,
+    itemName: e.itemName,
+    sku: e.sku ?? null,
+    categoryName: e.category?.name ?? null,
+    description: e.description ?? null,
+    uom: e.uom ?? null,
+    quantity: e.quantity,
+    // The number, not `barcodeDataUri`: the customer may want to quote it, and shipping the rendered
+    // PNG for every row of every page is real payload for an image no portal screen prints.
+    barcode: e.barcode ?? null,
+    status: e.status,
+    receivedAt: e.receivedAt ? e.receivedAt.toISOString() : null,
+    createdAt: e.createdAt.toISOString(),
+  };
 }
 
 type StockEntryRow = NonNullable<Awaited<ReturnType<typeof customerRepo.findStockEntryById>>>;
@@ -2135,24 +2441,125 @@ export async function listCustomerStockEntries(
   customerId: string,
   status?: string,
 ): Promise<PublicStockEntry[]> {
-  const entries = await customerRepo.findStockEntriesByCustomer(customerId, status);
+  const entries = await customerRepo.findStockEntriesByCustomer(customerId, { status });
   return entries.map((e) => toStockEntry(e as StockEntryRow));
 }
 
 // PORTAL: the customer's own stock entries, PAGED (consignment history grows forever). The
 // unpaged variant above stays for the admin detail tab, which loads a single customer's set.
 export interface PagedStockEntries {
-  entries: PublicStockEntry[];
+  entries: PortalStockEntry[];
   total: number;
   page: number;
   pageSize: number;
   totalPages: number;
 }
 export async function listCustomerStockEntriesPaged(customerId: string, params: PortalListParams = {}): Promise<PagedStockEntries> {
-  const total = await customerRepo.countStockEntriesByCustomer(customerId, params.status, params.search);
+  // ONE filters object shared by the count and the page read, so the two can never drift apart —
+  // counting a different set than you page through gives a paginator that runs off the end.
+  const filters = { status: params.status, search: params.search, warehouseId: params.warehouseId };
+  const total = await customerRepo.countStockEntriesByCustomer(customerId, filters);
   const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
-  const rows = await customerRepo.findStockEntriesByCustomer(customerId, params.status, skip, pageSize, params.search);
-  return { entries: rows.map((e) => toStockEntry(e as StockEntryRow)), total, page, pageSize, totalPages };
+  const rows = await customerRepo.findStockEntriesByCustomer(customerId, filters, { skip, take: pageSize });
+  return { entries: rows.map((e) => toPortalStockEntry(e as StockEntryRow)), total, page, pageSize, totalPages };
+}
+
+// Cap on an export. High enough that no real customer hits it, low enough that a runaway account
+// can't ask us to render an unbounded document into memory. Mirrors AUDIT_EXPORT_MAX.
+export const PORTAL_EXPORT_MAX = 50_000;
+
+// PORTAL: the customer's own stock, as a CSV of the FILTERED set.
+//
+// Filters are honoured, paging is NOT: the export is "everything matching what I'm looking at", not
+// "the twenty rows on screen" — the same contract as the audit and inventory exports. NO price or
+// cost anywhere: the portal has never carried them and a spreadsheet is exactly the place a leak
+// would go unnoticed.
+export async function exportOwnStockCsv(
+  customerId: string,
+  params: PortalListParams = {},
+): Promise<{ csv: string; capped: boolean }> {
+  const rows = await customerRepo.findStockEntriesByCustomer(
+    customerId,
+    { status: params.status, search: params.search, warehouseId: params.warehouseId },
+    { skip: 0, take: PORTAL_EXPORT_MAX },
+  );
+  const entries = rows.map((e) => toPortalStockEntry(e as StockEntryRow));
+  const csv = toCsv(
+    ["Item", "Warehouse", "Warehouse code", "SKU", "Quantity", "Unit", "Category", "Barcode", "Status", "Received"],
+    entries.map((e) => [
+      e.itemName,
+      e.warehouseName,
+      e.warehouseCode,
+      e.sku,
+      e.quantity,
+      e.uom,
+      e.categoryName,
+      e.barcode,
+      e.status,
+      // Date only, no time: the received timestamp's time-of-day is warehouse admin, and a bare date
+      // is what a spreadsheet can sort and filter without the reader parsing it first.
+      e.receivedAt ? e.receivedAt.slice(0, 10) : null,
+    ]),
+  );
+  return { csv, capped: entries.length >= PORTAL_EXPORT_MAX };
+}
+
+// PORTAL: the customer's submissions, as a CSV of the FILTERED set. One row PER WAREHOUSE LEG for a
+// split submission (plus a single row when it was never assigned), because the per-leg received and
+// short figures are the whole reason to export this — flattening them into one row would drop the
+// detail the customer is reconciling against.
+export async function exportOwnStockRequestsCsv(
+  customerId: string,
+  params: PortalListParams = {},
+): Promise<{ csv: string; capped: boolean }> {
+  const rows = await customerRepo.findStockRequestsByCustomer(
+    customerId,
+    { status: params.status, search: params.search },
+    { skip: 0, take: PORTAL_EXPORT_MAX },
+  );
+  const requests = rows.map(toPortalStockRequest);
+  const body: (string | number | null)[][] = [];
+  for (const r of requests) {
+    const base = [
+      r.editedName ?? r.name,
+      // Only when it differs — repeating the same name in both columns is noise.
+      r.editedName && r.editedName !== r.name ? r.name : null,
+      r.quantity,
+      r.status,
+      r.createdAt.slice(0, 10),
+    ];
+    if (r.warehouseAssignments.length === 0) {
+      body.push([...base, null, null, null, null]);
+      continue;
+    }
+    for (const leg of r.warehouseAssignments) {
+      const notReceived = leg.status === "closed_short" ? Math.max(0, leg.quantity - leg.receivedQuantity) : 0;
+      body.push([
+        ...base,
+        leg.warehouseName,
+        leg.quantity,
+        leg.receivedQuantity,
+        // Blank rather than 0 for a leg with nothing missing — a column of zeros reads as "checked and
+        // fine" on every row, which buries the ones that aren't.
+        notReceived > 0 ? notReceived : null,
+      ]);
+    }
+  }
+  const csv = toCsv(
+    ["Item", "Submitted as", "Quantity", "Status", "Submitted", "Warehouse", "Assigned", "Received", "Not received"],
+    body,
+  );
+  return { csv, capped: requests.length >= PORTAL_EXPORT_MAX };
+}
+
+// PORTAL: the warehouses holding this customer's stock — the option list for My Stock's warehouse
+// filter. Its own endpoint rather than a field on the paged list, because the options must NOT narrow
+// as the customer filters: derived from the current page you would lose every warehouse whose stock
+// isn't on screen, and picking one would then remove the option you just used.
+export async function listOwnStockWarehouses(
+  customerId: string,
+): Promise<{ id: string; name: string; code: string }[]> {
+  return customerRepo.findStockWarehousesByCustomer(customerId);
 }
 
 export async function listWarehouseStockEntries(

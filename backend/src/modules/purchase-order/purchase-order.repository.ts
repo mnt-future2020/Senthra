@@ -1,6 +1,6 @@
 import { Prisma, type PurchaseOrder, type PurchaseOrderAttachment } from "@prisma/client";
 
-import { prisma, withTransaction } from "../../lib/prisma.js";
+import { isWriteConflict, prisma, withTransaction } from "../../lib/prisma.js";
 import { escapeRegex } from "../../utils/search.js";
 
 // Data-access layer for Purchase Orders. The ONLY place Prisma is touched for POs. Soft-deleted
@@ -349,12 +349,11 @@ async function fastForwardCounter(): Promise<void> {
   await prisma.counter.upsert({ where: { key: PO_CODE_PREFIX }, create: { key: PO_CODE_PREFIX, seq: max }, update: { seq: max } });
 }
 
-// P2034 — Prisma surfaces a MongoDB transaction write-conflict / deadlock as this code. Two
-// concurrent multi-creates both incrementing the PO counter inside their transactions race here;
-// the loser retries the whole transaction (the counter increment rolled back, so no number lost).
-function isWriteConflict(e: unknown): boolean {
-  return e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2034";
-}
+// The P2034 write-conflict predicate lives in lib/prisma alongside withTransactionRetry — the case
+// it covers here is the same one: two concurrent multi-creates both increment the PO counter inside
+// their transactions, and the loser retries the whole thing (the increment rolled back, no number
+// lost). Re-exported below as `isPoWriteConflict` for the PRF-conversion seam, which drives its own
+// retry loop because it must also handle a duplicate-code conflict.
 
 // Ensure the PO counter row exists (idempotent). Seeds it at the current high-water mark so the
 // FIRST in-transaction increment yields max+1 — seeding itself consumes no number. Done OUTSIDE the

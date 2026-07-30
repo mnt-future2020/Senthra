@@ -8,6 +8,7 @@ import * as customerService from "@/services/customer.service";
 import { Notice } from "@/components/ui/Notice";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
+import { toolbarBtn, toolbarInputCls } from "@/components/ui/styles";
 import type { PagedCustomerProjects } from "@/services/customer.service";
 import type { Msg } from "@/components/ui/types";
 
@@ -115,19 +116,30 @@ export function PortalProjects() {
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             placeholder="Search name or code…"
-            className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
+            aria-label="Search your projects"
+            className={`${toolbarInputCls} pl-9`}
           />
         </div>
-        <Select
-          size="sm"
-          value={sortOldest ? "oldest" : "newest"}
-          onChange={(v) => patchParams({ sort: v === "oldest" ? "oldest" : null }, true)}
-          options={[
-            { value: "newest", label: "Newest first" },
-            { value: "oldest", label: "Oldest first" },
-          ]}
-          ariaLabel="Sort order"
-        />
+        <div className="flex flex-wrap items-center gap-2">
+          <Select
+            size="sm"
+            value={sortOldest ? "oldest" : "newest"}
+            onChange={(v) => patchParams({ sort: v === "oldest" ? "oldest" : null }, true)}
+            options={[
+              { value: "newest", label: "Newest first" },
+              { value: "oldest", label: "Oldest first" },
+            ]}
+            ariaLabel="Sort order"
+          />
+          {/* Clears the SEARCH, not the sort — same rule as every other portal list: Clear undoes
+              what is HIDING rows, and a sort order hides nothing. That's also why it appears only
+              when there's a search: a Clear button next to an unfiltered list does nothing. */}
+          {filtered && (
+            <button type="button" onClick={() => patchParams({ q: null }, true)} className={toolbarBtn}>
+              Clear
+            </button>
+          )}
+        </div>
       </div>
 
       {msg?.type === "error" ? null : loading ? (

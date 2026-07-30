@@ -13,6 +13,30 @@ import { AdminTransferBoard } from "./AdminTransferBoard";
 const TH = "px-4 py-3 text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]";
 const TD = "px-4 py-3";
 
+// Loading placeholder for the two engineer-detail tables. They previously rendered a bare
+// "Loading…" line, which collapses the card to one row and then snaps to a full table — the layout
+// jumps and you can't tell what's coming. Everywhere else in this module (including the engineer
+// LIST directly below) shows the real table shell with skeleton rows, so these now do too.
+// `rows={3}` rather than the helper's default of 8: these are cards inside a page, not a full list.
+function LoadingTable({ headers }: { headers: { label: string; right?: boolean }[] }) {
+  return (
+    <div className="overflow-x-auto rounded-xl border border-[var(--border)]">
+      <table className="w-full text-left text-sm">
+        <thead>
+          <tr className="border-b border-[var(--border)]">
+            {headers.map((h) => (
+              <th key={h.label} className={h.right ? `${TH} text-right` : TH}>
+                {h.label}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <TableSkeletonRows cols={headers.length} rows={3} />
+      </table>
+    </div>
+  );
+}
+
 const JOB_STATUS_CLS: Record<string, string> = {
   assigned: "text-[var(--accent)] bg-[var(--accent-10)]",
   accepted: "text-[var(--accent)] bg-[var(--accent-10)]",
@@ -68,7 +92,7 @@ function EngineerDetail({ engineer, onBack }: { engineer: EngineerOverviewRow; o
       <section className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs">
         <h4 className="mb-3 text-sm font-extrabold text-[var(--ink)]">Holding now</h4>
         {!data ? (
-          <p className="text-xs text-[var(--muted)]">Loading…</p>
+          <LoadingTable headers={[{ label: "Item" }, { label: "Owner" }, { label: "Qty", right: true }]} />
         ) : data.holdings.length === 0 ? (
           <div className="flex flex-col items-center gap-2 py-8 text-center">
             <PackageOpen className="h-6 w-6 text-[var(--faint)]" />
@@ -109,7 +133,7 @@ function EngineerDetail({ engineer, onBack }: { engineer: EngineerOverviewRow; o
       <section className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xs">
         <h4 className="mb-3 text-sm font-extrabold text-[var(--ink)]">Active jobs</h4>
         {!data ? (
-          <p className="text-xs text-[var(--muted)]">Loading…</p>
+          <LoadingTable headers={[{ label: "Job" }, { label: "Customer" }, { label: "Status" }]} />
         ) : data.jobs.length === 0 ? (
           <div className="flex flex-col items-center gap-2 py-8 text-center">
             <Briefcase className="h-6 w-6 text-[var(--faint)]" />

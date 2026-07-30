@@ -180,6 +180,29 @@ export interface DamagedRow {
   photoUrl: string | null;
 }
 
+// ── Report damage on stock already in a warehouse ─────────────────────────────
+
+export interface ReportDamagePayload {
+  warehouseId: string;
+  ownerType: "company" | "customer";
+  irmItemId: string | null;
+  customerStockEntryId: string | null;
+  quantity: number;
+  reason: string; // required — the damaged pool exists to hold evidence
+  damagePhotoUrl: string; // required, same as a damaged return line
+  notes?: string;
+}
+
+export interface ReportDamageResult {
+  warehouseId: string;
+  ownerType: "company" | "customer";
+  irmItemId: string | null;
+  customerStockEntryId: string | null;
+  quantityDamaged: number;
+  damagedBalanceAfter: number;
+  usableBalanceAfter: number;
+}
+
 // ── Damaged history (drill-down behind one damaged row) ───────────────────────
 
 export interface DamagedHistoryEntry {
