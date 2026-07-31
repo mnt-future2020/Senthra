@@ -4,6 +4,9 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import { ArrowLeft, Barcode, Loader2, Save } from "lucide-react";
 
+import { printLabels } from "@/lib/printBarcode";
+import { BarcodePanel } from "@/components/dashboard/irm/BarcodePanel";
+
 import * as customerService from "@/services/customer.service";
 import * as warehouseService from "@/services/warehouse.service";
 import { listCategories, getCachedCategories } from "@/services/category.service";
@@ -141,6 +144,14 @@ export function AddStockEntryPage({ customer }: { customer: CustomerInfo }) {
     } finally {
       setSaving(false);
     }
+  };
+
+  // One sticker per unit being received, matching the GRN receive + Add stock surfaces. Blank
+  // tracks the Quantity field live; typing a number pins it.
+  const [labelCopies, setLabelCopies] = React.useState("");
+  const printBarcodeLabel = (count: number) => {
+    if (!created?.barcodeDataUri) return;
+    printLabels({ dataUri: created.barcodeDataUri, code: created.barcode ?? "", copies: count });
   };
 
   const handleGenerateBarcode = async () => {
@@ -297,15 +308,26 @@ export function AddStockEntryPage({ customer }: { customer: CustomerInfo }) {
 
             <FormSection title="Barcode" description="Generate a unique Code128 barcode for this stock entry.">
               {created?.barcodeDataUri ? (
-                <div className="flex flex-col items-center gap-3 py-4">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={created.barcodeDataUri}
-                    alt={`Barcode ${created.barcode}`}
-                    className="max-w-xs"
+                // The shared panel, same as every other barcode surface. This page used to render
+                // the image with the hint "Print this barcode and attach it to the physical stock."
+                // and NO print button anywhere — the instruction was a dead end, and you had to
+                // navigate to the entry's detail page to actually print it.
+                <div className="py-2">
+                  <BarcodePanel
+                    code={created.barcode ?? ""}
+                    barcodeDataUri={created.barcodeDataUri}
+                    canManage
+                    busy={busy}
+                    onGenerate={handleGenerateBarcode}
+                    onPrint={printBarcodeLabel}
+                    copies={labelCopies}
+                    onCopiesChange={setLabelCopies}
+                    defaultCopies={Number(quantity) || 1}
                   />
-                  <span className="font-mono text-sm font-bold text-[var(--ink)]">{created.barcode}</span>
-                  <p className={hintCls}>Print this barcode and attach it to the physical stock.</p>
+                  {/* Blank-box only — see StockEntryDetail: a pinned count is already on the button. */}
+                  {labelCopies.trim() === "" && (
+                    <p className={`${hintCls} mt-2`}>One sticker per unit — attach them to the physical stock.</p>
+                  )}
                 </div>
               ) : (
                 <div className="flex flex-col items-center gap-3 py-6">

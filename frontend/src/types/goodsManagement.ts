@@ -122,6 +122,13 @@ export interface QueueRow {
   engineerId: string | null;
   engineerName: string | null;
   goodsStatus: GoodsStatus;
+  /** When the job was raised — the age anchor for a job that has never had a goods movement. */
+  createdAt: string;
+  /**
+   * Last goods movement, `null` if nothing has ever moved. For a RECONCILED job this is effectively
+   * its close-out date — the Closed view shows it, so the date filter narrows on something visible.
+   */
+  lastActivityAt: string | null;
   kitLines: QueueKitLine[];
 }
 
@@ -132,6 +139,11 @@ export interface QueuePage {
   page: number;
   pageSize: number;
   totalPages: number;
+  /**
+   * The configured overdue window (Settings → Operations). Colour the "Waiting Nd" badge against THIS,
+   * never a local constant — it's the same number the Overdue tab and the Inventory Hub count with.
+   */
+  overdueAfterDays: number;
 }
 
 // Queue status filter. "active" = everything still needing work (all but reconciled); "reconciled"
@@ -143,6 +155,11 @@ export type QueueStatusFilter =
   | "issued"
   | "awaiting_return"
   | "reconciled";
+
+// Queue ordering. "newest" = job raised most recently first (the historical default); "activity_asc" =
+// least-recently-touched first, which is the only thing that surfaces neglected work; "activity_desc" =
+// most-recently-touched first, the sane default for Closed.
+export type QueueSort = "newest" | "activity_asc" | "activity_desc";
 
 // ── Per-job goods detail ──────────────────────────────────────────────────────
 
@@ -232,6 +249,18 @@ export interface DamagedHistory {
 
 // ── Overdue holdings ──────────────────────────────────────────────────────────
 
+// One page of overdue rows. Paged and searched SERVER-side: this list is not guaranteed small — a busy
+// operation can have hundreds of jobs overdue at once — and `total` counts the searched set, so the
+// pager never offers a page that isn't there.
+export interface OverduePage {
+  days: number;
+  rows: OverdueRow[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
 export interface OverdueRow {
   jobId: string;
   jobNumber: string;
@@ -279,13 +308,29 @@ export interface PostMovementPayload {
   lines: MovementLinePayload[];
 }
 
+// Why stock is being booked as lost. Mirrors WRITE_OFF_REASONS in goods-management.validation.ts —
+// the server rejects anything outside this list, and requires a reason whenever writeOffLost is true.
+export const WRITE_OFF_REASONS = [
+  { value: "not_returned", label: "Not returned after repeated requests" },
+  { value: "lost_in_transit", label: "Lost in transit" },
+  { value: "engineer_left", label: "Engineer left the company" },
+  { value: "site_theft", label: "Theft on site" },
+  { value: "other", label: "Other (describe below)" },
+] as const;
+export type WriteOffReason = (typeof WRITE_OFF_REASONS)[number]["value"];
+
 export interface CloseReconcilePayload {
   writeOffLost?: boolean;
+  /** Required by the server whenever `writeOffLost` is true. */
+  writeOffReason?: WriteOffReason;
+  /** Required by the server when the reason is "other". */
+  writeOffNotes?: string;
 }
 
 export interface CloseReconcileResult {
   summary: JobStockSummary;
-  unaccounted: { itemName: string; qty: number }[];
+  /** `itemCode` is the catalogue code — `itemName` is a kit-line snapshot and is not reliably unique. */
+  unaccounted: { itemName: string; itemCode: string | null; qty: number }[];
 }
 
 export interface UsedLinePayload {

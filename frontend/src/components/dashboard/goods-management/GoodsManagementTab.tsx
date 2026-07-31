@@ -2,28 +2,37 @@
 
 // GoodsManagementTab — warehouse "Goods Management" tab.
 // Sections (pills):
-//   "Queue"   — ACTIVE jobs for this warehouse (everything except reconciled), text search +
-//               pagination. Each row → JobScanPanel via "Manage".
-//   "Closed"  — reconciled (done) jobs, read-only (no Manage) — kept for audit/history.
-//   "Overdue" — holdings out > 14 days with a "Write off (lost)" action per job.
+//   "Queue"   — ACTIVE jobs for this warehouse (everything except reconciled). Text search, a stage
+//               filter (All active / Not issued / Partial / Issued / Awaiting return) and a kit-line
+//               density control. Each row → JobScanPanel via "Manage".
+//   "Closed"  — reconciled (done) jobs, read-only (no Manage) — kept for audit/history. Bounded by a
+//               From/To window on last goods activity, which for a closed job is its reconciliation.
+//   "Overdue" — stock still out beyond the window configured in Settings → Operations, with
+//               "Write off (lost)". No control of its own: one definition of overdue, set by an admin.
 // The STATUS column is PER ITEM (per kit line) — each line shows its own issuance (Not issued /
-// Partial / Issued), since one job's lines can sit in different warehouses. Search + pagination
-// are server-side (goodsManagement.service).
-// Tab/filter state is persisted in the URL using namespaced params (?gmSection, ?gmq, ?gmPage)
-// so that a browser refresh restores the view without clobbering the host page's ?tab param.
+// Partial / Issued), since one job's lines can sit in different warehouses. Search, stage filter,
+// date window and pagination are all server-side (goodsManagement.service); only the kit-line
+// density control is client-side, since it just chooses how much of an already-loaded kit to draw.
+// Tab/filter state is persisted in the URL using namespaced params (?gmSection, ?gmq, ?gmPage,
+// ?gmStatus, ?gmFrom, ?gmTo, ?gmLines, ?gmSort) so that a browser refresh restores the view without
+// clobbering the host page's ?tab param. Switching section clears them — see goToSection.
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ClipboardList, Clock, PackageCheck } from "lucide-react";
 
 import * as gmService from "@/services/goodsManagement.service";
-import type { QueuePage, QueueKitLine } from "@/types/goodsManagement";
+import type { QueuePage, QueueKitLine, QueueStatusFilter, QueueSort } from "@/types/goodsManagement";
 import { useGoodsSocket } from "@/hooks/useGoodsSocket";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { Pagination } from "@/components/ui/Pagination";
+import { Select } from "@/components/ui/Select";
 import { WorkspaceToolbar } from "@/components/ui/WorkspaceToolbar";
+import { toolbarBtn, toolbarDateCls } from "@/components/ui/styles";
 import { JobScanPanel } from "./JobScanPanel";
 import { OverdueHoldingsView } from "./OverdueHoldingsView";
+import { visibleKitLines } from "./kitLineVisibility";
+import { ageTone, formatDay, jobAgeDays } from "./jobAge";
 
 type GmSection = "queue" | "closed" | "overdue";
 
@@ -58,6 +67,45 @@ const STATUS_COLORS: Record<GoodsStatusKey, string> = {
 
 const PAGE_SIZE = 20;
 const QUEUE_HEADERS = ["Job", "Engineer", "Item", "Status", "Planned", "Issued", "Used", "Returned", "To return", "Available", ""];
+
+// Stage filter for the ACTIVE queue. "active" (everything but reconciled) stays the default; the rest
+// target one exact stage. "Awaiting return" is the one that earns its place — it's the chase list, the
+// stock a manager has to get back. The backend has always accepted these values (QUEUE_STATUSES in
+// goods-management.service.ts) and validates them; the tab simply never offered them.
+const STATUS_FILTER_OPTIONS = [
+  { value: "active", label: "All active" },
+  { value: "not_issued", label: "Not issued" },
+  { value: "partially_issued", label: "Partially issued" },
+  { value: "issued", label: "Issued" },
+  { value: "awaiting_return", label: "Awaiting return" },
+];
+const ACTIVE_STATUS_VALUES = STATUS_FILTER_OPTIONS.map((o) => o.value);
+
+// Kit-line density. Defaults to the actionable subset: a multi-warehouse job otherwise fills the table
+// with greyed rows that can't be touched here. The full kit is one click away and the job row says how
+// many were folded away — see kitLineVisibility.ts.
+const LINE_OPTIONS = [
+  { value: "relevant", label: "Actionable lines" },
+  { value: "all", label: "All kit lines" },
+];
+
+// Queue order. Newest-first is how this list has always come back, and it's a reasonable default —
+// but it's also why a neglected job disappears: it sinks below every newer one. "Longest waiting"
+// is the antidote, and the only view that surfaces a job which was never issued at all.
+const SORT_OPTIONS = [
+  { value: "newest", label: "Newest first" },
+  { value: "activity_asc", label: "Longest waiting" },
+];
+const SORT_VALUES = SORT_OPTIONS.map((o) => o.value);
+
+// Age badge colours, keyed off ageTone(). Kept next to the option lists so the whole toolbar's
+// vocabulary is in one place.
+const AGE_TONE_CLS = {
+  normal: "text-[var(--faint)]",
+  warn: "text-amber-600",
+  bad: "text-[var(--neg)]",
+} as const;
+
 
 function statusChip(s: GoodsStatusKey) {
   return (
@@ -173,10 +221,8 @@ function QueueSkeleton() {
 
 export function GoodsManagementTab({
   warehouseId,
-  warehouseCode,
 }: {
   warehouseId: string;
-  warehouseCode: string;
   router?: unknown; // kept for forward-compat signature
 }) {
   const router = useRouter();
@@ -186,6 +232,16 @@ export function GoodsManagementTab({
   const section = (searchParams.get("gmSection") as GmSection | null) ?? "queue";
   const urlSearch = searchParams.get("gmq") ?? "";
   const page = Math.max(1, Number(searchParams.get("gmPage")) || 1);
+  // Every filter is validated against its option list rather than trusted: these come from a URL a user
+  // can hand-edit or a stale bookmark, and an unrecognised value has to fall back to the default instead
+  // of reaching the API (a bogus status would 400 the whole tab).
+  const rawStatus = searchParams.get("gmStatus");
+  const statusFilter = (rawStatus && ACTIVE_STATUS_VALUES.includes(rawStatus) ? rawStatus : "active") as QueueStatusFilter;
+  const activityFrom = searchParams.get("gmFrom") ?? "";
+  const activityTo = searchParams.get("gmTo") ?? "";
+  const showAllLines = searchParams.get("gmLines") === "all";
+  const rawSort = searchParams.get("gmSort");
+  const queueSort = (rawSort && SORT_VALUES.includes(rawSort) ? rawSort : "newest") as QueueSort;
 
   // Local search input — seeded from URL, debounce-writes back to ?gmq.
   const [searchInput, setSearchInput] = React.useState(urlSearch);
@@ -231,7 +287,22 @@ export function GoodsManagementTab({
     if (!showsTable) return;
     let active = true;
     gmService
-      .getQueue({ warehouseId, status: isClosed ? "reconciled" : "active", search: urlSearch || undefined, page, pageSize: PAGE_SIZE })
+      .getQueue({
+        warehouseId,
+        // Closed is reconciled BY DEFINITION, so the stage filter belongs to the active queue only.
+        status: isClosed ? "reconciled" : statusFilter,
+        search: urlSearch || undefined,
+        // Date window is offered in Closed only. On the active queue it would hide OPEN work — the one
+        // thing this screen exists to keep in front of the manager.
+        activityFrom: isClosed ? activityFrom || undefined : undefined,
+        activityTo: isClosed ? activityTo || undefined : undefined,
+        // Closed always reads most-recently-closed first — "what did we finish last?" is the question
+        // there, and ordering it by when the JOB was raised (the default) put an old job that closed
+        // yesterday below a new one that closed last month, right beside the date now on screen.
+        sort: isClosed ? "activity_desc" : queueSort,
+        page,
+        pageSize: PAGE_SIZE,
+      })
       .then((res) => {
         if (!active) return;
         setError(null);
@@ -244,12 +315,18 @@ export function GoodsManagementTab({
     return () => {
       active = false;
     };
-  }, [warehouseId, section, isClosed, showsTable, urlSearch, page, loadTick]);
+  }, [warehouseId, section, isClosed, showsTable, urlSearch, statusFilter, activityFrom, activityTo, queueSort, page, loadTick]);
 
   const goToSection = (key: GmSection) => {
     setSearchInput("");
     setData(null); // clear immediately so the skeleton shows while the new section loads
-    patch({ gmSection: key !== "queue" ? key : null, gmq: null, gmPage: null }, false);
+    // Clears every filter too: they don't all exist in every section (a stage filter means nothing in
+    // Closed, a date window nothing in Queue), so carrying them across would leave the new view
+    // silently narrowed by a control it doesn't even show.
+    patch(
+      { gmSection: key !== "queue" ? key : null, gmq: null, gmPage: null, gmStatus: null, gmFrom: null, gmTo: null, gmLines: null, gmSort: null },
+      false,
+    );
   };
 
   const selectedRow = React.useMemo(
@@ -267,7 +344,6 @@ export function GoodsManagementTab({
           jobNumber={selectedRow.jobNumber}
           jobName={selectedRow.jobName}
           warehouseId={warehouseId}
-          warehouseCode={warehouseCode}
           miscLines={selectedRow.kitLines.filter((k) => k.lineType === "misc")}
           onBack={() => {
             setSelectedJobId(null);
@@ -300,22 +376,87 @@ export function GoodsManagementTab({
         ))}
       </div>
 
-      {/* Overdue section */}
-      {section === "overdue" && <OverdueHoldingsView days={14} warehouseId={warehouseId} />}
+      {/* Overdue section — no controls at all. "Overdue" means the window configured in
+          Settings → Operations, full stop; the view states that window above its table and owns its
+          own empty state. A per-view day picker used to sit here, and it was a mistake: picking a
+          number BELOW the configured one filled a tab labelled "Overdue" with jobs that were not
+          overdue by the company's own rule, with nothing distinguishing them. One definition, one
+          place to change it. */}
+      {section === "overdue" && <OverdueHoldingsView warehouseId={warehouseId} />}
 
       {/* Queue / Closed sections */}
       {showsTable && (
         <>
           {/* Operational workspace tab: no title (the Warehouse header owns the identity) — the
-              controls start directly. Full-width search (this tab has no filters/actions beside it). */}
+              controls start directly. The search box is constrained now that filters sit beside it. */}
           <WorkspaceToolbar
             search={{
               value: searchInput,
               onChange: setSearchInput,
               placeholder: "Search job no., name, customer or engineer…",
               ariaLabel: "Search goods management jobs",
-              constrained: false,
             }}
+            filters={
+              isClosed ? (
+                <>
+                  {/* Bounds the history. Filters the job's LAST GOODS ACTIVITY, which for a reconciled
+                      job is its close-out — there is no separate reconciledAt column, so the title says
+                      plainly what the dates match rather than implying a field that doesn't exist. */}
+                  <label className="flex items-center gap-1.5 text-xs font-bold text-[var(--muted)]" title="Filters on the job's last goods activity — for a closed job, when it was reconciled.">
+                    From
+                    <input
+                      type="date"
+                      value={activityFrom}
+                      max={activityTo || undefined}
+                      onChange={(e) => patch({ gmFrom: e.target.value || null })}
+                      className={toolbarDateCls}
+                      aria-label="Closed from date"
+                    />
+                  </label>
+                  <label className="flex items-center gap-1.5 text-xs font-bold text-[var(--muted)]" title="Filters on the job's last goods activity — for a closed job, when it was reconciled.">
+                    To
+                    <input
+                      type="date"
+                      value={activityTo}
+                      min={activityFrom || undefined}
+                      onChange={(e) => patch({ gmTo: e.target.value || null })}
+                      className={toolbarDateCls}
+                      aria-label="Closed to date"
+                    />
+                  </label>
+                  {(activityFrom || activityTo) && (
+                    <button type="button" onClick={() => patch({ gmFrom: null, gmTo: null })} className={toolbarBtn}>
+                      Clear dates
+                    </button>
+                  )}
+                </>
+              ) : (
+                <>
+                  <Select
+                    size="sm"
+                    ariaLabel="Filter by goods stage"
+                    value={statusFilter}
+                    onChange={(v) => patch({ gmStatus: v === "active" ? null : v })}
+                    options={STATUS_FILTER_OPTIONS}
+                  />
+                  {/* Purely how much of each kit is drawn — no refetch, so it isn't in the fetch deps. */}
+                  <Select
+                    size="sm"
+                    ariaLabel="Kit line visibility"
+                    value={showAllLines ? "all" : "relevant"}
+                    onChange={(v) => patch({ gmLines: v === "all" ? "all" : null }, false)}
+                    options={LINE_OPTIONS}
+                  />
+                  <Select
+                    size="sm"
+                    ariaLabel="Sort order"
+                    value={queueSort}
+                    onChange={(v) => patch({ gmSort: v === "newest" ? null : v })}
+                    options={SORT_OPTIONS}
+                  />
+                </>
+              )
+            }
           />
 
           {error ? (
@@ -356,15 +497,21 @@ export function GoodsManagementTab({
                   </thead>
                   <tbody>
                     {data.rows.map((row, jobIdx) => {
-                      // Show the FULL kit list. A line is actionable HERE when it's a real item stocked
-                      // at this warehouse, or a misc line not yet fully issued. Everything else is greyed:
-                      // other-warehouse real items (issue them from their warehouse) + already-done misc.
-                      const visibleLines = row.kitLines;
+                      // A line is actionable HERE when it's a real item stocked at this warehouse (or
+                      // holding van-sourced stock, returnable anywhere), or a misc line not yet fully
+                      // issued. Everything else renders greyed and can't be touched here, so the default
+                      // view folds those away and reports the count — "All kit lines" brings them back.
+                      // Closed is history: nothing is actionable in it, so it always shows the full kit.
+                      const { lines: visibleLines, hiddenCount } = visibleKitLines(row.kitLines, warehouseId, showAllLines || isClosed);
                       const rowCount = visibleLines.length || 1;
                       // Returned = actual returns; To return = engineer's real holding (so it always
                       // matches what the return scan will accept), both spread across the item's lines.
-                      const effReturns = effectiveReturns(visibleLines);
-                      const toReturns = distributeToReturn(visibleLines);
+                      // Distributed over the FULL kit, NOT the visible subset: both helpers apportion an
+                      // item's total across all of its warehouse lines, so feeding them a filtered list
+                      // would re-spread the same totals over fewer lines and change what a visible row
+                      // reads. Keyed by line id, so the lookups below still resolve.
+                      const effReturns = effectiveReturns(row.kitLines);
+                      const toReturns = distributeToReturn(row.kitLines);
                       return visibleLines.map((line, lineIdx) => {
                         const isMisc = line.lineType === "misc";
                         const atWh = !!line.warehouseId && line.warehouseId === warehouseId;
@@ -392,6 +539,45 @@ export function GoodsManagementTab({
                                 <td className="px-4 py-3" rowSpan={rowCount}>
                                   <div className="font-bold text-[var(--ink)]">{row.jobNumber}</div>
                                   <div className="text-xs text-[var(--muted)]">{row.jobName}</div>
+                                  {/* The time signal, stacked here rather than as a 12th column — this
+                                      table is already wide, and the date belongs beside the job it
+                                      describes. Closed shows WHEN it closed, which is the value the
+                                      date filter matches: without it you filter on something the screen
+                                      never shows and can't tell whether it did the right thing. Queue
+                                      shows how long the job has gone untouched, colouring past the
+                                      Overdue threshold, so neglected work reads at a glance. */}
+                                  {isClosed ? (
+                                    <div className="mt-1 text-[10px] font-semibold text-[var(--muted)]">
+                                      Closed {formatDay(row.lastActivityAt)}
+                                    </div>
+                                  ) : (
+                                    (() => {
+                                      const age = jobAgeDays(row);
+                                      if (age === null) return null;
+                                      return (
+                                        <div
+                                          className={`mt-1 text-[10px] font-semibold ${AGE_TONE_CLS[ageTone(age, data.overdueAfterDays)]}`}
+                                          title={
+                                            row.lastActivityAt
+                                              ? `Last goods movement ${formatDay(row.lastActivityAt)}`
+                                              : `No goods movement yet — raised ${formatDay(row.createdAt)}`
+                                          }
+                                        >
+                                          {age === 0 ? "Today" : `Waiting ${age}d`}
+                                        </div>
+                                      );
+                                    })()
+                                  )}
+                                  {/* Folded, never dropped: the manager still learns the job carries more
+                                      kit than the rows show, without paying eight untouchable rows for it. */}
+                                  {hiddenCount > 0 && (
+                                    <div
+                                      className="mt-1 text-[10px] font-semibold text-[var(--faint)]"
+                                      title="Kit lines that can't be actioned at this warehouse — switch to “All kit lines” to see them."
+                                    >
+                                      +{hiddenCount} more line{hiddenCount === 1 ? "" : "s"} hidden
+                                    </div>
+                                  )}
                                 </td>
                                 <td className="px-4 py-3 text-xs text-[var(--muted)]" rowSpan={rowCount}>
                                   {row.engineerName ?? "—"}

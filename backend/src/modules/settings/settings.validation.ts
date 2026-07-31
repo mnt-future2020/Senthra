@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { postcodeField as ukPostcode } from "../../utils/postcode.js";
+import { MAX_OVERDUE_AFTER_DAYS, MIN_OVERDUE_AFTER_DAYS } from "./settings.service.js";
 
 // A network port is empty (clear it), or an integer 1–65535. Accepts the value
 // as a string (from a form input) or a number. Used by both the settings patch
@@ -108,6 +109,17 @@ export const updateSettingsSchema = z.object({
 
   // --- Engineer transfer feature flags ---
   engineerTransferRequireSignature: z.boolean().optional(),
+  // Whole days. Coerced because a number input posts a string. Bounded so a slip like "3650" can't
+  // turn the overdue list into every job the business has ever run. `""` clears it back to the
+  // read-time default, the same escape hatch every other nullable setting here offers — without it,
+  // "" coerces to 0 and gets rejected by the minimum, so the field could never be un-set.
+  overdueAfterDays: z.coerce
+    .number({ error: "Enter the number of days." })
+    .int("Use a whole number of days.")
+    .min(MIN_OVERDUE_AFTER_DAYS, `Must be at least ${MIN_OVERDUE_AFTER_DAYS} day.`)
+    .max(MAX_OVERDUE_AFTER_DAYS, `Must be ${MAX_OVERDUE_AFTER_DAYS} days or fewer.`)
+    .or(z.literal(""))
+    .optional(),
 });
 export type UpdateSettingsInput = z.infer<typeof updateSettingsSchema>;
 

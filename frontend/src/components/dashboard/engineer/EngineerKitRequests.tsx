@@ -12,6 +12,7 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Modal } from "@/components/ui/Modal";
 import { Notice } from "@/components/ui/Notice";
 import { inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
+import { RequiredMark } from "@/components/ui/FormScaffold";
 import { EmptyState, fmtDate } from "@/components/dashboard/portal/portalUi";
 import type { Job } from "@/types/job";
 import type { Msg } from "@/components/ui/types";
@@ -400,7 +401,7 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
         </div>
 
         <div>
-          <label className={labelCls}>Why do you need these? <span className="text-[var(--neg)]">*</span></label>
+          <label className={labelCls}>Why do you need these?<RequiredMark /></label>
           <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={2} maxLength={2000} placeholder="e.g. Two cables damaged during install; need extras to finish." className={`${inputCls} resize-none`} />
         </div>
 

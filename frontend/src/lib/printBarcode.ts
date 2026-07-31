@@ -7,7 +7,8 @@ const LABEL_W = "50mm";
 const LABEL_H = "30mm";
 
 // Upper bound on a single print job. Guards against a mistyped copy count (e.g. 99999) locking the
-// browser up building the document. Callers validate against this and surface the cap themselves.
+// browser up building the document. Enforced HERE for every surface — via parseCopiesParam /
+// resolveCopies / copiesError below — rather than by each caller writing the rule out again.
 export const MAX_LABEL_COPIES = 500;
 
 export interface BarcodeLabel {
@@ -82,11 +83,6 @@ export function printLabels(label: BarcodeLabel & { copies?: number }): void {
   }
 }
 
-// Print a SINGLE barcode label.
-export function printSingleLabel(label: BarcodeLabel): void {
-  printLabels({ ...label, copies: 1 });
-}
-
 // Read a copy count out of a URL query param — untrusted input, so anything that isn't a whole
 // number inside 1..MAX_LABEL_COPIES yields null and the caller falls back to its own default
 // rather than seeding the field with junk. Used by the stock-entry page, which the Incoming list
@@ -97,4 +93,31 @@ export function parseCopiesParam(raw: string | null | undefined): number | null 
   if (!Number.isFinite(n) || !Number.isInteger(n)) return null;
   if (n < 1 || n > MAX_LABEL_COPIES) return null;
   return n;
+}
+
+/**
+ * The message for a copies box that won't print, or null when it will.
+ *
+ * Deliberately DERIVED from parseCopiesParam rather than re-deciding validity: whether a value is
+ * printable is settled in exactly one place, and this only chooses the wording. The GRN form used
+ * to carry its own copy of the rules, and an earlier version of the stock-entry page carried a
+ * third — one of them accepted "2.5", so the button read "Print 2.5 labels" while the printer
+ * floored it to 2. A count that lies about what comes out of the printer ends up on physical stock.
+ *
+ * Blank is VALID: it means "use this surface's own default" (the quantity being received/put away).
+ */
+export function copiesError(raw: string): string | null {
+  if (raw.trim() === "") return null;
+  if (parseCopiesParam(raw) !== null) return null;
+  const n = Number(raw);
+  if (Number.isInteger(n) && n > MAX_LABEL_COPIES) return `Up to ${MAX_LABEL_COPIES} labels per print run.`;
+  return "Enter a whole number of at least 1.";
+}
+
+// What a copies box actually prints: the typed value, or the surface's default when blank. The
+// default is clamped because it comes from live data (an entry's running total can exceed the cap).
+// Returns null only when the typed value is unusable — callers disable the button on null.
+export function resolveCopies(raw: string, fallback: number): number | null {
+  if (raw.trim() === "") return Math.min(MAX_LABEL_COPIES, Math.max(1, Math.floor(fallback) || 1));
+  return parseCopiesParam(raw);
 }

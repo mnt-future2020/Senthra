@@ -21,6 +21,7 @@ import {
   type MovementCursor,
 } from "./movement.js";
 import { csvEscape } from "../../utils/csv.js";
+import { warehouseScopeFilter, type WarehouseScopedActor } from "../../lib/warehouse-access.js";
 
 export interface MovementFilters {
   dateFrom?: Date;
@@ -33,6 +34,14 @@ export interface MovementFilters {
   locationType?: "warehouse" | "engineer" | "damaged";
   type?: string;
   sourceType?: string;
+  /**
+   * The caller's warehouse ACCESS SCOPE. NOT a user-suppliable filter — it is derived from the actor
+   * and must never be read off the query string.
+   *
+   * `undefined` = unrestricted. An array constrains to those warehouses; an empty array matches
+   * nothing, which is the correct reading of "scoped to no warehouses".
+   */
+  scopeWarehouseIds?: string[];
 }
 
 export interface MovementPage {
@@ -94,6 +103,12 @@ const CAN_EMIT: Record<LedgerKind, ReadonlySet<string>> = {
 // Narrow the ledger set to those that can possibly satisfy the filters (also makes the query cheaper).
 function selectLedgers(f: MovementFilters, restrictTo?: LedgerKind[]): LedgerKind[] {
   let kinds = restrictTo ? ALL_LEDGERS.filter((k) => restrictTo.includes(k)) : [...ALL_LEDGERS];
+  // A warehouse-scoped caller sees only WAREHOUSE-LOCATED movements. The engineer ledgers record
+  // stock in a van — they carry no warehouseId, so there is nothing to check them against, and
+  // returning them unfiltered would hand a warehouse-restricted user the company-wide field ledger:
+  // a wider leak than the one the scope exists to prevent. `inventory` and `damaged` are then
+  // narrowed to the permitted warehouses by scopeWarehouseIds in each ledger's own query.
+  if (f.scopeWarehouseIds !== undefined) kinds = kinds.filter((k) => k === "inventory" || k === "damaged");
   if (f.ownership === "company") kinds = kinds.filter((k) => k !== "engineerCustomer");
   if (f.ownership === "customer") kinds = kinds.filter((k) => k === "engineerCustomer" || k === "damaged");
   if (f.locationType === "warehouse") kinds = kinds.filter((k) => k === "inventory");
@@ -148,7 +163,7 @@ async function queryUnified(
     tasks.push(
       inventoryRepo
         .findInventoryTxnPage(
-          { dateFrom: filters.dateFrom, dateTo: filters.dateTo, irmItemId: filters.irmItemId, warehouseId: filters.warehouseId, type: filters.type, sourceType: filters.sourceType },
+          { dateFrom: filters.dateFrom, dateTo: filters.dateTo, irmItemId: filters.irmItemId, warehouseId: filters.warehouseId, scopeWarehouseIds: filters.scopeWarehouseIds, type: filters.type, sourceType: filters.sourceType },
           before,
           fetch,
         )
@@ -185,6 +200,7 @@ async function queryUnified(
             dateFrom: filters.dateFrom,
             dateTo: filters.dateTo,
             warehouseId: filters.warehouseId,
+            scopeWarehouseIds: filters.scopeWarehouseIds,
             ownerType: filters.ownership,
             irmItemId: filters.irmItemId,
             customerId: filters.customerId,
@@ -260,9 +276,18 @@ async function mapPage(page: Tagged[]): Promise<Movement[]> {
   });
 }
 
-// Company-wide history (admin). Honours every structured filter.
-export function listMovements(filters: MovementFilters, cursor: MovementCursor | null, limit?: number): Promise<MovementPage> {
-  return queryUnified(filters, cursor, clampLimit(limit));
+// Admin history. Honours every structured filter, NARROWED to the actor's warehouse scope.
+//
+// The scope is taken from the actor here rather than from `filters`, so a caller cannot widen itself
+// by putting `scopeWarehouseIds` on the query string — `movementFiltersFrom(req.query)` never reads it.
+// Unrestricted actors resolve to `undefined` and the query is company-wide exactly as before.
+export function listMovements(
+  filters: MovementFilters,
+  cursor: MovementCursor | null,
+  limit?: number,
+  actor?: WarehouseScopedActor,
+): Promise<MovementPage> {
+  return queryUnified({ ...filters, scopeWarehouseIds: warehouseScopeFilter(actor) }, cursor, clampLimit(limit));
 }
 
 // Engineer-scoped history. The engineerId is ALWAYS the signed-in engineer (never client-supplied), and
@@ -299,8 +324,13 @@ export interface MovementCsvResult {
 
 // The movement DTO carries NO value/cost field, so the export is pricing-safe by construction (honours
 // the "customers never see pricing" constraint without special-casing).
-export async function exportMovementsCsv(filters: MovementFilters): Promise<MovementCsvResult> {
-  const { rows, capped } = await collectMovements(filters);
+// Same scope rule as the list read — an export that ignored it would be the easier way to take the
+// data the list refuses to show.
+export async function exportMovementsCsv(
+  filters: MovementFilters,
+  actor?: WarehouseScopedActor,
+): Promise<MovementCsvResult> {
+  const { rows, capped } = await collectMovements({ ...filters, scopeWarehouseIds: warehouseScopeFilter(actor) });
   const header = [
     "Date (UTC)", "Type", "Item", "Code", "SKU", "Ownership", "Location Type",
     "Location", "Quantity", "Balance After", "Reference", "Source", "Actor",

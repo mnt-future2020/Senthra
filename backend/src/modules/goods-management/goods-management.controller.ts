@@ -26,6 +26,11 @@ export const listQueue = asyncHandler(async (req, res) => {
         warehouseId,
         status: (req.query["status"] as string | undefined)?.trim() || undefined,
         search: (req.query["search"] as string | undefined) ?? undefined,
+        // Last-activity window. Unparseable values are dropped by the service (no filter) rather than
+        // rejected — these arrive from a URL the user can edit, and a typo shouldn't 400 the whole tab.
+        activityFrom: queryStr(req.query["activityFrom"])?.trim() || undefined,
+        activityTo: queryStr(req.query["activityTo"])?.trim() || undefined,
+        sort: queryStr(req.query["sort"])?.trim() || undefined,
         page: queryInt(req.query["page"]),
         pageSize: queryInt(req.query["pageSize"]),
       },
@@ -95,12 +100,20 @@ export const getDamagedHistory = asyncHandler(async (req, res) => {
   );
 });
 
+// The window is NOT a query parameter. It comes from Settings → Operations and nowhere else, so
+// "overdue" means one thing across the tab, the Inventory Hub and anything added later. A `?days=`
+// override used to exist; it was the seam that let a caller produce a list of jobs that were not
+// overdue by the company's own rule. The response reports the window it used so the screen can label
+// itself honestly.
 export const listOverdue = asyncHandler(async (req, res) => {
-  const rawDays = req.query["days"];
-  const days = rawDays !== undefined ? Number(rawDays) : 14;
-  if (!Number.isFinite(days) || days < 1) throw badRequest("days must be a positive integer.");
-  const warehouseId = queryStr(req.query["warehouseId"])?.trim() || undefined;
-  res.json({ overdue: await service.listOverdue(actorFrom(req), days, warehouseId) });
+  res.json(
+    await service.getOverdueView(actorFrom(req), {
+      warehouseId: queryStr(req.query["warehouseId"])?.trim() || undefined,
+      search: queryStr(req.query["search"]) ?? undefined,
+      page: queryInt(req.query["page"]),
+      pageSize: queryInt(req.query["pageSize"]),
+    }),
+  );
 });
 
 // POST /goods-management/damage-photo — upload a damage photo data URI to Cloudinary; returns { url }.

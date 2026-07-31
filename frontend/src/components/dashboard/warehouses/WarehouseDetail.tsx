@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Activity, AlertTriangle, Boxes, Eye, Loader2, MapPin, Pencil, Power, Printer, ScrollText, Search } from "lucide-react";
+import { AlertTriangle, Boxes, Eye, Loader2, MapPin, Pencil, Power, Printer, ScrollText, Search } from "lucide-react";
 
 import * as warehouseService from "@/services/warehouse.service";
 import * as customerService from "@/services/customer.service";
@@ -21,6 +21,8 @@ import { DetailHeader } from "@/components/ui/DetailHeader";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { actionLabel, actionTone, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
 import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
+import { MovementFeed, type MovementFetcher } from "@/components/dashboard/inventory/MovementFeed";
+import * as stockPositionService from "@/services/stockPosition.service";
 import { ReportDamageModal, type ReportDamageTarget } from "@/components/dashboard/goods-management/ReportDamageModal";
 import { ReceiveStockModal } from "@/components/dashboard/customers/ReceiveStockModal";
 import { CloseShortModal } from "@/components/dashboard/customers/CloseShortModal";
@@ -87,7 +89,7 @@ type Tab = "overview" | "inventory" | "incoming" | "goods" | "van" | "demand" | 
 // it shows if the user can see EITHER pool.
 // `fill: true` marks a tab whose content is a full-height inline-scroll layout (flex h-full → the
 // table body scrolls internally): the content region gives it a bounded, non-scrolling box. Omit it
-// for card-style tabs (overview / transactions / audit) that scroll the whole page naturally. Set it
+// for card-style tabs (overview / audit) that scroll the whole page naturally. Set it
 // declaratively per tab rather than string-matching keys in the render, so a new tab can't silently
 // clip by being missed off a hardcoded list.
 const TABS: { key: Tab; label: string; perms?: string[]; fill?: boolean }[] = [
@@ -97,7 +99,11 @@ const TABS: { key: Tab; label: string; perms?: string[]; fill?: boolean }[] = [
   { key: "goods", label: "Goods Management", perms: ["goods_management.view"], fill: true },
   { key: "van", label: "Field Stock Requests", perms: ["van_stock_request.review"], fill: true },
   { key: "demand", label: "Demand", perms: ["inventory.view"], fill: true },
-  { key: "transactions", label: "Transactions" },
+  // `inventory.history` is what the movements endpoint itself requires. Without this gate the tab was
+  // visible to anyone who could open a warehouse and returned a 403 the moment they clicked it —
+  // advertising a capability they don't have. `fill` because the feed is a full-height inline-scroll
+  // layout (its own body scrolls); omitting it gave the tab a second, outer scrollbar.
+  { key: "transactions", label: "Transactions", perms: ["inventory.history"], fill: true },
   { key: "audit", label: "Audit trail" },
 ];
 
@@ -199,16 +205,10 @@ export function WarehouseDetail({ initial }: { initial: Warehouse }) {
         {tab === "overview" && <Overview w={w} />}
         {tab === "inventory" && <StockTab warehouseCode={w.code} warehouseId={w.id} router={router} />}
         {tab === "incoming" && <IncomingTab warehouseCode={w.code} warehouseId={w.id} router={router} pushToast={pushToast} />}
-        {tab === "goods" && <GoodsManagementTab warehouseId={w.id} warehouseCode={w.code} router={router} />}
+        {tab === "goods" && <GoodsManagementTab warehouseId={w.id} router={router} />}
         {tab === "van" && <VanRequestsWorkspace warehouse={{ id: w.id, name: w.name, code: w.code }} />}
         {tab === "demand" && <DemandTab warehouseId={w.id} />}
-        {tab === "transactions" && (
-          <Placeholder
-            icon={Activity}
-            title="Transactions"
-            body="Goods in, goods out, transfers and adjustments for this warehouse will be listed here once inventory movements are live."
-          />
-        )}
+        {tab === "transactions" && <WarehouseTransactions warehouseId={w.id} />}
         {tab === "audit" && <AuditTrail warehouseId={w.id} />}
       </div>
     </div>
@@ -1135,17 +1135,32 @@ function WarehouseStockEntries({
   );
 }
 
-function Placeholder({ icon: Icon, title, body }: { icon: React.ElementType; title: string; body: string }) {
+// This warehouse's stock movement history — the shared MovementFeed, pinned to this warehouse.
+//
+// It replaced a "Coming soon" placeholder that read "…once inventory movements are live". Movements
+// HAVE been live for some time (the Inventory Hub's Movements tab, the engineer feed and the IRM item
+// history all render this same component) and the ledger already accepted a warehouse filter — this
+// tab was simply never wired up. Nothing needed building; it needed connecting.
+// Module-level, not inline: a fetcher recreated on every render is a new function identity, which
+// would retrigger the feed's load effect on each parent re-render.
+const movementFetcher: MovementFetcher = (params) => stockPositionService.listMovements(params);
+
+function WarehouseTransactions({ warehouseId }: { warehouseId: string }) {
   return (
-    <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] px-6 py-16 text-center">
-      <span className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--accent-10)] text-[var(--accent)]">
-        <Icon className="h-5 w-5" />
-      </span>
-      <p className="text-sm font-bold text-[var(--ink)]">{title}</p>
-      <p className="max-w-md text-xs text-[var(--muted)]">{body}</p>
-      <span className="mt-1 rounded-full bg-[var(--surface-2)] px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-[var(--faint)]">
-        Coming soon
-      </span>
+    <div className="flex h-full flex-col gap-3">
+      {/* States the scope precisely, because the ledger's warehouse filter narrows to the company
+          (IRM) pool plus damaged. Customer consignment stock at this warehouse has no per-movement
+          ledger — its balances move correctly but only the damaged leg produces a row — so a reader
+          comparing the two legs of a damage report would otherwise think the feed had lost one. Same
+          caveat the Inventory Hub's Movements tab carries, worded for one warehouse. No promise about
+          what might change. */}
+      <p className="shrink-0 text-xs text-[var(--muted)]">
+        Goods in, transfers and adjustments for this warehouse. Newest first.{" "}
+        <span className="text-[var(--faint)]">Customer consignment shows the damaged leg only.</span>
+      </p>
+      <div className="min-h-0 flex-1">
+        <MovementFeed fetcher={movementFetcher} scope="admin" lockedWarehouse={warehouseId} />
+      </div>
     </div>
   );
 }

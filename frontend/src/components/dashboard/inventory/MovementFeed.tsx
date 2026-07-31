@@ -65,8 +65,14 @@ interface OptionLists {
   items: SelectOption[];
 }
 
-function hasActiveFilter(f: MovementFilters): boolean {
-  return Boolean(f.ownership || f.location || f.type || f.dateFrom || f.dateTo || f.irmItem || f.warehouse || f.engineer || f.customer);
+// `lockedWarehouse` is the feed's fixed scope, not a user choice, so it must NOT count as an active
+// filter — otherwise "Clear filters" is permanently visible on a scoped feed and appears to offer
+// something it can't do.
+function hasActiveFilter(f: MovementFilters, lockedWarehouse?: string): boolean {
+  const warehouseChosenByUser = Boolean(f.warehouse) && f.warehouse !== lockedWarehouse;
+  return Boolean(
+    f.ownership || f.location || f.type || f.dateFrom || f.dateTo || f.irmItem || warehouseChosenByUser || f.engineer || f.customer,
+  );
 }
 
 function FilterBar({
@@ -78,6 +84,7 @@ function FilterBar({
   canExport,
   exporting,
   onExport,
+  lockedWarehouse,
 }: {
   scope: "admin" | "engineer";
   value: MovementFilters;
@@ -87,6 +94,7 @@ function FilterBar({
   canExport: boolean;
   exporting: boolean;
   onExport: () => void;
+  lockedWarehouse?: string;
 }) {
   const set = (patch: Partial<MovementFilters>) => onChange({ ...value, ...patch });
   return (
@@ -94,13 +102,19 @@ function FilterBar({
       {scope === "admin" && (
         <>
           <Select size="sm" ariaLabel="Filter by item" value={value.irmItem ?? ""} onChange={(v) => set({ irmItem: v || undefined })} options={[{ value: "", label: "All items" }, ...lists.items]} />
-          <Select size="sm" ariaLabel="Filter by warehouse" value={value.warehouse ?? ""} onChange={(v) => set({ warehouse: v || undefined })} options={[{ value: "", label: "All warehouses" }, ...lists.warehouses]} />
+          {/* Both hidden when the feed is locked to one warehouse. The warehouse picker would let the
+              user navigate out of the page they're on; the LOCATION picker is worse than redundant —
+              "Warehouse" is already implied, and picking "Engineer van" asks the server for the
+              intersection of engineer-held and warehouse-held movements, which is always empty. */}
+          {!lockedWarehouse && (
+            <Select size="sm" ariaLabel="Filter by warehouse" value={value.warehouse ?? ""} onChange={(v) => set({ warehouse: v || undefined })} options={[{ value: "", label: "All warehouses" }, ...lists.warehouses]} />
+          )}
           <Select size="sm" ariaLabel="Filter by engineer" value={value.engineer ?? ""} onChange={(v) => set({ engineer: v || undefined })} options={[{ value: "", label: "All engineers" }, ...lists.engineers]} />
           <Select size="sm" ariaLabel="Filter by customer" value={value.customer ?? ""} onChange={(v) => set({ customer: v || undefined })} options={[{ value: "", label: "All customers" }, ...lists.customers]} />
         </>
       )}
       <Select size="sm" ariaLabel="Filter by ownership" value={value.ownership ?? ""} onChange={(v) => set({ ownership: v || undefined })} options={OWNERSHIP_OPTIONS} />
-      {scope === "admin" && (
+      {scope === "admin" && !lockedWarehouse && (
         <Select size="sm" ariaLabel="Filter by location" value={value.location ?? ""} onChange={(v) => set({ location: v || undefined })} options={LOCATION_OPTIONS} />
       )}
       <Select size="sm" ariaLabel="Filter by movement type" value={value.type ?? ""} onChange={(v) => set({ type: v || undefined })} options={TYPE_OPTIONS} />
@@ -112,7 +126,7 @@ function FilterBar({
         To
         <input type="date" aria-label="To date" className={dateCls} value={value.dateTo ?? ""} onChange={(e) => set({ dateTo: e.target.value || undefined })} />
       </label>
-      {hasActiveFilter(value) && (
+      {hasActiveFilter(value, lockedWarehouse) && (
         <button type="button" onClick={onClear} className="text-[11px] font-bold text-[var(--muted)] underline-offset-2 transition-colors hover:text-[var(--accent)] hover:underline">
           Clear filters
         </button>
@@ -160,11 +174,27 @@ function Row({ m }: { m: Movement }) {
 
 const EMPTY_LISTS: OptionLists = { warehouses: [], customers: [], engineers: [], items: [] };
 
-export function MovementFeed({ fetcher, scope }: { fetcher: MovementFetcher; scope: "admin" | "engineer" }) {
+export function MovementFeed({
+  fetcher,
+  scope,
+  lockedWarehouse,
+}: {
+  fetcher: MovementFetcher;
+  scope: "admin" | "engineer";
+  /**
+   * Pins the feed to one warehouse — for a warehouse's own Transactions tab. Held INSIDE `filters`
+   * rather than applied separately by the fetcher, so the one value drives the query, the CSV export
+   * and the filter bar alike. Applying it only in the fetcher would let the visible filter state and
+   * the request disagree, which is exactly the bug that shape invites.
+   */
+  lockedWarehouse?: string;
+}) {
   const { can } = useAuth();
   const { pushToast } = useDashboard();
 
-  const [filters, setFilters] = React.useState<MovementFilters>({});
+  const [filters, setFilters] = React.useState<MovementFilters>(
+    lockedWarehouse ? { warehouse: lockedWarehouse } : {},
+  );
   const [rows, setRows] = React.useState<Movement[]>([]);
   const [cursor, setCursor] = React.useState<string | null>(null);
   const [hasMore, setHasMore] = React.useState(false);
@@ -258,11 +288,15 @@ export function MovementFeed({ fetcher, scope }: { fetcher: MovementFetcher; sco
         scope={scope}
         value={filters}
         onChange={setFilters}
-        onClear={() => setFilters({})}
+        // Clears back to the LOCK, not to nothing. Resetting to `{}` on a warehouse-scoped feed would
+        // silently widen it to every warehouse in the company while the page still claims to be about
+        // this one.
+        onClear={() => setFilters(lockedWarehouse ? { warehouse: lockedWarehouse } : {})}
         lists={lists}
         canExport={canExport}
         exporting={exporting}
         onExport={() => void onExport()}
+        lockedWarehouse={lockedWarehouse}
       />
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">

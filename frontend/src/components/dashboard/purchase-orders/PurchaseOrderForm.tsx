@@ -485,7 +485,7 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
             </FormSection>
           )}
 
-          <FormSection title="Items" description="Add one or more IRM items to this order. Prices and VAT pre-fill from each item's settings. Quantity must be greater than zero. Unit price can be adjusted if required. UK standard VAT is 20%.">
+          <FormSection title={<>Items<RequiredMark /></>} description="Add one or more IRM items to this order. Prices and VAT pre-fill from each item's settings. Quantity must be greater than zero. Unit price can be adjusted if required. UK standard VAT is 20%.">
             <div className="space-y-3">
               {lineRows.map((row, idx) => {
                 const qty = Number(row.quantity) || 0;

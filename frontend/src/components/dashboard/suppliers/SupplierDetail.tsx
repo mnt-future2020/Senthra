@@ -2,12 +2,14 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Boxes, Loader2, PackageCheck, Pencil, Power, ScrollText } from "lucide-react";
+import { Loader2, Pencil, Power, ScrollText } from "lucide-react";
 
 import * as supplierService from "@/services/supplier.service";
 import * as auditService from "@/services/audit.service";
 import * as poService from "@/services/purchase-order.service";
 import * as prfService from "@/services/purchase-request.service";
+import * as irmService from "@/services/irm.service";
+import * as grnService from "@/services/goods-in.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { NoStaffAssigned, StaffChip } from "@/components/ui/StaffChip";
@@ -20,6 +22,8 @@ import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkele
 import { PoStatusBadge, formatMoney, formatDate as poDate } from "@/components/dashboard/purchase-orders/poStatus";
 import { PrfStatusBadge } from "@/components/dashboard/purchase-requests/prfStatus";
 import type { AuditEntry, PagedAuditLogs } from "@/types/audit";
+import type { IrmItem } from "@/types/irm";
+import type { GoodsReceipt } from "@/types/goods-in";
 import type { PurchaseOrder } from "@/types/purchase-order";
 import type { PurchaseRequest } from "@/types/purchase-request";
 import type { Supplier } from "@/types/supplier";
@@ -51,12 +55,16 @@ export function SupplierDetail({ initial }: { initial: Supplier }) {
   const [s, setS] = React.useState<Supplier>(initial);
   const [busy, setBusy] = React.useState(false);
 
-  // The Procurement tab reads the PO summary endpoint, so it only shows to users who can view POs.
+  // Every tab that calls an endpoint is gated on that endpoint's OWN permission. Items and Goods In
+  // used to be static "coming soon" cards, so being ungated cost nothing; now that they actually fetch
+  // (`/irm-items` needs irm.view, `/goods-in` needs goods_in.view) an ungated tab is a tab that is
+  // visible to someone who can only ever get a 403 out of it.
+  const tab$ = (key: Tab, label: string) => [{ key, label }] as { key: Tab; label: string }[];
   const TABS: { key: Tab; label: string }[] = [
     { key: "overview", label: "Overview" },
-    { key: "items", label: "Items" },
-    ...(can("purchase_orders.view") ? ([{ key: "procurement", label: "Procurement" }] as { key: Tab; label: string }[]) : []),
-    { key: "goods-in", label: "Goods In" },
+    ...(can("irm.view") ? tab$("items", "Items") : []),
+    ...(can("purchase_orders.view") ? tab$("procurement", "Procurement") : []),
+    ...(can("goods_in.view") ? tab$("goods-in", "Goods In") : []),
     { key: "audit", label: "Audit trail" },
   ];
 
@@ -137,19 +145,11 @@ export function SupplierDetail({ initial }: { initial: Supplier }) {
       <div className="min-h-0 flex-1 overflow-auto">
         {tab === "overview" && <Overview s={s} />}
         {tab === "items" && (
-          <Placeholder
-            icon={Boxes}
-            title="Items"
-            body="Catalogue items supplied by this supplier will appear here once the IRM catalogue module is connected."
-          />
+          <SupplierItems supplierId={s.id} />
         )}
         {tab === "procurement" && <Procurement supplier={s} />}
         {tab === "goods-in" && (
-          <Placeholder
-            icon={PackageCheck}
-            title="Goods In"
-            body="Deliveries received from this supplier will be listed here once the goods-in module is live."
-          />
+          <SupplierGoodsIn supplierId={s.id} />
         )}
         {tab === "audit" && <AuditTrail supplierId={s.id} />}
       </div>
@@ -434,18 +434,146 @@ function Procurement({ supplier }: { supplier: Supplier }) {
   );
 }
 
-function Placeholder({ icon: Icon, title, body }: { icon: React.ElementType; title: string; body: string }) {
+// Catalogue items this supplier supplies.
+//
+// Replaced a "Coming soon" card reading "once the IRM catalogue module is connected". The catalogue
+// has been live for a long time and the item list ALREADY accepted a supplier filter
+// (irm.repository: `where.suppliers = { some: { supplierId } }`) — nothing needed building, only
+// connecting. An item can have several suppliers with one primary, so this is the "supplies it at
+// all" set, not "sourced from here by default".
+function SupplierItems({ supplierId }: { supplierId: string }) {
+  const router = useRouter();
+  const [items, setItems] = React.useState<IrmItem[] | null>(null);
+  const [total, setTotal] = React.useState(0);
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    let active = true;
+    irmService
+      .listIrmItems({ supplier: supplierId, pageSize: 50 })
+      .then((r) => {
+        if (!active) return;
+        setItems(r.items);
+        setTotal(r.total);
+      })
+      .catch((e) => active && setError(e instanceof Error ? e.message : "Could not load this supplier's items."));
+    return () => { active = false; };
+  }, [supplierId]);
+
+  if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
+  if (items === null) {
+    return (
+      <div className="space-y-2">
+        {Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-12 w-full rounded-xl" />)}
+      </div>
+    );
+  }
+  if (items.length === 0) {
+    return (
+      <p className="rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center text-xs text-[var(--muted)]">
+        No catalogue items list this supplier yet.
+      </p>
+    );
+  }
+
   return (
-    <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] px-6 py-16 text-center">
-      <span className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--accent-10)] text-[var(--accent)]">
-        <Icon className="h-5 w-5" />
-      </span>
-      <p className="text-sm font-bold text-[var(--ink)]">{title}</p>
-      <p className="max-w-md text-xs text-[var(--muted)]">{body}</p>
-      <span className="mt-1 rounded-full bg-[var(--surface-2)] px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-[var(--faint)]">
-        Coming soon
-      </span>
-    </div>
+    <Card title={`Catalogue items (${total})`}>
+      <ul className="divide-y divide-[var(--border-2)]">
+        {items.map((it) => (
+          <li key={it.id}>
+            <button
+              type="button"
+              // `/dashboard/irm/<code>` — the item detail lives under `irm`, not `inventory`, and the
+              // page resolves an id OR a code. Same target IrmItemDetail and IrmItemForm push to.
+              onClick={() => router.push(`/dashboard/irm/${it.code}`)}
+              className="flex w-full items-center justify-between gap-3 py-2.5 text-left transition-colors hover:bg-[var(--surface-2)]"
+            >
+              <span className="flex min-w-0 items-center gap-2.5">
+                <span className="font-mono text-xs text-[var(--muted)]">{it.code}</span>
+                <span className="truncate text-sm font-semibold text-[var(--ink)]">{it.name}</span>
+              </span>
+              <span className="shrink-0 text-[11px] text-[var(--faint)]">{it.sku ?? "—"}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+      {/* Stated rather than silently truncated — a list that stops at 50 with no note reads as the
+          complete set. */}
+      {total > items.length && (
+        <p className="pt-3 text-[11px] text-[var(--faint)]">
+          Showing the first {items.length} of {total}. Open Inventory to see them all.
+        </p>
+      )}
+    </Card>
+  );
+}
+
+// Deliveries received from this supplier. Same story as the Items tab: the goods-in module is live
+// and GoodsReceipt already carried a denormalised `supplierId` WITH its own `@@index([supplierId])`
+// — the index existed for precisely this lookup. Only the list filter had to be threaded through.
+function SupplierGoodsIn({ supplierId }: { supplierId: string }) {
+  const router = useRouter();
+  const [receipts, setReceipts] = React.useState<GoodsReceipt[] | null>(null);
+  const [total, setTotal] = React.useState(0);
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    let active = true;
+    grnService
+      .listGoodsReceipts({ supplier: supplierId, pageSize: 50 })
+      .then((r) => {
+        if (!active) return;
+        setReceipts(r.goodsReceipts);
+        setTotal(r.total);
+      })
+      .catch((e) => active && setError(e instanceof Error ? e.message : "Could not load this supplier's deliveries."));
+    return () => { active = false; };
+  }, [supplierId]);
+
+  if (error) return <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>;
+  if (receipts === null) {
+    return (
+      <div className="space-y-2">
+        {Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-12 w-full rounded-xl" />)}
+      </div>
+    );
+  }
+  if (receipts.length === 0) {
+    return (
+      <p className="rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center text-xs text-[var(--muted)]">
+        Nothing has been received from this supplier yet.
+      </p>
+    );
+  }
+
+  return (
+    <Card title={`Goods receipts (${total})`}>
+      <ul className="divide-y divide-[var(--border-2)]">
+        {receipts.map((g) => (
+          <li key={g.id}>
+            <button
+              type="button"
+              onClick={() => router.push(`/dashboard/goods-in/${g.code}`)}
+              className="flex w-full items-center justify-between gap-3 py-2.5 text-left transition-colors hover:bg-[var(--surface-2)]"
+            >
+              <span className="flex min-w-0 items-center gap-2.5">
+                <span className="font-mono text-xs text-[var(--muted)]">{g.code}</span>
+                <span className="truncate text-[11px] text-[var(--muted)]">{g.warehouse?.name ?? "—"}</span>
+              </span>
+              <span className="flex shrink-0 items-center gap-3 text-[11px] text-[var(--muted)]">
+                <span className="font-mono text-[var(--faint)]">{g.poCode ?? "—"}</span>
+                <span className="text-[var(--faint)]">{poDate(g.receivedDate)}</span>
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+      {total > receipts.length && (
+        <p className="pt-3 text-[11px] text-[var(--faint)]">
+          Showing the first {receipts.length} of {total}. Open Goods In to see them all.
+        </p>
+      )}
+    </Card>
   );
 }
 

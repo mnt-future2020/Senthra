@@ -1,6 +1,7 @@
 import * as inventoryRepo from "./inventory.repository.js";
 import * as engineerRepo from "#modules/engineer/engineer.repository.js";
 import * as gmRepo from "#modules/goods-management/goods-management.repository.js";
+import * as gmService from "#modules/goods-management/goods-management.service.js";
 import * as customerRepo from "#modules/customer/customer.repository.js";
 import * as jobRepo from "#modules/job/job.repository.js";
 import {
@@ -79,14 +80,17 @@ export async function getInventorySummary(): Promise<InventorySummary> {
   const customersHolding = new Set(customerWh.map((p) => p.customerId).filter(Boolean)).size;
   const engineersHolding = new Set(engineer.map((p) => p.locationId)).size;
 
-  // Real counts from DB for overdue and this-month damage
-  const cutoff = new Date(Date.now() - 14 * 86400000); // 14 days ago
+  // Real counts from DB for overdue and this-month damage.
+  // `overdue` goes through the goods-management service so this card counts exactly what the Overdue
+  // tab lists — unique JOBS that still have stock out. It used to call a raw movement count, which
+  // counted a three-scan job three times and never dropped reconciled ones, so the headline number
+  // climbed forever and never matched the list it summarised.
   const monthStart = new Date();
   monthStart.setUTCDate(1);
   monthStart.setUTCHours(0, 0, 0, 0);
 
   const [overdue, thisMonthUnits] = await Promise.all([
-    gmRepo.countOverdueIssues(cutoff),
+    gmService.getOverdueSummary().then((s) => s.count),
     gmRepo.countDamagedUnitsSince(monthStart),
   ]);
 

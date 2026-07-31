@@ -46,6 +46,7 @@ export interface SettingsUpdate {
   dateFormat?: string;
   timeFormat?: string;
   engineerTransferRequireSignature?: boolean;
+  overdueAfterDays?: number;
 }
 
 // Stale-while-revalidate cache (module-level, survives route navigation): switching

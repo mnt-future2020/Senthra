@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ArrowLeft, Barcode, CheckCircle2, Loader2, Printer, Save } from "lucide-react";
+import { ArrowLeft, Barcode, CheckCircle2, Loader2, Save } from "lucide-react";
 
 import * as customerService from "@/services/customer.service";
 import { listCategories, getCachedCategories } from "@/services/category.service";
@@ -12,7 +12,8 @@ import { useReferenceData } from "@/hooks/useReferenceData";
 import { FormSection, FormAsideCard, RequiredMark } from "@/components/ui/FormScaffold";
 import { Select } from "@/components/ui/Select";
 import { inputCls, labelCls, primaryBtn, secondaryBtn, hintCls } from "@/components/ui/styles";
-import { printLabels, parseCopiesParam, MAX_LABEL_COPIES } from "@/lib/printBarcode";
+import { printLabels, parseCopiesParam } from "@/lib/printBarcode";
+import { BarcodePanel } from "@/components/dashboard/irm/BarcodePanel";
 import type { CustomerStockEntry, StockEntryStatus } from "@/types/customer";
 import type { Category } from "@/types/category";
 
@@ -158,22 +159,11 @@ export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
 
   // One sticker per physical unit, so the copy count defaults to the quantity actually received.
   // Blank means "track the quantity"; typing a number pins it (reprinting the three that smudged).
-  // Same control and the same shared printer the Goods Receipt form uses — this page used to carry
-  // its own 40-line iframe printer that could only ever produce a SINGLE label, which is wrong for
-  // an entry holding 50 units and was the one place in the app not using lib/printBarcode.
-  // Clamped to the print cap: `entry.quantity` is the entry's RUNNING TOTAL, so a line topped up
-  // past MAX_LABEL_COPIES over its life would otherwise default to a count the printer refuses,
-  // opening the panel with the button already disabled and nothing typed.
-  const defaultCopies = Math.min(MAX_LABEL_COPIES, Math.max(1, entry.quantity));
-  // Typed input goes through the SAME validator as the ?copies= URL param. It began as a separate
-  // inline check and drifted: the URL path rejected fractions, this one didn't, so "2.5" enabled a
-  // button reading "Print 2.5 labels" while printLabels floored it to 2 — the UI promising one
-  // count and the printer producing another, onto physical stock. One validator, no drift.
-  const copiesNum = copies.trim() === "" ? defaultCopies : parseCopiesParam(copies);
-  const copiesValid = copiesNum !== null;
-  const printBarcodeLabel = () => {
-    if (!entry.barcodeDataUri || copiesNum === null) return;
-    printLabels({ dataUri: entry.barcodeDataUri, code: entry.barcode ?? "", copies: copiesNum });
+  // Resolving + clamping + validating the count is BarcodePanel's job now (via lib/printBarcode),
+  // so the rules can't drift between this page, the GRN form and the ?copies= URL param again.
+  const printBarcodeLabel = (count: number) => {
+    if (!entry.barcodeDataUri) return;
+    printLabels({ dataUri: entry.barcodeDataUri, code: entry.barcode ?? "", copies: count });
   };
 
   const isDraft = entry.status === "draft";
@@ -333,46 +323,28 @@ export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
               invalid={Boolean(errors.barcode)}
             >
               {entry.barcodeDataUri ? (
-                <div className="flex flex-col items-center gap-3 py-4">
-                  <img
-                    src={entry.barcodeDataUri}
-                    alt={`Barcode ${entry.barcode}`}
-                    className="max-w-xs"
+                // The SHARED panel, same as IRM item detail / Add stock / GRN receive. This page
+                // used to hand-roll its own copy of it, and printing was hidden behind
+                // `fromWarehouse` — a ?from= query param, not a permission — so the very same entry
+                // could be printed when reached from the warehouse Incoming list and not when
+                // reached from the customer's stock tab or an inventory search. Printing reuses the
+                // stored image and creates nothing, so it belongs to anyone who can see the entry.
+                <div className="py-2">
+                  <BarcodePanel
+                    code={entry.barcode ?? ""}
+                    barcodeDataUri={entry.barcodeDataUri}
+                    canManage={canEdit}
+                    busy={generatingBarcode}
+                    onGenerate={handleGenerateBarcode}
+                    onPrint={printBarcodeLabel}
+                    copies={copies}
+                    onCopiesChange={setCopies}
+                    defaultCopies={entry.quantity}
                   />
-                  <span className="font-mono text-sm font-bold text-[var(--ink)]">{entry.barcode}</span>
-                  {fromWarehouse && (
-                    <>
-                      <div className="flex flex-wrap items-end justify-center gap-2">
-                        <div>
-                          <label htmlFor="label-copies" className={labelCls}>Copies</label>
-                          <input
-                            id="label-copies"
-                            type="number"
-                            min={1}
-                            max={MAX_LABEL_COPIES}
-                            value={copies}
-                            onChange={(e) => setCopies(e.target.value)}
-                            placeholder={String(defaultCopies)}
-                            aria-invalid={!copiesValid || undefined}
-                            className={`${inputCls} w-24 text-center`}
-                          />
-                        </div>
-                        <button
-                          type="button"
-                          onClick={printBarcodeLabel}
-                          disabled={!copiesValid}
-                          className={secondaryBtn}
-                        >
-                          <Printer className="h-3.5 w-3.5" />
-                          Print {copiesValid ? copiesNum : ""} label{copiesValid && copiesNum === 1 ? "" : "s"}
-                        </button>
-                      </div>
-                      <p className={hintCls}>
-                        {copiesValid
-                          ? "One sticker per unit — attach them to the physical stock."
-                          : `Enter a whole number between 1 and ${MAX_LABEL_COPIES}.`}
-                      </p>
-                    </>
+                  {/* Only while the box is blank: once a count is pinned the button states it
+                      exactly, and "one sticker per unit" would be describing a different number. */}
+                  {copies.trim() === "" && (
+                    <p className={`${hintCls} mt-2`}>One sticker per unit — attach them to the physical stock.</p>
                   )}
                 </div>
               ) : canEdit ? (

@@ -58,6 +58,15 @@ export const DEFAULT_TIMEZONE = "Europe/London";
 export const DEFAULT_DATE_FORMAT = "DD/MM/YYYY";
 export const DEFAULT_TIME_FORMAT = "24h";
 
+// After how many days stock still held by an engineer counts as OVERDUE. Applied at READ time so a
+// fresh install, a legacy row and an admin who clears the field all behave identically — the fallback
+// lives here, not frozen into every stored document.
+export const DEFAULT_OVERDUE_AFTER_DAYS = 14;
+// Bounds shared with the zod schema. Below 1 the window is meaningless; the ceiling stops a typo like
+// "3650" quietly turning the overdue list into "every job we have ever run".
+export const MIN_OVERDUE_AFTER_DAYS = 1;
+export const MAX_OVERDUE_AFTER_DAYS = 365;
+
 // Clean a stored/configured prefix into a usable code: uppercase, letters only,
 // 2–5 chars. Anything shorter/invalid falls back to the default, so employee-ID
 // generation always has a sane prefix even for legacy/blank rows.
@@ -235,6 +244,8 @@ export interface PublicSettings extends PublicBranding {
   timeFormat: string;
   // Engineer-to-engineer transfer feature flags.
   engineerTransferRequireSignature: boolean;
+  /** Overdue window in days, default already applied — never null to the client. */
+  overdueAfterDays: number;
 }
 
 function publicSettings(s: Settings): PublicSettings {
@@ -291,7 +302,20 @@ function publicSettings(s: Settings): PublicSettings {
 
     // Engineer transfer feature flags
     engineerTransferRequireSignature: s.engineerTransferRequireSignature ?? false,
+
+    // Goods management
+    overdueAfterDays: s.overdueAfterDays ?? DEFAULT_OVERDUE_AFTER_DAYS,
   };
+}
+
+/**
+ * The configured overdue window, with the default applied. Read by goods-management for BOTH the
+ * Overdue list and the Inventory Hub's count, so one edit here moves every screen that says "overdue"
+ * together instead of leaving each with its own hardcoded fortnight.
+ */
+export async function getOverdueAfterDays(): Promise<number> {
+  const s = await settingsRepo.getOrCreate();
+  return s.overdueAfterDays ?? DEFAULT_OVERDUE_AFTER_DAYS;
 }
 
 export async function getSettings(): Promise<PublicSettings> {
@@ -342,6 +366,8 @@ export interface UpdateSettingsParams {
   timeFormat?: string;
   // Engineer-to-engineer transfer feature flags.
   engineerTransferRequireSignature?: boolean;
+  // Goods management: the overdue window, in days. `""` clears it back to the read-time default.
+  overdueAfterDays?: number | "";
 }
 
 export async function updateSettings(input: UpdateSettingsParams): Promise<PublicSettings> {
@@ -443,6 +469,10 @@ export async function updateSettings(input: UpdateSettingsParams): Promise<Publi
 
   // Engineer transfer flags
   if (typeof input.engineerTransferRequireSignature === "boolean") data.engineerTransferRequireSignature = input.engineerTransferRequireSignature;
+  // "" clears the override so getOverdueAfterDays falls back to the default — same contract as the
+  // other nullable settings, and what the schema comment promises.
+  if (typeof input.overdueAfterDays === "number") data.overdueAfterDays = input.overdueAfterDays;
+  else if (input.overdueAfterDays === "") data.overdueAfterDays = null;
 
   const updated = await settingsRepo.update(s.id, data);
   return publicSettings(updated);

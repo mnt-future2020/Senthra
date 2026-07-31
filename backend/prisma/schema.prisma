@@ -103,6 +103,15 @@ model Settings {
   // signature acknowledging receipt. Default (null/false) = optional.
   engineerTransferRequireSignature Boolean @default(false)
 
+  // --- Goods management ---
+  // After how many days stock still held by an engineer counts as OVERDUE. Drives the Goods
+  // Management → Overdue list and the Inventory Hub's "N overdue" figure, so both move together.
+  // Nullable with the default applied at READ time (getOverdueAfterDays), matching how timezone /
+  // dateFormat are modelled — a fresh install and an admin who clears the field behave identically,
+  // and the fallback lives in code rather than being frozen into every existing row.
+  // 14 days suits a same-week install job; a business running month-long projects will want more.
+  overdueAfterDays Int?
+
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
 }
@@ -996,6 +1005,12 @@ model InventoryTransaction {
   @@index([irmItemId, warehouseId])
   @@index([sourceType, sourceId])
   @@index([createdAt])
+  // Serves the warehouse's Transactions tab: equality on warehouseId, then the keyset sort on
+  // createdAt (findInventoryTxnPage). Neither existing index covers it — `[irmItemId, warehouseId]`
+  // has the wrong prefix for a warehouseId-only filter, so the planner falls back to `[createdAt]`
+  // and walks the whole ledger newest-first discarding every row belonging to another warehouse.
+  // This ledger is append-only, so that scan only ever gets longer.
+  @@index([warehouseId, createdAt])
 }
 
 // A completed warehouse → warehouse stock movement (TRF-0001). The Warehouse Inventory module's

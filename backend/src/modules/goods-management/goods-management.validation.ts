@@ -72,9 +72,42 @@ export const uploadDamagePhotoSchema = z.object({
 });
 export type UploadDamagePhotoInput = z.infer<typeof uploadDamagePhotoSchema>;
 
-export const closeReconcileSchema = z.object({
-  writeOffLost: z.boolean().optional(), // book any unaccounted units as lost on close
-});
+// Why stock is being booked as lost. A fixed list rather than free text because these repeat and
+// because free text collects the word "lost" — which answers nothing six months later when someone
+// asks where the units went. Mirrors STOCK_ADJUST_DOWN_REASONS' shape (enum + optional notes).
+// NOTE: there is deliberately no "damaged" reason here. Damaged stock has its own route — return it on
+// the Goods In side with a damaged portion (photo + reason required), which posts it to the damaged
+// pool where it can back a supplier or insurance claim and can be restored. Writing it off as LOST
+// records `condition: "lost"`, so the units never reach that pool and the evidence trail is gone. An
+// option saying "damaged beyond recovery" would quietly steer people out of the flow built for it.
+export const WRITE_OFF_REASONS = [
+  "not_returned",
+  "lost_in_transit",
+  "engineer_left",
+  "site_theft",
+  "other",
+] as const;
+export type WriteOffReason = (typeof WRITE_OFF_REASONS)[number];
+
+export const closeReconcileSchema = z
+  .object({
+    writeOffLost: z.boolean().optional(), // book any unaccounted units as lost on close
+    writeOffReason: z.enum(WRITE_OFF_REASONS).optional(),
+    writeOffNotes: z.string().trim().max(2000).optional(),
+  })
+  // Writing stock off as lost is irreversible (the job locks) and is a real financial loss, so it may
+  // not happen anonymously. Every other destructive stock action here — report damage, close a delivery
+  // short, adjust stock down — already demands a reason; this was the one exception.
+  .superRefine((v, ctx) => {
+    if (!v.writeOffLost) return;
+    if (!v.writeOffReason) {
+      ctx.addIssue({ code: "custom", path: ["writeOffReason"], message: "Select why this stock is being written off." });
+    }
+    // "Other" without a note is the same dead end as free text defaulting to "lost".
+    if (v.writeOffReason === "other" && !v.writeOffNotes?.trim()) {
+      ctx.addIssue({ code: "custom", path: ["writeOffNotes"], message: "Describe the reason when choosing Other." });
+    }
+  });
 export type CloseReconcileInput = z.infer<typeof closeReconcileSchema>;
 
 // Restore damaged stock back to usable pool (reversal of a write-off).

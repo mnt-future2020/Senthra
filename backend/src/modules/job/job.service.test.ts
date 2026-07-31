@@ -87,7 +87,9 @@ const baseJob = {
   supplierName: null,
   supplier: null,
   trsArea: null,
-  addressLine1: null,
+  // A DESTINATION (a site or an address) — updateJob rejects a merged result that has neither, so
+  // without this every update test below would fail for a reason unrelated to what it's testing.
+  addressLine1: "1 Test Street",
   addressLine2: null,
   city: null,
   county: null,
@@ -321,6 +323,84 @@ describe("updateJob (issued kit-line edit rules)", () => {
     expect(mockMergeKitLines).not.toHaveBeenCalled();
     expect(mockUpdate).toHaveBeenCalledTimes(1);
     expect(job.notes).toBe("x");
+  });
+});
+
+// ── updateJob: a job can never be left without a destination ──────────────────────────────────
+// createJobSchema enforces "a site OR an address" at the schema level, but an update is a PATCH:
+// omitting both keys says nothing about them, so the rule is only decidable against the MERGED
+// result. That's why it lives in the service, and why these tests cover the merge — not the schema.
+describe("updateJob (destination is mandatory on edit too)", () => {
+  const addressOnly = { ...baseJob, status: "in_progress" }; // addressLine1 set, no site
+  const siteOnly = { ...baseJob, status: "in_progress", siteId: "f".repeat(24), siteName: "Leeds Basinghall", addressLine1: null };
+  const noDestination = { ...baseJob, status: "in_progress", addressLine1: null };
+
+  it("rejects clearing the address when the job has no site to fall back on", async () => {
+    mockFindById.mockResolvedValue(addressOnly);
+    await expect(updateJob(JOB_ID, { addressLine1: "" } as never, { email: "a@x.com" } as never)).rejects.toThrow(/without a destination/i);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it("rejects a whitespace-only address just like a blank one", async () => {
+    mockFindById.mockResolvedValue(noDestination);
+    await expect(updateJob(JOB_ID, { addressLine1: "   " } as never, { email: "a@x.com" } as never)).rejects.toThrow(/without a destination/i);
+  });
+
+  it("rejects ANY edit to a job that already has neither (it must be given one first)", async () => {
+    // The patch doesn't touch the destination at all — but the merged result still has none, and a
+    // save that leaves the engineer with nowhere to go is exactly what this rule exists to stop.
+    mockFindById.mockResolvedValue(noDestination);
+    await expect(updateJob(JOB_ID, { notes: "just a note" } as never, { email: "a@x.com" } as never)).rejects.toThrow(/without a destination/i);
+  });
+
+  it("allows repairing a destination-less job by supplying an address in the same patch", async () => {
+    mockFindById.mockResolvedValue(noDestination);
+    mockUpdate.mockResolvedValue({ ...noDestination, addressLine1: "9 New Road" });
+    const job = await updateJob(JOB_ID, { addressLine1: "9 New Road" } as never, { email: "a@x.com" } as never);
+    expect(job.addressLine1).toBe("9 New Road");
+  });
+
+  it("allows clearing the address when the job keeps a site (a site alone IS a destination)", async () => {
+    // A customer site's own address fields are optional, so "has a site" is complete on its own —
+    // demanding an address here would punish someone who correctly picked an address-less site.
+    mockFindById.mockResolvedValue(siteOnly);
+    mockUpdate.mockResolvedValue({ ...siteOnly, addressLine1: null });
+    await updateJob(JOB_ID, { addressLine1: "" } as never, { email: "a@x.com" } as never);
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves an untouched destination alone (a patch that omits both keys still passes)", async () => {
+    mockFindById.mockResolvedValue(addressOnly);
+    mockUpdate.mockResolvedValue({ ...addressOnly, notes: "x" });
+    await updateJob(JOB_ID, { notes: "x" } as never, { email: "a@x.com" } as never);
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  // Un-picking a site is now reachable at all (the schema used to swallow "" as "not mentioned").
+  // The name has to go with it: siteName holds the CHOSEN site's label, so leaving it behind would
+  // show "Leeds Basinghall" next to whatever address replaced it — two places on one job.
+  it("clearing the site clears its name too, not just the id", async () => {
+    mockFindById.mockResolvedValue(siteOnly);
+    mockUpdate.mockResolvedValue({ ...siteOnly, siteId: null, siteName: null, addressLine1: "9 New Road" });
+    await updateJob(JOB_ID, { siteId: null, addressLine1: "9 New Road" } as never, { email: "a@x.com" } as never);
+    const patch = mockUpdate.mock.calls[0][1];
+    expect(patch.siteId).toBeNull();
+    expect(patch.siteName).toBeNull();
+  });
+
+  it("keeps a manually typed site name when the saved site is un-picked", async () => {
+    mockFindById.mockResolvedValue(siteOnly);
+    mockUpdate.mockResolvedValue(siteOnly);
+    await updateJob(JOB_ID, { siteId: null, siteName: "Unit 4, back yard", addressLine1: "9 New Road" } as never, { email: "a@x.com" } as never);
+    const patch = mockUpdate.mock.calls[0][1];
+    expect(patch.siteId).toBeNull();
+    expect(patch.siteName).toBe("Unit 4, back yard");
+  });
+
+  it("refuses to clear the site when nothing else names the destination", async () => {
+    mockFindById.mockResolvedValue(siteOnly); // site set, addressLine1 null
+    await expect(updateJob(JOB_ID, { siteId: null } as never, { email: "a@x.com" } as never)).rejects.toThrow(/without a destination/i);
+    expect(mockUpdate).not.toHaveBeenCalled();
   });
 });
 

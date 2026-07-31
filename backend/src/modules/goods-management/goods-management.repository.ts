@@ -361,6 +361,9 @@ export interface DamagedTxnFilters {
   dateFrom?: Date;
   dateTo?: Date;
   warehouseId?: string;
+  /** Caller's warehouse ACCESS SCOPE — `undefined` unrestricted, an array constrains (empty matches
+   *  nothing). Applied alongside `warehouseId`: that is what was asked for, this is what's allowed. */
+  scopeWarehouseIds?: string[];
   ownerType?: string;
   irmItemId?: string;
   customerId?: string;
@@ -373,6 +376,7 @@ export function findDamagedTxnPage(f: DamagedTxnFilters, before: MovementKeyset 
   if (f.dateFrom) and.push({ createdAt: { gte: f.dateFrom } });
   if (f.dateTo) and.push({ createdAt: { lte: f.dateTo } });
   if (f.warehouseId) and.push({ warehouseId: f.warehouseId });
+  if (f.scopeWarehouseIds !== undefined) and.push({ warehouseId: { in: f.scopeWarehouseIds } });
   if (f.ownerType) and.push({ ownerType: f.ownerType });
   if (f.irmItemId) and.push({ irmItemId: f.irmItemId });
   if (f.customerId) and.push({ customerId: f.customerId });
@@ -617,9 +621,17 @@ export async function findLatestDamagedTxnsByBalances(
 // `warehouseId` narrows to the issues made FROM one warehouse — the Goods Management tab is a
 // per-warehouse surface, so its Overdue section must not report another warehouse's holdings.
 // Omitted (the Inventory Hub's company-wide read) returns every warehouse's.
-export function findRecentMovementsForOverdue(cutoff: Date, warehouseId?: string) {
+// Issue movements older than `cutoff` belonging to the given jobs, oldest first.
+//
+// The `jobId` constraint is the whole point. This used to run unbounded — every posted issue movement
+// in history older than the cutoff, with relations — so the query grew with the age of the system
+// rather than with how much stock was actually out, and it got slower every month even for a business
+// whose workload never changed. Scoping it to the open-job set makes the cost track work in flight.
+export function findOldIssueMovementsForJobs(jobIds: string[], cutoff: Date, warehouseId?: string) {
+  if (jobIds.length === 0) return Promise.resolve([]);
   return prisma.jobStockMovement.findMany({
     where: {
+      jobId: { in: jobIds },
       direction: "issue",
       status: "posted",
       deletedAt: null,
@@ -635,35 +647,13 @@ export function findRecentMovementsForOverdue(cutoff: Date, warehouseId?: string
 export function findAllCustomerHoldings() {
   return prisma.engineerCustomerStockHolding.findMany({ where: { quantityOnHand: { gt: 0 } } });
 }
-export function countOverdueIssues(beforeDate: Date): Promise<number> {
-  return prisma.jobStockMovement.count({
-    where: { direction: "issue", status: "posted", deletedAt: null, createdAt: { lt: beforeDate } },
-  });
-}
-
-/** Dashboard read-model: DISTINCT unreconciled jobs with a posted issue older than `cutoff` —
- *  the same population OverdueHoldingsView lists, as a cheap count (no per-job enrichment).
- *  A job with no jobStockSummary yet counts as unreconciled (summary is created on first issue,
- *  so an old posted issue without one is a legacy/edge row — still outstanding). */
-export async function countOverdueUnreconciledJobs(cutoff: Date, warehouseIds?: string[]): Promise<number> {
-  const movements = await prisma.jobStockMovement.findMany({
-    where: {
-      direction: "issue",
-      status: "posted",
-      deletedAt: null,
-      createdAt: { lt: cutoff },
-      ...(warehouseIds ? { warehouseId: { in: warehouseIds } } : {}),
-    },
-    select: { jobId: true },
-    distinct: ["jobId"],
-  });
-  if (movements.length === 0) return 0;
-  const jobIds = movements.map((m) => m.jobId);
-  const reconciled = await prisma.jobStockSummary.count({
-    where: { jobId: { in: jobIds }, goodsStatus: "reconciled" },
-  });
-  return jobIds.length - reconciled;
-}
+// Two overdue counters used to live here and both were wrong in the same way — they answered
+// "how many old issue movements / unreconciled jobs are there?" rather than "how much stock is
+// still out?", and each carried its own hardcoded window. `countOverdueIssues` counted MOVEMENTS
+// with no reconciled filter and no lower bound; `countOverdueUnreconciledJobs` counted jobs that
+// merely lacked a reconcile, so a delivery already back on the shelf still counted. Every caller
+// now uses `goodsManagementService.getOverdueSummary()`, which shares the Overdue list's own
+// definition and reports the window it counted with, so no screen can drift from another again.
 // Gross units WRITTEN OFF as damaged since `since` — write-offs only (quantityDelta > 0). Restores
 // carry a negative delta; netting them in here would understate the "damaged this month" KPI and could
 // even render it negative when this month's restores exceed this month's write-offs.

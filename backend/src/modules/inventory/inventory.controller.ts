@@ -114,14 +114,19 @@ export const getSummary = asyncHandler(async (_req, res) => {
   res.json(await aggregation.getInventorySummary());
 });
 
-// GET /inventory/movements — unified Stock Movement History (company-wide).
+// GET /inventory/movements — unified Stock Movement History, narrowed to the caller's warehouse scope.
 // ?dateFrom&dateTo&irmItem&warehouse&engineer&customer&ownership&location&type&sourceType&cursor&limit
+//
+// `actorFrom(req)` is what applies that scope. Without it a warehouse-restricted user could read any
+// warehouse's ledger by passing `?warehouse=<other>` — the UI never offers it, but the API is callable
+// directly. Every other read in this controller already passed the actor; this one didn't.
 export const listMovements = asyncHandler(async (req, res) => {
   res.json(
     await movementService.listMovements(
       movementFiltersFrom(req.query),
       decodeCursor(queryStr(req.query.cursor)),
       queryInt(req.query.limit),
+      actorFrom(req),
     ),
   );
 });
@@ -129,7 +134,7 @@ export const listMovements = asyncHandler(async (req, res) => {
 // GET /inventory/movements/export.csv — the SAME filtered movement history as a CSV download.
 // Same filter params as listMovements (cursor/limit ignored — the export walks the whole filtered set).
 export const exportMovementsCsv = asyncHandler(async (req, res) => {
-  const { csv, capped } = await movementService.exportMovementsCsv(movementFiltersFrom(req.query));
+  const { csv, capped } = await movementService.exportMovementsCsv(movementFiltersFrom(req.query), actorFrom(req));
   const date = new Date().toISOString().slice(0, 10);
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", `attachment; filename="stock-movements-${date}.csv"`);

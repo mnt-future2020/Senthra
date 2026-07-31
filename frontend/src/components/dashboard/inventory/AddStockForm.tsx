@@ -8,7 +8,7 @@ import * as inventoryService from "@/services/inventory.service";
 import type { StockAdjustment, StockAdjustmentReason } from "@/services/inventory.service";
 import { listIrmItems, generateBarcode, getIrmItem } from "@/services/irm.service";
 import { listWarehouses } from "@/services/warehouse.service";
-import { printSingleLabel } from "@/lib/printBarcode";
+import { printLabels } from "@/lib/printBarcode";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
@@ -193,9 +193,13 @@ export function AddStockForm() {
     }
   };
 
-  const printItemBarcode = () => {
+  // One sticker per unit being put away, mirroring GRN receive — this used to print a SINGLE label
+  // no matter how many units you were adding, so a 50-unit addition gave you one sticker for 50
+  // boxes. Blank tracks the quantity field live; typing a number pins it.
+  const [labelCopies, setLabelCopies] = React.useState("");
+  const printItemBarcode = (count: number) => {
     if (!selectedItem?.barcodeDataUri) return;
-    printSingleLabel({ dataUri: selectedItem.barcodeDataUri, code: selectedItem.code });
+    printLabels({ dataUri: selectedItem.barcodeDataUri, code: selectedItem.code, copies: count });
   };
 
   const validate = (): Record<string, string> => {
@@ -338,7 +342,15 @@ export function AddStockForm() {
                   busy={barcodeBusy}
                   onGenerate={generateItemBarcode}
                   onPrint={printItemBarcode}
+                  copies={labelCopies}
+                  onCopiesChange={setLabelCopies}
+                  defaultCopies={Number(quantity) || 1}
                 />
+              )}
+              {/* Same blank-box-only hint the GRN receive and stock-entry surfaces carry: this one
+                  also defaults its count to a quantity, so it needs to say which quantity. */}
+              {selectedItem.barcodeDataUri && labelCopies.trim() === "" && (
+                <p className="mt-1.5 text-[11px] text-[var(--faint)]">One label per unit being added.</p>
               )}
             </FormSection>
           )}

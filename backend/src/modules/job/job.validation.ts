@@ -17,16 +17,27 @@ export const JOB_TYPES = ["installation", "survey", "maintenance", "decommission
 export const INSTALLER_TYPES = ["internal", "external"] as const;
 
 const emptyToUndef = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
+// "" (or null) means CLEAR THIS FIELD, as distinct from a missing key meaning "leave it alone".
+// A plain text field gets this for free — z.string() keeps the "" and the service's trimToNull
+// turns it into null. An id or a date can't: their inner validator rejects "", so they were wrapped
+// in emptyToUndef, which collapsed "the user emptied this box" into "the client said nothing" —
+// making a site, a supplier or a completion date settable but never removable.
+const emptyToNull = (v: unknown) => (v === null || (typeof v === "string" && v.trim() === "") ? null : v);
 
 const objectId = (label: string) => z.string({ error: `Select ${label}.` }).regex(OBJECT_ID_RE, `Select ${label}.`);
 const optionalObjectId = (label: string) => z.preprocess(emptyToUndef, z.string().regex(OBJECT_ID_RE, `Select ${label}.`).optional());
+// Header ids the user can un-pick. Kit-line ids deliberately keep optionalObjectId: a line's source
+// id isn't "cleared", the whole line is replaced, and null there would only widen what the service
+// has to defend against.
+const clearableObjectId = (label: string) => z.preprocess(emptyToNull, z.string().regex(OBJECT_ID_RE, `Select ${label}.`).nullable().optional());
 
 const optionalDate = (label: string) =>
   z.preprocess(
-    emptyToUndef,
+    emptyToNull,
     z
       .string()
       .refine((v) => !Number.isNaN(Date.parse(v)), `Enter a valid ${label.toLowerCase()}.`)
+      .nullable()
       .optional(),
   );
 
@@ -96,7 +107,7 @@ const sharedHeader = {
   technology: z.string().trim().max(120).optional(),
   customerRef: z.string().trim().max(120).optional(),
   schemeNo: z.string().trim().max(120).optional(),
-  siteId: optionalObjectId("a site"),
+  siteId: clearableObjectId("a site"),
   siteName: z.string().trim().max(200).optional(),
   trsArea: z.string().trim().max(120).optional(),
   addressLine1: z.string().trim().max(300).optional(),
@@ -112,7 +123,7 @@ const sharedHeader = {
   shelf: z.string().trim().max(60).optional(),
   completionDate: optionalDate("Completion date"),
   priority: z.preprocess(emptyToUndef, z.enum(JOB_PRIORITIES).optional()),
-  supplierId: optionalObjectId("a supplier"),
+  supplierId: clearableObjectId("a supplier"),
   installerType: z.preprocess(emptyToUndef, z.enum(INSTALLER_TYPES).optional()),
   plannerName: z.string().trim().max(160).optional(),
   plannerPhone: z.string().trim().max(60).optional(),
@@ -120,14 +131,37 @@ const sharedHeader = {
   attachments: z.array(z.string().trim().max(1000)).max(50).optional(),
 };
 
-export const createJobSchema = z.object({
-  name: z.string({ error: "Job name is required." }).trim().min(1, "Job name is required.").max(300),
-  customerId: objectId("a customer"),
-  projectId: objectId("a project"),
-  assignedEngineerId: objectId("an engineer"),
-  ...sharedHeader,
-  kitLines: kitLinesField,
-});
+export const createJobSchema = z
+  .object({
+    name: z.string({ error: "Job name is required." }).trim().min(1, "Job name is required.").max(300),
+    customerId: objectId("a customer"),
+    projectId: objectId("a project"),
+    assignedEngineerId: objectId("an engineer"),
+    ...sharedHeader,
+    kitLines: kitLinesField,
+  })
+  // A job DISPATCHES an engineer somewhere, so it has to name a destination — one of the two ways
+  // the form offers: pick a saved site, or type an address. Both were optional, so a job could be
+  // created pointing nowhere and the engineer's job detail would show "—" for every location field.
+  //
+  // Deliberately siteId OR addressLine1, NOT "an address is required": a customer site's own
+  // addressLine1/city/postcode are all optional (siteSchema), so a site can legitimately be saved
+  // with just a name. Demanding an address would reject someone who correctly picked such a site —
+  // punishing them for a gap that belongs on the SITE record, not on every job that references it.
+  //
+  // The SAME rule applies on update, but it can't be expressed here: an update is a PATCH, so a
+  // payload that omits both keys says nothing about them and the rule is only decidable against the
+  // merged result (existing row + patch). It therefore lives in job.service.updateJob, next to the
+  // other guards that need the existing record. updateJobSchema is intentionally rule-free.
+  .superRefine((v, ctx) => {
+    if (!v.siteId && !v.addressLine1?.trim()) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["siteId"],
+        message: "Pick a site, or enter an address for where the work happens.",
+      });
+    }
+  });
 export type CreateJobInput = z.infer<typeof createJobSchema>;
 
 // Update = a full re-save; every field optional (kitLines optional — if provided it REPLACES).

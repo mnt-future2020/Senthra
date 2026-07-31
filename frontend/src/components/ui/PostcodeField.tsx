@@ -22,7 +22,11 @@ interface PostcodeFieldProps {
   onResolved?: () => void;
   error?: string;
   label?: string;
-  required?: boolean;
+  // MANDATORY, not defaulted. This drives the red asterisk, and a default of `true` meant that
+  // simply FORGETTING the prop asserted "this field is required" — which is how the customer form
+  // ended up marking an optional postcode as mandatory while nothing on either side enforced it.
+  // A marker that isn't backed by a rule is worse than no marker, so the compiler now asks.
+  required: boolean;
   errorId?: string;
   // The host form has no City/County fields to populate — the lookup becomes a confirm-only check that
   // reports the resolved place (e.g. "Found: Leeds, West Yorkshire") rather than claiming it filled any
@@ -43,7 +47,7 @@ export function PostcodeField({
   onResolved,
   error,
   label = "Postcode",
-  required = true,
+  required,
   errorId = "err-postcode",
   confirmOnly = false,
 }: PostcodeFieldProps) {

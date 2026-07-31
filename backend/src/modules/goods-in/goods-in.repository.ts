@@ -126,6 +126,10 @@ export interface GoodsReceiptListFilters {
   // warehouses (an empty array correctly matches nothing). Applied alongside `warehouseId` — both apply.
   warehouseIds?: string[];
   purchaseOrderId?: string;
+  /** Every receipt from one supplier — the supplier's own Goods In tab. Matches the DENORMALISED
+   *  `supplierId` snapshot on the receipt (there is no FK; it is resolved from the PO at creation),
+   *  which is what `@@index([supplierId])` on GoodsReceipt exists to serve. */
+  supplierId?: string;
 }
 
 function buildWhere(filters: GoodsReceiptListFilters): Prisma.GoodsReceiptWhereInput {
@@ -134,6 +138,7 @@ function buildWhere(filters: GoodsReceiptListFilters): Prisma.GoodsReceiptWhereI
   if (filters.warehouseId) where.warehouseId = filters.warehouseId;
   if (filters.warehouseIds !== undefined) where.warehouseId = { ...(where.warehouseId ? { equals: where.warehouseId as string } : {}), in: filters.warehouseIds };
   if (filters.purchaseOrderId) where.purchaseOrderId = filters.purchaseOrderId;
+  if (filters.supplierId) where.supplierId = filters.supplierId;
   if (filters.search) {
     const q = escapeRegex(filters.search);
     where.OR = [

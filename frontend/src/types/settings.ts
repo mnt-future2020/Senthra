@@ -56,4 +56,7 @@ export interface Settings extends Branding {
   timeFormat: string;
   // Engineer-to-engineer transfers: when true, the recipient must sign on receipt.
   engineerTransferRequireSignature: boolean;
+  // After how many days engineer-held stock counts as overdue. The server applies the default, so
+  // this is always a number — never null.
+  overdueAfterDays: number;
 }

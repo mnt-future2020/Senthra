@@ -41,6 +41,14 @@ export const secondaryBtn =
 export const toolbarInputCls =
   "w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs text-[var(--ink)] outline-none transition-all placeholder:text-[var(--faint)] focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-60";
 
+/**
+ * Date input for a list toolbar. Same `rounded-lg` / `py-2.5` / `text-xs` family as the search box and
+ * `<Select size="sm">`, so a From/To pair sits level with the controls beside it. Wrap it in a
+ * `<label>` carrying the From/To word — a bare date input gives no clue which end of the range it is.
+ */
+export const toolbarDateCls =
+  "rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-60";
+
 /** Button sized to sit in a list toolbar beside a `<Select size="sm">` — e.g. Clear. */
 export const toolbarBtn =
   "flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-60";

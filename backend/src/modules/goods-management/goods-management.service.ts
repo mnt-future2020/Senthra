@@ -1,8 +1,9 @@
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
+import { parseFilterDate } from "../../utils/filter-date.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
-import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
+import { getCloudinaryCreds, getOverdueAfterDays } from "#modules/settings/settings.service.js";
 import * as jobRepo from "#modules/job/job.repository.js";
 import type { JobWithRelations } from "#modules/job/job.repository.js";
 import * as irmService from "#modules/irm/irm.service.js";
@@ -633,6 +634,15 @@ export interface QueueRow {
   engineerName: string | null;
   status: string;
   goodsStatus: string; // from JobStockSummary (default not_issued)
+  /** When the job was raised — the age anchor for a job that has never had a goods movement. */
+  createdAt: Date;
+  /**
+   * Last goods movement (JobStockSummary.lastMovementAt), `null` if nothing has ever moved.
+   * For a RECONCILED job this is effectively its close-out date, which is what the Closed view shows —
+   * without it the date filter would be sorting and narrowing on a value the screen never displays, so
+   * nobody could tell whether it had done the right thing.
+   */
+  lastActivityAt: Date | null;
   kitLines: QueueKitLine[];
 }
 
@@ -659,6 +669,14 @@ export interface QueuePage {
   page: number;
   pageSize: number;
   totalPages: number;
+  /**
+   * The configured overdue window (Settings → Operations). Carried on the queue payload so the tab's
+   * "Waiting Nd" badge can colour against the SAME number the Overdue tab and the Inventory Hub count
+   * with. Sent rather than hardcoded client-side: a warehouse manager may not hold `settings.view`, so
+   * the tab cannot fetch Settings for itself, and a local constant would silently disagree the moment
+   * an admin moved the window.
+   */
+  overdueAfterDays: number;
 }
 
 // Queue status filters. "active" = anything still needing work (everything except reconciled); the
@@ -666,10 +684,29 @@ export interface QueuePage {
 export const QUEUE_STATUSES = ["active", "not_issued", "partially_issued", "issued", "awaiting_return", "reconciled"] as const;
 export type QueueStatusFilter = (typeof QUEUE_STATUSES)[number];
 
+// Queue ordering.
+//   "newest"        — job raised most recently first. The DB's own order, and the historical default.
+//   "activity_asc"  — least-recently-touched first: the NEGLECTED work. A job that has never moved
+//                     sorts by when it was raised, so a request sitting untouched for six weeks rises
+//                     to the top instead of sinking under newer ones. Nothing else surfaces it —
+//                     listOverdue is driven by issue MOVEMENTS, so a never-issued job can't appear there.
+//   "activity_desc" — most-recently-touched first; the sane default for Closed, where "what did we
+//                     finish last?" is the question, not "which job was raised last?".
+export const QUEUE_SORTS = ["newest", "activity_asc", "activity_desc"] as const;
+export type QueueSort = (typeof QUEUE_SORTS)[number];
+
 export interface QueueParams {
   warehouseId: string;
   status?: string; // one of QUEUE_STATUSES; defaults to "active"
   search?: string; // job number / name / customer / engineer (DB-filtered)
+  // Window on the job's LAST GOODS ACTIVITY (JobStockSummary.lastMovementAt) — "YYYY-MM-DD" or a full
+  // ISO datetime. For a reconciled job that timestamp IS the close-out, which is what makes the Closed
+  // view answerable ("what did we finish last month?") instead of an ever-growing scroll. There is no
+  // dedicated reconciledAt column, so this is the honest field to filter on — hence the neutral name:
+  // it means last activity in EVERY view, not "closed on".
+  activityFrom?: string;
+  activityTo?: string;
+  sort?: string; // one of QUEUE_SORTS; defaults to "newest"
   page?: number;
   pageSize?: number;
 }
@@ -736,6 +773,8 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
   assertWarehouseAccess(actor, params.warehouseId);
   const status = params.status ?? "active";
   if (!QUEUE_STATUSES.includes(status as QueueStatusFilter)) throw badRequest(`Invalid status filter "${status}".`);
+  const sort = (params.sort ?? "newest") as QueueSort;
+  if (!QUEUE_SORTS.includes(sort)) throw badRequest(`Invalid sort "${params.sort}".`);
   const pageSize = Math.min(Math.max(Math.trunc(params.pageSize ?? DEFAULT_QUEUE_PAGE_SIZE), 1), MAX_QUEUE_PAGE_SIZE);
   const search = params.search?.trim() || undefined;
 
@@ -752,7 +791,23 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
   const goodsStatusOf = (jobId: string) => statusByJob.get(jobId) ?? "not_issued";
   const matchesStatus = (gs: string) => (status === "active" ? gs !== "reconciled" : gs === status);
 
-  const byStatus = jobs.filter((j) => matchesStatus(goodsStatusOf(j.id)));
+  // 2a) Optional last-activity window. Applied HERE, from the summaries already loaded, rather than
+  // pushed into the job query: the timestamp lives on JobStockSummary, not Job. A job with no summary
+  // (or no movement yet) has no activity at all, so it can't fall inside any window — excluded rather
+  // than passed through, otherwise "reconciled in July" would also hand back never-touched jobs.
+  const activityFrom = parseFilterDate(params.activityFrom, "start");
+  const activityTo = parseFilterDate(params.activityTo, "end");
+  const activityByJob = new Map(summaries.map((s) => [s.jobId, s.lastMovementAt]));
+  const inActivityWindow = (jobId: string) => {
+    if (!activityFrom && !activityTo) return true;
+    const at = activityByJob.get(jobId);
+    if (!at) return false;
+    if (activityFrom && at < activityFrom) return false;
+    if (activityTo && at > activityTo) return false;
+    return true;
+  };
+
+  const byStatus = jobs.filter((j) => matchesStatus(goodsStatusOf(j.id)) && inActivityWindow(j.id));
 
   // 2b) Drop jobs the DB matched ONLY through the warehouse-blind misc arm of the kit-line filter
   // (see jobRepo.findActiveForGoodsManagement) once that misc work is finished. A misc line carries
@@ -797,11 +852,23 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
 
   const filtered = byStatus.filter((j) => hasWorkHere(j) || vanReturnableJobs.has(j.id));
 
-  // 3) Paginate (createdAt-desc order preserved from the query).
-  const total = filtered.length;
+  // 3) Order, then paginate. "newest" keeps the query's own createdAt-desc order; the activity sorts
+  // re-order the whole candidate set — correct only because it is already in memory here, and
+  // necessarily BEFORE the slice, or "longest waiting" would just re-shuffle whichever page you were
+  // looking at. A job that has never moved sorts by when it was raised, so it ages like any other
+  // rather than pinning to one end. Array.sort is stable, so ties keep the DB's order.
+  const ageKey = (j: (typeof jobs)[number]) => (activityByJob.get(j.id) ?? j.createdAt).getTime();
+  const ordered =
+    sort === "activity_asc"
+      ? [...filtered].sort((a, b) => ageKey(a) - ageKey(b))
+      : sort === "activity_desc"
+        ? [...filtered].sort((a, b) => ageKey(b) - ageKey(a))
+        : filtered;
+
+  const total = ordered.length;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const page = Math.min(Math.max(Math.trunc(params.page ?? 1), 1), totalPages);
-  const pageJobs = filtered.slice((page - 1) * pageSize, page * pageSize);
+  const pageJobs = ordered.slice((page - 1) * pageSize, page * pageSize);
 
   // 4) Enrich ONLY the page, in batched queries (movements grouped by job; IRM balances; customer qty).
   const movementsByJob = new Map<string, Awaited<ReturnType<typeof goodsManagementRepo.findMovementsByJobs>>>();
@@ -864,11 +931,13 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
         (job.assignedEngineer ? `${job.assignedEngineer.firstName} ${job.assignedEngineer.lastName}`.trim() : null),
       status: job.status,
       goodsStatus: goodsStatusOf(job.id),
+      createdAt: job.createdAt,
+      lastActivityAt: activityByJob.get(job.id) ?? null,
       kitLines,
     };
   });
 
-  return { rows, total, page, pageSize, totalPages };
+  return { rows, total, page, pageSize, totalPages, overdueAfterDays: await getOverdueAfterDays() };
 }
 
 export async function getJobGoods(jobId: string, actor?: AuditActor): Promise<JobGoodsDetail> {
@@ -1593,8 +1662,35 @@ export async function getDamagedHistory(
 }
 
 // ── Overdue holdings ──────────────────────────────────────────────────────────────────────────
-// Issue movements older than `days` whose job's engineer still holds stock
-// (goodsStatus !== "reconciled").
+// Jobs whose FIRST issue movement is older than `days` and that still have stock genuinely out with
+// the engineer — outstanding = issued − used − returned, summed over the stock-tracked kit lines.
+//
+// It used to test `goodsStatus !== "reconciled"` and call that "still holds stock". Those are not the
+// same thing: posting a return sets the status to "awaiting_return" unconditionally (see postReturn)
+// and only an explicit Close & reconcile clears it, so a job whose stock had ALL come back sat in this
+// list for as long as nobody closed it, day count climbing, offering to write off as "lost" stock that
+// was already on the shelf. A chase list has to contain only what actually needs chasing, or people
+// stop believing it.
+
+const DEFAULT_OVERDUE_PAGE_SIZE = 20;
+const MAX_OVERDUE_PAGE_SIZE = 100;
+
+export interface OverdueParams {
+  warehouseId?: string;
+  /** Job number, job name or engineer name. */
+  search?: string;
+  page?: number;
+  pageSize?: number;
+}
+
+export interface OverduePage {
+  rows: OverdueRow[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
 export interface OverdueRow {
   jobId: string;
   jobNumber: string;
@@ -1602,7 +1698,13 @@ export interface OverdueRow {
   engineerId: string;
   engineerName: string;
   warehouseId: string | null;
+  /** The issue movement this row reports — its code is shown, and it keys the row in the UI. */
+  movementId: string;
+  movementCode: string;
   issuedAt: Date;
+  /** Whole days since `issuedAt`, computed SERVER-side so it can't disagree with the cutoff that
+   *  selected the row (a browser clock running slow would otherwise show 13 days for a 14-day row). */
+  daysOut: number;
   goodsStatus: string;
   lines: { source: string; irmItemId: string | null; customerStockEntryId: string | null; itemName: string; qty: number }[];
 }
@@ -1611,18 +1713,54 @@ export interface OverdueRow {
 // passes it; without it the tab showed every warehouse the actor could reach, so an admin standing
 // in Warehouse A's tab was chasing Warehouse B's overdue jobs. The actor's own warehouse-access
 // check below still applies on top — this narrows WHAT is asked for, it does not widen access.
-export async function listOverdue(actor?: AuditActor, days = 14, warehouseId?: string): Promise<OverdueRow[]> {
-  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-  const movements = await goodsManagementRepo.findRecentMovementsForOverdue(cutoff, warehouseId);
+/**
+ * The work, against an ALREADY-RESOLVED window. Private on purpose: `days` is not a caller's choice.
+ *
+ * There was briefly a public override — a `days` parameter on the endpoint and on this function. It is
+ * gone, because it was the seam through which this screen's one real bug could return: pass a number
+ * below the configured threshold and you get a list of jobs that are NOT overdue by the company's rule,
+ * which is exactly what the deleted UI picker did. Settings is the only place the window is chosen, so
+ * "overdue" means one thing everywhere. If an audit report ever needs a different window, add a
+ * parameter then, deliberately, with the window shown on whatever renders it.
+ */
+async function listOverdueWithin(days: number, actor?: AuditActor, opts: OverdueParams = {}): Promise<OverduePage> {
+  const now = Date.now();
+  const cutoff = new Date(now - days * 24 * 60 * 60 * 1000);
+  const pageSize = Math.min(Math.max(Math.trunc(opts.pageSize ?? DEFAULT_OVERDUE_PAGE_SIZE), 1), MAX_OVERDUE_PAGE_SIZE);
+  const empty = (): OverduePage => ({ rows: [], total: 0, page: 1, pageSize, totalPages: 1 });
 
-  // Group by job, filter to jobs not yet reconciled.
-  const seenJobIds = new Set<string>();
-  const rows: OverdueRow[] = [];
+  // 1) Start from OPEN jobs, not from the ledger. This is the read's cost ceiling: work in flight,
+  // rather than every issue movement ever posted. Reversing these two steps is what used to make the
+  // Overdue tab (and, once the Hub shared it, the Inventory Hub) slower every month regardless of how
+  // much stock was actually out.
+  //
+  // A job is open unless its summary says `reconciled`. Note the direction: jobs are EXCLUDED by proof
+  // of reconciliation, never included by proof of openness. A job with no summary row at all therefore
+  // stays in — deliberately, and twice-decided in this codebase's history. `recomputeGoodsStatus`
+  // (the engineer-transfer attribution path) is best-effort and swallows its own failure, so an
+  // unreturned issue CAN exist with no summary; excluding it would drop the one thing a chase list must
+  // never drop. listQueue makes the same choice, defaulting a missing summary to "not_issued".
+  const activeJobIds = (await jobRepo.findGoodsActiveJobIds()).map((j) => j.id);
+  if (activeJobIds.length === 0) return empty();
+  const goodsStatusByJob = new Map(
+    (await goodsManagementRepo.getSummariesByJobs(activeJobIds)).map((s) => [s.jobId, s.goodsStatus]),
+  );
+  const openJobIds = activeJobIds.filter((id) => goodsStatusByJob.get(id) !== "reconciled");
+  if (openJobIds.length === 0) return empty();
 
+  // 2) …then their issue movements older than the window, oldest first.
+  const movements = await goodsManagementRepo.findOldIssueMovementsForJobs(
+    openJobIds,
+    cutoff,
+    opts.warehouseId,
+  );
+  if (movements.length === 0) return empty();
+
+  // 3) One row per job — its FIRST issue, since that is the one that has been out longest. Warehouse
+  // access is checked here so an inaccessible job never reaches the count either.
+  const firstIssueByJob = new Map<string, (typeof movements)[number]>();
   for (const m of movements) {
-    if (seenJobIds.has(m.jobId)) continue;
-
-    // Check warehouse scope access.
+    if (firstIssueByJob.has(m.jobId)) continue;
     if (m.warehouseId) {
       try {
         assertWarehouseAccess(actor, m.warehouseId);
@@ -1630,32 +1768,118 @@ export async function listOverdue(actor?: AuditActor, days = 14, warehouseId?: s
         continue; // skip movements the actor can't access
       }
     }
+    firstIssueByJob.set(m.jobId, m);
+  }
+  const candidateJobIds = [...firstIssueByJob.keys()];
+  if (candidateJobIds.length === 0) return empty();
 
-    const summary = await goodsManagementRepo.getSummary(m.jobId);
-    if (summary?.goodsStatus === "reconciled") continue;
-
-    seenJobIds.add(m.jobId);
-
-    rows.push({
-      jobId: m.jobId,
-      jobNumber: m.job?.jobNumber ?? m.jobId,
-      jobName: m.job?.name ?? "",
-      engineerId: m.engineerId,
-      engineerName: m.engineerName,
-      warehouseId: m.warehouseId,
-      issuedAt: m.createdAt,
-      goodsStatus: summary?.goodsStatus ?? "issued",
-      lines: m.items.map((l) => ({
-        source: l.source,
-        irmItemId: l.irmItemId,
-        customerStockEntryId: l.customerStockEntryId,
-        itemName: l.itemName,
-        qty: l.qty,
-      })),
-    });
+  // 4) Is anything actually still out? Netted per kit line over the job's FULL movement history —
+  // issued − used − returned — exactly the sum postConsume uses to decide whether a job can
+  // auto-reconcile. `misc` lines are skipped: free-text, never stock-tracked, so they can't be handed
+  // back and would hold a job in this list permanently. Both reads are batched over the candidates.
+  const allMovementsByJob = new Map<string, Awaited<ReturnType<typeof goodsManagementRepo.findMovementsByJobs>>>();
+  for (const m of await goodsManagementRepo.findMovementsByJobs(candidateJobIds)) {
+    const list = allMovementsByJob.get(m.jobId);
+    if (list) list.push(m);
+    else allMovementsByJob.set(m.jobId, [m]);
+  }
+  const stillOut = new Set<string>();
+  for (const j of await jobRepo.findKitLineTypesByJobs(candidateJobIds)) {
+    const jobMovements = allMovementsByJob.get(j.id) ?? [];
+    const outstanding = j.kitLines
+      .filter((kl) => kl.lineType !== "misc")
+      .reduce((total, kl) => {
+        const s = kitLineSplit(jobMovements, kl.id);
+        return total + Math.max(0, s.issued - s.used - s.returned);
+      }, 0);
+    if (outstanding > 0) stillOut.add(j.id);
   }
 
-  return rows;
+  // 5) Search, then count, then slice — in that order, so `total` and the page numbers describe the
+  // SAME set the user is looking at.
+  //
+  // DELIBERATE DIVERGENCE: every other searchable list in this codebase pushes the term into Prisma via
+  // `escapeRegex` (utils/search.ts) — this one matches in memory. It has to: the still-out test above
+  // is computed from movement tallies, not stored, so a DB-side `contains` could only filter the raw
+  // candidate pool and `total` would then count rows the user can't see. Matching after that filter is
+  // what keeps the count honest. A plain substring test also can't be broken by a `(` or `*`, which is
+  // the hazard escapeRegex exists to neutralise. If this ever moves DB-side, it must move BELOW the
+  // still-out filter, which means denormalising outstanding quantity first.
+  const term = opts.search?.trim().toLowerCase();
+  const matched = [...firstIssueByJob.values()]
+    .filter((m) => stillOut.has(m.jobId))
+    .filter((m) =>
+      !term ||
+      [m.job?.jobNumber, m.job?.name, m.engineerName].some((f) => f?.toLowerCase().includes(term)),
+    );
+
+  const total = matched.length;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const page = Math.min(Math.max(Math.trunc(opts.page ?? 1), 1), totalPages);
+  // Already oldest-first from the query, so the page order is longest-overdue-first for free.
+  const pageMovements = matched.slice((page - 1) * pageSize, page * pageSize);
+
+  const rows: OverdueRow[] = pageMovements.map((m) => ({
+    jobId: m.jobId,
+    jobNumber: m.job?.jobNumber ?? m.jobId,
+    jobName: m.job?.name ?? "",
+    engineerId: m.engineerId,
+    engineerName: m.engineerName,
+    warehouseId: m.warehouseId,
+    movementId: m.id,
+    movementCode: m.code,
+    issuedAt: m.createdAt,
+    daysOut: Math.max(0, Math.floor((now - m.createdAt.getTime()) / 86_400_000)),
+    goodsStatus: goodsStatusByJob.get(m.jobId) ?? "issued",
+    lines: m.items.map((l) => ({
+      source: l.source,
+      irmItemId: l.irmItemId,
+      customerStockEntryId: l.customerStockEntryId,
+      itemName: l.itemName,
+      qty: l.qty,
+    })),
+  }));
+
+  return { rows, total, page, pageSize, totalPages };
+}
+
+/** One page of overdue rows for the configured window. The window is not a parameter — see above. */
+export async function listOverdue(actor?: AuditActor, opts: OverdueParams = {}): Promise<OverduePage> {
+  return listOverdueWithin(await getOverdueAfterDays(), actor, opts);
+}
+
+/**
+ * How many jobs are overdue, company-wide — the Inventory Hub's "N overdue" on the With-engineers card.
+ *
+ * Shares the list's definition so the card and the tab can never disagree, but asks for a ONE-row page:
+ * it wants `total`, not the rows, and building a few hundred row objects just to read `.length` was
+ * work the Hub's page load had no reason to pay for. It used to be
+ * `jobStockMovement.count({ direction: "issue", createdAt: { lt: cutoff } })`, which answered a
+ * different question in three ways — it counted MOVEMENTS (a job issued in three scans counted three),
+ * it never excluded reconciled jobs, and it never checked whether anything was still out.
+ */
+export async function getOverdueSummary(actor?: AuditActor): Promise<{ count: number; days: number }> {
+  // Asks for a ONE-row page: it wants `total` and the window, not the rows, and building hundreds of
+  // row objects to read a length off them was work these callers had no reason to pay for. Passing the
+  // actor scopes the count to warehouses they can reach (omit it for the company-wide read).
+  const { total, days } = await getOverdueView(actor, { pageSize: 1 });
+  return { count: total, days };
+}
+
+/**
+ * The Overdue tab's payload: a page of rows AND the window they were selected with.
+ *
+ * The window is returned because the screen must not assume it — it lives in Settings, so a page that
+ * printed a hardcoded "14" would start lying the moment an admin changed the value. Resolved once here
+ * (rather than read again inside the list) so the number the UI prints is provably the number the query
+ * ran with, from a single read.
+ */
+export async function getOverdueView(
+  actor?: AuditActor,
+  opts: OverdueParams = {},
+): Promise<{ days: number } & OverduePage> {
+  const days = await getOverdueAfterDays();
+  return { days, ...(await listOverdueWithin(days, actor, opts)) };
 }
 
 // ── Close & reconcile ─────────────────────────────────────────────────────────────────────────
@@ -1666,6 +1890,7 @@ export async function listOverdue(actor?: AuditActor, days = 14, warehouseId?: s
 
 interface UnaccountedItem {
   itemName: string;
+  itemCode: string | null;
   qty: number;
   source: "irm" | "customer";
   irmItemId: string | null;
@@ -1674,7 +1899,7 @@ interface UnaccountedItem {
   customerId: string | null;
 }
 
-type TallyEntry = { jobKitLineId: string; itemName: string; source: "irm" | "customer"; irmItemId: string | null; customerStockEntryId: string | null; warehouseId: string | null; issued: number; consumed: number; returnedGood: number; returnedDamaged: number };
+type TallyEntry = { jobKitLineId: string; itemName: string; itemCode: string | null; source: "irm" | "customer"; irmItemId: string | null; customerStockEntryId: string | null; warehouseId: string | null; issued: number; consumed: number; returnedGood: number; returnedDamaged: number };
 
 // Tally goods for reconciliation, keyed by the job's CURRENT, stock-tracked kit lines (jobKitLineId).
 // Keying by kit line — not by item id — keeps this consistent with the held / queue / job-pack views
@@ -1691,6 +1916,11 @@ function computeTallies(
     tallies.set(kl.id, {
       jobKitLineId: kl.id,
       itemName: kl.itemName,
+      // The catalogue code, from relations the job already carries. `itemName` is a snapshot frozen on
+      // the kit line and is NOT reliably unique — the catalogue holds e.g. IRM-0002 "Cat6 U/UTP Cable
+      // 305m Box" and IRM-0004 "CAT6 U/UTP Cable, 305m box", which read as the same thing. Writing off
+      // the wrong one is irreversible, so the code travels with the row.
+      itemCode: kl.irmItem?.code ?? kl.seCode ?? null,
       source: kl.irmItemId ? "irm" : "customer",
       irmItemId: kl.irmItemId ?? null,
       customerStockEntryId: kl.customerStockEntryId ?? null,
@@ -1724,7 +1954,7 @@ export async function closeReconcile(
   jobId: string,
   input: CloseReconcileInput,
   actor?: AuditActor,
-): Promise<{ summary: { goodsStatus: string; workSummary: string | null; lastMovementAt: Date | null }; unaccounted: { itemName: string; qty: number }[] }> {
+): Promise<{ summary: { goodsStatus: string; workSummary: string | null; lastMovementAt: Date | null }; unaccounted: { itemName: string; itemCode: string | null; qty: number }[] }> {
   const job = await loadJobOrThrow(jobId);
   const existingSummary = await goodsManagementRepo.getSummary(job.id);
 
@@ -1767,24 +1997,28 @@ export async function closeReconcile(
     else talliesByItem.set(key, [t]);
   }
 
+  // ONE entry per ITEM, not per kit line. The same item can sit on two kit lines of a job and both be
+  // short, which used to produce two rows with the identical name and different numbers — indis-
+  // tinguishable from a bug on a screen asking you to approve a permanent loss. Summing is safe: the
+  // drain below keys off irmItemId / customerStockEntryId (never the kit line), the lost movement lines
+  // carry `jobKitLineId: null` anyway, and `warehouseId`/`customerId` on this shape are unread.
   const unaccountedItems: UnaccountedItem[] = [];
   for (const group of talliesByItem.values()) {
-    let remainingHeld = group[0].source === "irm" ? irmHeld.get(group[0].irmItemId!) ?? 0 : cseHeld.get(group[0].customerStockEntryId!) ?? 0;
-    for (const t of group) {
-      const rawRemaining = Math.max(0, t.issued - t.consumed - t.returnedGood - t.returnedDamaged);
-      const qty = Math.min(rawRemaining, remainingHeld); // never more than the engineer truly holds
-      remainingHeld -= qty;
-      if (qty > 0) {
-        unaccountedItems.push({
-          itemName: t.itemName,
-          qty,
-          source: t.source,
-          irmItemId: t.irmItemId,
-          customerStockEntryId: t.customerStockEntryId,
-          warehouseId: t.warehouseId,
-          customerId: null,
-        });
-      }
+    const held = group[0].source === "irm" ? irmHeld.get(group[0].irmItemId!) ?? 0 : cseHeld.get(group[0].customerStockEntryId!) ?? 0;
+    const rawRemaining = group.reduce((n, t) => n + Math.max(0, t.issued - t.consumed - t.returnedGood - t.returnedDamaged), 0);
+    const qty = Math.min(rawRemaining, held); // never more than the engineer truly holds
+    if (qty > 0) {
+      const t = group[0];
+      unaccountedItems.push({
+        itemName: t.itemName,
+        itemCode: t.itemCode,
+        qty,
+        source: t.source,
+        irmItemId: t.irmItemId,
+        customerStockEntryId: t.customerStockEntryId,
+        warehouseId: t.warehouseId,
+        customerId: null,
+      });
     }
   }
 
@@ -1796,11 +2030,21 @@ export async function closeReconcile(
       summary: existingSummary
         ? { goodsStatus: existingSummary.goodsStatus, workSummary: existingSummary.workSummary, lastMovementAt: existingSummary.lastMovementAt }
         : { goodsStatus: "awaiting_return", workSummary: null, lastMovementAt: null },
-      unaccounted: unaccountedItems.map((u) => ({ itemName: u.itemName, qty: u.qty })),
+      unaccounted: unaccountedItems.map((u) => ({ itemName: u.itemName, itemCode: u.itemCode, qty: u.qty })),
     };
   }
 
   // Either balanced (no unaccounted) or writeOffLost = true.
+  //
+  // One reason string, written to every ledger row this write-off produces and quoted in the audit
+  // entry, so the stock trail and the audit log tell the same story. Empty when nothing is being
+  // written off (a clean reconcile has no reason to give).
+  const wroteOffAnything = unaccountedItems.length > 0 && input.writeOffLost === true;
+  const writeOffNote = wroteOffAnything
+    ? [input.writeOffReason, input.writeOffNotes?.trim()].filter(Boolean).join(" — ")
+    : null;
+  const writeOffUnits = wroteOffAnything ? unaccountedItems.reduce((n, u) => n + u.qty, 0) : 0;
+
   // Build lost movement lines for unaccounted items.
   // condition: "lost" distinguishes these write-off consume lines from normal consumes in the audit ledger.
   const lostLines: goodsManagementRepo.MovementLineRow[] = unaccountedItems.map((u) => ({
@@ -1855,6 +2099,10 @@ export async function closeReconcile(
                 sourceId: movementId,
                 sourceCode: code,
                 balanceAfter: eng.quantityOnHand,
+                // The WHY, on the ledger row itself. Without it the stock trail records that units
+                // vanished and who signed it off, but never why — which is the one question asked
+                // about a write-off months later.
+                notes: writeOffNote,
                 createdBy: actorEmail,
               });
             }
@@ -1879,6 +2127,7 @@ export async function closeReconcile(
                 sourceId: movementId,
                 sourceCode: code,
                 balanceAfter: hold.quantityOnHand,
+                notes: writeOffNote, // same reason trail as the company-stock path above
                 createdBy: actorEmail,
               });
             }
@@ -1894,7 +2143,22 @@ export async function closeReconcile(
     });
   }
 
-  audit.record({ actor, action: "goods_management.reconciled", targetType: "job", targetId: job.id, targetLabel: job.jobNumber ?? job.id });
+  // A write-off gets its OWN action, not the same "reconciled" line as a clean close. Both used to
+  // record `goods_management.reconciled` with just the job number, so the audit log could not tell a
+  // job that balanced from one where units were booked as lost — you had to go digging in the engineer
+  // ledger to find out. The label carries the quantity and the reason, which is what anyone auditing
+  // shrinkage actually needs.
+  audit.record(
+    wroteOffAnything
+      ? {
+          actor,
+          action: "goods_management.written_off_lost",
+          targetType: "job",
+          targetId: job.id,
+          targetLabel: `${job.jobNumber ?? job.id} — ${writeOffUnits} unit${writeOffUnits === 1 ? "" : "s"} written off as lost: ${writeOffNote}`,
+        }
+      : { actor, action: "goods_management.reconciled", targetType: "job", targetId: job.id, targetLabel: job.jobNumber ?? job.id },
+  );
 
   // Realtime: notify the engineer + all office staff.
   const reconcilePayload = { jobId: job.id, direction: "reconcile" };

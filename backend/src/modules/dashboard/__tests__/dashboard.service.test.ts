@@ -40,8 +40,11 @@ vi.mock("#modules/audit/audit.repository.js", () => ({ findMany: vi.fn(async () 
 vi.mock("#modules/goods-in/goods-in.repository.js", () => ({
   completedReceiptsSince: vi.fn(async () => [{ at: new Date() }, { at: new Date(Date.now() - 20 * 86_400_000) }]),
 }));
-vi.mock("#modules/goods-management/goods-management.repository.js", () => ({
-  countOverdueUnreconciledJobs: vi.fn(async () => 6),
+// The overdue card now shares the Goods Management SERVICE's definition instead of counting
+// unreconciled jobs itself, so it reports the window it actually counted with rather than a constant
+// this file used to have to keep in step by hand.
+vi.mock("#modules/goods-management/goods-management.service.js", () => ({
+  getOverdueSummary: vi.fn(async () => ({ count: 6, days: 21 })),
 }));
 
 // warehouseScopeFilter → undefined (unscoped) for a plain admin.
@@ -81,7 +84,9 @@ describe("buildDashboardSummary", () => {
     // 2 completed GRNs mocked: one today (inside the 7-day pulse), one 20 days ago (outside).
     expect(summary.cards.goodsReceived?.count).toBe(1);
     expect(summary.cards.goodsReceived?.weeklyReceived).toHaveLength(8);
-    expect(summary.cards.overdueHoldings).toEqual({ count: 6, days: 14 });
+    // `days` comes from the shared summary (Settings-driven), NOT a constant in dashboard.service —
+    // 21 here proves the card reports whatever window the count was actually taken with.
+    expect(summary.cards.overdueHoldings).toEqual({ count: 6, days: 21 });
     expect(typeof summary.generatedAt).toBe("string");
     expect(summary.errors ?? []).toEqual([]); // nothing failed
   });

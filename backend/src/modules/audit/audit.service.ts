@@ -4,6 +4,7 @@ import * as auditLogRepo from "./audit.repository.js";
 import type { AuditListFilters } from "./audit.repository.js";
 import { getAccessibleWarehouseIds } from "../../lib/warehouse-access.js";
 import { csvEscape } from "../../utils/csv.js";
+import { parseFilterDate } from "../../utils/filter-date.js";
 
 // Actor is snapshotted (id + email) so an entry stays meaningful even if that
 // account is later renamed or removed.
@@ -93,22 +94,6 @@ export interface PagedAuditLogs {
   totalPages: number;
 }
 
-// Parse a filter date. A date-only value ("YYYY-MM-DD", what the UI's date input
-// sends) is widened to the whole UTC day: the `start` edge → 00:00:00.000, the
-// `end` edge → 23:59:59.999. This makes a "To" date INCLUSIVE of that day's events
-// instead of cutting off at midnight, and keeps the range timezone-stable (the
-// audit timestamps are stored in UTC). A full ISO datetime is used as-is. Invalid
-// input → undefined (no filter).
-function parseDate(value: string | undefined, edge: "start" | "end"): Date | undefined {
-  if (!value) return undefined;
-  const trimmed = value.trim();
-  const iso = /^\d{4}-\d{2}-\d{2}$/.test(trimmed)
-    ? `${trimmed}T${edge === "end" ? "23:59:59.999" : "00:00:00.000"}Z`
-    : trimmed;
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? undefined : d;
-}
-
 // SINGLE source of filter normalization — used by BOTH list and export so they
 // can never diverge. Invalid values are dropped (no filter) rather than throwing:
 // a typo'd query returns an unfiltered result, never a 500.
@@ -123,8 +108,8 @@ function normalizeFilters(params: ListAuditParams): AuditListFilters {
     actorType,
     targetType: params.targetType?.trim() || undefined,
     targetId: params.targetId?.trim() || undefined,
-    from: parseDate(params.from, "start"),
-    to: parseDate(params.to, "end"),
+    from: parseFilterDate(params.from, "start"),
+    to: parseFilterDate(params.to, "end"),
   };
 }
 

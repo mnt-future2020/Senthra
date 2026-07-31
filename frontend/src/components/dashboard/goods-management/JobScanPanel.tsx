@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 
 import * as gmService from "@/services/goodsManagement.service";
+import { WriteOffLostModal, type WriteOffTarget } from "./WriteOffLostModal";
 import { useDashboard } from "@/hooks/useDashboard";
 import { readFileAsDataUrl } from "@/lib/image";
 import { ScannerInput } from "./ScannerInput";
@@ -72,7 +73,6 @@ export function JobScanPanel({
   jobNumber,
   jobName,
   warehouseId,
-  warehouseCode: _warehouseCode,
   miscLines = [],
   onBack,
 }: {
@@ -80,7 +80,6 @@ export function JobScanPanel({
   jobNumber: string;
   jobName: string;
   warehouseId: string;
-  warehouseCode: string;
   miscLines?: QueueKitLine[]; // free-text kit lines — issued by count (no barcode)
   onBack: () => void;
 }) {
@@ -94,9 +93,10 @@ export function JobScanPanel({
 
   // Reconcile result
   const [unaccounted, setUnaccounted] = React.useState<
-    { itemName: string; qty: number }[] | null
+    { itemName: string; itemCode: string | null; qty: number }[] | null
   >(null);
-  const [writeOffConfirm, setWriteOffConfirm] = React.useState(false);
+  // The modal owns confirmation now; this just says which job it is confirming for.
+  const [writeOffTarget, setWriteOffTarget] = React.useState<WriteOffTarget | null>(null);
 
   // Damage-photo picker refs (one per line, managed by key via Map)
   const photoRefs = React.useRef<Map<string, HTMLInputElement>>(new Map());
@@ -363,13 +363,14 @@ export function JobScanPanel({
   };
 
   // ── Close & reconcile ─────────────────────────────────────────────────────
-  const onReconcile = async (writeOffLost = false) => {
+  // Preview only. Anything still held comes back as `unaccounted` and the job stays open; writing it
+  // off is a separate, deliberate step through WriteOffLostModal.
+  const onReconcile = async () => {
     setReconciling(true);
     try {
-      const result = await gmService.closeReconcile(jobId, writeOffLost || undefined);
-      if (result.unaccounted.length > 0 && !writeOffLost) {
+      const result = await gmService.closeReconcile(jobId);
+      if (result.unaccounted.length > 0) {
         setUnaccounted(result.unaccounted);
-        setWriteOffConfirm(false);
       } else {
         pushToast("Job reconciled — stock balanced.", "success");
         onBack();
@@ -744,7 +745,7 @@ export function JobScanPanel({
         {direction === "return" && (
           <button
             type="button"
-            onClick={() => onReconcile(false)}
+            onClick={() => onReconcile()}
             disabled={reconciling || posting}
             className={secondaryBtn}
           >
@@ -778,56 +779,32 @@ export function JobScanPanel({
               </li>
             ))}
           </ul>
-          {!writeOffConfirm ? (
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => setWriteOffConfirm(true)}
-                className="rounded-xl bg-[var(--neg)] px-4 py-2 text-xs font-extrabold text-white transition-all hover:opacity-90"
-              >
-                Write off as lost
-              </button>
-              <button
-                type="button"
-                onClick={() => setUnaccounted(null)}
-                className={secondaryBtn}
-              >
-                Leave open
-              </button>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              <p className="text-xs font-bold text-[var(--neg)]">
-                Confirm: mark these {unaccounted.reduce((s, u) => s + u.qty, 0)}{" "}
-                units as lost? This cannot be undone.
-              </p>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => onReconcile(true)}
-                  disabled={reconciling}
-                  className="rounded-xl bg-[var(--neg)] px-4 py-2 text-xs font-extrabold text-white transition-all hover:opacity-90 disabled:opacity-60"
-                >
-                  {reconciling ? (
-                    <Loader2 className="inline h-3.5 w-3.5 animate-spin" />
-                  ) : null}{" "}
-                  Confirm write-off
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setWriteOffConfirm(false);
-                    setUnaccounted(null);
-                  }}
-                  className={secondaryBtn}
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
+          <div className="flex gap-2">
+            {/* Hands off to the shared modal, which shows the same list again alongside the REQUIRED
+                reason. The Overdue tab uses the same component, so a write-off asks the same question
+                wherever it is started — this panel used to confirm inline with no reason at all. */}
+            <button
+              type="button"
+              onClick={() => setWriteOffTarget({ jobId, jobNumber, unaccounted })}
+              className="rounded-xl bg-[var(--neg)] px-4 py-2 text-xs font-extrabold text-white transition-all hover:opacity-90"
+            >
+              Write off as lost
+            </button>
+            <button type="button" onClick={() => setUnaccounted(null)} className={secondaryBtn}>
+              Leave open
+            </button>
+          </div>
         </div>
       )}
+
+      <WriteOffLostModal
+        target={writeOffTarget}
+        onClose={() => setWriteOffTarget(null)}
+        onWrittenOff={() => {
+          pushToast("Job reconciled — stock written off as lost.", "success");
+          onBack();
+        }}
+      />
     </div>
   );
 }

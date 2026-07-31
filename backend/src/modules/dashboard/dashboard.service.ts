@@ -12,7 +12,7 @@ import * as invRepo from "#modules/inventory/inventory.repository.js";
 import * as inventoryService from "#modules/inventory/inventory.service.js";
 import * as auditRepo from "#modules/audit/audit.repository.js";
 import * as grnRepo from "#modules/goods-in/goods-in.repository.js";
-import * as gmRepo from "#modules/goods-management/goods-management.repository.js";
+import * as gmService from "#modules/goods-management/goods-management.service.js";
 import { bucketByWeek, bucketByMonth, bucketValueByWeek, bucketValueByDay } from "../../utils/time-buckets.js";
 import { compareWorklist, type WorklistItem } from "./worklist.js";
 import type { DashboardSummary, DashboardCards, DashboardCharts, SpendPeriod } from "./dashboard.types.js";
@@ -23,7 +23,8 @@ const SPEND_MONTHS = 12;
 const SPEND_90D_WEEKS = 13; // 90 days ≈ 13 ISO weeks
 const SPEND_30D_DAYS = 30;
 const GRN_PULSE_DAYS = 7; // "Goods received" card counts completed GRNs in this window
-const OVERDUE_HOLDINGS_DAYS = 14; // must match the Goods Management "Overdue" view's default
+// (The overdue window used to be duplicated here as a constant that "must match" Goods Management's.
+//  It now comes from Settings via getOverdueSummary, so there is nothing left to keep in step.)
 // Each source queue is DB-capped at this many rows (see the repos' `take:`). A queue that returns
 // EXACTLY this many may have more behind it, so `total` becomes a floor and we flag `truncated`.
 const WORKLIST_QUERY_CAP = 50;
@@ -178,13 +179,12 @@ export async function buildDashboardSummary(
         weeklyReceived: bucketByWeek(rows, SPARK_WEEKS, now),
       };
     }),
-    section("overdueHoldings", canGm, async () => {
-      const cutoff = new Date(now.getTime() - OVERDUE_HOLDINGS_DAYS * 86_400_000);
-      return {
-        count: await gmRepo.countOverdueUnreconciledJobs(cutoff, scope),
-        days: OVERDUE_HOLDINGS_DAYS,
-      };
-    }),
+    // Shares the Goods Management definition rather than reimplementing it. It used to hold its own
+    // fixed 14-day window and count "not reconciled" jobs, which meant a delivery already back on the
+    // shelf still showed here, and the number silently diverged the moment the window became a Settings
+    // value. Same source as the Overdue tab and the Inventory Hub card now — one definition, and the
+    // window it reports is the window it counted with.
+    section("overdueHoldings", canGm, async () => gmService.getOverdueSummary(actor)),
     section("poPipeline", canPo, async () => poRepo.pipelineCounts(scope)),
     section("spendTrend", canPo, async () => bucketSpend(await poRepo.issuedSpendSince(spendSince, scope))),
     section("activity", canAudit, async () => {

@@ -57,6 +57,9 @@ const VERB_TONE: Record<string, ActionTone> = {
   issued: "update",
   return_posted: "update",
   reconciled: "neutral",
+  // Booking stock as lost is a write-off, not a tidy-up: it reads negative so it never blends into the
+  // neutral "reconciled" lines it used to be recorded as.
+  written_off_lost: "delete",
   damaged_restored: "create",
   // Its exact inverse — units leaving usable stock. Negative, so the pair reads as opposites in the
   // trail instead of one being coloured and the other falling through to the default grey.

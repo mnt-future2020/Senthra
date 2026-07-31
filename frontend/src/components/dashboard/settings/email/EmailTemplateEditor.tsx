@@ -186,6 +186,14 @@ export function EmailTemplateEditor({
   };
 
   const save = async () => {
+    // Mirrors updateTemplateSchema — all three are min(1) server-side. Without this check the user
+    // gets a raw API error on a field that never showed it was required, and (before the schema was
+    // tightened) an empty message body saved silently and sent blank emails.
+    const blank = !name.trim() ? "Template name" : !subject.trim() ? "Subject" : !message.trim() ? "Message" : null;
+    if (blank) {
+      setMsg({ type: "error", text: `${blank} can't be empty.` });
+      return;
+    }
     setSaving(true);
     setMsg(null);
     try {
@@ -259,8 +267,11 @@ export function EmailTemplateEditor({
     }
   };
 
-  const tabs: { id: EditorTab; label: string; icon: React.ElementType }[] = [
-    { id: "message", label: "Message", icon: FileText },
+  // The tab strip doubles as the label for the message textarea, so the required mark rides on the
+  // Message tab — there is no other label to hang it off. Plain `currentColor` rather than the usual
+  // red: the active tab is white-on-accent, where a red asterisk is close to unreadable.
+  const tabs: { id: EditorTab; label: string; icon: React.ElementType; required?: boolean }[] = [
+    { id: "message", label: "Message", icon: FileText, required: true },
     { id: "preview", label: "Preview", icon: Eye },
   ];
 
@@ -304,7 +315,7 @@ export function EmailTemplateEditor({
           </ReadOnlyNotice>
         )}
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="Template name">
+          <Field label="Template name" required>
             <input
               className={inputCls}
               value={name}
@@ -312,7 +323,7 @@ export function EmailTemplateEditor({
               disabled={!canManage}
             />
           </Field>
-          <Field label="Subject" hint="The subject line. Variables allowed.">
+          <Field label="Subject" hint="The subject line. Variables allowed." required>
             <input
               ref={subjectRef}
               className={inputCls}
@@ -366,6 +377,7 @@ export function EmailTemplateEditor({
                 key={t.id}
                 type="button"
                 onClick={() => openTab(t.id)}
+                aria-label={t.required ? `${t.label}, required` : undefined}
                 className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-bold transition-all ${
                   tab === t.id
                     ? "bg-[var(--accent)] text-white shadow-xs"
@@ -374,6 +386,7 @@ export function EmailTemplateEditor({
               >
                 <t.icon className="h-3.5 w-3.5" />
                 {t.label}
+                {t.required && <span aria-hidden>*</span>}
               </button>
             ))}
           </div>

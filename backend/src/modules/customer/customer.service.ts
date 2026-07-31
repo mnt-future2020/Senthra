@@ -1911,9 +1911,9 @@ export async function listCustomerSiteKeys(customerId: string): Promise<{ name: 
   return customerRepo.findSitesByCustomer(customerId);
 }
 
-// PORTAL dashboard summary: company header + live counts + a few recent requests.
-// Everything here is derivable today; richer cards (stock movements, allocations)
-// arrive with the inventory module and are surfaced as "coming soon" on the client.
+// PORTAL dashboard summary: company header + live counts + per-warehouse holdings + a few recent
+// requests. Everything here is derived from real data — the client renders no placeholders, so any
+// field added must actually be computable rather than promised.
 export interface CustomerOverview {
   customer: {
     id: string;

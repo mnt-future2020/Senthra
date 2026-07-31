@@ -650,6 +650,16 @@ export async function updateJob(id: string, input: UpdateJobInput, actor?: Audit
   if (input.customerId !== undefined && input.customerId !== existing.customerId) {
     throw badRequest("A job's customer can't be changed after creation. Create a new job for a different customer.");
   }
+  // A job must ALWAYS name a destination — a saved site or a typed address — not just at creation.
+  // This can't live in updateJobSchema: an update is a PATCH, so a payload omitting both keys says
+  // nothing about them, and the rule is only decidable against the MERGED result (existing + patch).
+  // That needs the existing row, which a zod schema never sees. Same either/or as createJobSchema
+  // (a site's own address fields are optional, so "has a site" is a complete destination).
+  const nextSiteId = input.siteId !== undefined ? input.siteId : existing.siteId;
+  const nextAddressLine1 = input.addressLine1 !== undefined ? input.addressLine1 : existing.addressLine1;
+  if (!nextSiteId && !nextAddressLine1?.trim()) {
+    throw badRequest("Pick a site, or enter an address for where the work happens — a job can't be left without a destination.");
+  }
   if (input.projectId !== undefined) {
     const project = await requireProject(input.projectId, customerId);
     headerPatch.projectId = project.id;
@@ -685,7 +695,11 @@ export async function updateJob(id: string, input: UpdateJobInput, actor?: Audit
       headerPatch.siteId = site.id;
       headerPatch.siteName = site.name;
     } else {
+      // Un-picking the site must take its NAME with it. siteName holds the chosen site's name, so
+      // leaving it behind would show the old site's label next to whatever address replaced it —
+      // two different places on one job. The manual "Site name" box (if the user typed one) wins.
       headerPatch.siteId = null;
+      headerPatch.siteName = input.siteName !== undefined ? trimToNull(input.siteName) : null;
     }
   }
   if (input.supplierId !== undefined) {

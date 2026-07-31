@@ -8,7 +8,7 @@ import * as irmService from "@/services/irm.service";
 import * as auditService from "@/services/audit.service";
 import * as stockPositionService from "@/services/stockPosition.service";
 import * as poService from "@/services/purchase-order.service";
-import { printSingleLabel } from "@/lib/printBarcode";
+import { printLabels } from "@/lib/printBarcode";
 import { BarcodePanel } from "@/components/dashboard/irm/BarcodePanel";
 import { MovementFeed, type MovementFetcher } from "@/components/dashboard/inventory/MovementFeed";
 import { PoStatusBadge, formatDate as poFormatDate } from "@/components/dashboard/purchase-orders/poStatus";
@@ -323,9 +323,12 @@ function BarcodeCard({
     }
   };
 
-  const print = () => {
+  // The item master isn't a put-away, so a blank box means ONE sticker — but the count is still
+  // typeable here, because reprinting a handful that smudged is the whole reason you open this card.
+  const [copies, setCopies] = React.useState("");
+  const print = (count: number) => {
     if (!i.barcodeDataUri) return;
-    printSingleLabel({ dataUri: i.barcodeDataUri, code: i.code });
+    printLabels({ dataUri: i.barcodeDataUri, code: i.code, copies: count });
   };
 
   return (
@@ -337,6 +340,9 @@ function BarcodeCard({
         busy={busy}
         onGenerate={generate}
         onPrint={print}
+        copies={copies}
+        onCopiesChange={setCopies}
+        defaultCopies={1}
       />
     </Card>
   );

@@ -330,13 +330,17 @@ export interface ListGoodsReceiptsParams {
   status?: string;
   warehouse?: string;
   purchaseOrder?: string;
+  /** Narrows to one supplier's receipts — the supplier detail page's Goods In tab. */
+  supplier?: string;
   page?: number;
   pageSize?: number;
   sort?: string;
 }
 
 export async function listGoodsReceipts(params: ListGoodsReceiptsParams = {}, actor?: AuditActor): Promise<PagedGoodsReceipts> {
-  const filters = { search: params.search, status: params.status, warehouseId: params.warehouse, warehouseIds: warehouseScopeFilter(actor), purchaseOrderId: params.purchaseOrder };
+  // `warehouseIds` (the actor's warehouse scope) still applies alongside every other filter — a
+  // supplier filter must narrow the caller's permitted set, never widen it.
+  const filters = { search: params.search, status: params.status, warehouseId: params.warehouse, warehouseIds: warehouseScopeFilter(actor), purchaseOrderId: params.purchaseOrder, supplierId: params.supplier };
   const total = await grnRepo.count(filters);
   const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
   const rows = await grnRepo.findMany(filters, skip, pageSize, params.sort);

@@ -9,6 +9,8 @@ export interface GrnListParams {
   status?: string;
   warehouse?: string;
   purchaseOrder?: string;
+  /** Narrows to one supplier's receipts — the supplier detail page's Goods In tab. */
+  supplier?: string;
   page?: number;
   pageSize?: number;
   sort?: string;
@@ -63,6 +65,7 @@ function qs(params: GrnListParams): string {
   if (params.status) sp.set("status", params.status);
   if (params.warehouse) sp.set("warehouse", params.warehouse);
   if (params.purchaseOrder) sp.set("purchaseOrder", params.purchaseOrder);
+  if (params.supplier) sp.set("supplier", params.supplier);
   if (params.sort) sp.set("sort", params.sort);
   if (params.page) sp.set("page", String(params.page));
   if (params.pageSize) sp.set("pageSize", String(params.pageSize));
@@ -73,7 +76,10 @@ function qs(params: GrnListParams): string {
 const listCache = new Map<string, PagedGoodsReceipts>();
 registerClientCache(() => listCache.clear());
 const listCacheKey = (p: GrnListParams): string =>
-  `${p.page ?? 1}|${p.pageSize ?? ""}|${p.search ?? ""}|${p.status ?? ""}|${p.warehouse ?? ""}|${p.purchaseOrder ?? ""}|${p.sort ?? ""}`;
+  // EVERY filter must appear here. `supplier` was once missing while being sent to the API, so two
+  // suppliers' Goods In tabs — identical but for the supplier — hashed to the same key and each
+  // overwrote the other's cached page. A filter in `qs()` but not in the key is a silent wrong answer.
+  `${p.page ?? 1}|${p.pageSize ?? ""}|${p.search ?? ""}|${p.status ?? ""}|${p.warehouse ?? ""}|${p.purchaseOrder ?? ""}|${p.supplier ?? ""}|${p.sort ?? ""}`;
 
 export const getCachedGoodsReceipts = (params: GrnListParams = {}): PagedGoodsReceipts | undefined => listCache.get(listCacheKey(params));
 

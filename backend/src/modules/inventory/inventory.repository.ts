@@ -206,6 +206,10 @@ export interface MovementLedgerFilters {
   dateTo?: Date;
   irmItemId?: string;
   warehouseId?: string;
+  /** The caller's warehouse ACCESS SCOPE — `undefined` is unrestricted, an array constrains to those
+   *  warehouses (an empty array correctly matches nothing). Applied ALONGSIDE `warehouseId`, never
+   *  instead of it: `warehouseId` is what the user asked for, this is what they're allowed. */
+  scopeWarehouseIds?: string[];
   type?: string;
   sourceType?: string;
 }
@@ -222,6 +226,7 @@ export function findInventoryTxnPage(f: MovementLedgerFilters, before: MovementK
   if (f.dateTo) and.push({ createdAt: { lte: f.dateTo } });
   if (f.irmItemId) and.push({ irmItemId: f.irmItemId });
   if (f.warehouseId) and.push({ warehouseId: f.warehouseId });
+  if (f.scopeWarehouseIds !== undefined) and.push({ warehouseId: { in: f.scopeWarehouseIds } });
   if (f.type) and.push({ type: f.type });
   if (f.sourceType) and.push({ sourceType: f.sourceType });
   and.push(...keysetClause<Prisma.InventoryTransactionWhereInput>(before));

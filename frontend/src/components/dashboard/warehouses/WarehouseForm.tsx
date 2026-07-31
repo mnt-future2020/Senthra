@@ -416,6 +416,7 @@ export function WarehouseForm({ mode, warehouse }: { mode: "create" | "edit"; wa
                   clearError("country");
                 }}
                 error={errors.postcode}
+                required
               />
               <div>
                 <label className={labelCls}>

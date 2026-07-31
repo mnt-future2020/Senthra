@@ -7,7 +7,7 @@ import { Loader2, Plus, Trash2 } from "lucide-react";
 import * as grnService from "@/services/goods-in.service";
 import { listPurchaseOrders } from "@/services/purchase-order.service";
 import { listIrmItems, generateBarcode, getIrmItem } from "@/services/irm.service";
-import { printLabels, MAX_LABEL_COPIES } from "@/lib/printBarcode";
+import { printLabels } from "@/lib/printBarcode";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
@@ -65,8 +65,6 @@ const parseSerials = (text: string) => text.split(/[\n,]/).map((s) => s.trim()).
 // One sticker per accepted unit by default — staff put away N boxes and label each one. A blank
 // box tracks the accepted qty live; typing a number pins it (e.g. reprinting 3 that smudged).
 const defaultCopies = (accepted: number) => Math.max(1, accepted);
-const effectiveCopies = (l: LineState, accepted: number) =>
-  l.copies.trim() === "" ? defaultCopies(accepted) : num(l.copies);
 // Only barcode-able lines get a label panel: serial/batch-tracked items would print an identical
 // sticker on every unit AND are rejected by scan lookup, so a label there is a dead sticker.
 const canLabel = (l: LineState) => !l.trackSerials && !l.trackBatches && Boolean(l.itemCode);
@@ -293,19 +291,12 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
   const setLineCopies = (idx: number, value: string) =>
     setLines((rows) => rows.map((r, i) => (i === idx ? { ...r, copies: value } : r)));
 
-  const printLineLabels = (l: LineState, accepted: number) => {
+  // The panel resolves the count (typed value, or the accepted qty when blank) and hands it over.
+  // Copies is print-only — it never blocks the GRN save — and its validation now lives in
+  // lib/printBarcode alongside every other surface's, rather than in a second copy of the rules here.
+  const printLineLabels = (l: LineState, count: number) => {
     if (!l.barcodeDataUri) return;
-    printLabels({ dataUri: l.barcodeDataUri, code: l.itemCode, copies: effectiveCopies(l, accepted) });
-  };
-
-  // Copies is print-only — it never blocks the GRN save, so it's validated here rather than in
-  // validate(). Blank is valid (falls back to the accepted qty).
-  const copiesError = (l: LineState): string | undefined => {
-    if (l.copies.trim() === "") return undefined;
-    const n = Number(l.copies);
-    if (!Number.isInteger(n) || n < 1) return "Enter a whole number of at least 1.";
-    if (n > MAX_LABEL_COPIES) return `Up to ${MAX_LABEL_COPIES} labels per print run.`;
-    return undefined;
+    printLabels({ dataUri: l.barcodeDataUri, code: l.itemCode, copies: count });
   };
 
   // On create: when the user picks a PO, build the received-item lines (only lines with
@@ -657,17 +648,15 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
                             canManage={canManageBarcode}
                             busy={barcodeBusyId === l.irmItemId}
                             onGenerate={() => generateLineBarcode(l.irmItemId)}
-                            onPrint={() => printLineLabels(l, accepted)}
+                            onPrint={(count) => printLineLabels(l, count)}
                             copies={l.copies}
                             onCopiesChange={(v) => setLineCopies(idx, v)}
-                            copiesPlaceholder={String(defaultCopies(accepted))}
-                            copiesError={copiesError(l)}
+                            defaultCopies={defaultCopies(accepted)}
                           />
-                          {l.barcodeDataUri && !copiesError(l) && (
-                            <p className="mt-1.5 text-[11px] text-[var(--faint)]">
-                              Prints {effectiveCopies(l, accepted)} label{effectiveCopies(l, accepted) === 1 ? "" : "s"}
-                              {l.copies.trim() === "" ? " — one per accepted unit." : "."}
-                            </p>
+                          {/* The button already states the count; this only explains where a blank
+                              box gets it from. */}
+                          {l.barcodeDataUri && l.copies.trim() === "" && (
+                            <p className="mt-1.5 text-[11px] text-[var(--faint)]">One label per accepted unit.</p>
                           )}
                         </div>
                       )}

@@ -3,13 +3,14 @@ import type {
   ScanMatch,
   QueuePage,
   QueueStatusFilter,
+  QueueSort,
   JobGoodsDetail,
   PublicMovement,
   DamagedRow,
   DamagedHistory,
   ReportDamagePayload,
   ReportDamageResult,
-  OverdueRow,
+  OverduePage,
   PostMovementPayload,
   CloseReconcilePayload,
   CloseReconcileResult,
@@ -43,15 +44,27 @@ export interface GetQueueParams {
   warehouseId: string;
   status?: QueueStatusFilter; // defaults to "active" server-side
   search?: string;
+  /**
+   * Window ("YYYY-MM-DD") on the job's last goods activity. For a reconciled job that timestamp IS the
+   * close-out, which is what makes the Closed view answerable instead of an ever-growing scroll. The
+   * server drops an unparseable value (no filter) rather than erroring.
+   */
+  activityFrom?: string;
+  activityTo?: string;
+  /** Row order; defaults to "newest" server-side. Applied across the whole result, not just the page. */
+  sort?: QueueSort;
   page?: number;
   pageSize?: number;
 }
 
-/** One page of the Goods Management queue for a warehouse (filtered by status + search). */
+/** One page of the Goods Management queue for a warehouse (filtered by status, search + date window). */
 export function getQueue(params: GetQueueParams): Promise<QueuePage> {
   const q = new URLSearchParams({ warehouseId: params.warehouseId });
   if (params.status) q.set("status", params.status);
   if (params.search?.trim()) q.set("search", params.search.trim());
+  if (params.activityFrom) q.set("activityFrom", params.activityFrom);
+  if (params.activityTo) q.set("activityTo", params.activityTo);
+  if (params.sort) q.set("sort", params.sort);
   if (params.page) q.set("page", String(params.page));
   if (params.pageSize) q.set("pageSize", String(params.pageSize));
   return api<QueuePage>(`/goods-management/queue?${q.toString()}`);
@@ -90,11 +103,15 @@ export function postReturn(jobId: string, payload: Omit<PostMovementPayload, "di
  * Reconcile a job's stock. If `writeOffLost` is true, any unaccounted units are written off.
  * Returns the updated summary and an array of unaccounted items (empty when fully balanced).
  */
-export function closeReconcile(jobId: string, writeOffLost?: boolean): Promise<CloseReconcileResult> {
-  const body: CloseReconcilePayload = writeOffLost != null ? { writeOffLost } : {};
+/**
+ * Close & reconcile a job. Called with no payload it PREVIEWS: anything the engineer still holds comes
+ * back as `unaccounted` and the job stays open. Call it again with `writeOffLost` (plus a reason, which
+ * the server requires) to book those units as lost — that reconciles and LOCKS the job.
+ */
+export function closeReconcile(jobId: string, writeOff?: CloseReconcilePayload): Promise<CloseReconcileResult> {
   return api<CloseReconcileResult>(`/goods-management/jobs/${jobId}/close`, {
     method: "POST",
-    body,
+    body: writeOff ?? {},
   });
 }
 
@@ -167,14 +184,29 @@ export function uploadDamagePhoto(dataUri: string): Promise<string> {
  * List overdue-holding rows: issue movements older than `days` (default 14) whose job's stock
  * has not yet been reconciled. Used in the GoodsManagementTab overdue section.
  */
-export function listOverdue(days?: number, warehouseId?: string): Promise<OverdueRow[]> {
-  const params = new URLSearchParams();
-  if (days != null) params.set("days", String(days));
-  // Scopes to one warehouse's issues — the Goods Management tab is per-warehouse. Omit for the
-  // company-wide read.
-  if (warehouseId) params.set("warehouseId", warehouseId);
-  const qs = params.toString();
-  return api<{ overdue: OverdueRow[] }>(`/goods-management/overdue${qs ? `?${qs}` : ""}`).then((r) => r.overdue);
+/**
+ * Overdue holdings, plus the window they were selected with.
+ *
+ * There is no `days` argument by design: the window is set once in Settings → Operations and applies
+ * everywhere, so a screen cannot quietly ask for a different definition of "overdue". The response
+ * echoes the window the server used — print that, never a hardcoded number, or the page starts lying
+ * the moment an admin changes the setting.
+ */
+export function listOverdue(params: {
+  /** Scopes to one warehouse's issues — the tab is per-warehouse. Omit for the company-wide read. */
+  warehouseId?: string;
+  /** Job number, job name or engineer name. */
+  search?: string;
+  page?: number;
+  pageSize?: number;
+} = {}): Promise<OverduePage> {
+  const q = new URLSearchParams();
+  if (params.warehouseId) q.set("warehouseId", params.warehouseId);
+  if (params.search?.trim()) q.set("search", params.search.trim());
+  if (params.page) q.set("page", String(params.page));
+  if (params.pageSize) q.set("pageSize", String(params.pageSize));
+  const qs = q.toString();
+  return api<OverduePage>(`/goods-management/overdue${qs ? `?${qs}` : ""}`);
 }
 
 /**

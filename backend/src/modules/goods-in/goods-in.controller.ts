@@ -6,12 +6,13 @@ import type { CreateGoodsReceiptInput, GRNAttachmentInput, GRNCancelInput, Updat
 
 // GET /goods-in?search=&status=&warehouse=&purchaseOrder=&sort=&page=&pageSize=
 export const listGoodsReceipts = asyncHandler(async (req, res) => {
-  const { search, status, warehouse, purchaseOrder, sort, page, pageSize } = req.query;
+  const { search, status, warehouse, purchaseOrder, supplier, sort, page, pageSize } = req.query;
   const result = await grnService.listGoodsReceipts({
     search: queryStr(search),
     status: queryStr(status),
     warehouse: queryStr(warehouse),
     purchaseOrder: queryStr(purchaseOrder),
+    supplier: queryStr(supplier),
     sort: queryStr(sort),
     page: queryInt(page),
     pageSize: queryInt(pageSize),

@@ -37,6 +37,9 @@ const jobBase = {
   assignedEngineerId: OID("c"),
   // A job needs at least one kit line; a `misc` line is the one shape needing no source id.
   kitLines: [{ lineType: "misc", itemName: "Misc part", qty: 1 }],
+  // …and a DESTINATION on create (a saved site or a typed address) — see createJobSchema. Without
+  // it this fixture fails for a reason that has nothing to do with postcode normalisation.
+  addressLine1: "1 Test Street",
 };
 
 const cases: [string, { safeParse: (v: unknown) => { success: boolean; data?: unknown } }, object][] = [

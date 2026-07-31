@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { postMovementSchema, reportDamageSchema, scanLookupSchema } from "./goods-management.validation.js";
+import { closeReconcileSchema, postMovementSchema, reportDamageSchema, scanLookupSchema } from "./goods-management.validation.js";
 
 const OID = "a".repeat(24);
 
@@ -71,5 +71,35 @@ describe("reportDamageSchema", () => {
   it("rejects a zero or negative quantity", () => {
     expect(reportDamageSchema.safeParse({ ...base, quantity: 0, ownerType: "company", irmItemId: OID }).success).toBe(false);
     expect(reportDamageSchema.safeParse({ ...base, quantity: -3, ownerType: "company", irmItemId: OID }).success).toBe(false);
+  });
+});
+
+// Writing stock off as lost is irreversible (the job locks) and is a real financial loss. Every other
+// destructive stock action here already demands a reason; this schema is what stops this one being the
+// exception it used to be.
+describe("closeReconcileSchema", () => {
+  it("allows a plain reconcile with no write-off and no reason", () => {
+    expect(closeReconcileSchema.safeParse({}).success).toBe(true);
+    expect(closeReconcileSchema.safeParse({ writeOffLost: false }).success).toBe(true);
+  });
+
+  it("REJECTS a write-off with no reason", () => {
+    const r = closeReconcileSchema.safeParse({ writeOffLost: true });
+    expect(r.success).toBe(false);
+  });
+
+  it("accepts a write-off with a known reason", () => {
+    expect(closeReconcileSchema.safeParse({ writeOffLost: true, writeOffReason: "not_returned" }).success).toBe(true);
+  });
+
+  it("rejects a reason outside the list", () => {
+    expect(closeReconcileSchema.safeParse({ writeOffLost: true, writeOffReason: "vanished" }).success).toBe(false);
+  });
+
+  // "Other" with no note is the same dead end as free text everyone fills in with the word "lost".
+  it("requires a note when the reason is Other", () => {
+    expect(closeReconcileSchema.safeParse({ writeOffLost: true, writeOffReason: "other" }).success).toBe(false);
+    expect(closeReconcileSchema.safeParse({ writeOffLost: true, writeOffReason: "other", writeOffNotes: "   " }).success).toBe(false);
+    expect(closeReconcileSchema.safeParse({ writeOffLost: true, writeOffReason: "other", writeOffNotes: "Dropped in a canal" }).success).toBe(true);
   });
 });

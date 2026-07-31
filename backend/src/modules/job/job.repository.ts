@@ -194,6 +194,45 @@ export function findActiveWithKitLines(excludeJobId?: string): Promise<JobWithRe
   });
 }
 
+// Ids of every job whose goods can still be out — stock is only issued from `accepted` onward, so the
+// earlier statuses can't be holding any and are what keeps this read from degrading into "every job".
+//
+// This is the overdue read's starting point. Driving from JOBS rather than from JobStockSummary rows
+// matters: a summary is created on first issue, but the engineer-transfer attribution path creates it
+// through a best-effort `recomputeGoodsStatus` that swallows its own failure, so a job CAN hold an
+// unreturned issue with no summary row. Starting from summaries made those jobs invisible; starting
+// here keeps them, matching how listQueue treats a missing summary (defaults to open, not excluded).
+// Still bounded by work in flight rather than by the movement ledger, which is the point of the change.
+//
+// `cancelled` is in the list, which is where this DIVERGES from findActiveForGoodsManagement — and it
+// has to. That one answers "what work is live?", so a cancelled job rightly drops off the Queue. This
+// one answers "whose stock is unaccounted for?", and cancelling is the moment stock is most likely to
+// be stranded: `cancelJob` is reachable from accepted/in_progress, has no guard on outstanding stock,
+// and never touches goodsStatus — the engineer is simply still holding the kit for a job nobody is
+// tracking any more. Mirroring the Queue's window here dropped exactly that stock off the chase list
+// and out of the Hub's overdue count. Nothing downstream is a dead end: goods-management's flows don't
+// gate on job status, so the engineer's return still posts, moves the summary to `awaiting_return`,
+// and lets the remainder be written off. `completed` is likewise terminal and already listed, so the
+// cost argument doesn't distinguish the two — and cancelled is by far the smaller set.
+export function findGoodsActiveJobIds(): Promise<{ id: string }[]> {
+  return prisma.job.findMany({
+    where: { deletedAt: null, status: { in: ["accepted", "in_progress", "completed", "cancelled"] } },
+    select: { id: true },
+  });
+}
+
+// Kit-line TYPES for a set of jobs, and nothing else. The overdue read needs to know which lines are
+// `misc` so it can leave them out of "is anything still out?" — misc is free-text, never stock-tracked,
+// so it can never be returned and would otherwise keep a job overdue forever. Deliberately lean: no
+// `withRelations` (customer/site/supplier/engineer joins) for a question that only needs two columns.
+export function findKitLineTypesByJobs(jobIds: string[]): Promise<{ id: string; kitLines: { id: string; lineType: string }[] }[]> {
+  if (jobIds.length === 0) return Promise.resolve([]);
+  return prisma.job.findMany({
+    where: { id: { in: jobIds } },
+    select: { id: true, kitLines: { select: { id: true, lineType: true } } },
+  });
+}
+
 // Jobs assigned to one engineer that may still have stock out with them — the goods-active statuses,
 // with kit lines. Powers "how much is this engineer holding against jobs" (the field-stock RETURN flow
 // subtracts it so job stock can't be handed back outside the job). Statuses mirror

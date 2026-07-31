@@ -6,15 +6,18 @@ vi.mock("./goods-management.repository.js", () => ({
   createMovementWithCode: vi.fn(), findMovementsByJob: vi.fn(), findMovementsByJobs: vi.fn(), findIssuedQtyByKitLine: vi.fn(), getSummary: vi.fn(), getSummariesByJobs: vi.fn(), upsertSummaryTx: vi.fn(),
   upsertCustomerHoldingTx: vi.fn(), findCustomerHoldingTx: vi.fn(), insertCustomerHoldingTxnTx: vi.fn(), findCustomerHoldingsByEngineer: vi.fn(),
   adjustCustomerStockEntryQtyTx: vi.fn(), findCustomerStockEntryById: vi.fn(), findCustomerStockEntriesByIds: vi.fn(), findCustomerStockEntryByBarcode: vi.fn(),
-  upsertDamagedBalanceTx: vi.fn(), insertDamagedTxnTx: vi.fn(), findDamagedByWarehouse: vi.fn(), findDamagedByCustomer: vi.fn(), findAllDamaged: vi.fn(), findRecentMovementsForOverdue: vi.fn(), findCustomerHolding: vi.fn(),
+  upsertDamagedBalanceTx: vi.fn(), insertDamagedTxnTx: vi.fn(), findDamagedByWarehouse: vi.fn(), findDamagedByCustomer: vi.fn(), findAllDamaged: vi.fn(), findOldIssueMovementsForJobs: vi.fn(), findSummariesByGoodsStatuses: vi.fn(), findCustomerHolding: vi.fn(),
   findLatestDamagedTxnsByBalances: vi.fn(), findDamagedBalance: vi.fn(), findDamagedTxnsByKey: vi.fn(),
 }));
-vi.mock("#modules/job/job.repository.js", () => ({ findById: vi.fn(), findActiveForGoodsManagement: vi.fn(), findActiveWithKitLines: vi.fn(), completeIfInProgressTx: vi.fn() }));
+vi.mock("#modules/job/job.repository.js", () => ({ findById: vi.fn(), findActiveForGoodsManagement: vi.fn(), findActiveWithKitLines: vi.fn(), findKitLineTypesByJobs: vi.fn(), findGoodsActiveJobIds: vi.fn(), completeIfInProgressTx: vi.fn() }));
 vi.mock("#modules/irm/irm.service.js", () => ({ requireActiveIrmItem: vi.fn(), findActiveByCodeOrBarcode: vi.fn() }));
 vi.mock("#modules/inventory/inventory.repository.js", () => ({ findBalancePair: vi.fn(), findBalancesByItemsAndWarehouses: vi.fn(), findBalancePairTx: vi.fn(), upsertBalanceTx: vi.fn(), insertTransactionTx: vi.fn() }));
 vi.mock("#modules/inventory/inventory.service.js", () => ({ applyOutbound: vi.fn(), applyInbound: vi.fn() }));
 vi.mock("#modules/engineer-stock/engineer-stock.repository.js", () => ({ upsertEngineerBalanceTx: vi.fn(), insertEngineerTxnTx: vi.fn(), findEngineerBalanceTx: vi.fn(), findEngineerBalance: vi.fn(), findEngineerBalances: vi.fn() }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
+// The overdue window comes from Settings now, so the service reaches for it whenever a caller doesn't
+// pass an explicit `days`. Mocked to the shipped default so these tests stay about goods logic.
+vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn(), getOverdueAfterDays: vi.fn(async () => 14) }));
 vi.mock("#modules/engineer-transfer/engineer-transfer.repository.js", () => ({ findVanSourcesByKitLines: vi.fn() }));
 vi.mock("#modules/warehouse/warehouse.repository.js", () => ({ findById: vi.fn() }));
 
@@ -376,6 +379,127 @@ describe("listQueue", () => {
 
   it("rejects an invalid status filter", async () => {
     await expect(listQueue({ warehouseId: WH_ID, status: "bogus" })).rejects.toThrow(/invalid status/i);
+  });
+
+  // The last-activity window bounds the Closed view, whose candidate set otherwise grows forever.
+  // Filtering happens BEFORE pagination, so `total` has to shrink too — a window that only trimmed the
+  // visible page would leave the pager promising rows that aren't there.
+  describe("last-activity window", () => {
+    const staged = () => {
+      mockFindActive.mockResolvedValue([job(A1, "JOB-1"), job(A2, "JOB-2")]);
+      mockSummaries.mockResolvedValue([
+        { jobId: A1, goodsStatus: "reconciled", lastMovementAt: new Date("2026-07-05T10:00:00.000Z") },
+        { jobId: A2, goodsStatus: "reconciled", lastMovementAt: new Date("2026-08-20T10:00:00.000Z") },
+      ]);
+    };
+
+    it("keeps only jobs whose last activity is on/after activityFrom", async () => {
+      staged();
+      const res = await listQueue({ warehouseId: WH_ID, status: "reconciled", activityFrom: "2026-08-01" });
+      expect(res.total).toBe(1);
+      expect(res.rows[0].jobNumber).toBe("JOB-2");
+    });
+
+    it("keeps only jobs whose last activity is on/before activityTo", async () => {
+      staged();
+      const res = await listQueue({ warehouseId: WH_ID, status: "reconciled", activityTo: "2026-07-31" });
+      expect(res.total).toBe(1);
+      expect(res.rows[0].jobNumber).toBe("JOB-1");
+    });
+
+    // The inclusive-end rule, end to end: a "To" of the activity's own date must keep it. Cutting off
+    // at midnight would drop everything closed on the last day of the range.
+    it("treats activityTo as inclusive of that whole day", async () => {
+      staged();
+      const res = await listQueue({ warehouseId: WH_ID, status: "reconciled", activityTo: "2026-07-05" });
+      expect(res.total).toBe(1);
+      expect(res.rows[0].jobNumber).toBe("JOB-1");
+    });
+
+    it("excludes a job with no recorded activity when a window is set", async () => {
+      mockFindActive.mockResolvedValue([job(A1, "JOB-1")]);
+      mockSummaries.mockResolvedValue([{ jobId: A1, goodsStatus: "reconciled", lastMovementAt: null }]);
+      const res = await listQueue({ warehouseId: WH_ID, status: "reconciled", activityFrom: "2026-01-01" });
+      expect(res.total).toBe(0);
+    });
+
+    it("ignores an unparseable date rather than returning nothing", async () => {
+      staged();
+      const res = await listQueue({ warehouseId: WH_ID, status: "reconciled", activityFrom: "not-a-date" });
+      expect(res.total).toBe(2);
+    });
+  });
+
+  // Ordering exists to surface NEGLECTED work: nothing else does. listOverdue keys off issue movements,
+  // so a job that was never issued can't appear there, and under the default newest-first order it just
+  // sinks below newer jobs forever.
+  describe("ordering", () => {
+    // JOB-1 raised first but touched recently; JOB-2 raised later and untouched since.
+    const staged = () => {
+      mockFindActive.mockResolvedValue([job(A1, "JOB-1"), job(A2, "JOB-2")]);
+      mockSummaries.mockResolvedValue([
+        { jobId: A1, goodsStatus: "issued", lastMovementAt: new Date("2026-08-20T10:00:00.000Z") },
+        { jobId: A2, goodsStatus: "issued", lastMovementAt: new Date("2026-07-01T10:00:00.000Z") },
+      ]);
+    };
+
+    it("keeps the query's newest-first order by default", async () => {
+      staged();
+      const res = await listQueue({ warehouseId: WH_ID });
+      expect(res.rows.map((r) => r.jobNumber)).toEqual(["JOB-1", "JOB-2"]);
+    });
+
+    it("puts the least-recently-touched job first for activity_asc", async () => {
+      staged();
+      const res = await listQueue({ warehouseId: WH_ID, sort: "activity_asc" });
+      expect(res.rows.map((r) => r.jobNumber)).toEqual(["JOB-2", "JOB-1"]);
+    });
+
+    it("puts the most-recently-touched job first for activity_desc", async () => {
+      staged();
+      const res = await listQueue({ warehouseId: WH_ID, sort: "activity_desc" });
+      expect(res.rows.map((r) => r.jobNumber)).toEqual(["JOB-1", "JOB-2"]);
+    });
+
+    // A job with no movement has to age from when it was RAISED, or a never-touched request would
+    // either pin to one end of the list or never surface at all — the exact blind spot this fixes.
+    it("ages a never-moved job from its createdAt", async () => {
+      mockFindActive.mockResolvedValue([
+        { ...job(A1, "JOB-OLD"), createdAt: new Date("2026-01-01T00:00:00.000Z") },
+        { ...job(A2, "JOB-NEW"), createdAt: new Date("2026-08-01T00:00:00.000Z") },
+      ]);
+      mockSummaries.mockResolvedValue([]); // neither has ever moved
+      const res = await listQueue({ warehouseId: WH_ID, sort: "activity_asc" });
+      expect(res.rows.map((r) => r.jobNumber)).toEqual(["JOB-OLD", "JOB-NEW"]);
+    });
+
+    it("orders across the WHOLE candidate set, not just the page on screen", async () => {
+      staged();
+      const res = await listQueue({ warehouseId: WH_ID, sort: "activity_asc", page: 1, pageSize: 1 });
+      expect(res.rows.map((r) => r.jobNumber)).toEqual(["JOB-2"]);
+      expect(res.total).toBe(2);
+    });
+
+    it("rejects an unknown sort", async () => {
+      await expect(listQueue({ warehouseId: WH_ID, sort: "sideways" })).rejects.toThrow(/invalid sort/i);
+    });
+  });
+
+  // The dates the Closed view displays. Without these the filter would narrow on a value the screen
+  // never shows, leaving the user no way to tell whether it did the right thing.
+  it("returns the job's createdAt and last activity on each row", async () => {
+    const moved = new Date("2026-08-20T10:00:00.000Z");
+    mockFindActive.mockResolvedValue([{ ...job(A1, "JOB-1"), createdAt: new Date("2026-08-01T00:00:00.000Z") }]);
+    mockSummaries.mockResolvedValue([{ jobId: A1, goodsStatus: "issued", lastMovementAt: moved }]);
+    const res = await listQueue({ warehouseId: WH_ID });
+    expect(res.rows[0]).toMatchObject({ createdAt: new Date("2026-08-01T00:00:00.000Z"), lastActivityAt: moved });
+  });
+
+  it("reports lastActivityAt as null for a job that has never moved", async () => {
+    mockFindActive.mockResolvedValue([job(A1, "JOB-1")]);
+    mockSummaries.mockResolvedValue([]);
+    const res = await listQueue({ warehouseId: WH_ID });
+    expect(res.rows[0].lastActivityAt).toBeNull();
   });
 
   // The queue greys out any line not homed at the warehouse being managed, because only that
@@ -1570,13 +1694,33 @@ describe("restoreDamaged (warehouse scoping)", () => {
 });
 
 // ── listOverdue ──────────────────────────────────────────────────────────────────────────────
-import { listOverdue } from "./goods-management.service.js";
+import { getOverdueSummary, getOverdueView, listOverdue } from "./goods-management.service.js";
+import * as settingsService from "#modules/settings/settings.service.js";
 
-const mockFindRecentMovementsForOverdue = repo.findRecentMovementsForOverdue as ReturnType<typeof vi.fn>;
+const mockFindRecentMovementsForOverdue = repo.findOldIssueMovementsForJobs as ReturnType<typeof vi.fn>;
 
 describe("listOverdue", () => {
+  // The read now STARTS from open jobs (indexed goodsStatus) and only then looks at their movements,
+  // so the cost tracks work in flight instead of the whole ledger. These two mocks are that order.
+  const mockOverdueSummaries = repo.getSummariesByJobs as ReturnType<typeof vi.fn>;
+  const mockActiveJobIds = jobRepo.findGoodsActiveJobIds as ReturnType<typeof vi.fn>;
+  const mockKitLineTypes = jobRepo.findKitLineTypesByJobs as ReturnType<typeof vi.fn>;
+  const mockAllMovements = repo.findMovementsByJobs as ReturnType<typeof vi.fn>;
+  const KIT_LINE = "k-overdue";
+
+  // A job is only overdue while stock is genuinely still out, so every case here has to stage the
+  // netting inputs: one stock-tracked kit line, and the job's full movement history.
+  const stageOutstanding = (issued: number, used = 0, returned = 0) => {
+    mockKitLineTypes.mockResolvedValue([{ id: JOB_ID, kitLines: [{ id: KIT_LINE, lineType: "irm" }] }]);
+    const moves = [{ jobId: JOB_ID, status: "posted", direction: "issue", items: [{ jobKitLineId: KIT_LINE, qty: issued }] }];
+    if (used) moves.push({ jobId: JOB_ID, status: "posted", direction: "consume", items: [{ jobKitLineId: KIT_LINE, qty: used }] });
+    if (returned) moves.push({ jobId: JOB_ID, status: "posted", direction: "return", items: [{ jobKitLineId: KIT_LINE, qty: returned }] });
+    mockAllMovements.mockResolvedValue(moves);
+  };
+
   beforeEach(() => {
-    const mockGetSummary = repo.getSummary as ReturnType<typeof vi.fn>;
+    mockActiveJobIds.mockResolvedValue([{ id: JOB_ID }]);
+    stageOutstanding(5); // 5 issued, nothing back — genuinely out
     // Default: one overdue issue movement, job not yet reconciled.
     mockFindRecentMovementsForOverdue.mockResolvedValue([
       {
@@ -1593,11 +1737,11 @@ describe("listOverdue", () => {
         items: [{ source: "irm", irmItemId: IRM_ID, customerStockEntryId: null, itemName: "CAT6", qty: 5, condition: "good" }],
       },
     ]);
-    mockGetSummary.mockResolvedValue({ goodsStatus: "issued", workSummary: null, lastMovementAt: new Date() });
+    mockOverdueSummaries.mockResolvedValue([{ jobId: JOB_ID, goodsStatus: "issued" }]);
   });
 
   it("returns issue movements older than the cutoff whose job is not reconciled", async () => {
-    const rows = await listOverdue();
+    const { rows } = await listOverdue();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       jobId: JOB_ID,
@@ -1609,24 +1753,221 @@ describe("listOverdue", () => {
     expect(rows[0].lines[0]).toMatchObject({ source: "irm", irmItemId: IRM_ID, qty: 5 });
   });
 
+  // The ledger only grows; open jobs track work in flight. Asking the summaries FIRST and constraining
+  // the movement query to those job ids is what stops this read getting slower every month on its own.
+  it("drives from open jobs and scopes the movement query to them", async () => {
+    await listOverdue();
+    expect(mockActiveJobIds).toHaveBeenCalledTimes(1);
+    expect(mockFindRecentMovementsForOverdue).toHaveBeenCalledWith([JOB_ID], expect.any(Date), undefined);
+  });
+
+  it("does no movement work at all when nothing is open", async () => {
+    mockActiveJobIds.mockResolvedValue([]);
+    const page = await listOverdue();
+    expect(page.rows).toHaveLength(0);
+    expect(page.total).toBe(0);
+    expect(mockFindRecentMovementsForOverdue).not.toHaveBeenCalled();
+  });
+
   // The Goods Management tab is per-warehouse and its other sections are scoped, but this one asked
   // for every warehouse the actor could reach — so Warehouse A's tab listed Warehouse B's overdue
   // jobs. Scoping happens in the QUERY, not after the fact.
   it("scopes the query to one warehouse when given a warehouseId", async () => {
-    await listOverdue(undefined, 14, "wh-A");
-    expect(mockFindRecentMovementsForOverdue).toHaveBeenCalledWith(expect.any(Date), "wh-A");
+    await listOverdue(undefined, { warehouseId: "wh-A" });
+    expect(mockFindRecentMovementsForOverdue).toHaveBeenCalledWith([JOB_ID], expect.any(Date), "wh-A");
   });
 
   it("asks for every warehouse when no warehouseId is given (the company-wide read)", async () => {
     await listOverdue();
-    expect(mockFindRecentMovementsForOverdue).toHaveBeenCalledWith(expect.any(Date), undefined);
+    expect(mockFindRecentMovementsForOverdue).toHaveBeenCalledWith([JOB_ID], expect.any(Date), undefined);
   });
 
-  it("excludes jobs that are already reconciled", async () => {
-    const mockGetSummaryReconciled = repo.getSummary as ReturnType<typeof vi.fn>;
-    mockGetSummaryReconciled.mockResolvedValue({ goodsStatus: "reconciled", workSummary: null, lastMovementAt: new Date() });
-    const rows = await listOverdue();
-    expect(rows).toHaveLength(0);
+  it("excludes a job once its summary says reconciled", async () => {
+    mockOverdueSummaries.mockResolvedValue([{ jobId: JOB_ID, goodsStatus: "reconciled" }]);
+    expect((await listOverdue()).rows).toHaveLength(0);
+  });
+
+  // The direction matters: jobs are excluded by PROOF of reconciliation, never included by proof of
+  // openness. `recomputeGoodsStatus` is best-effort and swallows failures, so an unreturned issue can
+  // exist with no summary row at all — dropping it would be a silent false negative on a chase list,
+  // and listQueue makes the same call (missing summary → "not_issued", not excluded).
+  it("keeps a job that has NO summary row at all", async () => {
+    mockOverdueSummaries.mockResolvedValue([]);
+    const { rows } = await listOverdue();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ jobId: JOB_ID, goodsStatus: "issued" });
+  });
+
+  // The status lookup is ONE query, however many jobs and movements the window spans. It used to run
+  // per iteration, and a reconciled job re-queried on every one of its movements because it
+  // `continue`d without being marked seen.
+  it("looks up job status in a single batched query", async () => {
+    await listOverdue();
+    expect(mockOverdueSummaries).toHaveBeenCalledTimes(1);
+  });
+
+  // "Overdue" has to mean stock is genuinely still out. Posting a return leaves the job at
+  // "awaiting_return" no matter what came back, and only an explicit Close & reconcile clears that —
+  // so testing the status alone kept fully-returned jobs on the chase list, day count climbing,
+  // offering to write off as lost stock that was already back on the shelf.
+  describe("only lists stock that is actually still out", () => {
+    it("drops a job whose stock has all been returned, even though it isn't reconciled yet", async () => {
+      stageOutstanding(5, 0, 5); // 5 issued, 5 returned → nothing out
+      expect((await listOverdue()).rows).toHaveLength(0);
+    });
+
+    it("drops a job whose stock was all consumed on site", async () => {
+      stageOutstanding(5, 5, 0);
+      expect((await listOverdue()).rows).toHaveLength(0);
+    });
+
+    it("keeps a job that is only PARTLY back", async () => {
+      stageOutstanding(5, 1, 2); // 5 − 1 used − 2 returned = 2 still out
+      expect((await listOverdue()).rows).toHaveLength(1);
+    });
+
+    // misc lines are free-text and never stock-tracked, so they can't be handed back. Counting them
+    // as outstanding would pin the job to this list permanently.
+    it("ignores misc lines when deciding whether anything is out", async () => {
+      mockKitLineTypes.mockResolvedValue([{ id: JOB_ID, kitLines: [{ id: "k-misc", lineType: "misc" }] }]);
+      mockAllMovements.mockResolvedValue([
+        { jobId: JOB_ID, status: "posted", direction: "issue", items: [{ jobKitLineId: "k-misc", qty: 3 }] },
+      ]);
+      expect((await listOverdue()).rows).toHaveLength(0);
+    });
+  });
+
+  // These three were declared by the frontend's OverdueRow but never sent, so the "Days out" column
+  // and the movement code rendered blank and every row's React key was undefined.
+  it("returns the movement identity and a server-computed daysOut", async () => {
+    const { rows } = await listOverdue();
+    expect(rows[0]).toMatchObject({ movementId: "m1", movementCode: "GM-0001" });
+    expect(rows[0].daysOut).toBe(20); // the staged movement is 20 days old
+  });
+
+  // Paging and search exist because this list is NOT guaranteed small — a busy operation can have
+  // hundreds of jobs overdue at once. Both are applied AFTER the still-out filter, so `total` and the
+  // page numbers describe the same set the user is looking at rather than the raw candidate pool.
+  describe("paging and search", () => {
+    const JOB_B = "b".repeat(24);
+    // Two overdue jobs: the staged one (JOB-0001 / Bob Smith) plus a second, newer one.
+    const stageTwoJobs = () => {
+      mockActiveJobIds.mockResolvedValue([{ id: JOB_ID }, { id: JOB_B }]);
+      mockOverdueSummaries.mockResolvedValue([
+        { jobId: JOB_ID, goodsStatus: "issued" },
+        { jobId: JOB_B, goodsStatus: "issued" },
+      ]);
+      mockFindRecentMovementsForOverdue.mockResolvedValue([
+        { id: "m1", code: "GM-0001", jobId: JOB_ID, direction: "issue", status: "posted", engineerId: ENG_ID, engineerName: "Bob Smith", warehouseId: WH_ID, createdAt: new Date(Date.now() - 40 * 86_400_000), job: { id: JOB_ID, jobNumber: "JOB-0001", name: "Fibre install" }, items: [] },
+        { id: "m2", code: "GM-0002", jobId: JOB_B, direction: "issue", status: "posted", engineerId: ENG_ID, engineerName: "Ann Green", warehouseId: WH_ID, createdAt: new Date(Date.now() - 20 * 86_400_000), job: { id: JOB_B, jobNumber: "JOB-0002", name: "Patch panel" }, items: [] },
+      ]);
+      mockKitLineTypes.mockResolvedValue([
+        { id: JOB_ID, kitLines: [{ id: "ka", lineType: "irm" }] },
+        { id: JOB_B, kitLines: [{ id: "kb", lineType: "irm" }] },
+      ]);
+      mockAllMovements.mockResolvedValue([
+        { jobId: JOB_ID, status: "posted", direction: "issue", items: [{ jobKitLineId: "ka", qty: 5 }] },
+        { jobId: JOB_B, status: "posted", direction: "issue", items: [{ jobKitLineId: "kb", qty: 5 }] },
+      ]);
+    };
+
+    it("pages the result, longest overdue first", async () => {
+      stageTwoJobs();
+      const first = await listOverdue(undefined, { page: 1, pageSize: 1 });
+      expect(first).toMatchObject({ total: 2, totalPages: 2, page: 1 });
+      expect(first.rows.map((r) => r.jobNumber)).toEqual(["JOB-0001"]); // 40 days out
+
+      const second = await listOverdue(undefined, { page: 2, pageSize: 1 });
+      expect(second.rows.map((r) => r.jobNumber)).toEqual(["JOB-0002"]); // 20 days out
+    });
+
+    it("clamps a page beyond the end rather than returning nothing", async () => {
+      stageTwoJobs();
+      const page = await listOverdue(undefined, { page: 99, pageSize: 1 });
+      expect(page.page).toBe(2);
+      expect(page.rows).toHaveLength(1);
+    });
+
+    it("searches job number, job name and engineer name", async () => {
+      stageTwoJobs();
+      expect((await listOverdue(undefined, { search: "JOB-0002" })).rows.map((r) => r.jobNumber)).toEqual(["JOB-0002"]);
+      expect((await listOverdue(undefined, { search: "patch" })).rows.map((r) => r.jobNumber)).toEqual(["JOB-0002"]);
+      expect((await listOverdue(undefined, { search: "bob" })).rows.map((r) => r.jobNumber)).toEqual(["JOB-0001"]);
+    });
+
+    // A search that narrows to one row must say "1", not "2 with one shown" — the count and the rows
+    // have to come from the same filtered set or the pager offers pages that aren't there.
+    it("counts the SEARCHED set, not the whole one", async () => {
+      stageTwoJobs();
+      expect(await listOverdue(undefined, { search: "patch" })).toMatchObject({ total: 1, totalPages: 1 });
+    });
+
+    // Regex-special characters are why this matches in memory rather than through a Mongo `contains`.
+    it("treats a regex-special search term as plain text", async () => {
+      stageTwoJobs();
+      expect((await listOverdue(undefined, { search: "JOB-000(" })).rows).toHaveLength(0);
+    });
+
+    // The Hub wants the number, not the rows — asking for a 1-row page keeps it from building
+    // hundreds of row objects just to read a length off them.
+    it("getOverdueSummary returns the full total from a one-row page", async () => {
+      stageTwoJobs();
+      expect((await getOverdueSummary()).count).toBe(2);
+    });
+  });
+
+  // The window is configuration, not a constant. An admin who sets 30 days must move the Overdue list
+  // AND the Hub figure together; an explicit `days` is only an ad-hoc override for one read.
+  describe("configured window", () => {
+    const mockConfiguredDays = settingsService.getOverdueAfterDays as ReturnType<typeof vi.fn>;
+
+    it("uses the configured window when the caller passes no days", async () => {
+      mockConfiguredDays.mockResolvedValue(30);
+      await listOverdue();
+      const cutoff = mockFindRecentMovementsForOverdue.mock.calls[0][1] as Date;
+      expect(Math.round((Date.now() - cutoff.getTime()) / 86_400_000)).toBe(30);
+    });
+
+    // There is deliberately NO way for a caller to ask for a different window — that override was the
+    // seam through which a caller could produce a list of jobs that aren't overdue by the company's
+    // rule, which is exactly the bug the UI picker caused. Settings is the only input.
+    it("takes the window ONLY from settings — no caller override exists", async () => {
+      mockConfiguredDays.mockResolvedValue(30);
+      await listOverdue(undefined, { warehouseId: "wh-A" });
+      const cutoff = mockFindRecentMovementsForOverdue.mock.calls[0][1] as Date;
+      expect(Math.round((Date.now() - cutoff.getTime()) / 86_400_000)).toBe(30);
+    });
+
+    // The Hub has no window control of its own — it must follow Settings, never a hardcoded fortnight.
+    it("getOverdueSummary follows the configured window", async () => {
+      mockConfiguredDays.mockResolvedValue(45);
+      await getOverdueSummary();
+      const cutoff = mockFindRecentMovementsForOverdue.mock.calls[0][1] as Date;
+      expect(Math.round((Date.now() - cutoff.getTime()) / 86_400_000)).toBe(45);
+    });
+
+    // The screen prints this number, so it has to be the one the query actually ran with.
+    it("getOverdueView reports back the window it used", async () => {
+      mockConfiguredDays.mockResolvedValue(21);
+      expect((await getOverdueView()).days).toBe(21);
+    });
+
+    // One settings read per request, not one per layer — the view resolves the window and hands it
+    // down rather than the list looking it up again.
+    it("reads the setting once per request", async () => {
+      mockConfiguredDays.mockClear().mockResolvedValue(21);
+      await getOverdueView();
+      expect(mockConfiguredDays).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // One implementation, so the Hub card and the Overdue tab cannot drift apart again.
+  it("getOverdueSummary counts jobs, not movements", async () => {
+    mockFindRecentMovementsForOverdue.mockResolvedValue([
+      { id: "m1", code: "GM-0001", jobId: JOB_ID, direction: "issue", status: "posted", engineerId: ENG_ID, engineerName: "Bob", warehouseId: WH_ID, createdAt: new Date(Date.now() - 20 * 86_400_000), job: { id: JOB_ID, jobNumber: "JOB-0001", name: "T", customerId: "c", customerName: "A" }, items: [] },
+      { id: "m2", code: "GM-0002", jobId: JOB_ID, direction: "issue", status: "posted", engineerId: ENG_ID, engineerName: "Bob", warehouseId: WH_ID, createdAt: new Date(Date.now() - 19 * 86_400_000), job: { id: JOB_ID, jobNumber: "JOB-0001", name: "T", customerId: "c", customerName: "A" }, items: [] },
+    ]);
+    expect((await getOverdueSummary()).count).toBe(1);
   });
 
   it("deduplicates the same job appearing in multiple issue movements", async () => {
@@ -1648,7 +1989,7 @@ describe("listOverdue", () => {
       { ...baseMovement },
       { ...baseMovement, id: "m2", code: "GM-0002" },
     ]);
-    const rows = await listOverdue();
+    const { rows } = await listOverdue();
     // The same job appears only once even with two issue movements.
     expect(rows).toHaveLength(1);
   });

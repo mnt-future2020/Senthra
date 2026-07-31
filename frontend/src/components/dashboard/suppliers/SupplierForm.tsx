@@ -497,6 +497,7 @@ export function SupplierForm({ mode, supplier }: { mode: "create" | "edit"; supp
                   clearError("country");
                 }}
                 error={errors.postcode}
+                required
               />
               <div>
                 <label className={labelCls}>
