@@ -485,11 +485,32 @@ export function VanStockCartTable({
 }) {
   if (cart.length === 0) return <p className="text-xs text-[var(--muted)]">{emptyText}</p>;
   return (
-    <div className="overflow-hidden rounded-xl border border-[var(--border)]">
-      <table className="w-full text-left text-sm">
+    // overflow-x-AUTO, not overflow-hidden. The fixed columns below come to ~390px on their own, so
+    // on a phone — which is where an engineer actually builds a restock — `hidden` CLIPPED the qty
+    // box and the remove button with no way to reach them. Auto is also what the other ~50 tables in
+    // this app use (EngineerKitRequests, EngineerTransfers, EngineerJobDetail…); this one was the
+    // outlier.
+    //
+    // The min-w has to exceed the column the table actually sits in, or it does nothing and the
+    // browser crushes the cells instead of scrolling. This table lives in a form's 2-of-3 column,
+    // which is ~580px at a 1280px viewport — measured at 34rem the scroll never engaged, the qty box
+    // collapsed to 30px and the item name wrapped over four lines. `w-24`/`w-64` are only hints under
+    // auto layout: the "London Logistics Hub (WH-0005) — 109 free" label wins the space and the rest
+    // give it up. 42rem clears that column so the scroll takes over before anything is squeezed; the
+    // narrower floor is for the walk-in composer, which has no warehouse column.
+    // `relative` is load-bearing, not decoration. The "Remove" column's header label is an
+    // `sr-only` span, and Tailwind's sr-only is `position:absolute`. With no positioned ancestor its
+    // containing block was the INITIAL one, so it escaped this scroll container entirely and sat at
+    // the table's full width (~670px) in the document's coordinate space — dragging the whole PAGE
+    // into a 176px horizontal scroll on a phone, while every visible element stayed inside the
+    // viewport. Making the wrapper a containing block puts the span back under `overflow-x-auto`,
+    // where it is clipped like everything else. Verified in-browser: 176px → 0.
+    <div className="relative overflow-x-auto rounded-xl border border-[var(--border)]">
+      <table className={`w-full text-left text-sm ${warehouseCell ? "min-w-[42rem]" : "min-w-[24rem]"}`}>
         <thead>
           <tr className="border-b border-[var(--border)] text-[10px] font-bold uppercase tracking-wider text-[var(--faint)]">
-            <th className="px-3 py-2">Item</th>
+            {/* Floors the name column so a long item never concertinas into a 100px stack. */}
+            <th className="min-w-[10rem] px-3 py-2">Item</th>
             {warehouseCell && <th className="w-64 px-3 py-2">Collect from</th>}
             <th className="w-24 px-3 py-2">Qty</th>
             <th className="w-10 px-3 py-2"><span className="sr-only">Remove</span></th>
@@ -527,7 +548,10 @@ export function VanStockCartTable({
                       const raw = Math.max(1, Math.floor(Number(e.target.value) || 1));
                       onQty(c.irmItemId, typeof c.maxQty === "number" ? Math.min(raw, c.maxQty) : raw);
                     }}
-                    className={`${inputCls} py-1.5`}
+                    // min-w, not w: inputCls already carries w-full, and min-width beats it in the
+                    // cascade. Without a floor, auto table layout squeezed this to 30px — a number
+                    // input too narrow to read its own value, let alone show the spinners.
+                    className={`${inputCls} min-w-14 py-1.5`}
                   />
                 </td>
                 <td className="px-3 py-2 text-right">

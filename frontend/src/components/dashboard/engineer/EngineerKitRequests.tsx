@@ -337,7 +337,11 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
         {planned.length > 0 && (
           <div>
             <p className="mb-2 text-xs font-bold text-[var(--faint)]">More of a planned item</p>
-            <div className="overflow-x-auto rounded-xl border border-[var(--border)]">
+            {/* `relative` contains the "Remove" header's sr-only span (Tailwind's sr-only is
+                position:absolute). Without a positioned ancestor it resolves against the initial
+                containing block, escapes this scroll container and pushes the PAGE into a horizontal
+                scroll at phone widths — see the note in van-requests/vanRequestUi.tsx. */}
+            <div className="relative overflow-x-auto rounded-xl border border-[var(--border)]">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-[var(--border)] text-[10px] font-bold uppercase tracking-wider text-[var(--faint)]">

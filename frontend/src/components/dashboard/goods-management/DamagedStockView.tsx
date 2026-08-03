@@ -284,12 +284,18 @@ export function DamagedStockView({
         </div>
       )}
 
+      {/* Both scroll containers below are `relative`, and it is load-bearing: the "History" column's
+          header label is an sr-only span, Tailwind's sr-only is position:absolute, and with no
+          positioned ancestor it resolves against the initial containing block. It then escapes the
+          scroll container at the table's full width and drags the whole PAGE into a horizontal
+          scroll on a phone, while every visible element stays inside the viewport. See the note in
+          van-requests/vanRequestUi.tsx. */}
       {fill ? (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
-          <div className="min-h-0 flex-1 overflow-auto">{table}</div>
+          <div className="relative min-h-0 flex-1 overflow-auto">{table}</div>
         </div>
       ) : (
-        <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">{table}</div>
+        <div className="relative overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">{table}</div>
       )}
 
       {rows && total > 0 && (

@@ -207,7 +207,11 @@ export function InventoryView({ warehouseId, embedded }: { warehouseId?: string;
           </div>
         ) : (
           <>
-            <div className="min-h-0 flex-1 overflow-auto">
+            {/* `relative` contains the "Actions" header's sr-only span: Tailwind's sr-only is
+                position:absolute, so with no positioned ancestor it resolves against the initial
+                containing block, escapes this scroll container at the table's full 1040px and drags
+                the whole page into a horizontal scroll. See vanRequestUi.tsx. */}
+            <div className="relative min-h-0 flex-1 overflow-auto">
               <table className="w-full min-w-[1040px] text-left text-sm">
                 {/* Sticky so the column headings stay readable once the body scrolls — the same
                     treatment StockPositionTable gives its header. */}

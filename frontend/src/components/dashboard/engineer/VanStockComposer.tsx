@@ -49,18 +49,34 @@ function useOpenLineMap(type: "restock" | "return"): Map<string, string> {
   return map;
 }
 
+// The advisories that annotate the selected-items table: compact, evenly spaced, and — because BOTH
+// composers render one — defined once rather than as a className at a call site.
+//
+// That distinction is the whole reason this exists. The gap used to live inside DuplicateWarning as
+// its own `mt-3`, and moving it out to the restock call site silently left the return composer's
+// notice sitting flush against the table, since FormSection renders {children} with no spacing of its
+// own. A shared wrapper makes the two pages incapable of drifting apart again.
+//
+// `empty:mt-0` because the stack is always mounted but usually renders nothing — without it every
+// composer with no advisories carries 12px of dead space under its table.
+function AdvisoryStack({ children }: { children: React.ReactNode }) {
+  return <div className="mt-3 space-y-2 empty:mt-0">{children}</div>;
+}
+
 function DuplicateWarning({ cart, openLines }: { cart: VanStockCartItem[]; openLines: Map<string, string> }) {
   const dups = cart.filter((c) => openLines.has(c.irmItemId));
   if (dups.length === 0) return null;
+  // No margin of its own — AdvisoryStack owns the spacing for every composer that renders one.
   return (
-    <div className="mt-3">
-      <Notice
-        msg={{
-          type: "error",
-          text: `Heads up — you already have an open request for: ${dups.map((d) => `${d.name} (${openLines.get(d.irmItemId)})`).join(", ")}. You can still send this one.`,
-        }}
-      />
-    </div>
+    <Notice
+      size="sm"
+      msg={{
+        // "warn", not "error": this is advisory by design (spec §8) and the text says so. It read as
+        // a blocker purely because Notice had no middle tier.
+        type: "warn",
+        text: `Heads up — you already have an open request for: ${dups.map((d) => `${d.name} (${openLines.get(d.irmItemId)})`).join(", ")}. You can still send this one.`,
+      }}
+    />
   );
 }
 
@@ -93,7 +109,9 @@ export function RestockComposerPage() {
     vanStockSvc
       .getVanStockAvailability(cartKey ? cartKey.split(",") : [])
       .then((rows) => { if (!cancelled) setAvailability(rows); })
-      .catch(() => { if (!cancelled) { setAvailability([]); setMsg({ type: "error", text: "Couldn't load stock levels — warehouse counts may be unavailable. You can still send the request." }); } });
+      // "warn": the counts are advisory (see the header note), so losing them degrades the form
+      // rather than breaking it — the request still sends.
+      .catch(() => { if (!cancelled) { setAvailability([]); setMsg({ type: "warn", text: "Couldn't load stock levels — warehouse counts may be unavailable. You can still send the request." }); } });
     return () => { cancelled = true; };
   }, [cartKey]);
 
@@ -252,7 +270,7 @@ export function RestockComposerPage() {
       />
 
       <div className="grid gap-6 lg:grid-cols-3">
-        <div className="space-y-6 lg:col-span-2">
+        <div className="min-w-0 space-y-6 lg:col-span-2">
           <FormSection title="Add items" description="Search the catalogue for the stock you need.">
             <VanStockItemSearch excludeIds={excludeKeys} onAddItem={addItem} placeholder="Search the item you need…" />
           </FormSection>
@@ -279,29 +297,34 @@ export function RestockComposerPage() {
                 );
               }}
             />
-            <DuplicateWarning cart={cart} openLines={openLines} />
-            {stops > 1 && (
-              // The engineer is the one who drives, so the cost of their own split is stated while
-              // they can still change it — this used to be a reviewer's decision they learned about
-              // only after approval.
-              <p className="mt-2 text-[11px] font-semibold text-amber-600">
-                This request collects from {stops} warehouses — you&apos;ll need {stops} stops. Move a line to a shared
-                warehouse if one has everything.
-              </p>
-            )}
+            <AdvisoryStack>
+              <DuplicateWarning cart={cart} openLines={openLines} />
+              {stops > 1 && (
+                // The engineer is the one who drives, so the cost of their own split is stated while
+                // they can still change it — this used to be a reviewer's decision they learned
+                // about only after approval.
+                <Notice
+                  size="sm"
+                  msg={{
+                    type: "warn",
+                    text: `This request collects from ${stops} warehouses — you'll need ${stops} stops. Move a line to a shared warehouse if one has everything.`,
+                  }}
+                />
+              )}
+            </AdvisoryStack>
           </FormSection>
 
-          <FormSection title="Priority" description="How soon you need this.">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div>
+          {/* Priority sits WITH Reason and Attachments rather than in a card of its own: alone it was
+              a full-width section wrapping one half-width Select, so most of the card was empty. The
+              Return composer below already groups its request-shaping Select ("Return to warehouse")
+              into Details the same way, and the file header describes this flow as one group —
+              "priority/reason/attachments". */}
+          <FormSection title="Details" description="How soon you need this, and why.">
+            <div className="space-y-4">
+              <div className="sm:max-w-xs">
                 <label className={labelCls}>Priority</label>
                 <Select ariaLabel="Priority" value={priority} onChange={(v) => setPriority((v || "normal") as VanStockPriority)} options={PRIORITY_OPTIONS} />
               </div>
-            </div>
-          </FormSection>
-
-          <FormSection title="Details" description="Tell the warehouse why you need this stock.">
-            <div className="space-y-4">
               <div>
                 <label className={labelCls}>Reason <RequiredMark /></label>
                 <textarea
@@ -448,7 +471,7 @@ export function ReturnComposerPage() {
       />
 
       <div className="grid gap-6 lg:grid-cols-3">
-        <div className="space-y-6 lg:col-span-2">
+        <div className="min-w-0 space-y-6 lg:col-span-2">
           <FormSection title="Pick from your stock" description="Only your free field stock — anything issued for a job goes back when you complete that job, not here.">
             {holdings === null ? (
               <div className="space-y-1.5" aria-hidden>
@@ -488,7 +511,9 @@ export function ReturnComposerPage() {
 
           <FormSection title={`Selected items${cart.length ? ` (${cart.length})` : ""}`} description="Set the quantity you're bringing back.">
             <VanStockCartTable cart={cart} onQty={setQty} onRemove={remove} />
-            <DuplicateWarning cart={cart} openLines={openLines} />
+            <AdvisoryStack>
+              <DuplicateWarning cart={cart} openLines={openLines} />
+            </AdvisoryStack>
           </FormSection>
 
           <FormSection title="Details" description="Where you'll return it, and why.">
