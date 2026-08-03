@@ -46,13 +46,8 @@ import type { PagedAuditLogs } from "@/types/audit";
 import type { CustomerStockEntry, PendingStockItem } from "@/types/customer";
 import type { Warehouse } from "@/types/warehouse";
 import type { UserStatus } from "@/types/user";
+import { formatDate as fmtDate } from "@/lib/formatDate";
 
-function fmtDate(iso: string | null): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
-}
 
 // First-load placeholder mirroring a data table — keeps the warehouse panes' loading style
 // consistent with the GRN list (skeleton rows, not a spinner). Pass the column headers + min width.

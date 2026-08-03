@@ -21,33 +21,13 @@ import { Pagination } from "@/components/ui/Pagination";
 // inline action, its documented use); secondaryBtn for the empty-state Clear, which stands alone in
 // the centre of the panel rather than in a filter row; toolbarInputCls for the list search box.
 import { ghostBtn, secondaryBtn, toolbarInputCls } from "@/components/ui/styles";
+import { formatDate as fmtDate, formatDateTime as fmtDateTime } from "@/lib/formatDate";
 
 const PAGE_SIZE = 20;
 
-function fmtDate(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString("en-GB", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-  });
-}
 
 // History entries need the TIME too: two reports for the same item on the same day are exactly the
 // case this drill-down exists to separate, and a date alone would render them indistinguishable.
-function fmtDateTime(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleString("en-GB", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
 
 // The photo lightbox is opened from two places — a row's latest photo and any entry's photo inside
 // the history modal — so it holds its own subject rather than a whole DamagedRow.
@@ -55,18 +35,6 @@ interface PhotoSubject {
   url: string;
   itemName: string;
   caption: string | null;
-}
-
-// Advisory banner for the history modal. The shared <Notice> only models success/error, and neither
-// of these is an error: a truncated list and a balance with no ledger rows behind it are both
-// "heads up, this view isn't the whole picture".
-function WarnBanner({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="flex items-start gap-2 rounded-xl bg-[var(--warn)]/10 px-3.5 py-2.5 text-xs font-semibold text-[var(--warn)]">
-      <AlertTriangle className="mt-px h-4 w-4 shrink-0" />
-      <span>{children}</span>
-    </div>
-  );
 }
 
 // Free-text match over the row's text columns — item, warehouse, and the latest damage reason.
@@ -330,17 +298,17 @@ export function DamagedStockView({
         ) : history.entries.length === 0 ? (
           // Defensive: a balance always has at least one report behind it, so an empty list means
           // the ledger and the balance have diverged — say so plainly rather than showing nothing.
-          <WarnBanner>
-            No ledger entries found for this item. The quantity shown may predate damage-history
-            tracking.
-          </WarnBanner>
+          <Notice
+            size="sm"
+            msg={{ type: "warn", text: "No ledger entries found for this item. The quantity shown may predate damage-history tracking." }}
+          />
         ) : (
           <div className="space-y-3">
             {history.truncated && (
-              <WarnBanner>
-                Showing the most recent {history.entries.length} entries only — older reports exist
-                for this item.
-              </WarnBanner>
+              <Notice
+                size="sm"
+                msg={{ type: "warn", text: `Showing the most recent ${history.entries.length} entries only — older reports exist for this item.` }}
+              />
             )}
 
             {/* Vertical timeline, newest first. The connector runs BEHIND the dots (absolute, inset

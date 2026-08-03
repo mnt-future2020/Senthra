@@ -22,21 +22,11 @@ export function InventoryStatusBadge({ status }: { status: InventoryStatus }) {
   );
 }
 
-// UK date — DD/MM/YYYY (en-GB).
-export function formatDate(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString("en-GB");
-}
-
-// UK date + time, for the ledger / movement timestamps.
-export function formatDateTime(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleString("en-GB");
-}
+// Re-exported so this module's importers keep the same entry point. Both local copies had drifted:
+// `formatDate` rendered 03/08/2026 against the DD Mon YYYY that Settings → Company promises, and
+// `formatDateTime` used a bare toLocaleString, which appends seconds to every ledger row. See
+// lib/formatDate.ts.
+export { formatDate, formatDateTime } from "@/lib/formatDate";
 
 // Money in the row's currency (value is already in major units / pounds).
 export function formatMoney(value: number, currency = "GBP"): string {

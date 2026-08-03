@@ -18,6 +18,7 @@ import {
 
 import { useDashboard } from "@/hooks/useDashboard";
 import { useAuth } from "@/hooks/useAuth";
+import { formatDate } from "@/lib/formatDate";
 import * as roleService from "@/services/role.service";
 import * as userService from "@/services/user.service";
 import type { Role } from "@/types/role";
@@ -515,7 +516,7 @@ export function UsersView() {
                       <StatusBadge status={u.status} />
                     </td>
                     <td className="hidden px-5 py-3 text-xs text-[var(--muted)] md:table-cell">
-                      {new Date(u.createdAt).toLocaleDateString("en-GB")}
+                      {formatDate(u.createdAt)}
                     </td>
                     <td className="px-5 py-3">
                       <RowActions

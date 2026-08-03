@@ -47,13 +47,15 @@ export function ageTone(days: number | null, overdueDays: number): "normal" | "w
   return "normal";
 }
 
-/** UK short date for a row timestamp; em dash when absent, matching the tables elsewhere. */
-export function formatDay(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString("en-GB");
-}
+/**
+ * UK short date for a row timestamp; em dash when absent, matching the tables elsewhere.
+ *
+ * Delegates to the shared formatter — this copy had drifted to a bare toLocaleDateString, rendering
+ * 21/07/2026 where the rest of the dashboard (and Settings → Company's own promise) is DD Mon YYYY.
+ * Kept as a named re-export rather than changing callers, since `formatDay` reads better than
+ * `formatDate` beside `formatDueDay` below.
+ */
+export { formatDate as formatDay } from "@/lib/formatDate";
 
 /**
  * Short day+month for a job's completion date — "5 Aug".

@@ -67,6 +67,7 @@ import { EditApproveModal } from "./EditApproveModal";
 import { AssignWarehouseModal } from "./AssignWarehouseModal";
 import { AdminStockSubmissionModal } from "./AdminStockSubmissionModal";
 import { DamagedStockView } from "@/components/dashboard/goods-management/DamagedStockView";
+import { formatDate as fmtDate } from "@/lib/formatDate";
 
 // Fallback destination for the back button when there is no in-app history to return to.
 const CUSTOMERS_LIST = "/dashboard/customers";
@@ -97,13 +98,6 @@ const TAB_PERMISSION: Record<TabId, string | null> = {
   users: "customer_portal.view",
 };
 
-// "10 Jun 2026" — en-GB, matching the rest of the dashboard.
-function fmtDate(iso: string | null): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
-}
 
 const STATUS_STYLE: Record<string, string> = {
   active: "bg-[var(--pos)]/12 text-[var(--pos)]",

@@ -38,10 +38,6 @@ export function GrnQualityLabel({ status }: { status: GrnQualityStatus }) {
   return <span className={GRN_QUALITY_CLASSES[status] ?? "text-[var(--muted)]"}>{GRN_QUALITY_LABELS[status] ?? status}</span>;
 }
 
-// UK date — DD/MM/YYYY (en-GB).
-export function formatDate(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString("en-GB");
-}
+// Re-exported so this module's importers keep the same entry point. The local copy had drifted to
+// 03/08/2026, against the DD Mon YYYY that Settings → Company promises. See lib/formatDate.ts.
+export { formatDate } from "@/lib/formatDate";

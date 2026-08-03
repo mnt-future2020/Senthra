@@ -28,15 +28,10 @@ import type { PurchaseOrder } from "@/types/purchase-order";
 import type { PurchaseRequest } from "@/types/purchase-request";
 import type { Supplier } from "@/types/supplier";
 import type { UserStatus } from "@/types/user";
+import { formatDate as fmtDate } from "@/lib/formatDate";
 
 const AUDIT_PAGE_SIZE = 20;
 
-function fmtDate(iso: string | null): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
-}
 
 // The displayed payment term — "Custom" shows the free-text value.
 function paymentTermsLabel(s: Supplier): string {

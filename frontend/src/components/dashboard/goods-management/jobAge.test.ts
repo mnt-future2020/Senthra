@@ -65,7 +65,9 @@ describe("ageTone", () => {
 
 describe("formatDay", () => {
   it("renders a UK short date", () => {
-    expect(formatDay("2026-07-21T10:00:00.000Z")).toBe("21/07/2026");
+    // Was "21/07/2026": this copy of the formatter had drifted to the numeric format while the rest
+    // of the dashboard — and the promise on Settings → Company — is DD Mon YYYY. See lib/formatDate.ts.
+    expect(formatDay("2026-07-21T10:00:00.000Z")).toBe("21 Jul 2026");
   });
 
   it("renders an em dash when there is no date", () => {

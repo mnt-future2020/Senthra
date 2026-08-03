@@ -21,6 +21,7 @@ import { Pagination } from "@/components/ui/Pagination";
 import { WorkspaceToolbar } from "@/components/ui/WorkspaceToolbar";
 import { WriteOffLostModal, type WriteOffTarget } from "./WriteOffLostModal";
 import type { OverdueRow } from "@/types/goodsManagement";
+import { formatDate as fmtDate } from "@/lib/formatDate";
 
 // Status sits next to the right-aligned Days out so the two right-hand columns read as one group. When
 // Days out was the ONLY right-aligned column, wedged between left-aligned text, its number looked
@@ -55,15 +56,6 @@ function statusChip(s: string) {
   );
 }
 
-function fmtDate(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString("en-GB", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-  });
-}
 
 // `warehouseId` scopes the list to issues made FROM that warehouse. The Goods Management tab is a
 // per-warehouse surface and its other sections are already scoped — this one wasn't, so standing in

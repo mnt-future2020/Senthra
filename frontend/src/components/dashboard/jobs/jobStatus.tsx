@@ -90,21 +90,10 @@ export const INSTALLER_TYPE_LABELS: Record<string, string> = {
   external: "External",
 };
 
-// UK date — DD/MM/YYYY (en-GB).
-export function formatDate(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString("en-GB");
-}
-
-// Date + time — used for start/complete timestamps where the time of day matters.
-export function formatDateTime(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
-}
+// Re-exported so the module's existing importers keep the same entry point. The local copies were
+// the drifted ones: `formatDate` rendered 03/08/2026 while Settings → Company promises on-screen
+// dates in DD Mon YYYY. See lib/formatDate.ts.
+export { formatDate, formatDateTime } from "@/lib/formatDate";
 
 // A kit line MERGES sources: the same item at the same warehouse is one row, so units collected from
 // the warehouse and units handed over from another engineer's van end up on a single line (e.g.

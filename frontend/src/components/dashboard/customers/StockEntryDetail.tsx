@@ -16,6 +16,7 @@ import { printLabels, parseCopiesParam } from "@/lib/printBarcode";
 import { BarcodePanel } from "@/components/dashboard/irm/BarcodePanel";
 import type { CustomerStockEntry, StockEntryStatus } from "@/types/customer";
 import type { Category } from "@/types/category";
+import { formatDate as fmtDate } from "@/lib/formatDate";
 
 // Standard units of measure — mirrors the IRM item form + backend UOM_OPTIONS.
 const UOM_OPTIONS = ["Each", "Metre", "Roll", "Pack", "Box", "Set", "Pair", "Reel"];
@@ -442,9 +443,3 @@ function SummaryRow({ label, children }: { label: string; children: React.ReactN
   );
 }
 
-function fmtDate(iso: string | null): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
-}
