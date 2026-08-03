@@ -14,7 +14,7 @@ import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { primaryBtn, secondaryBtn } from "@/components/ui/styles";
 import { EmptyState, fmtDateTime, PortalHeader } from "@/components/dashboard/portal/portalUi";
-import { singlePickup, VanRequestItemsSummary, VanRequestLinesTable, VanRequestListSkeleton, VanStockAttachments, VanStockPostings, VanStockWalkInBadge, warehouseCaption } from "@/components/dashboard/van-requests/vanRequestUi";
+import { singlePickup, VanRequestItemsSummary, VanRequestLinesTable, VanRequestListSkeleton, VanStockAttachments, VanStockCompletionBadge, VanStockPostings, VanStockWalkInBadge, warehouseCaption } from "@/components/dashboard/van-requests/vanRequestUi";
 import { WarehousePickupModal } from "./WarehousePickupModal";
 import type { Msg } from "@/components/ui/types";
 
@@ -264,6 +264,7 @@ export function EngineerVanStock() {
                       {/* An engineer never RAISED a walk-in — it was handed to them at the counter. Without
                           this it reads as an approved request they don't remember asking for. */}
                       <VanStockWalkInBadge createdVia={r.createdVia} />
+                      <VanStockCompletionBadge completionType={r.completionType} lines={r.lines} />
                       {r.stale && <StaleChip />}
                       {r.priority !== "normal" && (
                         <span className="inline-flex items-center rounded-full border border-red-500/30 bg-red-500/10 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-red-600">{r.priority}</span>
@@ -282,7 +283,11 @@ export function EngineerVanStock() {
                         {busyId === r.id && <Loader2 className="h-3 w-3 animate-spin" />} Cancel
                       </button>
                     )}
-                    {r.status === "partially_fulfilled" && (
+                    {/* Approved counts too: per-warehouse review flips a request to `approved` on the
+                        FIRST warehouse's answer, so a split request sits there — collectable from one
+                        warehouse, still being decided by another — for as long as that takes. The
+                        engineer could cancel it while pending and then abruptly couldn't. */}
+                    {(r.status === "approved" || r.status === "partially_fulfilled") && (
                       <button type="button" onClick={() => setConfirm({ open: true, id: r.id, kind: "cancel-remaining" })} disabled={busyId === r.id} className="inline-flex items-center gap-1 rounded-lg border border-[var(--border)] px-2.5 py-1 text-[11px] font-bold text-[var(--ink)] hover:bg-[var(--surface-2)] disabled:opacity-60">
                         {busyId === r.id && <Loader2 className="h-3 w-3 animate-spin" />} Cancel remaining
                       </button>

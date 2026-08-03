@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   approveVanStockRequestSchema,
+  declineVanStockRequestSchema,
   closeShortSchema,
   createVanStockRequestSchema,
   fulfilVanStockRequestSchema,
@@ -9,38 +10,89 @@ import {
 } from "./van-stock-request.validation.js";
 
 const oid = "a".repeat(24);
-const line = { irmItemId: oid, itemName: "Cable Ties", qty: 100 };
+const WH_A = "b".repeat(24);
+const WH_B = "c".repeat(24);
+// A restock line now names the warehouse it is collected FROM; a return line never does.
+const line = { irmItemId: oid, itemName: "Cable Ties", qty: 100, warehouseId: WH_A };
+const returnLine = { irmItemId: oid, itemName: "Cable Ties", qty: 100 };
 
 describe("createVanStockRequestSchema", () => {
-  it("accepts a restock with a preferred (collection) warehouse", () => {
-    const r = createVanStockRequestSchema.safeParse({ type: "restock", reason: "van low", preferredWarehouseId: oid, lines: [line] });
+  it("accepts a restock whose every line names a collection warehouse", () => {
+    expect(createVanStockRequestSchema.safeParse({ type: "restock", reason: "van low", lines: [line] }).success).toBe(true);
+  });
+
+  // The whole point of the per-line model: the engineer decides where each item comes from, seeing
+  // that warehouse's live stock, instead of naming one place and having a reviewer split it later.
+  it("accepts lines collected from DIFFERENT warehouses (a split the engineer chose)", () => {
+    const r = createVanStockRequestSchema.safeParse({
+      type: "restock",
+      reason: "van low",
+      lines: [line, { irmItemId: "d".repeat(24), itemName: "Fibre", qty: 2, warehouseId: WH_B }],
+    });
     expect(r.success).toBe(true);
   });
-  it("REQUIRES the preferred warehouse on a restock (it routes the request)", () => {
-    const r = createVanStockRequestSchema.safeParse({ type: "restock", reason: "van low", lines: [line] });
+
+  it("REJECTS a restock line with no warehouse, and names the line", () => {
+    const r = createVanStockRequestSchema.safeParse({ type: "restock", reason: "van low", lines: [returnLine] });
     expect(r.success).toBe(false);
+    if (!r.success) expect(r.error.issues.some((i) => i.path.join(".") === "lines.0.warehouseId")).toBe(true);
   });
+
+  it("rejects a malformed line warehouse id — required is not unvalidated", () => {
+    expect(createVanStockRequestSchema.safeParse({ type: "restock", reason: "x", lines: [{ ...line, warehouseId: "nope" }] }).success).toBe(false);
+  });
+
+  // Derived server-side from the lines. Accepting it would let a caller route the request to a
+  // warehouse none of its stock is actually coming from.
+  it("rejects a client-supplied preferredWarehouseId on a restock", () => {
+    expect(createVanStockRequestSchema.safeParse({ type: "restock", reason: "x", preferredWarehouseId: WH_A, lines: [line] }).success).toBe(false);
+  });
+
   it("rejects a restock carrying a final warehouseId", () => {
-    const r = createVanStockRequestSchema.safeParse({ type: "restock", reason: "x", preferredWarehouseId: oid, warehouseId: oid, lines: [line] });
-    expect(r.success).toBe(false);
+    expect(createVanStockRequestSchema.safeParse({ type: "restock", reason: "x", warehouseId: oid, lines: [line] }).success).toBe(false);
   });
+
   it("requires warehouseId on a return and rejects preferredWarehouseId", () => {
-    expect(createVanStockRequestSchema.safeParse({ type: "return", reason: "excess", lines: [line] }).success).toBe(false);
-    expect(createVanStockRequestSchema.safeParse({ type: "return", reason: "excess", warehouseId: oid, lines: [line] }).success).toBe(true);
-    expect(createVanStockRequestSchema.safeParse({ type: "return", reason: "excess", warehouseId: oid, preferredWarehouseId: oid, lines: [line] }).success).toBe(false);
+    expect(createVanStockRequestSchema.safeParse({ type: "return", reason: "excess", lines: [returnLine] }).success).toBe(false);
+    expect(createVanStockRequestSchema.safeParse({ type: "return", reason: "excess", warehouseId: oid, lines: [returnLine] }).success).toBe(true);
+    expect(createVanStockRequestSchema.safeParse({ type: "return", reason: "excess", warehouseId: oid, preferredWarehouseId: oid, lines: [returnLine] }).success).toBe(false);
   });
-  it("rejects duplicate items across lines", () => {
-    const r = createVanStockRequestSchema.safeParse({ type: "restock", reason: "x", preferredWarehouseId: oid, lines: [line, { ...line, qty: 5 }] });
+
+  // A return goes to ONE place the engineer drives to — a per-line source there would be meaningless
+  // and would leave lines pointing at warehouses the stock never reaches.
+  it("rejects a per-line warehouse on a return", () => {
+    const r = createVanStockRequestSchema.safeParse({ type: "return", reason: "excess", warehouseId: oid, lines: [line] });
     expect(r.success).toBe(false);
+    if (!r.success) expect(r.error.issues.some((i) => i.path.join(".") === "lines.0.warehouseId")).toBe(true);
   });
+
+  it("rejects duplicate items across lines", () => {
+    expect(createVanStockRequestSchema.safeParse({ type: "restock", reason: "x", lines: [line, { ...line, qty: 5 }] }).success).toBe(false);
+  });
+
   it("defaults priority to normal and rejects unknown priorities", () => {
-    const ok = createVanStockRequestSchema.parse({ type: "restock", reason: "x", preferredWarehouseId: oid, lines: [line] });
+    const ok = createVanStockRequestSchema.parse({ type: "restock", reason: "x", lines: [line] });
     expect(ok.priority).toBe("normal");
-    expect(createVanStockRequestSchema.safeParse({ type: "restock", reason: "x", preferredWarehouseId: oid, priority: "asap", lines: [line] }).success).toBe(false);
+    expect(createVanStockRequestSchema.safeParse({ type: "restock", reason: "x", priority: "asap", lines: [line] }).success).toBe(false);
   });
+
   it("rejects qty < 1 and non-integers", () => {
-    expect(createVanStockRequestSchema.safeParse({ type: "restock", reason: "x", preferredWarehouseId: oid, lines: [{ ...line, qty: 0 }] }).success).toBe(false);
-    expect(createVanStockRequestSchema.safeParse({ type: "restock", reason: "x", preferredWarehouseId: oid, lines: [{ ...line, qty: 1.5 }] }).success).toBe(false);
+    expect(createVanStockRequestSchema.safeParse({ type: "restock", reason: "x", lines: [{ ...line, qty: 0 }] }).success).toBe(false);
+    expect(createVanStockRequestSchema.safeParse({ type: "restock", reason: "x", lines: [{ ...line, qty: 1.5 }] }).success).toBe(false);
+  });
+});
+
+// A decline now refuses only the ACTING warehouse's lines, so it must name that warehouse — the same
+// shape closeShortSchema has always had. Without it the service fell back to the actor's permission
+// scope, and an unrestricted actor (a super admin has no warehouse scope at all) refused every
+// warehouse's lines from whichever tab they happened to be in.
+describe("declineVanStockRequestSchema", () => {
+  it("requires the warehouse being declined FROM", () => {
+    expect(declineVanStockRequestSchema.safeParse({ decisionNote: "no stock" }).success).toBe(false);
+    expect(declineVanStockRequestSchema.safeParse({ warehouseId: oid, decisionNote: "no stock" }).success).toBe(true);
+  });
+  it("still requires a reason", () => {
+    expect(declineVanStockRequestSchema.safeParse({ warehouseId: oid, decisionNote: "" }).success).toBe(false);
   });
 });
 

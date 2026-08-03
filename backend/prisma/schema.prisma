@@ -1498,11 +1498,27 @@ model VanStockRequestLine {
   sourceWarehouseName String?
   sourceWarehouseCode String?
 
+  // Per-warehouse REVIEW: each source warehouse decides its OWN lines, so the decision has to be
+  // recorded per line. The request-level reviewedBy/reviewedAt/decisionNote can only hold one
+  // decision — whoever acted second overwrote the first, crediting one manager for another's call and
+  // erasing their note. approvedQty stays the decision marker (null = undecided, 0 = excluded).
+  reviewedByEmail String?
+  reviewedAt      DateTime?
+  decisionNote    String?
+
   // Per-warehouse close-short: the source warehouse that owns this line writes off its outstanding qty.
   closedShortQty  Int?
   closedShortBy   String?
   closedShortNote String?
   closedShortAt   DateTime?
+
+  // Per-line CANCELLATION by the engineer ("cancel remaining" — they no longer need it). Deliberately
+  // NOT reusing closedShort*: that is the WAREHOUSE saying it cannot supply, this is the REQUESTER
+  // saying they no longer want it. Folding them together would attribute the engineer's decision to
+  // the warehouse in its own queue. Both zero the line's outstanding qty; only the story differs.
+  cancelledQty Int?
+  cancelledBy  String?
+  cancelledAt  DateTime?
 
   createdAt DateTime @default(now())
 

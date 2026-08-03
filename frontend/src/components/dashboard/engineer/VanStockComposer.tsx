@@ -72,7 +72,9 @@ export function RestockComposerPage() {
   const [cart, setCart] = React.useState<VanStockCartItem[]>([]);
   const [reason, setReason] = React.useState("");
   const [priority, setPriority] = React.useState<VanStockPriority>("normal");
-  const [preferredWarehouseId, setPreferredWarehouseId] = React.useState("");
+  // irmItemId → the warehouse this line is collected from. Replaces the single request-level
+  // "collect from": the engineer picks per item, seeing that warehouse's free stock.
+  const [lineWarehouses, setLineWarehouses] = React.useState<Record<string, string>>({});
   const [attachments, setAttachments] = React.useState<string[]>([]);
   const [uploading, setUploading] = React.useState(false);
   const [submitting, setSubmitting] = React.useState(false);
@@ -95,29 +97,84 @@ export function RestockComposerPage() {
     return () => { cancelled = true; };
   }, [cartKey]);
 
-  // Warehouse options annotated with "in stock" coverage of the current cart, best coverage first.
-  const warehouseOptions = React.useMemo(() => {
-    const opts = availability.map((w) => {
-      const inStock = w.items.filter((i) => i.quantityOnHand > 0).length;
-      const label = w.warehouseCode ? `${w.warehouseName} (${w.warehouseCode})` : w.warehouseName;
-      return {
-        value: w.warehouseId,
-        label: cart.length > 0 ? `${label} — ${inStock}/${cart.length} items in stock` : label,
-        inStock,
-      };
-    });
-    opts.sort((a, b) => b.inStock - a.inStock || a.label.localeCompare(b.label));
-    return opts.map(({ value, label }) => ({ value, label }));
-  }, [availability, cart.length]);
+  // Per ITEM: the warehouses that actually hold it, most stock first, each labelled with its free
+  // count — the engineer's whole basis for choosing. Warehouses with none of that item are left OUT
+  // rather than disabled: unlike the old single picker (where a zero-coverage warehouse was still a
+  // legitimate-looking choice for the OTHER items), here the row is about this one item, so a
+  // warehouse with none of it is simply not an answer.
+  const warehouseOptionsByItem = React.useMemo(() => {
+    const map = new Map<string, { value: string; label: string; free: number }[]>();
+    for (const c of cart) {
+      const opts = availability
+        .map((w) => {
+          const free = w.items.find((i) => i.irmItemId === c.irmItemId)?.quantityOnHand ?? 0;
+          const name = w.warehouseCode ? `${w.warehouseName} (${w.warehouseCode})` : w.warehouseName;
+          return { value: w.warehouseId, label: `${name} — ${free} free`, free };
+        })
+        .filter((o) => o.free > 0)
+        .sort((a, b) => b.free - a.free || a.label.localeCompare(b.label));
+      map.set(c.irmItemId, opts);
+    }
+    return map;
+  }, [availability, cart]);
 
-  // Per-line shelf count at the SELECTED warehouse (drives the "On shelf there" hints).
-  const shelfByItem = React.useMemo(() => {
-    const w = availability.find((a) => a.warehouseId === preferredWarehouseId);
-    return w ? new Map(w.items.map((i) => [i.irmItemId, i.quantityOnHand])) : undefined;
-  }, [availability, preferredWarehouseId]);
+  // What each line ACTUALLY collects from: the engineer's explicit pick when they made one and it is
+  // still stocked there, otherwise the warehouse holding the most of that item. Derived during render
+  // rather than written back by an effect — an effect would set state on every availability refresh
+  // (cascading renders, and the React Compiler lint rejects it), and it keeps `lineWarehouses` meaning
+  // exactly one thing: what the ENGINEER chose. A pick that stops being valid (stock ran out there
+  // between refreshes) silently falls back instead of leaving the line pointing at an empty shelf.
+  const effectiveWarehouses = React.useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const c of cart) {
+      const opts = warehouseOptionsByItem.get(c.irmItemId) ?? [];
+      const picked = lineWarehouses[c.irmItemId];
+      const valid = picked && opts.some((o) => o.value === picked);
+      const chosen = valid ? picked : opts[0]?.value;
+      if (chosen) out[c.irmItemId] = chosen;
+    }
+    return out;
+  }, [cart, warehouseOptionsByItem, lineWarehouses]);
 
-  const selectedWarehouse = availability.find((a) => a.warehouseId === preferredWarehouseId);
+  // How many separate places this request sends the engineer to. Shown while it can still be changed.
+  const stops = React.useMemo(
+    () => new Set(Object.values(effectiveWarehouses)).size,
+    [effectiveWarehouses],
+  );
+  const unplaced = cart.filter((c) => !effectiveWarehouses[c.irmItemId]);
   const totalQty = cart.reduce((s, c) => s + c.qty, 0);
+
+  // Free stock at the warehouse THIS line is collected from — the cap the qty box is judged against.
+  // Sourced per line now, not from one request-level warehouse.
+  const shelfByItem = React.useMemo(() => {
+    const m = new Map<string, number>();
+    for (const c of cart) {
+      const whId = effectiveWarehouses[c.irmItemId];
+      if (!whId) continue;
+      const w = availability.find((a) => a.warehouseId === whId);
+      const free = w?.items.find((i) => i.irmItemId === c.irmItemId)?.quantityOnHand;
+      if (typeof free === "number") m.set(c.irmItemId, free);
+    }
+    return m;
+  }, [availability, cart, effectiveWarehouses]);
+
+  // Cap each line's qty at what is FREE at the warehouse that line collects from — the same rule the
+  // job kit list applies to its own warehouse column. VanStockCartTable already clamps typing to
+  // maxQty, so the number simply cannot be typed past the shelf.
+  const cappedCart = React.useMemo(
+    () => cart.map((c) => {
+      const free = shelfByItem.get(c.irmItemId);
+      return typeof free === "number" ? { ...c, maxQty: free } : c;
+    }),
+    [cart, shelfByItem],
+  );
+  // Switching a line to a warehouse with less stock leaves an already-typed qty above the new cap
+  // (clamping it silently would rewrite a number the engineer chose), so it's caught here instead.
+  const overCap = cart.find((c) => {
+    const free = shelfByItem.get(c.irmItemId);
+    return typeof free === "number" && c.qty > free;
+  });
+
 
   const addItem = (it: VanStockItemOption) =>
     setCart((c) => (c.some((x) => x.irmItemId === it.irmItemId) ? c : [...c, { irmItemId: it.irmItemId, name: it.name, code: it.code, qty: 1 }]));
@@ -142,17 +199,31 @@ export function RestockComposerPage() {
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (cart.length === 0) { setMsg({ type: "error", text: "Add at least one item." }); return; }
-    if (!preferredWarehouseId) { setMsg({ type: "error", text: "Pick the warehouse you'll collect from." }); return; }
+    if (overCap) {
+      const free = shelfByItem.get(overCap.irmItemId) ?? 0;
+      setMsg({ type: "error", text: `Only ${free} of "${overCap.name}" are free at the warehouse you picked — lower the quantity or collect it from somewhere else.` });
+      return;
+    }
+    if (unplaced.length > 0) {
+      // Only reachable when an item is stocked NOWHERE (auto-select fills every other case).
+      setMsg({ type: "error", text: `No warehouse has "${unplaced[0]!.name}" in stock — remove it or ask the office to order it.` });
+      return;
+    }
     if (!reason.trim()) { setMsg({ type: "error", text: "Tell the warehouse why you need this." }); return; }
     setSubmitting(true);
     setMsg(null);
     try {
-      const lines: VanStockLinePayload[] = cart.map((c) => ({ irmItemId: c.irmItemId, itemName: c.name, qty: c.qty }));
+      const lines: VanStockLinePayload[] = cart.map((c) => ({
+        irmItemId: c.irmItemId,
+        itemName: c.name,
+        qty: c.qty,
+        warehouseId: effectiveWarehouses[c.irmItemId]!,
+      }));
       await vanStockSvc.createVanStockRequest({
         type: "restock",
         reason: reason.trim(),
         priority,
-        preferredWarehouseId,
+        // No request-level warehouse: the collection point is derived server-side from the lines.
         attachments: attachments.length ? attachments : undefined,
         lines,
       });
@@ -186,23 +257,42 @@ export function RestockComposerPage() {
             <VanStockItemSearch excludeIds={excludeKeys} onAddItem={addItem} placeholder="Search the item you need…" />
           </FormSection>
 
-          <FormSection title={`Selected items${cart.length ? ` (${cart.length})` : ""}`} description="Set the quantity for each item.">
-            <VanStockCartTable cart={cart} onQty={setQty} onRemove={remove} shelfByItem={shelfByItem} />
+          <FormSection title={`Selected items${cart.length ? ` (${cart.length})` : ""}`} description="Set the quantity, and where you'll collect each item from.">
+            <VanStockCartTable
+              cart={cappedCart}
+              onQty={setQty}
+              onRemove={remove}
+              shelfByItem={shelfByItem}
+              shelfLabel="Free there"
+              warehouseCell={(c) => {
+                const opts = warehouseOptionsByItem.get(c.irmItemId) ?? [];
+                if (opts.length === 0) {
+                  return <span className="text-[11px] font-semibold text-[var(--neg)]">No warehouse has this in stock</span>;
+                }
+                return (
+                  <Select
+                    ariaLabel={`Collect ${c.name} from`}
+                    value={effectiveWarehouses[c.irmItemId] ?? ""}
+                    onChange={(v) => setLineWarehouses((prev) => ({ ...prev, [c.irmItemId]: v }))}
+                    options={opts.map(({ value, label }) => ({ value, label }))}
+                  />
+                );
+              }}
+            />
             <DuplicateWarning cart={cart} openLines={openLines} />
+            {stops > 1 && (
+              // The engineer is the one who drives, so the cost of their own split is stated while
+              // they can still change it — this used to be a reviewer's decision they learned about
+              // only after approval.
+              <p className="mt-2 text-[11px] font-semibold text-amber-600">
+                This request collects from {stops} warehouses — you&apos;ll need {stops} stops. Move a line to a shared
+                warehouse if one has everything.
+              </p>
+            )}
           </FormSection>
 
-          <FormSection title="Collection & priority" description="Your request goes to that warehouse's team — they confirm (or change) it on approval.">
+          <FormSection title="Priority" description="How soon you need this.">
             <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <label className={labelCls}>Collect from <RequiredMark /></label>
-                <Select
-                  ariaLabel="Collection warehouse"
-                  value={preferredWarehouseId}
-                  onChange={setPreferredWarehouseId}
-                  options={[{ value: "", label: cart.length ? "Pick a warehouse…" : "Add items first to see stock…" }, ...warehouseOptions]}
-                />
-                <p className="mt-1 text-[11px] text-[var(--faint)]">Stock counts are a live snapshot, not a reservation.</p>
-              </div>
               <div>
                 <label className={labelCls}>Priority</label>
                 <Select ariaLabel="Priority" value={priority} onChange={(v) => setPriority((v || "normal") as VanStockPriority)} options={PRIORITY_OPTIONS} />
@@ -268,8 +358,8 @@ export function RestockComposerPage() {
             <FormAsideCard title="Summary">
               <dl className="space-y-2.5 text-xs">
                 <div className="flex justify-between gap-2">
-                  <dt className="text-[var(--muted)]">Collect from</dt>
-                  <dd className="text-right font-semibold text-[var(--ink)]">{selectedWarehouse?.warehouseName ?? "—"}</dd>
+                  <dt className="text-[var(--muted)]">Collection stops</dt>
+                  <dd className="text-right font-semibold text-[var(--ink)]">{stops || "—"}</dd>
                 </div>
                 <div className="flex justify-between gap-2">
                   <dt className="text-[var(--muted)]">Items</dt>
@@ -279,14 +369,7 @@ export function RestockComposerPage() {
                   <dt className="text-[var(--muted)]">Total quantity</dt>
                   <dd className="font-semibold text-[var(--ink)]">{totalQty}</dd>
                 </div>
-                {selectedWarehouse && cart.length > 0 && (
-                  <div className="flex justify-between gap-2">
-                    <dt className="text-[var(--muted)]">In stock there</dt>
-                    <dd className="font-semibold text-[var(--ink)]">
-                      {selectedWarehouse.items.filter((i) => i.quantityOnHand > 0).length}/{cart.length} items
-                    </dd>
-                  </div>
-                )}
+
                 <div className="flex justify-between gap-2">
                   <dt className="text-[var(--muted)]">Priority</dt>
                   <dd className="font-semibold capitalize text-[var(--ink)]">{priority}</dd>
@@ -324,6 +407,7 @@ export function ReturnComposerPage() {
 
   const inCart = React.useMemo(() => new Set(cart.map((c) => c.irmItemId)), [cart]);
   const totalQty = cart.reduce((s, c) => s + c.qty, 0);
+
   const add = (h: HoldingOption) =>
     setCart((c) => (c.some((x) => x.irmItemId === h.irmItemId) ? c : [...c, { irmItemId: h.irmItemId, name: h.name, code: h.code, qty: h.quantityOnHand, maxQty: h.quantityOnHand }]));
   const setQty = (id: string, qty: number) => setCart((c) => c.map((x) => (x.irmItemId === id ? { ...x, qty } : x)));

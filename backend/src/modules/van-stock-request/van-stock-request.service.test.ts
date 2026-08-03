@@ -131,6 +131,16 @@ describe("requestAccessWarehouseIds (getOne access mirrors belongsToWarehouses)"
     const req = { status: "pending", warehouseId: null, preferredWarehouseId: "WH-0003", lines: [] };
     expect(requestAccessWarehouseIds(req)).toContain("WH-0003");
   });
+
+  // Fail-closed guarantee. Per-line selection means a live restock always owns at least one warehouse,
+  // but a request with nothing set (legacy data, a half-written row) must own NOTHING rather than
+  // defaulting to something: assertRequestAccess turns an empty owner set into "only an unrestricted
+  // actor may proceed". If this ever invented an id, an arbitrary manager would start seeing other
+  // engineers' requests.
+  it("owns NO warehouse when nothing on the request names one", () => {
+    const req = { status: "pending", warehouseId: null, preferredWarehouseId: null, lines: [{ sourceWarehouseId: null }] };
+    expect(requestAccessWarehouseIds(req)).toEqual([]);
+  });
   it("does NOT include preferredWarehouseId once the request is past pending (final warehouse governs)", () => {
     const req = { status: "approved", warehouseId: "WH-0005", preferredWarehouseId: "WH-0003", lines: [{ sourceWarehouseId: "WH-0005" }] };
     const ids = requestAccessWarehouseIds(req);
@@ -153,6 +163,24 @@ describe("assertRequestAccess (shared reviewer gate — getOne / scanLookup / cl
   });
   it("denies a scoped reviewer who owns none of them", () => {
     expect(() => assertRequestAccess(scoped(["WH-0009"]), split)).toThrow(/don't have access/);
+  });
+
+  // decline() used to resolve ownership as `warehouseId ?? preferredWarehouseId` — a rule written
+  // before the engineer chose a collection warehouse PER LINE. On a pending split both are null
+  // (preferredWarehouseId is derived, and deliberately null when the lines disagree), so the guard
+  // hit its fail-closed branch and NO warehouse-scoped reviewer could decline a split request at
+  // all. It now shares this gate, which has always considered line sources.
+  it("lets each source warehouse act on a PENDING SPLIT, where neither warehouse field is set", () => {
+    const pendingSplit = {
+      status: "pending",
+      warehouseId: null,
+      preferredWarehouseId: null,
+      lines: [{ sourceWarehouseId: "WH-0005" }, { sourceWarehouseId: "WH-0003" }],
+    };
+    expect(requestAccessWarehouseIds(pendingSplit)).toEqual(["WH-0005", "WH-0003"]);
+    expect(() => assertRequestAccess(scoped(["WH-0005"]), pendingSplit)).not.toThrow();
+    expect(() => assertRequestAccess(scoped(["WH-0003"]), pendingSplit)).not.toThrow();
+    expect(() => assertRequestAccess(scoped(["WH-0009"]), pendingSplit)).toThrow(/don't have access/);
   });
   it("never restricts an unrestricted actor (admin)", () => {
     expect(() => assertRequestAccess({ type: "admin" as const, permissions: [] }, split)).not.toThrow();
@@ -189,6 +217,24 @@ describe("isReviewer", () => {
   });
   it("false for a warehouse-SCOPED actor without the review perm", () => {
     expect(isReviewer({ type: "user", permissions: [], assignedWarehouseIds: ["W1"] })).toBe(false);
+  });
+});
+
+// Which states still have a remainder the ENGINEER may cancel. Pinned as data because the window
+// widened for a non-obvious reason: under per-warehouse review a request reaches `approved` on the
+// FIRST warehouse's answer, so that is where a split request now spends most of its life — waiting on
+// a second warehouse, collectable from the first, and (before this) uncancellable by the person who
+// raised it. Narrowing it back to partially_fulfilled would silently strand them again.
+const CANCELLABLE_REMAINDER_STATES = ["approved", "partially_fulfilled"];
+
+describe("cancel-remaining window", () => {
+  it.each([["approved"], ["partially_fulfilled"]])("allows %s", (status) => {
+    expect(CANCELLABLE_REMAINDER_STATES.includes(status)).toBe(true);
+  });
+
+  // pending has its own whole-request cancel; the rest are terminal.
+  it.each([["pending"], ["fulfilled"], ["declined"], ["cancelled"]])("does not offer a remainder for %s", (status) => {
+    expect(CANCELLABLE_REMAINDER_STATES.includes(status)).toBe(false);
   });
 });
 
@@ -245,11 +291,39 @@ describe("resolveLineApprovals (approve sourcing + hard-block)", () => {
   const wh = { id: "PRIMARY", name: "Primary WH", code: "WH-1" };
   const activeWarehouse = async (id: string) => (id === "PRIMARY" ? wh : id === "LONDON" ? { id: "LONDON", name: "London", code: "WH-2" } : null);
 
-  it("defaults each line's source to the primary warehouse", async () => {
+  it("falls back to the primary warehouse when a line carries no source of its own", async () => {
+    // Legacy requests (raised before the engineer picked per line) and walk-ins/returns.
     const balances = [{ irmItemId: "I1", warehouseId: "PRIMARY", quantityOnHand: 5 }, { irmItemId: "I2", warehouseId: "PRIMARY", quantityOnHand: 5 }];
     const out = await resolveLineApprovals(reqLines, [], wh, activeWarehouse, async () => balances);
     expect(out.every((l) => l.sourceWarehouseId === "PRIMARY")).toBe(true);
     expect(out.map((l) => l.approvedQty)).toEqual([2, 2]);
+  });
+
+  // The engineer now chooses each line's collection warehouse at create, seeing that warehouse's live
+  // stock. Approving must NOT silently re-point those lines at whatever warehouse the reviewer happens
+  // to be sitting in — that would undo the route the engineer planned their drive around.
+  it("KEEPS the engineer's own per-line choice over the primary", async () => {
+    const chosen = [
+      { ...reqLines[0]!, sourceWarehouseId: "LONDON" },
+      { ...reqLines[1]!, sourceWarehouseId: "PRIMARY" },
+    ];
+    const balances = [
+      { irmItemId: "I1", warehouseId: "LONDON", quantityOnHand: 5 },
+      { irmItemId: "I2", warehouseId: "PRIMARY", quantityOnHand: 5 },
+    ];
+    const out = await resolveLineApprovals(chosen, [], wh, activeWarehouse, async () => balances);
+    expect(out.find((l) => l.lineId === "L1")!.sourceWarehouseId).toBe("LONDON");
+    expect(out.find((l) => l.lineId === "L2")!.sourceWarehouseId).toBe("PRIMARY");
+  });
+
+  it("still lets a reviewer override the engineer's choice on a line", async () => {
+    const chosen = [{ ...reqLines[0]!, sourceWarehouseId: "LONDON" }, { ...reqLines[1]!, sourceWarehouseId: "LONDON" }];
+    const balances = [
+      { irmItemId: "I1", warehouseId: "PRIMARY", quantityOnHand: 5 },
+      { irmItemId: "I2", warehouseId: "LONDON", quantityOnHand: 5 },
+    ];
+    const out = await resolveLineApprovals(chosen, [{ lineId: "L1", approvedQty: 2, sourceWarehouseId: "PRIMARY" }], wh, activeWarehouse, async () => balances);
+    expect(out.find((l) => l.lineId === "L1")!.sourceWarehouseId).toBe("PRIMARY");
   });
 
   it("uses an explicit per-line source when provided", async () => {
@@ -354,5 +428,59 @@ describe("per-warehouse close-short", () => {
     const three = [...lines, { id: "L3", approvedQty: 5, requestedQty: 5, fulfilledQty: 0, closedShortQty: null, sourceWarehouseId: "W3", itemName: "Screws" }];
     const after = three.map((l) => (l.id === "L1" ? { ...l, closedShortQty: 2 } : l));
     expect(requestDoneAfter(after)).toBe(false); // L3 (W3) still open
+  });
+});
+
+// The rule that makes per-warehouse review safe. Each source warehouse approves only ITS OWN lines,
+// so a line can sit undecided inside an already-approved request — a state that could not exist while
+// one approval covered everything. `approvedQty ?? requestedQty` used to stand in for "not reviewed
+// yet"; under per-warehouse review that made an undecided line read as fully outstanding, and the
+// fulfil zone (remainingQty > 0 && mine) would have offered it to be scanned out with NO approval
+// behind it. The two questions below are the whole safety property and they must not collapse back
+// into one expression.
+describe("an undecided line is neither issuable nor complete", () => {
+  const undecided = { approvedQty: null, requestedQty: 4, fulfilledQty: 0, closedShortQty: null };
+
+  it("has NOTHING issuable — stock cannot leave before its warehouse approves", () => {
+    expect(lineRemaining(undecided)).toBe(0);
+  });
+
+  it("is NOT done — it still holds the request open for the warehouse that owes an answer", () => {
+    // If this returned true the request would close as `fulfilled` while a warehouse hadn't looked.
+    expect(lineDone(undecided)).toBe(false);
+  });
+
+  it("becomes issuable only once approved", () => {
+    expect(lineRemaining({ ...undecided, approvedQty: 4 })).toBe(4);
+    expect(lineDone({ ...undecided, approvedQty: 4 })).toBe(false);
+  });
+
+  // The engineer can now cancel while a request is merely `approved`, which under per-warehouse
+  // review is where a split request waits — so a line can be cancelled BEFORE its warehouse ever
+  // answered. Such a line must close: lineRemaining reads 0 for it (nothing issuable pre-approval),
+  // so without cancelled-first here it stayed "not done" forever on a closed request, and the
+  // engineer's own view called it "Awaiting" stock they had withdrawn themselves.
+  it("a cancelled line is DONE even though its warehouse never answered", () => {
+    const cancelledBeforeApproval = { approvedQty: null, requestedQty: 4, fulfilledQty: 0, closedShortQty: null, cancelledQty: 4 };
+    expect(lineDone(cancelledBeforeApproval)).toBe(true);
+    expect(lineRemaining(cancelledBeforeApproval)).toBe(0); // still nothing issuable
+  });
+
+  it("an UNCANCELLED undecided line still holds the request open", () => {
+    expect(lineDone({ approvedQty: null, requestedQty: 4, fulfilledQty: 0, closedShortQty: null, cancelledQty: null })).toBe(false);
+  });
+
+  it("an EXCLUDED line (approved 0) is done and issues nothing — unchanged", () => {
+    expect(lineRemaining({ ...undecided, approvedQty: 0 })).toBe(0);
+    expect(lineDone({ ...undecided, approvedQty: 0 })).toBe(true);
+  });
+
+  it("a fully fulfilled line is done", () => {
+    expect(lineDone({ approvedQty: 4, requestedQty: 4, fulfilledQty: 4, closedShortQty: null })).toBe(true);
+  });
+
+  // Returns and walk-ins set approvedQty at create, so they are never undecided and behave as before.
+  it("returns/walk-ins are unaffected (approvedQty set at create)", () => {
+    expect(lineRemaining({ approvedQty: 3, requestedQty: 3, fulfilledQty: 1, closedShortQty: null })).toBe(2);
   });
 });

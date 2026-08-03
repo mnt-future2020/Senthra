@@ -26,6 +26,17 @@ export interface VanStockLine {
   // warehouse shape so the engineer's pickup modal is literally the same component in both flows.
   sourceWarehouse: JobKitWarehouse | null;
   isMine: boolean; // server-computed: this line's source is in the reading actor's warehouse scope
+  // Per-line close-short — the source warehouse writing off what it can't supply. Distinct from the
+  // request-level closeShort* fields, which predate close-short being per warehouse.
+  closedShortQty: number | null;
+  closedShortBy: string | null;
+  closedShortNote: string | null;
+  closedShortAt: string | null;
+  // Cancelled by the ENGINEER (cancel remaining). Separate from closedShort*, which is the WAREHOUSE
+  // saying it can't supply — same effect on the maths, different actor and different story.
+  cancelledQty: number | null;
+  cancelledBy: string | null;
+  cancelledAt: string | null;
 }
 
 export interface VanStockFulfilmentLine {
@@ -99,6 +110,10 @@ export interface VanStockLinePayload {
   irmItemId: string;
   itemName: string;
   qty: number;
+  // RESTOCK only: the warehouse this line is collected from. The engineer picks it per item against
+  // that warehouse's live free stock; the server stores it as the line's sourceWarehouseId, which is
+  // what routes the request to each warehouse's queue. Omitted on a return (one destination).
+  warehouseId?: string;
 }
 
 export interface CreateVanStockRequestPayload {
@@ -107,7 +122,7 @@ export interface CreateVanStockRequestPayload {
   notes?: string;
   priority?: VanStockPriority;
   attachments?: string[];
-  preferredWarehouseId?: string; // restock — REQUIRED there (routes the request to that warehouse's queue)
+  preferredWarehouseId?: string; // never sent on a restock — DERIVED server-side from the lines
   warehouseId?: string; // return — final
   lines: VanStockLinePayload[];
 }
@@ -264,8 +279,11 @@ export function approveVanStockRequest(
   return api<{ request: VanStockRequest }>(`/van-stock-requests/${id}/approve`, { method: "POST", body: payload }).then((r) => r.request);
 }
 
-export function declineVanStockRequest(id: string, decisionNote: string): Promise<VanStockRequest> {
-  return api<{ request: VanStockRequest }>(`/van-stock-requests/${id}/decline`, { method: "POST", body: { decisionNote } }).then((r) => r.request);
+// warehouseId = the warehouse tab the decline is happening in. Only ITS lines are refused — a
+// warehouse never speaks for stock it doesn't hold, and the request is marked declined only once
+// every line has been answered and none survived.
+export function declineVanStockRequest(id: string, warehouseId: string, decisionNote: string): Promise<VanStockRequest> {
+  return api<{ request: VanStockRequest }>(`/van-stock-requests/${id}/decline`, { method: "POST", body: { warehouseId, decisionNote } }).then((r) => r.request);
 }
 
 // warehouseId = the warehouse tab the scan/post is happening in. The backend enforces every line is

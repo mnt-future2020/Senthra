@@ -2,7 +2,7 @@ import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import * as engineerStockRepo from "#modules/engineer-stock/engineer-stock.repository.js";
 import * as goodsManagementRepo from "#modules/goods-management/goods-management.repository.js";
-import { jobCommittedByEngineer } from "#modules/goods-management/goods-management.service.js";
+import { getOpenDemand, jobCommittedByEngineer } from "#modules/goods-management/goods-management.service.js";
 import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
 import * as inventoryService from "#modules/inventory/inventory.service.js";
 import * as irmRepo from "#modules/irm/irm.repository.js";
@@ -73,6 +73,20 @@ export interface PublicVanStockLine {
   // line's source (and for a line whose warehouse was since removed).
   sourceWarehouse: PublicVanStockLineWarehouse | null;
   isMine: boolean; // sourceWarehouseId ∈ the reading actor's warehouse scope (false for the engineer's own read)
+  // PER-LINE close-short: the source warehouse that owns this line writing off what it can't supply.
+  // The request-level closedShort* fields predate close-short being per warehouse — on a split request
+  // they name one warehouse's write-off while another's is invisible — so the line has to carry its
+  // own. Without these a written-off line is indistinguishable from an untouched one (approved 6,
+  // fulfilled 0), and the engineer's view calls it "Awaiting" stock that is never coming.
+  closedShortQty: number | null;
+  closedShortBy: string | null;
+  closedShortNote: string | null;
+  closedShortAt: string | null;
+  // Per-line cancellation by the ENGINEER (cancel remaining) — kept apart from closedShort*, which is
+  // the WAREHOUSE saying it can't supply. Same effect on the arithmetic, different story and actor.
+  cancelledQty: number | null;
+  cancelledBy: string | null;
+  cancelledAt: string | null;
 }
 
 export interface PublicVanStockLineWarehouse {
@@ -273,6 +287,13 @@ export function toPublic(r: RequestWithLines, now: Date, scope: string[] | undef
       sourceWarehouseCode: l.sourceWarehouseCode,
       sourceWarehouse: l.sourceWarehouse,
       isMine: lineIsMine(l, scope),
+      closedShortQty: l.closedShortQty,
+      closedShortBy: l.closedShortBy,
+      closedShortNote: l.closedShortNote,
+      closedShortAt: iso(l.closedShortAt),
+      cancelledQty: l.cancelledQty,
+      cancelledBy: l.cancelledBy,
+      cancelledAt: iso(l.cancelledAt),
     })),
     fulfilments: r.fulfilments.map((f) => ({
       id: f.id,
@@ -354,16 +375,51 @@ export function assertRequestAccess(
 // The reads run in parallel and create/walk-in are low-frequency, so this isn't hot; a batched
 // findMany({ id: { in } }) is the fix (the return path below already batches its balance read) but it
 // must keep the per-line error messages, which name the offending item.
-async function resolveLines(lines: Array<{ irmItemId: string; itemName: string; qty: number }>): Promise<CreateRequestLineData[]> {
+async function resolveLines(
+  lines: Array<{ irmItemId: string; itemName: string; qty: number; warehouseId?: string }>,
+  // Restock only: resolves each line's chosen collection warehouse. Omitted for returns/walk-in,
+  // where one warehouse governs the whole request and the caller sets the source itself.
+  sourceFor?: (warehouseId: string) => { id: string; name: string; code: string | null },
+): Promise<CreateRequestLineData[]> {
   return Promise.all(
     lines.map(async (l): Promise<CreateRequestLineData> => {
       const item = await irmRepo.findById(l.irmItemId);
       if (!item) throw badRequest(`The IRM item for "${l.itemName}" no longer exists.`);
       if (item.status !== "active") throw badRequest(`"${item.name}" is not active.`);
       if (item.trackSerialNumbers || item.trackBatchNumbers) throw badRequest(`"${item.name}" is serial/batch-tracked — not supported on van stock requests.`);
-      return { irmItemId: item.id, itemName: item.name, code: item.code ?? null, sku: item.sku ?? null, uom: item.baseUnit ?? null, requestedQty: l.qty };
+      const src = sourceFor && l.warehouseId ? sourceFor(l.warehouseId) : null;
+      return {
+        irmItemId: item.id,
+        itemName: item.name,
+        code: item.code ?? null,
+        sku: item.sku ?? null,
+        uom: item.baseUnit ?? null,
+        requestedQty: l.qty,
+        // Set at CREATE for a restock now that the engineer picks per line — this is what routes the
+        // request (belongsToWarehouses matches any line's source), so each warehouse sees only its own.
+        ...(src ? { sourceWarehouseId: src.id, sourceWarehouseName: src.name, sourceWarehouseCode: src.code } : {}),
+      };
     }),
   );
+}
+
+// Load + validate every DISTINCT warehouse the restock's lines collect from, in one read per
+// warehouse rather than one per line. An inactive warehouse can't be collected from, and its
+// manager's queue is gone, so it's rejected here rather than surfacing at approve.
+async function resolveLineWarehouses(
+  lines: Array<{ warehouseId?: string }>,
+): Promise<Map<string, { id: string; name: string; code: string | null }>> {
+  const ids = [...new Set(lines.map((l) => l.warehouseId).filter((id): id is string => Boolean(id)))];
+  const found = new Map<string, { id: string; name: string; code: string | null }>();
+  await Promise.all(
+    ids.map(async (id) => {
+      const wh = await warehouseRepo.findById(id);
+      if (!wh) throw badRequest("One of the selected collection warehouses no longer exists.");
+      if (wh.status !== "active") throw badRequest(`"${wh.name}" is no longer active — pick another warehouse for that item.`);
+      found.set(id, { id: wh.id, name: wh.name, code: wh.code ?? null });
+    }),
+  );
+  return found;
 }
 
 // ── create (engineer) ───────────────────────────────────────────────────────────────────────────
@@ -377,7 +433,14 @@ export async function create(input: CreateVanStockRequestInput, actor: AuditActo
   // fails closed if a non-stock-holding or deactivated role somehow carries engineer.van_stock.request.
   if (!engineer.role?.canHoldStock) throw forbidden("Your role can't hold field stock.");
 
-  const lines = await resolveLines(input.lines);
+  // Restock: every line names its own collection warehouse (validation enforces), so load them first
+  // and stamp each line's source at create. Returns resolve with no per-line source — one destination
+  // governs the whole request.
+  const lineWarehouses = input.type === "restock" ? await resolveLineWarehouses(input.lines) : null;
+  const lines = await resolveLines(
+    input.lines,
+    lineWarehouses ? (id) => lineWarehouses.get(id) ?? (() => { throw badRequest("That collection warehouse is no longer available."); })() : undefined,
+  );
 
   let warehouseId: string | null = null;
   let warehouseName: string | null = null;
@@ -412,13 +475,14 @@ export async function create(input: CreateVanStockRequestInput, actor: AuditActo
       }
     }
   } else {
-    // REQUIRED on restock (validation enforces): the collection warehouse routes the pending
-    // request to that warehouse manager's queue. Snapshot name/code for lists + worklist links.
-    const wh = await warehouseRepo.findById(input.preferredWarehouseId!);
-    if (!wh) throw badRequest("The selected collection warehouse no longer exists.");
-    // Route only to a live warehouse — an inactive collection warehouse has no active reviewer queue.
-    if (wh.status !== "active") throw badRequest("The selected collection warehouse is no longer active.");
-    preferred = { id: wh.id, name: wh.name, code: wh.code ?? null };
+    // Restock. The collection point is DERIVED from the lines, never taken from the client: when every
+    // line collects from the same warehouse that warehouse is the request's single pickup (and the
+    // lists can name it); when they differ this is a split, and naming any one of them would send the
+    // engineer to the wrong place — so it stays null and the per-line sources speak for themselves.
+    // Routing does not depend on it either way: belongsToWarehouses() already matches a request by any
+    // line's sourceWarehouseId, so each source warehouse sees this request from the moment it exists.
+    const distinct = [...lineWarehouses!.values()];
+    preferred = distinct.length === 1 ? distinct[0]! : null;
   }
 
   const data: CreateRequestData = {
@@ -544,7 +608,11 @@ export interface ResolvedLineApproval {
   sourceWarehouseCode: string | null;
 }
 export async function resolveLineApprovals(
-  reqLines: Array<{ id: string; irmItemId: string; itemName: string; requestedQty: number }>,
+  // sourceWarehouseId is the warehouse the ENGINEER chose for this line at create. It is the default
+  // now — the primary is only a fallback for legacy requests raised before per-line selection, and for
+  // returns/walk-ins. Defaulting to the primary instead would silently re-point every line at whatever
+  // warehouse the reviewer happens to be sitting in, quietly undoing the engineer's route.
+  reqLines: Array<{ id: string; irmItemId: string; itemName: string; requestedQty: number; sourceWarehouseId?: string | null; sourceWarehouseName?: string | null; sourceWarehouseCode?: string | null }>,
   lineApprovals: Array<{ lineId: string; approvedQty: number; sourceWarehouseId?: string }>,
   primary: { id: string; name: string; code: string | null },
   findWarehouse: (id: string) => Promise<{ id: string; name: string; code: string | null } | null>,
@@ -559,9 +627,15 @@ export async function resolveLineApprovals(
       const approvedQty = a?.approvedQty ?? l.requestedQty;
       if (approvedQty > l.requestedQty) throw badRequest(`"${l.itemName}": approved quantity can't exceed the requested ${l.requestedQty}.`);
       if (approvedQty === 0) {
-        return { lineId: l.id, approvedQty: 0, sourceWarehouseId: null, sourceWarehouseName: null, sourceWarehouseCode: null, irmItemId: l.irmItemId, itemName: l.itemName };
+        // KEEP the source on an excluded line. Nulling it made sense when one approval covered the
+        // whole request, but the source is now what says WHICH warehouse a line belongs to: a
+        // sourceless line reads as unowned/legacy, so an item London excluded reappeared in every
+        // other warehouse's queue — and blocked their Approve, because it had no source. The line is
+        // still excluded (approvedQty 0 ⇒ done, nothing issuable); it just remembers whose call it was.
+        return { lineId: l.id, approvedQty: 0, sourceWarehouseId: l.sourceWarehouseId ?? null, sourceWarehouseName: l.sourceWarehouseName ?? null, sourceWarehouseCode: l.sourceWarehouseCode ?? null, irmItemId: l.irmItemId, itemName: l.itemName };
       }
-      const sourceId = a?.sourceWarehouseId ?? primary.id;
+      // Reviewer override → the engineer's own choice → the primary.
+      const sourceId = a?.sourceWarehouseId ?? l.sourceWarehouseId ?? primary.id;
       const sw = sourceId === primary.id ? primary : await findWarehouse(sourceId);
       if (!sw) throw badRequest(`"${l.itemName}": the chosen source warehouse no longer exists or isn't active.`);
       return { lineId: l.id, approvedQty, sourceWarehouseId: sw.id, sourceWarehouseName: sw.name, sourceWarehouseCode: sw.code, irmItemId: l.irmItemId, itemName: l.itemName };
@@ -588,16 +662,30 @@ export async function approve(id: string, input: ApproveVanStockRequestInput, ac
   const req = await vsrRepo.findById(id);
   if (!req) throw notFound("Van stock request not found.");
   if (req.type !== "restock") throw conflict("Returns don't need approval — scan them in to accept.");
-  if (req.status !== "pending") throw conflict(`This request has already been ${req.status}.`);
+  // Terminal states only. `status !== "pending"` used to gate this, which is wrong now that each
+  // warehouse decides separately: the FIRST approval moves the request to `approved`, and the second
+  // warehouse must still be able to answer for its own lines.
+  if (["declined", "cancelled", "fulfilled"].includes(req.status)) throw conflict(`This request has already been ${req.status}.`);
+  assertRequestAccess(actor, req);
 
   const wh = await warehouseRepo.findById(input.warehouseId);
   if (!wh) throw badRequest("The chosen warehouse no longer exists.");
-  if (wh.status !== "active") throw badRequest("The chosen warehouse is no longer active."); // M1: primary must be active too
+  if (wh.status !== "active") throw badRequest("The chosen warehouse is no longer active.");
   assertWarehouseAccess(actor, wh.id);
 
-  // Resolve per-line source + hard-block on live availability (authoritative — never trust the UI).
+  // MY lines = the undecided ones sourced to THE WAREHOUSE BEING ACTED FOR — not to everything the
+  // actor happens to have rights over. Scoping by the actor's permissions instead meant an
+  // unrestricted actor (a super admin, who has no warehouse scope at all) reviewing from London's tab
+  // silently answered for every other warehouse's lines too, so the warehouse that actually held the
+  // stock never got to decide. assertWarehouseAccess above already proves they may act for this one.
+  // Legacy lines carry no source and stay claimable by whichever warehouse opens them, else requests
+  // raised before per-line selection would be approvable by nobody; the atomic claim settles ties.
+  const mine = req.lines.filter((l) => l.approvedQty === null && (l.sourceWarehouseId === wh.id || l.sourceWarehouseId === null));
+  if (mine.length === 0) throw conflict("There are no lines here for you to review — another warehouse has already answered for them.");
+
+  // Resolve + hard-block on live availability, over MY lines only (authoritative — never trust the UI).
   const lineApprovals = await resolveLineApprovals(
-    req.lines,
+    mine,
     input.lineApprovals ?? [],
     { id: wh.id, name: wh.name, code: wh.code ?? null },
     async (whId) => {
@@ -607,44 +695,83 @@ export async function approve(id: string, input: ApproveVanStockRequestInput, ac
     (itemIds, whIds) => inventoryRepo.findBalancesByItemsAndWarehouses(itemIds, whIds),
   );
 
-  const updated = await vsrRepo.claimPendingForApproval(
+  const updated = await vsrRepo.claimLinesForReview(
     id,
+    lineApprovals.map((l) => ({ ...l, reviewedByEmail: actor.email ?? null, decisionNote: input.decisionNote ?? null })),
     { warehouseId: wh.id, warehouseName: wh.name, warehouseCode: wh.code ?? null, reviewedByUserId: actor.id ?? null, reviewedByEmail: actor.email ?? null, decisionNote: input.decisionNote ?? null },
-    lineApprovals,
   );
 
   audit.record({ actor, action: "van_stock_request.approved", targetType: "van_stock_request", targetId: id, targetLabel: req.code, metadata: { warehouseId: wh.id, decisionNote: input.decisionNote ?? null, lineApprovals: lineApprovals.map((l) => ({ lineId: l.lineId, approvedQty: l.approvedQty, sourceWarehouseId: l.sourceWarehouseId })) } });
-  emitUpdate(req.engineerId, { id, code: req.code, status: "approved", type: req.type });
-  notify(req.engineerId, { title: "Restock approved", body: `Your field stock request ${req.code} was approved — collect it from the warehouse.`, data: { type: "vanstock", requestId: id } });
+  emitUpdate(req.engineerId, { id, code: req.code, status: updated.status, type: req.type });
+
+  // Notify per DECISION, not per request: this warehouse answered for its own lines, and another may
+  // still be deciding. Naming the warehouse is what makes a second notification make sense.
+  const sources = [...new Set(lineApprovals.filter((l) => l.approvedQty > 0 && l.sourceWarehouseName).map((l) => l.sourceWarehouseName as string))];
+  const byId = new Map(req.lines.map((l) => [l.id, l]));
+  const trimmed = lineApprovals.filter((l) => l.approvedQty > 0 && l.approvedQty < (byId.get(l.lineId)?.requestedQty ?? 0));
+  const excluded = lineApprovals.filter((l) => l.approvedQty === 0);
+  const changes = [
+    ...trimmed.map((l) => `${byId.get(l.lineId)?.itemName ?? "an item"} cut to ${l.approvedQty}`),
+    ...excluded.map((l) => `${byId.get(l.lineId)?.itemName ?? "an item"} excluded`),
+  ];
+  const stillWaiting = updated.lines.some((l) => l.approvedQty === null);
+  const where = sources.length > 0 ? `ready to collect from ${sources.join(", ")}` : "no items approved here";
+  notify(req.engineerId, {
+    title: changes.length > 0 ? `${wh.name} approved with changes` : `${wh.name} approved your request`,
+    body: `${req.code} — ${where}.${changes.length > 0 ? ` Changed: ${changes.join("; ")}.` : ""}${stillWaiting ? " Other warehouses are still reviewing their items." : ""}`,
+    data: { type: "vanstock", requestId: id },
+  });
   return toPublic(updated, new Date(), warehouseScopeFilter(actor));
 }
 
 export async function decline(id: string, input: DeclineVanStockRequestInput, actor: AuditActor): Promise<PublicVanStockRequest> {
   const req = await vsrRepo.findById(id);
   if (!req) throw notFound("Van stock request not found.");
-  if (req.status !== "pending") throw conflict(`This request has already been ${req.status}.`);
-  // Ownership guard: a pending request belongs to its final warehouse (returns) or the engineer's
-  // collection warehouse (restocks) — only that warehouse's reviewers may decline it.
-  const owningWarehouseId = req.warehouseId ?? req.preferredWarehouseId;
-  if (owningWarehouseId) {
-    assertWarehouseAccess(actor, owningWarehouseId);
-  } else if (getAccessibleWarehouseIds(actor) !== null) {
-    // No owning warehouse resolved (legacy/edge request) — a warehouse-SCOPED reviewer has no claim
-    // to it, so fail closed. Only an unrestricted actor (admin, scope null) may decline such a request.
-    throw forbidden("You don't have access to this request.");
-  }
+  if (["declined", "cancelled", "fulfilled"].includes(req.status)) throw conflict(`This request has already been ${req.status}.`);
+  // Ownership guard — the SAME rule every other reviewer entry point uses: a request belongs to its
+  // final warehouse, its pending collection warehouse, AND every line's source. This used to read
+  // `warehouseId ?? preferredWarehouseId` only, which predates the engineer choosing a collection
+  // warehouse per line: on a SPLIT restock both of those are null, so the guard fell through to its
+  // fail-closed branch and NO warehouse-scoped reviewer could decline a split request at all.
+  assertRequestAccess(actor, req);
 
-  const count = await vsrRepo.declinePending(id, { reviewedByUserId: actor.id ?? null, reviewedByEmail: actor.email ?? null, decisionNote: input.decisionNote });
-  if (count === 0) throw conflict("This request was just handled by someone else.");
-  const updated = await vsrRepo.findById(id);
+  // Declining is now "I can't supply MY lines", not "this whole request is refused". A warehouse
+  // never speaks for stock it doesn't hold — the request is only marked declined once every line has
+  // been answered and none survived (decided in claimLinesForReview). Scoped by the warehouse being
+  // ACTED FOR, not the actor's rights: an unrestricted actor has no warehouse scope, so the old rule
+  // let a super admin refuse every warehouse's lines from one tab.
+  assertWarehouseAccess(actor, input.warehouseId);
+  const mine = req.lines.filter((l) => l.approvedQty === null && (l.sourceWarehouseId === input.warehouseId || l.sourceWarehouseId === null));
+  if (mine.length === 0) throw conflict("There are no lines here for you to decline — another warehouse has already answered for them.");
 
-  audit.record({ actor, action: "van_stock_request.declined", targetType: "van_stock_request", targetId: id, targetLabel: req.code, metadata: { decisionNote: input.decisionNote } });
-  emitUpdate(req.engineerId, { id, code: req.code, status: "declined", type: req.type });
-  notify(req.engineerId, { title: "Field stock declined", body: `Your field stock request ${req.code} was declined.`, data: { type: "vanstock", requestId: id } });
-  return toPublic(updated!, new Date(), warehouseScopeFilter(actor)); // reviewer action
+  const updated = await vsrRepo.claimLinesForReview(
+    id,
+    // Excluded, with THIS warehouse's reason recorded against its own lines.
+    mine.map((l) => ({
+      lineId: l.id,
+      approvedQty: 0,
+      sourceWarehouseId: l.sourceWarehouseId,
+      sourceWarehouseName: l.sourceWarehouseName,
+      sourceWarehouseCode: l.sourceWarehouseCode,
+      reviewedByEmail: actor.email ?? null,
+      decisionNote: input.decisionNote,
+    })),
+    { warehouseId: null, warehouseName: null, warehouseCode: null, reviewedByUserId: actor.id ?? null, reviewedByEmail: actor.email ?? null, decisionNote: input.decisionNote },
+  );
+
+  audit.record({ actor, action: "van_stock_request.declined", targetType: "van_stock_request", targetId: id, targetLabel: req.code, metadata: { decisionNote: input.decisionNote, lineIds: mine.map((l) => l.id) } });
+  emitUpdate(req.engineerId, { id, code: req.code, status: updated.status, type: req.type });
+  const whName = mine[0]?.sourceWarehouseName ?? "A warehouse";
+  const items = mine.map((l) => l.itemName).join(", ");
+  notify(req.engineerId, {
+    title: updated.status === "declined" ? "Field stock declined" : `${whName} can't supply some items`,
+    body: updated.status === "declined"
+      ? `Your field stock request ${req.code} was declined — ${input.decisionNote}`
+      : `${req.code} — ${whName} declined: ${items}. ${input.decisionNote}`,
+    data: { type: "vanstock", requestId: id },
+  });
+  return toPublic(updated, new Date(), warehouseScopeFilter(actor));
 }
-
-// ── cancel / cancel-remaining (engineer) + close-short (reviewer) ───────────────────────────────
 
 export async function cancel(id: string, actor: AuditActor): Promise<PublicVanStockRequest> {
   const req = await vsrRepo.findById(id);
@@ -661,8 +788,10 @@ export async function cancel(id: string, actor: AuditActor): Promise<PublicVanSt
 export async function cancelRemaining(id: string, actor: AuditActor): Promise<PublicVanStockRequest> {
   const req = await vsrRepo.findById(id);
   if (!req) throw notFound("Van stock request not found.");
-  if (req.status !== "partially_fulfilled") throw conflict("Only a partially fulfilled request has a remainder to cancel.");
-  const count = await vsrRepo.finishRemaining(id, { completionType: "cancelled_remaining", engineerId: actor.id ?? "" });
+  // Approved-but-unissued counts: per-warehouse review moves a request to `approved` on the FIRST
+  // warehouse's answer, so this is where a split request now spends most of its life.
+  if (!["approved", "partially_fulfilled"].includes(req.status)) throw conflict("Only an approved or partly fulfilled request has a remainder to cancel.");
+  const count = await vsrRepo.finishRemaining(id, { completionType: "cancelled_remaining", engineerId: actor.id ?? "", cancelledBy: actor.email ?? null });
   if (count === 0) throw forbidden("Only the engineer who raised this request can cancel its remainder.");
   const updated = await vsrRepo.findById(id);
   audit.record({ actor, action: "van_stock_request.cancelled_remaining", targetType: "van_stock_request", targetId: id, targetLabel: req.code, metadata: {} });
@@ -676,7 +805,7 @@ export async function closeShort(id: string, input: CloseShortInput, actor: Audi
   // Gate BEFORE the status check — otherwise the 409s ("already fulfilled", "no outstanding lines")
   // disclose another warehouse's request existence + lifecycle state to an out-of-scope reviewer.
   assertRequestAccess(actor, req);
-  // Scoped to ONE warehouse (the tab) — the actor must hold it, and only ITS lines are written off,
+  // Scoped to ONE warehouse (the tab) — the actor must hold it, and only ITS lines are closed short,
   // even for an admin. Mirrors the scan/fulfil warehouseId enforcement so the per-tab model is
   // consistent on this destructive path too.
   assertWarehouseAccess(actor, input.warehouseId);
@@ -689,7 +818,10 @@ export async function closeShort(id: string, input: CloseShortInput, actor: Audi
   const { request: updated } = await vsrRepo.closeShortLines(id, targets.map((l) => l.id), input.note, actor.email ?? "");
   audit.record({ actor, action: "van_stock_request.closed_short", targetType: "van_stock_request", targetId: id, targetLabel: req.code, metadata: { note: input.note, lineIds: targets.map((l) => l.id), warehouseIds: [...new Set(targets.map((l) => l.sourceWarehouseId))] } });
   emitUpdate(req.engineerId, { id, code: req.code, status: updated.status, type: req.type });
-  notify(req.engineerId, { title: "Request closed short", body: `Request ${req.code} was closed — the remaining items were written off.`, data: { type: "vanstock", requestId: id } });
+  // "closed short", not "written off" — write-off is this app's word for draining a real ledger
+  // (goods-management job_lost). Nothing leaves a ledger here: the remainder was approved but never
+  // issued, so it was never stock. See customers/CloseShortModal for the same distinction.
+  notify(req.engineerId, { title: "Request closed short", body: `Request ${req.code} was closed short — the remaining items won't be supplied.`, data: { type: "vanstock", requestId: id } });
   return toPublic(updated, new Date(), warehouseScopeFilter(actor));
 }
 
@@ -1054,13 +1186,32 @@ export async function availability(irmItemIds: string[]): Promise<WarehouseAvail
   const ids = [...new Set(irmItemIds)].slice(0, 100);
   if (ids.length === 0) return [];
   const warehouses = await warehouseRepo.findMany({ status: "active" }, 0, 200);
-  const balances = await inventoryRepo.findBalancesByItemsAndWarehouses(ids, warehouses.map((w) => w.id));
+  const [balances, demand] = await Promise.all([
+    inventoryRepo.findBalancesByItemsAndWarehouses(ids, warehouses.map((w) => w.id)),
+    // Stock already PLANNED on active jobs but not yet issued. Subtracting it is what makes this
+    // number mean the same thing as the job kit list's "N free" — the job planner has always shown
+    // on-hand minus other jobs' demand, while this endpoint showed raw on-hand. An engineer could
+    // therefore be told 2 were free, request both, and have them scanned onto their van out from
+    // under a job that had already planned them. Same physical stock, so the same arithmetic.
+    getOpenDemand(),
+  ]);
   const byKey = new Map(balances.map((b) => [`${b.warehouseId}:${b.irmItemId}`, b.quantityOnHand]));
+  const demandByKey = new Map<string, number>();
+  for (const d of demand.values()) {
+    if (!d.irmItemId || !d.warehouseId) continue;
+    const k = `${d.warehouseId}:${d.irmItemId}`;
+    demandByKey.set(k, (demandByKey.get(k) ?? 0) + d.demand);
+  }
   return warehouses.map((w) => ({
     warehouseId: w.id,
     warehouseName: w.name,
     warehouseCode: w.code ?? null,
-    items: ids.map((irmItemId) => ({ irmItemId, quantityOnHand: byKey.get(`${w.id}:${irmItemId}`) ?? 0 })),
+    items: ids.map((irmItemId) => {
+      const k = `${w.id}:${irmItemId}`;
+      // Advisory, exactly like the job planner's: the authoritative gate is approve()'s hard-block
+      // against live on-hand. Floored at 0 — demand can exceed stock, and "-3 free" helps nobody.
+      return { irmItemId, quantityOnHand: Math.max(0, (byKey.get(k) ?? 0) - (demandByKey.get(k) ?? 0)) };
+    }),
   }));
 }
 

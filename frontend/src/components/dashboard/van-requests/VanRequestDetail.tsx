@@ -5,21 +5,18 @@ import { ArrowLeft, Camera, Check, CheckCircle2, ImageUp, Loader2, PackageCheck,
 
 import * as vanStockSvc from "@/services/vanStockRequest.service";
 import type { FulfilEntryPayload, VanStockRequest, WarehouseAvailability } from "@/services/vanStockRequest.service";
-import { listWarehouseOptions, type WarehouseOption } from "@/services/warehouse.service";
 import { subscribe } from "@/lib/socket";
 import { cn } from "@/lib/utils";
 import { useDashboard } from "@/hooks/useDashboard";
 import { CopyableCode } from "@/components/ui/CopyableCode";
 import { Modal } from "@/components/ui/Modal";
 import { Notice } from "@/components/ui/Notice";
-import { Select } from "@/components/ui/Select";
 import { QtyStepper } from "@/components/ui/QtyStepper";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { dangerBtn, inputCls, labelCls, primaryBtn, secondaryBtn } from "@/components/ui/styles";
 import { fmtDateTime } from "@/components/dashboard/portal/portalUi";
 import { ScannerInput } from "@/components/dashboard/goods-management/ScannerInput";
-import { VanStockStatusChip } from "@/components/dashboard/engineer/EngineerVanStock";
-import { VanStockAttachments, VanStockPostings, VanStockWalkInBadge } from "./vanRequestUi";
+import { VanStockAttachments, VanStockCompletionBadge, VanStockPostings, VanStockWalkInBadge, linesForWarehouse, warehouseStatus } from "./vanRequestUi";
 import type { Msg } from "@/components/ui/types";
 
 // Review + fulfil panel for one van stock request. Three zones by state:
@@ -105,8 +102,6 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
   const [busy, setBusy] = React.useState(false);
 
   // Review state (pending restock)
-  const [warehouses, setWarehouses] = React.useState<WarehouseOption[]>([]);
-  const [warehouseId, setWarehouseId] = React.useState("");
   const [trims, setTrims] = React.useState<Record<string, number>>({});
   const [sources, setSources] = React.useState<Record<string, string>>({}); // lineId → sourceWarehouseId
   const [availability, setAvailability] = React.useState<WarehouseAvailability[]>([]);
@@ -145,7 +140,15 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
       .then((r) => {
         if (seq !== fetchSeq.current) return; // superseded by a newer fetch
         setReq(r);
-        setWarehouseId((prev) => prev || r.warehouseId || r.preferredWarehouseId || "");
+        // Seed the per-line source dropdowns from the engineer's own choice — they pick a collection
+        // warehouse per item at create, so the reviewer's table should open showing that route rather
+        // than an empty "Select…" they have to re-enter. Only fills BLANKS, so a re-point the reviewer
+        // has already made survives a socket-driven refresh.
+        setSources((prev) => {
+          const next = { ...prev };
+          for (const l of r.lines) if (!next[l.id] && l.sourceWarehouseId) next[l.id] = l.sourceWarehouseId;
+          return next;
+        });
         setEntries([]);
       })
       .catch((err) => {
@@ -185,17 +188,22 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
     };
     return subscribe(["van_stock_request:updated"], onEvent);
   }, [idOrCode]);
+  // Free stock per warehouse — it feeds the "N free" beside each line's source and the shortfall guard
+  // on Approve.
+  //
+  // Gated on the request being LIVE, not on `status === "pending"`. Review is per warehouse now: the
+  // first warehouse to answer moves the request to `approved`, so a second warehouse still holding
+  // undecided lines was landing on that early return — no availability, no free-stock figure beside
+  // its source, and the client-side shortfall check silently disabled (it treats an empty feed as
+  // "not loaded yet" and defers to the server).
   React.useEffect(() => {
-    listWarehouseOptions().then(setWarehouses).catch(() => setWarehouses([]));
-  }, []);
-  // Per-warehouse availability for the review-zone source pickers. Each line's source defaults to the
-  // primary lazily at read time (`sources[l.id] ?? warehouseId`), so no eager seed is needed here —
-  // the primary-warehouse select keeps un-touched lines in sync via its onChange.
-  React.useEffect(() => {
-    if (!req || req.status !== "pending" || req.type !== "restock") return;
+    if (!req || req.type !== "restock") return;
+    if (["declined", "cancelled", "fulfilled"].includes(req.status)) return;
     const ids = req.lines.map((l) => l.irmItemId);
     vanStockSvc.getVanStockAvailability(ids).then(setAvailability).catch(() => setAvailability([]));
   }, [req]);
+  // NB "free", not "on shelf": /availability subtracts stock already planned on active jobs, so this
+  // is what can actually be taken — the same number and the same word the engineer's composer shows.
   const shelfOf = React.useCallback(
     (irmItemId: string, whId: string): number | null => {
       const w = availability.find((a) => a.warehouseId === whId);
@@ -203,23 +211,6 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
       return w.items.find((i) => i.irmItemId === irmItemId)?.quantityOnHand ?? 0;
     },
     [availability],
-  );
-  // Per-line source-warehouse options, from the AVAILABILITY feed (ALL warehouses, unscoped — NOT the
-  // reviewer-scoped `warehouses` list, since re-sourcing is a work order to any warehouse holding the
-  // item). We show only warehouses that actually HOLD this item (on-hand > 0), PLUS the primary/current
-  // source (even at 0) so the dropdown's default value always has a matching option and stays visible.
-  // Falls back to the scoped `warehouses` only while availability hasn't loaded (dropdown never blank).
-  const sourceOptionsFor = React.useCallback(
-    (irmItemId: string, keepId: string): Array<{ id: string; name: string; code: string | null }> => {
-      if (availability.length === 0) return warehouses.map((w) => ({ id: w.id, name: w.name, code: w.code }));
-      return availability
-        .filter((a) => {
-          const onHand = a.items.find((i) => i.irmItemId === irmItemId)?.quantityOnHand ?? 0;
-          return onHand > 0 || a.warehouseId === keepId; // in-stock warehouses + always keep the current/primary
-        })
-        .map((a) => ({ id: a.warehouseId, name: a.warehouseName, code: a.warehouseCode }));
-    },
-    [availability, warehouses],
   );
   // Is this item on ANY warehouse's shelf right now? Drives the shortfall hint's wording: with stock
   // somewhere, "pick another" is real advice; with none anywhere it's a wild goose chase — the only
@@ -251,7 +242,23 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
       .catch(() => setOtherOpen([]));
   }, [req]);
 
-  const isReviewZone = req?.status === "pending" && req.type === "restock";
+  // MY undecided lines — what this warehouse still owes an answer on. Review is no longer a property
+  // of the REQUEST's status: the first warehouse to approve moves it to `approved`, and the second
+  // must still be able to answer for its own lines. Legacy lines carry no source; they stay reviewable
+  // here so pre-per-line requests remain approvable by the warehouse looking at them.
+  const myPendingLines = React.useMemo(
+    () => (req?.lines ?? []).filter((l) => l.approvedQty === null && (!l.sourceWarehouseId || l.sourceWarehouseId === currentWarehouseId)),
+    [req, currentWarehouseId],
+  );
+  const isReviewZone = req?.type === "restock" && !["declined", "cancelled", "fulfilled"].includes(req.status) && myPendingLines.length > 0;
+  const myPendingIds = React.useMemo(() => new Set(myPendingLines.map((l) => l.id)), [myPendingLines]);
+  // The lines this warehouse handles — the ONLY ones its table shows. It reviews, issues and closes
+  // short its own lines, so another warehouse's stock here was noise it couldn't act on, and it made
+  // the request read as bigger than this warehouse's share of it. The count of what's elsewhere is
+  // still surfaced below the table, so nothing disappears silently.
+  const myLines = React.useMemo(() => linesForWarehouse(req?.lines ?? [], currentWarehouseId), [req, currentWarehouseId]);
+  const otherLineCount = (req?.lines.length ?? 0) - myLines.length;
+  const lineIsMine = React.useCallback((l: { id: string }) => myPendingIds.has(l.id), [myPendingIds]);
   const isFulfilZone =
     !!req &&
     ((req.type === "restock" && (req.status === "approved" || req.status === "partially_fulfilled")) ||
@@ -265,16 +272,18 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
   // the server decide — otherwise a slow/failed /availability call wrongly disables Approve (M2).
   const approveBlocked = React.useMemo(() => {
     if (!req || !isReviewZone) return false;
-    if (!warehouseId) return true;
+    // MY undecided lines only. Gating on every line let another warehouse's line — or one it had
+    // already answered and excluded, which carries no qty of its own — disable this warehouse's
+    // Approve, with nothing on screen to fix because that line isn't even shown here any more.
+    if (myPendingLines.some((l) => (trims[l.id] ?? l.requestedQty) > 0 && !sources[l.id])) return true;
     if (availability.length === 0) return false; // availability not loaded yet — don't block; server re-checks
-    return req.lines.some((l) => {
+    return myPendingLines.some((l) => {
       const need = trims[l.id] ?? l.requestedQty;
       if (need === 0) return false; // excluded — fine
-      const src = sources[l.id] ?? warehouseId;
-      const shelf = src ? shelfOf(l.irmItemId, src) : null;
+      const shelf = shelfOf(l.irmItemId, sources[l.id]!);
       return shelf !== null && shelf < need; // block ONLY on a KNOWN shortfall (unknown ⇒ let server decide)
     });
-  }, [req, isReviewZone, warehouseId, availability, trims, sources, shelfOf]);
+  }, [req, isReviewZone, myPendingLines, availability, trims, sources, shelfOf]);
 
   // ── Review actions ─────────────────────────────────────────────────────────────
 
@@ -285,23 +294,19 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
     // so both would read busy===false and fire. The ref flips synchronously. Same reason the socket
     // handler reads busyRef.
     if (busyRef.current) return;
-    // The bulk setter doubles as the request's FINAL fulfilment warehouse (backend requires it), so it
-    // must be set even when every line was individually re-pointed.
-    if (!warehouseId) { setMsg({ type: "error", text: "Set the warehouse the lines are issued from." }); return; }
+    if (myPendingLines.length === 0) { setMsg({ type: "error", text: "There are no lines here for you to review." }); return; }
     setBusyBoth(true);
     setMsg(null);
     try {
-      // Send a line if its qty was trimmed OR its source differs from the primary. Excluded lines
-      // (qty 0) carry no source. Unchanged lines are omitted (default to requestedQty @ primary).
-      const lineApprovals = req.lines
-        .map((l) => {
-          const approvedQty = trims[l.id] ?? l.requestedQty;
-          const src = sources[l.id] ?? warehouseId;
-          const changed = approvedQty !== l.requestedQty || src !== warehouseId;
-          return changed ? { lineId: l.id, approvedQty, ...(approvedQty > 0 && src ? { sourceWarehouseId: src } : {}) } : null;
-        })
-        .filter((x): x is { lineId: string; approvedQty: number; sourceWarehouseId?: string } => x !== null);
-      await vanStockSvc.approveVanStockRequest(req.id, { warehouseId, lineApprovals: lineApprovals.length ? lineApprovals : undefined, decisionNote: decisionNote.trim() || undefined });
+      // ONLY this warehouse's own undecided lines. Sending every line was how a super admin — who has
+      // no warehouse scope, so the server couldn't narrow it either — approved another warehouse's
+      // lines from this tab: the warehouse that actually held that stock never got to answer, and its
+      // review zone was already gone by the time it opened the request.
+      const lineApprovals = myPendingLines.map((l) => {
+        const approvedQty = trims[l.id] ?? l.requestedQty;
+        return { lineId: l.id, approvedQty, ...(approvedQty > 0 ? { sourceWarehouseId: sources[l.id] ?? currentWarehouseId } : {}) };
+      });
+      await vanStockSvc.approveVanStockRequest(req.id, { warehouseId: currentWarehouseId, lineApprovals, decisionNote: decisionNote.trim() || undefined });
       pushToast("Request approved — fulfil it by scan.", "success");
       load();
     } catch (err) {
@@ -317,7 +322,7 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
     setBusyBoth(true);
     setMsg(null);
     try {
-      await vanStockSvc.declineVanStockRequest(req.id, declineNote.trim());
+      await vanStockSvc.declineVanStockRequest(req.id, currentWarehouseId, declineNote.trim());
       pushToast("Request declined.", "success");
       setDeclineOpen(false);
       load();
@@ -500,7 +505,7 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
     setMsg(null);
     try {
       await vanStockSvc.closeVanStockShort(req.id, currentWarehouseId, closeShortNote.trim());
-      pushToast("Closed short — remaining quantity written off.", "success");
+      pushToast("Closed short — the remaining quantity won't be supplied.", "success");
       setCloseShortOpen(false);
       load();
     } catch (err) {
@@ -542,7 +547,11 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
           <h2 className="truncate text-base font-extrabold text-[var(--ink)]">
             {req ? `${req.code} — ${req.type === "return" ? "Stock return" : "Restock request"}` : "Field stock request"}
           </h2>
-          <p className="truncate text-xs text-[var(--muted)]">{req ? `${req.engineerName}${req.warehouseName ? ` · ${req.warehouseName}` : ""}` : warehouseName}</p>
+          {/* The warehouse named here is the one you are WORKING IN, not the request's own. It used to
+              print req.warehouseName — the request's derived primary — so a request first approved by
+              London read "· London Logistics Hub" while you were stood in another warehouse's tab
+              reviewing your own lines. */}
+          <p className="truncate text-xs text-[var(--muted)]">{req ? `${req.engineerName} · ${warehouseName}` : warehouseName}</p>
         </div>
       </div>
 
@@ -559,9 +568,13 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
         <div className="space-y-5">
           {/* ── Info ─────────────────────────────────────────────────────────── */}
           <div className="flex flex-wrap items-center gap-2">
-            <VanStockStatusChip value={req.status} />
+            {(() => {
+              const s = warehouseStatus(req, currentWarehouseId);
+              return <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider ${s.cls}`}>{s.label}</span>;
+            })()}
             {/* Next to the status it qualifies: this "Approved" was never reviewed. */}
             <VanStockWalkInBadge createdVia={req.createdVia} />
+            <VanStockCompletionBadge completionType={req.completionType} lines={req.lines} />
             {req.stale && <span className="inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-amber-600">Stale</span>}
             {req.priority !== "normal" && <span className="inline-flex items-center rounded-full border border-red-500/30 bg-red-500/10 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-red-600">{req.priority}</span>}
             {/* Per-warehouse progress ("your part is done" even while the request is still partial
@@ -600,35 +613,11 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
             </p>
           )}
 
-          {/* Bulk setter — a TOOL for the table below, not a review decision, so it sits with the table
-              rather than in the Review box (where it read as "approve from here?" next to Approve). It
-              re-points every line the reviewer hasn't manually overridden; per-line dropdowns win. The
-              engineer's preference rides alongside as context — it's what this defaults to. */}
-          {isReviewZone && (
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-              <span className="text-xs font-bold text-[var(--faint)]">Set all lines from</span>
-              <div className="min-w-64">
-                <Select
-                  ariaLabel="Set all lines from"
-                  value={warehouseId}
-                  onChange={(v) => {
-                    // Re-default every line's source that the reviewer hasn't manually re-pointed.
-                    setSources((prev) => Object.fromEntries(req.lines.map((l) => [l.id, prev[l.id] && prev[l.id] !== warehouseId ? prev[l.id] : v])));
-                    setWarehouseId(v);
-                  }}
-                  options={[{ value: "", label: "Pick a warehouse…" }, ...warehouses.map((w) => ({ value: w.id, label: w.code ? `${w.name} (${w.code})` : w.name }))]}
-                />
-              </div>
-              {/* Only the engineer's preference is worth saying — that this sets the lines below, and
-                  that each can be re-pointed, is already evident from the control and the table. */}
-              {req.preferredWarehouseName && (
-                <p className="text-[11px] text-[var(--faint)]">
-                  Engineer is collecting from <span className="font-semibold text-[var(--muted)]">{req.preferredWarehouseName}</span>
-                </p>
-              )}
-            </div>
-          )}
-
+          {/* No bulk "set all lines from" control: the engineer now picks a collection warehouse PER
+              LINE at create (against that warehouse's live free stock), so the route arrives already
+              decided. Re-pointing every line at once is the wholesale override this flow was changed
+              to avoid — a reviewer who genuinely needs to move a line still has its own dropdown in
+              the table below. */}
           {/* Lines. overflow-x-auto + the table's min-w: at full width every column fits and nothing
               scrolls (the old modal's 32rem box is what truncated the warehouse names); on a narrow
               viewport the table scrolls sideways rather than crushing the source dropdown. Same
@@ -652,7 +641,7 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
                 </tr>
               </thead>
               <tbody>
-                {req.lines.map((l) => {
+                {myLines.map((l) => {
                   const need = trims[l.id] ?? l.requestedQty;
                   return (
                   <tr key={l.id} className="border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]/50">
@@ -662,7 +651,7 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
                     </td>
                     <td className="px-4 py-3 text-[var(--muted)]">{l.requestedQty}</td>
                     <td className="px-4 py-3">
-                      {isReviewZone ? (
+                      {isReviewZone && lineIsMine(l) ? (
                         <input
                           type="number"
                           min={0}
@@ -678,7 +667,19 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
                           className={cn(inputCls, "w-20 py-1.5 text-right")}
                         />
                       ) : (
-                        <span className="text-[var(--muted)]">{l.approvedQty ?? "—"}</span>
+                        <span className="text-[var(--muted)]">
+                          {l.approvedQty ?? "—"}
+                          {/* A dropped line reads as a bare "0" once the request is past review — the
+                              Excluded marker only ever showed in the source column DURING review, and
+                              that column disappears afterwards. Same reasoning as the closed-short and
+                              cancelled markers: a zero with no word beside it is a number to
+                              reverse-engineer, not an answer. */}
+                          {l.approvedQty === 0 && (
+                            <span className="ml-1.5 whitespace-nowrap text-[10px] font-bold uppercase tracking-wider text-[var(--faint)]">
+                              · excluded
+                            </span>
+                          )}
+                        </span>
                       )}
                     </td>
                     {isReviewZone ? (
@@ -687,18 +688,33 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
                           <span className="block text-right text-[11px] font-bold uppercase text-[var(--faint)]">Excluded</span>
                         ) : (
                           <div className="space-y-1">
-                            <Select
-                              size="sm"
-                              ariaLabel={`Source warehouse for ${l.itemName}`}
-                              value={sources[l.id] ?? warehouseId}
-                              onChange={(v) => setSources((s) => ({ ...s, [l.id]: v }))}
-                              options={sourceOptionsFor(l.irmItemId, sources[l.id] ?? warehouseId).map((w) => {
-                                const shelf = shelfOf(l.irmItemId, w.id);
-                                return { value: w.id, label: `${w.code ? `${w.name} (${w.code})` : w.name}${shelf !== null ? ` — ${shelf} on shelf` : ""}` };
-                              })}
-                            />
+                            {/* The source is READ-ONLY. The engineer chose this warehouse against its
+                                live free stock and planned their drive around it, and each warehouse
+                                now answers only for its own lines — so re-pointing a line would both
+                                redirect the engineer without asking and hand the line to a warehouse
+                                that has to approve it all over again. A warehouse that can't supply a
+                                line trims it, excludes it (qty 0), or declines its own lines; the
+                                engineer is told and re-requests from somewhere that has it. */}
+                            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                              <span className="text-xs font-semibold text-[var(--ink)]">
+                                {l.sourceWarehouseName ?? "—"}
+                              </span>
+                              {(() => {
+                                // Free stock at that warehouse, shown next to its name — the same
+                                // number the engineer chose against, and what the reviewer judges the
+                                // qty by. It disappeared when this cell became read-only.
+                                const free = l.sourceWarehouseId ? shelfOf(l.irmItemId, l.sourceWarehouseId) : null;
+                                if (free === null) return null;
+                                return <span className="text-[10px] font-semibold text-[var(--muted)]">· {free} free</span>;
+                              })()}
+                              {!lineIsMine(l) && (
+                                <span className="text-[10px] font-bold uppercase tracking-wider text-[var(--faint)]">
+                                  {l.approvedQty === null ? "Another warehouse" : "Answered"}
+                                </span>
+                              )}
+                            </div>
                             {(() => {
-                              const src = sources[l.id] ?? warehouseId;
+                              const src = sources[l.id];
                               const shelf = src ? shelfOf(l.irmItemId, src) : null;
                               if (shelf === null) return null;
                               const cls = shelf >= need ? "text-[var(--pos)]" : shelf > 0 ? "text-amber-600" : "text-[var(--neg)]";
@@ -708,7 +724,7 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
                               // real exit (qty 0 = exclude), instead of sending the reviewer hunting a
                               // warehouse that doesn't exist.
                               const zeroHint = stockedSomewhere(l.irmItemId) ? "⚠ 0 here — pick another" : "⚠ Not stocked anywhere — set qty to 0 to exclude";
-                              return <div className={`text-[10px] font-semibold ${cls}`}>{shelf >= need ? `✓ ${shelf} on shelf` : shelf > 0 ? `⚠ only ${shelf} here` : zeroHint}</div>;
+                              return <div className={`text-[10px] font-semibold ${cls}`}>{shelf >= need ? `✓ ${shelf} free` : shelf > 0 ? `⚠ only ${shelf} here` : zeroHint}</div>;
                             })()}
                           </div>
                         )}
@@ -725,13 +741,46 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
                         {l.isMine && l.sourceWarehouseId === currentWarehouseId && l.approvedQty !== 0 && <span className="ml-1 rounded bg-[var(--accent)]/10 px-1 text-[9px] font-bold uppercase text-[var(--accent)]">Yours</span>}
                       </td>
                     ) : null}
-                    <td className="px-4 py-3 text-[var(--muted)]">{l.fulfilledQty}</td>
+                    <td className="px-4 py-3 text-[var(--muted)]">
+                      {l.fulfilledQty}
+                      {/* A closed-short line used to read "approved 6 · fulfilled 0" — identical to one
+                          nobody had touched. The qty makes the arithmetic add up again, and the reason
+                          (captured at close-short and previously shown to nobody) rides on the title.
+                          "Closed short", not "written off" — see the note in lineProgress. */}
+                      {(l.closedShortQty ?? 0) > 0 && (
+                        <span
+                          className="ml-1.5 whitespace-nowrap text-[10px] font-bold uppercase tracking-wider text-amber-600"
+                          title={[l.closedShortNote, l.closedShortBy && `— ${l.closedShortBy}`].filter(Boolean).join(" ")}
+                        >
+                          · {l.closedShortQty} closed short
+                        </span>
+                      )}
+                      {/* The ENGINEER gave up on this qty, not this warehouse — so it is named
+                          separately and in neutral grey, not the amber this warehouse's own
+                          close-short wears. Without it the row read "approved 3 · fulfilled 0" on a
+                          request marked Fulfilled, with nothing saying why nothing was issued. */}
+                      {(l.cancelledQty ?? 0) > 0 && (
+                        <span
+                          className="ml-1.5 whitespace-nowrap text-[10px] font-bold uppercase tracking-wider text-[var(--muted)]"
+                          title={l.cancelledBy ? `Cancelled by ${l.cancelledBy}` : "Cancelled by the engineer"}
+                        >
+                          · {l.cancelledQty} cancelled by engineer
+                        </span>
+                      )}
+                    </td>
                   </tr>
                   );
                 })}
               </tbody>
             </table>
           </div>
+          {/* The rest of the request still exists — say so without listing stock this warehouse can
+              neither issue nor decide on. */}
+          {otherLineCount > 0 && (
+            <p className="text-[11px] text-[var(--faint)]">
+              {otherLineCount} more {otherLineCount === 1 ? "item is" : "items are"} handled by another warehouse.
+            </p>
+          )}
 
           {/* ── Review zone (pending restock) ────────────────────────────────── */}
           {isReviewZone && (
@@ -961,7 +1010,8 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
 
           {/* Fulfilment history — shared with the engineer's list so both sides read the same record
               of what physically moved (and, on a return, what came back damaged). */}
-          <VanStockPostings fulfilments={req.fulfilments} type={req.type} />
+          {/* Scoped to this warehouse's own lines — another warehouse's issue is its history, not ours. */}
+          <VanStockPostings fulfilments={req.fulfilments} type={req.type} lineIds={new Set(myLines.map((l) => l.id))} />
 
         </div>
       )}

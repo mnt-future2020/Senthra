@@ -1,8 +1,22 @@
 import { z } from "zod";
 
 // Validation for the non-job Van Stock Request flow (engineer ↔ warehouse).
-// Restock: engineer may hint a PREFERRED warehouse; the reviewer fixes the final one on approve.
-// Return: the engineer picks the FINAL warehouse at create (they drive there); no preference field.
+// Restock: the engineer picks a collection warehouse PER LINE, with that warehouse's live free stock
+//   shown beside it — the same shape as a job's kit list, where each line names the warehouse it is
+//   picked from. Lines route the request: belongsToWarehouses() already matches on any line's
+//   sourceWarehouseId, so each source warehouse sees (and scans out) only its own lines.
+// Return: the engineer picks the FINAL warehouse at create (they drive there); no per-line source.
+//
+// Why per line rather than one warehouse for the whole request: the engineer is the one who drives.
+// Asking for a single collection point forced a guess about where stock LIVES — knowledge they don't
+// have — and a wrong guess meant a reviewer split the request afterwards, so the engineer discovered
+// the second stop only after approval. Showing per-warehouse availability inline moves that choice to
+// the person who bears its cost, before they commit. The multi-warehouse end state is unchanged: it
+// is exactly what a reviewer-side split already produced, and the whole fulfilment path (per-line
+// isMine, per-warehouse progress and close-short) was built for it.
+//
+// preferredWarehouseId is now DERIVED server-side (the shared warehouse when every line agrees, else
+// null for a split) and is never accepted from the client on a restock.
 
 const objectId = z.string().regex(/^[a-f0-9]{24}$/i, "Must be a valid ObjectId.");
 
@@ -10,6 +24,9 @@ const requestLineSchema = z.object({
   irmItemId: objectId,
   itemName: z.string().trim().min(1, "Item name is required.").max(300),
   qty: z.number().int("Quantity must be a whole number.").min(1, "Quantity must be at least 1.").max(1_000_000),
+  // RESTOCK only: where the engineer collects THIS line. Required there (superRefine below), rejected
+  // on a return — a return has ONE destination the engineer drives to, named at request level.
+  warehouseId: objectId.optional(),
 });
 
 // Shared line-array rule: no duplicate items on one request — scan-lookup matches a line BY irmItemId,
@@ -39,14 +56,22 @@ export const createVanStockRequestSchema = z
   })
   .superRefine((v, ctx) => {
     if (v.type === "restock") {
-      // The collection warehouse ROUTES the pending request to that warehouse manager's queue —
-      // without it nobody owns the request (reviewers are warehouse-scoped).
-      if (!v.preferredWarehouseId) ctx.addIssue({ code: "custom", path: ["preferredWarehouseId"], message: "Pick the warehouse you'll collect from." });
-      if (v.warehouseId) ctx.addIssue({ code: "custom", path: ["warehouseId"], message: "Restocks don't fix the final warehouse — the reviewer confirms it. Use preferredWarehouseId." });
+      // Every line names where it is collected from. Reported per line so the form can mark the
+      // offending row rather than showing one error for a table.
+      v.lines.forEach((l, i) => {
+        if (!l.warehouseId) ctx.addIssue({ code: "custom", path: ["lines", i, "warehouseId"], message: "Pick where you'll collect this item." });
+      });
+      if (v.warehouseId) ctx.addIssue({ code: "custom", path: ["warehouseId"], message: "Restocks don't fix the final warehouse — the reviewer confirms it on approve." });
+      // Derived from the lines — accepting it would let a caller route a request somewhere none of
+      // its stock is coming from.
+      if (v.preferredWarehouseId) ctx.addIssue({ code: "custom", path: ["preferredWarehouseId"], message: "Set each line's warehouse instead — the collection point is derived from them." });
     }
     if (v.type === "return") {
       if (!v.warehouseId) ctx.addIssue({ code: "custom", path: ["warehouseId"], message: "Pick the warehouse you'll return the stock to." });
       if (v.preferredWarehouseId) ctx.addIssue({ code: "custom", path: ["preferredWarehouseId"], message: "Returns fix the warehouse directly — no preference field." });
+      v.lines.forEach((l, i) => {
+        if (l.warehouseId) ctx.addIssue({ code: "custom", path: ["lines", i, "warehouseId"], message: "A return goes to one warehouse — set it on the request, not per line." });
+      });
     }
   });
 export type CreateVanStockRequestInput = z.infer<typeof createVanStockRequestSchema>;
@@ -68,6 +93,10 @@ export const approveVanStockRequestSchema = z.object({
 export type ApproveVanStockRequestInput = z.infer<typeof approveVanStockRequestSchema>;
 
 export const declineVanStockRequestSchema = z.object({
+  // The warehouse tab the reviewer is declining FROM — only its own lines are refused, mirroring
+  // closeShortSchema. Without it the service had to guess from the actor's permissions, and an
+  // unrestricted actor (super admin, no warehouse scope) declined every warehouse's lines at once.
+  warehouseId: objectId,
   decisionNote: z.string().trim().min(1, "Tell the engineer why this was declined.").max(2000),
 });
 export type DeclineVanStockRequestInput = z.infer<typeof declineVanStockRequestSchema>;

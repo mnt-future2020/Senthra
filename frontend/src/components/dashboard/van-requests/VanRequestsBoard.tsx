@@ -12,8 +12,7 @@ import { Select } from "@/components/ui/Select";
 import { primaryBtn } from "@/components/ui/styles";
 import { WorkspaceToolbar } from "@/components/ui/WorkspaceToolbar";
 import { EmptyState, fmtDateTime } from "@/components/dashboard/portal/portalUi";
-import { VanStockStatusChip } from "@/components/dashboard/engineer/EngineerVanStock";
-import { VanRequestItemsSummary, VanRequestLinesTable, VanRequestListSkeleton, VanStockTypeBadge, VanStockWalkInBadge, warehouseCaption } from "./vanRequestUi";
+import { VanRequestItemsSummary, VanRequestLinesTable, VanRequestListSkeleton, VanStockCompletionBadge, VanStockTypeBadge, VanStockWalkInBadge, linesForWarehouse, warehouseCaption, warehouseStatus } from "./vanRequestUi";
 
 // Warehouse-side board for NON-job van stock requests: review pending restocks (approve with trims /
 // decline), receive returns and fulfil approved restocks by scan, close short, and raise walk-ins.
@@ -170,6 +169,13 @@ export function VanRequestsBoard({
             {requests.map((r) => {
               const isOpen = expanded.has(r.id);
               const caption = warehouseCaption(r);
+              // Everything in this row is scoped to THIS warehouse: its own lines, and a status that
+              // describes ITS work. The global status said "Approved" the moment any other warehouse
+              // approved, so a manager scrolled past requests still waiting on them — and "Partially
+              // fulfilled" appeared because someone else had issued their part.
+              const myLines = linesForWarehouse(r.lines, warehouse.id);
+              const otherCount = r.lines.length - myLines.length;
+              const myStatus = warehouseStatus(r, warehouse.id);
               return (
                 <li key={r.id} className="rounded-lg border border-[var(--border)] bg-[var(--surface)] shadow-xs transition-colors hover:border-[var(--accent)]">
                   {/* Compact row: click opens the request's review workspace (approve / scan-fulfil live
@@ -189,10 +195,11 @@ export function VanRequestsBoard({
                       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                         <span className="font-mono text-xs font-bold text-[var(--accent)]">{r.code}</span>
                         <VanStockTypeBadge type={r.type} />
-                        <VanStockStatusChip value={r.status} />
+                        <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider ${myStatus.cls}`}>{myStatus.label}</span>
                         {/* Qualifies the status beside it: a walk-in's "Approved" was never reviewed —
                             without this the queue reads as though someone here approved it. */}
                         <VanStockWalkInBadge createdVia={r.createdVia} />
+                        <VanStockCompletionBadge completionType={r.completionType} lines={r.lines} />
                         {r.stale && <span className="inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-amber-600">Stale</span>}
                         {r.priority !== "normal" && (
                           <span className="inline-flex items-center rounded-full border border-red-500/30 bg-red-500/10 px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-red-600">{r.priority}</span>
@@ -202,15 +209,22 @@ export function VanRequestsBoard({
                       <div className="mt-1 flex min-w-0 items-center gap-2 text-xs">
                         <span className="shrink-0 font-semibold text-[var(--ink)]">{r.engineerName}</span>
                         <span className="shrink-0 text-[var(--faint)]">·</span>
-                        <span className="shrink-0 text-[var(--faint)]">{r.lines.length} {r.lines.length === 1 ? "item" : "items"}</span>
-                        {r.lines.length > 0 && <span className="shrink-0 text-[var(--faint)]">·</span>}
-                        <VanRequestItemsSummary lines={r.lines} className="min-w-0" />
+                        <span className="shrink-0 text-[var(--faint)]">{myLines.length} {myLines.length === 1 ? "item" : "items"}</span>
+                        {myLines.length > 0 && <span className="shrink-0 text-[var(--faint)]">·</span>}
+                        <VanRequestItemsSummary lines={myLines} className="min-w-0" />
                       </div>
                     </button>
                   </div>
                   {isOpen && (
                     <div className="border-t border-[var(--border)] bg-[var(--surface-2)]/40 px-3 py-2.5 pl-9">
-                      <VanRequestLinesTable lines={r.lines} variant="reviewer" />
+                      <VanRequestLinesTable lines={myLines} variant="reviewer" />
+                      {/* The rest of the request still exists — say so without listing stock this
+                          warehouse can neither issue nor decide on. */}
+                      {otherCount > 0 && (
+                        <p className="mt-1.5 text-[11px] text-[var(--faint)]">
+                          {otherCount} more {otherCount === 1 ? "item is" : "items are"} handled by another warehouse.
+                        </p>
+                      )}
                       {caption && <p className="mt-1.5 text-[11px] text-[var(--faint)]">{caption}</p>}
                     </div>
                   )}

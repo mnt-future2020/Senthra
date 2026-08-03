@@ -10,6 +10,7 @@ import { fmtDateTime } from "@/components/dashboard/portal/portalUi";
 import { WarehousePickupModal } from "@/components/dashboard/engineer/WarehousePickupModal";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { inputCls } from "@/components/ui/styles";
+import { VSR_STATUS } from "@/components/dashboard/engineer/EngineerVanStock";
 
 // Shared presentational bits for the Field Stock (VSR) lists — used by BOTH the warehouse board and
 // the engineer's own list so the two read as one system. Kept in a neutral module (not either list
@@ -38,6 +39,62 @@ export function VanStockWalkInBadge({ createdVia }: { createdVia: VanStockReques
       className="inline-flex items-center rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-[var(--muted)]"
     >
       Walk-in
+    </span>
+  );
+}
+
+// How a request ENDED, when that isn't what its status chip says. Same argument as the walk-in badge
+// above and the same placement rule — it rides next to the status wherever a request is listed.
+//
+// `fulfilled` is this flow's terminal "closed" state, reached three different ways, with
+// completionType as the discriminator. So a request the engineer called off with nothing collected
+// wears the identical FULFILLED chip as one that was fully handed over. The chip is not wrong (it IS
+// closed) but on its own it is unreadable, and completionType was surfaced in exactly one place in
+// the whole UI — a note-gated line on the engineer's list, for closed_short only.
+//
+// `complete` returns null: the chip already says it, and a badge on every finished request would be
+// noise that trains people to ignore the badge on the ones that matter.
+export function completionBadge(
+  completionType: VanStockRequest["completionType"],
+  // Needed to tell a request that came to NOTHING from one that mostly landed. completionType records
+  // the last ACTION, not the OUTCOME: a request where 3 of 4 items were collected and the remainder
+  // called off carries the same `cancelled_remaining` as one where nothing was ever handed over. A
+  // flat "Cancelled" on the first reads as though the engineer got nothing, which is simply untrue.
+  lines: Pick<VanStockLine, "fulfilledQty">[] = [],
+): { label: string; cls: string; title: string } | null {
+  const gotSome = lines.some((l) => l.fulfilledQty > 0);
+  if (completionType === "cancelled_remaining") {
+    return {
+      // "Rest cancelled" is the SAME phrasing the per-line progress uses ("2/6 — rest cancelled"), so
+      // the row and the lines under it describe the outcome with one vocabulary.
+      label: gotSome ? "Rest cancelled" : "Cancelled",
+      // Grey, not amber: nobody failed here. The engineer decided they no longer needed it.
+      cls: "border-[var(--border)] bg-[var(--surface-2)] text-[var(--muted)]",
+      title: gotSome ? "Collected in part — the engineer cancelled what was left" : "The engineer cancelled the whole request",
+    };
+  }
+  if (completionType === "closed_short") {
+    return {
+      label: gotSome ? "Rest closed short" : "Closed short",
+      cls: "border-amber-500/30 bg-amber-500/10 text-amber-600",
+      title: gotSome ? "Collected in part — a warehouse couldn't supply the rest" : "A warehouse couldn't supply any of it",
+    };
+  }
+  return null;
+}
+
+export function VanStockCompletionBadge({
+  completionType,
+  lines = [],
+}: {
+  completionType: VanStockRequest["completionType"];
+  lines?: Pick<VanStockLine, "fulfilledQty">[];
+}) {
+  const b = completionBadge(completionType, lines);
+  if (!b) return null;
+  return (
+    <span title={b.title} className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider ${b.cls}`}>
+      {b.label}
     </span>
   );
 }
@@ -90,10 +147,30 @@ export function singlePickup(lines: VanStockLine[]): VanStockLine["sourceWarehou
 
 // Per-line fulfilment state for the engineer's Progress column: excluded (dropped at approval) →
 // fulfilled (all approved qty issued) → partial (some issued) → pending (approved, none issued yet).
-function lineProgress(l: VanStockLine): { label: string; cls: string } {
+export function lineProgress(l: VanStockLine): { label: string; cls: string } {
   if (l.approvedQty === 0) return { label: "Excluded", cls: "text-[var(--faint)]" };
   const target = l.approvedQty ?? l.requestedQty;
   if (l.fulfilledQty >= target && target > 0) return { label: "Fulfilled", cls: "text-[var(--pos)]" };
+  // Closed short by its warehouse — checked BEFORE the "Awaiting" fallback, which such a line used to
+  // land on: the engineer was told stock was still coming when the warehouse had already given up on
+  // it, while the request itself read "Done". Partly-issued-then-closed reads as both.
+  //
+  // "Closed short", never "written off": this app reserves write-off for the goods-management action
+  // that really does drain a ledger (job_lost). Nothing leaves a ledger here — the line was approved
+  // but never issued, so it was never stock. See the note in customers/CloseShortModal.
+  if ((l.closedShortQty ?? 0) > 0) {
+    return l.fulfilledQty > 0
+      ? { label: `${l.fulfilledQty}/${target} — rest closed short`, cls: "text-amber-600" }
+      : { label: "Closed short", cls: "text-amber-600" };
+  }
+  // Cancelled by the engineer themselves. Also checked before the "Awaiting" fallback, which this
+  // used to hit: they cancelled the remainder and were then told it was still on its way, on a
+  // request whose own header already said Done.
+  if ((l.cancelledQty ?? 0) > 0) {
+    return l.fulfilledQty > 0
+      ? { label: `${l.fulfilledQty}/${target} — rest cancelled`, cls: "text-[var(--muted)]" }
+      : { label: "Cancelled", cls: "text-[var(--muted)]" };
+  }
   if (l.fulfilledQty > 0) return { label: `${l.fulfilledQty}/${target} done`, cls: "text-sky-600" };
   return { label: "Awaiting", cls: "text-[var(--muted)]" };
 }
@@ -190,14 +267,39 @@ type WarehouseCaptionReq = Pick<
 // a reason; without this the engineer just sees their van balance drop by 5 and the request close,
 // with no record of why 2 didn't count. Same reason the reason text is shown here and not only the
 // photo — "Crushed in transit" is the part they'd dispute.
-export function VanStockPostings({ fulfilments, type }: { fulfilments: VanStockFulfilment[]; type: VanStockRequest["type"] }) {
-  if (fulfilments.length === 0) return null;
+// Postings narrowed to a given set of request lines, dropping any left with nothing. Pulled out of
+// the component so the rule is testable: a posting is a whole scan session, and on a split request one
+// session can only ever contain ONE warehouse's lines (the scan is warehouse-scoped), but the log
+// itself carries no warehouse — the line it points at is the only thing that knows.
+export function postingsForLines(fulfilments: VanStockFulfilment[], lineIds?: Set<string>): VanStockFulfilment[] {
+  if (!lineIds) return fulfilments;
+  return fulfilments
+    .map((f) => ({ ...f, lines: f.lines.filter((fl) => lineIds.has(fl.lineId)) }))
+    .filter((f) => f.lines.length > 0);
+}
+
+export function VanStockPostings({
+  fulfilments,
+  type,
+  lineIds,
+}: {
+  fulfilments: VanStockFulfilment[];
+  type: VanStockRequest["type"];
+  // Reviewer only: restrict the log to postings against THESE lines. A warehouse's queue shows only
+  // its own lines, so listing every posting under them meant an item that isn't in the table above —
+  // issued by another warehouse entirely — appeared in this warehouse's "Issued" history as though
+  // it had handed it over. The ENGINEER passes nothing: they collect from every warehouse on the
+  // request, so the whole log is theirs to read.
+  lineIds?: Set<string>;
+}) {
+  const shown = postingsForLines(fulfilments, lineIds);
+  if (shown.length === 0) return null;
   const verb = type === "return" ? "Received" : "Issued";
   return (
     <div>
       <p className="mb-1.5 text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">{verb}</p>
       <div className="space-y-1.5">
-        {fulfilments.map((f) => (
+        {shown.map((f) => (
           <div key={f.id} className="rounded-lg border border-[var(--border)] bg-[var(--surface)] p-2.5 text-[11px] text-[var(--muted)]">
             <span className="font-bold text-[var(--ink)]">#{f.sequence}</span> · {fmtDateTime(f.postedAt)} · {f.performedBy}
             <div className="mt-1 space-y-0.5">
@@ -259,26 +361,67 @@ export function VanStockAttachments({ urls, className }: { urls: string[]; class
   );
 }
 
+// The lines a given warehouse actually handles. Every reviewer surface filters through this: a
+// warehouse reviews, issues and closes short only its OWN lines, so showing another warehouse's
+// stock in its queue is noise it can't act on — and worse, it made the request look bigger and its
+// status look wrong. Legacy lines carry no source and belong to whoever opens them.
+export function linesForWarehouse<T extends { sourceWarehouseId: string | null; approvedQty: number | null }>(
+  lines: T[],
+  warehouseId: string,
+): T[] {
+  return lines.filter((l) => {
+    if (l.sourceWarehouseId) return l.sourceWarehouseId === warehouseId;
+    // No source. UNDECIDED ⇒ legacy (raised before per-line selection), claimable by whoever opens
+    // it. ANSWERED ⇒ excluded by a reviewer back when excluding wiped the source, so it belongs to
+    // nobody now — showing it in every warehouse's queue made an item London had already dropped
+    // reappear here, and it dragged the Approve gate down with it.
+    return l.approvedQty === null;
+  });
+}
+
+// What THIS warehouse's queue should say about a request, which is not the same thing as the
+// request's own status. Each source warehouse now reviews and issues only its own lines, so a
+// request can be `approved` overall while this warehouse hasn't looked at it yet — the queue used to
+// print that global "Approved" chip and a manager would scroll past work that was still theirs to do.
+// Terminal states stay global: a declined/cancelled/fulfilled request has nothing left for anyone.
+export function warehouseStatus(
+  r: Pick<VanStockRequest, "status" | "lines">,
+  warehouseId: string,
+): { label: string; cls: string } {
+  if (["declined", "cancelled", "fulfilled"].includes(r.status)) return VSR_STATUS[r.status as keyof typeof VSR_STATUS];
+  // Legacy lines carry no source and belong to whoever opens them, so they count as this warehouse's.
+  const mine = linesForWarehouse(r.lines, warehouseId);
+  if (mine.length === 0) return VSR_STATUS[r.status as keyof typeof VSR_STATUS] ?? VSR_STATUS.pending;
+  if (mine.some((l) => l.approvedQty === null)) return VSR_STATUS.pending; // still ours to answer
+  const outstanding = mine.some((l) => l.remainingQty > 0);
+  if (!outstanding) return { cls: "border-[var(--border)] bg-[var(--surface-2)] text-[var(--muted)]", label: "Done here" };
+  return mine.some((l) => l.fulfilledQty > 0) ? VSR_STATUS.partially_fulfilled : VSR_STATUS.approved;
+}
+
 export function warehouseCaption(r: WarehouseCaptionReq, variant: "reviewer" | "engineer" = "reviewer"): string | null {
   const withCode = (name: string | null, code: string | null) => (name ? (code ? `${name} (${code})` : name) : null);
   if (r.type === "return") {
     const wh = withCode(r.warehouseName, r.warehouseCode);
     return wh ? `Returning to: ${wh}` : null;
   }
-  // Restock. Before approval nothing is sourced yet — surface the engineer's collection choice.
-  if (r.status === "pending") {
-    const pref = withCode(r.preferredWarehouseName, r.preferredWarehouseCode);
-    return pref ? `Requested warehouse: ${pref} (pending review)` : null;
-  }
-  // Approved onward: how many distinct source warehouses actually fulfil this request. The engineer has
-  // to GO there, so name the action; the reviewer is watching it ship, so name the accounting.
-  const verb = variant === "engineer" ? "Collect from" : "Fulfilled from";
+  // Restock. Lines ARE sourced from the moment the request exists — the engineer picks a collection
+  // warehouse per item at create — so a pending request is read from its LINES, exactly like an
+  // approved one. It used to read `preferredWarehouseName`, which is now derived and deliberately null
+  // on a split: every split request therefore rendered NO caption at all, a blank where its location
+  // belongs, in both the reviewer queue and the engineer's own list.
+  const verb = variant === "engineer" ? "Collect from" : r.status === "pending" ? "Requested from" : "Fulfilled from";
+  const suffix = r.status === "pending" ? " (pending review)" : "";
   if (isSplit(r.lines)) {
     const n = new Set(r.lines.map((l) => l.sourceWarehouseId).filter(Boolean)).size;
-    return `${verb} ${n} warehouses — see each line below`;
+    return `${verb} ${n} warehouses — see each line below${suffix}`;
   }
-  const wh = withCode(r.warehouseName, r.warehouseCode);
-  return wh ? `${verb}: ${wh}` : null;
+  // Not split: the one source the lines agree on. Falls back to the request's own warehouse for
+  // legacy requests raised before per-line selection, whose lines carry no source at all.
+  const lineSource = r.lines.find((l) => l.sourceWarehouseName)
+    ? withCode(r.lines.find((l) => l.sourceWarehouseName)!.sourceWarehouseName, r.lines.find((l) => l.sourceWarehouseName)!.sourceWarehouseCode ?? null)
+    : null;
+  const wh = lineSource ?? withCode(r.warehouseName, r.warehouseCode) ?? withCode(r.preferredWarehouseName, r.preferredWarehouseCode);
+  return wh ? `${verb}: ${wh}${suffix}` : null;
 }
 
 // Skeleton rows that mirror the compact worklist row (two short lines) so the list doesn't shift
@@ -323,6 +466,7 @@ export function VanStockCartTable({
   shelfByItem,
   shelfLabel = "On shelf there",
   emptyText = "No items added yet.",
+  warehouseCell,
 }: {
   cart: VanStockCartItem[];
   onQty: (irmItemId: string, qty: number) => void;
@@ -333,6 +477,11 @@ export function VanStockCartTable({
   // the walk-in composer passes "In stock" (the item's on-hand at the issuing counter).
   shelfLabel?: string;
   emptyText?: string;
+  // Restock only: renders a per-line COLLECTION WAREHOUSE cell, the way a job's kit list names the
+  // warehouse each line is picked from. A render-prop rather than options/value/onChange threaded
+  // through, so the shared table stays ignorant of availability and the walk-in composer — which
+  // issues from ONE counter and has no such choice — simply omits it and gets no column.
+  warehouseCell?: (item: VanStockCartItem) => React.ReactNode;
 }) {
   if (cart.length === 0) return <p className="text-xs text-[var(--muted)]">{emptyText}</p>;
   return (
@@ -341,6 +490,7 @@ export function VanStockCartTable({
         <thead>
           <tr className="border-b border-[var(--border)] text-[10px] font-bold uppercase tracking-wider text-[var(--faint)]">
             <th className="px-3 py-2">Item</th>
+            {warehouseCell && <th className="w-64 px-3 py-2">Collect from</th>}
             <th className="w-24 px-3 py-2">Qty</th>
             <th className="w-10 px-3 py-2"><span className="sr-only">Remove</span></th>
           </tr>
@@ -364,6 +514,7 @@ export function VanStockCartTable({
                     </div>
                   )}
                 </td>
+                {warehouseCell && <td className="px-3 py-2 align-top">{warehouseCell(c)}</td>}
                 <td className="px-3 py-2">
                   <input
                     type="number"

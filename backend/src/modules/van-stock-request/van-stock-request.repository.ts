@@ -38,11 +38,32 @@ const INCLUDE = {
 // Every cap, remaining-qty, and status-recompute MUST use these (posting, scan-lookup, close-short,
 // approve). Re-implementing the arithmetic inline is what caused the closedShortQty over-issue and the
 // stuck-partially_fulfilled bugs — do NOT inline it again.
-type LineMath = { approvedQty: number | null; requestedQty: number; fulfilledQty: number; closedShortQty: number | null };
+type LineMath = { approvedQty: number | null; requestedQty: number; fulfilledQty: number; closedShortQty: number | null; cancelledQty?: number | null };
+// How much of this line can be scanned RIGHT NOW. Zero until its own warehouse has approved it.
+//
+// This used to read `approvedQty ?? requestedQty`, which was safe only while one approval covered the
+// whole request: a line could never sit undecided inside an approved one. Each source warehouse now
+// approves only ITS OWN lines, so that state is normal — and the old fallback made an undecided line
+// look fully outstanding, so the fulfil zone offered it to be scanned out with no approval behind it.
+// Returns and walk-ins are unaffected: both set approvedQty at create, so they are never undecided.
 export function lineRemaining(l: LineMath): number {
-  return (l.approvedQty ?? l.requestedQty) - l.fulfilledQty - (l.closedShortQty ?? 0);
+  if (l.approvedQty == null) return 0; // awaiting its warehouse's decision — nothing issuable yet
+  // Both close-short (the warehouse can't supply) and cancel-remaining (the engineer no longer wants
+  // it) retire outstanding qty; neither will ever be issued, so both come off what's left to collect.
+  return l.approvedQty - l.fulfilledQty - (l.closedShortQty ?? 0) - (l.cancelledQty ?? 0);
 }
+
+// …but an undecided line still HOLDS THE REQUEST OPEN, and this is derived from lineRemaining, so the
+// rule above would otherwise report it complete and close the whole request while a warehouse had not
+// yet looked at it. The two questions are genuinely different — "how much can be issued now" versus
+// "is there anything left for anyone to do" — and only here do they diverge.
 export function lineDone(l: LineMath): boolean {
+  // Cancelled FIRST, and regardless of whether the line was ever approved: once the engineer has
+  // withdrawn it nobody owes an answer, so an UNDECIDED line that was cancelled must not keep the
+  // request open forever. Without this a request the engineer called off while one warehouse was
+  // still deliberating carried a line that could never be finished by anyone.
+  if ((l.cancelledQty ?? 0) > 0) return true;
+  if (l.approvedQty == null) return false; // undecided — its warehouse still owes an answer
   if (l.approvedQty === 0) return true; // excluded at approval — never holds the request open
   return lineRemaining(l) <= 0;
 }
@@ -280,46 +301,99 @@ export interface ApprovalPatch {
   decisionNote: string | null;
 }
 
-// Approve (restock): flip pending → approved atomically, then stamp the warehouse + per-line
-// approvedQty AND source warehouse in the SAME transaction. Loser of a concurrent approve matches
-// 0 rows → conflict.
-export async function claimPendingForApproval(
+// Review (restock) — each source warehouse decides ITS OWN lines, so this claims LINES, not the
+// request. Every line is claimed with `approvedQty: null` in the WHERE, so two warehouses reviewing
+// at the same moment can't overwrite each other: the loser's updateMany matches 0 rows for a line
+// already decided and that line is left exactly as the winner set it.
+//
+// The request row is only dragged forward: pending → approved on the FIRST approval (so the engineer
+// can start collecting from that warehouse while others are still deciding), and → declined only when
+// every line has been decided and none survived. Its reviewedBy/reviewedAt/decisionNote are the FIRST
+// decision's; per-warehouse detail lives on the line, because one set of request-level fields can
+// only ever record one manager's call.
+export interface LineDecision {
+  lineId: string;
+  approvedQty: number;
+  sourceWarehouseId: string | null;
+  sourceWarehouseName: string | null;
+  sourceWarehouseCode: string | null;
+  reviewedByEmail: string | null;
+  decisionNote: string | null;
+}
+
+export async function claimLinesForReview(
   id: string,
-  patch: ApprovalPatch,
-  lineApprovals: Array<{ lineId: string; approvedQty: number; sourceWarehouseId: string | null; sourceWarehouseName: string | null; sourceWarehouseCode: string | null }>,
+  decisions: LineDecision[],
+  requestPatch: { warehouseId: string | null; warehouseName: string | null; warehouseCode: string | null; reviewedByUserId: string | null; reviewedByEmail: string | null; decisionNote: string | null },
 ): Promise<RequestWithLines> {
   return withTransaction(async (tx) => {
-    const res = await tx.vanStockRequest.updateMany({
-      where: { id, status: "pending", deletedAt: null },
-      data: {
-        status: "approved",
-        warehouseId: patch.warehouseId,
-        warehouseName: patch.warehouseName,
-        warehouseCode: patch.warehouseCode,
-        reviewedByUserId: patch.reviewedByUserId,
-        reviewedByEmail: patch.reviewedByEmail,
-        reviewedAt: new Date(),
-        decisionNote: patch.decisionNote,
-      },
-    });
-    if (res.count === 0) throw conflict("This request was just handled by someone else.");
-    for (const la of lineApprovals) {
-      await tx.vanStockRequestLine.update({
-        where: { id: la.lineId },
+    const now = new Date();
+    let claimed = 0;
+    for (const d of decisions) {
+      const res = await tx.vanStockRequestLine.updateMany({
+        // "Still undecided" is the claim: an already-decided line is another warehouse's answer, and
+        // matching 0 rows is how the loser of a concurrent review is detected.
+        //
+        // MONGO TRAP: this MUST be `isSet: false` OR `null`, never `approvedQty: null` alone. A line
+        // is created without approvedQty, so the field is ABSENT from the document — and Prisma's
+        // MongoDB connector treats `{ field: null }` as "explicitly null", which does NOT match a
+        // missing field. With the bare null filter every claim matched 0 rows and EVERY approval
+        // failed with "just handled by someone else". Reads are unaffected (Prisma hydrates a missing
+        // optional as null), so `l.approvedQty === null` in TS stays correct — the trap is filters only.
+        where: { id: d.lineId, requestId: id, OR: [{ approvedQty: null }, { approvedQty: { isSet: false } }] },
         data: {
-          approvedQty: la.approvedQty,
-          sourceWarehouseId: la.sourceWarehouseId,
-          sourceWarehouseName: la.sourceWarehouseName,
-          sourceWarehouseCode: la.sourceWarehouseCode,
+          approvedQty: d.approvedQty,
+          sourceWarehouseId: d.sourceWarehouseId,
+          sourceWarehouseName: d.sourceWarehouseName,
+          sourceWarehouseCode: d.sourceWarehouseCode,
+          reviewedByEmail: d.reviewedByEmail,
+          reviewedAt: now,
+          decisionNote: d.decisionNote,
         },
       });
+      claimed += res.count;
     }
-    // If the approval left NOTHING to fulfil — e.g. every line excluded (approvedQty 0) because no
-    // warehouse could cover it — the request is already complete; move it straight to fulfilled so it
-    // isn't stranded in `approved` with no terminating action available (H3).
+    if (claimed === 0) throw conflict("Those lines were just handled by someone else.");
+
+    // Derive the request's own status from the lines. Deliberately never moves a request BACKWARDS
+    // and never touches one that is already terminal.
     const fresh = await tx.vanStockRequestLine.findMany({ where: { requestId: id } });
-    if (linesAllDone(fresh)) {
-      await tx.vanStockRequest.update({ where: { id }, data: { status: "fulfilled", completionType: "complete", lastFulfilledAt: new Date() } });
+    const anyApproved = fresh.some((l) => (l.approvedQty ?? 0) > 0);
+    const allDecided = fresh.every((l) => l.approvedQty !== null);
+    const req = await tx.vanStockRequest.findUniqueOrThrow({ where: { id } });
+
+    if (req.status === "pending") {
+      if (anyApproved) {
+        await tx.vanStockRequest.update({
+          where: { id },
+          data: {
+            status: "approved",
+            // Only the FIRST decision stamps the request; later warehouses record on their lines.
+            warehouseId: req.warehouseId ?? requestPatch.warehouseId,
+            warehouseName: req.warehouseName ?? requestPatch.warehouseName,
+            warehouseCode: req.warehouseCode ?? requestPatch.warehouseCode,
+            reviewedByUserId: requestPatch.reviewedByUserId,
+            reviewedByEmail: requestPatch.reviewedByEmail,
+            reviewedAt: now,
+            decisionNote: requestPatch.decisionNote,
+          },
+        });
+      } else if (allDecided) {
+        // Every warehouse answered and nobody approved anything — that is a decline, not an approval
+        // with an empty kit, and the engineer's list must read it as one.
+        await tx.vanStockRequest.update({
+          where: { id },
+          data: { status: "declined", reviewedByUserId: requestPatch.reviewedByUserId, reviewedByEmail: requestPatch.reviewedByEmail, reviewedAt: now, decisionNote: requestPatch.decisionNote },
+        });
+      }
+    }
+
+    // Nothing left for anyone to do (every line fulfilled / excluded / closed short) ⇒ complete. Only
+    // reachable once every warehouse has decided: lineDone is false while a line is undecided.
+    const after = await tx.vanStockRequestLine.findMany({ where: { requestId: id } });
+    const status = (await tx.vanStockRequest.findUniqueOrThrow({ where: { id } })).status;
+    if (status === "approved" && linesAllDone(after)) {
+      await tx.vanStockRequest.update({ where: { id }, data: { status: "fulfilled", completionType: "complete", lastFulfilledAt: now } });
     }
     return tx.vanStockRequest.findUniqueOrThrow({ where: { id }, include: INCLUDE });
   });
@@ -352,21 +426,54 @@ export interface FinishRemainingPatch {
   closedShortBy?: string | null;
   closeShortNote?: string | null;
   engineerId?: string; // guard: only the owner may cancel-remaining
+  cancelledBy?: string | null; // stamped on each still-open line, so the record names who gave up on it
 }
 
-// Cancel remaining (engineer): whole-request partially_fulfilled → fulfilled.
+// Cancel remaining (engineer): partially_fulfilled → fulfilled, STAMPING each still-open line with
+// what was given up on.
+//
+// It used to update the request row alone, which left the two disagreeing: the request read
+// `fulfilled` while a line still reported its full approved qty outstanding. That is what made the
+// engineer's own view say "Awaiting" for stock they had just cancelled, and left the warehouse with a
+// "Fulfilled" request it had issued nothing against and no reason why. Mirrors closeShortLines, which
+// has always stamped per line — this was the last request-level-only completion left.
 export async function finishRemaining(id: string, patch: FinishRemainingPatch): Promise<number> {
-  const res = await prisma.vanStockRequest.updateMany({
-    where: { id, status: "partially_fulfilled", deletedAt: null, ...(patch.engineerId ? { engineerId: patch.engineerId } : {}) },
-    data: {
-      status: "fulfilled",
-      completionType: patch.completionType,
-      ...(patch.completionType === "closed_short"
-        ? { closedShortBy: patch.closedShortBy ?? null, closedShortAt: new Date(), closeShortNote: patch.closeShortNote ?? null }
-        : { cancelledAt: new Date() }),
-    },
+  return withTransaction(async (tx) => {
+    const res = await tx.vanStockRequest.updateMany({
+      // APPROVED counts too, not just partially_fulfilled. Under per-warehouse review a request flips
+      // to `approved` the moment ONE warehouse answers, so it can sit there for hours while another
+      // deliberates — and the engineer, who could cancel it while it was pending, suddenly couldn't.
+      // "Cancel the remainder" reads perfectly well when the remainder happens to be everything.
+      where: { id, status: { in: ["approved", "partially_fulfilled"] }, deletedAt: null, ...(patch.engineerId ? { engineerId: patch.engineerId } : {}) },
+      data: {
+        status: "fulfilled",
+        completionType: patch.completionType,
+        ...(patch.completionType === "closed_short"
+          ? { closedShortBy: patch.closedShortBy ?? null, closedShortAt: new Date(), closeShortNote: patch.closeShortNote ?? null }
+          : { cancelledAt: new Date() }),
+      },
+    });
+    if (res.count === 0) return 0; // lost the race / not the owner — leave the lines untouched
+    const now = new Date();
+    const lines = await tx.vanStockRequestLine.findMany({ where: { requestId: id } });
+    for (const l of lines) {
+      // An UNDECIDED line reads 0 from lineRemaining — nothing is ISSUABLE before its warehouse
+      // answers — but everything requested is still outstanding, and once the engineer has cancelled
+      // no warehouse will ever answer it. Cancel what was ASKED for, or the line is left dangling on
+      // a closed request and the engineer is told "Awaiting" for stock they withdrew themselves.
+      // Reachable because cancel now accepts `approved`, which is where a split request waits.
+      const outstanding = l.approvedQty == null ? l.requestedQty : lineRemaining(l);
+      if (outstanding <= 0) continue; // already issued, excluded, closed short or cancelled
+      await tx.vanStockRequestLine.update({
+        where: { id: l.id },
+        // approvedQty stays null on purpose: it never WAS decided, and recording a 0 there would read
+        // as "the warehouse excluded it" — someone else's decision, and it would label the line
+        // Excluded instead of Cancelled.
+        data: { cancelledQty: outstanding, cancelledBy: patch.cancelledBy ?? null, cancelledAt: now },
+      });
+    }
+    return res.count;
   });
-  return res.count;
 }
 
 export interface CloseShortLinesResult {
