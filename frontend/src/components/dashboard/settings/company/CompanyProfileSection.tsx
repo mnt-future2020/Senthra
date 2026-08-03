@@ -165,9 +165,19 @@ export function CompanyProfileSection() {
 
           <div className="border-t border-[var(--border)] pt-5">
             <h3 className="mb-1 text-sm font-extrabold text-[var(--ink)]">Regional formatting</h3>
-            <p className="mb-4 text-xs text-[var(--muted)]">Used by documents, exports and emails. Existing screens are unaffected.</p>
+            {/* This description is deliberately specific: it previously claimed "documents, exports and
+                emails" while exports emitted raw UTC ISO timestamps, so an admin who set DD/MM/YYYY and
+                then opened a CSV had no reason to trust anything else on this screen. Say only what
+                these fields actually drive, and name the screens they DON'T.
+
+                The on-screen example is a PATTERN ("DD Mon YYYY"), never a sample date. A literal like
+                "03 Aug 2026" is a claim about what the app renders, and it silently rots — read in
+                2027 it looks like a stale value or a bug, and someone goes hunting for a date that was
+                never dynamic. The pattern also matches the notation of the Date format control below,
+                so the two read as one vocabulary. */}
+            <p className="mb-4 text-xs text-[var(--muted)]">Applies to generated documents, supplier emails and CSV exports. On-screen dates keep the standard UK format (DD Mon YYYY).</p>
             <div className="grid gap-5 sm:grid-cols-3">
-              <Field label="Timezone">
+              <Field label="Timezone" hint="Also sets when a day starts and ends — Overdue, Due today and dashboard counts all follow it.">
                 <Select
                   value={form.timezone || "Europe/London"}
                   onChange={(v) => set("timezone", v)}

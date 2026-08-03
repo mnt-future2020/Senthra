@@ -15,8 +15,18 @@ vi.mock("#modules/supplier/supplier.service.js", () => ({ requireActiveSupplier:
 vi.mock("#modules/user/user.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/settings/settings.service.js", () => ({ getIrmCodePrefix: vi.fn().mockResolvedValue("IRM") }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
+// Deleting an IRM item first asks four other modules whether anything still references it. Those are
+// live Prisma calls, so without these stubs the delete tests silently need a running MongoDB — they
+// passed only on a machine that happened to have one, and would hang for 5s then fail in CI.
+// Default 0 = "nothing depends on it", the deletable case; a test overrides one to assert the guard.
+vi.mock("#modules/purchase-order/purchase-order.repository.js", () => ({ countByIrmItem: vi.fn(async () => 0) }));
+vi.mock("#modules/goods-in/goods-in.repository.js", () => ({ countByIrmItem: vi.fn(async () => 0) }));
+vi.mock("#modules/inventory/inventory.repository.js", () => ({ countBalancesWithStockByIrmItem: vi.fn(async () => 0) }));
+vi.mock("#modules/engineer-stock/engineer-stock.repository.js", () => ({ countEngineerStockWithStockByIrmItem: vi.fn(async () => 0) }));
 
 import * as irmRepo from "./irm.repository.js";
+import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
+import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
 import * as irmTypeService from "#modules/irm-type/irm-type.service.js";
 import * as irmCategoryService from "#modules/irm-category/irm-category.service.js";
 import * as supplierService from "#modules/supplier/supplier.service.js";
@@ -115,6 +125,11 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockUpdate.mockImplementation((_id: string, data: Record<string, unknown>) => Promise.resolve(iRow(data)));
   mockFindBySku.mockResolvedValue(null);
+  // Re-assert "nothing depends on this item". clearAllMocks wipes call history but NOT a
+  // mockResolvedValue, so without this the guard test below would leak its non-zero count into
+  // whatever ran next and delete would start refusing for no visible reason.
+  vi.mocked(poRepo.countByIrmItem).mockResolvedValue(0);
+  vi.mocked(inventoryRepo.countBalancesWithStockByIrmItem).mockResolvedValue(0);
 });
 
 describe("updateIrmItem — owner change handling", () => {
@@ -300,6 +315,23 @@ describe("deleteIrmItem", () => {
   it("throws not found when the item does not exist", async () => {
     mockFindById.mockResolvedValue(null);
     await expect(deleteIrmItem(IRM_ID)).rejects.toThrow(/not found/i);
+  });
+
+  // The dependency guard had no coverage at all — only the happy path was tested, so a checker that
+  // stopped being consulted would not have failed anything. Deleting an item still referenced by a PO
+  // or still holding stock orphans those records, which is exactly what this guard exists to prevent.
+  it("REFUSES the delete when a purchase order still references the item", async () => {
+    mockFindById.mockResolvedValue(iRow());
+    vi.mocked(poRepo.countByIrmItem).mockResolvedValue(1);
+    await expect(deleteIrmItem(IRM_ID)).rejects.toThrow(/in use/i);
+    expect(mockSoftDelete).not.toHaveBeenCalled();
+  });
+
+  it("REFUSES the delete when stock is still on hand", async () => {
+    mockFindById.mockResolvedValue(iRow());
+    vi.mocked(inventoryRepo.countBalancesWithStockByIrmItem).mockResolvedValue(4);
+    await expect(deleteIrmItem(IRM_ID)).rejects.toThrow(/in use/i);
+    expect(mockSoftDelete).not.toHaveBeenCalled();
   });
 });
 

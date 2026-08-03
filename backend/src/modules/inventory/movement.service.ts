@@ -21,6 +21,8 @@ import {
   type MovementCursor,
 } from "./movement.js";
 import { csvEscape } from "../../utils/csv.js";
+import { getRegionalSettings } from "#modules/settings/settings.service.js";
+import { formatDateTime } from "#modules/document/document.formatter.js";
 import { warehouseScopeFilter, type WarehouseScopedActor } from "../../lib/warehouse-access.js";
 
 export interface MovementFilters {
@@ -331,15 +333,18 @@ export async function exportMovementsCsv(
   actor?: WarehouseScopedActor,
 ): Promise<MovementCsvResult> {
   const { rows, capped } = await collectMovements({ ...filters, scopeWarehouseIds: warehouseScopeFilter(actor) });
+  // Company timezone + configured date format, like every generated artifact; the column names the
+  // zone so a reader is never left guessing which one the timestamps are in.
+  const regional = await getRegionalSettings();
   const header = [
-    "Date (UTC)", "Type", "Item", "Code", "SKU", "Ownership", "Location Type",
+    `Date (${regional.timezone})`, "Type", "Item", "Code", "SKU", "Ownership", "Location Type",
     "Location", "Quantity", "Balance After", "Reference", "Source", "Actor",
   ];
   const lines = [header.map(csvEscape).join(",")];
   for (const m of rows) {
     lines.push(
       [
-        m.date,
+        formatDateTime(m.date, regional),
         m.label,
         m.itemName,
         m.itemCode,

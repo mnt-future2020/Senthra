@@ -5,10 +5,11 @@ import { createJobSchema, updateJobSchema } from "./job.validation.js";
 const A = "a".repeat(24), B = "b".repeat(24), C = "c".repeat(24), D = "d".repeat(24), E = "e".repeat(24), WH = "f".repeat(24), WH2 = "1".repeat(24);
 
 // Carries a destination (addressLine1) because create now requires a site OR an address — see the
-// destination suite below. Without it these kit-line cases would fail for a reason that has nothing
-// to do with kit lines, and the "rejects duplicates" ones would pass for the wrong reason.
+// destination suite below — and a completionDate, which create also requires. Without them these
+// kit-line cases would fail for a reason that has nothing to do with kit lines, and the "rejects
+// duplicates" ones would pass for the wrong reason.
 function base(kitLines: unknown[]) {
-  return { name: "Job", customerId: A, projectId: B, assignedEngineerId: C, addressLine1: "1 Test Street", kitLines };
+  return { name: "Job", customerId: A, projectId: B, assignedEngineerId: C, addressLine1: "1 Test Street", completionDate: "2026-08-10", kitLines };
 }
 const irm = (irmItemId: string, qty = 5, warehouseId: string = WH) => ({ lineType: "irm", itemName: "CAT6", irmItemId, warehouseId, qty });
 const cse = (customerStockEntryId: string, qty = 1) => ({ lineType: "customer_stock", itemName: "SFP", customerStockEntryId, qty });
@@ -42,6 +43,7 @@ describe("createJobSchema destination (site or address)", () => {
     customerId: A,
     projectId: B,
     assignedEngineerId: C,
+    completionDate: "2026-08-10", // also required — see the completionDate suite
     kitLines: [misc("Cable ties")],
     ...extra,
   });
@@ -90,14 +92,16 @@ describe("createJobSchema destination (site or address)", () => {
 // supplier or a completion date you could set but never remove: the save succeeded and silently
 // kept the old value. They now normalise "" to null, which the service already knew how to store.
 describe("ids and dates the user can un-pick normalise '' to null (= clear it)", () => {
-  it.each([["siteId"], ["supplierId"], ["completionDate"]])("%s: '' becomes null", (field) => {
+  // completionDate is NO LONGER one of them — it is required now, so it appears in its own suite
+  // below. siteId and supplierId remain genuinely clearable.
+  it.each([["siteId"], ["supplierId"]])("%s: '' becomes null", (field) => {
     const r = updateJobSchema.safeParse({ [field]: "" });
     expect(r.success).toBe(true);
     expect((r.data as Record<string, unknown>)[field]).toBeNull();
   });
 
   it("accepts an explicit null too (a caller that means 'clear' outright)", () => {
-    const r = updateJobSchema.safeParse({ siteId: null, supplierId: null, completionDate: null });
+    const r = updateJobSchema.safeParse({ siteId: null, supplierId: null });
     expect(r.success).toBe(true);
   });
 
@@ -127,5 +131,75 @@ describe("updateJobSchema deliberately carries NO destination rule (it lives in 
 
   it("accepts a patch that explicitly blanks the address — the service decides if that's allowed", () => {
     expect(updateJobSchema.safeParse({ addressLine1: "" }).success).toBe(true);
+  });
+});
+
+// A job is DISPATCHED WORK the moment it exists — createJob hardcodes status "assigned" and demands
+// an engineer, and nothing in the app ever creates a draft. A job with no completion date is not
+// merely harder to find: it is absent from the goods queue's due filter, the dashboard's overdue and
+// due-this-week counts, and the engineer's Overdue filter alike. The only way to see it is to already
+// be reading the full active list, which is the situation those views exist to prevent.
+describe("completionDate is required on BOTH create and update", () => {
+  const job = (extra: Record<string, unknown>) => ({
+    name: "Job",
+    customerId: A,
+    projectId: B,
+    assignedEngineerId: C,
+    addressLine1: "1 Basinghall Street",
+    kitLines: [misc("Cable ties")],
+    ...extra,
+  });
+
+  it("accepts a create that carries a date", () => {
+    expect(createJobSchema.safeParse(job({ completionDate: "2026-08-10" })).success).toBe(true);
+  });
+
+  it("REJECTS a create with the key missing entirely", () => {
+    const r = createJobSchema.safeParse(job({}));
+    expect(r.success).toBe(false);
+    if (!r.success) expect(r.error.issues.some((i) => i.path.includes("completionDate"))).toBe(true);
+  });
+
+  it("REJECTS a create with an empty or whitespace-only date", () => {
+    expect(createJobSchema.safeParse(job({ completionDate: "" })).success).toBe(false);
+    expect(createJobSchema.safeParse(job({ completionDate: "   " })).success).toBe(false);
+  });
+
+  it("REJECTS a create with a malformed date", () => {
+    expect(createJobSchema.safeParse(job({ completionDate: "not-a-date" })).success).toBe(false);
+  });
+
+  // The half that the Site field got wrong: create demanded a destination while update let it be
+  // blanked away. The rule has to hold on the way IN and on the way THROUGH, or the gap simply moves
+  // from the create form to the edit form.
+  it("REJECTS an update that blanks the date — it can no longer be cleared", () => {
+    expect(updateJobSchema.safeParse({ completionDate: "" }).success).toBe(false);
+    expect(updateJobSchema.safeParse({ completionDate: "   " }).success).toBe(false);
+  });
+
+  // `optionalFor("edit")` sends "" for a box the user emptied, so this is exactly the payload a
+  // cleared date field produces. It must surface an error, never be re-read as "leave it alone" —
+  // that would show a success toast for a change the server silently discarded.
+  it("does not let a blanked box degrade into 'leave this field alone'", () => {
+    const r = updateJobSchema.safeParse({ completionDate: "" });
+    expect(r.success).toBe(false);
+    if (!r.success) expect(r.error.issues.some((i) => i.path.includes("completionDate"))).toBe(true);
+  });
+
+  it("REJECTS an explicit null on update", () => {
+    expect(updateJobSchema.safeParse({ completionDate: null }).success).toBe(false);
+  });
+
+  // PATCH semantics survive: an edit that only touches the address must not have to resend the date.
+  it("still allows an update that omits the key — that means 'leave it alone'", () => {
+    const r = updateJobSchema.safeParse({ city: "Leeds" });
+    expect(r.success).toBe(true);
+    if (r.success) expect(r.data.completionDate).toBeUndefined();
+  });
+
+  it("accepts an update that sets a new date", () => {
+    const r = updateJobSchema.safeParse({ completionDate: "2026-09-01" });
+    expect(r.success).toBe(true);
+    if (r.success) expect(r.data.completionDate).toBe("2026-09-01");
   });
 });

@@ -14,15 +14,17 @@
 // date window and pagination are all server-side (goodsManagement.service); only the kit-line
 // density control is client-side, since it just chooses how much of an already-loaded kit to draw.
 // Tab/filter state is persisted in the URL using namespaced params (?gmSection, ?gmq, ?gmPage,
-// ?gmStatus, ?gmFrom, ?gmTo, ?gmLines, ?gmSort) so that a browser refresh restores the view without
-// clobbering the host page's ?tab param. Switching section clears them — see goToSection.
+// ?gmStatus, ?gmFrom, ?gmTo, ?gmLines, ?gmSort, ?gmDue) so that a browser refresh restores the view
+// without clobbering the host page's ?tab param. Switching section clears them ALL — see goToSection;
+// anything added here must be cleared there too, or the new section arrives silently narrowed by a
+// filter it doesn't even display.
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ClipboardList, Clock, PackageCheck } from "lucide-react";
+import { ChevronRight, ChevronsDownUp, ChevronsUpDown, ClipboardList, Clock, PackageCheck } from "lucide-react";
 
 import * as gmService from "@/services/goodsManagement.service";
-import type { QueuePage, QueueKitLine, QueueStatusFilter, QueueSort } from "@/types/goodsManagement";
+import type { GoodsLineStatus, QueuePage, QueueKitLine, QueueStatusFilter, QueueSort } from "@/types/goodsManagement";
 import { useGoodsSocket } from "@/hooks/useGoodsSocket";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { Pagination } from "@/components/ui/Pagination";
@@ -32,18 +34,14 @@ import { toolbarBtn, toolbarDateCls } from "@/components/ui/styles";
 import { JobScanPanel } from "./JobScanPanel";
 import { OverdueHoldingsView } from "./OverdueHoldingsView";
 import { visibleKitLines } from "./kitLineVisibility";
-import { ageTone, formatDay, jobAgeDays } from "./jobAge";
+import { foldedStatus, itemNamesTitle, summariseLines } from "./collapsedRow";
+import { ageTone, dueBadge, formatDay, jobAgeDays } from "./jobAge";
 
 type GmSection = "queue" | "closed" | "overdue";
 
-type GoodsStatusKey =
-  | "not_issued"
-  | "partially_issued"
-  | "issued"
-  | "awaiting_return"
-  | "returned"
-  | "used"
-  | "reconciled";
+// The per-LINE status vocabulary, from the shared types so this file and collapsedRow's foldedStatus
+// can't drift apart. Richer than the job-level GoodsStatus — see the note on GoodsLineStatus.
+type GoodsStatusKey = GoodsLineStatus;
 
 const STATUS_LABELS: Record<GoodsStatusKey, string> = {
   not_issued: "Not issued",
@@ -67,6 +65,23 @@ const STATUS_COLORS: Record<GoodsStatusKey, string> = {
 
 const PAGE_SIZE = 20;
 const QUEUE_HEADERS = ["Job", "Engineer", "Item", "Status", "Planned", "Issued", "Used", "Returned", "To return", "Available", ""];
+
+// Due-date filter for the ACTIVE queue, read off the job's completion date. The Closed tab keeps its
+// activity window instead — there, "when did we finish it" is the question; here it's "what has to go
+// out". They are different fields on purpose: a job due today with nothing issued has no activity at
+// all, so an activity window would hide precisely the work this filter exists to surface.
+// "Past due", NOT "Overdue": this screen ALREADY has an Overdue section, and it counts something
+// entirely different — stock still out with an engineer beyond the Settings window (a chase list).
+// This one is about the job's own deadline. Two controls a few pixels apart both reading "Overdue"
+// while answering different questions is the kind of thing people quietly mis-read for months.
+// The VALUE stays "overdue" — it is the backend's filter contract and shared with saved URLs.
+const DUE_OPTIONS = [
+  { value: "", label: "Any due date" },
+  { value: "overdue", label: "Past due" },
+  { value: "today", label: "Due today" },
+  { value: "week", label: "Due this week" },
+];
+const DUE_VALUES = DUE_OPTIONS.map((o) => o.value).filter(Boolean);
 
 // Stage filter for the ACTIVE queue. "active" (everything but reconciled) stays the default; the rest
 // target one exact stage. "Awaiting return" is the one that earns its place — it's the chase list, the
@@ -237,6 +252,9 @@ export function GoodsManagementTab({
   // of reaching the API (a bogus status would 400 the whole tab).
   const rawStatus = searchParams.get("gmStatus");
   const statusFilter = (rawStatus && ACTIVE_STATUS_VALUES.includes(rawStatus) ? rawStatus : "active") as QueueStatusFilter;
+  // Validated against the option list like every other filter — these arrive from an editable URL.
+  const rawDue = searchParams.get("gmDue") ?? "";
+  const dueFilter = DUE_VALUES.includes(rawDue) ? rawDue : "";
   const activityFrom = searchParams.get("gmFrom") ?? "";
   const activityTo = searchParams.get("gmTo") ?? "";
   const showAllLines = searchParams.get("gmLines") === "all";
@@ -250,6 +268,36 @@ export function GoodsManagementTab({
   const [error, setError] = React.useState<string | null>(null);
   const [selectedJobId, setSelectedJobId] = React.useState<string | null>(null);
   const [loadTick, setLoadTick] = React.useState(0);
+
+  // Which job groups are folded to a single line.
+  //
+  // Held as a DEFAULT plus an exception set, not as a list of folded ids, so "Collapse all" keeps
+  // holding for jobs that arrive on the next page or after a socket refresh. A plain id list would
+  // let those in expanded and quietly undo the fold the user just asked for.
+  //
+  // Deliberately local state rather than a URL param: per-job ids would bloat the query string this
+  // tab shares with its host page, and a fold is a reading aid for right now, not a view worth
+  // restoring on refresh.
+  const [collapseAll, setCollapseAll] = React.useState(false);
+  const [foldExceptions, setFoldExceptions] = React.useState<ReadonlySet<string>>(new Set());
+  const isCollapsed = React.useCallback(
+    (jobId: string) => (foldExceptions.has(jobId) ? !collapseAll : collapseAll),
+    [collapseAll, foldExceptions],
+  );
+  const toggleFold = React.useCallback((jobId: string) => {
+    setFoldExceptions((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(jobId)) next.add(jobId);
+      return next;
+    });
+  }, []);
+  // Flipping the global control re-bases the default, so the per-job exceptions have to go with it —
+  // keeping them would leave a job the user folded by hand now standing alone expanded (and vice
+  // versa), which reads as the button having half-worked.
+  const toggleAll = React.useCallback(() => {
+    setCollapseAll((v) => !v);
+    setFoldExceptions(new Set());
+  }, []);
 
   const isClosed = section === "closed";
   const showsTable = section === "queue" || section === "closed";
@@ -296,6 +344,9 @@ export function GoodsManagementTab({
         // thing this screen exists to keep in front of the manager.
         activityFrom: isClosed ? activityFrom || undefined : undefined,
         activityTo: isClosed ? activityTo || undefined : undefined,
+        // Mirror image of the window above: due belongs to the ACTIVE queue only. On Closed every job
+        // is finished, so "what's due" has nothing left to answer.
+        due: isClosed ? undefined : (dueFilter || undefined) as "overdue" | "today" | "week" | undefined,
         // Closed always reads most-recently-closed first — "what did we finish last?" is the question
         // there, and ordering it by when the JOB was raised (the default) put an old job that closed
         // yesterday below a new one that closed last month, right beside the date now on screen.
@@ -315,7 +366,7 @@ export function GoodsManagementTab({
     return () => {
       active = false;
     };
-  }, [warehouseId, section, isClosed, showsTable, urlSearch, statusFilter, activityFrom, activityTo, queueSort, page, loadTick]);
+  }, [warehouseId, section, isClosed, showsTable, urlSearch, statusFilter, activityFrom, activityTo, dueFilter, queueSort, page, loadTick]);
 
   const goToSection = (key: GmSection) => {
     setSearchInput("");
@@ -324,9 +375,13 @@ export function GoodsManagementTab({
     // Closed, a date window nothing in Queue), so carrying them across would leave the new view
     // silently narrowed by a control it doesn't even show.
     patch(
-      { gmSection: key !== "queue" ? key : null, gmq: null, gmPage: null, gmStatus: null, gmFrom: null, gmTo: null, gmLines: null, gmSort: null },
+      { gmSection: key !== "queue" ? key : null, gmq: null, gmPage: null, gmStatus: null, gmFrom: null, gmTo: null, gmLines: null, gmSort: null, gmDue: null },
       false,
     );
+    // Folding is a per-view reading aid, not a filter — carrying it into a section the user just
+    // switched to would hand them a queue already folded up for reasons they can't see.
+    setCollapseAll(false);
+    setFoldExceptions(new Set());
   };
 
   const selectedRow = React.useMemo(
@@ -353,6 +408,164 @@ export function GoodsManagementTab({
       </div>
     );
   }
+
+  // The Job + Engineer cells, shared by the expanded and the folded rendering so the two can't drift
+  // apart. Folding must cost HEIGHT, never information: the folded row carries the same job identity,
+  // due badge, age and hidden-line count as the expanded one.
+  // `overdueAfterDays` is passed in rather than read off `data` here: at this point in the component
+  // `data` is still `QueuePage | null`, so reading it would need a fallback — and a local default
+  // would be exactly the hardcoded threshold QueuePage.overdueAfterDays exists to prevent (it is the
+  // Settings value the Overdue tab and Inventory Hub also count with, so a stray 14 here would tint
+  // rows against a number nothing else in the app uses). Both call sites are inside the branch where
+  // `data` is known non-null, so they can hand over the real value.
+  const jobCell = (row: QueuePage["rows"][number], hiddenCount: number, rowSpan: number, overdueAfterDays: number) => {
+    const folded = isCollapsed(row.jobId);
+    const age = jobAgeDays(row);
+    const badge = isClosed ? null : dueBadge(row.dueState, row.completionDate);
+    const chevron = (
+      <button
+        type="button"
+        onClick={() => toggleFold(row.jobId)}
+        aria-expanded={!folded}
+        aria-label={`${folded ? "Expand" : "Collapse"} ${row.jobNumber}`}
+        title={folded ? "Show this job's kit lines" : "Fold this job to a single line"}
+        className="shrink-0 rounded-md p-0.5 text-[var(--faint)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--ink)]"
+      >
+        <ChevronRight className={`h-4 w-4 transition-transform ${folded ? "" : "rotate-90"}`} />
+      </button>
+    );
+
+    // FOLDED — one text line, laid out horizontally.
+    //
+    // Stacking job number / name / badges the way the expanded cell does would keep the row four
+    // lines tall no matter how many kit rows were removed, so "collapse" would shrink nothing that
+    // the eye can see. The row only gets shorter if THIS cell does, so everything runs inline and the
+    // vertical padding drops with it. The job name truncates rather than wraps for the same reason:
+    // one long name must not silently put the height back.
+    if (folded) {
+      return (
+        <>
+          <td className="px-4 py-2" rowSpan={rowSpan}>
+            <div className="flex items-center gap-2 whitespace-nowrap text-[11px] font-semibold">
+              {chevron}
+              <span className="text-sm font-bold text-[var(--ink)]">{row.jobNumber}</span>
+              <span className="max-w-[9rem] truncate text-xs font-normal text-[var(--muted)]" title={row.jobName}>
+                {row.jobName}
+              </span>
+              {isClosed ? (
+                <span className="text-[10px] text-[var(--muted)]">Closed {formatDay(row.lastActivityAt)}</span>
+              ) : (
+                <>
+                  {badge && (
+                    <span className={`text-[10px] ${badge.cls}`} title={badge.title}>
+                      {badge.label}
+                    </span>
+                  )}
+                  {age !== null && (
+                    <span className={`text-[10px] ${AGE_TONE_CLS[ageTone(age, overdueAfterDays)]}`}>
+                      {age === 0 ? "Today" : `Waiting ${age}d`}
+                    </span>
+                  )}
+                </>
+              )}
+            </div>
+          </td>
+          <td className="px-4 py-2 text-xs text-[var(--muted)]" rowSpan={rowSpan}>
+            {row.engineerName ?? "—"}
+          </td>
+        </>
+      );
+    }
+
+    return (
+      <>
+        <td className="px-4 py-3" rowSpan={rowSpan}>
+          <div className="flex items-start gap-2">
+            <div className="mt-0.5">{chevron}</div>
+            <div className="min-w-0">
+              <div className="font-bold text-[var(--ink)]">{row.jobNumber}</div>
+              <div className="text-xs text-[var(--muted)]">{row.jobName}</div>
+              {/* The time signals, stacked here rather than as extra columns — this table is already
+                  wide, and they belong beside the job they describe. Closed shows WHEN it closed,
+                  which is the value that view's date filter matches. Queue shows the DUE date (what
+                  its own filter matches) plus how long the job has gone untouched: different
+                  questions, so neither substitutes for the other. */}
+              {isClosed ? (
+                <div className="mt-1 text-[10px] font-semibold text-[var(--muted)]">Closed {formatDay(row.lastActivityAt)}</div>
+              ) : (
+                <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] font-semibold">
+                  {badge && (
+                    <span className={badge.cls} title={badge.title}>
+                      {badge.label}
+                    </span>
+                  )}
+                  {badge && age !== null && <span className="text-[var(--border)]">·</span>}
+                  {age !== null && (
+                    <span
+                      className={AGE_TONE_CLS[ageTone(age, overdueAfterDays)]}
+                      title={
+                        row.lastActivityAt
+                          ? `Last goods movement ${formatDay(row.lastActivityAt)}`
+                          : `No goods movement yet — raised ${formatDay(row.createdAt)}`
+                      }
+                    >
+                      {age === 0 ? "Today" : `Waiting ${age}d`}
+                    </span>
+                  )}
+                </div>
+              )}
+              {/* Folded, never dropped: the manager still learns the job carries more kit than the
+                  rows show, without paying eight untouchable rows for it. */}
+              {hiddenCount > 0 && (
+                <div
+                  className="mt-1 text-[10px] font-semibold text-[var(--faint)]"
+                  title="Kit lines that can't be actioned at this warehouse — switch to “All kit lines” to see them."
+                >
+                  +{hiddenCount} more line{hiddenCount === 1 ? "" : "s"} hidden
+                </div>
+              )}
+            </div>
+          </div>
+        </td>
+        <td className="px-4 py-3 text-xs text-[var(--muted)]" rowSpan={rowSpan}>
+          {row.engineerName ?? "—"}
+        </td>
+      </>
+    );
+  };
+
+  // `compact` trims the vertical padding for a folded row — with py-3 the button's own height would
+  // hold the row open after the job cell had already shrunk to one line.
+  const manageCell = (row: QueuePage["rows"][number], rowSpan: number, compact = false) => (
+    <td className={`px-4 ${compact ? "py-1.5" : "py-3"}`} rowSpan={rowSpan}>
+      {/* Closed (reconciled) jobs are read-only — no dead-end Manage button. */}
+      {!isClosed && (
+        <button
+          type="button"
+          onClick={() => setSelectedJobId(row.jobId)}
+          className={`rounded-xl bg-[var(--accent)] px-3 text-[11px] font-extrabold text-white transition-all hover:opacity-90 ${compact ? "py-1" : "py-1.5"}`}
+        >
+          Manage
+        </button>
+      )}
+    </td>
+  );
+
+  // Folds every job to one line — the "how many jobs am I actually looking at" read, which a
+  // kit-line-per-row table can't give on a busy warehouse. Offered on Closed as well as Queue: the
+  // per-job chevron already works in both, so a bulk control in only one of them would read as the
+  // button being broken on the other. Purely visual, so like the line-density control it never refetches.
+  const collapseAllBtn = (
+    <button
+      type="button"
+      onClick={toggleAll}
+      className={toolbarBtn}
+      title={collapseAll ? "Show every job's kit lines" : "Fold every job to a single line"}
+    >
+      {collapseAll ? <ChevronsUpDown className="h-3.5 w-3.5" /> : <ChevronsDownUp className="h-3.5 w-3.5" />}
+      {collapseAll ? "Expand all" : "Collapse all"}
+    </button>
+  );
 
   return (
     <div className="flex h-full flex-col gap-4">
@@ -429,6 +642,7 @@ export function GoodsManagementTab({
                       Clear dates
                     </button>
                   )}
+                  {collapseAllBtn}
                 </>
               ) : (
                 <>
@@ -438,6 +652,13 @@ export function GoodsManagementTab({
                     value={statusFilter}
                     onChange={(v) => patch({ gmStatus: v === "active" ? null : v })}
                     options={STATUS_FILTER_OPTIONS}
+                  />
+                  <Select
+                    size="sm"
+                    ariaLabel="Filter by due date"
+                    value={dueFilter}
+                    onChange={(v) => patch({ gmDue: v || null })}
+                    options={DUE_OPTIONS}
                   />
                   {/* Purely how much of each kit is drawn — no refetch, so it isn't in the fetch deps. */}
                   <Select
@@ -454,6 +675,7 @@ export function GoodsManagementTab({
                     onChange={(v) => patch({ gmSort: v === "newest" ? null : v })}
                     options={SORT_OPTIONS}
                   />
+                  {collapseAllBtn}
                 </>
               )
             }
@@ -512,6 +734,61 @@ export function GoodsManagementTab({
                       // reads. Keyed by line id, so the lookups below still resolve.
                       const effReturns = effectiveReturns(row.kitLines);
                       const toReturns = distributeToReturn(row.kitLines);
+                      // A job with nothing drawable renders nothing, folded or not — a folded row that
+                      // expanded into zero rows would be a dead chevron.
+                      if (visibleLines.length === 0) return null;
+                      if (isCollapsed(row.jobId)) {
+                        const t = summariseLines(visibleLines, effReturns, toReturns);
+                        const inReturnPhase = row.goodsStatus === "awaiting_return";
+                        return (
+                          <tr
+                            key={row.jobId}
+                            className={`align-middle transition-colors hover:bg-[var(--surface-2)] ${jobIdx > 0 ? "border-t-2 border-[var(--border)]" : ""}`}
+                          >
+                            {jobCell(row, hiddenCount, 1, data.overdueAfterDays)}
+                            {/* The item names are what the chevron traded away, so the count stands in
+                                for them — with the names themselves on hover, since "what's on this
+                                job" is the one thing you'd otherwise have to expand to check. The
+                                not-actionable-here count rides along instead of taking its own line in
+                                the job cell, which would put the row's height straight back. */}
+                            <td className="whitespace-nowrap px-4 py-2 text-[var(--muted)]" title={itemNamesTitle(visibleLines)}>
+                              {t.items} item{t.items === 1 ? "" : "s"}
+                              {hiddenCount > 0 && (
+                                <span className="ml-1.5 text-[10px] font-semibold text-[var(--faint)]" title="Kit lines that can't be actioned at this warehouse.">
+                                  +{hiddenCount} hidden
+                                </span>
+                              )}
+                            </td>
+                            {/* Derived from the lines this row folded, NOT from row.goodsStatus —
+                                that covers the whole job including other warehouses' lines, so it
+                                would print "Partial" beside an Issued column of 0. See foldedStatus. */}
+                            <td className="px-4 py-2">
+                              {statusChip(
+                                isClosed
+                                  ? "reconciled"
+                                  : foldedStatus(
+                                      visibleLines.map((l) =>
+                                        lineStatus(l, row.goodsStatus, effReturns.get(l.id) ?? l.returnedQty, toReturns.get(l.id) ?? 0),
+                                      ),
+                                    ),
+                              )}
+                            </td>
+                            <td className="px-4 py-2 text-right tabular-nums text-[var(--muted)]">{t.planned}</td>
+                            <td className={`px-4 py-2 text-right font-semibold tabular-nums ${isClosed ? "text-[var(--ink)]" : shortfallColor(t.planned, t.issued)}`}>{t.issued}</td>
+                            <td className={`px-4 py-2 text-right tabular-nums ${t.used === 0 ? "text-[var(--faint)]" : "text-[var(--ink)]"}`}>{t.used}</td>
+                            <td className={`px-4 py-2 text-right tabular-nums ${t.returned > 0 ? "text-teal-600" : "text-[var(--faint)]"}`}>{t.returned}</td>
+                            <td className={`px-4 py-2 text-right tabular-nums ${inReturnPhase && t.toReturn > 0 ? "font-semibold text-indigo-600" : "text-[var(--faint)]"}`}>
+                              {inReturnPhase ? t.toReturn : "—"}
+                            </td>
+                            {/* Availability is per ITEM warehouse stock — adding it across different
+                                items would give a number that means nothing, so it stays folded. */}
+                            <td className="px-4 py-2 text-right tabular-nums text-[var(--faint)]" title="Availability is per item — expand the job to see it.">
+                              —
+                            </td>
+                            {manageCell(row, 1, true)}
+                          </tr>
+                        );
+                      }
                       return visibleLines.map((line, lineIdx) => {
                         const isMisc = line.lineType === "misc";
                         const atWh = !!line.warehouseId && line.warehouseId === warehouseId;
@@ -534,56 +811,7 @@ export function GoodsManagementTab({
                         const jobSep = lineIdx === 0 && jobIdx > 0 ? "border-t-2 border-[var(--border)]" : "";
                         return (
                           <tr key={`${row.jobId}-${line.id}`} className={`align-middle transition-colors hover:bg-[var(--surface-2)] ${jobSep}`}>
-                            {lineIdx === 0 && (
-                              <>
-                                <td className="px-4 py-3" rowSpan={rowCount}>
-                                  <div className="font-bold text-[var(--ink)]">{row.jobNumber}</div>
-                                  <div className="text-xs text-[var(--muted)]">{row.jobName}</div>
-                                  {/* The time signal, stacked here rather than as a 12th column — this
-                                      table is already wide, and the date belongs beside the job it
-                                      describes. Closed shows WHEN it closed, which is the value the
-                                      date filter matches: without it you filter on something the screen
-                                      never shows and can't tell whether it did the right thing. Queue
-                                      shows how long the job has gone untouched, colouring past the
-                                      Overdue threshold, so neglected work reads at a glance. */}
-                                  {isClosed ? (
-                                    <div className="mt-1 text-[10px] font-semibold text-[var(--muted)]">
-                                      Closed {formatDay(row.lastActivityAt)}
-                                    </div>
-                                  ) : (
-                                    (() => {
-                                      const age = jobAgeDays(row);
-                                      if (age === null) return null;
-                                      return (
-                                        <div
-                                          className={`mt-1 text-[10px] font-semibold ${AGE_TONE_CLS[ageTone(age, data.overdueAfterDays)]}`}
-                                          title={
-                                            row.lastActivityAt
-                                              ? `Last goods movement ${formatDay(row.lastActivityAt)}`
-                                              : `No goods movement yet — raised ${formatDay(row.createdAt)}`
-                                          }
-                                        >
-                                          {age === 0 ? "Today" : `Waiting ${age}d`}
-                                        </div>
-                                      );
-                                    })()
-                                  )}
-                                  {/* Folded, never dropped: the manager still learns the job carries more
-                                      kit than the rows show, without paying eight untouchable rows for it. */}
-                                  {hiddenCount > 0 && (
-                                    <div
-                                      className="mt-1 text-[10px] font-semibold text-[var(--faint)]"
-                                      title="Kit lines that can't be actioned at this warehouse — switch to “All kit lines” to see them."
-                                    >
-                                      +{hiddenCount} more line{hiddenCount === 1 ? "" : "s"} hidden
-                                    </div>
-                                  )}
-                                </td>
-                                <td className="px-4 py-3 text-xs text-[var(--muted)]" rowSpan={rowCount}>
-                                  {row.engineerName ?? "—"}
-                                </td>
-                              </>
-                            )}
+                            {lineIdx === 0 && jobCell(row, hiddenCount, rowCount, data.overdueAfterDays)}
                             <td className={`px-4 py-3 ${active ? "font-medium text-[var(--ink)]" : "text-[var(--faint)]"} ${dim}`}>
                               {line.itemName}
                               {/* At its home warehouse a line reads "This warehouse" (full line
@@ -636,20 +864,7 @@ export function GoodsManagementTab({
                             <td className={`px-4 py-3 text-right tabular-nums ${line.available < line.plannedQty - line.issuedQty ? "font-semibold text-[var(--neg)]" : "text-[var(--muted)]"}`}>
                               {line.available}
                             </td>
-                            {lineIdx === 0 && (
-                              <td className="px-4 py-3" rowSpan={rowCount}>
-                                {/* Closed (reconciled) jobs are read-only — no dead-end Manage button. */}
-                                {!isClosed && (
-                                  <button
-                                    type="button"
-                                    onClick={() => setSelectedJobId(row.jobId)}
-                                    className="rounded-xl bg-[var(--accent)] px-3 py-1.5 text-[11px] font-extrabold text-white transition-all hover:opacity-90"
-                                  >
-                                    Manage
-                                  </button>
-                                )}
-                              </td>
-                            )}
+                            {lineIdx === 0 && manageCell(row, rowCount)}
                           </tr>
                         );
                       });

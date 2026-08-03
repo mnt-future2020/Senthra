@@ -30,6 +30,8 @@ export const listQueue = asyncHandler(async (req, res) => {
         // rejected — these arrive from a URL the user can edit, and a typo shouldn't 400 the whole tab.
         activityFrom: queryStr(req.query["activityFrom"])?.trim() || undefined,
         activityTo: queryStr(req.query["activityTo"])?.trim() || undefined,
+        // Due window on the job's completion date — validated in the service against QUEUE_DUE_FILTERS.
+        due: queryStr(req.query["due"])?.trim() || undefined,
         sort: queryStr(req.query["sort"])?.trim() || undefined,
         page: queryInt(req.query["page"]),
         pageSize: queryInt(req.query["pageSize"]),

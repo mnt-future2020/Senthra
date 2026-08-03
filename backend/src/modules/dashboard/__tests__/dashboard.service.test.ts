@@ -49,6 +49,9 @@ vi.mock("#modules/goods-management/goods-management.service.js", () => ({
 
 // warehouseScopeFilter → undefined (unscoped) for a plain admin.
 vi.mock("../../../lib/warehouse-access.js", () => ({ warehouseScopeFilter: vi.fn(() => undefined) }));
+// The due-date cards resolve "today" in the COMPANY timezone, which reads Settings → Prisma. Stubbed
+// so this stays a unit test rather than one that quietly needs a live MongoDB.
+vi.mock("#modules/settings/settings.service.js", () => ({ getCompanyTimezone: vi.fn(async () => "Europe/London") }));
 
 import * as invRepo from "#modules/inventory/inventory.repository.js";
 import * as prfRepo from "#modules/purchase-request/purchase-request.repository.js";

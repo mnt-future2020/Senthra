@@ -19,6 +19,9 @@ vi.mock("#modules/goods-management/goods-management.repository.js", () => ({
   findMiscIssueLinesByEngineer: vi.fn(),
 }));
 vi.mock("#modules/inventory/movement.service.js", () => ({ listEngineerMovements: vi.fn() }));
+// The overview's "today" boundary is resolved in the COMPANY timezone, which reads Settings → Prisma.
+// Stubbed so this stays a unit test rather than one that quietly needs a live MongoDB.
+vi.mock("#modules/settings/settings.service.js", () => ({ getCompanyTimezone: vi.fn(async () => "Europe/London") }));
 
 import * as engineerRepo from "./engineer.repository.js";
 import * as jobService from "#modules/job/job.service.js";

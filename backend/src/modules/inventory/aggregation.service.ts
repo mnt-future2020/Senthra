@@ -17,6 +17,8 @@ import {
   type PositionFilters,
 } from "./stock-position.js";
 import { csvEscape } from "../../utils/csv.js";
+import { getRegionalSettings } from "#modules/settings/settings.service.js";
+import { formatDateTime } from "#modules/document/document.formatter.js";
 
 // Engineer display name from a balance's included `engineer` relation (falls back to email, then a
 // generic label). Single source of truth for the assemblers and the engineer-lens roll-up below.
@@ -191,9 +193,12 @@ export async function exportAllPositionsCsv(filters: PositionFilters): Promise<A
   const all = await assembleAll(filters);
   const rows = sortPositions(filterPositions(all, filters));
 
+  // Company timezone + configured date format, like every generated artifact; the column names the
+  // zone so a reader is never left guessing which one the timestamps are in.
+  const regional = await getRegionalSettings();
   const header = [
     "Item", "SKU", "Ownership", "Location", "Location Type",
-    "Qty", "Available", "Value (GBP)", "Status", "Last Movement (UTC)",
+    "Qty", "Available", "Value (GBP)", "Status", `Last Movement (${regional.timezone})`,
   ];
   const lines = [header.map(csvEscape).join(",")];
 
@@ -211,7 +216,7 @@ export async function exportAllPositionsCsv(filters: PositionFilters): Promise<A
         String(p.available),
         showValue && p.value != null ? p.value.toFixed(2) : "",
         p.status,
-        p.lastMovementAt,
+        formatDateTime(p.lastMovementAt, regional),
       ]
         .map((v) => csvEscape(String(v)))
         .join(","),

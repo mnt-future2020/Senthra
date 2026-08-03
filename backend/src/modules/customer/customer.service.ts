@@ -20,7 +20,8 @@ import { withTransactionRetry } from "../../lib/prisma.js";
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
 import { geocodePostcode, geocodePostcodesBulk, canonicalPostcode } from "../../lib/geocode.js";
 import { siteSchema } from "./customer.validation.js";
-import { getCloudinaryCreds, getStockCodePrefix } from "#modules/settings/settings.service.js";
+import { getCloudinaryCreds, getRegionalSettings, getStockCodePrefix } from "#modules/settings/settings.service.js";
+import { formatDate } from "#modules/document/document.formatter.js";
 import { assertWarehouseAccess } from "../../lib/warehouse-access.js";
 import { generateTempPassword } from "../../utils/generate-password.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
@@ -2484,6 +2485,7 @@ export async function exportOwnStockCsv(
     { skip: 0, take: PORTAL_EXPORT_MAX },
   );
   const entries = rows.map((e) => toPortalStockEntry(e as StockEntryRow));
+  const regional = await getRegionalSettings();
   const csv = toCsv(
     ["Item", "Warehouse", "Warehouse code", "SKU", "Quantity", "Unit", "Category", "Barcode", "Status", "Received"],
     entries.map((e) => [
@@ -2497,8 +2499,10 @@ export async function exportOwnStockCsv(
       e.barcode,
       e.status,
       // Date only, no time: the received timestamp's time-of-day is warehouse admin, and a bare date
-      // is what a spreadsheet can sort and filter without the reader parsing it first.
-      e.receivedAt ? e.receivedAt.slice(0, 10) : null,
+      // is what a spreadsheet can sort and filter without the reader parsing it first. Rendered in the
+      // COMPANY timezone — slicing the ISO string gave the UTC day, so anything received after 23:00
+      // during BST was reported to the customer as the day AFTER they actually received it.
+      formatDate(e.receivedAt, regional.dateFormat, regional.timezone) || null,
     ]),
   );
   return { csv, capped: entries.length >= PORTAL_EXPORT_MAX };
@@ -2518,6 +2522,7 @@ export async function exportOwnStockRequestsCsv(
     { skip: 0, take: PORTAL_EXPORT_MAX },
   );
   const requests = rows.map(toPortalStockRequest);
+  const regional = await getRegionalSettings();
   const body: (string | number | null)[][] = [];
   for (const r of requests) {
     const base = [
@@ -2526,7 +2531,8 @@ export async function exportOwnStockRequestsCsv(
       r.editedName && r.editedName !== r.name ? r.name : null,
       r.quantity,
       r.status,
-      r.createdAt.slice(0, 10),
+      // Company timezone, not the UTC slice — same off-by-one-day trap as the stock-entry export.
+      formatDate(r.createdAt, regional.dateFormat, regional.timezone) || null,
     ];
     if (r.warehouseAssignments.length === 0) {
       body.push([...base, null, null, null, null]);

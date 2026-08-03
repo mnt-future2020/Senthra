@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ageTone, daysSince, formatDay, jobAgeDays } from "./jobAge";
+import { ageTone, daysSince, dueBadge, formatDay, formatDueDay, jobAgeDays } from "./jobAge";
 
 // Fixed "now" so the suite can't drift with the wall clock.
 const NOW = new Date("2026-07-31T12:00:00.000Z").getTime();
@@ -71,5 +71,51 @@ describe("formatDay", () => {
   it("renders an em dash when there is no date", () => {
     expect(formatDay(null)).toBe("—");
     expect(formatDay("nonsense")).toBe("—");
+  });
+});
+
+// The due badge is the only place the queue shows the date its due filter matches on. Before it, you
+// could filter by "Due today" and the list gave no way to check the answer — the rows showed only how
+// long each job had been waiting, which is a different question entirely.
+describe("dueBadge", () => {
+  const DAY = "2026-08-05T00:00:00.000Z"; // as <input type="date"> stores it: UTC midnight
+
+  it("names the date for an upcoming job", () => {
+    expect(dueBadge("upcoming", DAY)!.label).toBe("Due 5 Aug");
+  });
+
+  it("says past due WITH the date, so the row shows how late it is", () => {
+    expect(dueBadge("past_due", DAY)!.label).toBe("Past due 5 Aug");
+  });
+
+  // "Due today" needs no date — the date is today, and repeating it just costs width.
+  it("says due today without repeating the date", () => {
+    expect(dueBadge("today", DAY)!.label).toBe("Due today");
+  });
+
+  // Past due is the one that must not blend in; today is a warning, not yet a failure.
+  it("colours past due apart from today and from upcoming", () => {
+    const past = dueBadge("past_due", DAY)!.cls;
+    expect(past).not.toBe(dueBadge("today", DAY)!.cls);
+    expect(past).not.toBe(dueBadge("upcoming", DAY)!.cls);
+  });
+
+  // The case the badge exists for: completion date is OPTIONAL, and a job without one is dropped by
+  // every due filter. Rendering nothing would make that look like lost data.
+  it("says NO DUE DATE rather than going blank when the job has none", () => {
+    expect(dueBadge(null, null)!.label).toBe("No due date");
+    expect(dueBadge(null, null)!.title).toMatch(/hidden by every due-date filter/i);
+  });
+
+  // The state is the SERVER's judgement in the company timezone — never re-derived from the browser
+  // clock — so a missing state must not silently fall through to an "upcoming" badge.
+  it("falls back to no-due-date when the state is missing", () => {
+    expect(dueBadge(null, DAY)!.label).toBe("No due date");
+  });
+
+  // A completion date is a CALENDAR date stored at UTC midnight. Formatting it in a local zone behind
+  // UTC would name the previous day — so 5 Aug must read "5 Aug" regardless of where it is rendered.
+  it("formats the calendar date in UTC, not the viewer's zone", () => {
+    expect(formatDueDay(DAY)).toBe("5 Aug");
   });
 });

@@ -1,9 +1,9 @@
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
-import { parseFilterDate } from "../../utils/filter-date.js";
+import { parseFilterDate, startOfDayIn } from "../../utils/filter-date.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
-import { getCloudinaryCreds, getOverdueAfterDays } from "#modules/settings/settings.service.js";
+import { getCloudinaryCreds, getCompanyTimezone, getOverdueAfterDays } from "#modules/settings/settings.service.js";
 import * as jobRepo from "#modules/job/job.repository.js";
 import type { JobWithRelations } from "#modules/job/job.repository.js";
 import * as irmService from "#modules/irm/irm.service.js";
@@ -637,6 +637,15 @@ export interface QueueRow {
   /** When the job was raised — the age anchor for a job that has never had a goods movement. */
   createdAt: Date;
   /**
+   * The job's TARGET completion date (the planner's deadline), `null` when none was set — it is an
+   * optional field on the job. This is the value the queue's due filter matches, so the screen has to
+   * be able to show it: filtering on something never displayed leaves nobody able to tell whether the
+   * filter did the right thing. NOT `completedAt`, which is when the engineer actually finished.
+   */
+  completionDate: Date | null;
+  /** How that date reads today, in the COMPANY timezone — see `dueStateOf`. `null` = no date set. */
+  dueState: QueueDueState | null;
+  /**
    * Last goods movement (JobStockSummary.lastMovementAt), `null` if nothing has ever moved.
    * For a RECONCILED job this is effectively its close-out date, which is what the Closed view shows —
    * without it the date filter would be sorting and narrowing on a value the screen never displays, so
@@ -693,6 +702,55 @@ export type QueueStatusFilter = (typeof QUEUE_STATUSES)[number];
 //   "activity_desc" — most-recently-touched first; the sane default for Closed, where "what did we
 //                     finish last?" is the question, not "which job was raised last?".
 export const QUEUE_SORTS = ["newest", "activity_asc", "activity_desc"] as const;
+
+// Due-date windows for the ACTIVE queue, read off Job.completionDate.
+//
+// Deliberately NOT the existing activity window, which those filters look like: activity is when
+// stock last MOVED, so a job raised for today with nothing issued has no activity and a "today"
+// activity window would hide precisely the work being asked about. Due reads the only date a human
+// sets on a job, which is the one that answers "what has to go out today".
+export const QUEUE_DUE_FILTERS = ["overdue", "today", "week"] as const;
+export type QueueDueFilter = (typeof QUEUE_DUE_FILTERS)[number];
+
+// Resolved from the SERVER's clock, never from anything the client sends. A browser in another
+// timezone would otherwise shift what "today" means per user, and two managers looking at the same
+// queue would disagree about which jobs are due — the same reason the app never accepts a client
+// date for a day-boundary decision. The day itself is the COMPANY timezone's calendar day — see
+// startOfDayIn — NOT the UTC one: they name different dates for the first hour of every BST day,
+// which is the bug this filter was rewritten to stop reproducing.
+export function dueWindow(due: QueueDueFilter, now: Date, timeZone: string): { from?: Date; to?: Date } {
+  // Shared with the dashboard's dueBreakdown so the card and this queue can never disagree, and
+  // company-wide rather than per-warehouse: a job belongs to no warehouse (only its kit lines do), so
+  // the dashboard's own count would have no warehouse timezone to read.
+  const startOfToday = startOfDayIn(timeZone, now);
+  const endOfToday = new Date(startOfToday.getTime() + 24 * 60 * 60 * 1000 - 1);
+  if (due === "overdue") return { to: new Date(startOfToday.getTime() - 1) }; // due before today began
+  if (due === "today") return { from: startOfToday, to: endOfToday };
+  // "week" is today + the next 6 days INCLUSIVE — a planning horizon, so it deliberately includes
+  // today rather than starting tomorrow. It does NOT reach backwards; overdue is its own filter.
+  return { from: startOfToday, to: new Date(endOfToday.getTime() + 6 * 24 * 60 * 60 * 1000) };
+}
+
+/**
+ * How a row's due date reads RIGHT NOW — the badge beside the job number.
+ *
+ * Derived here rather than in the browser so it is provably the same judgement `dueWindow` makes: the
+ * "Past due" filter and the "Past due" badge must never disagree about which day it is. `null` for a
+ * job with no completion date, which is also the case the badge exists to expose — such a job is
+ * silently excluded by EVERY due filter, so the row has to say the date is missing rather than leave
+ * the manager wondering where the job went.
+ */
+export type QueueDueState = "past_due" | "today" | "upcoming";
+export function dueStateOf(completionDate: Date | null, now: Date, timeZone: string): QueueDueState | null {
+  if (!completionDate) return null;
+  const startOfToday = startOfDayIn(timeZone, now);
+  if (completionDate < startOfToday) return "past_due";
+  // Same inclusive end-of-day the "today" window uses, so a job the filter calls due today always
+  // wears the "Due today" badge and never the "upcoming" one.
+  if (completionDate.getTime() < startOfToday.getTime() + 24 * 60 * 60 * 1000) return "today";
+  return "upcoming";
+}
+
 export type QueueSort = (typeof QUEUE_SORTS)[number];
 
 export interface QueueParams {
@@ -706,6 +764,7 @@ export interface QueueParams {
   // it means last activity in EVERY view, not "closed on".
   activityFrom?: string;
   activityTo?: string;
+  due?: string; // one of QUEUE_DUE_FILTERS — active queue only
   sort?: string; // one of QUEUE_SORTS; defaults to "newest"
   page?: number;
   pageSize?: number;
@@ -807,7 +866,29 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
     return true;
   };
 
-  const byStatus = jobs.filter((j) => matchesStatus(goodsStatusOf(j.id)) && inActivityWindow(j.id));
+  // 2b) Optional DUE window on the job's own completionDate — "what has to go out today", which the
+  // activity window above cannot answer (a job with nothing issued yet has no activity at all). A job
+  // with no completion date can't fall inside any window, so it is excluded rather than passed
+  // through, exactly as an activity-less job is.
+  const due = params.due?.trim() || undefined;
+  if (due && !QUEUE_DUE_FILTERS.includes(due as QueueDueFilter)) throw badRequest(`Invalid due filter "${due}".`);
+  // Resolved ONCE and reused for both the filter window and each row's `dueState`, so the badge the
+  // manager reads and the filter that selected the row are computed from the same instant in the same
+  // timezone. Deriving the badge in the browser instead would let a client clock or a non-UK laptop
+  // disagree with the server about which day it is — the row would sit under "Past due" without
+  // looking past due. Same reason the day boundary never comes from the client anywhere else.
+  const nowForDue = new Date();
+  const dueTimeZone = await getCompanyTimezone();
+  const dueRange = due ? dueWindow(due as QueueDueFilter, nowForDue, dueTimeZone) : null;
+  const inDueWindow = (j: { completionDate: Date | null }) => {
+    if (!dueRange) return true;
+    if (!j.completionDate) return false;
+    if (dueRange.from && j.completionDate < dueRange.from) return false;
+    if (dueRange.to && j.completionDate > dueRange.to) return false;
+    return true;
+  };
+
+  const byStatus = jobs.filter((j) => matchesStatus(goodsStatusOf(j.id)) && inActivityWindow(j.id) && inDueWindow(j));
 
   // 2b) Drop jobs the DB matched ONLY through the warehouse-blind misc arm of the kit-line filter
   // (see jobRepo.findActiveForGoodsManagement) once that misc work is finished. A misc line carries
@@ -932,6 +1013,8 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
       status: job.status,
       goodsStatus: goodsStatusOf(job.id),
       createdAt: job.createdAt,
+      completionDate: job.completionDate ?? null,
+      dueState: dueStateOf(job.completionDate ?? null, nowForDue, dueTimeZone),
       lastActivityAt: activityByJob.get(job.id) ?? null,
       kitLines,
     };

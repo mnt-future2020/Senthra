@@ -31,15 +31,42 @@ const optionalObjectId = (label: string) => z.preprocess(emptyToUndef, z.string(
 // has to defend against.
 const clearableObjectId = (label: string) => z.preprocess(emptyToNull, z.string().regex(OBJECT_ID_RE, `Select ${label}.`).nullable().optional());
 
-const optionalDate = (label: string) =>
-  z.preprocess(
-    emptyToNull,
-    z
-      .string()
-      .refine((v) => !Number.isNaN(Date.parse(v)), `Enter a valid ${label.toLowerCase()}.`)
-      .nullable()
-      .optional(),
-  );
+// A plain PREDICATE, with the message passed as refine's second argument. Returning the message from
+// the predicate instead (`ok || "..."`) reads naturally and is silently wrong: refine treats any
+// truthy return as "valid", so the failure message itself passes validation and every malformed date
+// is accepted.
+const isDateString = (v: string) => !Number.isNaN(Date.parse(v));
+const badDate = (label: string) => `Enter a valid ${label.toLowerCase()}.`;
+
+// A job's completion date is REQUIRED, and deliberately NOT part of sharedHeader: create and update
+// need different rules, and a field whose rule differs per flow is exactly the one that goes wrong
+// when it is inherited silently.
+//
+// Why required at all: this app has no draft/backlog state — `createJob` hardcodes status "assigned"
+// and demands an engineer, so a job is DISPATCHED WORK from the moment it exists. A job with no due
+// date is invisible to every escalation path there is (the goods queue's due filter, the dashboard's
+// overdue + due-this-week counts, the engineer's Overdue filter) — not less visible, absent. It can
+// only ever be found by someone already scrolling the full active list, which is the one situation
+// those lists exist to avoid.
+const requiredDateOnCreate = (label: string) =>
+  z
+    .string({ error: `${label} is required.` })
+    .trim()
+    .min(1, `${label} is required.`)
+    .refine(isDateString, badDate(label));
+
+// PATCH semantics: an ABSENT key means "leave it alone" and stays legal, so an edit that touches only
+// the address needn't resend the date. But an empty string must be REJECTED rather than cleared —
+// `optionalFor("edit")` sends "" for a box the user blanked, which is precisely the attempt to remove
+// a date that is now mandatory. No `emptyToUndef` preprocessing here: that would rewrite "" into
+// "absent" and silently accept the clear it is meant to refuse.
+const requiredDateOnUpdate = (label: string) =>
+  z
+    .string({ error: `${label} is required.` })
+    .trim()
+    .min(1, `${label} can't be removed — a job must say when it is due.`)
+    .refine(isDateString, badDate(label))
+    .optional();
 
 // One kit line — exactly one source pool per line (lineType). The matching source id is optional in
 // the schema (a misc line has none); the service snapshots the rest.
@@ -121,7 +148,6 @@ const sharedHeader = {
   suite: z.string().trim().max(60).optional(),
   rack: z.string().trim().max(60).optional(),
   shelf: z.string().trim().max(60).optional(),
-  completionDate: optionalDate("Completion date"),
   priority: z.preprocess(emptyToUndef, z.enum(JOB_PRIORITIES).optional()),
   supplierId: clearableObjectId("a supplier"),
   installerType: z.preprocess(emptyToUndef, z.enum(INSTALLER_TYPES).optional()),
@@ -138,6 +164,7 @@ export const createJobSchema = z
     projectId: objectId("a project"),
     assignedEngineerId: objectId("an engineer"),
     ...sharedHeader,
+    completionDate: requiredDateOnCreate("Completion date"),
     kitLines: kitLinesField,
   })
   // A job DISPATCHES an engineer somewhere, so it has to name a destination — one of the two ways
@@ -171,6 +198,9 @@ export const updateJobSchema = z.object({
   projectId: objectId("a project").optional(),
   assignedEngineerId: objectId("an engineer").optional(),
   ...sharedHeader,
+  // Same rule as create, expressed for PATCH — see requiredDateOnUpdate. Create demanding a date
+  // while edit let it be blanked is the exact inconsistency the Site field had.
+  completionDate: requiredDateOnUpdate("Completion date"),
   kitLines: kitLinesField.optional(),
 });
 export type UpdateJobInput = z.infer<typeof updateJobSchema>;

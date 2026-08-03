@@ -16,6 +16,8 @@ import { notify } from "#modules/notification/notification.service.js";
 import { roleGrants } from "#modules/role/permissions.js";
 import { emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
 import { conflict, forbidden, notFound, badRequest } from "../../utils/http-error.js";
+import { startOfDayIn } from "../../utils/filter-date.js";
+import { getCompanyTimezone } from "#modules/settings/settings.service.js";
 import { paginate } from "../../utils/pagination.js";
 import type { CreateJobInput, JobKitLineInput, UpdateJobInput, CompleteJobInput } from "./job.validation.js";
 import * as goodsManagementService from "#modules/goods-management/goods-management.service.js";
@@ -515,7 +517,9 @@ export async function createJob(input: CreateJobInput, actor?: AuditActor): Prom
       suite: trimToNull(input.suite),
       rack: trimToNull(input.rack),
       shelf: trimToNull(input.shelf),
-      completionDate: input.completionDate ? new Date(input.completionDate) : null,
+      // Required by createJobSchema — no `: null` fallback, because a job that reached here without a
+      // date would be one the validation says cannot exist, and quietly writing null would hide it.
+      completionDate: new Date(input.completionDate),
       priority: input.priority ?? "normal",
       assignedEngineerId: engineer.id,
       assignedEngineerName: `${engineer.firstName} ${engineer.lastName}`.trim(),
@@ -729,7 +733,9 @@ export async function updateJob(id: string, input: UpdateJobInput, actor?: Audit
   if (input.suite !== undefined) headerPatch.suite = trimToNull(input.suite);
   if (input.rack !== undefined) headerPatch.rack = trimToNull(input.rack);
   if (input.shelf !== undefined) headerPatch.shelf = trimToNull(input.shelf);
-  if (input.completionDate !== undefined) headerPatch.completionDate = input.completionDate ? new Date(input.completionDate) : null;
+  // Absent = leave the existing date alone. It can no longer arrive empty — updateJobSchema rejects a
+  // blanked box rather than letting it clear the field, so there is nothing to null out here.
+  if (input.completionDate !== undefined) headerPatch.completionDate = new Date(input.completionDate);
   if (input.priority !== undefined) headerPatch.priority = input.priority;
   if (input.installerType !== undefined) headerPatch.installerType = input.installerType;
   if (input.plannerName !== undefined) headerPatch.plannerName = trimToNull(input.plannerName);
@@ -1041,7 +1047,13 @@ export interface ListEngineerJobsParams {
 // Paged like the admin list (same clamping) — an engineer's job history grows unbounded, so the
 // portal list must never fetch it all at once.
 export async function listJobsForEngineer(engineerId: string, params: ListEngineerJobsParams = {}): Promise<PagedJobs> {
-  const filters = { status: params.status, search: params.search };
+  // "Today" for the derived overdue filter is a company-timezone question, so it's resolved here and
+  // handed to the repository — the same boundary the dashboard card and the warehouse Due filter use.
+  const filters = {
+    status: params.status,
+    search: params.search,
+    overdueBefore: params.status === "overdue" ? startOfDayIn(await getCompanyTimezone(), new Date()) : undefined,
+  };
   const total = await jobRepo.countByEngineer(engineerId, filters);
   const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
   // LIST projection (no kit lines) — the engineer's list renders only header fields.

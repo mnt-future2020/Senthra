@@ -521,6 +521,10 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
     if (!customerId) e.customerId = "Select a customer.";
     if (!projectId) e.projectId = "Select a project.";
     if (!assignedEngineerId) e.assignedEngineerId = "Assign an engineer.";
+    // Required in BOTH modes, exactly like the destination rule below. A job here is always dispatched
+    // work — there is no draft state — and one with no due date is absent from every overdue and
+    // due-today view in the app, so it can only be found by someone already reading the full list.
+    if (!completionDate) e.completionDate = "Set the completion date — a job must say when it is due.";
     // A job dispatches an engineer somewhere, so it must name a destination — by reference (a saved
     // site) or by text (an address). Picking a site copies its address into these same fields, so
     // both paths converge here. Either/or rather than "address required": a customer site's own
@@ -581,7 +585,10 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
       suite: opt(suite),
       rack: opt(rack),
       shelf: opt(shelf),
-      completionDate: opt(completionDate),
+      // Sent plainly, not through `opt`: this is a REQUIRED field now, so it never needs the
+      // clear-on-edit "" that optionalFor exists to produce — and validate() has already refused a
+      // blank in both modes before we reach here.
+      completionDate: completionDate.trim(),
       assignedEngineerId,
       installerType: installerType || undefined,
       supplierId: opt(supplierId),
@@ -825,8 +832,15 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
           <Step n={4} title="Schedule & engineer" description="When it should be done and who does it. The assigned engineer is notified instantly.">
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
-                <label className={labelCls}>Completion date</label>
-                <input type="date" className={inputCls} value={completionDate} onChange={(e) => { setCompletionDate(e.target.value); touch(); }} />
+                <label className={labelCls}>Completion date<RequiredMark /></label>
+                <input
+                  type="date"
+                  className={inputCls}
+                  value={completionDate}
+                  aria-invalid={Boolean(errors.completionDate)}
+                  onChange={(e) => { setCompletionDate(e.target.value); touch(); clearError("completionDate"); }}
+                />
+                <FieldError message={errors.completionDate} />
               </div>
               <div>
                 <label className={labelCls}>Assigned engineer<RequiredMark /></label>

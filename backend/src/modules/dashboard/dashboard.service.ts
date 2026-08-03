@@ -1,4 +1,5 @@
 import { principalGrants } from "../../types/principal.js";
+import * as settingsService from "#modules/settings/settings.service.js";
 import type { Principal } from "../../types/principal.js";
 import { warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import * as prfRepo from "#modules/purchase-request/purchase-request.repository.js";
@@ -157,7 +158,7 @@ export async function buildDashboardSummary(
       const [count, created, due] = await Promise.all([
         jobRepo.countActive(),
         jobRepo.createdSince(sparkSince),
-        jobRepo.dueBreakdown(now),
+        jobRepo.dueBreakdown(now, await settingsService.getCompanyTimezone()),
       ]);
       return {
         count,

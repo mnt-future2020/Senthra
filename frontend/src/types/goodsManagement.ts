@@ -16,6 +16,14 @@ export type GoodsStatus =
   | "awaiting_return"
   | "reconciled";
 
+/**
+ * A single KIT LINE's status — a richer vocabulary than the job-level `GoodsStatus` above, which is
+ * why the two are separate types rather than one shared union. A line can be individually `returned`
+ * or `used` while the job as a whole is still `awaiting_return`, so collapsing them into one union
+ * would let a job-level value be assigned where only a line status is meaningful (and vice versa).
+ */
+export type GoodsLineStatus = GoodsStatus | "returned" | "used";
+
 // ── Scan-lookup result ────────────────────────────────────────────────────────
 
 export interface ScanMatch {
@@ -124,6 +132,17 @@ export interface QueueRow {
   goodsStatus: GoodsStatus;
   /** When the job was raised — the age anchor for a job that has never had a goods movement. */
   createdAt: string;
+  /**
+   * The job's TARGET completion date (the planner's deadline), `null` when none was set — it is an
+   * optional field on the job. This is what the queue's due filter matches, so the row shows it.
+   */
+  completionDate: string | null;
+  /**
+   * How that date reads today, decided by the SERVER in the company timezone. Never re-derive it from
+   * the browser clock: a client in another day would badge a row differently from the filter that
+   * selected it. `null` = no completion date set.
+   */
+  dueState: "past_due" | "today" | "upcoming" | null;
   /**
    * Last goods movement, `null` if nothing has ever moved. For a RECONCILED job this is effectively
    * its close-out date — the Closed view shows it, so the date filter narrows on something visible.

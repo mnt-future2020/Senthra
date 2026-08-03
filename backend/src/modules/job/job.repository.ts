@@ -2,6 +2,7 @@ import { Prisma, type Job } from "@prisma/client";
 
 import { prisma, withTransaction } from "../../lib/prisma.js";
 import { escapeRegex } from "../../utils/search.js";
+import { startOfDayIn } from "../../utils/filter-date.js";
 
 // Data-access layer for Jobs (field-work job header + kit lines). The ONLY place Prisma is touched
 // for job records. Soft-deleted jobs (deletedAt set) are excluded from normal reads. Header + kit
@@ -253,17 +254,29 @@ export function findActiveByEngineerWithKitLines(engineerId: string): Promise<Jo
 export interface EngineerJobFilters {
   status?: string;
   search?: string;
+  /**
+   * Start of today, for the derived "overdue" status. Supplied by the SERVICE rather than computed
+   * here: "what day is it" depends on the company timezone (a settings read), and a repository is a
+   * query builder — it holds no business decisions and reads no settings. REQUIRED whenever
+   * `status === "overdue"`; see the throw below for why it isn't quietly defaulted.
+   */
+  overdueBefore?: Date;
 }
 function buildEngineerWhere(engineerId: string, filters: EngineerJobFilters): Prisma.JobWhereInput {
   const where: Prisma.JobWhereInput = { assignedEngineerId: engineerId, deletedAt: null };
   if (filters.status === "overdue") {
     // "Overdue" is a DERIVED pseudo-status (never stored): an active job whose completion date has
-    // passed. Same definition as the dashboard overview's overdue count (active + completionDate <
-    // start of today, UTC) so the filter and the "N jobs past the completion date" card agree exactly.
-    const now = new Date();
-    const startToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    // passed. The boundary comes from the caller so this shares ONE definition of "start of today"
+    // with the dashboard card and the warehouse Due filter — all three read the company timezone.
+    // It used to compute a UTC day here, which drifted a day behind for the first hour of every BST
+    // day and made this filter disagree with the very card it was written to match.
+    // Loud, not lenient. A missing boundary is a WIRING mistake, not user input, and every quiet
+    // default lies: an epoch floor reports "no overdue jobs" and a UTC day is wrong for the first
+    // hour of each BST day. Both are invisible — an engineer would simply believe they were on top
+    // of their work. Throwing surfaces it the moment the call is wrong.
+    if (!filters.overdueBefore) throw new Error("buildEngineerWhere: overdueBefore is required for the overdue filter.");
     where.status = { in: ["assigned", "accepted", "in_progress"] };
-    where.completionDate = { lt: startToday };
+    where.completionDate = { lt: filters.overdueBefore };
   } else if (filters.status) {
     where.status = filters.status;
   }
@@ -539,11 +552,17 @@ export async function createdSince(since: Date): Promise<Array<{ at: Date }>> {
   return rows.map((r) => ({ at: r.createdAt }));
 }
 
-/** Active jobs past / approaching their completionDate (UTC day boundaries). Jobs with no
- *  completionDate count in neither bucket — there is nothing to be overdue against. */
-export async function dueBreakdown(now: Date): Promise<{ overdue: number; dueThisWeek: number }> {
-  const startToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-  const in7Days = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 7));
+/** Active jobs past / approaching their completionDate. Jobs with no completionDate count in neither
+ *  bucket — there is nothing to be overdue against.
+ *
+ *  Day boundaries come from the COMPANY timezone, not UTC: for the first hour of every BST day a
+ *  UTC-derived "today" is a day behind, so this card and the warehouse queue both reported yesterday.
+ *  They must share `startOfDayIn` — a card reading "3 overdue" above a queue listing 4 is worse than
+ *  either being an hour out. Not per-warehouse: a job belongs to no warehouse (only its kit lines do),
+ *  so this company-wide count would have none to read. */
+export async function dueBreakdown(now: Date, timeZone: string): Promise<{ overdue: number; dueThisWeek: number }> {
+  const startToday = startOfDayIn(timeZone, now);
+  const in7Days = new Date(startToday.getTime() + 7 * 24 * 60 * 60 * 1000);
   const active = { status: { in: [...ACTIVE_JOB_STATUSES] }, deletedAt: null };
   const [overdue, dueThisWeek] = await Promise.all([
     prisma.job.count({ where: { ...active, completionDate: { lt: startToday } } }),

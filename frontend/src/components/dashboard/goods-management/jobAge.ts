@@ -54,3 +54,42 @@ export function formatDay(iso: string | null | undefined): string {
   if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleDateString("en-GB");
 }
+
+/**
+ * Short day+month for a job's completion date — "5 Aug".
+ *
+ * Rendered in UTC, unlike `formatDay`. A completion date is a CALENDAR DATE, not an instant: it comes
+ * from `<input type="date">` and is stored as UTC midnight. Formatting that in the viewer's local zone
+ * shows the day before for anyone behind UTC, so the date-only value is read back on the same scale it
+ * was written on.
+ */
+export function formatDueDay(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" });
+}
+
+export type DueState = "past_due" | "today" | "upcoming";
+
+/**
+ * The due badge beside a queue row's job number.
+ *
+ * `dueState` is decided by the SERVER in the company timezone — never re-derived here — so the badge
+ * and the due filter that selected the row can never disagree about which day it is.
+ *
+ * A job with no completion date gets an explicit "No due date" rather than nothing: such a job is
+ * excluded by EVERY due filter, so it vanishes the moment one is applied. Rendering nothing would
+ * leave that looking like lost data instead of a job nobody gave a deadline.
+ */
+export function dueBadge(
+  dueState: DueState | null,
+  completionDate: string | null,
+): { label: string; cls: string; title: string } | null {
+  if (!completionDate || !dueState) {
+    return { label: "No due date", cls: "text-[var(--faint)]", title: "No completion date set — this job is hidden by every due-date filter." };
+  }
+  const day = formatDueDay(completionDate);
+  if (dueState === "past_due") return { label: `Past due ${day}`, cls: "text-[var(--neg)]", title: `Completion date ${day} has passed.` };
+  if (dueState === "today") return { label: "Due today", cls: "text-amber-600", title: `Completion date is today, ${day}.` };
+  return { label: `Due ${day}`, cls: "text-[var(--faint)]", title: `Completion date ${day}.` };
+}

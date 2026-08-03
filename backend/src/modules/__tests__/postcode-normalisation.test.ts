@@ -40,6 +40,9 @@ const jobBase = {
   // …and a DESTINATION on create (a saved site or a typed address) — see createJobSchema. Without
   // it this fixture fails for a reason that has nothing to do with postcode normalisation.
   addressLine1: "1 Test Street",
+  // …and a completion date, required on create for the same reason: keep this fixture failing only
+  // ever for postcode reasons.
+  completionDate: "2026-08-10",
 };
 
 const cases: [string, { safeParse: (v: unknown) => { success: boolean; data?: unknown } }, object][] = [

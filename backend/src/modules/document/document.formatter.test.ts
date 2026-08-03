@@ -42,4 +42,19 @@ describe("formatDateTime", () => {
     const r = { dateFormat: "DD/MM/YYYY", timeFormat: "24h", timezone: "Europe/London" };
     expect(formatDateTime(null, r)).toBe("");
   });
+
+  // The audit CSV opts into seconds: entries land in the same minute routinely, and their ORDER is
+  // the thing a reviewer is reading the file for.
+  it("adds seconds only when asked", () => {
+    const r = { dateFormat: "DD/MM/YYYY", timeFormat: "24h", timezone: "Europe/London" };
+    expect(formatDateTime("2026-06-19T10:30:15Z", r, { seconds: true })).toBe("19/06/2026 11:30:15");
+    expect(formatDateTime("2026-06-19T10:30:15Z", r)).toBe("19/06/2026 11:30");
+  });
+
+  // The whole reason exports stopped emitting raw UTC: during BST a late-evening UTC timestamp
+  // belongs to the NEXT London day, so a UTC-sliced export dated it a day early.
+  it("rolls into the next London day for a late-evening UTC timestamp in BST", () => {
+    const r = { dateFormat: "DD/MM/YYYY", timeFormat: "24h", timezone: "Europe/London" };
+    expect(formatDateTime("2026-06-19T23:30:00Z", r)).toBe("20/06/2026 00:30");
+  });
 });

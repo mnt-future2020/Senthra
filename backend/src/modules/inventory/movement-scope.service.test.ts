@@ -21,6 +21,11 @@ vi.mock("#modules/engineer/engineer.repository.js", () => ({
   findEngineerTxnPage: (...a: unknown[]) => engineerPage(...(a as [])),
   findEngineerNamesByIds: () => Promise.resolve(new Map()),
 }));
+// The CSV export renders timestamps in the COMPANY timezone, so it reads Settings — which goes to
+// Prisma. Stubbed to keep this a unit test (otherwise it silently requires a live MongoDB).
+vi.mock("#modules/settings/settings.service.js", () => ({
+  getRegionalSettings: vi.fn(async () => ({ timezone: "Europe/London", dateFormat: "DD/MM/YYYY", timeFormat: "24h" })),
+}));
 // The engineer-CUSTOMER ledger lives on the goods-management repo, not the engineer one.
 vi.mock("#modules/goods-management/goods-management.repository.js", () => ({
   findEngineerCustomerTxnPage: (...a: unknown[]) => engineerCustomerPage(...(a as [])),

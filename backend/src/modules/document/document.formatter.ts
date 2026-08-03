@@ -44,10 +44,13 @@ export function formatDate(
   }
 }
 
-// Format a timestamp (date + time) per the regional prefs — used in document metadata footers.
+// Format a timestamp (date + time) per the regional prefs — used in document metadata footers and in
+// CSV exports. `seconds` is for the audit trail: two entries in the same minute are ordinary there,
+// and minute precision would make their sequence unreadable in the exported file.
 export function formatDateTime(
   value: Date | string | null | undefined,
   regional: { dateFormat: string; timeFormat: string; timezone: string },
+  opts: { seconds?: boolean } = {},
 ): string {
   if (!value) return "";
   const d = value instanceof Date ? value : new Date(value);
@@ -57,6 +60,7 @@ export function formatDateTime(
     timeZone: regional.timezone,
     hour: "2-digit",
     minute: "2-digit",
+    ...(opts.seconds ? { second: "2-digit" as const } : {}),
     hour12: regional.timeFormat === "12h",
   }).format(d);
   return `${datePart} ${timePart}`;

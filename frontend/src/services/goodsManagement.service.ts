@@ -51,6 +51,13 @@ export interface GetQueueParams {
    */
   activityFrom?: string;
   activityTo?: string;
+  /**
+   * Due window on the JOB's completion date — "what has to go out today". Deliberately a different
+   * field from activityFrom/To above: activity is when stock last MOVED, so a job raised for today
+   * with nothing issued has none, and an activity window would hide exactly the work being asked
+   * about. Resolved against the SERVER's clock, so every manager sees the same "today".
+   */
+  due?: "overdue" | "today" | "week";
   /** Row order; defaults to "newest" server-side. Applied across the whole result, not just the page. */
   sort?: QueueSort;
   page?: number;
@@ -64,6 +71,7 @@ export function getQueue(params: GetQueueParams): Promise<QueuePage> {
   if (params.search?.trim()) q.set("search", params.search.trim());
   if (params.activityFrom) q.set("activityFrom", params.activityFrom);
   if (params.activityTo) q.set("activityTo", params.activityTo);
+  if (params.due) q.set("due", params.due);
   if (params.sort) q.set("sort", params.sort);
   if (params.page) q.set("page", String(params.page));
   if (params.pageSize) q.set("pageSize", String(params.pageSize));

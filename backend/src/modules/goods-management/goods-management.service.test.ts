@@ -17,7 +17,13 @@ vi.mock("#modules/engineer-stock/engineer-stock.repository.js", () => ({ upsertE
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 // The overdue window comes from Settings now, so the service reaches for it whenever a caller doesn't
 // pass an explicit `days`. Mocked to the shipped default so these tests stay about goods logic.
-vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn(), getOverdueAfterDays: vi.fn(async () => 14) }));
+// getCompanyTimezone backs BOTH the due-date filter window and each row's due badge, so the queue
+// reads it on every load now — not only when a due filter is applied.
+vi.mock("#modules/settings/settings.service.js", () => ({
+  getCloudinaryCreds: vi.fn(),
+  getOverdueAfterDays: vi.fn(async () => 14),
+  getCompanyTimezone: vi.fn(async () => "Europe/London"),
+}));
 vi.mock("#modules/engineer-transfer/engineer-transfer.repository.js", () => ({ findVanSourcesByKitLines: vi.fn() }));
 vi.mock("#modules/warehouse/warehouse.repository.js", () => ({ findById: vi.fn() }));
 
@@ -1992,5 +1998,109 @@ describe("listOverdue", () => {
     const { rows } = await listOverdue();
     // The same job appears only once even with two issue movements.
     expect(rows).toHaveLength(1);
+  });
+});
+
+import { dueStateOf, dueWindow } from "./goods-management.service.js";
+
+// The due window is resolved from the SERVER's clock. It is the only date filter on the active queue,
+// and it deliberately reads Job.completionDate rather than the last-activity timestamp the Closed tab
+// uses: a job raised for today with nothing issued has NO activity, so an activity window would hide
+// exactly the work "what's due today" is asking about.
+describe("dueWindow", () => {
+  // Mid-afternoon, so a naive implementation using `now` as an edge would visibly cut the day short.
+  const now = new Date("2026-08-03T15:30:00.000Z");
+  const TZ = "Europe/London";
+
+  it("overdue = strictly before today began", () => {
+    const w = dueWindow("overdue", now, TZ);
+    expect(w.from).toBeUndefined(); // no floor — everything still outstanding counts
+    expect(w.to!.toISOString()).toBe("2026-08-02T23:59:59.999Z");
+  });
+
+  it("today covers the WHOLE day, not up to the current moment", () => {
+    const w = dueWindow("today", now, TZ);
+    expect(w.from!.toISOString()).toBe("2026-08-03T00:00:00.000Z");
+    expect(w.to!.toISOString()).toBe("2026-08-03T23:59:59.999Z");
+  });
+
+  it("week is today plus the next six days, inclusive", () => {
+    const w = dueWindow("week", now, TZ);
+    expect(w.from!.toISOString()).toBe("2026-08-03T00:00:00.000Z");
+    expect(w.to!.toISOString()).toBe("2026-08-09T23:59:59.999Z");
+  });
+
+  // Overdue is its own filter; a planning horizon that silently swept in last month's misses would
+  // make "this week" the only filter anyone ever needed and hide the distinction that matters.
+  it("week does NOT reach backwards into overdue work", () => {
+    expect(dueWindow("week", now, TZ).from!.getTime()).toBe(dueWindow("today", now, TZ).from!.getTime());
+  });
+  // 00:30 BST on 4 Aug is 23:30 UTC on the 3rd. Deriving the day from getUTCDate() answered "3 Aug"
+  // — so for the first hour of every British Summer Time day, a UK manager was shown YESTERDAY's due
+  // jobs, and the dashboard card above the queue said the same. Seven months of the year.
+  it("uses the UK calendar day, not UTC, during BST", () => {
+    const justAfterUkMidnight = new Date("2026-08-03T23:30:00.000Z"); // 00:30 on 4 Aug in London
+    const w = dueWindow("today", justAfterUkMidnight, "Europe/London");
+    expect(w.from!.toISOString()).toBe("2026-08-04T00:00:00.000Z");
+  });
+
+  // In winter the UK is on UTC, so nothing shifts — the fix must not move a date that was correct.
+  it("is unchanged in winter, when the UK is on UTC", () => {
+    const w = dueWindow("today", new Date("2026-01-15T23:30:00.000Z"), "Europe/London");
+    expect(w.from!.toISOString()).toBe("2026-01-15T00:00:00.000Z");
+  });
+
+  it("falls back to UTC rather than throwing on an unusable timezone", () => {
+    expect(dueWindow("today", now, "Not/AZone").from!.toISOString()).toBe("2026-08-03T00:00:00.000Z");
+  });
+});
+
+// The badge on each queue row. It must agree with dueWindow by construction: a row the "Past due"
+// filter selected has to WEAR "Past due", or the filter looks broken to the person reading the list.
+// That is the whole reason this is computed on the server — a browser deriving it from its own clock
+// would disagree the moment the two were in different days.
+describe("dueStateOf", () => {
+  const now = new Date("2026-08-03T15:30:00.000Z");
+  const TZ = "Europe/London";
+  const on = (d: string) => new Date(`${d}T00:00:00.000Z`); // how <input type="date"> is stored
+
+  it("reads a date before today as past due", () => {
+    expect(dueStateOf(on("2026-08-02"), now, TZ)).toBe("past_due");
+  });
+
+  it("reads today's date as today, all day long", () => {
+    expect(dueStateOf(on("2026-08-03"), now, TZ)).toBe("today");
+  });
+
+  it("reads a later date as upcoming", () => {
+    expect(dueStateOf(on("2026-08-04"), now, TZ)).toBe("upcoming");
+  });
+
+  // Not a state — the row renders "No due date". Such a job is invisible to EVERY due filter, so the
+  // badge is the only thing that explains why it vanishes the moment one is applied.
+  it("returns null when the job has no completion date", () => {
+    expect(dueStateOf(null, now, TZ)).toBeNull();
+  });
+
+  // The pairing that matters: whatever the filter selects, the badge must confirm.
+  it("agrees with dueWindow — anything the overdue window admits is badged past due", () => {
+    const w = dueWindow("overdue", now, TZ);
+    const d = on("2026-08-02");
+    expect(d <= w.to!).toBe(true);
+    expect(dueStateOf(d, now, TZ)).toBe("past_due");
+  });
+
+  it("agrees with dueWindow — the today window's edges both badge as today", () => {
+    const w = dueWindow("today", now, TZ);
+    expect(dueStateOf(w.from!, now, TZ)).toBe("today");
+    expect(dueStateOf(w.to!, now, TZ)).toBe("today");
+  });
+
+  // Same BST trap as the window: 23:30 UTC is already tomorrow in London, so a job due 4 Aug must
+  // read "today" — not "upcoming" — for the first hour of a British Summer Time day.
+  it("uses the UK calendar day during BST", () => {
+    const justAfterUkMidnight = new Date("2026-08-03T23:30:00.000Z"); // 00:30 on 4 Aug in London
+    expect(dueStateOf(on("2026-08-04"), justAfterUkMidnight, TZ)).toBe("today");
+    expect(dueStateOf(on("2026-08-03"), justAfterUkMidnight, TZ)).toBe("past_due");
   });
 });

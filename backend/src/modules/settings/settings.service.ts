@@ -318,6 +318,16 @@ export async function getOverdueAfterDays(): Promise<number> {
   return s.overdueAfterDays ?? DEFAULT_OVERDUE_AFTER_DAYS;
 }
 
+// The company's IANA timezone, applied at READ time like every other setting default. This is what
+// "today" means for any DAY-BOUNDARY decision (due today, overdue, due this week) — one answer for the
+// whole company, not per warehouse: a job is not scoped to a warehouse at all (only its kit lines
+// are), so a per-warehouse answer would leave the dashboard's company-wide counts with no timezone to
+// use and let them drift from the queue.
+export async function getCompanyTimezone(): Promise<string> {
+  const s = await settingsRepo.getOrCreate();
+  return s.timezone || DEFAULT_TIMEZONE;
+}
+
 export async function getSettings(): Promise<PublicSettings> {
   const s = await settingsRepo.getOrCreate();
   return publicSettings(s);

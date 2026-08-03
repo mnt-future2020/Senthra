@@ -5,6 +5,8 @@ import type { AuditListFilters } from "./audit.repository.js";
 import { getAccessibleWarehouseIds } from "../../lib/warehouse-access.js";
 import { csvEscape } from "../../utils/csv.js";
 import { parseFilterDate } from "../../utils/filter-date.js";
+import { getRegionalSettings } from "#modules/settings/settings.service.js";
+import { formatDateTime } from "#modules/document/document.formatter.js";
 
 // Actor is snapshotted (id + email) so an entry stays meaningful even if that
 // account is later renamed or removed.
@@ -187,8 +189,12 @@ export interface AuditCsvResult {
 export async function exportAuditCsv(params: ListAuditParams = {}, actor?: AuditActor): Promise<AuditCsvResult> {
   const filters: AuditListFilters = { ...normalizeFilters(params), scopeWarehouseIds: warehouseScope(actor) };
   const rows = await auditLogRepo.findForExport(filters, AUDIT_EXPORT_MAX);
+  // Timestamps render in the COMPANY timezone with the configured date format, like every other
+  // generated artifact. The column names the zone rather than saying "UTC", because a reader who
+  // trusts a stale header misreads every row by an hour for half the year (BST = UTC+1).
+  const regional = await getRegionalSettings();
   const header = [
-    "When (UTC)",
+    `When (${regional.timezone})`,
     "Action",
     "Actor Type",
     "Actor Email",
@@ -202,7 +208,8 @@ export async function exportAuditCsv(params: ListAuditParams = {}, actor?: Audit
   for (const r of rows) {
     lines.push(
       [
-        r.createdAt.toISOString(),
+        // Seconds kept: audit entries land in the same minute routinely, and their order is the point.
+        formatDateTime(r.createdAt, regional, { seconds: true }),
         r.action,
         r.actorType,
         r.actorEmail ?? "",

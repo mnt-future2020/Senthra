@@ -20,6 +20,8 @@ import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import type { AddStockInput, AdjustStockInput, CreateTransferInput } from "./inventory.validation.js";
 import { csvEscape } from "../../utils/csv.js";
+import { getRegionalSettings } from "#modules/settings/settings.service.js";
+import { formatDateTime } from "#modules/document/document.formatter.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 const EXPORT_MAX = 50_000;
@@ -730,7 +732,10 @@ export interface InventoryCsvResult {
 export async function exportInventoryCsv(params: ListInventoryParams = {}, actor?: AuditActor): Promise<InventoryCsvResult> {
   const all = await filteredBalanceDTOs(params, actor);
   const rows = all.slice(0, EXPORT_MAX);
-  const header = ["Item Code", "Item", "SKU", "Warehouse", "Category", "Unit", "On Hand", "Reserved", "Available", "Value (GBP)", "Last Movement (UTC)", "Status"];
+  // Company timezone + configured date format, like every generated artifact; the column names the
+  // zone so a reader is never left guessing which one the timestamps are in.
+  const regional = await getRegionalSettings();
+  const header = ["Item Code", "Item", "SKU", "Warehouse", "Category", "Unit", "On Hand", "Reserved", "Available", "Value (GBP)", `Last Movement (${regional.timezone})`, "Status"];
   const lines = [header.map(csvEscape).join(",")];
   for (const d of rows) {
     lines.push(
@@ -745,7 +750,7 @@ export async function exportInventoryCsv(params: ListInventoryParams = {}, actor
         String(d.reserved),
         String(d.available),
         d.value.toFixed(2),
-        d.lastMovementAt,
+        formatDateTime(d.lastMovementAt, regional),
         d.status,
       ]
         .map((v) => csvEscape(String(v)))

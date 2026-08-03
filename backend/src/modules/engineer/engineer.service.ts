@@ -1,4 +1,6 @@
 import * as jobService from "#modules/job/job.service.js";
+import { startOfDayIn } from "../../utils/filter-date.js";
+import { getCompanyTimezone } from "#modules/settings/settings.service.js";
 import * as engineerTransferService from "#modules/engineer-transfer/engineer-transfer.service.js";
 import * as vanStockRequestService from "#modules/van-stock-request/van-stock-request.service.js";
 import * as kitRequestService from "#modules/job-kit-request/job-kit-request.service.js";
@@ -146,8 +148,12 @@ export async function getOwnOverview(engineerId: string): Promise<EngineerOvervi
   ]);
 
   // Status counts + due maths over the active set (assigned + accepted + in_progress).
-  const todayUtc = new Date();
-  const dayStart = Date.UTC(todayUtc.getUTCFullYear(), todayUtc.getUTCMonth(), todayUtc.getUTCDate());
+  //
+  // "Today" comes from the COMPANY timezone, shared with the dashboard's overdue card, the engineer's
+  // Overdue job filter and the warehouse Due filter — all four answer "is this job overdue?" and must
+  // answer it identically. Computing it from UTC (as this did) is a day behind for the first hour of
+  // every BST day, so an engineer opening the portal early saw yesterday's counts.
+  const dayStart = startOfDayIn(await getCompanyTimezone(), new Date()).getTime();
   const weekEnd = dayStart + 7 * 86_400_000;
   let toAccept = 0;
   let accepted = 0;
