@@ -23,6 +23,10 @@ import type { CreateJobInput, JobKitLineInput, UpdateJobInput, CompleteJobInput 
 import * as goodsManagementService from "#modules/goods-management/goods-management.service.js";
 import * as kitRequestRepo from "#modules/job-kit-request/job-kit-request.repository.js";
 import * as transferRepo from "#modules/engineer-transfer/engineer-transfer.repository.js";
+import * as transferService from "#modules/engineer-transfer/engineer-transfer.service.js";
+// Cyclic with this module (approve() grows the kit through jobService), which ESM resolves because
+// both sides only ever reach across inside a function body — never at module top level.
+import * as kitRequestService from "#modules/job-kit-request/job-kit-request.service.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 
@@ -974,7 +978,10 @@ export async function assignJob(id: string, engineerId: string, actor?: AuditAct
     updatedBy: actor?.email ?? null,
   });
 
-  const job = toPublic(updated);
+  // WITH tallies, for the same reason as cancelJob below: JobDetail's Reassign puts this response
+  // straight into state, and the bare toPublic defaults would blank the goods columns of a job whose
+  // kit has already been issued.
+  const job = await withGoodsTallies(toPublic(updated));
   if (job.assignedEngineerId) {
     emitToUser(job.assignedEngineerId, "job:new", job);
     notify(job.assignedEngineerId, { title: "New job assigned", body: `${job.jobNumber} · ${job.name}`, data: { type: "job", jobId: job.id } });
@@ -1003,11 +1010,44 @@ export async function cancelJob(id: string, reason: string | undefined, actor?: 
     updatedBy: actor?.email ?? null,
   });
   audit.record({ actor, action: "job.cancelled", targetType: "job", targetId: id, targetLabel: updated.jobNumber });
-  // A cancel can land on a job the engineer has already accepted / started, so refresh their list +
-  // open detail (they could otherwise drive to a dead job) and push them a notification, plus every
-  // office Jobs-list watcher. job:updated is the event both web (useJobSocket) and the mobile jobs list
-  // live-refresh on — mobile also listens for job:cancelled, but job:updated already covers it.
-  const pub = toPublic(updated);
+
+  // Cancelling moves no stock — the engineer walks away still holding the kit — and a cancelled job can
+  // never reach `completed`, so it can never get to `awaiting_return` through them. That left the kit
+  // with no way home at all: postReturn refused the job, and closeReconcile (which only unlocks from
+  // awaiting_return) refused it too, so it couldn't even be written off, while the overdue list chased
+  // it forever. Cancelling is precisely when the stock should be coming back, so open the return here.
+  // Best-effort: a summary write must not cost the planner their cancel, and the job stays on the chase
+  // list regardless (findGoodsActiveJobIds keeps cancelled), so nothing goes unseen if this fails.
+  // LOGGED, not swallowed. Best-effort means the cancel still succeeds, not that the failure is
+  // invisible: a job that never reached `awaiting_return` looks completely normal on screen while its
+  // stock is quietly unreturnable, so the one trace of it has to end up somewhere a human will look.
+  await goodsManagementService
+    .openReturnsOnCancel(id)
+    .catch((e) => console.error(`Opening returns after job ${updated.jobNumber} was cancelled failed:`, e instanceof Error ? e.message : e));
+
+  // Withdraw the pending van handovers this job asked other engineers for. They are to-dos on someone
+  // else's list ("hand N units from your van to this job"), and the job going away is exactly what
+  // makes them pointless — left pending, they sat there forever and both kit lists kept showing
+  // "awaiting handover" for stock that was never coming. No balance moves; a pending transfer has
+  // never touched one. Best-effort for the same reason as the return above.
+  // Same reasoning: cancelPendingForJob logs each transfer it can't close, but a failure to READ the
+  // pending set would otherwise vanish, leaving another engineer holding a to-do nobody knows about.
+  await transferService
+    .cancelPendingForJob(id, actor ?? {})
+    .catch((e) => console.error(`Withdrawing pending handovers after job ${updated.jobNumber} was cancelled failed:`, e instanceof Error ? e.message : e));
+
+  // And the requests still waiting on a decision. Approving one after this point cannot work — the
+  // grow refuses a cancelled job — so a pending request was a permanent error in the review queue and
+  // an unanswered question for the engineer. Best-effort for the same reason as the two above.
+  await kitRequestService
+    .declinePendingForJob(id, actor ?? {})
+    .catch((e) => console.error(`Declining pending kit requests after job ${updated.jobNumber} was cancelled failed:`, e instanceof Error ? e.message : e));
+
+  // WITH tallies: the office job detail puts this response straight into state, and toPublic alone
+  // carries the constructor defaults (issued/used/returned/remaining 0, goodsStatus "not_issued",
+  // no van sources). Returning that zeroed every goods column on screen the moment a cancel was
+  // confirmed, reading as "the stock went back" when nothing had moved.
+  const pub = await withGoodsTallies(toPublic(updated));
   if (pub.assignedEngineerId) {
     emitToUser(pub.assignedEngineerId, "job:updated", pub);
     notify(pub.assignedEngineerId, { title: "Job cancelled", body: `${pub.jobNumber} — ${pub.name} was cancelled.`, data: { type: "job", jobId: pub.id } });

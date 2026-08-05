@@ -26,7 +26,9 @@ import { ChevronRight, ChevronsDownUp, ChevronsUpDown, ClipboardList, Clock, Pac
 import * as gmService from "@/services/goodsManagement.service";
 import type { GoodsLineStatus, QueuePage, QueueKitLine, QueueStatusFilter, QueueSort } from "@/types/goodsManagement";
 import { useGoodsSocket } from "@/hooks/useGoodsSocket";
+import { useDashboard } from "@/hooks/useDashboard";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { CopyableCode } from "@/components/ui/CopyableCode";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { WorkspaceToolbar } from "@/components/ui/WorkspaceToolbar";
@@ -34,6 +36,7 @@ import { toolbarBtn, toolbarDateCls } from "@/components/ui/styles";
 import { JobScanPanel } from "./JobScanPanel";
 import { OverdueHoldingsView } from "./OverdueHoldingsView";
 import { visibleKitLines } from "./kitLineVisibility";
+import { lineStatus } from "./lineStatus";
 import { foldedStatus, itemNamesTitle, summariseLines } from "./collapsedRow";
 import { ageTone, dueBadge, formatDay, jobAgeDays } from "./jobAge";
 
@@ -128,25 +131,6 @@ function statusChip(s: GoodsStatusKey) {
       {STATUS_LABELS[s]}
     </span>
   );
-}
-
-// Per-LINE lifecycle status. The job's goodsStatus gates the return phase: stock that's been issued
-// is just OUT WITH THE ENGINEER ("Issued") while they do the work — it only becomes "Awaiting return"
-// once the engineer completes the job and declares what they used (backend flips goodsStatus to
-// "awaiting_return" then, or when a return is posted). Within the return phase the per-line state then
-// derives from the engineer's REAL holding (toReturn) + actual returns/used.
-//   Not issued → Partial → Issued → [job completed] → Awaiting return (still held) → Returned / Used.
-function lineStatus(line: QueueKitLine, goodsStatus: string, returned: number, toReturn: number): GoodsStatusKey {
-  const { lineType, plannedQty, issuedQty, usedQty } = line;
-  if (issuedQty <= 0) return "not_issued";
-  if (issuedQty < plannedQty) return "partially_issued";
-  if (lineType === "misc") return "issued"; // misc is free-text — only issuance applies
-  // Not in the return phase yet → the engineer is still using the stock; show plain "Issued".
-  if (goodsStatus !== "awaiting_return") return "issued";
-  if (toReturn > 0) return "awaiting_return"; // job completed but engineer still holds some
-  if (returned > 0) return "returned";
-  if (usedQty > 0) return "used";
-  return "issued";
 }
 
 // Groups a job's kit lines by item identity (misc is its own group, keyed by line id).
@@ -266,6 +250,7 @@ export function GoodsManagementTab({
 
   const [data, setData] = React.useState<QueuePage | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  const { pushToast } = useDashboard();
   const [selectedJobId, setSelectedJobId] = React.useState<string | null>(null);
   const [loadTick, setLoadTick] = React.useState(0);
 
@@ -397,6 +382,7 @@ export function GoodsManagementTab({
         <JobScanPanel
           jobId={selectedJobId}
           jobNumber={selectedRow.jobNumber}
+          jobStatus={selectedRow.status}
           jobName={selectedRow.jobName}
           warehouseId={warehouseId}
           miscLines={selectedRow.kitLines.filter((k) => k.lineType === "misc")}
@@ -421,7 +407,19 @@ export function GoodsManagementTab({
   const jobCell = (row: QueuePage["rows"][number], hiddenCount: number, rowSpan: number, overdueAfterDays: number) => {
     const folded = isCollapsed(row.jobId);
     const age = jobAgeDays(row);
-    const badge = isClosed ? null : dueBadge(row.dueState, row.completionDate);
+    const cancelled = row.status === "cancelled";
+    // No DUE badge on a cancelled job — the deadline is void, and "Due 8 Aug · Today" next to a job
+    // nobody is working reads as work to schedule. The AGE signal stays: how long its stock has been
+    // out is exactly what still matters. The Cancelled chip below takes the badge's place.
+    const badge = isClosed || cancelled ? null : dueBadge(row.dueState, row.completionDate);
+    // Same rose as the Jobs list chip and the scan panel's, so the one state reads identically in all
+    // three places. It was only visible INSIDE the panel before — the queue row that leads there gave
+    // no hint, so a manager picked the job with no idea the work was off.
+    const cancelledChip = cancelled ? (
+      <span className="rounded-full bg-rose-500/12 px-1.5 py-0.5 text-[10px] font-bold text-rose-600" title="This job was cancelled — its stock can only be returned or written off.">
+        Cancelled
+      </span>
+    ) : null;
     const chevron = (
       <button
         type="button"
@@ -452,6 +450,7 @@ export function GoodsManagementTab({
               <span className="max-w-[9rem] truncate text-xs font-normal text-[var(--muted)]" title={row.jobName}>
                 {row.jobName}
               </span>
+              {cancelledChip}
               {isClosed ? (
                 <span className="text-[10px] text-[var(--muted)]">Closed {formatDay(row.lastActivityAt)}</span>
               ) : (
@@ -483,7 +482,10 @@ export function GoodsManagementTab({
           <div className="flex items-start gap-2">
             <div className="mt-0.5">{chevron}</div>
             <div className="min-w-0">
-              <div className="font-bold text-[var(--ink)]">{row.jobNumber}</div>
+              <div className="flex items-center gap-1.5">
+                <span className="font-bold text-[var(--ink)]">{row.jobNumber}</span>
+                {cancelledChip}
+              </div>
               <div className="text-xs text-[var(--muted)]">{row.jobName}</div>
               {/* The time signals, stacked here rather than as extra columns — this table is already
                   wide, and they belong beside the job they describe. Closed shows WHEN it closed,
@@ -724,7 +726,7 @@ export function GoodsManagementTab({
                       // issued. Everything else renders greyed and can't be touched here, so the default
                       // view folds those away and reports the count — "All kit lines" brings them back.
                       // Closed is history: nothing is actionable in it, so it always shows the full kit.
-                      const { lines: visibleLines, hiddenCount } = visibleKitLines(row.kitLines, warehouseId, showAllLines || isClosed);
+                      const { lines: visibleLines, hiddenCount } = visibleKitLines(row.kitLines, warehouseId, showAllLines || isClosed, row.status === "cancelled");
                       const rowCount = visibleLines.length || 1;
                       // Returned = actual returns; To return = engineer's real holding (so it always
                       // matches what the return scan will accept), both spread across the item's lines.
@@ -768,7 +770,7 @@ export function GoodsManagementTab({
                                   ? "reconciled"
                                   : foldedStatus(
                                       visibleLines.map((l) =>
-                                        lineStatus(l, row.goodsStatus, effReturns.get(l.id) ?? l.returnedQty, toReturns.get(l.id) ?? 0),
+                                        lineStatus(l, row.goodsStatus, effReturns.get(l.id) ?? l.returnedQty, toReturns.get(l.id) ?? 0, row.status === "cancelled"),
                                       ),
                                     ),
                               )}
@@ -813,7 +815,17 @@ export function GoodsManagementTab({
                           <tr key={`${row.jobId}-${line.id}`} className={`align-middle transition-colors hover:bg-[var(--surface-2)] ${jobSep}`}>
                             {lineIdx === 0 && jobCell(row, hiddenCount, rowCount, data.overdueAfterDays)}
                             <td className={`px-4 py-3 ${active ? "font-medium text-[var(--ink)]" : "text-[var(--faint)]"} ${dim}`}>
-                              {line.itemName}
+                              {/* Click the NAME to copy the code that scans this line, so issuing or
+                                  returning is paste-and-go instead of looking the item up again. The
+                                  code is resolved server-side to mirror scanLookup — see scanCodeFor.
+                                  A line with nothing scannable (misc, or a customer entry with no
+                                  barcode) stays plain text: a copy button that hands over a value the
+                                  scan then rejects is worse than no button. */}
+                              {line.scanCode ? (
+                                <CopyableCode code={line.scanCode} label={line.itemName} className="text-left" onCopied={(c) => pushToast(`Copied ${c}`)} />
+                              ) : (
+                                line.itemName
+                              )}
                               {/* At its home warehouse a line reads "This warehouse" (full line
                                   returnable there); away from home, only its van portion can land, so
                                   it reads "Any warehouse" with that quantity. */}
@@ -845,7 +857,7 @@ export function GoodsManagementTab({
                             </td>
                             {/* Per-item status — this line's own issuance (Closed view → reconciled). */}
                             <td className={`px-4 py-3 ${dim}`}>
-                              {statusChip(isClosed ? "reconciled" : lineStatus(line, row.goodsStatus, effReturned, toReturn))}
+                              {statusChip(isClosed ? "reconciled" : lineStatus(line, row.goodsStatus, effReturned, toReturn, row.status === "cancelled"))}
                             </td>
                             {/* Counts stay full-strength even on greyed (other-warehouse) lines so the WM can
                                 still see how much is planned/issued/available there. */}

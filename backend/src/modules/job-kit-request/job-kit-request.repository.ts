@@ -186,6 +186,8 @@ export interface LineSourcePatch {
   sourceType: string | null; // warehouse | engineer | null (misc)
   sourceEngineerId: string | null;
   sourceWarehouseId: string | null;
+  /** What the reviewer approved. null = in full; 0 = the line was excluded. See the schema note. */
+  approvedQty: number | null;
 }
 
 export interface FinalizeApprovalPatch {
@@ -239,7 +241,7 @@ export async function finalizeApproval(id: string, patch: FinalizeApprovalPatch)
   for (const s of lineSources) {
     await prisma.jobKitRequestLine.update({
       where: { id: s.id },
-      data: { sourceType: s.sourceType, sourceEngineerId: s.sourceEngineerId, sourceWarehouseId: s.sourceWarehouseId },
+      data: { sourceType: s.sourceType, sourceEngineerId: s.sourceEngineerId, sourceWarehouseId: s.sourceWarehouseId, approvedQty: s.approvedQty },
     });
   }
   return prisma.jobKitRequest.update({ where: { id }, data: header, include: { lines: true } });

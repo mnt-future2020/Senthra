@@ -13,7 +13,7 @@ import { Select } from "@/components/ui/Select";
 import { Modal } from "@/components/ui/Modal";
 import { inputCls } from "@/components/ui/styles";
 import { Skeleton } from "@/components/ui/Skeleton";
-import { KitLineChips, KitRequestStatusChip } from "@/components/dashboard/engineer/EngineerKitRequests";
+import { KitRequestLines, KitRequestStatusChip } from "@/components/dashboard/engineer/EngineerKitRequests";
 import { formatDate } from "./jobStatus";
 
 // PM/planner review of a job's additional-kit requests: approve (grow the kit + open fulfilment via a
@@ -87,19 +87,15 @@ export function JobKitRequestsReview({ jobId, assignedEngineerId, locked, onJobC
         <div className="space-y-2">
           {[...pending, ...history].map((r) => (
             <div key={r.id} className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3">
+              {/* Only the HEADER shares a row with the actions. The lines table and notes sit BELOW at
+                  full card width — inside the flex row they were bounded by the buttons, so a pending
+                  request's table stopped short while a decided one (no buttons) ran to the edge, and
+                  two rows in the same list didn't line up. Mirrors the engineer's own card, and VSR. */}
               <div className="flex flex-wrap items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-mono text-xs font-bold text-[var(--ink)]">{r.code}</span>
-                    <KitRequestStatusChip value={r.status} />
-                    <span className="text-[11px] text-[var(--faint)]">{r.requestedByEngineerName} · {formatDate(r.createdAt)}</span>
-                  </div>
-                  <KitLineChips lines={r.lines} />
-                  <p className="mt-1 text-[11px] italic text-[var(--muted)]">“{r.reason}”</p>
-                  {r.status === "approved" && r.fulfillmentMode && (
-                    <p className="mt-0.5 text-[11px] text-[var(--pos)]">Approved · {FULFILMENT_LABELS[r.fulfillmentMode] ?? r.fulfillmentMode}{r.reviewedByEmail ? ` by ${r.reviewedByEmail}` : ""}</p>
-                  )}
-                  {r.status === "declined" && <p className="mt-0.5 text-[11px] text-[var(--neg)]">Declined{r.decisionNote ? ` — ${r.decisionNote}` : ""}</p>}
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  <span className="font-mono text-xs font-bold text-[var(--ink)]">{r.code}</span>
+                  <KitRequestStatusChip value={r.status} />
+                  <span className="text-[11px] text-[var(--faint)]">{r.requestedByEngineerName} · {formatDate(r.createdAt)}</span>
                 </div>
                 {r.status === "pending" && (
                   // Reconciled goods lock the job — approving grows the kit (a goods write the server
@@ -119,6 +115,14 @@ export function JobKitRequestsReview({ jobId, assignedEngineerId, locked, onJobC
                     </button>
                   </div>
                 )}
+              </div>
+              <div className="min-w-0">
+                <KitRequestLines lines={r.lines} />
+                <p className="mt-1 text-[11px] italic text-[var(--muted)]">“{r.reason}”</p>
+                {r.status === "approved" && r.fulfillmentMode && (
+                  <p className="mt-0.5 text-[11px] text-[var(--pos)]">Approved · {FULFILMENT_LABELS[r.fulfillmentMode] ?? r.fulfillmentMode}{r.reviewedByEmail ? ` by ${r.reviewedByEmail}` : ""}</p>
+                )}
+                {r.status === "declined" && <p className="mt-0.5 text-[11px] text-[var(--neg)]">Declined{r.decisionNote ? ` — ${r.decisionNote}` : ""}</p>}
               </div>
             </div>
           ))}
@@ -146,7 +150,10 @@ export function JobKitRequestsReview({ jobId, assignedEngineerId, locked, onJobC
   );
 }
 
-type Opt = { value: string; label: string };
+// `free` rides along so the dialog can VALIDATE against a warehouse's stock, not merely print it.
+// Without it the reviewer could approve 3 against a site the same dropdown said held 2 — the kit line
+// homes at ONE warehouse, so the shortfall is unissuable and sits on the job forever.
+type Opt = { value: string; label: string; free?: number };
 
 function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequest; assignedEngineerId: string | null; onClose: () => void; onDone: () => void; onError: (m: string) => void }) {
   // Requested stock is rarely all in one place: the warehouse may hold some items while another
@@ -154,6 +161,10 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
   const [lineSrc, setLineSrc] = React.useState<Record<string, LineSourceType>>({}); // lineId → warehouse | engineer
   const [lineWh, setLineWh] = React.useState<Record<string, string>>({}); // lineId → warehouseId (IRM lines)
   const [lineEng, setLineEng] = React.useState<Record<string, string>>({}); // lineId → source engineer
+  // The reviewer's trim (lineId → approved qty) and, within it, how many come off the van. Both
+  // default to "all of it": an untouched request approves exactly what was asked for, from one source.
+  const [lineQty, setLineQty] = React.useState<Record<string, number>>({});
+  const [lineVanQty, setLineVanQty] = React.useState<Record<string, number>>({});
   const [decisionNote, setDecisionNote] = React.useState("");
   const [busy, setBusy] = React.useState(false);
 
@@ -162,6 +173,8 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
   const [vanOptions, setVanOptions] = React.useState<Record<string, Opt[]>>({}); // per line: engineers with enough
   const [holdersFailed, setHoldersFailed] = React.useState(false); // lookup errored ≠ nobody holds it
   const [unstocked, setUnstocked] = React.useState<Set<string>>(new Set()); // IRM lines stocked in no warehouse
+  // Kept apart from `unstocked` on purpose: a failed stock lookup must not read as an empty shelf.
+  const [stockCheckFailed, setStockCheckFailed] = React.useState<Set<string>>(new Set());
 
   const stockLines = request.lines.filter((l) => l.source !== "misc");
   const allMisc = stockLines.length === 0;
@@ -178,29 +191,45 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
       const opts: Record<string, Opt[]> = {};
       const defaults: Record<string, string> = {};
       const noStock = new Set<string>();
+      const failedCheck = new Set<string>();
       await Promise.all(
         request.lines
           .filter((l) => l.source === "irm" && l.irmItemId)
           .map(async (l) => {
             let stocked: Opt[] = [];
+            let lookupFailed = false;
             try {
               const rows = await listItemWarehouseStock(l.irmItemId!);
+              // `available`, not raw `onHand`: it is on-hand minus what other jobs have already
+              // planned here, which is the same figure the engineer's composer and the Demand board
+              // use. On raw on-hand this dropdown would offer stock that is already spoken for.
               stocked = rows
-                .filter((r) => r.onHand > 0)
-                .sort((a, b) => b.onHand - a.onHand)
-                .map((r) => ({ value: r.warehouseId, label: `${r.warehouseName}${r.warehouseCode ? ` (${r.warehouseCode})` : ""} · ${r.onHand} in stock` }));
+                .filter((r) => r.available > 0)
+                .sort((a, b) => b.available - a.available)
+                .map((r) => ({ value: r.warehouseId, free: r.available, label: `${r.warehouseName}${r.warehouseCode ? ` (${r.warehouseCode})` : ""} · ${r.available} free` }));
             } catch {
-              /* lookup failed (e.g. no inventory-read permission) — fall through to the full list below */
+              // "Couldn't check" is NOT "there is none" — the two used to share a branch, which meant a
+              // permission error looked identical to an empty shelf. Tracked separately below.
+              lookupFailed = true;
             }
             if (stocked.length) {
               opts[l.id] = stocked;
               defaults[l.id] = stocked[0].value; // auto-default to the most-stocked warehouse
-            } else {
-              // Stocked nowhere (or lookup failed): still offer the full warehouse list so the PM can PLAN
-              // an issue (fulfilled once restocked) — but require an EXPLICIT pick (no silent auto-select of
-              // a zero-stock location) and flag it. Keeps unstocked items approvable instead of a dead-end,
-              // while never quietly issuing from a location holding none.
+            } else if (lookupFailed) {
+              // We could NOT see stock (no inventory-read permission, or the call errored). That is not
+              // the same as "there is none", and treating it as such would strand a reviewer who can
+              // approve but can't read balances. Offer the full list and say the check didn't run.
               opts[l.id] = fallback;
+              failedCheck.add(l.id);
+            } else {
+              // Genuinely stocked NOWHERE. Previously this offered every warehouse so the PM could
+              // "plan an issue, fulfilled once restocked" — which is why JKR-0026 dead-ended: the
+              // engineer could request an item nobody had, and the reviewer's only route was to
+              // nominate a warehouse holding none of it. Requests are now availability-gated at
+              // source (see kitItemAvailability), so this state only survives a race: in stock when
+              // asked for, gone by the time it was reviewed. There is no honest warehouse to pick,
+              // so offer none — the line is fulfillable only from a van, or not at all.
+              opts[l.id] = [];
               noStock.add(l.id);
             }
           }),
@@ -208,6 +237,7 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
       if (!active) return;
       setWhOptions(opts);
       setUnstocked(noStock);
+      setStockCheckFailed(failedCheck);
       setLineWh((prev) => ({ ...defaults, ...prev }));
       setWhLoading(false);
     })();
@@ -230,12 +260,65 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
 
   const srcOf = (lineId: string): LineSourceType => lineSrc[lineId] ?? "warehouse";
   // Every stock line needs a resolved source: a warehouse pick (IRM only) or a chosen engineer.
+  // How many units are being approved for a line, and how many of those come off a van.
+  const approvedOf = (l: KitRequest["lines"][number]) => Math.min(lineQty[l.id] ?? l.qty, l.qty);
+  // 0 EXCLUDES the line — the planner refuses this one item and approves the rest, instead of having
+  // to decline the whole request and make the engineer raise it again minus one. Field Stock has
+  // treated approvedQty 0 as "excluded" all along.
+  const excluded = (l: KitRequest["lines"][number]) => l.source !== "misc" && approvedOf(l) === 0;
+  // Only a van-sourced line has a split; the value is clamped so trimming the approved quantity can
+  // never leave the van portion stranded above it.
+  const vanOf = (l: KitRequest["lines"][number]) =>
+    srcOf(l.id) === "engineer" ? Math.min(lineVanQty[l.id] ?? approvedOf(l), approvedOf(l)) : 0;
+  const isSplit = (l: KitRequest["lines"][number]) => srcOf(l.id) === "engineer" && vanOf(l) < approvedOf(l);
+
+  // What this warehouse must supply for the line: the approved quantity less anything a van brings.
+  const warehousePortion = (l: KitRequest["lines"][number]) => approvedOf(l) - vanOf(l);
+  // A kit line homes at ONE warehouse, so anything approved beyond what that site can cover is simply
+  // unissuable — it would sit on the job as a permanent shortfall. The dropdown already SHOWED the
+  // number; nothing checked the approval against it.
+  const shortAt = (l: KitRequest["lines"][number]): { name: string; free: number } | null => {
+    if (excluded(l)) return null;
+    if (l.source === "customer_stock") {
+      return l.availableQty != null && approvedOf(l) > l.availableQty
+        ? { name: l.warehouseName ?? "That warehouse", free: l.availableQty }
+        : null;
+    }
+    if (l.source !== "irm") return null;
+    const opt = (whOptions[l.id] ?? []).find((o) => o.value === lineWh[l.id]);
+    if (!opt || opt.free === undefined) return null; // unknown stock (lookup failed) — never guess
+    return warehousePortion(l) > opt.free ? { name: opt.label.split(" · ")[0], free: opt.free } : null;
+  };
+
+  // The most this line could actually be fulfilled for: whatever a van is bringing, plus what the
+  // chosen warehouse genuinely has free. Returns null when that is unknowable (no warehouse picked
+  // yet, or the stock lookup failed) — a cap must never be guessed.
+  const maxApprovable = (l: KitRequest["lines"][number]): number | null => {
+    // Consignment has no warehouse picker — the entry IS its location — so its ceiling comes straight
+    // off the entry. It was previously uncapped, which made it the one source you could over-approve
+    // against while the IRM lines beside it were guarded.
+    if (l.source === "customer_stock") return l.availableQty ?? null;
+    if (l.source !== "irm") return null;
+    const opt = (whOptions[l.id] ?? []).find((o) => o.value === lineWh[l.id]);
+    if (!opt || opt.free === undefined) return null;
+    return vanOf(l) + opt.free;
+  };
+
   const lineReady = (l: KitRequest["lines"][number]) => {
     if (l.source === "misc") return true;
-    if (srcOf(l.id) === "engineer") return !!lineEng[l.id];
+    if (excluded(l)) return true; // nothing is sourced for a refused line
+    if (srcOf(l.id) === "engineer") {
+      if (!lineEng[l.id]) return false;
+      // A partial split leaves a remainder that has to be collectable from somewhere.
+      return !isSplit(l) || l.source !== "irm" || !!lineWh[l.id];
+    }
+    if (shortAt(l)) return false;
     return l.source !== "irm" || !!lineWh[l.id]; // customer stock issues from where it's stored
   };
-  const canSubmit = !busy && request.lines.every(lineReady);
+  // Excluding EVERYTHING is a decline wearing an approval's clothes — it would mark the request
+  // approved while giving the engineer nothing, and the reason belongs in the decline note.
+  const allExcluded = request.lines.length > 0 && request.lines.every((l) => excluded(l) || l.source === "misc") && request.lines.some(excluded);
+  const canSubmit = !busy && !allExcluded && request.lines.every(lineReady);
 
   const submit = async () => {
     setBusy(true);
@@ -245,11 +328,23 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
       const payload: ApproveKitRequestPayload = allMisc
         ? { fulfillmentMode: "warehouse_issue", decisionNote: decisionNote.trim() || undefined }
         : {
-            lineSources: stockLines.map((l) =>
-              srcOf(l.id) === "engineer"
-                ? { requestLineId: l.id, sourceType: "engineer" as const, engineerId: lineEng[l.id] }
-                : { requestLineId: l.id, sourceType: "warehouse" as const, warehouseId: l.source === "irm" ? lineWh[l.id] : undefined },
-            ),
+            lineSources: stockLines.map((l) => {
+              // Only send a trim / split when the reviewer actually changed something — an untouched
+              // line keeps the exact payload older servers already understand.
+              const approvedQty = approvedOf(l) < l.qty ? approvedOf(l) : undefined; // includes 0 = excluded
+              if (srcOf(l.id) !== "engineer") {
+                return { requestLineId: l.id, sourceType: "warehouse" as const, warehouseId: l.source === "irm" ? lineWh[l.id] : undefined, approvedQty };
+              }
+              return {
+                requestLineId: l.id,
+                sourceType: "engineer" as const,
+                engineerId: lineEng[l.id],
+                engineerQty: isSplit(l) ? vanOf(l) : undefined,
+                // The remainder's pickup location — only meaningful on a split.
+                warehouseId: isSplit(l) && l.source === "irm" ? lineWh[l.id] : undefined,
+                approvedQty,
+              };
+            }),
             decisionNote: decisionNote.trim() || undefined,
           };
       await kitRequestService.approveKitRequest(request.id, payload);
@@ -261,8 +356,32 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
     }
   };
 
+  // Approve is disabled until every line has a source, and on a request holding an unsourceable line
+  // the button sat greyed out with nothing saying why — the only clue was a per-line note halfway up a
+  // scrolling dialog. Name what is missing, next to the control that refuses to act, and distinguish
+  // the two reasons: one is a pick the reviewer can make, the other has no pick at all and needs a
+  // decline. Telling someone to "pick a warehouse" when no warehouse has it is worse than silence.
+  const unresolved = allExcluded ? [] : request.lines.filter((l) => !lineReady(l));
+  const blocked = unresolved.filter((l) => unstocked.has(l.id) && (vanOptions[l.id] ?? []).length === 0);
+  // Over-approved against the chosen site: a source IS picked, it just can't cover the quantity — so
+  // "pick a source" would be the wrong instruction.
+  const overCommitted = unresolved.filter((l) => !blocked.includes(l) && !!shortAt(l));
+  const pickable = unresolved.filter((l) => !blocked.includes(l) && !overCommitted.includes(l));
+  const nameOrCount = (ls: typeof unresolved) => (ls.length === 1 ? ls[0].itemName : `${ls.length} items`);
+
   const footer = (
     <>
+      {!busy && !whLoading && (allExcluded || blocked.length > 0 || overCommitted.length > 0 || pickable.length > 0) && (
+        <span className={`mr-auto text-[11px] font-semibold ${allExcluded || blocked.length > 0 || overCommitted.length > 0 ? "text-[var(--neg)]" : "text-[var(--muted)]"}`}>
+          {allExcluded
+            ? "Every item is excluded — use Decline instead, so the engineer gets the reason."
+            : blocked.length > 0
+              ? `${nameOrCount(blocked)} can't be sourced from anywhere — decline this request.`
+              : overCommitted.length > 0
+                ? `${nameOrCount(overCommitted)} — more approved than that warehouse can supply. Lower the quantity or pick another site.`
+                : `Pick a source for ${nameOrCount(pickable)} to approve.`}
+        </span>
+      )}
       <button type="button" onClick={onClose} disabled={busy} className="rounded-xl border border-[var(--border)] px-3.5 py-2 text-xs font-bold text-[var(--ink)] hover:bg-[var(--surface-2)] disabled:opacity-60">Cancel</button>
       <button type="button" onClick={submit} disabled={!canSubmit} className="flex items-center gap-1.5 rounded-xl bg-[var(--pos)] px-3.5 py-2 text-xs font-extrabold text-white hover:opacity-90 disabled:opacity-60">
         <Check className="h-3.5 w-3.5" /> {busy ? "Approving…" : "Approve & grow kit"}
@@ -271,8 +390,34 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
   );
 
   return (
-    <Modal open onClose={busy ? () => {} : onClose} title={`Approve ${request.code}`} subtitle={request.lines.map((l) => `${l.itemName} ×${l.qty}`).join(", ")} footer={footer} size="lg" scrollBody>
+    // The subtitle used to be every line joined with commas — the same names and quantities that head
+    // each source card two inches below, so it filled four lines of the header saying nothing new and
+    // pushed the actual decision out of view. It names the request instead, and the one thing a
+    // reviewer needs that ISN'T repeated below (the engineer's reason) now leads the body.
+    <Modal
+      open
+      onClose={busy ? () => {} : onClose}
+      title={`Approve ${request.code}`}
+      subtitle={`${request.lines.length} item${request.lines.length === 1 ? "" : "s"} · requested by ${request.requestedByEngineerName}`}
+      footer={footer}
+      size="lg"
+      scrollBody
+    >
       <div className="space-y-4">
+        {/* Why the engineer asked. It was nowhere in this dialog, which meant approving or declining
+            without the one piece of context the request was raised to carry.
+            The label sits INSIDE the box on the same line as the quote. A stacked heading + panel
+            spent two rows and a full section gap on what is usually three words, pushing the item
+            list — the part being decided — below the fold. The label still has to be there: a bare
+            italic quote under the title reads as a stray note, with nothing tying it to the
+            engineer's "Why do you need these?" field. It wraps to a second line only when the reason
+            is genuinely long. */}
+        {request.reason && (
+          <p className="flex flex-wrap items-baseline gap-x-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-xs">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">Reason</span>
+            <span className="min-w-0 italic text-[var(--muted)]">“{request.reason}”</span>
+          </p>
+        )}
         {/* One row per requested item, each choosing its OWN source. Stock is rarely all in one place —
             the warehouse may hold some items while another engineer's van holds the rest — so a single
             request-level mode would force the PM into a dead end whenever neither covers everything.
@@ -287,32 +432,150 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
                 const vans = vanOptions[l.id] ?? [];
                 const src = srcOf(l.id);
                 return (
-                  <div key={l.id} className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3">
-                    <p className="mb-1.5 truncate text-xs font-semibold text-[var(--ink)]">
-                      {l.itemName} <span className="font-normal text-[var(--faint)]">×{l.qty}</span>
-                    </p>
+                  <div key={l.id} className={`rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3 ${excluded(l) ? "opacity-60" : ""}`}>
+                    <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                      <p className={`min-w-0 truncate text-xs font-semibold ${excluded(l) ? "text-[var(--muted)] line-through" : "text-[var(--ink)]"}`}>
+                        {/* The requested quantity is the number the reviewer is sourcing AGAINST — it
+                            decides which warehouses can cover the line and whether a van is short. In
+                            --faint it read as decoration next to the name; it carries as much weight
+                            as the item itself. */}
+                        {l.itemName} <span className="font-semibold text-[var(--ink)]">×{l.qty}</span>
+                      </p>
+                      {/* The TRIM. Without it the only moves were "approve all 5" or "decline the
+                          lot", so a request that was 80% reasonable got refused and the engineer had
+                          to raise it again for the number the planner would have said yes to. Field
+                          Stock has had this as approvedQty ("the trim") all along. */}
+                      {l.source !== "misc" && (
+                        // whitespace-nowrap on the whole control: "of 5" was breaking between the
+                        // word and the number, so the row read as a stray "of" with a lone digit
+                        // under it. The input is fixed-width, so the label never needs to wrap.
+                        <label className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[11px] font-semibold text-[var(--muted)]">
+                          Approve
+                          {/* Fixed width on a WRAPPER, never as a competing `w-` class: inputCls
+                              already carries w-full, and which of two width utilities wins is decided
+                              by stylesheet order, not by the order they appear in this string. The
+                              van input below lost that race and rendered full-bleed. */}
+                          <span className="inline-block w-14 shrink-0">
+                            <input
+                            type="number"
+                            min={0}
+                            // Capped at what can actually be supplied, so an over-approval simply
+                            // can't be typed. The state used to be reachable and then explained in two
+                            // lines of red prose under every offending row.
+                            max={Math.min(l.qty, maxApprovable(l) ?? l.qty)}
+                            step={1}
+                            value={approvedOf(l)}
+                            aria-label={`Approved quantity for ${l.itemName}`}
+                            onChange={(e) => {
+                              const ceiling = Math.min(l.qty, maxApprovable(l) ?? l.qty);
+                              const n = Math.max(0, Math.min(ceiling, Math.floor(Number(e.target.value) || 0)));
+                              setLineQty((p) => ({ ...p, [l.id]: n }));
+                              // Keep the van portion inside the new cap, so trimming can never leave a
+                              // split asking for more than was approved.
+                              setLineVanQty((p) => (p[l.id] != null ? { ...p, [l.id]: Math.min(p[l.id], n) } : p));
+                            }}
+                            className={`${inputCls} py-1 text-right text-xs`}
+                            />
+                          </span>
+                          <span className="whitespace-nowrap text-[var(--faint)]">of {l.qty}</span>
+                        </label>
+                      )}
+                    </div>
+
+                    {/* An excluded line has no source to choose — nothing is being collected or
+                        transferred for it — so the pickers are replaced by a line saying so. Leaving
+                        a dimmed warehouse dropdown behind would invite the reviewer to configure a
+                        pickup for an item they just refused. */}
+                    {excluded(l) && (
+                      <p className="text-[11px] font-semibold text-[var(--neg)]">
+                        Not approved — this item won&apos;t be added to the kit. Set a quantity above to include it again.
+                      </p>
+                    )}
 
                     {/* Source switch — only where a van is genuinely an option for THIS item. */}
-                    {l.source !== "misc" && vans.length > 0 && (
+                    {!excluded(l) && l.source !== "misc" && vans.length > 0 && (
                       <div className="mb-2 grid grid-cols-2 gap-2">
                         <ModeButton active={src === "warehouse"} onClick={() => setLineSrc((p) => ({ ...p, [l.id]: "warehouse" }))} title="Warehouse" hint="Collect from stock" />
                         <ModeButton active={src === "engineer"} onClick={() => setLineSrc((p) => ({ ...p, [l.id]: "engineer" }))} title="Engineer" hint="From another van" />
                       </div>
                     )}
 
-                    {l.source !== "misc" && src === "engineer" ? (
-                      <Select value={lineEng[l.id] ?? ""} onChange={(v) => setLineEng((p) => ({ ...p, [l.id]: v }))} options={vans} placeholder="— Select engineer —" ariaLabel={`Source engineer for ${l.itemName}`} />
+                    {excluded(l) ? null : l.source !== "misc" && src === "engineer" ? (
+                      <>
+                        <Select value={lineEng[l.id] ?? ""} onChange={(v) => setLineEng((p) => ({ ...p, [l.id]: v }))} options={vans} placeholder="— Select engineer —" ariaLabel={`Source engineer for ${l.itemName}`} />
+                        {/* The SPLIT. A van rarely covers the whole line on its own — 5 requested with
+                            2 on the shelf and 29 on a colleague's van had no answer before, because
+                            the source was all-or-nothing. The kit line already merges sources
+                            downstream, so this only removes a limit in the review step. */}
+                        {/* Only once an engineer is actually chosen. It used to render the moment the
+                            Engineer tab was clicked, so the reviewer was splitting a quantity away
+                            from nobody — and the remainder warehouse appeared under an empty picker. */}
+                        {approvedOf(l) > 1 && !!lineEng[l.id] && (
+                          <label className="mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] font-semibold text-[var(--muted)]">
+                            <span className="whitespace-nowrap">Take</span>
+                            <span className="inline-block w-14 shrink-0">
+                              <input
+                                type="number"
+                                min={1}
+                                max={approvedOf(l)}
+                                step={1}
+                                value={vanOf(l)}
+                                aria-label={`Units from the van for ${l.itemName}`}
+                                onChange={(e) => {
+                                  const n = Math.max(1, Math.min(approvedOf(l), Math.floor(Number(e.target.value) || 1)));
+                                  setLineVanQty((p) => ({ ...p, [l.id]: n }));
+                                }}
+                                className={`${inputCls} py-1 text-right text-xs`}
+                              />
+                            </span>
+                            <span className="whitespace-nowrap">of {approvedOf(l)} from this van</span>
+                            {isSplit(l) && (
+                              <span className="whitespace-nowrap text-[var(--faint)]">· {approvedOf(l) - vanOf(l)} from the warehouse below</span>
+                            )}
+                          </label>
+                        )}
+                        {/* A split still needs a pickup location for the remainder. */}
+                        {isSplit(l) && !!lineEng[l.id] && l.source === "irm" && (
+                          <div className="mt-2">
+                            <Select value={lineWh[l.id] ?? ""} onChange={(v) => setLineWh((p) => ({ ...p, [l.id]: v }))} options={whOptions[l.id] ?? []} placeholder="— Warehouse for the remainder —" ariaLabel={`Warehouse for the remainder of ${l.itemName}`} />
+                          </div>
+                        )}
+                      </>
                     ) : l.source === "irm" ? (
-                      (whOptions[l.id] ?? []).length === 0 ? (
+                      unstocked.has(l.id) ? (
+                        // No warehouse holds it. There is no honest pick to offer, so none is shown —
+                        // nominating a zero-stock location was the old dead-end. Requests are gated on
+                        // availability now, so reaching here means stock ran out between the ask and
+                        // the review; the route is a van if one has it, otherwise decline.
+                        <p className="text-[11px] font-semibold text-[var(--neg)]">
+                          {vans.length > 0
+                            ? "No warehouse has this any more — take it from an engineer's van above."
+                            : "No longer available — no warehouse or engineer has this. Decline the request, or wait for stock and review it again."}
+                        </p>
+                      ) : (whOptions[l.id] ?? []).length === 0 ? (
                         <p className="text-[11px] font-semibold text-[var(--neg)]">No warehouses configured — add one to issue this item.</p>
                       ) : (
                         <>
-                          <Select value={lineWh[l.id] ?? ""} onChange={(v) => setLineWh((p) => ({ ...p, [l.id]: v }))} options={whOptions[l.id] ?? []} placeholder="— Pick warehouse —" ariaLabel={`Warehouse for ${l.itemName}`} />
-                          {unstocked.has(l.id) && (
-                            <p className="mt-1.5 text-[11px] text-amber-600">
-                              Not in stock in any warehouse right now — pick where it will be issued once restocked
-                              {vans.length > 0 ? ", or take it from an engineer's van above." : "."}
-                            </p>
+                          <Select
+                            value={lineWh[l.id] ?? ""}
+                            onChange={(v) => {
+                              setLineWh((p) => ({ ...p, [l.id]: v }));
+                              // Switching to a smaller site has to bring the quantity down with it,
+                              // or the cap above is bypassed by the order of clicks.
+                              const opt = (whOptions[l.id] ?? []).find((o) => o.value === v);
+                              if (opt?.free === undefined) return;
+                              const ceiling = Math.min(l.qty, vanOf(l) + opt.free);
+                              setLineQty((p) => ({ ...p, [l.id]: Math.min(p[l.id] ?? l.qty, ceiling) }));
+                            }}
+                            options={whOptions[l.id] ?? []}
+                            placeholder="— Pick warehouse —"
+                            ariaLabel={`Warehouse for ${l.itemName}`}
+                          />
+                          {/* Couldn't READ stock ≠ there is none. The reviewer keeps a full pick here,
+                              but is told the figures behind it are missing rather than trusting a list
+                              that looks stock-aware and isn't. */}
+                          {stockCheckFailed.has(l.id) && (
+                            <p className="mt-1.5 text-[11px] text-amber-600">Couldn&apos;t check stock levels — pick the warehouse you know holds it.</p>
                           )}
                           {/* Tells the PM WHY there's no van option, instead of silently offering only one route. */}
                           {vans.length === 0 && !holdersFailed && (
@@ -332,10 +595,22 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
                         >
                           <span className="min-w-0 truncate">
                             {l.warehouseName ? `${l.warehouseName}${l.warehouseCode ? ` (${l.warehouseCode})` : ""}` : "Stored location"}
+                            {/* The same "· N free" the IRM picker shows. Consignment was the only
+                                source with no quantity on screen at all, so a reviewer had nothing to
+                                judge the approved amount against — and it was the only one the
+                                over-approval cap didn't cover either. */}
+                            {l.availableQty != null && <span className="text-[var(--faint)]"> · {l.availableQty} free</span>}
                           </span>
                           <Lock aria-hidden className="h-3.5 w-3.5 shrink-0 text-[var(--faint)]" />
                         </div>
-                        <p className="mt-1.5 text-[11px] text-[var(--faint)]">Customer stock — issued from where it’s stored. This can’t be changed.</p>
+                        {/* States a FACT about the data, not a restriction the app is imposing. A
+                            CustomerStockEntry carries one required warehouseId, so the entry IS its
+                            location — there is no other warehouse it could be issued from. (Moving
+                            consignment between sites doesn't relocate an entry either:
+                            transferCustomerStock decrements this one and increments/creates a
+                            separate entry at the destination.) The old wording — "this can't be
+                            changed" — read as a lock someone might go looking for a way around. */}
+                        <p className="mt-1.5 text-[11px] text-[var(--faint)]">Stored at this warehouse — customer stock is issued from wherever it sits.</p>
                       </>
                     ) : (
                       <p className="text-[11px] text-[var(--muted)]">Misc item · handed over without a warehouse.</p>

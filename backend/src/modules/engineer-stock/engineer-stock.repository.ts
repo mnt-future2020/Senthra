@@ -56,6 +56,32 @@ export function findEngineerBalances(engineerId: string) {
   });
 }
 
+// Van holdings for a SET of items, for "can this item be fulfilled at all?" checks over a whole
+// search page. Deliberately batched: the per-item alternative (findHoldersForIrm) is one query per
+// row, which is fine for the handful of lines on one request but not for every keystroke of a
+// catalogue search.
+//
+// `excludeEngineerId` is how a requester is kept out of their own tally — an engineer's kit request
+// can be sourced from a COLLEAGUE's van but never from their own, so counting theirs would advertise
+// stock no source could actually draw on. Returns raw rows, not a total: the caller sums, since this
+// is a repository.
+// `engineerId` rides along because a van holding is only transferable once that engineer's OWN job
+// commitments are netted off, and those are looked up per engineer.
+export function findBalancesByItems(
+  irmItemIds: string[],
+  excludeEngineerId?: string,
+): Promise<{ irmItemId: string; engineerId: string; quantityOnHand: number }[]> {
+  if (irmItemIds.length === 0) return Promise.resolve([]);
+  return prisma.engineerStockBalance.findMany({
+    where: {
+      irmItemId: { in: irmItemIds },
+      quantityOnHand: { gt: 0 },
+      ...(excludeEngineerId ? { engineerId: { not: excludeEngineerId } } : {}),
+    },
+    select: { irmItemId: true, engineerId: true, quantityOnHand: true },
+  });
+}
+
 // --- delete-guard counters (IRM item / engineer-user can't be deleted while holding stock) ----
 export function countEngineerStockWithStockByIrmItem(irmItemId: string): Promise<number> {
   return prisma.engineerStockBalance.count({ where: { irmItemId, quantityOnHand: { gt: 0 } } });

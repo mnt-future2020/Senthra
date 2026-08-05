@@ -9,6 +9,7 @@ const line = (over: Partial<QueueKitLine> = {}): QueueKitLine => ({
   irmItemId: "i1",
   customerStockEntryId: null,
   itemName: "CAT6",
+  scanCode: null,
   warehouseId: "w1",
   warehouseName: "London",
   warehouseCode: "WH-0005",

@@ -23,6 +23,7 @@ import { OwnerTag } from "@/components/dashboard/inventory/hubUi";
 import type { InventoryDetail as InventoryDetailType, InventoryTransaction } from "@/types/inventory";
 import type { StockPosition } from "@/types/stock-position";
 import type { ItemHolders, ItemJob } from "@/services/stockPosition.service";
+import { CopyableCode } from "@/components/ui/CopyableCode";
 
 const TXN_PAGE_SIZE = 20;
 
@@ -370,7 +371,7 @@ export function InventoryDetailPage({ initial }: { initial: InventoryDetailType 
         badges={<InventoryStatusBadge status={inv.status} />}
         meta={
           <>
-            <span className="font-mono">{inv.itemCode}</span>
+            <CopyableCode code={inv.itemCode} className="text-xs text-[var(--muted)]" />
             {inv.sku && (
               <>
                 <span aria-hidden>·</span>

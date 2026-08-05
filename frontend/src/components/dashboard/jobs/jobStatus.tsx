@@ -106,20 +106,52 @@ export { formatDate, formatDateTime } from "@/lib/formatDate";
 export interface KitLineSourceSplit {
   warehouseQty: number; // issued from this line's own warehouse
   vanQty: number; // handed over from a van (transfer completed)
+  /**
+   * Of `vanQty`, how much may be handed back at ANY warehouse — IRM only.
+   *
+   * Customer stock cannot: a CustomerStockEntry IS one location and a return credits that entry, so an
+   * away-from-home consignment return has nowhere to land without the record claiming the customer's
+   * stock is at a warehouse that doesn't physically have it. scanLookup and postReturn have always
+   * refused it; only these kit lists said otherwise. Misc isn't stock-tracked at all.
+   */
+  vanReturnableQty: number;
   pendingVanQty: number; // agreed but not yet handed over
+  /** Still to be collected from this line's warehouse — planned, minus what has been issued, minus
+   *  what a van is bringing. */
+  outstandingWarehouseQty: number;
+  /** The warehouse's WHOLE obligation: already issued + still owed. What a kit list should show. */
+  warehouseShare: number;
   vanOnly: boolean;
 }
-export function kitLineSourceSplit(line: JobKitLine): KitLineSourceSplit {
+// `jobCancelled` turns off the "still to collect" half. A cancelled job can't be issued against
+// (postIssue refuses it) and its pending handovers are withdrawn the moment it's cancelled, so units
+// that never left the warehouse are never coming — printing "N to collect" sends an engineer to a
+// warehouse for work that no longer exists. What already MOVED is untouched: those units are real and
+// still have to be returned.
+export function kitLineSourceSplit(line: JobKitLine, opts: { jobCancelled?: boolean } = {}): KitLineSourceSplit {
   const sources = line.vanSources ?? [];
   const sum = (status: string) => sources.filter((v) => v.status === status).reduce((n, v) => n + v.quantity, 0);
   const vanQty = sum("completed");
+  const pendingVanQty = sum("pending");
+  // Whatever the van didn't supply came from the warehouse. Clamped: a return posted at another
+  // warehouse can push `issued` below `vanQty`, and a negative would render as nonsense.
+  const warehouseQty = Math.max(0, line.issued - vanQty);
+  const vanReturnableQty = line.lineType === "irm" ? vanQty : 0;
+  // What the warehouse still owes. `warehouseQty` is derived from `issued`, so it answers "how much of
+  // what already MOVED came from here" — correct after the fact, and zero on a line the planner has
+  // just split, which is exactly when the engineer needs to know where to collect the remainder.
+  // Floored: an over-issue (or a return posted at another site) must not render as "-1 to collect".
+  const outstandingWarehouseQty = opts.jobCancelled ? 0 : Math.max(0, line.qty - line.issued - pendingVanQty);
   return {
     vanQty,
-    pendingVanQty: sum("pending"),
-    // Whatever the van didn't supply came from the warehouse. Clamped: a return posted at another
-    // warehouse can push `issued` below `vanQty`, and a negative would render as nonsense.
-    warehouseQty: Math.max(0, line.issued - vanQty),
-    vanOnly: line.issued > 0 && vanQty >= line.issued,
+    vanReturnableQty,
+    pendingVanQty,
+    warehouseQty,
+    outstandingWarehouseQty,
+    warehouseShare: warehouseQty + outstandingWarehouseQty,
+    // Gated on the RETURNABLE portion, not the van portion: a fully van-supplied consignment line is
+    // still owed to its entry's warehouse, so "Return at any warehouse" must not fire on it.
+    vanOnly: line.issued > 0 && vanReturnableQty >= line.issued,
   };
 }
 

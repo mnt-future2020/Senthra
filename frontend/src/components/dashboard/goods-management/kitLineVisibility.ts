@@ -27,9 +27,26 @@ export interface VisibilityKitLine {
  *   - a real line homed at this warehouse
  *   - a real line homed elsewhere that still holds van-sourced stock, which owes no warehouse and so is
  *     returnable at any of them
+ *
+ * `jobCancelled` narrows all three to "something actually went out against this line". A cancelled job
+ * can never be issued against again (postIssue refuses it) and its pending handovers are withdrawn on
+ * cancel, so a never-issued line isn't work waiting here — it's a row that can only be looked at, and
+ * the queue was presenting it as "Not issued · planned 3", i.e. outstanding work at this warehouse.
+ *
+ * This narrowing is DISPLAY-ONLY and deliberately not mirrored into the backend's hasWorkHere, which
+ * decides whether the job appears at all: a cancelled job whose stock has all come back still has to be
+ * CLOSED from this screen, so it must keep its place in the queue. visibleKitLines' empty-result
+ * fallback covers that case by showing the whole kit.
  */
-export function isLineActionable(line: VisibilityKitLine, warehouseId: string): boolean {
-  if (line.lineType === "misc") return line.issuedQty < line.plannedQty;
+export function isLineActionable(line: VisibilityKitLine, warehouseId: string, jobCancelled = false): boolean {
+  if (jobCancelled) {
+    // Nothing more is issued or handed over, so the only thing left to do to a line is take back what
+    // actually went out. MISC never can be: it is free text, handed over by count and not stock-tracked,
+    // so it cannot be scanned back at any warehouse and has no remaining action here at all.
+    if (line.lineType === "misc" || (line.issuedQty === 0 && line.vanReturnableQty === 0)) return false;
+  } else if (line.lineType === "misc") {
+    return line.issuedQty < line.plannedQty;
+  }
   return line.warehouseId === warehouseId || line.vanReturnableQty > 0;
 }
 
@@ -45,9 +62,10 @@ export function visibleKitLines<T extends VisibilityKitLine>(
   lines: T[],
   warehouseId: string,
   showAll: boolean,
+  jobCancelled = false,
 ): { lines: T[]; hiddenCount: number } {
   if (showAll) return { lines, hiddenCount: 0 };
-  const actionable = lines.filter((l) => isLineActionable(l, warehouseId));
+  const actionable = lines.filter((l) => isLineActionable(l, warehouseId, jobCancelled));
   if (actionable.length === 0) return { lines, hiddenCount: 0 };
   return { lines: actionable, hiddenCount: lines.length - actionable.length };
 }

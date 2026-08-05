@@ -27,6 +27,7 @@ import { WriteOffLostModal, type WriteOffTarget } from "./WriteOffLostModal";
 import { useDashboard } from "@/hooks/useDashboard";
 import { readFileAsDataUrl } from "@/lib/image";
 import { ScannerInput } from "./ScannerInput";
+import { defaultScanDirection, scanDirections } from "./scanDirections";
 import type {
   MovementLinePayload,
   QueueKitLine,
@@ -72,6 +73,7 @@ export function JobScanPanel({
   jobId,
   jobNumber,
   jobName,
+  jobStatus,
   warehouseId,
   miscLines = [],
   onBack,
@@ -79,13 +81,17 @@ export function JobScanPanel({
   jobId: string;
   jobNumber: string;
   jobName: string;
+  jobStatus: string;
   warehouseId: string;
   miscLines?: QueueKitLine[]; // free-text kit lines — issued by count (no barcode)
   onBack: () => void;
 }) {
   const { pushToast } = useDashboard();
 
-  const [direction, setDirection] = React.useState<Direction>("issue");
+  // A cancelled job is return-only — see scanDirections. Computed once at mount: the panel is keyed by
+  // job, so a different job remounts it rather than needing this to track a changing prop.
+  const directions = scanDirections(jobStatus);
+  const [direction, setDirection] = React.useState<Direction>(() => defaultScanDirection(jobStatus));
   const [lines, setLines] = React.useState<ScanLine[]>([]);
   const [scanning, setScanning] = React.useState(false);
   const [posting, setPosting] = React.useState(false);
@@ -412,8 +418,12 @@ export function JobScanPanel({
       {/* Direction — segmented control: Goods Out (issue) vs Goods In (return) */}
       <div className="flex items-center gap-3">
         <span className="text-xs font-bold text-[var(--muted)]">Direction</span>
+        {/* Says WHY there is only one option, without a paragraph explaining a button that isn't there. */}
+        {directions.length === 1 && (
+          <span className="rounded-full bg-rose-500/12 px-2.5 py-0.5 text-[11px] font-bold text-rose-600">Job cancelled</span>
+        )}
         <div className="inline-flex rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-1">
-          {(["issue", "return"] as const).map((d) => {
+          {directions.map((d) => {
             const Icon = d === "issue" ? PackageMinus : PackagePlus;
             return (
               <button

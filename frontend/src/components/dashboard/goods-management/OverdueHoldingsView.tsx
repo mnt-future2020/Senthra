@@ -144,13 +144,15 @@ export function OverdueHoldingsView({ warehouseId }: { warehouseId?: string }) {
   const startWriteOff = async (row: OverdueRow) => {
     setWritingOff(row.jobId);
     try {
-      const { unaccounted } = await gmService.closeReconcile(row.jobId);
+      // `fromOverdue` marks this as THIS tab's escape hatch — the one place allowed to close a job the
+      // engineer never completed. The scan panel deliberately cannot; see CloseReconcilePayload.
+      const { unaccounted } = await gmService.closeReconcile(row.jobId, { fromOverdue: true });
       if (unaccounted.length === 0) {
         pushToast(`Job ${row.jobNumber} reconciled — nothing was outstanding.`, "success");
         reload();
         return;
       }
-      setWriteOffTarget({ jobId: row.jobId, jobNumber: row.jobNumber, unaccounted });
+      setWriteOffTarget({ jobId: row.jobId, jobNumber: row.jobNumber, unaccounted, fromOverdue: true });
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Could not check what is outstanding.", "alert");
     } finally {
@@ -249,8 +251,14 @@ export function OverdueHoldingsView({ warehouseId }: { warehouseId?: string }) {
               className="border-b border-[var(--border)] align-middle last:border-0"
             >
               <td className="px-4 py-3">
-                <div className="font-bold text-[var(--ink)]">
-                  {row.jobNumber}
+                {/* Same rose chip as the Jobs list, the queue row and the scan panel — one state, one
+                    look. A cancelled job here isn't waiting on an engineer to finish: its stock can
+                    only come back or be written off, which changes how the chase reads. */}
+                <div className="flex items-center gap-1.5">
+                  <span className="font-bold text-[var(--ink)]">{row.jobNumber}</span>
+                  {row.status === "cancelled" && (
+                    <span className="rounded-full bg-rose-500/12 px-1.5 py-0.5 text-[10px] font-bold text-rose-600">Cancelled</span>
+                  )}
                 </div>
                 <div className="font-mono text-[11px] text-[var(--faint)]">
                   {row.movementCode}

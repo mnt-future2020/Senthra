@@ -8,7 +8,7 @@ vi.mock("../../lib/prisma.js", () => ({
   withTransaction: (fn: (tx: unknown) => unknown) => fn({}),
 }));
 
-import { findGoodsActiveJobIds } from "./job.repository.js";
+import { findActiveByEngineerWithKitLines, findActiveForGoodsManagement, findGoodsActiveJobIds } from "./job.repository.js";
 
 // A chase list exists to surface stock nobody is looking at any more, so the one status that must NOT
 // silently drop out of it is the one where everybody stops looking: cancelled. `cancelJob` is reachable
@@ -44,5 +44,44 @@ describe("findGoodsActiveJobIds — the overdue read's starting set", () => {
   it("excludes soft-deleted jobs", async () => {
     await findGoodsActiveJobIds();
     expect(findMany.mock.calls.at(-1)?.[0].where.deletedAt).toBeNull();
+  });
+});
+
+// Putting the job on the chase list was only half the job: cancelling has to leave the stock a way
+// HOME as well. These two reads are that path — one lets the warehouse find the job to scan the kit
+// back in, the other keeps the units counted as committed while they are still in the van. Both used
+// to stop at `completed`, so the moment a job was cancelled its kit both vanished from the Queue and
+// silently became free van stock other jobs could be offered.
+describe("findActiveForGoodsManagement — the warehouse must still be able to take the kit back", () => {
+  it("includes cancelled jobs", async () => {
+    await findActiveForGoodsManagement("wh1");
+    expect(findMany.mock.calls.at(-1)?.[0].where.status.in).toContain("cancelled");
+  });
+
+  // Issuing is blocked on a cancelled job by postIssue; the queue row exists to RETURN, and listQueue
+  // drops the cancelled jobs that never had anything issued.
+  it("still excludes statuses stock cannot be issued against", async () => {
+    await findActiveForGoodsManagement("wh1");
+    const statuses: string[] = findMany.mock.calls.at(-1)?.[0].where.status.in;
+    expect(statuses).not.toContain("draft");
+    expect(statuses).not.toContain("assigned");
+    expect(statuses).not.toContain("rejected");
+  });
+});
+
+describe("findActiveByEngineerWithKitLines — cancelled stock is still committed", () => {
+  // jobCommittedByEngineer reads this. Dropping cancelled released every unit the engineer was holding
+  // for that job: the field-stock return flow stopped subtracting it, and kit-request availability
+  // started offering it to other jobs as "on another van" — the same units, promised twice.
+  it("includes cancelled jobs", async () => {
+    await findActiveByEngineerWithKitLines("eng1");
+    expect(findMany.mock.calls.at(-1)?.[0].where.status.in).toContain("cancelled");
+  });
+
+  it("stays scoped to the one engineer, and to live records", async () => {
+    await findActiveByEngineerWithKitLines("eng1");
+    const where = findMany.mock.calls.at(-1)?.[0].where;
+    expect(where.assignedEngineerId).toBe("eng1");
+    expect(where.deletedAt).toBeNull();
   });
 });

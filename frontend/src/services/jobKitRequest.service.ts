@@ -18,12 +18,18 @@ export interface KitRequestLine {
   itemName: string;
   sku: string | null;
   uom: string | null;
+  /** What the ENGINEER asked for. */
   qty: number;
+  /** What the reviewer approved: null = in full (and every row predating the trim), 0 = excluded. */
+  approvedQty: number | null;
   jobKitLineId: string | null;
   // customer_stock lines: the warehouse the entry is stored in (read-only pickup location on approve).
   // Null for irm/misc, and on responses that don't drive the approve modal.
   warehouseName: string | null;
   warehouseCode: string | null;
+  /** customer_stock only: the entry's quantity net of other jobs' planned demand. Null for irm/misc
+   *  (their figure comes from the warehouse picker) and on reads that don't drive the approve modal. */
+  availableQty: number | null;
   // Where this line was sourced, set on approve. Null while pending/declined, and on requests
   // approved before per-line sourcing shipped (fall back to the request's fulfillmentMode).
   sourceType: LineSourceType | null;
@@ -91,6 +97,11 @@ export interface LineSourcePayload {
   sourceType: LineSourceType;
   warehouseId?: string;
   engineerId?: string;
+  /** Units taken off the van. Omit for the whole line. A PARTIAL split also needs warehouseId — the
+   *  remainder has to be collectable from somewhere. */
+  engineerQty?: number;
+  /** The reviewer's trim: approve fewer than were asked for. Omit to approve the full request. */
+  approvedQty?: number;
 }
 
 export interface ApproveKitRequestPayload {
@@ -178,6 +189,12 @@ export interface KitItemIrmOption {
   name: string;
   sku: string | null;
   uom: string | null;
+  /** On-hand across all active warehouses, network-wide. */
+  quantityOnHand: number;
+  /** On OTHER engineers' vans — the requesting job's own engineer is excluded, since nobody can
+   *  transfer stock to themselves. Together with quantityOnHand this is everything approve() could
+   *  source the line from; both at 0 means the request could never be actioned. */
+  heldByEngineers: number;
 }
 export interface KitItemCustomerStockOption {
   source: "customer_stock";
@@ -185,6 +202,13 @@ export interface KitItemCustomerStockOption {
   name: string;
   sku: string | null;
   uom: string | null;
+  /** At the storing warehouse, net of other jobs' planned demand.
+   *
+   *  There is deliberately NO van figure. A field stock request carries no customerStockEntryId, so
+   *  consignment never reaches an engineer as free stock — the only writes to its holding table are a
+   *  job issue and a job-scoped transfer, meaning anything an engineer holds is committed to their
+   *  job. jobCommittedByEngineer excludes this pool ("never field-returnable"), so there is no
+   *  commitment figure to net off and counting the raw holding would double-book another job. */
   qty: number;
   warehouseName: string;
   warehouseCode: string | null;
@@ -204,4 +228,18 @@ export function approveKitRequest(id: string, payload: ApproveKitRequestPayload)
 
 export function declineKitRequest(id: string, decisionNote?: string): Promise<KitRequest> {
   return api<{ request: KitRequest }>(`/job-kit-requests/${id}/decline`, { method: "POST", body: { decisionNote } }).then((r) => r.request);
+}
+
+// Availability for items the composer already holds — the job's planned kit lines and the cart —
+// which never came from a search and so carried no stock figure of their own. Same calculation the
+// search uses, so a stepper's cap can't disagree with the result that put the item there.
+export interface KitAvailabilityMap {
+  irm: Record<string, { quantityOnHand: number; heldByEngineers: number }>;
+  cse: Record<string, { qty: number }>;
+}
+
+export function kitItemAvailabilityFor(jobId: string, irmItemIds: string[], cseIds: string[]): Promise<KitAvailabilityMap> {
+  if (irmItemIds.length === 0 && cseIds.length === 0) return Promise.resolve({ irm: {}, cse: {} });
+  const q = qs({ jobId, irm: irmItemIds.join(","), cse: cseIds.join(",") });
+  return api<KitAvailabilityMap>(`/job-kit-requests/item-availability${q}`);
 }

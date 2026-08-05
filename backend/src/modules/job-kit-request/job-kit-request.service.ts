@@ -6,6 +6,9 @@ import * as transferService from "#modules/engineer-transfer/engineer-transfer.s
 import * as irmRepo from "#modules/irm/irm.repository.js";
 import * as goodsManagementRepo from "#modules/goods-management/goods-management.repository.js";
 import * as goodsManagementService from "#modules/goods-management/goods-management.service.js";
+// From the LEAF module, not the service re-export: demand.ts imports repositories only, so pulling it
+// in directly keeps this free of the service↔service cycle its own header warns about.
+import { getOpenDemand } from "#modules/goods-management/demand.js";
 import * as engineerStockRepo from "#modules/engineer-stock/engineer-stock.repository.js";
 import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
@@ -29,13 +32,20 @@ export interface PublicKitRequestLine {
   itemName: string;
   sku: string | null;
   uom: string | null;
+  /** What the ENGINEER asked for. */
   qty: number;
+  /** What the reviewer approved: null = in full (and every row predating the trim), 0 = excluded. */
+  approvedQty: number | null;
   jobKitLineId: string | null;
   // For customer_stock lines: the warehouse the entry is stored in (where it will be issued from). The
   // planner can't change it — it's shown read-only so the approve modal reveals the pickup location.
   // Null for irm/misc lines. Populated on reads that feed the approve modal (list/getOne).
   warehouseName: string | null;
   warehouseCode: string | null;
+  /** customer_stock only: what the entry has free — its quantity net of other jobs' planned demand.
+   *  Null for irm/misc, and on reads that don't drive the approve modal. The IRM equivalent comes
+   *  from the warehouse picker; consignment has no picker, so it had no figure at all. */
+  availableQty: number | null;
   // Where this line was actually sourced (set on approve): "warehouse" | "engineer" | null (misc, or
   // a request approved before per-line sourcing shipped — fall back to the request's fulfillmentMode).
   sourceType: string | null;
@@ -82,7 +92,10 @@ function iso(d: Date | null | undefined): string | null {
 // whByEntry: customerStockEntryId → its warehouse label, resolved by the caller in one batched query
 // (see resolveLineWarehouses) so toPublic stays synchronous and free of per-line DB hits. Absent map =
 // no customer-stock warehouse labels (fine for responses that don't drive the approve modal).
-function toPublic(r: KitRequestWithLines, whByEntry?: Map<string, { name: string | null; code: string | null }>): PublicKitRequest {
+function toPublic(
+  r: KitRequestWithLines,
+  whByEntry?: Map<string, { name: string | null; code: string | null; available: number }>,
+): PublicKitRequest {
   return {
     id: r.id,
     code: r.code,
@@ -115,9 +128,11 @@ function toPublic(r: KitRequestWithLines, whByEntry?: Map<string, { name: string
         sku: l.sku,
         uom: l.uom,
         qty: l.qty,
+        approvedQty: l.approvedQty ?? null,
         jobKitLineId: l.jobKitLineId,
         warehouseName: wh?.name ?? null,
         warehouseCode: wh?.code ?? null,
+        availableQty: wh?.available ?? null,
         sourceType: l.sourceType,
         sourceWarehouseId: l.sourceWarehouseId,
         sourceEngineerId: l.sourceEngineerId,
@@ -128,14 +143,31 @@ function toPublic(r: KitRequestWithLines, whByEntry?: Map<string, { name: string
 
 // Batch-resolve the warehouse each customer_stock line's entry is stored in — one query for all lines
 // across all given requests (no N+1). Returns entryId → { name, code }. IRM/misc lines are ignored.
-async function resolveLineWarehouses(requests: KitRequestWithLines[]): Promise<Map<string, { name: string | null; code: string | null }>> {
+async function resolveLineWarehouses(
+  requests: KitRequestWithLines[],
+): Promise<Map<string, { name: string | null; code: string | null; available: number }>> {
   const entryIds = [
     ...new Set(
       requests.flatMap((r) => r.lines.filter((l) => l.source === "customer_stock" && l.customerStockEntryId).map((l) => l.customerStockEntryId as string)),
     ),
   ];
   if (entryIds.length === 0) return new Map();
-  return goodsManagementRepo.findCustomerEntryWarehousesByIds(entryIds);
+  // Netted against other jobs' planned demand, exactly like every other availability figure in the
+  // app — the raw entry quantity would offer units already committed elsewhere.
+  const [entries, demand] = await Promise.all([
+    goodsManagementRepo.findCustomerEntryWarehousesByIds(entryIds),
+    getOpenDemand().catch(() => new Map<string, { customerStockEntryId: string | null; demand: number }>()),
+  ]);
+  const planned = new Map<string, number>();
+  for (const d of demand.values()) {
+    if (!d.customerStockEntryId) continue;
+    planned.set(d.customerStockEntryId, (planned.get(d.customerStockEntryId) ?? 0) + d.demand);
+  }
+  const out = new Map<string, { name: string | null; code: string | null; available: number }>();
+  for (const [id, e] of entries) {
+    out.set(id, { name: e.name, code: e.code, available: Math.max(0, e.quantity - (planned.get(id) ?? 0)) });
+  }
+  return out;
 }
 
 function emitUpdate(engineerId: string, jobId: string, data: { id: string; code: string; status: string }): void {
@@ -208,19 +240,33 @@ export async function create(input: CreateKitRequestInput, actor: AuditActor): P
 
 // Which stock-tracked request lines the given engineer can't cover from their van — powers the
 // pre-claim transfer holdings check. Labels read `CAT6 (needs 3, holds 1)`.
-async function findHolderShortages(engineerId: string, stockLines: KitRequestWithLines["lines"]): Promise<string[]> {
+// `vanQtyByLine` is what is actually being asked of THIS engineer — a split line draws only part of
+// its quantity from them, and testing the full line would reject a colleague who can comfortably
+// cover the portion requested.
+async function findHolderShortages(
+  engineerId: string,
+  stockLines: KitRequestWithLines["lines"],
+  vanQtyByLine?: Map<string, number>,
+  approvedQtyByLine?: Map<string, number>,
+): Promise<string[]> {
   // Load the engineer's whole van ONCE (two queries in parallel) rather than one round-trip per line —
   // matters on a high-latency DB link where per-line queries serialise.
-  const [irmBalances, customerHoldings] = await Promise.all([
+  // Netted against the holder's OWN job commitments, exactly as holdersByLine does for the picker.
+  // Reading the raw balance made this guard laxer than the dialog: a colleague the UI would never
+  // offer could still be named directly, and the approval went through — stripping the job those
+  // units were being held for.
+  const [irmBalances, customerHoldings, committed] = await Promise.all([
     engineerStockRepo.findEngineerBalances(engineerId),
     goodsManagementRepo.findCustomerHoldingsByEngineer(engineerId),
+    goodsManagementService.jobCommittedByEngineer(engineerId).catch(() => new Map<string, number>()),
   ]);
-  const irmHeld = new Map(irmBalances.map((b) => [b.irmItemId, b.quantityOnHand]));
+  const irmHeld = new Map(irmBalances.map((b) => [b.irmItemId, Math.max(0, b.quantityOnHand - (committed.get(b.irmItemId) ?? 0))]));
   const customerHeld = new Map(customerHoldings.map((h) => [h.customerStockEntryId, h.quantityOnHand]));
   const out: string[] = [];
   for (const l of stockLines) {
     const held = l.source === "irm" ? irmHeld.get(l.irmItemId!) ?? 0 : customerHeld.get(l.customerStockEntryId!) ?? 0;
-    if (held < l.qty) out.push(`${l.itemName} (needs ${l.qty}, holds ${held})`);
+    const need = vanQtyByLine?.get(l.id) ?? approvedQtyByLine?.get(l.id) ?? l.qty;
+    if (held < need) out.push(`${l.itemName} (needs ${need}, holds ${held})`);
   }
   return out;
 }
@@ -262,11 +308,39 @@ export async function holdersByLine(requestId: string): Promise<LineHolders[]> {
   const stockLines = req.lines.filter((l) => l.source !== "misc");
   if (stockLines.length === 0) return [];
   const perLine = await Promise.all(
-    stockLines.map((l) => (l.source === "irm" ? transferRepo.findHoldersForIrm(l.irmItemId!, exclude) : transferRepo.findHoldersForCustomer(l.customerStockEntryId!, exclude))),
+    // IRM ONLY. Consignment never reaches an engineer except through a job — a field stock request
+    // carries no customerStockEntryId, and the only writes to EngineerCustomerStockHolding are a job
+    // issue and a job-scoped transfer — so everything a colleague holds is already committed to their
+    // job. There is no spare to offer, and jobCommittedByEngineer deliberately excludes this pool, so
+    // the figure couldn't even be netted: the reviewer saw "holds 2" in the same words used for
+    // genuinely free IRM stock, and taking it would strip the job relying on it. The engineer's own
+    // composer already treats consignment as warehouse-only; this makes the review step agree. A
+    // deliberate re-allocation is still possible — as a job transfer, where it is explicit.
+    stockLines.map((l) => (l.source === "irm" ? transferRepo.findHoldersForIrm(l.irmItemId!, exclude) : Promise.resolve([]))),
   );
+
+  // `available` off the raw balance counts stock the holder is already holding AGAINST THEIR OWN
+  // active job — it has to go back through that job's Close & Reconcile and can never be transferred
+  // away. Offering it double-books the same units: the reviewer picks a colleague who looks well
+  // stocked, and the transfer strands the job that was relying on them. Netted here so the shortage
+  // filter below tests what is genuinely SPARE. IRM only — customer stock is a separate pool with its
+  // own holdings, which jobCommittedByEngineer deliberately doesn't cover.
+  const holderIds = [...new Set(perLine.flat().map((h) => h.engineerId))];
+  const committedByEngineer = new Map<string, Map<string, number>>();
+  await Promise.all(
+    holderIds.map(async (engineerId) => {
+      committedByEngineer.set(engineerId, await goodsManagementService.jobCommittedByEngineer(engineerId).catch(() => new Map<string, number>()));
+    }),
+  );
+
   return stockLines.map((l, i) => ({
     requestLineId: l.id,
     holders: perLine[i]
+      .map((h) => {
+        if (l.source !== "irm" || !l.irmItemId) return h;
+        const committed = committedByEngineer.get(h.engineerId)?.get(l.irmItemId) ?? 0;
+        return { ...h, available: Math.max(0, h.available - committed) };
+      })
       .filter((h) => h.available >= l.qty)
       .map((h) => ({ engineerId: h.engineerId, name: h.name, available: h.available })),
   }));
@@ -294,6 +368,12 @@ export async function approve(id: string, input: ApproveKitRequestInput, actor: 
   // directly; the legacy request-level fulfillmentMode is normalised into the same per-line shape
   // below so there is exactly ONE code path from here on.
   const engineerByLine = new Map<string, string>(); // request-line id → source engineer (transfer lines)
+  // How many units of a line come off the van. Absent ⇒ the whole line, which is the non-split case.
+  // A PARTIAL split leaves a remainder that must still be collectable, so it also requires a warehouse.
+  const vanQtyByLine = new Map<string, number>();
+  // The reviewer's TRIM — how many of the requested units are actually approved. Absent ⇒ all of them.
+  // The kit grows by this, and any van split has to fit inside it.
+  const approvedQtyByLine = new Map<string, number>();
   const whByLine = new Map<string, string>(); // request-line id → pickup/home warehouse (IRM lines)
 
   const explicit = new Map((input.lineSources ?? []).map((s) => [s.requestLineId, s]));
@@ -307,9 +387,42 @@ export async function approve(id: string, input: ApproveKitRequestInput, actor: 
       const line = req.lines.find((l) => l.id === lineId);
       if (!line) throw badRequest("A chosen source refers to an item that isn't on this request.");
       if (line.source === "misc") continue; // ignore a stray source on a misc line
+      // Trim first — every downstream quantity (the kit grow, and the van split's cap) is measured
+      // against what was APPROVED, not what was asked for.
+      if (s.approvedQty !== undefined) {
+        if (s.approvedQty > line.qty) {
+          throw badRequest(`"${line.itemName}" — can't approve more than the ${line.qty} requested.`);
+        }
+        approvedQtyByLine.set(lineId, s.approvedQty);
+        // Nothing is collected, transferred or grown for an excluded line, so it needs no source.
+        // Demanding a pickup warehouse for an item the planner just refused is asking where to
+        // collect something nobody is collecting.
+        if (s.approvedQty === 0) continue;
+      }
       if (s.sourceType === "engineer") {
+        // The UI no longer offers this for consignment, but "the client stopped sending it" is not a
+        // guarantee — a stale tab or a direct call would otherwise open a transfer that strips
+        // another job's committed stock.
+        if (line.source !== "irm") {
+          throw badRequest(`"${line.itemName}" is customer stock — it can only be issued from the warehouse it's stored at, not from a van.`);
+        }
         if (!s.engineerId) throw badRequest(`Pick the engineer to transfer "${line.itemName}" from.`);
         engineerByLine.set(lineId, s.engineerId);
+        if (s.engineerQty !== undefined) {
+          // Against the APPROVED quantity, not the requested one: approving 1 while transferring 2
+          // would put more on the kit line than the planner agreed to.
+          const cap = approvedQtyByLine.get(lineId) ?? line.qty;
+          if (s.engineerQty > cap) {
+            throw badRequest(`"${line.itemName}" — can't take more than the ${cap} approved from a van.`);
+          }
+          // A partial split needs somewhere to collect the rest; without it the remaining units have
+          // no pickup location and the engineer turns up short with nothing explaining why.
+          if (s.engineerQty < cap && !s.warehouseId) {
+            throw badRequest(`"${line.itemName}" — pick a warehouse for the ${cap - s.engineerQty} not coming from the van.`);
+          }
+          vanQtyByLine.set(lineId, s.engineerQty);
+          if (s.warehouseId) whByLine.set(lineId, s.warehouseId);
+        }
       } else if (line.source === "irm") {
         if (!s.warehouseId) throw badRequest(`Choose a pickup warehouse for "${line.itemName}".`);
         whByLine.set(lineId, s.warehouseId);
@@ -329,15 +442,109 @@ export async function approve(id: string, input: ApproveKitRequestInput, actor: 
     // Legacy shorthand: ALL stock-tracked lines transfer from one engineer's van.
     if (!input.fromEngineerId) throw badRequest("Pick the engineer to transfer stock from.");
     if (stockLines.length === 0) throw badRequest("These are all misc items — they must be issued from a warehouse, not transferred from a van.");
+    // …except consignment, which cannot come off a van at all. The per-line `sourceType: "engineer"`
+    // path refuses it (see above); this shorthand assigned the engineer to EVERY non-misc line and
+    // walked straight past that, opening a transfer that strips stock another job has already been
+    // issued. Same rule, same wording — the shape of the request must not change the answer.
+    const consignment = stockLines.find((l) => l.source !== "irm");
+    if (consignment) {
+      throw badRequest(`"${consignment.itemName}" is customer stock — it can only be issued from the warehouse it's stored at, not from a van.`);
+    }
     for (const l of stockLines) engineerByLine.set(l.id, input.fromEngineerId);
   }
 
   // Validate the transfer side ONCE PER SOURCE ENGINEER, against only the lines they actually supply —
   // checking their whole-request coverage would wrongly reject an engineer who covers just their share.
+  // The chosen warehouse has to be able to supply its share. A kit line homes at ONE warehouse, so
+  // anything approved beyond what that site holds is unissuable and sits on the job as a permanent
+  // shortfall. This lived only in the approve dialog, which a stale tab or a direct call bypasses.
+  //
+  // Measured against the WAREHOUSE portion — a van covering part of the line is not the warehouse's
+  // problem — and netted against other jobs' planned demand, so it agrees with the figure the dialog
+  // shows and with every other availability surface.
+  {
+    const wanted = new Map<string, { itemId: string; whId: string; qty: number; name: string }>();
+    for (const l of irmLines) {
+      if (approvedQtyByLine.get(l.id) === 0) continue; // excluded — nothing to supply
+      const whId = whByLine.get(l.id);
+      if (!whId || !l.irmItemId) continue;
+      if (engineerByLine.has(l.id) && !vanQtyByLine.has(l.id)) continue; // wholly from a van
+      const approved = approvedQtyByLine.get(l.id) ?? l.qty;
+      const fromWarehouse = approved - (vanQtyByLine.get(l.id) ?? 0);
+      if (fromWarehouse > 0) wanted.set(l.id, { itemId: l.irmItemId, whId, qty: fromWarehouse, name: l.itemName });
+    }
+    if (wanted.size > 0) {
+      const items = [...new Set([...wanted.values()].map((w) => w.itemId))];
+      const whIds = [...new Set([...wanted.values()].map((w) => w.whId))];
+      const [balances, demand] = await Promise.all([
+        inventoryRepo.findBalancesByItemsAndWarehouses(items, whIds),
+        getOpenDemand().catch(() => new Map<string, { irmItemId: string | null; warehouseId: string | null; demand: number }>()),
+      ]);
+      const demandByKey = new Map<string, number>();
+      for (const d of demand.values()) {
+        if (!d.irmItemId || !d.warehouseId) continue;
+        const k = `${d.warehouseId}:${d.irmItemId}`;
+        demandByKey.set(k, (demandByKey.get(k) ?? 0) + d.demand);
+      }
+      const freeByKey = new Map<string, number>();
+      for (const b of balances) {
+        const k = `${b.warehouseId}:${b.irmItemId}`;
+        freeByKey.set(k, Math.max(0, b.quantityOnHand - (demandByKey.get(k) ?? 0)));
+      }
+      for (const w of wanted.values()) {
+        const free = freeByKey.get(`${w.whId}:${w.itemId}`) ?? 0;
+        if (w.qty > free) {
+          throw badRequest(`"${w.name}" — that warehouse has only ${free} free, but ${w.qty} would be issued from it. Lower the quantity, take more from a van, or pick another warehouse.`);
+        }
+      }
+    }
+  }
+
+  // The same check for CONSIGNMENT. It has no warehouse picker — the entry IS its location, and it
+  // can't be van-sourced — so the whole approved quantity comes off the entry. This lived only in the
+  // approve dialog, leaving the one source a direct call could still over-approve against.
+  {
+    const cseLines = req.lines.filter(
+      (l) => l.source === "customer_stock" && l.customerStockEntryId && approvedQtyByLine.get(l.id) !== 0,
+    );
+    if (cseLines.length > 0) {
+      const ids = [...new Set(cseLines.map((l) => l.customerStockEntryId!))];
+      const [entries, demand] = await Promise.all([
+        goodsManagementRepo.findCustomerStockEntriesByIds(ids).catch(() => []),
+        getOpenDemand().catch(() => new Map<string, { customerStockEntryId: string | null; demand: number }>()),
+      ]);
+      // Netted like every other availability figure — the raw entry quantity would offer units
+      // another job has already planned against the same consignment.
+      const planned = new Map<string, number>();
+      for (const d of demand.values()) {
+        if (!d.customerStockEntryId) continue;
+        planned.set(d.customerStockEntryId, (planned.get(d.customerStockEntryId) ?? 0) + d.demand);
+      }
+      const freeByEntry = new Map(entries.map((e) => [e.id, Math.max(0, e.quantity - (planned.get(e.id) ?? 0))]));
+      for (const l of cseLines) {
+        const want = approvedQtyByLine.get(l.id) ?? l.qty;
+        const free = freeByEntry.get(l.customerStockEntryId!) ?? 0;
+        if (want > free) {
+          throw badRequest(`"${l.itemName}" — that customer stock has only ${free} free, but ${want} would be issued. Lower the quantity or exclude the item.`);
+        }
+      }
+    }
+  }
+
+  // approvedQty 0 EXCLUDES a line: the planner refuses that item and approves the rest. Excluded
+  // lines grow no kit, join no transfer and are exempt from every stock check — nothing is being
+  // moved for them.
+  const isExcluded = (lineId: string) => approvedQtyByLine.get(lineId) === 0;
+  // Excluding everything is a decline wearing an approval's clothes: it would stamp the request
+  // "approved" while handing the engineer nothing, and strand the reason in the wrong field.
+  if (req.lines.length > 0 && req.lines.every((l) => isExcluded(l.id))) {
+    throw badRequest("Every item is excluded — decline the request instead, so the engineer gets the reason.");
+  }
+
   const linesByEngineer = new Map<string, KitRequestWithLines["lines"]>();
   for (const l of stockLines) {
     const eng = engineerByLine.get(l.id);
-    if (!eng) continue;
+    if (!eng || isExcluded(l.id)) continue;
     const bucket = linesByEngineer.get(eng);
     if (bucket) bucket.push(l);
     else linesByEngineer.set(eng, [l]);
@@ -345,12 +552,15 @@ export async function approve(id: string, input: ApproveKitRequestInput, actor: 
   for (const [engineerId, lines] of linesByEngineer) {
     if (engineerId === job.assignedEngineerId) throw badRequest("Pick a different engineer — the job's own engineer can't transfer to themselves.");
     await transferService.assertTransferEngineers(engineerId, job.assignedEngineerId);
-    const shortages = await findHolderShortages(engineerId, lines);
+    const shortages = await findHolderShortages(engineerId, lines, vanQtyByLine, approvedQtyByLine);
     if (shortages.length > 0) throw badRequest(`That engineer doesn't hold enough of: ${shortages.join("; ")}.`);
   }
 
   // IRM lines coming from a van still need a nominal home warehouse (for returns), same as before.
-  const vanIrmLines = irmLines.filter((l) => engineerByLine.has(l.id));
+  // Only lines coming ENTIRELY from a van need a derived home — a split line already carries the
+  // warehouse the reviewer picked for its remainder, and overwriting that would send the engineer to
+  // collect the leftover units somewhere they were never allocated.
+  const vanIrmLines = irmLines.filter((l) => engineerByLine.has(l.id) && !whByLine.has(l.id));
   const homeWarehouses = await Promise.all(vanIrmLines.map((l) => deriveHomeWarehouse(l.irmItemId!, job)));
   vanIrmLines.forEach((l, i) => whByLine.set(l.id, homeWarehouses[i]));
 
@@ -369,25 +579,40 @@ export async function approve(id: string, input: ApproveKitRequestInput, actor: 
     // transaction. So a crash can never leave a grow un-stamped or a transfer un-recorded, and a retry
     // resumes from the failed step — never re-growing the kit or opening a duplicate transfer.
 
-    // 1. Grow the kit — skip if the request lines are already stamped (a prior attempt grew it).
-    const alreadyGrown = req.lines.length > 0 && req.lines.every((l) => l.jobKitLineId);
-    let jobKitLineIds: (string | null)[];
+    // 1. Grow the kit — skip if a prior attempt already grew it.
+    //
+    // ONE stamped line proves the WHOLE grow landed: the stamping runs inside the grow's transaction,
+    // so they commit together or not at all. Asking whether EVERY line is stamped would be wrong now
+    // that an excluded line is deliberately never stamped — one exclusion and the request could never
+    // look grown, so a retry after a crash past this step would grow the kit a second time, and
+    // appendKitFromRequest ADDS to the kit line it matches. That inflates the quantity on the job.
+    const alreadyGrown = req.lines.some((l) => l.jobKitLineId);
+    const includedLines = req.lines.filter((l) => !isExcluded(l.id));
+    // Which JobKitLine each request line grew, for the transfer below. Built from the SAME list the
+    // ids came from in either branch — resuming reads the stamps off req.lines (which still holds the
+    // excluded line), while a fresh grow returns ids positional to includedLines.
+    let kitLineIdByRequestLine: Map<string, string | null>;
     if (alreadyGrown) {
-      jobKitLineIds = req.lines.map((l) => l.jobKitLineId);
+      kitLineIdByRequestLine = new Map(req.lines.map((l) => [l.id, l.jobKitLineId]));
     } else {
-      const appendLines: jobService.KitAppendLine[] = req.lines.map((l) => ({
+      // ONE list drives both the grow and the stamping. appendKitFromRequest returns kit-line ids
+      // positionally (`ids[i]`), so filtering the grow while stamping from req.lines would shift every
+      // line after an exclusion onto its neighbour's kit line — silently attributing a transfer to the
+      // wrong item. Derive both from `includedLines` and they cannot drift.
+      const appendLines: jobService.KitAppendLine[] = includedLines.map((l) => ({
         source: l.source as "irm" | "customer_stock" | "misc",
         irmItemId: l.irmItemId,
         customerStockEntryId: l.customerStockEntryId,
         itemName: l.itemName,
-        qty: l.qty,
+        // The reviewer's trim, falling back to what was requested.
+        qty: approvedQtyByLine.get(l.id) ?? l.qty,
         warehouseId: l.source === "irm" ? whByLine.get(l.id) ?? null : null,
       }));
       // stampTx runs inside the grow's transaction → grow + stamp are atomic.
       const grown = await jobService.appendKitFromRequest(job.id, appendLines, actor, (tx, ids) =>
-        kitRequestRepo.stampLineKitIdsTx(tx, req.lines.map((l, i) => ({ id: l.id, jobKitLineId: ids[i] }))),
+        kitRequestRepo.stampLineKitIdsTx(tx, includedLines.map((l, i) => ({ id: l.id, jobKitLineId: ids[i] }))),
       );
-      jobKitLineIds = grown.jobKitLineIds;
+      kitLineIdByRequestLine = new Map(includedLines.map((l, i) => [l.id, grown.jobKitLineIds[i]]));
     }
 
     // 2. Fulfilment — ONE transfer per distinct source engineer (warehouse-sourced lines need no
@@ -396,7 +621,6 @@ export async function approve(id: string, input: ApproveKitRequestInput, actor: 
     // Resumability: each transfer APPENDS its id to req.transferIds inside its own transaction, and
     // we skip any engineer already recorded there. So a crash midway through a two-engineer approval
     // resumes by opening only the transfer that never got created — never a duplicate.
-    const kitLineIdByRequestLine = new Map(req.lines.map((l, i) => [l.id, jobKitLineIds[i]]));
     // Transfers already opened by a previous attempt, keyed by their SOURCE engineer — the only
     // reliable way to tell which of several transfers survived a crash. Reads from the transfer
     // records themselves rather than inferring from request state.
@@ -411,7 +635,7 @@ export async function approve(id: string, input: ApproveKitRequestInput, actor: 
       if (existing) { transferIds.push(existing); continue; } // already opened — resume past it
       const transferLines = lines
         .map((l) => ({ l, jobKitLineId: kitLineIdByRequestLine.get(l.id) }))
-        .filter((x) => x.l.source !== "misc");
+        .filter((x) => x.l.source !== "misc" && !isExcluded(x.l.id));
       if (transferLines.some((x) => !x.jobKitLineId)) throw conflict("Couldn't link a requested item to its kit line — refresh and try again.");
       const transfer = await transferService.createJobTransfer(
         {
@@ -425,7 +649,7 @@ export async function approve(id: string, input: ApproveKitRequestInput, actor: 
             ownership: x.l.source === "irm" ? "company" : "customer",
             irmItemId: x.l.irmItemId ?? undefined,
             customerStockEntryId: x.l.customerStockEntryId ?? undefined,
-            quantity: x.l.qty,
+            quantity: vanQtyByLine.get(x.l.id) ?? approvedQtyByLine.get(x.l.id) ?? x.l.qty,
             jobKitLineId: x.jobKitLineId ?? undefined,
           })),
         },
@@ -451,7 +675,14 @@ export async function approve(id: string, input: ApproveKitRequestInput, actor: 
         id: l.id,
         sourceType: l.source === "misc" ? null : engineerByLine.has(l.id) ? "engineer" : "warehouse",
         sourceEngineerId: engineerByLine.get(l.id) ?? null,
-        sourceWarehouseId: engineerByLine.has(l.id) ? null : whByLine.get(l.id) ?? null,
+        // A SPLIT line has both, and both matter afterwards: the engineer needs to know a colleague
+        // is handing over part of it AND where to collect the rest. Nulling the warehouse because a
+        // van is involved would erase the pickup location for the remainder. Only a line coming
+        // wholly from a van has no warehouse of its own (its home is derived for returns).
+        sourceWarehouseId: engineerByLine.has(l.id) && !vanQtyByLine.has(l.id) ? null : whByLine.get(l.id) ?? null,
+        // Recorded so the request stays a faithful record of ask-versus-granted. An EXCLUDED line
+        // grows no kit line at all, so without this the refusal would vanish from the history.
+        approvedQty: approvedQtyByLine.get(l.id) ?? null,
       })),
     });
 
@@ -483,6 +714,36 @@ export async function decline(id: string, input: DeclineKitRequestInput, actor: 
   emitUpdate(req.requestedByEngineerId, req.jobId, { id, code: req.code, status: "declined" });
   notify(req.requestedByEngineerId, { title: "Kit request declined", body: `Your kit request ${req.code} was declined.${input.decisionNote ? ` ${input.decisionNote}` : ""}`, data: { type: "job", jobId: req.jobId } });
   return toPublic(updated!);
+}
+
+// Decline everything still waiting on a job that has just been cancelled. A pending request on a dead
+// job is a dead end from both ends: Approve can only ever fail (appendKitFromRequest refuses a
+// cancelled job), so it sat in the review queue as a permanent 409, while the engineer watched a
+// request that was never going to be answered. Cancelling the job IS the answer — record it as one.
+// Mirrors transferService.cancelPendingForJob, which withdraws the van handovers for the same reason.
+export async function declinePendingForJob(jobId: string, actor: AuditActor): Promise<number> {
+  // Pending requests per job are a handful, not a page — take enough that none is silently left behind.
+  const { requests } = await kitRequestRepo.listRequests({ jobId, status: "pending", pageSize: 200 });
+  let declined = 0;
+  for (const req of requests) {
+    try {
+      const count = await kitRequestRepo.declinePending(req.id, {
+        reviewedByUserId: actor.id ?? null,
+        reviewedByEmail: actor.email ?? null,
+        decisionNote: "The job was cancelled.",
+      });
+      if (count === 0) continue; // a race — someone reviewed it a moment ago, and their decision stands
+      declined += 1;
+      audit.record({ actor, action: "job_kit_request.declined", targetType: "job", targetId: req.jobId, targetLabel: req.code, metadata: { jobNumber: req.jobNumber, reason: "job cancelled" } });
+      emitUpdate(req.requestedByEngineerId, req.jobId, { id: req.id, code: req.code, status: "declined" });
+      notify(req.requestedByEngineerId, { title: "Kit request declined", body: `The job was cancelled — kit request ${req.code} is no longer needed.`, data: { type: "job", jobId: req.jobId } });
+    } catch (e) {
+      // One request failing must not abandon the rest. Logged, never swallowed: the engineer's queue
+      // still shows it as pending, and this line is the only trace of why.
+      console.error(`Declining kit request ${req.code} after job ${jobId} was cancelled failed:`, e instanceof Error ? e.message : e);
+    }
+  }
+  return declined;
 }
 
 // ---- cancel (requester, while pending) -------------------------------------------------------
@@ -548,24 +809,141 @@ export async function getOne(id: string, actor: AuditActor): Promise<PublicKitRe
 //   • customer_stock — the JOB'S OWN customer's active, in-stock consignment entries (only when jobId is
 //                      given). Scoped HARD to the job's customerId — never leaks another customer's stock.
 export type KitItemOption =
-  | { source: "irm"; irmItemId: string; code: string; name: string; sku: string | null; uom: string | null }
+  | {
+      source: "irm";
+      irmItemId: string;
+      code: string;
+      name: string;
+      sku: string | null;
+      uom: string | null;
+      /** Total on-hand across ACTIVE warehouses, network-wide. */
+      quantityOnHand: number;
+      /** Total on OTHER engineers' vans — the job's own engineer is excluded (see searchItems). */
+      heldByEngineers: number;
+    }
   | {
       source: "customer_stock";
       customerStockEntryId: string;
       name: string;
       sku: string | null;
       uom: string | null;
+      /** At the storing warehouse, net of other jobs' planned demand. Consignment has no van figure:
+       *  it never reaches an engineer except through a job, so any holding is already committed. */
       qty: number;
       warehouseName: string;
       warehouseCode: string | null;
       serialNumber: string | null;
     };
 
+// ---- availability (shared by the composer's SEARCH and its quantity steppers) -----------------
+//
+// ONE calculation, because the search decides what may be added and the steppers decide how much —
+// and if those two disagreed the engineer would be told an item is available, then handed a cap that
+// says otherwise (or worse, no cap at all, which is what the planned-item and cart rows had).
+//
+// approve() can source a line from exactly two places, so both are counted:
+//   • the warehouse network — on-hand net of OTHER jobs' planned demand, floored per warehouse
+//   • a COLLEAGUE's van — their holding net of what they owe their own job; never the requester's own
+//
+// Best-effort throughout: this is advisory metadata. If a lookup fails the engineer must still be able
+// to work — approve() re-checks authoritatively before any stock moves, so a missing count here can
+// never let a bad issue through.
+export interface KitAvailability {
+  irm: Map<string, { quantityOnHand: number; heldByEngineers: number }>;
+  cse: Map<string, { qty: number }>;
+}
+
+export async function itemAvailability(irmItemIds: string[], cseIds: string[], ownEngineerId?: string): Promise<KitAvailability> {
+  const irm = new Map<string, { quantityOnHand: number; heldByEngineers: number }>();
+  const cse = new Map<string, { qty: number }>();
+  if (irmItemIds.length === 0 && cseIds.length === 0) return { irm, cse };
+
+  const [whRows, demand, vanRows, cseRows] = await Promise.all([
+    irmItemIds.length
+      ? (async () => {
+          const warehouses = await warehouseRepo.findMany({ status: "active" }, 0, 200);
+          return inventoryRepo.findBalancesByItemsAndWarehouses(irmItemIds, warehouses.map((w) => w.id));
+        })().catch(() => [])
+      : Promise.resolve([]),
+    getOpenDemand().catch(() => new Map<string, { irmItemId: string | null; customerStockEntryId: string | null; warehouseId: string | null; demand: number }>()),
+    irmItemIds.length ? engineerStockRepo.findBalancesByItems(irmItemIds, ownEngineerId).catch(() => []) : Promise.resolve([]),
+    cseIds.length ? goodsManagementRepo.findCustomerStockEntriesByIds(cseIds).catch(() => []) : Promise.resolve([]),
+  ]);
+
+  // Demand, split by pool. IRM is keyed per warehouse so one over-committed site can't eat stock
+  // standing at another; a consignment entry lives at exactly one warehouse, so it needs no split.
+  const irmDemand = new Map<string, number>();
+  const cseDemand = new Map<string, number>();
+  for (const d of demand.values()) {
+    if (d.irmItemId && d.warehouseId) {
+      const k = `${d.warehouseId}:${d.irmItemId}`;
+      irmDemand.set(k, (irmDemand.get(k) ?? 0) + d.demand);
+    } else if (d.customerStockEntryId) {
+      cseDemand.set(d.customerStockEntryId, (cseDemand.get(d.customerStockEntryId) ?? 0) + d.demand);
+    }
+  }
+
+  for (const id of irmItemIds) irm.set(id, { quantityOnHand: 0, heldByEngineers: 0 });
+  for (const b of whRows) {
+    const free = Math.max(0, b.quantityOnHand - (irmDemand.get(`${b.warehouseId}:${b.irmItemId}`) ?? 0));
+    const e = irm.get(b.irmItemId);
+    if (e) e.quantityOnHand += free;
+  }
+
+  // A colleague's van only counts for what is SPARE — stock held against their own active job has to
+  // return through that job's reconcile. Once per DISTINCT holder, not per balance row.
+  const holderIds = [...new Set(vanRows.map((b) => b.engineerId))];
+  const committed = new Map<string, Map<string, number>>();
+  await Promise.all(
+    holderIds.map(async (engineerId) => {
+      committed.set(engineerId, await goodsManagementService.jobCommittedByEngineer(engineerId).catch(() => new Map<string, number>()));
+    }),
+  );
+  for (const b of vanRows) {
+    const spare = Math.max(0, b.quantityOnHand - (committed.get(b.engineerId)?.get(b.irmItemId) ?? 0));
+    const e = irm.get(b.irmItemId);
+    if (e) e.heldByEngineers += spare;
+  }
+
+  // Consignment is WAREHOUSE-ONLY. A field stock request carries no customerStockEntryId, so this
+  // pool never reaches an engineer as free van stock — the only writes to EngineerCustomerStockHolding
+  // are a job issue and a job-scoped transfer, meaning every unit an engineer holds is committed to
+  // their job. jobCommittedByEngineer deliberately excludes this pool ("never field-returnable"), so
+  // there is no commitment figure to net off; counting the raw holding would double-book another
+  // job's stock. A planner can still re-allocate it deliberately via holdersByLine at approve time —
+  // that is a decision, not availability.
+  for (const id of cseIds) cse.set(id, { qty: 0 });
+  for (const r of cseRows) {
+    const e = cse.get(r.id);
+    if (e) e.qty = Math.max(0, r.quantity - (cseDemand.get(r.id) ?? 0));
+  }
+
+  return { irm, cse };
+}
+
 export async function searchItems(q: string, jobId?: string): Promise<KitItemOption[]> {
   const term = (q ?? "").trim();
   if (term.length < 1) return [];
 
   const irmRows = await irmRepo.findMany({ search: term, status: "active" }, 0, 20, "name");
+
+  // Customer stock only when we can resolve the job's customer. If the job is missing/soft-deleted, stay
+  // resilient and return IRM only rather than failing the whole search.
+  let cseRows: Awaited<ReturnType<typeof goodsManagementRepo.searchActiveCustomerStock>> = [];
+  let ownEngineerId: string | undefined;
+  if (jobId) {
+    const job = await jobRepo.findById(jobId);
+    ownEngineerId = job?.assignedEngineerId ?? undefined;
+    if (job?.customerId) cseRows = await goodsManagementRepo.searchActiveCustomerStock(job.customerId, term, 20);
+  }
+
+  // The SAME calculation the quantity steppers use — see itemAvailability. An item with neither a
+  // warehouse nor a colleague's van behind it cannot be actioned by any planner: the approve dialog
+  // has nothing to pick, its button stays disabled, and the request sits pending forever (JKR-0026).
+  // Returned WITH zeroes rather than hidden, so the composer can render it disabled and say why —
+  // an item that silently vanishes from a search just gets retyped.
+  const avail = await itemAvailability(irmRows.map((r) => r.id), cseRows.map((r) => r.id), ownEngineerId);
+
   const irmOptions: KitItemOption[] = irmRows.map((r) => ({
     source: "irm",
     irmItemId: r.id,
@@ -573,28 +951,21 @@ export async function searchItems(q: string, jobId?: string): Promise<KitItemOpt
     name: r.name,
     sku: r.sku ?? null,
     uom: r.baseUnit ?? null,
+    quantityOnHand: avail.irm.get(r.id)?.quantityOnHand ?? 0,
+    heldByEngineers: avail.irm.get(r.id)?.heldByEngineers ?? 0,
   }));
 
-  // Customer stock only when we can resolve the job's customer. If the job is missing/soft-deleted, stay
-  // resilient and return IRM only rather than failing the whole search.
-  let customerOptions: KitItemOption[] = [];
-  if (jobId) {
-    const job = await jobRepo.findById(jobId);
-    if (job?.customerId) {
-      const rows = await goodsManagementRepo.searchActiveCustomerStock(job.customerId, term, 20);
-      customerOptions = rows.map((r) => ({
-        source: "customer_stock",
-        customerStockEntryId: r.id,
-        name: r.itemName,
-        sku: r.sku,
-        uom: r.uom,
-        qty: r.quantity,
-        warehouseName: r.warehouseName,
-        warehouseCode: r.warehouseCode,
-        serialNumber: r.serialNumber,
-      }));
-    }
-  }
+  const customerOptions: KitItemOption[] = cseRows.map((r) => ({
+    source: "customer_stock",
+    customerStockEntryId: r.id,
+    name: r.itemName,
+    sku: r.sku,
+    uom: r.uom,
+    qty: avail.cse.get(r.id)?.qty ?? 0,
+    warehouseName: r.warehouseName,
+    warehouseCode: r.warehouseCode,
+    serialNumber: r.serialNumber,
+  }));
 
   return [...irmOptions, ...customerOptions];
 }
@@ -605,4 +976,18 @@ export async function uploadAttachment(image: string): Promise<{ url: string }> 
   const publicId = `kitreq-${Date.now()}`;
   const url = await uploadToCloudinary(image, publicId, creds, "senthra/kit-requests");
   return { url };
+}
+
+// Availability for a KNOWN set of items — the composer's planned-item rows and its cart, which come
+// from the job's kit list rather than from a search. Resolves the job's own engineer so a colleague's
+// van is counted but the requester's own never is, then defers to the one shared calculation, so a
+// stepper's cap can never disagree with the search result that put the item there.
+export async function itemAvailabilityFor(
+  jobId: string | undefined,
+  irmItemIds: string[],
+  cseIds: string[],
+): Promise<{ irm: Record<string, { quantityOnHand: number; heldByEngineers: number }>; cse: Record<string, { qty: number }> }> {
+  const ownEngineerId = jobId ? (await jobRepo.findById(jobId))?.assignedEngineerId ?? undefined : undefined;
+  const a = await itemAvailability(irmItemIds, cseIds, ownEngineerId);
+  return { irm: Object.fromEntries(a.irm), cse: Object.fromEntries(a.cse) };
 }

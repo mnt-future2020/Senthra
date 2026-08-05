@@ -22,6 +22,7 @@ vi.mock("./job.repository.js", () => ({
 
 vi.mock("#modules/goods-management/goods-management.service.js", () => ({
   recordConsumeAndComplete: vi.fn(),
+  openReturnsOnCancel: vi.fn(),
   warehouseScopeFilter: vi.fn(),
   scanLookup: vi.fn(),
   postIssue: vi.fn(),
@@ -49,6 +50,8 @@ vi.mock("#modules/warehouse/warehouse.repository.js", () => ({ findById: vi.fn()
 vi.mock("#modules/inventory/inventory.repository.js", () => ({ findBalancePair: vi.fn() }));
 vi.mock("#modules/user/user.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/engineer-transfer/engineer-transfer.repository.js", () => ({ findVanSourcesByKitLines: vi.fn() }));
+vi.mock("#modules/engineer-transfer/engineer-transfer.service.js", () => ({ cancelPendingForJob: vi.fn() }));
+vi.mock("#modules/job-kit-request/job-kit-request.service.js", () => ({ declinePendingForJob: vi.fn() }));
 vi.mock("#modules/email/email.service.js", () => ({ sendTemplatedEmail: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("#modules/role/permissions.js", () => ({ roleGrants: vi.fn().mockReturnValue(false) }));
 
@@ -58,7 +61,11 @@ import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
 import * as irmRepo from "#modules/irm/irm.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as transferRepo from "#modules/engineer-transfer/engineer-transfer.repository.js";
-import { startJobForEngineer, completeJobForEngineer, updateJob, kitLinesChanged, getJob } from "./job.service.js";
+import * as userRepo from "#modules/user/user.repository.js";
+import * as emailService from "#modules/email/email.service.js";
+import * as transferService from "#modules/engineer-transfer/engineer-transfer.service.js";
+import * as kitRequestService from "#modules/job-kit-request/job-kit-request.service.js";
+import { startJobForEngineer, completeJobForEngineer, updateJob, kitLinesChanged, getJob, cancelJob, assignJob } from "./job.service.js";
 
 const JOB_ID = "a".repeat(24);
 const ENG_ID = "b".repeat(24);
@@ -127,6 +134,8 @@ const baseJob = {
 };
 
 const inProgressJob = { ...baseJob, status: "in_progress" };
+
+const KIT_LINE = { id: "kl1", lineType: "irm", seCode: null, itemName: "Cat6 Cable", description: null, customerStockEntryId: null, irmItemId: "i1", warehouseId: "w1", warehouseName: "London Logistics Hub", warehouseCode: "WH-0005", warehouse: null, qty: 6, notes: null };
 
 const mockFindById = jobRepo.findById as ReturnType<typeof vi.fn>;
 const mockStartIfAccepted = jobRepo.startIfAccepted as ReturnType<typeof vi.fn>;
@@ -501,5 +510,105 @@ describe("getJob — van-sourced kit lines", () => {
   it("defaults to an empty list when nothing was transferred", async () => {
     const job = await getJob(JOB_ID);
     expect(job.kitLines.every((l) => l.vanSources.length === 0)).toBe(true);
+  });
+});
+
+
+// ── cancelJob / assignJob ─────────────────────────────────────────────────────────────────────
+// Cancelling is the moment stock is MOST likely to be stranded: it is reachable from accepted and
+// in_progress, and the engineer is still physically holding the kit afterwards. Every exit was shut —
+// postReturn refused a cancelled job, the engineer could never complete it (so it never reached
+// awaiting_return), and closeReconcile only unlocks from awaiting_return. The kit had nowhere to go,
+// while the overdue list chased it forever. Cancelling now OPENS the return instead of blocking it.
+describe("cancelJob — cancelling opens the return, it doesn't strand the kit", () => {
+  const mockUpdate = jobRepo.update as ReturnType<typeof vi.fn>;
+  const mockOpenReturns = goodsManagementService.openReturnsOnCancel as ReturnType<typeof vi.fn>;
+  const cancelled = { ...baseJob, status: "cancelled", cancelledAt: new Date(), cancelReason: "customer pulled out" };
+
+  beforeEach(() => {
+    mockFindById.mockResolvedValue(baseJob);
+    mockUpdate.mockResolvedValue(cancelled);
+    mockOpenReturns.mockResolvedValue(undefined);
+    (transferService.cancelPendingForJob as ReturnType<typeof vi.fn>).mockResolvedValue(0);
+    (kitRequestService.declinePendingForJob as ReturnType<typeof vi.fn>).mockResolvedValue(0);
+    (goodsManagementService.getJobKitTallies as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    (goodsManagementService.getGoodsStatus as ReturnType<typeof vi.fn>).mockResolvedValue("awaiting_return");
+    (transferRepo.findVanSourcesByKitLines as ReturnType<typeof vi.fn>).mockResolvedValue(new Map());
+  });
+
+  it("hands the job to goods management so the kit can be scanned back in", async () => {
+    await cancelJob(JOB_ID, "customer pulled out");
+    expect(mockOpenReturns).toHaveBeenCalledWith(JOB_ID);
+  });
+
+  // A pending van handover is another engineer's to-do: "give N units from your van to this job".
+  // Cancelling the job doesn't make that stock needed any more, but the request stayed pending — so it
+  // sat on the holder's Transfers list forever, and both kit lists kept showing "awaiting handover" as
+  // though stock were still on its way to a dead job.
+  it("withdraws the pending van handovers other engineers were asked for", async () => {
+    await cancelJob(JOB_ID, "customer pulled out");
+    expect(transferService.cancelPendingForJob).toHaveBeenCalledWith(JOB_ID, expect.anything());
+  });
+
+  it("still cancels when withdrawing a handover fails", async () => {
+    (transferService.cancelPendingForJob as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("boom"));
+    await expect(cancelJob(JOB_ID, "reason")).resolves.toMatchObject({ status: "cancelled" });
+  });
+
+  // Same loose end one queue over: a kit request raised before the cancel stayed pending forever. The
+  // planner's Approve on it can't work — appendKitFromRequest refuses a cancelled job — so it sat in
+  // the review queue as a permanent 409, and the engineer never learned the answer was no.
+  it("declines the kit requests still waiting on this job", async () => {
+    await cancelJob(JOB_ID, "customer pulled out");
+    expect(kitRequestService.declinePendingForJob).toHaveBeenCalledWith(JOB_ID, expect.anything());
+  });
+
+  it("still cancels when declining a kit request fails", async () => {
+    (kitRequestService.declinePendingForJob as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("boom"));
+    await expect(cancelJob(JOB_ID, "reason")).resolves.toMatchObject({ status: "cancelled" });
+  });
+
+  // Best-effort: a summary write must never cost the planner their cancel. The chase list still holds
+  // the job either way (findGoodsActiveJobIds keeps cancelled), so the stock stays visible.
+  it("still cancels when the goods side fails", async () => {
+    mockOpenReturns.mockRejectedValue(new Error("mongo down"));
+    await expect(cancelJob(JOB_ID, "reason")).resolves.toMatchObject({ status: "cancelled" });
+  });
+
+  // The office job detail puts this response straight into state, so a payload without tallies wiped
+  // every Issued / Used / Returned / Remaining column to 0 the instant you confirmed the cancel — and
+  // the warehouse split under each item with it. Nothing had moved; the response simply carried the
+  // defaults. Same bug on Reassign, which is why assignJob is covered below.
+  it("returns the job WITH its goods tallies, not the zeroed defaults", async () => {
+    const withKit = { ...baseJob, kitLines: [{ ...KIT_LINE, id: "kl1" }] };
+    mockFindById.mockResolvedValue(withKit);
+    mockUpdate.mockResolvedValue({ ...withKit, status: "cancelled" });
+    (goodsManagementService.getJobKitTallies as ReturnType<typeof vi.fn>).mockResolvedValue({
+      kl1: { issued: 3, used: 0, returned: 0, remaining: 3 },
+    });
+    const job = await cancelJob(JOB_ID, undefined);
+    expect(job.kitLines[0]).toMatchObject({ issued: 3, remaining: 3 });
+    expect(job.goodsStatus).toBe("awaiting_return");
+  });
+});
+
+describe("assignJob — reassigning must not wipe the goods columns either", () => {
+  it("returns the job WITH its goods tallies", async () => {
+    const withKit = { ...baseJob, status: "assigned", kitLines: [{ ...KIT_LINE, id: "kl1" }] };
+    mockFindById.mockResolvedValue({ ...baseJob, status: "assigned" });
+    (jobRepo.update as ReturnType<typeof vi.fn>).mockResolvedValue(withKit);
+    (userRepo.findById as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: OTHER_ENG, firstName: "Ann", lastName: "Lee", email: "ann@x.com", status: "active", deletedAt: null, role: { name: "Engineer", canHoldStock: true },
+    });
+    (goodsManagementService.getJobKitTallies as ReturnType<typeof vi.fn>).mockResolvedValue({
+      kl1: { issued: 2, used: 0, returned: 0, remaining: 2 },
+    });
+    (goodsManagementService.getGoodsStatus as ReturnType<typeof vi.fn>).mockResolvedValue("issued");
+    (transferRepo.findVanSourcesByKitLines as ReturnType<typeof vi.fn>).mockResolvedValue(new Map());
+    // resetAllMocks in the global beforeEach drops the module-level default; the assignment email is
+    // fire-and-forget, so an unstubbed mock returns undefined and assignJob throws on `.catch`.
+    (emailService.sendTemplatedEmail as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    const job = await assignJob(JOB_ID, OTHER_ENG);
+    expect(job.kitLines[0]).toMatchObject({ issued: 2, remaining: 2 });
   });
 });

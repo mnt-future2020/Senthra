@@ -94,6 +94,17 @@ export const closeReconcileSchema = z
     writeOffLost: z.boolean().optional(), // book any unaccounted units as lost on close
     writeOffReason: z.enum(WRITE_OFF_REASONS).optional(),
     writeOffNotes: z.string().trim().max(2000).optional(),
+    /**
+     * The request is the OVERDUE TAB's escape hatch, not an everyday close.
+     *
+     * Both screens post here, so without this marker the relaxation written for the Overdue tab (see
+     * closeReconcile) also reached the warehouse scan panel, where it could reconcile — and write off —
+     * a job the engineer is still working, locking it against any further issue or return.
+     *
+     * A routing marker, NEVER an override: the service still reads the window from Settings and checks
+     * the job's own issue movements against it, so this cannot close a job that isn't genuinely overdue.
+     */
+    fromOverdue: z.boolean().optional(),
   })
   // Writing stock off as lost is irreversible (the job locks) and is a real financial loss, so it may
   // not happen anonymously. Every other destructive stock action here — report damage, close a delivery

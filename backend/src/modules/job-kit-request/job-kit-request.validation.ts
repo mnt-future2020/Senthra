@@ -59,17 +59,36 @@ export type CreateKitRequestInput = z.infer<typeof createKitRequestSchema>;
 // some items while another engineer's van holds the rest — so each line names its own source:
 //   warehouse → warehouseId required (IRM lines; misc/customer-stock derive or need none)
 //   engineer  → engineerId required (that line joins the transfer opened from that engineer)
-// A line is always fulfilled ENTIRELY from one source; quantities are never split.
+// A line MAY be split across both: `engineerQty` says how many units come off the van, and the
+// remainder is collected from `warehouseId`. Omit engineerQty and the whole line comes from the one
+// source, which is the original behaviour.
+//
+// The split exists because either/or had no answer for the common case — 5 requested, 2 on the shelf,
+// 29 on a colleague's van: the warehouse can't cover it, and taking all 5 off the van strips someone
+// who may need them. The kit line already merges sources downstream (see the note on
+// findVanSourcesByKitLines), so this only removes an artificial limit in the review step.
+//
+// engineerQty is NOT bounded against the line here — the schema can't see the request's quantities.
+// approve() owns that check, where the lines are loaded.
 const lineSourceSchema = z
   .object({
     requestLineId: objectId,
     sourceType: z.enum(["warehouse", "engineer"]),
     warehouseId: objectId.optional(),
     engineerId: objectId.optional(),
+    engineerQty: z.number().int().positive().optional(),
+    // The reviewer's TRIM: approve fewer than were asked for. Absent ⇒ the full requested quantity.
+    // ZERO is meaningful and deliberately allowed — it EXCLUDES the line, letting a planner refuse one
+    // item while approving the rest instead of declining the whole request. Not bounded above here;
+    // the schema can't see the request, so approve() checks it against the line.
+    approvedQty: z.number().int().min(0).optional(),
   })
   .superRefine((v, ctx) => {
     if (v.sourceType === "engineer" && !v.engineerId) {
       ctx.addIssue({ code: "custom", path: ["engineerId"], message: "Pick the engineer to transfer this item from." });
+    }
+    if (v.sourceType === "warehouse" && v.engineerQty !== undefined) {
+      ctx.addIssue({ code: "custom", path: ["engineerQty"], message: "A warehouse line can't take part of its quantity from a van." });
     }
   });
 

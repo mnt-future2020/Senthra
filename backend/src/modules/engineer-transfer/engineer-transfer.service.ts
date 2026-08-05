@@ -549,6 +549,48 @@ export async function cancel(id: string, actor: AuditActor): Promise<PublicTrans
   return toPublic(cancelled);
 }
 
+// Withdraw every pending handover raised for a job that has just been CANCELLED.
+//
+// A pending transfer is a to-do on the SOURCE engineer ("hand N units from your van to this job"). The
+// job going away doesn't clear it: it stayed on their Transfers list with nothing to decide, and both
+// kit lists kept rendering "awaiting handover" as though stock were still on its way to dead work.
+// No stock moves either way — a pending transfer has never touched a balance (only completeTransferTx
+// does) — so this is purely closing an open request.
+//
+// Unlike `cancel` above there is no requester/oversight check: the caller is the job-cancel flow, which
+// carries its own `jobs.cancel` permission, and the decision has already been made upstream. Each
+// transfer is cancelled independently so one failure can't strand the rest. Returns how many closed.
+export async function cancelPendingForJob(jobId: string, actor: AuditActor): Promise<number> {
+  const pending = await transferRepo.findPendingByJob(jobId);
+  let closed = 0;
+  for (const t of pending) {
+    try {
+      const cancelled = await transferRepo.cancelTx(t.id);
+      closed += 1;
+      audit.record({
+        actor,
+        action: "engineer_transfer.cancelled",
+        targetType: "engineer_transfer",
+        targetId: cancelled.id,
+        targetLabel: cancelled.code,
+        metadata: { cancelledBy: actor.email, reason: "job cancelled", jobId },
+      });
+      emitBoth(cancelled.fromEngineerId, cancelled.toEngineerId, { id: cancelled.id, code: cancelled.code, status: cancelled.status });
+      // The holder was the one being asked to act, so they are the one who needs to know it's off.
+      notify(cancelled.fromEngineerId, {
+        title: "Transfer request cancelled",
+        body: `The job was cancelled — stock request ${cancelled.code} no longer needs action.`,
+        data: { type: "transfer", transferId: cancelled.id },
+      });
+    } catch (e) {
+      // A race (the holder approved it a second ago) leaves a completed transfer, which is correct and
+      // not this function's business to undo. Log and carry on with the rest.
+      console.error(`Withdrawing transfer ${t.code} after job ${jobId} was cancelled failed:`, e instanceof Error ? e.message : e);
+    }
+  }
+  return closed;
+}
+
 // ---- override (admin force-complete) ---------------------------------------------------------
 
 export async function override(id: string, actor: AuditActor): Promise<PublicTransfer> {
