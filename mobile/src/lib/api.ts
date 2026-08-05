@@ -59,6 +59,14 @@ export function isPermissionError(err: unknown): boolean {
   return err instanceof ApiError && err.status === 403;
 }
 
+// Fired when a request ends 401 even after the silent refresh — the session is
+// truly dead (refresh token expired / revoked). The auth layer registers a
+// handler that clears the principal so the router falls back to the login page.
+let onAuthFailure: (() => void) | null = null;
+export function setOnAuthFailure(handler: (() => void) | null): void {
+  onAuthFailure = handler;
+}
+
 // One refresh at a time — a burst of expired-token requests triggers a single refresh.
 let refreshInFlight: Promise<boolean> | null = null;
 
@@ -117,6 +125,13 @@ export async function api<T>(path: string, options: ApiOptions = {}, _retried = 
   if (res.status === 401 && !_retried && !NO_REFRESH.some((p) => path.startsWith(p))) {
     const ok = await attemptRefresh();
     if (ok) return api<T>(path, options, true);
+  }
+
+  // Still 401 after the refresh path (or on the retried request): the session is
+  // dead — tell the auth layer so the app returns to the login screen. Login
+  // itself is excluded (a wrong password must not look like an expired session).
+  if (res.status === 401 && !NO_REFRESH.some((p) => path.startsWith(p))) {
+    onAuthFailure?.();
   }
 
   const data = (await res.json().catch(() => null)) as (T & { error?: string }) | null;

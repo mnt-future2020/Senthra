@@ -1,6 +1,6 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import { getOwnJobs } from "@/services/engineer.service";
 import { useLoad } from "@/lib/useLoad";
 import { useDebounced } from "@/lib/useDebounced";
@@ -26,6 +26,8 @@ const STATUS_FILTERS = [
   { key: "assigned", label: "Assigned" },
   { key: "accepted", label: "Accepted" },
   { key: "in_progress", label: "In progress" },
+  // "Overdue" is not a stored status — the backend derives it (active job, completion date passed).
+  { key: "overdue", label: "Overdue" },
   { key: "completed", label: "Completed" },
   { key: "rejected", label: "Rejected" },
   { key: "cancelled", label: "Cancelled" },
@@ -36,17 +38,32 @@ const SORT_OPTIONS = [
   { key: "oldest", label: "Oldest first" },
 ];
 
-// The events the web jobs list live-refreshes on (useJobSocket) plus job:updated,
-// which the backend sends to the assigned engineer on goods issue/return.
-const JOB_EVENTS = ["job:new", "job:accepted", "job:rejected", "job:deleted", "job:updated", "job:cancelled"];
+// Exactly the web's useJobSocket event set — job:updated covers edits, cancel,
+// start and complete; job:deleted covers deletes AND reassignment away from you.
+const JOB_EVENTS = ["job:new", "job:accepted", "job:rejected", "job:updated", "job:deleted"];
 
 export default function JobsScreen() {
   const router = useRouter();
+  const params = useLocalSearchParams<{ status?: string; t?: string }>();
   const [status, setStatus] = useState("");
   const [sort, setSort] = useState("");
   const [q, setQ] = useState("");
   const [page, setPage] = useState(1);
   const query = useDebounced(q);
+
+  // Dashboard deep-links: /(tabs)/jobs?status=assigned|overdue|in_progress seeds
+  // the filter; an empty status ("All jobs" link) resets it. The `t` nonce makes
+  // repeat taps of the same card re-seed. (Async tick keeps the update out of the
+  // effect body for the lint.)
+  useEffect(() => {
+    const seed = params.status;
+    if (typeof seed !== "string") return;
+    const timer = setTimeout(() => {
+      setStatus(seed);
+      setPage(1);
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [params.status, params.t]);
 
   const { data, loading, fetching, refreshing, error, reload, refresh } = useLoad(
     useCallback(async () => {

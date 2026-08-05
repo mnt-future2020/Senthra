@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from "react";
-import { Linking, Pressable, StyleSheet, Text, View } from "react-native";
+import { Alert, Linking, Pressable, StyleSheet, Text, View } from "react-native";
 import { Image } from "expo-image";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import {
@@ -159,7 +159,20 @@ export default function TransferDetailScreen() {
           <SectionTitle>You hold this stock</SectionTitle>
           <Button
             title="Approve Hand-over"
-            onPress={() => void run("approve", () => approveTransfer(transfer.id), "Transfer approved.")}
+            onPress={() =>
+              // Web parity: approving hands custody of your stock to the other engineer — confirm first.
+              Alert.alert(
+                "Approve this transfer?",
+                "The requested stock moves to the other engineer once you approve.",
+                [
+                  { text: "Cancel", style: "cancel" },
+                  {
+                    text: "Approve transfer",
+                    onPress: () => void run("approve", () => approveTransfer(transfer.id), "Transfer approved."),
+                  },
+                ],
+              )
+            }
             loading={busy === "approve"}
           />
           {declining ? (
@@ -196,7 +209,20 @@ export default function TransferDetailScreen() {
           title="Cancel Request"
           variant="secondary"
           loading={busy === "cancel"}
-          onPress={() => void run("cancel", () => cancelTransfer(transfer.id), "Transfer cancelled.")}
+          onPress={() =>
+            Alert.alert(
+              "Cancel this transfer?",
+              `Transfer ${transfer.code} will be cancelled. This can't be undone.`,
+              [
+                { text: "Keep it", style: "cancel" },
+                {
+                  text: "Cancel transfer",
+                  style: "destructive",
+                  onPress: () => void run("cancel", () => cancelTransfer(transfer.id), "Transfer cancelled."),
+                },
+              ],
+            )
+          }
         />
       ) : null}
 

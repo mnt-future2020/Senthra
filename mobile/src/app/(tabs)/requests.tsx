@@ -1,6 +1,6 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Alert, Linking, Pressable, StyleSheet, Text, View } from "react-native";
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import { listMyTransfers } from "@/services/transfer.service";
 import {
   cancelVanStockRemaining,
@@ -55,6 +55,8 @@ const TRANSFER_STATUS_FILTERS = [
 const VSR_STATUS_FILTERS = [
   { key: "", label: "All statuses" },
   { key: "pending", label: "Pending" },
+  // Composite of approved + partially_fulfilled — the two states with stock still to pick up.
+  { key: "collectible", label: "Ready to collect" },
   { key: "approved", label: "Approved" },
   { key: "partially_fulfilled", label: "Partially fulfilled" },
   { key: "fulfilled", label: "Fulfilled" },
@@ -88,8 +90,6 @@ const VSR_STATUS_LABELS: Record<string, string> = {
   cancelled: "Cancelled",
 };
 
-const GOODS_EVENTS = ["goods:issued", "goods:returned", "goods:updated", "engineer:transfer_updated"];
-
 /** Web's VanRequestItemsSummary: "Item ×2 • Other ×1 • +3 more". */
 function itemsSummary(r: VanStockRequest): string {
   const parts = r.lines.slice(0, 2).map((l) => `${l.itemName} ×${l.requestedQty}`);
@@ -104,6 +104,7 @@ function transferNeedsSign(t: EngineerTransfer): boolean {
 export default function RequestsScreen() {
   const router = useRouter();
   const toast = useToast();
+  const params = useLocalSearchParams<{ tab?: string; view?: string; status?: string; t?: string }>();
   const [tab, setTab] = useState("transfers");
 
   // ── Transfers ───────────────────────────────────────────────────────────────
@@ -138,7 +139,7 @@ export default function RequestsScreen() {
   const vQuery = useDebounced(vQ);
   const [vanPage, setVanPage] = useState(1);
 
-  const { data: vanRequests, loading: l2, fetching: f2, refresh: refreshVan, reload: reloadVan } = useLoad(
+  const { data: vanRequests, loading: l2, fetching: f2, error: vanError, refresh: refreshVan, reload: reloadVan } = useLoad(
     useCallback(async () => {
       const r = await listMyVanStockRequests({
         status: vStatus || undefined,
@@ -156,7 +157,7 @@ export default function RequestsScreen() {
 
   // ── Kit (mobile-only cross-job list; web shows kit requests per job) ────────
   const [kitPage, setKitPage] = useState(1);
-  const { data: kitRequests, loading: l3, fetching: f3, refresh: refreshKit, reload: reloadKit } = useLoad(
+  const { data: kitRequests, loading: l3, fetching: f3, error: kitError, refresh: refreshKit, reload: reloadKit } = useLoad(
     useCallback(async () => {
       const r = await listMyKitRequests({ page: kitPage, pageSize: PAGE_SIZE });
       if (r.totalPages > 0 && kitPage > r.totalPages) setKitPage(r.totalPages);
@@ -164,7 +165,30 @@ export default function RequestsScreen() {
     }, [kitPage]),
   );
 
-  useSocketRefresh(GOODS_EVENTS, () => void reloadTransfers());
+  // Dashboard deep-links: /(tabs)/requests?tab=van&status=collectible or
+  // ?tab=transfers&view=incoming&status=pending seed the segment + filters.
+  useEffect(() => {
+    const tabParam = params.tab;
+    if (typeof tabParam !== "string" || !tabParam) return;
+    const view = params.view;
+    const status = params.status;
+    const t = setTimeout(() => {
+      setTab(tabParam);
+      if (tabParam === "van") {
+        if (typeof status === "string") setVStatus(status);
+        setVanPage(1);
+      } else if (tabParam === "transfers") {
+        if (typeof view === "string") setTView(view);
+        if (typeof status === "string") setTStatus(status);
+        setTransferPage(1);
+      }
+    }, 0);
+    return () => clearTimeout(t);
+  }, [params.tab, params.view, params.status, params.t]);
+
+  // Narrow subscription (like the web): only the transfer event refetches this
+  // list — an unrelated warehouse issue/return doesn't trigger a paged refetch.
+  useSocketRefresh(["engineer:transfer_updated"], () => void reloadTransfers());
   useSocketRefresh(["van_stock_request:updated"], () => void reloadVan());
   useSocketRefresh(["kit_request:updated"], () => void reloadKit());
 
@@ -271,7 +295,10 @@ export default function RequestsScreen() {
               }}
             />
           </FilterRow>
-          <ErrorText message={error} />
+          {/* A load failure gets its own state — never rendered as an empty inbox. */}
+          {error ? (
+            <ErrorText message={error} />
+          ) : (
           <ListFade dimmed={f1}>
             {(transfers?.transfers ?? []).length === 0 ? (
               tFiltered ? (
@@ -334,6 +361,7 @@ export default function RequestsScreen() {
               />
             ) : null}
           </ListFade>
+          )}
         </>
       ) : null}
 
@@ -389,6 +417,9 @@ export default function RequestsScreen() {
               }}
             />
           </FilterRow>
+          {vanError ? (
+            <ErrorText message={vanError} />
+          ) : (
           <ListFade dimmed={f2}>
             {(vanRequests?.requests ?? []).length === 0 ? (
               <EmptyState
@@ -431,12 +462,16 @@ export default function RequestsScreen() {
               />
             ) : null}
           </ListFade>
+          )}
         </>
       ) : null}
 
       {tab === "kit" ? (
         <>
           <Text style={s.hint}>Raise kit requests from a job&rsquo;s detail page.</Text>
+          {kitError ? (
+            <ErrorText message={kitError} />
+          ) : (
           <ListFade dimmed={f3}>
             {(kitRequests?.requests ?? []).length === 0 ? (
               <EmptyState title="No kit requests" />
@@ -467,6 +502,7 @@ export default function RequestsScreen() {
               />
             ) : null}
           </ListFade>
+          )}
         </>
       ) : null}
     </Screen>

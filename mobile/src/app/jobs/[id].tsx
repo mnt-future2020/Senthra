@@ -1,5 +1,5 @@
-import React, { useCallback, useState } from "react";
-import { Linking, Pressable, StyleSheet, Text, View } from "react-native";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Alert, Linking, Pressable, StyleSheet, Text, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import {
@@ -9,6 +9,7 @@ import {
   startOwnJob,
 } from "@/services/engineer.service";
 import { cancelKitRequest, listMyKitRequests } from "@/services/kitRequest.service";
+import { ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useLoad } from "@/lib/useLoad";
 import { useSocketRefresh } from "@/lib/useSocketRefresh";
@@ -129,11 +130,36 @@ export default function JobDetailScreen() {
   const { data: job, setData: setJob, loading, refreshing, error, refresh } = useLoad(
     useCallback(() => getOwnJob(id), [id]),
   );
-  const { data: kitRequests, reload: reloadKitRequests } = useLoad(
+  const { data: kitRequests, error: kitError, reload: reloadKitRequests } = useLoad(
     useCallback(() => listMyKitRequests({ jobId: id, pageSize: 50 }).then((r) => r.requests), [id]),
   );
 
   useSocketRefresh(["kit_request:updated"], () => void reloadKitRequests());
+
+  // Live-refresh the job so kit tallies + the "Start work" gate never go stale
+  // (warehouse issues kit, planner edits/cancels/reassigns). Skipped while one of
+  // this screen's own mutations is in flight — that action already replaces state
+  // from its response, so a socket refetch can't race it. Mirrors the web detail.
+  const busyRef = useRef(busy);
+  useEffect(() => {
+    busyRef.current = busy;
+  });
+  useSocketRefresh(
+    ["job:new", "job:accepted", "job:rejected", "job:updated", "job:deleted", "goods:issued", "goods:returned", "goods:updated", "engineer:transfer_updated"],
+    () => {
+      if (busyRef.current) return;
+      getOwnJob(id)
+        .then(setJob)
+        .catch((e) => {
+          // Only a genuine stale-state error (404/409 — reassigned or cancelled out
+          // from under this engineer) is worth interrupting for; transient network
+          // blips are swallowed, leaving the current job on screen.
+          if (e instanceof ApiError && (e.status === 404 || e.status === 409)) {
+            toast.error("This job is no longer available — it may have been reassigned or cancelled.");
+          }
+        });
+    },
+  );
 
   const run = async (key: string, fn: () => Promise<typeof job>, successMsg?: string) => {
     setBusy(key);
@@ -187,6 +213,28 @@ export default function JobDetailScreen() {
 
   const openKitRequest = () =>
     router.push({ pathname: "/kit-requests/new", params: { jobId: job.id, jobNumber: job.jobNumber } });
+
+  // Web parity: cancelling a kit request asks for confirmation first.
+  const confirmCancelKitRequest = (krId: string) => {
+    Alert.alert(
+      "Cancel this kit request?",
+      "The planner will no longer see this request. This can't be undone.",
+      [
+        { text: "Keep it", style: "cancel" },
+        {
+          text: "Cancel request",
+          style: "destructive",
+          onPress: () =>
+            void cancelKitRequest(krId)
+              .then(() => {
+                toast.success("Kit request cancelled.");
+                return reloadKitRequests();
+              })
+              .catch(() => toast.error("Could not cancel the request.")),
+        },
+      ],
+    );
+  };
 
   return (
     <Screen refreshing={refreshing} onRefresh={() => void refresh()}>
@@ -351,8 +399,13 @@ export default function JobDetailScreen() {
           ) : (
             <Button title="Request items" variant="secondary" onPress={openKitRequest} />
           )}
-          {(kitRequests ?? []).length === 0 ? (
-            <EmptyState title="No kit requests on this job yet" />
+          {kitError ? (
+            <ErrorText message={kitError} />
+          ) : (kitRequests ?? []).length === 0 ? (
+            <EmptyState
+              title="No kit requests yet"
+              subtitle="Need more kit? Use &ldquo;Request items&rdquo; above and it&rsquo;ll show here."
+            />
           ) : (
             (kitRequests ?? []).map((kr: KitRequest) => (
               <Card key={kr.id}>
@@ -394,14 +447,7 @@ export default function JobDetailScreen() {
                     title="Cancel request"
                     variant="secondary"
                     small
-                    onPress={() =>
-                      void cancelKitRequest(kr.id)
-                        .then(() => {
-                          toast.success("Request cancelled.");
-                          return reloadKitRequests();
-                        })
-                        .catch(() => toast.error("Could not cancel the request."))
-                    }
+                    onPress={() => confirmCancelKitRequest(kr.id)}
                   />
                 ) : null}
               </Card>

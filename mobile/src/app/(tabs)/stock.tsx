@@ -1,16 +1,17 @@
-import React, { useCallback, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
+import { useLocalSearchParams } from "expo-router";
 import DateTimePicker, { DateTimePickerAndroid } from "@react-native-community/datetimepicker";
 import type { DateTimePickerEvent } from "@react-native-community/datetimepicker";
 import {
   getOwnCustomerStock,
   getOwnMiscStock,
   getOwnMovements,
-  getOwnOverview,
   getOwnStock,
 } from "@/services/engineer.service";
 import { useLoad } from "@/lib/useLoad";
 import { useSocketRefresh } from "@/lib/useSocketRefresh";
+import { useClientTable, type ClientTableOptions } from "@/lib/useClientTable";
 import {
   Button,
   Card,
@@ -18,17 +19,19 @@ import {
   EmptyState,
   ErrorText,
   FilterRow,
+  Input,
   ListFade,
   ListSkeleton,
+  Pager,
   Screen,
   Select,
 } from "@/components/ui";
 import { colors } from "@/lib/theme";
 import { formatDate, formatDateTime, signed } from "@/lib/format";
-import type { Movement } from "@/types";
+import type { CustomerHolding, EngineerStockItem, MiscHeldItem, Movement } from "@/types";
 
-// Section pills, captions and movement filters mirror the web dashboard's
-// EngineerInventory / MovementFeed.
+// Section pills, captions, per-tab search/sort/pagination and movement filters
+// mirror the web dashboard's EngineerInventory / MovementFeed.
 
 const SECTIONS = [
   { key: "irm", label: "Company (IRM)" },
@@ -44,6 +47,76 @@ const SECTION_CAPTIONS: Record<string, string> = {
   movements:
     "Every movement of stock in and out of your van — dispatches, transfers, job issues, returns and consumption. Newest first.",
 };
+
+// ── Client-side table configs (search / sort / 15-per-page, like the web) ────
+
+const dateVal = (iso: string | null): number => {
+  if (!iso) return 0;
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? 0 : t;
+};
+
+const IRM_TABLE: ClientTableOptions<EngineerStockItem> = {
+  searchText: (s) => `${s.itemName} ${s.itemCode}`,
+  comparators: {
+    item: (a, b) => a.itemName.localeCompare(b.itemName),
+    qty: (a, b) => a.quantityOnHand - b.quantityOnHand,
+    updated: (a, b) => dateVal(a.lastMovedAt) - dateVal(b.lastMovedAt),
+  },
+  initialSort: "updated:desc",
+};
+
+const IRM_SORTS = [
+  { key: "updated:desc", label: "Last updated (newest)" },
+  { key: "updated:asc", label: "Last updated (oldest)" },
+  { key: "item:asc", label: "Item (A–Z)" },
+  { key: "item:desc", label: "Item (Z–A)" },
+  { key: "qty:desc", label: "On hand (high–low)" },
+  { key: "qty:asc", label: "On hand (low–high)" },
+];
+
+const CUSTOMER_TABLE: ClientTableOptions<CustomerHolding> = {
+  searchText: (h) => `${h.itemName} ${h.customerName ?? ""}`,
+  comparators: {
+    item: (a, b) => a.itemName.localeCompare(b.itemName),
+    customer: (a, b) => (a.customerName ?? "").localeCompare(b.customerName ?? ""),
+    qty: (a, b) => a.quantityOnHand - b.quantityOnHand,
+  },
+  initialSort: "item:asc",
+};
+
+const CUSTOMER_SORTS = [
+  { key: "item:asc", label: "Item (A–Z)" },
+  { key: "item:desc", label: "Item (Z–A)" },
+  { key: "customer:asc", label: "Customer (A–Z)" },
+  { key: "customer:desc", label: "Customer (Z–A)" },
+  { key: "qty:desc", label: "On hand (high–low)" },
+  { key: "qty:asc", label: "On hand (low–high)" },
+];
+
+const MISC_TABLE: ClientTableOptions<MiscHeldItem> = {
+  searchText: (m) => m.itemName,
+  comparators: {
+    item: (a, b) => a.itemName.localeCompare(b.itemName),
+    qty: (a, b) => a.quantityOnHand - b.quantityOnHand,
+  },
+  initialSort: "item:asc",
+};
+
+const MISC_SORTS = [
+  { key: "item:asc", label: "Item (A–Z)" },
+  { key: "item:desc", label: "Item (Z–A)" },
+  { key: "qty:desc", label: "On hand (high–low)" },
+  { key: "qty:asc", label: "On hand (low–high)" },
+];
+
+function NoMatches() {
+  return (
+    <EmptyState title="No items match your search" subtitle="Try a different search or clear the filter." />
+  );
+}
+
+// ── Movements feed (unchanged web-side) ──────────────────────────────────────
 
 const OWNERSHIP_OPTIONS = [
   { key: "", label: "All ownership" },
@@ -126,29 +199,50 @@ function MovementCard({ m }: { m: Movement }) {
 }
 
 export default function StockScreen() {
+  const params = useLocalSearchParams<{ section?: string; t?: string }>();
   const [tab, setTab] = useState("irm");
+
+  // Dashboard deep-links: /(tabs)/stock?section=irm|customer|movements seeds the
+  // tab; the `t` nonce makes repeat taps of the same card re-seed.
+  useEffect(() => {
+    const section = params.section;
+    if (typeof section !== "string" || !section) return;
+    const timer = setTimeout(() => setTab(section), 0);
+    return () => clearTimeout(timer);
+  }, [params.section, params.t]);
 
   // ── Stock tabs ──────────────────────────────────────────────────────────────
   const { data: irm, loading: l1, refreshing, error, refresh, reload: reloadIrm } = useLoad(getOwnStock);
   const { data: customer, reload: reloadCustomer } = useLoad(getOwnCustomerStock);
   const { data: misc, reload: reloadMisc } = useLoad(getOwnMiscStock);
-  const { data: overview, reload: reloadOverview } = useLoad(getOwnOverview);
 
+  // Like the web: a goods event refetches only the tab being looked at.
   useSocketRefresh(GOODS_EVENTS, () => {
-    void reloadIrm();
-    void reloadCustomer();
-    void reloadMisc();
-    void reloadOverview();
+    if (tab === "irm") void reloadIrm();
+    else if (tab === "customer") void reloadCustomer();
+    else if (tab === "misc") void reloadMisc();
   });
 
-  // Web's IRM "Last updated" column: first recent-activity entry per item code.
-  const lastUpdated = useMemo(() => {
-    const map: Record<string, string> = {};
-    for (const a of overview?.recentActivity ?? []) {
-      if (!map[a.itemCode]) map[a.itemCode] = a.createdAt;
-    }
-    return map;
-  }, [overview]);
+  // Client-side search / sort / pagination per tab (15/page, like the web).
+  const irmTable = useClientTable(irm ?? [], IRM_TABLE);
+
+  const [customerFilter, setCustomerFilter] = useState("");
+  const customerOptions = useMemo(() => {
+    const names = [...new Set((customer ?? []).map((h) => h.customerName).filter((n): n is string => Boolean(n)))].sort(
+      (a, b) => a.localeCompare(b),
+    );
+    return [{ key: "", label: "All customers" }, ...names.map((n) => ({ key: n, label: n }))];
+  }, [customer]);
+  // A refetch can drop the selected customer — fall back to "All" for this render
+  // so the filter can never strand the view on an un-clearable empty list.
+  const activeCustomer = customerOptions.some((o) => o.key === customerFilter) ? customerFilter : "";
+  const customerPredicate = useMemo(
+    () => (activeCustomer ? (h: CustomerHolding) => (h.customerName ?? "") === activeCustomer : undefined),
+    [activeCustomer],
+  );
+  const customerTable = useClientTable(customer ?? [], CUSTOMER_TABLE, customerPredicate);
+
+  const miscTable = useClientTable(misc ?? [], MISC_TABLE);
 
   // ── Movements feed ──────────────────────────────────────────────────────────
   const [ownership, setOwnership] = useState("");
@@ -246,63 +340,142 @@ export default function StockScreen() {
       <ErrorText message={error} />
 
       {tab === "irm" ? (
-        (irm ?? []).length === 0 ? (
-          <EmptyState title="No IRM stock on hand" subtitle="Stock dispatched to you from a warehouse will appear here." />
-        ) : (
-          (irm ?? []).map((item) => (
-            <Card key={item.irmItemId}>
-              <View style={s.rowTop}>
-                <Text style={s.itemName} numberOfLines={2}>
-                  {item.itemName}
-                </Text>
-                <Text style={s.qtyBig}>
-                  {item.quantityOnHand}
-                  {item.baseUnit ? ` ${item.baseUnit}` : ""}
-                </Text>
-              </View>
-              <Text style={s.code}>{item.itemCode}</Text>
-              <Text style={s.meta}>Last updated {formatDate(lastUpdated[item.itemCode] ?? null)}</Text>
-            </Card>
-          ))
-        )
+        <>
+          <Input
+            placeholder="Search item or code…"
+            value={irmTable.query}
+            onChangeText={irmTable.setQuery}
+            autoCapitalize="none"
+            returnKeyType="search"
+          />
+          <FilterRow>
+            <Select options={IRM_SORTS} value={irmTable.sort} onChange={irmTable.setSort} />
+          </FilterRow>
+          {(irm ?? []).length === 0 ? (
+            <EmptyState title="No IRM stock on hand" subtitle="Stock dispatched to you from a warehouse will appear here." />
+          ) : irmTable.noMatches ? (
+            <NoMatches />
+          ) : (
+            irmTable.rows.map((item) => (
+              <Card key={item.irmItemId}>
+                <View style={s.rowTop}>
+                  <Text style={s.itemName} numberOfLines={2}>
+                    {item.itemName}
+                  </Text>
+                  <Text style={s.qtyBig}>
+                    {item.quantityOnHand}
+                    {item.baseUnit ? ` ${item.baseUnit}` : ""}
+                  </Text>
+                </View>
+                <Text style={s.code}>{item.itemCode}</Text>
+                <Text style={s.meta}>Last updated {formatDate(item.lastMovedAt)}</Text>
+              </Card>
+            ))
+          )}
+          {irmTable.total > 0 ? (
+            <Pager
+              page={irmTable.page}
+              totalPages={irmTable.totalPages}
+              onPage={irmTable.setPage}
+              total={irmTable.total}
+              label="items"
+            />
+          ) : null}
+        </>
       ) : null}
 
       {tab === "customer" ? (
-        (customer ?? []).length === 0 ? (
-          <EmptyState
-            title="No customer stock held"
-            subtitle="Customer consignment items issued to you for a job will appear here."
+        <>
+          <Input
+            placeholder="Search item or customer…"
+            value={customerTable.query}
+            onChangeText={customerTable.setQuery}
+            autoCapitalize="none"
+            returnKeyType="search"
           />
-        ) : (
-          (customer ?? []).map((item) => (
-            <Card key={item.id}>
-              <View style={s.rowTop}>
-                <Text style={s.itemName} numberOfLines={2}>
-                  {item.itemName}
-                </Text>
-                <Text style={s.qtyBig}>{item.quantityOnHand}</Text>
-              </View>
-              <Text style={s.meta}>{item.customerName ?? "—"}</Text>
-            </Card>
-          ))
-        )
+          <FilterRow>
+            {customerOptions.length > 2 || activeCustomer !== "" ? (
+              <Select
+                options={customerOptions}
+                value={activeCustomer}
+                onChange={(key) => {
+                  setCustomerFilter(key);
+                  customerTable.setPage(1);
+                }}
+              />
+            ) : null}
+            <Select options={CUSTOMER_SORTS} value={customerTable.sort} onChange={customerTable.setSort} />
+          </FilterRow>
+          {(customer ?? []).length === 0 ? (
+            <EmptyState
+              title="No customer stock held"
+              subtitle="Customer consignment items issued to you for a job will appear here."
+            />
+          ) : customerTable.noMatches ? (
+            <NoMatches />
+          ) : (
+            customerTable.rows.map((item) => (
+              <Card key={item.id}>
+                <View style={s.rowTop}>
+                  <Text style={s.itemName} numberOfLines={2}>
+                    {item.itemName}
+                  </Text>
+                  <Text style={s.qtyBig}>{item.quantityOnHand}</Text>
+                </View>
+                <Text style={s.meta}>{item.customerName ?? "—"}</Text>
+              </Card>
+            ))
+          )}
+          {customerTable.total > 0 ? (
+            <Pager
+              page={customerTable.page}
+              totalPages={customerTable.totalPages}
+              onPage={customerTable.setPage}
+              total={customerTable.total}
+              label="items"
+            />
+          ) : null}
+        </>
       ) : null}
 
       {tab === "misc" ? (
-        (misc ?? []).length === 0 ? (
-          <EmptyState title="No misc items" subtitle="Misc kit items issued to you for a job will appear here." />
-        ) : (
-          (misc ?? []).map((item, i) => (
-            <Card key={`${item.itemName}-${i}`}>
-              <View style={s.rowTop}>
-                <Text style={s.itemName} numberOfLines={2}>
-                  {item.itemName}
-                </Text>
-                <Text style={s.qtyBig}>{item.quantityOnHand}</Text>
-              </View>
-            </Card>
-          ))
-        )
+        <>
+          <Input
+            placeholder="Search item…"
+            value={miscTable.query}
+            onChangeText={miscTable.setQuery}
+            autoCapitalize="none"
+            returnKeyType="search"
+          />
+          <FilterRow>
+            <Select options={MISC_SORTS} value={miscTable.sort} onChange={miscTable.setSort} />
+          </FilterRow>
+          {(misc ?? []).length === 0 ? (
+            <EmptyState title="No misc items" subtitle="Misc kit items issued to you for a job will appear here." />
+          ) : miscTable.noMatches ? (
+            <NoMatches />
+          ) : (
+            miscTable.rows.map((item, i) => (
+              <Card key={`${item.itemName}-${i}`}>
+                <View style={s.rowTop}>
+                  <Text style={s.itemName} numberOfLines={2}>
+                    {item.itemName}
+                  </Text>
+                  <Text style={s.qtyBig}>{item.quantityOnHand}</Text>
+                </View>
+              </Card>
+            ))
+          )}
+          {miscTable.total > 0 ? (
+            <Pager
+              page={miscTable.page}
+              totalPages={miscTable.totalPages}
+              onPage={miscTable.setPage}
+              total={miscTable.total}
+              label="items"
+            />
+          ) : null}
+        </>
       ) : null}
 
       {tab === "movements" ? (
