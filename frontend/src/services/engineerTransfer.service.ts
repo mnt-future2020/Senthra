@@ -1,4 +1,4 @@
-import { api } from "@/lib/api";
+import { api, LONG_WRITE_TIMEOUT } from "@/lib/api";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -187,6 +187,11 @@ export function acknowledgeTransfer(id: string, signature: string): Promise<Engi
   return api<{ transfer: EngineerTransfer }>(`/engineer-transfers/${id}/acknowledge`, {
     method: "POST",
     body: { signature },
+    // The signature PNG is relayed to Cloudinary before the transfer is booked — see
+    // LONG_WRITE_TIMEOUT. Drawn on a phone, in a van, on whatever signal is going: the one call in
+    // this file least able to afford a 20s cliff, and a spurious failure here asks the customer to
+    // sign twice for one handover.
+    timeout: LONG_WRITE_TIMEOUT,
   }).then((r) => r.transfer);
 }
 
@@ -235,5 +240,6 @@ export function uploadAttachment(image: string): Promise<string> {
   return api<{ url: string }>("/engineer-transfers/attachments", {
     method: "POST",
     body: { image },
+    timeout: LONG_WRITE_TIMEOUT, // Cloudinary relay
   }).then((r) => r.url);
 }

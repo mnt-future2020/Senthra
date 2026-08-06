@@ -30,6 +30,7 @@ import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { inputCls, labelCls, primaryBtn, secondaryBtn } from "@/components/ui/styles";
 import type { EngineerTransfer, PagedTransfers } from "@/services/engineerTransfer.service";
+import { backingSize, isBlank, normalisePoint, type Stroke } from "./signaturePad";
 
 // Stock ownership shown in the lines table — "IRM (Company)" reads clearer than a bare "Company".
 const ownershipLabel = (o: string) => (o === "company" ? "IRM (Company)" : "Customer");
@@ -75,6 +76,12 @@ function requestAge(iso: string): string {
 
 // ── Signature pad (canvas draw) ───────────────────────────────────────────────
 
+// Draw-to-acknowledge pad.
+//
+// Strokes are held as fractions of the pad (see signaturePad.ts) and re-rendered whenever the box
+// changes size, so what is on screen never depends on the bitmap's pixel dimensions. That is the fix
+// for the original bug — a fixed 480×160 bitmap stretched to a `w-full` element, with CSS-pixel
+// pointer positions fed straight into it, put every stroke ~3× away from the cursor on a desktop.
 function SignaturePad({
   onCapture,
   onCancel,
@@ -83,80 +90,117 @@ function SignaturePad({
   onCancel: () => void;
 }) {
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
-  const drawing = React.useRef(false);
+  const strokes = React.useRef<Stroke[]>([]);
+  // Mirrors `strokes` for the Save button only. The strokes themselves stay in a ref: a re-render per
+  // pointer move would drop frames on the exact gesture that has to feel continuous.
+  const [hasInk, setHasInk] = React.useState(false);
 
-  const getPos = (e: React.MouseEvent | React.TouchEvent, canvas: HTMLCanvasElement) => {
-    const rect = canvas.getBoundingClientRect();
-    if ("touches" in e) {
-      const t = e.touches[0];
-      return { x: t.clientX - rect.left, y: t.clientY - rect.top };
-    }
-    return { x: (e as React.MouseEvent).clientX - rect.left, y: (e as React.MouseEvent).clientY - rect.top };
-  };
-
-  const start = (e: React.MouseEvent | React.TouchEvent) => {
+  // Repaint everything from the stored strokes. Drawing happens in CSS pixels — the transform below
+  // absorbs the device pixel ratio — so the line stays 2px thick on screen whatever the pad's size.
+  const redraw = React.useCallback(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
-    drawing.current = true;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    const { x, y } = getPos(e, canvas);
-    ctx.beginPath();
-    ctx.moveTo(x, y);
-    e.preventDefault();
-  };
-
-  const move = (e: React.MouseEvent | React.TouchEvent) => {
-    if (!drawing.current) return;
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    const { x, y } = getPos(e, canvas);
-    ctx.strokeStyle = "var(--ink, #111)";
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx) return;
+    const { width: cssW, height: cssH } = canvas.getBoundingClientRect();
+    ctx.setTransform(canvas.width / Math.max(cssW, 1), 0, 0, canvas.height / Math.max(cssH, 1), 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+    // A literal colour, not `var(--ink)`: a canvas context can't resolve CSS custom properties — it
+    // silently ignores the invalid value and keeps whatever was set before, so the old code was black
+    // by luck rather than by instruction.
+    ctx.strokeStyle = "#111111";
     ctx.lineWidth = 2;
     ctx.lineCap = "round";
-    ctx.lineTo(x, y);
-    ctx.stroke();
-    e.preventDefault();
-  };
+    ctx.lineJoin = "round";
+    for (const stroke of strokes.current) {
+      if (stroke.length === 0) continue;
+      ctx.beginPath();
+      ctx.moveTo(stroke[0].x * cssW, stroke[0].y * cssH);
+      // A single tap is a dot, not a zero-length line — lineCap "round" only paints one if the path
+      // actually goes somewhere.
+      if (stroke.length === 1) ctx.lineTo(stroke[0].x * cssW + 0.01, stroke[0].y * cssH);
+      else for (const p of stroke.slice(1)) ctx.lineTo(p.x * cssW, p.y * cssH);
+      ctx.stroke();
+    }
+  }, []);
 
-  const end = () => { drawing.current = false; };
-
-  const clear = () => {
+  // Size the bitmap to the box it is actually given, and re-size it whenever that changes — a window
+  // resize, or a drag onto a monitor with a different pixel ratio. The signature survives both,
+  // because it is stored as fractions and simply repainted.
+  React.useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    ctx?.clearRect(0, 0, canvas.width, canvas.height);
+    const fit = () => {
+      const { width, height } = canvas.getBoundingClientRect();
+      const next = backingSize(width, height, window.devicePixelRatio || 1);
+      if (canvas.width !== next.width || canvas.height !== next.height) {
+        canvas.width = next.width;
+        canvas.height = next.height;
+      }
+      redraw();
+    };
+    fit();
+    const ro = new ResizeObserver(fit);
+    ro.observe(canvas);
+    return () => ro.disconnect();
+  }, [redraw]);
+
+  // Pointer events, not mouse + touch: one code path covers a mouse, a finger and a stylus, and
+  // setPointerCapture keeps the stroke connected when a fast signature runs past the edge of the pad
+  // — the old handlers ended the stroke there and the next one started detached.
+  const down = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    strokes.current = [...strokes.current, [normalisePoint(e.clientX, e.clientY, e.currentTarget.getBoundingClientRect())]];
+    setHasInk(true);
+    redraw();
+  };
+
+  const move = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
+    e.preventDefault();
+    const current = strokes.current[strokes.current.length - 1];
+    if (!current) return;
+    current.push(normalisePoint(e.clientX, e.clientY, e.currentTarget.getBoundingClientRect()));
+    redraw();
+  };
+
+  const up = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+  };
+
+  const clear = () => {
+    strokes.current = [];
+    setHasInk(false);
+    redraw();
   };
 
   const save = () => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    // Guarded as well as disabled: `isBlank` is the rule, and a blank PNG uploaded as a signature is
+    // a receipt nobody signed that reads in the record exactly like one they did.
+    if (!canvas || isBlank(strokes.current)) return;
     onCapture(canvas.toDataURL("image/png"));
   };
 
   return (
     <div className="space-y-3">
       <p className="text-xs text-[var(--muted)]">Draw your signature below to acknowledge receipt.</p>
+      {/* A FIXED height. The pad used to inherit the canvas's 3:1 attribute ratio through `w-full`,
+          so on a wide desktop it grew to ~500px tall — half the screen for a one-line signature. */}
       <div className="overflow-hidden rounded-xl border border-dashed border-[var(--border)] bg-white">
         <canvas
           ref={canvasRef}
-          width={480}
-          height={160}
-          className="w-full touch-none"
-          onMouseDown={start}
-          onMouseMove={move}
-          onMouseUp={end}
-          onMouseLeave={end}
-          onTouchStart={start}
-          onTouchMove={move}
-          onTouchEnd={end}
+          className="h-40 w-full cursor-crosshair touch-none sm:h-44"
+          aria-label="Signature pad"
+          onPointerDown={down}
+          onPointerMove={move}
+          onPointerUp={up}
+          onPointerCancel={up}
         />
       </div>
       <div className="flex gap-2">
-        <button type="button" onClick={clear} className={secondaryBtn}>Clear</button>
-        <button type="button" onClick={save} className={primaryBtn}><PenLine className="h-3.5 w-3.5" /> Save signature</button>
+        <button type="button" onClick={clear} disabled={!hasInk} className={secondaryBtn}>Clear</button>
+        <button type="button" onClick={save} disabled={!hasInk} className={primaryBtn}><PenLine className="h-3.5 w-3.5" /> Save signature</button>
         <button type="button" onClick={onCancel} className="ml-auto text-xs text-[var(--muted)] hover:text-[var(--neg)]">Cancel</button>
       </div>
     </div>

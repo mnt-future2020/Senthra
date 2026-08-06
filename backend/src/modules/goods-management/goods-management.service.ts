@@ -36,7 +36,21 @@ export interface ScanMatch {
 }
 
 // Sum the qty already issued for a kit line (issue lines minus return lines pointing at it).
-function issuedForKitLine(movements: Awaited<ReturnType<typeof goodsManagementRepo.findMovementsByJob>>, kitLineId: string): number {
+// The movement fields the tally helpers below actually read. Typed structurally rather than as
+// `findMovementsByJob`'s full row so BOTH shapes satisfy them: the singular query still joins the item
+// and job relations for the detail views, while the batch query (findMovementsByJobs) fetches only
+// these. Naming what the arithmetic needs is also what stops the lean query being widened again
+// "because the type says so".
+type MovementTally = {
+  status: string;
+  direction: string;
+  warehouseId: string | null;
+  // `condition` ("good" | "damaged") is a plain column, not a join — the reconcile tally splits
+  // returns on it, and carrying one scalar costs nothing next to the relations this type drops.
+  items: { jobKitLineId: string | null; qty: number; condition: string }[];
+};
+
+function issuedForKitLine(movements: readonly MovementTally[], kitLineId: string): number {
   let n = 0;
   for (const m of movements) {
     if (m.status !== "posted") continue;
@@ -51,7 +65,7 @@ function issuedForKitLine(movements: Awaited<ReturnType<typeof goodsManagementRe
 
 // Split a kit line's posted movements into GROSS issued / used (consumed, incl. lost) / returned.
 // Powers the queue's per-item lifecycle status (issued → awaiting return → returned/used).
-function kitLineSplit(movements: Awaited<ReturnType<typeof goodsManagementRepo.findMovementsByJob>>, kitLineId: string): { issued: number; used: number; returned: number } {
+function kitLineSplit(movements: readonly MovementTally[], kitLineId: string): { issued: number; used: number; returned: number } {
   let issued = 0;
   let used = 0;
   let returned = 0;
@@ -246,7 +260,7 @@ async function completedVanQtyByKitLine(kitLineIds: string[]): Promise<Map<strin
 // That guarantees the warehouse-owed part is always brought home, never mis-credited elsewhere. We
 // can't tell one physical box from another; this is the safe accounting, not a per-unit truth.
 function vanReturnableAwayFromHome(
-  movements: Awaited<ReturnType<typeof goodsManagementRepo.findMovementsByJob>>,
+  movements: readonly MovementTally[],
   kitLineId: string,
   homeWarehouseId: string | null,
   vanQty: number,
@@ -269,7 +283,7 @@ function vanReturnableAwayFromHome(
 // line with the most remaining allowance when the item is homed at several. Null ⇒ nothing here.
 async function findAwayReturnKitLine<T extends { id: string; warehouseId: string | null }>(
   candidates: T[],
-  movements: Awaited<ReturnType<typeof goodsManagementRepo.findMovementsByJob>>,
+  movements: readonly MovementTally[],
 ): Promise<{ kit: T; cap: number } | null> {
   if (candidates.length === 0) return null;
   const vanQty = await completedVanQtyByKitLine(candidates.map((c) => c.id));
@@ -905,7 +919,7 @@ function buildKitLineRow(
     // the queue can both pass their rows without a cast.
     irmItem?: { code: string } | null;
   },
-  movements: Awaited<ReturnType<typeof goodsManagementRepo.findMovementsByJob>>,
+  movements: readonly MovementTally[],
   balByKey: Map<string, Awaited<ReturnType<typeof inventoryRepo.findBalancesByItemsAndWarehouses>>[number]>,
   cseQty: Map<string, number>,
   cseBarcode: Map<string, string | null>,
@@ -1112,12 +1126,19 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
   // Engineer's REAL holding per item (same balance the return scan checks) — keyed by
   // `${engineerId}|${itemId}`. The holding is global per item (shared across jobs/warehouses), so this
   // is the only honest source for "to return": it can never claim more than the engineer actually has.
-  // Batched per engineer (the page has only a handful), not per line.
+  //
+  // TWO queries for the whole page, not two PER ENGINEER. This looped over engineers on the belief
+  // that a page only has a handful — but the page size is 20, so a busy queue meant 40 sequential
+  // round trips (~3s on a remote cluster) to build one lookup map. The engineer id now rides in the
+  // rows, and the two reads run together.
+  const pageEngineerIds = [...new Set(pageJobs.map((j) => j.assignedEngineerId).filter((id): id is string => !!id))];
   const engHeld = new Map<string, number>();
-  for (const engId of [...new Set(pageJobs.map((j) => j.assignedEngineerId).filter((id): id is string => !!id))]) {
-    for (const b of await engineerStockRepo.findEngineerBalances(engId)) engHeld.set(`${engId}|${b.irmItemId}`, b.quantityOnHand);
-    for (const h of await goodsManagementRepo.findCustomerHoldingsByEngineer(engId)) engHeld.set(`${engId}|${h.customerStockEntryId}`, h.quantityOnHand);
-  }
+  const [engBalances, engCustomerHoldings] = await Promise.all([
+    engineerStockRepo.findBalanceQuantitiesByEngineers(pageEngineerIds),
+    goodsManagementRepo.findCustomerHoldingQuantitiesByEngineers(pageEngineerIds),
+  ]);
+  for (const b of engBalances) engHeld.set(`${b.engineerId}|${b.irmItemId}`, b.quantityOnHand);
+  for (const h of engCustomerHoldings) engHeld.set(`${h.engineerId}|${h.customerStockEntryId}`, h.quantityOnHand);
 
   // Van-supplied qty per kit line for the PAGE (one lean query) — decides which lines stay actionable
   // away from their nominal home warehouse.
@@ -2135,7 +2156,7 @@ type TallyEntry = { jobKitLineId: string; itemName: string; itemCode: string | n
 // longer match), which would otherwise double-count an item. Misc lines are free-text (not
 // stock-tracked) and can never be returned, so they're excluded from reconciliation entirely.
 function computeTallies(
-  movements: Awaited<ReturnType<typeof goodsManagementRepo.findMovementsByJob>>,
+  movements: readonly MovementTally[],
   kitLines?: NonNullable<JobWithRelations["kitLines"]>,
 ): Map<string, TallyEntry> {
   const tallies = new Map<string, TallyEntry>();

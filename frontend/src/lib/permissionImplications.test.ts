@@ -4,8 +4,10 @@ import type { PermissionGroup } from "@/types/role";
 import {
   applyImplied,
   baseKeyOf,
+  capabilityGrant,
   grantWithPrerequisites,
   grantableGroups,
+  keysOf,
   revokeWithDependents,
   stripUngrantable,
 } from "./permissionImplications";
@@ -304,5 +306,58 @@ describe("applyImplied (role-editor matrix, mirrors backend applyImpliedPermissi
 
   it("defaults to non-scoped behaviour when the flag is omitted", () => {
     expect(applyImplied(["stock_requests.complete"], GROUPS)).toContain("customers.view");
+  });
+});
+
+describe("capabilityGrant (turning 'Field role' on pre-selects its modules)", () => {
+  const GATED: PermissionGroup = { ...ENGINEER, capability: "field_ops" };
+  const CATALOG = [...GROUPS, GATED];
+
+  it("offers every key in the capability's groups when nothing is selected", () => {
+    const grant = capabilityGrant(CATALOG, [], "field_ops");
+    expect(grant?.keys).toEqual(keysOf(GATED));
+  });
+
+  it("names the categories to reveal, so the grant isn't ticked inside a collapsed section", () => {
+    expect(capabilityGrant(CATALOG, [], "field_ops")?.categories).toEqual(["Engineer Portal"]);
+  });
+
+  it("touches ONLY the capability's groups — an ungated module is never swept in", () => {
+    const grant = capabilityGrant(CATALOG, [], "field_ops");
+    expect(grant?.keys.every((k) => k.startsWith("engineer."))).toBe(true);
+    expect(grant?.keys).not.toContain("customers.view");
+  });
+
+  it("returns null when ANY of those keys is already selected — curation wins", () => {
+    // The off→on path on an edit. Re-granting everything here would silently replace a deliberate
+    // partial selection with the full set.
+    expect(capabilityGrant(CATALOG, ["engineer.jobs.view"], "field_ops")).toBeNull();
+  });
+
+  it("still grants when the selection holds only UNRELATED keys", () => {
+    // Permissions from other modules must not read as "already curated" for this capability.
+    expect(capabilityGrant(CATALOG, ["customers.view"], "field_ops")).not.toBeNull();
+  });
+
+  it("returns null when the catalog has no group with that capability", () => {
+    // A catalog that hasn't loaded, or a capability nothing is tagged with — the caller skips the
+    // state update entirely rather than re-rendering with an empty array.
+    expect(capabilityGrant(GROUPS, [], "field_ops")).toBeNull();
+  });
+
+  it("the granted set survives applyImplied unchanged (it is already closed)", () => {
+    // Granting the whole group can't pull in anything new, so the pre-selection the user sees is
+    // exactly what a save would store.
+    const grant = capabilityGrant(CATALOG, [], "field_ops")!;
+    const closed = applyImplied(grant.keys, CATALOG);
+    expect([...closed].sort()).toEqual([...grant.keys].sort());
+  });
+
+  it("survives a round-trip through stripUngrantable for a FIELD role", () => {
+    // What the form would actually save: nothing granted here may be stripped back out, or the
+    // toggle would tick boxes that vanish on save.
+    const grant = capabilityGrant(CATALOG, [], "field_ops")!;
+    const kept = stripUngrantable(grant.keys, CATALOG, { field_ops: true });
+    expect([...kept].sort()).toEqual([...grant.keys].sort());
   });
 });

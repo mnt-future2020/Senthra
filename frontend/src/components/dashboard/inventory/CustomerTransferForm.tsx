@@ -6,17 +6,14 @@ import { ArrowRight, Loader2 } from "lucide-react";
 import { transferCustomerStock } from "@/services/stockPosition.service";
 import { listWarehouses } from "@/services/warehouse.service";
 import { useDashboard } from "@/hooks/useDashboard";
+import { FieldError } from "@/components/ui/FormScaffold";
 import { inputCls, labelCls, ghostBtn, primaryBtn } from "@/components/ui/styles";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { Select } from "@/components/ui/Select";
 import type { StockPosition } from "@/types/stock-position";
+import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 
 type WarehouseOption = { id: string; name: string; code: string };
-
-function FieldError({ message }: { message?: string }) {
-  if (!message) return null;
-  return <p className="mt-1.5 text-[11px] font-semibold text-[var(--neg)]">{message}</p>;
-}
 
 interface CustomerTransferFormProps {
   row: StockPosition;
@@ -82,6 +79,7 @@ export function CustomerTransferForm({ row, onDone }: CustomerTransferFormProps)
     if (Object.keys(fieldErrors).length > 0) {
       setErrors(fieldErrors);
       pushToast("Please fix the highlighted fields.", "alert");
+      focusFirstInvalid();
       return;
     }
     setErrors({});

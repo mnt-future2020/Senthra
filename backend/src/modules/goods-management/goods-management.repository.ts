@@ -219,10 +219,42 @@ export async function openReturnOnCancel(jobId: string): Promise<number> {
 export function findMovementsByJob(jobId: string): Promise<JobStockMovementWithRelations[]> {
   return prisma.jobStockMovement.findMany({ where: { jobId, deletedAt: null }, include: withRelations, orderBy: { createdAt: "asc" } });
 }
-// Batch movements for many jobs in ONE query (queue page enrichment); caller groups by jobId.
-export function findMovementsByJobs(jobIds: string[]): Promise<JobStockMovementWithRelations[]> {
+/**
+ * Batch movements for many jobs in ONE query (queue page enrichment); caller groups by jobId.
+ *
+ * LEAN on purpose — the exact fields the batch consumers read and nothing more. Every one of them
+ * (kitLineSplit, getOpenDemand's issued tally, vanReturnableAwayFromHome, the reconcile sweep) does
+ * ARITHMETIC over quantities; none touches `items[].irmItem` or the `job` relation that
+ * `withRelations` joins in. Those joins were being paid per movement, on the goods queue, on every
+ * kit-request approval and on the demand board — against a remote cluster where each round trip
+ * already costs ~70ms.
+ *
+ * The SINGULAR `findMovementsByJob` keeps `withRelations`: the per-job detail views render item names
+ * and the job header from it. Two shapes because there are two genuinely different needs — do not
+ * "tidy" them back into one.
+ */
+export interface JobMovementTally {
+  id: string;
+  jobId: string;
+  status: string;
+  direction: string;
+  warehouseId: string | null;
+  items: { jobKitLineId: string | null; qty: number; condition: string }[];
+}
+export function findMovementsByJobs(jobIds: string[]): Promise<JobMovementTally[]> {
   if (jobIds.length === 0) return Promise.resolve([]);
-  return prisma.jobStockMovement.findMany({ where: { jobId: { in: jobIds }, deletedAt: null }, include: withRelations, orderBy: { createdAt: "asc" } });
+  return prisma.jobStockMovement.findMany({
+    where: { jobId: { in: jobIds }, deletedAt: null },
+    select: {
+      id: true,
+      jobId: true,
+      status: true,
+      direction: true,
+      warehouseId: true,
+      items: { select: { jobKitLineId: true, qty: true, condition: true } },
+    },
+    orderBy: { createdAt: "asc" },
+  });
 }
 
 // Per-kit-line ISSUED totals for many jobs in ONE query — the minimum needed to tell whether a given
@@ -289,6 +321,20 @@ export function insertCustomerHoldingTxnTx(tx: Prisma.TransactionClient, data: P
 }
 export function findCustomerHoldingsByEngineer(engineerId: string) {
   return prisma.engineerCustomerStockHolding.findMany({ where: { engineerId, quantityOnHand: { gt: 0 } }, orderBy: { updatedAt: "desc" } });
+}
+/**
+ * Consignment holdings for MANY engineers in one query — the batch twin of the call above, for the
+ * goods queue, which was issuing one round trip per engineer on the page just to build a lookup map.
+ * Lean by design: the map only ever needs entry id and quantity.
+ */
+export function findCustomerHoldingQuantitiesByEngineers(
+  engineerIds: string[],
+): Promise<{ engineerId: string; customerStockEntryId: string; quantityOnHand: number }[]> {
+  if (engineerIds.length === 0) return Promise.resolve([]);
+  return prisma.engineerCustomerStockHolding.findMany({
+    where: { engineerId: { in: engineerIds }, quantityOnHand: { gt: 0 } },
+    select: { engineerId: true, customerStockEntryId: true, quantityOnHand: true },
+  });
 }
 // Resolve customer display names by id — used to backfill holdings whose customerName snapshot is null.
 export function findCustomerNamesByIds(ids: string[]) {

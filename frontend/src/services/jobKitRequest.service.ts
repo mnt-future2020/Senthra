@@ -1,4 +1,4 @@
-import { api } from "@/lib/api";
+import { api, LONG_WRITE_TIMEOUT } from "@/lib/api";
 
 // Typed wrapper around the FE→PM additional-kit request API. Field engineers raise + cancel their own
 // requests; PMs/planners review the queue and approve (grow kit + open fulfilment) or decline.
@@ -223,7 +223,14 @@ export function searchKitItems(q: string, jobId?: string): Promise<KitItemOption
 }
 
 export function approveKitRequest(id: string, payload: ApproveKitRequestPayload): Promise<KitRequest> {
-  return api<{ request: KitRequest }>(`/job-kit-requests/${id}/approve`, { method: "POST", body: payload }).then((r) => r.request);
+  return api<{ request: KitRequest }>(`/job-kit-requests/${id}/approve`, {
+    method: "POST",
+    body: payload,
+    // Approval grows the kit, opens an engineer transfer per holding van and finalises the request —
+    // all inside one transaction whose server-side ceiling is itself 20s, the same as the client
+    // default was. See LONG_WRITE_TIMEOUT for why matching those two numbers was the bug.
+    timeout: LONG_WRITE_TIMEOUT,
+  }).then((r) => r.request);
 }
 
 export function declineKitRequest(id: string, decisionNote?: string): Promise<KitRequest> {

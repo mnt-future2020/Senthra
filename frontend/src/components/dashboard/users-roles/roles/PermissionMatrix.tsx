@@ -30,6 +30,15 @@ interface PermissionMatrixProps {
   // against the filtered list would silently skip that edge. Defaults to `groups`.
   catalog?: PermissionGroup[];
   onChange?: (next: string[]) => void; // omit → read-only
+  /**
+   * Categories to force OPEN, as a one-shot request from the parent. Pass a NEW array (new identity)
+   * to re-trigger; passing the same one does nothing. Only ever opens — it never closes a section the
+   * user opened themselves, so a request can't fight the user for control of the accordion.
+   *
+   * Exists so the role editor can reveal a section it just auto-granted (turning "Field role" on),
+   * rather than silently ticking permissions inside a collapsed box the user never sees.
+   */
+  revealCategories?: string[];
 }
 
 const FALLBACK_CATEGORY = "General";
@@ -105,6 +114,7 @@ export function PermissionMatrix({
   granted,
   catalog,
   onChange,
+  revealCategories,
 }: PermissionMatrixProps) {
   const readOnly = !onChange;
   // Dependency math always runs against the full catalog; only rendering uses `groups`.
@@ -142,6 +152,27 @@ export function PermissionMatrix({
     }
     setOpen(init);
   }, [sections, groups.length, grantedSet]);
+
+  // Honour a parent's reveal request. MERGES `true` in rather than replacing the map, so sections the
+  // user opened or closed themselves keep their state — this only ever adds.
+  //
+  // Adjusted DURING RENDER on the prop's identity changing, not in an effect: `react-hooks`'
+  // set-state-in-effect rule rejects the effect form (it schedules a second render pass after paint,
+  // so the section would visibly pop open a frame late). React re-runs this render before committing,
+  // so the reveal lands in the same paint. Same shape the portal list views use to resync a search box
+  // from the URL. The parent passes a FRESH array per request; re-rendering with the same one is a
+  // no-op, so this can't fight a user who has since closed the section.
+  const [prevReveal, setPrevReveal] = React.useState(revealCategories);
+  if (prevReveal !== revealCategories) {
+    setPrevReveal(revealCategories);
+    if (revealCategories?.length) {
+      setOpen((prev) => {
+        const next = { ...prev };
+        for (const cat of revealCategories) next[cat] = true;
+        return next;
+      });
+    }
+  }
 
   const matches = React.useCallback(
     (g: PermissionGroup): boolean => {

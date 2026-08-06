@@ -1136,6 +1136,22 @@ export function createDirectStockEntry(data: CreateDirectStockEntryData) {
   });
 }
 
+/**
+ * On-hand quantity for MANY stock entries in one query.
+ *
+ * For availability checks only — the job form's "can't plan more than exists" backstop was calling
+ * `findStockEntryById` once per kit line, so a 20-line job cost 20 sequential round trips (plus the
+ * customer/warehouse joins that read never used) before the save could even be validated.
+ *
+ * Deliberately NO status filter, matching `findStockEntryById` below: a line already pointing at a
+ * non-active entry must keep reporting that entry's quantity, or re-saving an untouched job would
+ * suddenly fail on a line nobody edited.
+ */
+export function findStockEntryQuantitiesByIds(ids: string[]): Promise<{ id: string; quantity: number }[]> {
+  if (ids.length === 0) return Promise.resolve([]);
+  return prisma.customerStockEntry.findMany({ where: { id: { in: ids } }, select: { id: true, quantity: true } });
+}
+
 export function findStockEntryById(id: string, client: Db = prisma) {
   return client.customerStockEntry.findUnique({
     where: { id },

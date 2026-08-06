@@ -1,4 +1,4 @@
-import { api } from "@/lib/api";
+import { api, LONG_WRITE_TIMEOUT } from "@/lib/api";
 import type { Branding, Settings } from "@/types/settings";
 
 // Public — used by the login page / anywhere outside auth.
@@ -15,6 +15,6 @@ export function uploadBrandingImage(
     method: "POST",
     body: { type, image },
     // Cloudinary upload can take a little longer than a normal request.
-    timeout: 60_000,
+    timeout: LONG_WRITE_TIMEOUT,
   });
 }

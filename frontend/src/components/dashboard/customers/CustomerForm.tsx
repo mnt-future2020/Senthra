@@ -12,12 +12,13 @@ import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles
 import { Select } from "@/components/ui/Select";
 import { Avatar } from "@/components/ui/Avatar";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
+import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { TempPasswordModal } from "@/components/ui/TempPasswordModal";
 import { PostcodeField } from "@/components/ui/PostcodeField";
 import { EMAIL_RE, UK_POSTCODE_RE, WEBSITE_RE, isPhone } from "@/lib/validation";
 import { MAX_IMAGE_BYTES, readFileAsDataUrl } from "@/lib/image";
 import type { UserStatus } from "@/types/user";
+import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 
 const CUSTOMERS_LIST = "/dashboard/customers";
 
@@ -65,15 +66,6 @@ function validate(v: {
     errs.postcode = "Enter a valid UK postcode (e.g. EC1A 1BB).";
   }
   return errs;
-}
-
-function FieldError({ id, message }: { id: string; message?: string }) {
-  if (!message) return null;
-  return (
-    <p id={id} className="mt-1.5 text-[11px] font-semibold text-[var(--neg)]">
-      {message}
-    </p>
-  );
 }
 
 // Full-page Add/Edit customer form — mirrors the staff user form: two-column
@@ -192,6 +184,7 @@ export function CustomerForm({ mode, customer }: { mode: "create" | "edit"; cust
     if (Object.keys(fieldErrors).length > 0) {
       setErrors(fieldErrors);
       pushToast("Please fix the highlighted fields.", "alert");
+      focusFirstInvalid();
       return;
     }
     setErrors({});

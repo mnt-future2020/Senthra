@@ -12,7 +12,8 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Modal } from "@/components/ui/Modal";
 import { Notice } from "@/components/ui/Notice";
 import { inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
-import { RequiredMark } from "@/components/ui/FormScaffold";
+import { FieldError, RequiredMark } from "@/components/ui/FormScaffold";
+import { capQty } from "./kitRequestQty";
 import { EmptyState, fmtDate } from "@/components/dashboard/portal/portalUi";
 import type { Job } from "@/types/job";
 import type { Msg } from "@/components/ui/types";
@@ -348,10 +349,25 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
   // planned-item rows come from the job's kit list and the cart rows from an earlier search, so both
   // rendered a bare quantity box with nothing to check it against — an engineer could ask for 50 of
   // an item with 2 free and only find out when the planner couldn't source it.
-  const [avail, setAvail] = React.useState<kitRequestService.KitAvailabilityMap>({ irm: {}, cse: {} });
+  // The availability figures TOGETHER WITH the item set they describe. Stapling the key on is what lets
+  // "still loading" be derived (`availKey` moved on, the answer hasn't caught up) instead of stored in
+  // a second state — a synchronous setState in the fetch effect is what the React Compiler lint
+  // forbids, and a separate boolean would have needed exactly that on every refetch.
+  //
+  // Why the distinction matters at all: "no figure yet" and "no figure at all" both read as
+  // `free == null`, and the latter must stay UNCAPPED (misc lines, or a failed lookup — never cap on a
+  // guess). So a quantity typed in the moment before the numbers landed went in uncapped, and the cap
+  // only ran again on the next keystroke — which is how a row reading "None free to request" could
+  // still be submitted with 1.
+  const [availState, setAvailState] = React.useState<{ key: string; data: kitRequestService.KitAvailabilityMap }>({ key: "", data: { irm: {}, cse: {} } });
   const [reason, setReason] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
   const [msg, setMsg] = React.useState<Msg>(null);
+  // Field-level error for the reason box, kept separate from `msg` (which carries cart-wide and
+  // server errors) so it can sit against the control it describes.
+  const [reasonError, setReasonError] = React.useState<string | undefined>(undefined);
+  const reasonRef = React.useRef<HTMLTextAreaElement>(null);
+  const noticeRef = React.useRef<HTMLDivElement>(null);
 
   // Keys already on the request (planned IRM + customer-stock lines + everything in the cart) — so the
   // search can grey out an item that's already added and the cart can't hold duplicates.
@@ -365,15 +381,21 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
 
   React.useEffect(() => {
     let active = true;
-    const { irm, cse } = JSON.parse(availKey) as { irm: string[]; cse: string[] };
+    const key = availKey;
+    const { irm, cse } = JSON.parse(key) as { irm: string[]; cse: string[] };
     kitRequestService
       .kitItemAvailabilityFor(job.id, irm, cse)
-      .then((a) => { if (active) setAvail(a); })
+      .then((a) => { if (active) setAvailState({ key, data: a }); })
       // Advisory only — losing it must never block the request. The steppers simply go uncapped, and
-      // approve() still re-checks before any stock moves.
-      .catch(() => { if (active) setAvail({ irm: {}, cse: {} }); });
+      // approve() still re-checks before any stock moves. Tagged with the key either way, so a failed
+      // lookup settles into "known-unknown" rather than looking like it is still loading forever.
+      .catch(() => { if (active) setAvailState({ key, data: { irm: {}, cse: {} } }); });
     return () => { active = false; };
   }, [availKey, job.id]);
+
+  // Derived, not stored: the answer we hold doesn't describe the item set we're showing.
+  const availLoading = availState.key !== availKey;
+  const avail = availState.data;
 
   // Where a row's stock actually is — kept SPLIT rather than merged. The cap needs the total, but the
   // engineer needs to know how much of it is a collection versus a transfer off a colleague's van;
@@ -396,6 +418,23 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
     const s = stockFor(source, irmItemId, cseId);
     return s ? s.warehouse + s.van : null;
   };
+
+  // Clamp at READ time, not by writing corrected state back. A quantity can outlive the figure it was
+  // typed against — set before the lookup landed, or left standing when a refetch returns a smaller
+  // number — and rewriting state from an effect is both a React Compiler violation and one render too
+  // late. Deriving it means the box and the payload are clamped by construction: a value the screen
+  // calls impossible can never be shown, and never submitted. The edge cases (unknown figure, and a
+  // figure of zero against a row whose minimum is 1) live in capQty with their own tests.
+  const cappedQty = (qty: number, source: string, irmItemId: string | null, cseId: string | null, min = 0): number =>
+    capQty(qty, freeFor(source, irmItemId, cseId), min);
+
+  // A row is only held while ITS OWN figure is outstanding. `availLoading` alone would disable every
+  // quantity box on the whole request each time the item set changes — and it changes on every cart
+  // add/remove, so adding a second item froze the first item's stepper too. Rows we already have an
+  // answer for keep working through the refetch; rows with no figure AT ALL (misc, or a lookup that
+  // failed and settled) were never capped in the first place and stay editable.
+  const qtyPending = (source: string, irmItemId: string | null, cseId: string | null): boolean =>
+    availLoading && freeFor(source, irmItemId, cseId) === null && source !== "misc";
 
   const excludeKeys = React.useMemo(
     () =>
@@ -440,32 +479,60 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
       if (existing) existing.qty += line.qty;
       else byKey.set(key, line);
     };
+    // Every quantity goes through the SAME cap the boxes render. Reading `p.qty` straight here is what
+    // let a value typed before the figures landed reach the server — the row said "None free to
+    // request" and the request still carried 1. A line clamped to 0 drops out below.
     for (const p of planned) {
-      if (p.qty <= 0) continue;
-      if (p.source === "irm" && p.irmItemId) push(`irm:${p.irmItemId}`, { source: "irm", irmItemId: p.irmItemId, itemName: p.itemName, qty: p.qty });
-      else if (p.source === "customer_stock" && p.customerStockEntryId) push(`cse:${p.customerStockEntryId}`, { source: "customer_stock", customerStockEntryId: p.customerStockEntryId, itemName: p.itemName, qty: p.qty });
-      else if (p.source === "misc") push(`misc:${p.itemName.trim().toLowerCase()}`, { source: "misc", itemName: p.itemName, qty: p.qty });
+      const qty = cappedQty(p.qty, p.source, p.irmItemId, p.customerStockEntryId);
+      if (qty <= 0) continue;
+      if (p.source === "irm" && p.irmItemId) push(`irm:${p.irmItemId}`, { source: "irm", irmItemId: p.irmItemId, itemName: p.itemName, qty });
+      else if (p.source === "customer_stock" && p.customerStockEntryId) push(`cse:${p.customerStockEntryId}`, { source: "customer_stock", customerStockEntryId: p.customerStockEntryId, itemName: p.itemName, qty });
+      else if (p.source === "misc") push(`misc:${p.itemName.trim().toLowerCase()}`, { source: "misc", itemName: p.itemName, qty });
     }
     for (const c of cart) {
-      if (c.qty <= 0) continue;
-      if (c.source === "irm" && c.irmItemId) push(c.key, { source: "irm", irmItemId: c.irmItemId, itemName: c.name, qty: c.qty });
-      else if (c.source === "customer_stock" && c.customerStockEntryId) push(c.key, { source: "customer_stock", customerStockEntryId: c.customerStockEntryId, itemName: c.name, qty: c.qty });
-      else push(c.key, { source: "misc", itemName: c.name, qty: c.qty });
+      const qty = cappedQty(c.qty, c.source, c.irmItemId, c.customerStockEntryId);
+      if (qty <= 0) continue;
+      if (c.source === "irm" && c.irmItemId) push(c.key, { source: "irm", irmItemId: c.irmItemId, itemName: c.name, qty });
+      else if (c.source === "customer_stock" && c.customerStockEntryId) push(c.key, { source: "customer_stock", customerStockEntryId: c.customerStockEntryId, itemName: c.name, qty });
+      else push(c.key, { source: "misc", itemName: c.name, qty });
     }
     return [...byKey.values()];
   };
 
+  // Validation errors are attached to the CONTROL they're about and the control is focused, rather
+  // than only appended to the notice at the bottom of the body. This modal has `scrollBody`, so with a
+  // full cart that notice sits below the fold — pressing "Send request" (in the fixed footer) looked
+  // like it did nothing until you scrolled down to find out why.
+  //
+  // Not a toast: a toast dismisses itself and leaves you hunting for the field it was about, and it
+  // isn't tied to the input for a screen reader. Focusing the control scrolls it into view for free,
+  // puts the cursor where the fix has to be typed, and `inputCls` already renders the red
+  // aria-invalid ring — so the error is visible, announced, and actionable in one move.
   const onSubmit = async () => {
     const lines = buildLines();
-    if (lines.length === 0) { setMsg({ type: "error", text: "Add at least one item with a quantity." }); return; }
-    if (!reason.trim()) { setMsg({ type: "error", text: "Tell the planner why you need these items." }); return; }
+    if (lines.length === 0) {
+      // Not a field error — it's about the cart as a whole, so it stays in the notice. The notice is
+      // scrolled into view because it sits at the bottom of the scrolling body.
+      setMsg({ type: "error", text: "Add at least one item with a quantity." });
+      noticeRef.current?.scrollIntoView({ block: "nearest" });
+      return;
+    }
+    if (!reason.trim()) {
+      setReasonError("Tell the planner why you need these items.");
+      reasonRef.current?.focus();
+      return;
+    }
+    setReasonError(undefined);
     setSubmitting(true);
     setMsg(null);
     try {
       await kitRequestService.createKitRequest({ jobId: job.id, reason: reason.trim(), lines });
       onSent();
     } catch (err) {
+      // A rejected save lands in the same bottom-of-the-body notice, so it needs the same nudge —
+      // otherwise pressing Send and having it fail looks identical to nothing happening.
       setMsg({ type: "error", text: err instanceof Error ? err.message : "Could not send the request." });
+      noticeRef.current?.scrollIntoView({ block: "nearest" });
     } finally {
       setSubmitting(false);
     }
@@ -505,7 +572,7 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
                       <tr key={p.key} className="border-b border-[var(--border)] last:border-0">
                         <td className="px-3 py-2">
                           <span className="font-semibold text-[var(--ink)]">{p.itemName}</span>
-                          <AvailabilityLine stock={stockFor(p.source, p.irmItemId, p.customerStockEntryId)} want={p.qty} />
+                          <AvailabilityLine stock={stockFor(p.source, p.irmItemId, p.customerStockEntryId)} want={cappedQty(p.qty, p.source, p.irmItemId, p.customerStockEntryId)} />
                         </td>
                         <td className="px-3 py-2">
                           {/* Capped at what could actually be sourced, so the box can't promise more
@@ -516,11 +583,14 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
                             min={0}
                             max={free ?? undefined}
                             step={1}
-                            value={p.qty}
+                            value={cappedQty(p.qty, p.source, p.irmItemId, p.customerStockEntryId)}
+                            disabled={qtyPending(p.source, p.irmItemId, p.customerStockEntryId)}
                             aria-label={`Extra quantity for ${p.itemName}`}
                             onChange={(e) => {
                               const raw = Math.max(0, Math.floor(Number(e.target.value) || 0));
-                              setPlannedQty(p.key, free == null ? raw : Math.min(raw, free));
+                              // Same rule as the rendered value, so typing can't push state past what
+                              // the box would show back.
+                              setPlannedQty(p.key, capQty(raw, free));
                             }}
                             className={`${inputCls} py-1.5 text-right`}
                           />
@@ -548,7 +618,9 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
                   </tr>
                 </thead>
                 <tbody>
-                  {cart.map((c) => (
+                  {cart.map((c) => {
+                    const cartFree = freeFor(c.source, c.irmItemId, c.customerStockEntryId);
+                    return (
                     <tr key={c.key} className="border-b border-[var(--border)] last:border-0">
                       <td className="px-3 py-2">
                         <div className="flex items-center gap-2">
@@ -557,20 +629,26 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
                           {c.source === "customer_stock" && <span className="rounded border border-[var(--accent)]/30 bg-[var(--accent-10)] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-[var(--accent)]">Customer stock</span>}
                         </div>
                         {c.code && <div className={c.source === "customer_stock" ? "text-[10px] text-[var(--muted)]" : "font-mono text-[10px] text-[var(--muted)]"}>{c.code}</div>}
-                        <AvailabilityLine stock={stockFor(c.source, c.irmItemId, c.customerStockEntryId)} want={c.qty} />
+                        <AvailabilityLine stock={stockFor(c.source, c.irmItemId, c.customerStockEntryId)} want={cappedQty(c.qty, c.source, c.irmItemId, c.customerStockEntryId, 1)} />
                       </td>
                       <td className="px-3 py-2">
                         <input
                           type="number"
-                          min={1}
-                          max={freeFor(c.source, c.irmItemId, c.customerStockEntryId) ?? undefined}
+                          // `min` follows the cap rather than sitting at a flat 1. With nothing free
+                          // the row is legitimately 0 (and drops out of the request), and a box
+                          // showing 0 under min={1} is a control that contradicts itself — the
+                          // browser reports it invalid and a stepper click jumps it back to 1.
+                          min={cartFree === 0 ? 0 : 1}
+                          max={cartFree ?? undefined}
                           step={1}
-                          value={c.qty}
+                          value={cappedQty(c.qty, c.source, c.irmItemId, c.customerStockEntryId, 1)}
+                          disabled={qtyPending(c.source, c.irmItemId, c.customerStockEntryId)}
                           aria-label={`Quantity for ${c.name}`}
                           onChange={(e) => {
                             const raw = Math.max(1, Math.floor(Number(e.target.value) || 1));
-                            const free = freeFor(c.source, c.irmItemId, c.customerStockEntryId);
-                            setCartQty(c.key, free == null ? raw : Math.min(raw, Math.max(1, free)));
+                            // Same rule as the rendered value, so typing can't push state past what
+                            // the box would show back.
+                            setCartQty(c.key, capQty(raw, cartFree, 1));
                           }}
                           className={`${inputCls} py-1.5`}
                         />
@@ -581,7 +659,8 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
                         </button>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -589,11 +668,26 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
         </div>
 
         <div>
-          <label className={labelCls}>Why do you need these?<RequiredMark /></label>
-          <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={2} maxLength={2000} placeholder="e.g. Two cables damaged during install; need extras to finish." className={`${inputCls} resize-none`} />
+          <label className={labelCls} htmlFor="kit-reason">Why do you need these?<RequiredMark /></label>
+          <textarea
+            id="kit-reason"
+            ref={reasonRef}
+            value={reason}
+            // Clears as soon as they start answering — leaving a red ring under a box they're
+            // actively filling in reads as "still wrong" when it isn't.
+            onChange={(e) => { setReason(e.target.value); if (reasonError) setReasonError(undefined); }}
+            rows={2}
+            maxLength={2000}
+            aria-required="true"
+            aria-invalid={Boolean(reasonError)}
+            aria-describedby={reasonError ? "kit-reason-error" : undefined}
+            placeholder="e.g. Two cables damaged during install; need extras to finish."
+            className={`${inputCls} resize-none`}
+          />
+          <FieldError id="kit-reason-error" message={reasonError} />
         </div>
 
-        {msg && <Notice msg={msg} />}
+        <div ref={noticeRef}>{msg && <Notice msg={msg} />}</div>
       </div>
     </Modal>
   );

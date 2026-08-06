@@ -112,6 +112,15 @@ export function Modal({
         tabIndex={-1}
         className={`my-8 w-full ${max} anim-fade-in rounded-2xl border border-[var(--border)] bg-[var(--surface)] shadow-2xl outline-none ${scrollBody ? "flex max-h-[calc(100dvh-4rem)] flex-col overflow-hidden" : ""}`}
         onClick={(e) => e.stopPropagation()}
+        // The portal above keeps the dialog out of the page's DOM — but React events do NOT follow the
+        // DOM tree, they follow the REACT tree. So a <form> inside this dialog still bubbles its submit
+        // (and reset) straight up to whatever page <form> the modal was DECLARED inside, running that
+        // page's submit handler. Opening "Add project" from the New Job form and saving it therefore
+        // validated the JOB: red fields and "Please fix the highlighted fields" for a form nobody
+        // submitted. Stopped HERE rather than in each modal — the dialog's own handlers sit deeper and
+        // have already run, and every modal in the app inherits the fix instead of having to remember it.
+        onSubmit={(e) => e.stopPropagation()}
+        onReset={(e) => e.stopPropagation()}
       >
         <div className={`flex items-start justify-between gap-4 border-b border-[var(--border-2)] p-5 ${scrollBody ? "shrink-0" : ""}`}>
           <div className="min-w-0">
@@ -125,6 +134,7 @@ export function Modal({
             )}
           </div>
           <button
+            type="button"
             onClick={onClose}
             className="shrink-0 rounded-lg p-1.5 text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--ink)]"
             aria-label="Close"

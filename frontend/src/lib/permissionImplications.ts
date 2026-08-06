@@ -140,6 +140,36 @@ export function grantableGroups(
   return groups.filter((g) => !g.capability || capabilities[g.capability]);
 }
 
+/**
+ * What turning a capability ON should pre-select, and which categories to reveal.
+ *
+ * Switching "Field role" on used to leave the Engineer Portal collapsed and empty, so the one
+ * outcome nearly every field role wants — all of it — was a manual scroll-find-expand-tick. This
+ * returns the grant to apply instead.
+ *
+ * ONLY pre-selects when nothing in those groups is chosen yet. That is the difference between a
+ * helpful default and destroying someone's work: a new role gets everything, while an edit that
+ * toggles off and back on gets its own curated picks back rather than being silently reset to all.
+ *
+ * Returns `null` when there is nothing to do, so the caller can skip the state update entirely
+ * rather than re-rendering with an identical array.
+ */
+export function capabilityGrant(
+  groups: PermissionGroup[],
+  granted: string[],
+  capability: NonNullable<PermissionGroup["capability"]>,
+): { keys: string[]; categories: string[] } | null {
+  const owned = groups.filter((g) => g.capability === capability);
+  if (owned.length === 0) return null;
+
+  const keys = owned.flatMap(keysOf);
+  // Anything already chosen means the user has curated this — leave it alone.
+  if (keys.some((k) => granted.includes(k))) return null;
+
+  const categories = [...new Set(owned.map((g) => g.category).filter((c): c is string => !!c))];
+  return { keys, categories };
+}
+
 // Drop any granted key whose group needs a capability the role lacks. Mirrors the backend
 // splitByCapability: it only ever REMOVES, so it can't widen a role by accident.
 export function stripUngrantable(

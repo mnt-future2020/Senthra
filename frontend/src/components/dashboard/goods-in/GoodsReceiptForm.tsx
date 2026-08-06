@@ -14,12 +14,13 @@ import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardP
 import { inputCls, ghostBtn, labelCls, primaryBtn } from "@/components/ui/styles";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { Select } from "@/components/ui/Select";
-import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
+import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { BarcodePanel } from "@/components/dashboard/irm/BarcodePanel";
 import { PO_STATUS_LABELS } from "@/components/dashboard/purchase-orders/poStatus";
 import { AttachmentGrid, DocPicker, attachmentToDoc, type DocItem, type PickedDoc } from "./DeliveryDocuments";
 import type { GoodsReceipt, GrnAttachment } from "@/types/goods-in";
 import type { PurchaseOrder } from "@/types/purchase-order";
+import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 
 const GRN_LIST = "/dashboard/goods-in";
 const QUALITY = ["passed", "partial", "failed"] as const;
@@ -68,11 +69,6 @@ const defaultCopies = (accepted: number) => Math.max(1, accepted);
 // Only barcode-able lines get a label panel: serial/batch-tracked items would print an identical
 // sticker on every unit AND are rejected by scan lookup, so a label there is a dead sticker.
 const canLabel = (l: LineState) => !l.trackSerials && !l.trackBatches && Boolean(l.itemCode);
-
-function FieldError({ message }: { message?: string }) {
-  if (!message) return null;
-  return <p className="mt-1.5 text-[11px] font-semibold text-[var(--neg)]">{message}</p>;
-}
 
 type ItemFlags = { serials: boolean; batches: boolean; code: string };
 
@@ -424,6 +420,7 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
     if (Object.keys(fieldErrors).length > 0) {
       setErrors(fieldErrors);
       pushToast("Please fix the highlighted fields.", "alert");
+      focusFirstInvalid();
       return;
     }
     setErrors({});

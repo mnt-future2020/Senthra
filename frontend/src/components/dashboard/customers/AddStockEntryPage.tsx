@@ -12,7 +12,7 @@ import * as warehouseService from "@/services/warehouse.service";
 import { listCategories, getCachedCategories } from "@/services/category.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
-import { FormSection, FormAsideCard, RequiredMark } from "@/components/ui/FormScaffold";
+import { FieldError, FormAsideCard, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { inputCls, labelCls, primaryBtn, hintCls } from "@/components/ui/styles";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { Select } from "@/components/ui/Select";
@@ -22,11 +22,6 @@ import type { PagedWarehouses } from "@/services/warehouse.service";
 
 // Standard units of measure — mirrors the IRM item form + backend UOM_OPTIONS.
 const UOM_OPTIONS = ["Each", "Metre", "Roll", "Pack", "Box", "Set", "Pair", "Reel"];
-
-function FieldError({ message }: { message?: string }) {
-  if (!message) return null;
-  return <p className="mt-1.5 text-[11px] font-semibold text-[var(--neg)]">{message}</p>;
-}
 
 interface CustomerInfo {
   id: string;

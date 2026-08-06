@@ -6,7 +6,8 @@ import { ArrowLeft, Loader2, PackagePlus } from "lucide-react";
 import * as vanStockSvc from "@/services/vanStockRequest.service";
 import type { VanStockPriority } from "@/services/vanStockRequest.service";
 import { listEngineerOptions } from "@/services/warehouse.service";
-import { FormAsideCard, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
+import { FieldError, FormAsideCard, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
+import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 import { Notice } from "@/components/ui/Notice";
 import { Select } from "@/components/ui/Select";
 import { inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
@@ -49,6 +50,10 @@ export function WalkInIssue({
   // synchronously. Same guard, same reason, as VanRequestDetail's busyRef.
   const submittingRef = React.useRef(false);
   const [msg, setMsg] = React.useState<Msg>(null);
+  // Field-level errors, kept apart from `msg` (cart-wide + server failures) so each renders against
+  // the control it describes.
+  const [errors, setErrors] = React.useState<{ engineerId?: string; reason?: string }>({});
+  const noticeRef = React.useRef<HTMLDivElement>(null);
 
   React.useEffect(() => {
     listEngineerOptions()
@@ -98,9 +103,24 @@ export function WalkInIssue({
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (submittingRef.current) return;
-    if (!engineerId) { setMsg({ type: "error", text: "Pick the engineer receiving the stock." }); return; }
-    if (cart.length === 0) { setMsg({ type: "error", text: "Add at least one item." }); return; }
-    if (!reason.trim()) { setMsg({ type: "error", text: "A reason is required." }); return; }
+    // Field problems are attached to their control and focused; only the cart-wide one stays in the
+    // notice. All three used to land in that notice, which sits at the BOTTOM of a scrolling modal
+    // body — pressing Send with an empty reason looked like nothing happened until you scrolled.
+    // Collected together rather than returned one at a time so a form with two gaps shows both.
+    const fieldErrors: { engineerId?: string; reason?: string } = {};
+    if (!engineerId) fieldErrors.engineerId = "Pick the engineer receiving the stock.";
+    if (!reason.trim()) fieldErrors.reason = "A reason is required.";
+    if (Object.keys(fieldErrors).length > 0) {
+      setErrors(fieldErrors);
+      focusFirstInvalid();
+      return;
+    }
+    setErrors({});
+    if (cart.length === 0) {
+      setMsg({ type: "error", text: "Add at least one item." });
+      noticeRef.current?.scrollIntoView({ block: "nearest" });
+      return;
+    }
     submittingRef.current = true;
     setSubmitting(true);
     setMsg(null);
@@ -174,9 +194,13 @@ export function WalkInIssue({
                   <Select
                     ariaLabel="Engineer"
                     value={engineerId}
-                    onChange={setEngineerId}
+                    // Clears the moment they pick — a red ring on a field they've just answered
+                    // reads as "still wrong".
+                    onChange={(v) => { setEngineerId(v); if (errors.engineerId) setErrors((p) => ({ ...p, engineerId: undefined })); }}
+                    invalid={Boolean(errors.engineerId)}
                     options={[{ value: "", label: "Pick an engineer…" }, ...engineers.map((e) => ({ value: e.id, label: e.name }))]}
                   />
+                  <FieldError message={errors.engineerId} />
                 </div>
                 <div>
                   <label className={labelCls}>Priority</label>
@@ -184,16 +208,21 @@ export function WalkInIssue({
                 </div>
               </div>
               <div className="mt-4">
-                <label className={labelCls}>Reason <RequiredMark /></label>
+                <label className={labelCls} htmlFor="walkin-reason">Reason <RequiredMark /></label>
                 <input
+                  id="walkin-reason"
                   value={reason}
-                  onChange={(e) => setReason(e.target.value)}
+                  onChange={(e) => { setReason(e.target.value); if (errors.reason) setErrors((p) => ({ ...p, reason: undefined })); }}
                   maxLength={2000}
+                  aria-required="true"
+                  aria-invalid={Boolean(errors.reason)}
+                  aria-describedby={errors.reason ? "walkin-reason-error" : undefined}
                   placeholder="e.g. Engineer collected consumables at the counter."
                   className={inputCls}
                 />
+                <FieldError id="walkin-reason-error" message={errors.reason} />
               </div>
-              {msg && <div className="mt-4"><Notice msg={msg} /></div>}
+              <div ref={noticeRef}>{msg && <div className="mt-4"><Notice msg={msg} /></div>}</div>
             </FormSection>
           </div>
 

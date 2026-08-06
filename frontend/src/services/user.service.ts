@@ -1,4 +1,4 @@
-import { api } from "@/lib/api";
+import { api, LONG_WRITE_TIMEOUT } from "@/lib/api";
 import { registerClientCache } from "@/lib/clientCache";
 import type { User, UserStatus } from "@/types/user";
 
@@ -105,14 +105,14 @@ export function getUser(id: string): Promise<User> {
 
 // Avatar uploads (Cloudinary) can take longer than a normal call.
 export function createUser(payload: CreateUserPayload): Promise<CreateUserResult> {
-  return api<CreateUserResult>("/users", { method: "POST", body: payload, timeout: 60_000 });
+  return api<CreateUserResult>("/users", { method: "POST", body: payload, timeout: LONG_WRITE_TIMEOUT });
 }
 
 export function updateUser(id: string, payload: UpdateUserPayload): Promise<User> {
   return api<{ user: User }>(`/users/${id}`, {
     method: "PUT",
     body: payload,
-    timeout: 60_000,
+    timeout: LONG_WRITE_TIMEOUT,
   }).then((r) => r.user);
 }
 
@@ -139,7 +139,7 @@ export function uploadMySignature(signature: string, fileName?: string): Promise
   return api<{ user: User }>("/users/me/signature", {
     method: "POST",
     body: { signature, fileName },
-    timeout: 60_000,
+    timeout: LONG_WRITE_TIMEOUT,
   }).then((r) => r.user);
 }
 
@@ -165,5 +165,5 @@ export function getMyProfile(): Promise<User> {
 }
 
 export function updateMyProfile(payload: MyProfileUpdate): Promise<User> {
-  return api<{ user: User }>("/users/me", { method: "PUT", body: payload, timeout: 60_000 }).then((r) => r.user);
+  return api<{ user: User }>("/users/me", { method: "PUT", body: payload, timeout: LONG_WRITE_TIMEOUT }).then((r) => r.user);
 }

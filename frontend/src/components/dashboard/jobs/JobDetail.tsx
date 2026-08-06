@@ -131,7 +131,9 @@ function JobView({ initial }: { initial: Job }) {
               {job.kitLines.length === 0 ? (
                 <tr><td colSpan={9} className="px-4 py-6 text-center text-[var(--muted)]">No kit lines.</td></tr>
               ) : (
-                job.kitLines.map((l) => (
+                job.kitLines.map((l) => {
+                  const isMisc = l.lineType === "misc";
+                  return (
                   <tr key={l.id} className="border-b border-[var(--border)] last:border-0">
                     <td className="px-4 py-3 text-[var(--muted)]">{JOB_LINE_TYPE_LABELS[l.lineType as JobLineType] ?? l.lineType}</td>
                     <td className="px-4 py-3">
@@ -195,11 +197,15 @@ function JobView({ initial }: { initial: Job }) {
                     </td>
                     <td className="px-4 py-3 text-right font-semibold text-[var(--ink)]">{l.qty}</td>
                     <td className="px-4 py-3 text-right text-[var(--ink)]">{l.issued}</td>
-                    <td className="px-4 py-3 text-right text-[var(--ink)]">{l.used}</td>
+                    {/* Misc is free text with no barcode or stock balance: never scanned back, left
+                        out of the engineer's Complete form, skipped by reconcile. These three would sit
+                        at 0 / 0 / issued forever, so a reconciled job would still claim units owed.
+                        Same em dash the Goods Management queue and the engineer job pack use. */}
+                    <td className="px-4 py-3 text-right text-[var(--ink)]">{isMisc ? "—" : l.used}</td>
                     <td className="px-4 py-3 text-right text-[var(--ink)]">
                       <div className="flex flex-col items-end gap-1">
-                        <span>{l.returned}</span>
-                        {l.returned > l.issued && (
+                        <span>{isMisc ? "—" : l.returned}</span>
+                        {!isMisc && l.returned > l.issued && (
                           <span className="inline-flex items-center gap-1 rounded-md bg-indigo-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-600" title="Returned here but issued from another warehouse">
                             <ArrowLeftRight className="h-2.5 w-2.5 shrink-0" />
                             {crossWarehouseReturnNote(l, job.kitLines)}
@@ -207,10 +213,11 @@ function JobView({ initial }: { initial: Job }) {
                         )}
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-right font-bold text-[var(--ink)]">{l.remaining}</td>
+                    <td className="px-4 py-3 text-right font-bold text-[var(--ink)]">{isMisc ? "—" : l.remaining}</td>
                     <td className="px-4 py-3 text-[var(--muted)]">{l.notes ?? "—"}</td>
                   </tr>
-                ))
+                  );
+                })
               )}
             </tbody>
           </table>

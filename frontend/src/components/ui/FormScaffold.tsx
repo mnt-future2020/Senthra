@@ -207,6 +207,36 @@ export function FormError({ message }: { message: string }) {
   );
 }
 
+/**
+ * The validation message for ONE field, rendered directly beneath it.
+ *
+ * Pair it with `aria-invalid` on the input and `aria-describedby={id}` — `inputCls` already carries
+ * the `aria-[invalid=true]` red border/ring, so the two together give the field a visible and an
+ * announced error without any extra styling at the call site.
+ *
+ * Use this rather than a toast for validation. A toast dismisses itself, leaving the user to hunt for
+ * the field it was about, and it isn't associated with the input for a screen reader. Toasts are for
+ * outcomes (saved, failed to save); field problems belong next to the field.
+ *
+ * `data-invalid` makes the message itself a target for `focusFirstInvalid`. It matters for the errors
+ * that belong to a SECTION rather than a control — "add at least one item" under a line table, where
+ * there is no input to carry `aria-invalid`. Without it those submits set an error, raised a toast
+ * and scrolled nothing, which reads as the Save button being broken. For an ordinary field the input
+ * sits EARLIER in document order, so it still wins and still takes focus; this only fills the gap.
+ *
+ * Every form in the dashboard had its own byte-identical copy of this (sixteen of them). They now all
+ * import this one — which is the point: a fix like the `data-invalid` above lands everywhere at once
+ * instead of in whichever copies someone remembered.
+ */
+export function FieldError({ id, message }: { id?: string; message?: string }) {
+  if (!message) return null;
+  return (
+    <p id={id} data-invalid="true" className="mt-1.5 text-[11px] font-semibold text-[var(--neg)]">
+      {message}
+    </p>
+  );
+}
+
 // A small red asterisk marking a required field. Decorative (aria-hidden) — the
 // matching input carries aria-required so assistive tech announces it.
 export function RequiredMark() {

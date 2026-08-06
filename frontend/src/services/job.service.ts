@@ -1,4 +1,4 @@
-import { api } from "@/lib/api";
+import { api, LONG_WRITE_TIMEOUT } from "@/lib/api";
 import { registerClientCache } from "@/lib/clientCache";
 import type { Job, JobSummary } from "@/types/job";
 
@@ -109,10 +109,10 @@ const mutate = (p: Promise<{ job: Job }>): Promise<Job> =>
   });
 
 export function createJob(payload: JobPayload): Promise<Job> {
-  return mutate(api<{ job: Job }>("/jobs", { method: "POST", body: payload, timeout: 60_000 }));
+  return mutate(api<{ job: Job }>("/jobs", { method: "POST", body: payload, timeout: LONG_WRITE_TIMEOUT }));
 }
 export function updateJob(id: string, payload: JobPayload): Promise<Job> {
-  return mutate(api<{ job: Job }>(`/jobs/${id}`, { method: "PATCH", body: payload, timeout: 60_000 }));
+  return mutate(api<{ job: Job }>(`/jobs/${id}`, { method: "PATCH", body: payload, timeout: LONG_WRITE_TIMEOUT }));
 }
 export function deleteJob(id: string): Promise<void> {
   return api(`/jobs/${id}`, { method: "DELETE" }).then(() => {

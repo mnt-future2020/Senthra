@@ -1,4 +1,4 @@
-import { api } from "@/lib/api";
+import { api, LONG_WRITE_TIMEOUT } from "@/lib/api";
 import { registerClientCache } from "@/lib/clientCache";
 import type { GoodsReceipt } from "@/types/goods-in";
 
@@ -113,15 +113,19 @@ export function deleteGoodsReceipt(id: string): Promise<void> {
 }
 
 // --- workflow transitions ---------------------------------------------------
+// `complete` posts EVERY received line into inventory in one transaction, so the whole family gets
+// the long timeout rather than only that one — see LONG_WRITE_TIMEOUT. `cancel` can't run long, but
+// splitting the helper to save 40s on a failure nobody is waiting through isn't worth the branch.
 const action = (id: string, name: string, body?: unknown): Promise<GoodsReceipt> =>
-  mutate(api<{ goodsReceipt: GoodsReceipt }>(`/goods-in/${id}/${name}`, { method: "POST", body: body ?? {} }));
+  mutate(api<{ goodsReceipt: GoodsReceipt }>(`/goods-in/${id}/${name}`, { method: "POST", body: body ?? {}, timeout: LONG_WRITE_TIMEOUT }));
 
 export const completeGoodsReceipt = (id: string) => action(id, "complete");
 export const cancelGoodsReceipt = (id: string, reason?: string) => action(id, "cancel", { reason: reason ?? "" });
 
 // --- attachments ------------------------------------------------------------
 export function addAttachment(id: string, payload: GrnAttachmentPayload): Promise<GoodsReceipt> {
-  return mutate(api<{ goodsReceipt: GoodsReceipt }>(`/goods-in/${id}/attachments`, { method: "POST", body: payload }));
+  // Cloudinary relay — see LONG_WRITE_TIMEOUT (matches the PRF attachment upload).
+  return mutate(api<{ goodsReceipt: GoodsReceipt }>(`/goods-in/${id}/attachments`, { method: "POST", body: payload, timeout: LONG_WRITE_TIMEOUT }));
 }
 export function removeAttachment(id: string, attachmentId: string): Promise<GoodsReceipt> {
   return mutate(api<{ goodsReceipt: GoodsReceipt }>(`/goods-in/${id}/attachments/${attachmentId}`, { method: "DELETE" }));

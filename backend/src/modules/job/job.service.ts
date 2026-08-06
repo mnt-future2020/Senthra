@@ -368,16 +368,35 @@ async function resolveKitLineRows(lines: JobKitLineInput[], customerId: string):
 // customer stock. Infinity for misc / unresolved lines (no stock limit). The form already caps planned
 // qty at this (minus other jobs' demand), so this server-side guard never blocks a real form submit —
 // it just stops a direct API call from promising more stock than physically exists.
-async function availableForLine(line: { irmItemId: string | null; warehouseId: string | null; customerStockEntryId: string | null }): Promise<number> {
-  if (line.irmItemId && line.warehouseId) {
-    const bal = await inventoryRepo.findBalancePair(line.irmItemId, line.warehouseId);
-    return (bal?.quantityOnHand ?? 0) - (bal?.quantityReserved ?? 0);
-  }
-  if (line.customerStockEntryId) {
-    const entry = await customerRepo.findStockEntryById(line.customerStockEntryId);
-    return entry?.quantity ?? 0;
-  }
-  return Infinity;
+type AvailabilityLine = { irmItemId: string | null; warehouseId: string | null; customerStockEntryId: string | null };
+
+/**
+ * Availability for a whole kit list in TWO queries, whatever its length.
+ *
+ * Callers used to `await availableForLine(...)` inside a `for` over the kit lines, so a 20-line job
+ * cost 20 sequential round trips — ~1.4s of pure latency on a remote cluster, on every job save,
+ * before anything was written. The lookups are independent, so they batch cleanly.
+ *
+ * Returns a reader keyed the same way the per-line check reads it, so the callers keep their existing
+ * "throw on the FIRST line that exceeds" order and error message.
+ */
+async function availabilityReader(lines: readonly AvailabilityLine[]): Promise<(line: AvailabilityLine) => number> {
+  const irmItemIds = [...new Set(lines.map((l) => l.irmItemId).filter((v): v is string => !!v))];
+  const warehouseIds = [...new Set(lines.map((l) => l.warehouseId).filter((v): v is string => !!v))];
+  const cseIds = [...new Set(lines.map((l) => l.customerStockEntryId).filter((v): v is string => !!v))];
+
+  const [balances, entries] = await Promise.all([
+    inventoryRepo.findBalancesByItemsAndWarehouses(irmItemIds, warehouseIds),
+    customerRepo.findStockEntryQuantitiesByIds(cseIds),
+  ]);
+  const freeByPair = new Map(balances.map((b) => [`${b.irmItemId}|${b.warehouseId}`, b.quantityOnHand - b.quantityReserved]));
+  const qtyByEntry = new Map(entries.map((e) => [e.id, e.quantity]));
+
+  return (line) => {
+    if (line.irmItemId && line.warehouseId) return freeByPair.get(`${line.irmItemId}|${line.warehouseId}`) ?? 0;
+    if (line.customerStockEntryId) return qtyByEntry.get(line.customerStockEntryId) ?? 0;
+    return Infinity; // misc — free text, nothing to run out of
+  };
 }
 
 // ── Notify the assigned engineer (fire-and-forget; never blocks/rolls back) ───────────────────
@@ -487,9 +506,12 @@ export async function createJob(input: CreateJobInput, actor?: AuditActor): Prom
   const supplier = input.supplierId ? await requireSupplier(input.supplierId) : null;
   const rows = await resolveKitLineRows(input.kitLines, customer.id);
   // Can't plan more than physically exists at the warehouse (server-side backstop for the form cap).
+  // Availability for the WHOLE kit list is read up front in two queries; the loop below then only does
+  // arithmetic, so a 20-line job costs the same two round trips as a 1-line one.
+  const availableFor = await availabilityReader(rows);
   for (const r of rows) {
     if (r.lineType === "misc") continue;
-    const avail = await availableForLine(r);
+    const avail = availableFor(r);
     if (r.qty > avail) throw badRequest(`"${r.itemName}" — only ${avail} in stock at that warehouse, but ${r.qty} planned.`);
   }
   const actorEmail = actor?.email ?? null;
@@ -758,9 +780,15 @@ export async function updateJob(id: string, input: UpdateJobInput, actor?: Audit
       // Stock cap: new lines must fit current stock; an increase to an existing line needs only the
       // INCREMENT to fit (its prior qty was validated when set — re-checking unchanged lines would
       // false-block on later stock drift). Only changed/added lines are checked.
+      // ONE read covering both loops — the added lines and the existing lines whose qty is growing.
+      const growingLines = diff.updates
+        .filter((u) => u.qty - u.existingQty > 0)
+        .map((u) => (existing.kitLines ?? []).find((k) => k.id === u.id))
+        .filter((kl): kl is NonNullable<typeof kl> => !!kl);
+      const availableFor = await availabilityReader([...diff.creates, ...growingLines]);
       for (const c of diff.creates) {
         if (c.lineType === "misc") continue;
-        const avail = await availableForLine(c);
+        const avail = availableFor(c);
         if (c.qty > avail) throw badRequest(`"${c.itemName}" — only ${avail} in stock at that warehouse, but ${c.qty} planned.`);
       }
       for (const u of diff.updates) {
@@ -768,7 +796,7 @@ export async function updateJob(id: string, input: UpdateJobInput, actor?: Audit
         if (inc <= 0) continue;
         const kl = (existing.kitLines ?? []).find((k) => k.id === u.id);
         if (!kl || kl.lineType === "misc") continue;
-        const avail = await availableForLine(kl);
+        const avail = availableFor(kl);
         if (inc > avail) throw badRequest(`"${u.itemName}" — only ${avail} more available to add at that warehouse (have ${u.existingQty}, requested ${u.qty}).`);
       }
       // Once a kit line has had stock ISSUED against it, it's locked: it can't be removed and its

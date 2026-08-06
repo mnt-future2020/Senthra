@@ -17,12 +17,13 @@ import { Select } from "@/components/ui/Select";
 import { PaymentTermsField } from "@/components/ui/PaymentTermsField";
 import { INCOTERM_OPTIONS } from "@/lib/incoterms";
 import { resolveSupplierPaymentTerms } from "@/lib/paymentTerms";
-import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
+import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { formatDate, formatMoney, PoStatusBadge } from "./poStatus";
 import type { PoPriority, PurchaseOrder } from "@/types/purchase-order";
 import type { Supplier } from "@/types/supplier";
 import type { Warehouse } from "@/types/warehouse";
 import type { IrmItem } from "@/types/irm";
+import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 
 const PO_LIST = "/dashboard/purchase-orders";
 const PRIORITIES = ["low", "normal", "high", "urgent"] as const;
@@ -32,11 +33,6 @@ const PRIORITY_LABELS: Record<string, string> = { low: "Low", normal: "Normal", 
 // keep their identity across add/remove and controlled inputs don't desync. `warehouseId` is the
 // per-row destination warehouse (create flow only — the backend auto-splits POs by it).
 type LineRow = { _key: string; irmItemId: string; warehouseId: string; quantity: string; unitPrice: string; vatRate: string; notes: string };
-
-function FieldError({ id, message }: { id: string; message?: string }) {
-  if (!message) return null;
-  return <p id={id} className="mt-1.5 text-[11px] font-semibold text-[var(--neg)]">{message}</p>;
-}
 
 // A small pill for the shared context shown on the split-create success screen (supplier / item
 // count / expected date). Long values truncate instead of stretching the pill.
@@ -273,6 +269,7 @@ export function PurchaseOrderForm({ mode, order }: { mode: "create" | "edit"; or
     if (Object.keys(fieldErrors).length > 0) {
       setErrors(fieldErrors);
       pushToast("Please fix the highlighted fields.", "alert");
+      focusFirstInvalid();
       return;
     }
     setErrors({});

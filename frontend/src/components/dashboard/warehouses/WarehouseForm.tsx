@@ -17,9 +17,10 @@ import { PostcodeField } from "@/components/ui/PostcodeField";
 import { CreatableSelect } from "@/components/ui/CreatableSelect";
 import { Select } from "@/components/ui/Select";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
+import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { EMAIL_RE, UK_POSTCODE_RE, isPhone } from "@/lib/validation";
 import type { UserStatus } from "@/types/user";
+import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 
 const WAREHOUSES_LIST = "/dashboard/warehouses";
 
@@ -27,15 +28,6 @@ const WAREHOUSES_LIST = "/dashboard/warehouses";
 // validation + postcodes.io geocoding are UK-specific.
 const COUNTRY_OPTIONS = ["United Kingdom"];
 const TIMEZONE_OPTIONS = ["Europe/London", "Europe/Dublin", "UTC"];
-
-function FieldError({ id, message }: { id: string; message?: string }) {
-  if (!message) return null;
-  return (
-    <p id={id} className="mt-1.5 text-[11px] font-semibold text-[var(--neg)]">
-      {message}
-    </p>
-  );
-}
 
 // Full-page Add/Edit warehouse form — mirrors the customer/user forms: a titled set of
 // sections plus a sticky summary aside, nav-guarded against losing edits. Code is
@@ -187,6 +179,7 @@ export function WarehouseForm({ mode, warehouse }: { mode: "create" | "edit"; wa
     if (Object.keys(fieldErrors).length > 0) {
       setErrors(fieldErrors);
       pushToast("Please fix the highlighted fields.", "alert");
+      focusFirstInvalid();
       return;
     }
     setErrors({});
