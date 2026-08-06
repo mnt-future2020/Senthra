@@ -87,12 +87,42 @@ describe("createIrmItemSchema — numbers", () => {
     expect(createIrmItemSchema.safeParse(valid({ vatRatePercent: 120 })).success).toBe(false);
   });
 
-  it("rejects maximumStock below minimumStock", () => {
-    expect(createIrmItemSchema.safeParse(valid({ minimumStock: 10, maximumStock: 5 })).success).toBe(false);
+  // critical ≤ reorder ≤ maximum. The old pair compared max against `minimumStock`, which the
+  // reorder engine never read — the rule guarded a number that changed nothing.
+  it("rejects a maximum below the reorder level", () => {
+    expect(createIrmItemSchema.safeParse(valid({ reorderLevel: 10, maximumStock: 5 })).success).toBe(false);
   });
 
-  it("accepts maximumStock >= minimumStock", () => {
-    expect(createIrmItemSchema.safeParse(valid({ minimumStock: 5, maximumStock: 10 })).success).toBe(true);
+  it("accepts a maximum at or above the reorder level", () => {
+    expect(createIrmItemSchema.safeParse(valid({ reorderLevel: 5, maximumStock: 10 })).success).toBe(true);
+    expect(createIrmItemSchema.safeParse(valid({ reorderLevel: 10, maximumStock: 10 })).success).toBe(true);
+  });
+
+  it("rejects a critical level above the reorder level", () => {
+    expect(createIrmItemSchema.safeParse(valid({ reorderLevel: 10, criticalLevel: 20 })).success).toBe(false);
+  });
+
+  it("accepts a critical level at or below the reorder level", () => {
+    expect(createIrmItemSchema.safeParse(valid({ reorderLevel: 10, criticalLevel: 3 })).success).toBe(true);
+    expect(createIrmItemSchema.safeParse(valid({ reorderLevel: 10, criticalLevel: 10 })).success).toBe(true);
+  });
+
+  // Each rule needs BOTH numbers — one alone can't contradict anything.
+  it("stays quiet when only one of the three is given", () => {
+    expect(createIrmItemSchema.safeParse(valid({ maximumStock: 5 })).success).toBe(true);
+    expect(createIrmItemSchema.safeParse(valid({ criticalLevel: 900 })).success).toBe(true);
+  });
+
+  // The chain closes on EVERY adjacent pair. Both rules above hinge on the reorder level, so with it
+  // blank nothing compared critical against maximum — critical 200 with a maximum of 50 passed,
+  // which is an ordering the comment claimed but the code only half-enforced.
+  it("still catches critical above maximum when NO reorder level is given", () => {
+    expect(createIrmItemSchema.safeParse(valid({ criticalLevel: 200, maximumStock: 50 })).success).toBe(false);
+  });
+
+  it("accepts critical at or below maximum with no reorder level", () => {
+    expect(createIrmItemSchema.safeParse(valid({ criticalLevel: 50, maximumStock: 50 })).success).toBe(true);
+    expect(createIrmItemSchema.safeParse(valid({ criticalLevel: 10, maximumStock: 50 })).success).toBe(true);
   });
 });
 
@@ -107,11 +137,5 @@ describe("updateIrmItemSchema", () => {
 
   it("accepts an empty suppliers array (clears every link)", () => {
     expect(updateIrmItemSchema.safeParse({ suppliers: [] }).success).toBe(true);
-  });
-
-  it("accepts clearing the owner via empty string", () => {
-    const r = updateIrmItemSchema.safeParse({ ownerUserId: "" });
-    expect(r.success).toBe(true);
-    if (r.success) expect(r.data.ownerUserId).toBeNull();
   });
 });

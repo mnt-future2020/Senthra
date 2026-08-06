@@ -12,7 +12,6 @@ import * as irmService from "@/services/irm.service";
 import * as grnService from "@/services/goods-in.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
-import { NoStaffAssigned, StaffChip } from "@/components/ui/StaffChip";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { DetailHeader } from "@/components/ui/DetailHeader";
 import { Pagination } from "@/components/ui/Pagination";
@@ -264,18 +263,6 @@ function Overview({ s }: { s: Supplier }) {
             <Field label="Notes">{s.notes}</Field>
           </div>
         </div>
-      </Card>
-
-      <Card title="Management">
-        <Field label="Internal owner">
-          {s.owner ? (
-            <div className="mt-2">
-              <StaffChip staff={s.owner} />
-            </div>
-          ) : (
-            <NoStaffAssigned label="No owner assigned" />
-          )}
-        </Field>
       </Card>
 
       <Card title="Record">

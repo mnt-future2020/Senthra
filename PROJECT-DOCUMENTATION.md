@@ -303,9 +303,9 @@ All routes are mounted in [routes/index.ts](backend/src/routes/index.ts). `GET /
 |---|---|
 | `/categories`, `/irm-categories`, `/irm-types`, `/supplier-types`, `/warehouse-types` | Uniform taxonomy CRUD: GET `/`, GET `/:idOrKey`, POST, PUT `/:id`, DELETE `/:id`. View/create also granted to the owning entity's create/edit permissions (form pickers + inline create). Delete blocked while in use (409 with count). |
 | `/departments`, `/job-titles` | GET/POST/PUT/DELETE reusing `users.*` permissions; rename cascades to `User.department`/`User.jobTitle` in a transaction. |
-| `/suppliers` | GET `/owner-options`; CRUD *(suppliers.view/create/edit/delete)* — `SUP-####` codes, PATCH change-detection audit events, payment-terms rules ("Custom" requires text), soft delete blocked by PRF/PO/GRN/catalogue usage. |
+| `/suppliers` | CRUD *(suppliers.view/create/edit/delete)* — `SUP-####` codes, PATCH change-detection audit events, payment-terms rules ("Custom" requires text), soft delete blocked by PRF/PO/GRN/catalogue usage. |
 | `/warehouses` | GET `/engineer-options` (role `canHoldStock`), `/options`; CRUD *(warehouse.\*)* — `WH-####`, postcode geocoding, single-default enforcement, warehouse-scoped visibility, soft delete guarded by dependencies. Also hosts the customer pending-stock router. |
-| `/irm-items` | GET `/owner-options`; CRUD *(irm.\*)*; POST `/:id/generate-barcode` *(irm.barcode.manage)* — Code-128 PNG of the item code. Global-forever SKU uniqueness; supplier links reconciled transactionally; soft delete guarded by PO/GRN/inventory/engineer-stock usage. |
+| `/irm-items` | CRUD *(irm.\*)*; POST `/:id/generate-barcode` *(irm.barcode.manage)* — Code-128 PNG of the item code. Global-forever SKU uniqueness; supplier links reconciled transactionally; soft delete guarded by PO/GRN/inventory/engineer-stock usage. |
 
 ### Customers & portal
 | Area | Routes |
@@ -339,7 +339,7 @@ Request-body shapes are defined per module in `*.validation.ts` (zod) — the sc
 The 30 modules fall into recognisable shapes:
 
 - **Taxonomy masters** (category, irm-category, irm-type, supplier-type, warehouse-type): identical CRUD slices with case-insensitive name uniqueness (`nameLower`), slugified keys, grouped-count in-use guards on delete, and `requireActiveX(id)` seams consumed by their parent modules.
-- **Rich entity masters** (supplier, warehouse, irm, customer): `Counter`-allocated display codes, PATCH change-detection emitting granular audit events (`x.activated`, `x.owner_assigned`, …), dependency-checked **soft delete**, picker option routes placed before `/:id`.
+- **Rich entity masters** (supplier, warehouse, irm, customer): `Counter`-allocated display codes, PATCH change-detection emitting granular audit events (`x.activated`, `x.deactivated`, …), dependency-checked **soft delete**, picker option routes placed before `/:id`.
 - **Employee masters** (department, jobTitle): denormalized names cascaded onto `User` transactionally on rename.
 - **Workflow documents** (purchase-request, purchase-order, goods-in, job, job-kit-request, van-stock-request, engineer-transfer): forward-only status machines (`ALLOWED_TRANSITIONS` + `assertTransition`), workflow stamp fields (`submittedBy/At`, `approvedBy/At`, …), fire-and-forget templated emails and realtime emits after commit.
 - **Stock primitives** (inventory, engineer-stock, goods-management repositories): balance upserts with a **zero-floor guard** (negative balance → conflict → transaction rollback) + append-only ledgers with `balanceAfter` snapshots. `inventoryService.applyInbound/applyOutbound` is the single write seam every other module uses to touch warehouse stock.

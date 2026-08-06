@@ -48,7 +48,6 @@ function balance(over: Partial<{ id: string; wh: string; onHand: number; reserve
       trackBatchNumbers: false,
       reorderLevel,
       criticalLevel,
-      reorderQuantity: 20,
       maximumStock: null,
       packSize: null,
       standardCostPence: 100,

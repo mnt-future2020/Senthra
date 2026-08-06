@@ -9,13 +9,6 @@ export interface IrmRef {
   name: string;
 }
 
-export interface IrmOwner {
-  id: string;
-  name: string;
-  email: string;
-  jobTitle: string | null;
-}
-
 export interface IrmSupplierLink {
   id: string;
   supplierId: string;
@@ -50,13 +43,9 @@ export interface IrmItem {
   // Unit.
   baseUnit: string | null;
   packSize: number | null;
-  conversionRatio: number | null;
   // Stock policies (advisory).
-  minimumStock: number | null;
   reorderLevel: number | null;
-  reorderQuantity: number | null;
   maximumStock: number | null;
-  safetyStock: number | null;
   criticalLevel: number | null;
   // Cost (internal only).
   standardCostPence: number | null;
@@ -67,10 +56,7 @@ export interface IrmItem {
   trackInventory: boolean;
   trackSerialNumbers: boolean;
   trackBatchNumbers: boolean;
-  allowNegativeStock: boolean;
   // Operations.
-  ownerUserId: string | null;
-  owner: IrmOwner | null;
   notes: string | null;
   // Stock rollups — 0 until the inventory ledger lands.
   onHand: number;

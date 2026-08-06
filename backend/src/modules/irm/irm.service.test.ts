@@ -12,7 +12,6 @@ vi.mock("./irm.repository.js", () => ({
 vi.mock("#modules/irm-type/irm-type.service.js", () => ({ requireActiveIrmType: vi.fn() }));
 vi.mock("#modules/irm-category/irm-category.service.js", () => ({ requireActiveIrmCategory: vi.fn() }));
 vi.mock("#modules/supplier/supplier.service.js", () => ({ requireActiveSupplier: vi.fn() }));
-vi.mock("#modules/user/user.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/settings/settings.service.js", () => ({ getIrmCodePrefix: vi.fn().mockResolvedValue("IRM") }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 // Deleting an IRM item first asks four other modules whether anything still references it. Those are
@@ -30,7 +29,6 @@ import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
 import * as irmTypeService from "#modules/irm-type/irm-type.service.js";
 import * as irmCategoryService from "#modules/irm-category/irm-category.service.js";
 import * as supplierService from "#modules/supplier/supplier.service.js";
-import * as userRepo from "#modules/user/user.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import { deleteIrmItem, requireActiveIrmItems, updateIrmItem } from "./irm.service.js";
 
@@ -41,9 +39,6 @@ const CAT_ID = "b".repeat(24);
 const NEW_CAT_ID = "2".repeat(24);
 const SUP_ID = "c".repeat(24);
 const NEW_SUP_ID = "4".repeat(24);
-const ACTIVE_OWNER = "d".repeat(24);
-const INACTIVE_OWNER = "e".repeat(24);
-const NEW_OWNER = "3".repeat(24);
 
 function iRow(over: Record<string, unknown> = {}) {
   return {
@@ -66,12 +61,8 @@ function iRow(over: Record<string, unknown> = {}) {
     suppliers: [],
     baseUnit: "Each",
     packSize: null,
-    conversionRatio: null,
-    minimumStock: null,
     reorderLevel: null,
-    reorderQuantity: null,
     maximumStock: null,
-    safetyStock: null,
     criticalLevel: null,
     standardCostPence: null,
     currency: "GBP",
@@ -79,9 +70,6 @@ function iRow(over: Record<string, unknown> = {}) {
     trackInventory: true,
     trackSerialNumbers: false,
     trackBatchNumbers: false,
-    allowNegativeStock: false,
-    ownerUserId: null,
-    owner: null,
     notes: null,
     deletedAt: null,
     createdBy: null,
@@ -101,7 +89,6 @@ const mockReqType = irmTypeService.requireActiveIrmType as ReturnType<typeof vi.
 const mockReqCat = irmCategoryService.requireActiveIrmCategory as ReturnType<typeof vi.fn>;
 const mockReqSupplier = supplierService.requireActiveSupplier as ReturnType<typeof vi.fn>;
 const mockIsSkuConflict = irmRepo.isSkuConflict as ReturnType<typeof vi.fn>;
-const mockUserFindById = userRepo.findById as ReturnType<typeof vi.fn>;
 const mockFindByIds = irmRepo.findByIds as ReturnType<typeof vi.fn>;
 const mockAudit = audit.record as ReturnType<typeof vi.fn>;
 
@@ -130,45 +117,6 @@ beforeEach(() => {
   // whatever ran next and delete would start refusing for no visible reason.
   vi.mocked(poRepo.countByIrmItem).mockResolvedValue(0);
   vi.mocked(inventoryRepo.countBalancesWithStockByIrmItem).mockResolvedValue(0);
-});
-
-describe("updateIrmItem — owner change handling", () => {
-  it("edits other fields when the existing owner is INACTIVE — owner untouched", async () => {
-    mockFindById.mockResolvedValue(
-      iRow({
-        ownerUserId: INACTIVE_OWNER,
-        owner: { id: INACTIVE_OWNER, firstName: "Ina", lastName: "Ctive", email: "ina@x.com", status: "inactive", jobTitle: null, role: null },
-      }),
-    );
-    await expect(updateIrmItem(IRM_ID, { name: "CAT6 Cable 305m", ownerUserId: INACTIVE_OWNER })).resolves.toMatchObject({
-      name: "CAT6 Cable 305m",
-    });
-    expect(mockUserFindById).not.toHaveBeenCalled();
-    expect("ownerUserId" in mockUpdate.mock.calls[0][1]).toBe(false);
-    expect(auditActions()).toContain("irm.updated");
-  });
-
-  it("assigns a different active owner → owner_assigned", async () => {
-    mockFindById.mockResolvedValue(iRow({ ownerUserId: INACTIVE_OWNER }));
-    mockUserFindById.mockResolvedValue({ id: NEW_OWNER, status: "active" });
-    await updateIrmItem(IRM_ID, { ownerUserId: NEW_OWNER });
-    expect(mockUpdate.mock.calls[0][1].ownerUserId).toBe(NEW_OWNER);
-    expect(auditActions()).toContain("irm.owner_assigned");
-  });
-
-  it("clears the owner → owner_removed", async () => {
-    mockFindById.mockResolvedValue(iRow({ ownerUserId: ACTIVE_OWNER }));
-    await updateIrmItem(IRM_ID, { ownerUserId: null });
-    expect(mockUpdate.mock.calls[0][1].ownerUserId).toBeNull();
-    expect(auditActions()).toContain("irm.owner_removed");
-  });
-
-  it("rejects assigning an inactive owner", async () => {
-    mockFindById.mockResolvedValue(iRow({ ownerUserId: null }));
-    mockUserFindById.mockResolvedValue({ id: INACTIVE_OWNER, status: "inactive" });
-    await expect(updateIrmItem(IRM_ID, { ownerUserId: INACTIVE_OWNER })).rejects.toThrow(/not an active user/i);
-    expect(mockUpdate).not.toHaveBeenCalled();
-  });
 });
 
 describe("updateIrmItem — type / category / cost", () => {
@@ -267,23 +215,70 @@ describe("updateIrmItem — suppliers reconcile", () => {
   });
 });
 
+// The three thresholds must stack: critical ≤ reorder ≤ maximum. A PATCH may send only one of a
+// pair, so the guard runs on the MERGED record — the zod refine only ever sees the request, and a
+// request that lowers max alone would otherwise sail past a stored reorder level it now sits under.
+// These used to compare max against `minimumStock`, a field the reorder engine never read.
+//
+// Each rule is scoped to requests that TOUCH one of its two fields, so a pre-existing violation can
+// never block an edit to something else — see the two legacy-row cases at the end.
 describe("updateIrmItem — stock policy cross-field (partial PATCH)", () => {
-  it("rejects maximumStock below the EXISTING minimumStock when only max is patched", async () => {
-    mockFindById.mockResolvedValue(iRow({ minimumStock: 100, maximumStock: 500 }));
-    await expect(updateIrmItem(IRM_ID, { maximumStock: 50 })).rejects.toThrow(/greater than or equal/i);
+  it("rejects a maximum below the EXISTING reorder level when only max is patched", async () => {
+    mockFindById.mockResolvedValue(iRow({ reorderLevel: 100, maximumStock: 500 }));
+    await expect(updateIrmItem(IRM_ID, { maximumStock: 50 })).rejects.toThrow(/greater than or equal to the reorder level/i);
     expect(mockUpdate).not.toHaveBeenCalled();
   });
 
-  it("accepts a max ≥ existing min on a partial PATCH", async () => {
-    mockFindById.mockResolvedValue(iRow({ minimumStock: 100, maximumStock: 500 }));
+  it("accepts a maximum at or above the existing reorder level", async () => {
+    mockFindById.mockResolvedValue(iRow({ reorderLevel: 100, maximumStock: 500 }));
     await expect(updateIrmItem(IRM_ID, { maximumStock: 150 })).resolves.toBeDefined();
     expect(mockUpdate).toHaveBeenCalled();
   });
 
-  it("accepts lowering min at/below the existing max", async () => {
-    mockFindById.mockResolvedValue(iRow({ minimumStock: 100, maximumStock: 500 }));
-    await expect(updateIrmItem(IRM_ID, { minimumStock: 20 })).resolves.toBeDefined();
+  it("accepts lowering the reorder level under the existing maximum", async () => {
+    mockFindById.mockResolvedValue(iRow({ reorderLevel: 100, maximumStock: 500 }));
+    await expect(updateIrmItem(IRM_ID, { reorderLevel: 20 })).resolves.toBeDefined();
     expect(mockUpdate).toHaveBeenCalled();
+  });
+
+  // Critical is the MORE urgent line, so it sits at or below the trigger. Above it, the row would be
+  // flagged critical before it was even due to be reordered.
+  it("rejects a critical level above the EXISTING reorder level", async () => {
+    mockFindById.mockResolvedValue(iRow({ reorderLevel: 100, maximumStock: 500 }));
+    await expect(updateIrmItem(IRM_ID, { criticalLevel: 150 })).rejects.toThrow(/at or below the reorder level/i);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  // Chain closure on the merged record: with no stored reorder level, the two rules above cannot
+  // fire, so this pair is the only thing keeping the numbers in order.
+  it("rejects a critical level above the maximum when the item has NO reorder level", async () => {
+    mockFindById.mockResolvedValue(iRow({ reorderLevel: null, maximumStock: 50 }));
+    await expect(updateIrmItem(IRM_ID, { criticalLevel: 200 })).rejects.toThrow(/at or below the maximum stock/i);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it("accepts a critical level at or below the reorder level", async () => {
+    mockFindById.mockResolvedValue(iRow({ reorderLevel: 100, maximumStock: 500 }));
+    await expect(updateIrmItem(IRM_ID, { criticalLevel: 100 })).resolves.toBeDefined();
+    expect(mockUpdate).toHaveBeenCalled();
+  });
+
+  // Rows predating these rules can already violate them — nothing enforced max ≥ reorder before, and
+  // criticalLevel had no rule at all. Renaming such an item must not fail with a 400 about stock
+  // policy the request never mentioned; the form has no way to show or clear that error.
+  it("lets an UNRELATED edit through on a legacy row that violates both rules", async () => {
+    mockFindById.mockResolvedValue(iRow({ reorderLevel: 100, maximumStock: 40, criticalLevel: 150 }));
+    await expect(updateIrmItem(IRM_ID, { name: "CAT6 Cable 305m" })).resolves.toMatchObject({
+      name: "CAT6 Cable 305m",
+    });
+    expect(mockUpdate).toHaveBeenCalled();
+  });
+
+  // …but touching either half of a pair means you own it, and the merged check applies in full.
+  it("still rejects when a legacy row's own bad pair is patched", async () => {
+    mockFindById.mockResolvedValue(iRow({ reorderLevel: 100, maximumStock: 40, criticalLevel: 150 }));
+    await expect(updateIrmItem(IRM_ID, { reorderLevel: 90 })).rejects.toThrow(/greater than or equal to the reorder level/i);
+    expect(mockUpdate).not.toHaveBeenCalled();
   });
 });
 

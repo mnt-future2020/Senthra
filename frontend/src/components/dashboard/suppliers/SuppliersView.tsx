@@ -166,7 +166,6 @@ function SuppliersTableSkeleton({ actions }: { actions: boolean }) {
             <th className="px-4 py-3">Supplier</th>
             <th className="px-4 py-3">Type</th>
             <th className="px-4 py-3">Primary Contact</th>
-            <th className="px-4 py-3">Owner</th>
             <th className="px-4 py-3">Payment Terms</th>
             <th className="px-4 py-3">Currency</th>
             <th className="px-4 py-3">Lead Time</th>
@@ -179,7 +178,6 @@ function SuppliersTableSkeleton({ actions }: { actions: boolean }) {
             <tr key={i} className="border-b border-[var(--border)] last:border-0">
               <td className="px-4 py-3"><Skeleton className="h-3 w-16" /></td>
               <td className="px-4 py-3"><Skeleton className="h-3 w-36" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-24" /></td>
               <td className="px-4 py-3"><Skeleton className="h-3 w-24" /></td>
               <td className="px-4 py-3"><Skeleton className="h-3 w-24" /></td>
               <td className="px-4 py-3"><Skeleton className="h-3 w-20" /></td>
@@ -387,7 +385,6 @@ export function SuppliersView() {
                   <th className="px-4 py-3">Supplier</th>
                   <th className="px-4 py-3">Type</th>
                   <th className="px-4 py-3">Primary Contact</th>
-                  <th className="px-4 py-3">Owner</th>
                   <th className="px-4 py-3">Payment Terms</th>
                   <th className="px-4 py-3">Currency</th>
                   <th className="px-4 py-3">Lead Time</th>
@@ -409,7 +406,6 @@ export function SuppliersView() {
                     </td>
                     <td className="px-4 py-3 text-[var(--muted)]">{s.type?.name ?? "—"}</td>
                     <td className="px-4 py-3 text-[var(--muted)]">{s.contactPerson ?? "—"}</td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{s.owner?.name ?? "—"}</td>
                     <td className="px-4 py-3 text-[var(--muted)]">{paymentTermsLabel(s)}</td>
                     <td className="px-4 py-3 text-[var(--muted)]">{s.currency ?? "—"}</td>
                     <td className="px-4 py-3 text-[var(--muted)]">

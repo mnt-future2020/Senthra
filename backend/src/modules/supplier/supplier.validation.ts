@@ -50,15 +50,8 @@ const websiteField = z
   .refine((v) => v === "" || WEBSITE_RE.test(v), "Enter a valid website (e.g. example.com).")
   .optional();
 
-// A reference to a staff user (the internal owner), validated against the active user list
-// in the service. Three states: omitted (no change), null / "" (clear it), or a valid id.
-const ownerIdField = z.preprocess(
-  (v) => (typeof v === "string" && v.trim() === "" ? null : v),
-  z.string().regex(OBJECT_ID_RE, "Select a valid owner.").nullable().optional(),
-);
-
 const currencyField = z.preprocess(emptyToUndef, z.enum(CURRENCY_OPTIONS).optional());
-// 3-state (like ownerUserId): omitted = no change, "" / null = clear it, a valid term = set.
+// 3-state: omitted = no change, "" / null = clear it, a valid term = set.
 // Sending "" from the edit form clears an existing payment term instead of being ignored.
 const paymentTermsField = z.preprocess(
   (v) => (typeof v === "string" && v.trim() === "" ? null : v),
@@ -137,7 +130,6 @@ const sharedSupplierFields = {
   // Operational.
   leadTimeDays: leadTimeField,
   notes: z.string().trim().max(2000).optional(),
-  ownerUserId: ownerIdField,
   status: statusEnum.optional(),
 };
 

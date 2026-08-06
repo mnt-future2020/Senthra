@@ -405,7 +405,6 @@ export async function getReorderSuggestions(actor?: AuditActor): Promise<Reorder
       plannedDemand: plannedByKey.get(key) ?? 0,
       reorderLevel: b.irmItem.reorderLevel,
       criticalLevel: b.irmItem.criticalLevel,
-      reorderQuantity: b.irmItem.reorderQuantity,
       maximumStock: b.irmItem.maximumStock,
       packSize: b.irmItem.packSize,
     });

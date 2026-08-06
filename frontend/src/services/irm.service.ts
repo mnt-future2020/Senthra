@@ -1,6 +1,6 @@
 import { api } from "@/lib/api";
 import { registerClientCache } from "@/lib/clientCache";
-import type { IrmItem, IrmOwner, IrmStatus } from "@/types/irm";
+import type { IrmItem, IrmStatus } from "@/types/irm";
 
 // Typed wrappers around the backend /irm-items endpoints.
 
@@ -46,12 +46,8 @@ export interface IrmItemPayload {
   suppliers?: IrmSupplierRowPayload[];
   baseUnit?: string;
   packSize?: number | string;
-  conversionRatio?: number | string;
-  minimumStock?: number | string;
   reorderLevel?: number | string;
-  reorderQuantity?: number | string;
   maximumStock?: number | string;
-  safetyStock?: number | string;
   criticalLevel?: number | string;
   standardCost?: number | string;
   currency?: string;
@@ -59,8 +55,6 @@ export interface IrmItemPayload {
   trackInventory?: boolean;
   trackSerialNumbers?: boolean;
   trackBatchNumbers?: boolean;
-  allowNegativeStock?: boolean;
-  ownerUserId?: string;
   notes?: string;
 }
 
@@ -125,7 +119,3 @@ export function generateBarcode(id: string): Promise<IrmItem> {
   });
 }
 
-// Active staff users for the owner dropdown.
-export function listOwnerOptions(): Promise<IrmOwner[]> {
-  return api<{ owners: IrmOwner[] }>("/irm-items/owner-options").then((r) => r.owners);
-}

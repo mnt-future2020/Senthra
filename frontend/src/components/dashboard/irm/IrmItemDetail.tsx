@@ -20,7 +20,6 @@ import type { StockPosition } from "@/types/stock-position";
 
 type PushToast = (msg: string, type?: "success" | "info" | "alert") => void;
 import { Pagination } from "@/components/ui/Pagination";
-import { NoStaffAssigned, StaffChip } from "@/components/ui/StaffChip";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { DetailHeader } from "@/components/ui/DetailHeader";
 import { actionLabel, actionTone, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
@@ -212,7 +211,6 @@ function Overview({
           <Field label="SKU">{i.sku}</Field>
           <Field label="Base unit">{i.baseUnit}</Field>
           <Field label="Pack size">{num(i.packSize)}</Field>
-          <Field label="Conversion ratio">{num(i.conversionRatio)}</Field>
         </div>
       </Card>
 
@@ -248,31 +246,17 @@ function Overview({
 
       <Card title="Stock policies">
         <div className="grid grid-cols-3 gap-3">
-          <Field label="Minimum">{num(i.minimumStock)}</Field>
           <Field label="Reorder level">{num(i.reorderLevel)}</Field>
-          <Field label="Reorder qty">{num(i.reorderQuantity)}</Field>
           <Field label="Maximum">{num(i.maximumStock)}</Field>
-          <Field label="Safety">{num(i.safetyStock)}</Field>
           <Field label="Critical">{num(i.criticalLevel)}</Field>
         </div>
       </Card>
 
-      <Card title="Tracking & owner">
+      <Card title="Tracking">
         <div className="grid grid-cols-2 gap-3">
           <Field label="Track inventory">{i.trackInventory ? "Yes" : "No"}</Field>
           <Field label="Serial numbers">{i.trackSerialNumbers ? "Yes" : "No"}</Field>
           <Field label="Batch numbers">{i.trackBatchNumbers ? "Yes" : "No"}</Field>
-          <div className="col-span-2">
-            <Field label="Internal owner">
-              {i.owner ? (
-                <div className="mt-2">
-                  <StaffChip staff={i.owner} />
-                </div>
-              ) : (
-                <NoStaffAssigned label="No owner assigned" />
-              )}
-            </Field>
-          </div>
           {i.notes && <div className="col-span-2"><Field label="Notes">{i.notes}</Field></div>}
         </div>
       </Card>

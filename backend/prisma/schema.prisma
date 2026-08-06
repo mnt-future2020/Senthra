@@ -331,10 +331,6 @@ model Supplier {
   leadTimeDays Int? // typical lead time in days (0–365)
   notes        String?
 
-  // Internal owner — an active staff user responsible for the relationship. Optional.
-  ownerUserId String? @db.ObjectId
-  owner       User?   @relation(fields: [ownerUserId], references: [id])
-
   // IRM items this supplier can supply (junction back-relation; no DB column).
   irmLinks IrmItemSupplier[]
   // Purchase requests + orders raised against this supplier (back-relations; no DB column).
@@ -351,7 +347,6 @@ model Supplier {
   updatedAt DateTime @updatedAt
 
   @@index([status])
-  @@index([ownerUserId])
   @@index([typeId])
 }
 
@@ -434,16 +429,42 @@ model IrmItem {
 
   // Unit of measure.
   baseUnit        String? // e.g. "Each", "Metre"
+  // Units per pack. LOAD-BEARING: the reorder engine rounds a suggested quantity UP to whole packs
+  // (see inventory/reorder.ts), so a 412-metre need on a 305m-box item is ordered as 2 boxes. Drop it
+  // and the rounding silently stops — purchase requests keep generating, just with quantities no
+  // supplier will accept.
   packSize        Int?
+  // RETIRED from the app: no reader, no writer, and no form field — it was captured and then never
+  // used by any calculation. Kept DECLARED so the values stay readable through Prisma (on MongoDB,
+  // dropping a field from the schema doesn't delete anything — `db push` only manages indexes — it
+  // just makes the data invisible to the client, which is worse than leaving it in view). Do not
+  // re-surface it in the UI without a consumer to justify it.
   conversionRatio Float?
 
   // Stock policies (planning thresholds — ADVISORY; never live stock).
-  minimumStock    Int?
+  //
+  // THREE live thresholds, and they stack: criticalLevel <= reorderLevel <= maximumStock.
+  //   reorderLevel  — WHEN to buy. The trigger; "minimum stock" in warehouse speech.
+  //   maximumStock  — HOW FAR to top up. The reorder target; null degrades to reorderLevel, which
+  //                   only restores the trigger line and re-fires immediately (see reorder.ts).
+  //   criticalLevel — HOW URGENT. Flags the row red; never changes the quantity ordered.
   reorderLevel    Int?
-  reorderQuantity Int?
   maximumStock    Int?
-  safetyStock     Int?
   criticalLevel   Int?
+  // RETIRED — no reader, no writer, no form field. `minimumStock` and `safetyStock` were captured and
+  // used by nothing, and `minimumStock` was the worse of the two: it is the familiar phrase, so people
+  // filled it in believing it set the trigger while `reorderLevel` silently did. `reorderQuantity` was
+  // a second way to express the target (reorderLevel + qty) that maximumStock always beat when both
+  // were set, so the number typed was discarded without a word.
+  //
+  // Kept DECLARED for the same reason as conversionRatio above — on MongoDB, removing a field from
+  // the schema deletes nothing, it only hides the stored values from Prisma. `reorderQuantity`
+  // especially: it is the evidence of what an item's old top-up target was, and
+  // scripts/backfill-reorder-target.ts carries it over to `maximumStock`. Do not re-surface any of
+  // them in the UI without a consumer to justify it.
+  minimumStock    Int?
+  reorderQuantity Int?
+  safetyStock     Int?
 
   // Cost (internal only — never exposed to customers). Pence to avoid float drift.
   standardCostPence Int?
@@ -451,15 +472,21 @@ model IrmItem {
   vatRatePercent    Float?  @default(20) // UK standard rate default
 
   // Tracking flags.
+  //
+  // No form field sets these — the item form's toggles were removed deliberately, so every item sits
+  // at the defaults. `trackInventory` is read widely; the serial/batch pair is a FUTURE seam, and the
+  // goods scan already refuses an item carrying either ("can't be moved here yet") so the feature
+  // cannot be half-enabled by data alone. Keep them.
   trackInventory     Boolean @default(true)
   trackSerialNumbers Boolean @default(false)
   trackBatchNumbers  Boolean @default(false)
+  // RETIRED — unlike its neighbours this one has NO consumer anywhere: nothing reads it, no rule
+  // branches on it, and every row is false. Column kept so existing rows aren't rewritten. Do not
+  // re-surface it without something that actually honours it.
   allowNegativeStock Boolean @default(false)
 
   // Operations.
-  ownerUserId String? @db.ObjectId
-  owner       User?   @relation(fields: [ownerUserId], references: [id])
-  notes       String?
+  notes String?
 
   // Purchase-request + purchase-order lines referencing this item (back-relations; no DB column).
   purchaseRequestLines PurchaseRequestItem[]
@@ -489,7 +516,6 @@ model IrmItem {
   @@index([status])
   @@index([typeId])
   @@index([irmCategoryId])
-  @@index([ownerUserId])
 }
 
 // Junction: which suppliers can provide an IRM item, with ranking + per-supplier detail.
@@ -1742,10 +1768,6 @@ model User {
   // Explicit warehouse assignments (for warehouse-scoped roles). Rows PERSIST across role changes —
   // only removed on permanent user delete or explicit admin un-assignment (back-relation).
   warehouseAssignments UserWarehouseAssignment[]
-  // Suppliers this user is the internal owner of (back-relation; no DB column).
-  ownedSuppliers    Supplier[]
-  // IRM items this user is the internal owner of (back-relation; no DB column).
-  ownedIrmItems     IrmItem[]
   // Engineer-held stock (back-relation; no DB column).
   engineerStockBalances     EngineerStockBalance[]     @relation("EngineerStockOwner")
   engineerStockTransactions EngineerStockTransaction[] @relation("EngineerStockTxnOwner")

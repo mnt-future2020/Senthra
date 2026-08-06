@@ -9,14 +9,6 @@ export interface SupplierTypeRef {
   name: string;
 }
 
-// The internal owner as surfaced on a supplier (resolved from the staff User).
-export interface SupplierOwner {
-  id: string;
-  name: string;
-  email: string;
-  jobTitle: string | null; // designation or role name — for the "Name — Role" label
-}
-
 export interface Supplier {
   id: string;
   code: string; // auto-allocated, e.g. SUP-0001
@@ -49,9 +41,6 @@ export interface Supplier {
   // Operational.
   leadTimeDays: number | null;
   notes: string | null;
-  // Internal owner.
-  ownerUserId: string | null;
-  owner: SupplierOwner | null;
   // Audit — staff email that created / last updated this supplier.
   createdBy: string | null;
   updatedBy: string | null;

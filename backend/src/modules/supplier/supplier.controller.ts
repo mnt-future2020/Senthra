@@ -18,11 +18,6 @@ export const listSuppliers = asyncHandler(async (req, res) => {
   res.json(result);
 });
 
-// GET /suppliers/owner-options — active staff users for the owner picker.
-export const listOwnerOptions = asyncHandler(async (_req, res) => {
-  res.json({ owners: await supplierService.listOwnerOptions() });
-});
-
 // GET /suppliers/:id  (id or code)
 export const getSupplier = asyncHandler(async (req, res) => {
   const supplier = await supplierService.getSupplier(param(req, "id"));

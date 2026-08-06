@@ -9,7 +9,7 @@ import { listSupplierTypes, createSupplierType } from "@/services/supplier-type.
 import { useDashboard } from "@/hooks/useDashboard";
 import { useAuth } from "@/hooks/useAuth";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
-import type { Supplier, SupplierOwner } from "@/types/supplier";
+import type { Supplier } from "@/types/supplier";
 import type { SupplierType } from "@/types/supplier-type";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import { firstActiveId } from "@/lib/utils";
@@ -78,22 +78,16 @@ export function SupplierForm({ mode, supplier }: { mode: "create" | "edit"; supp
     o?.leadTimeDays != null ? String(o.leadTimeDays) : "",
   );
   const [notes, setNotes] = React.useState(o?.notes ?? "");
-  const [ownerUserId, setOwnerUserId] = React.useState(o?.ownerUserId ?? "");
 
-  const [owners, setOwners] = React.useState<SupplierOwner[]>([]);
   const [types, setTypes] = React.useState<SupplierType[]>([]);
   const [saving, setSaving] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [errors, setErrors] = React.useState<Record<string, string>>({});
 
-  // Load the active-user list (owner picker) + the supplier-type master (type picker).
+  // Load the supplier-type master (type picker).
   React.useEffect(() => {
     let active = true;
-    supplierService.listOwnerOptions().then(
-      (m) => active && setOwners(m),
-      () => {},
-    );
     listSupplierTypes().then(
       (t) => {
         if (!active) return;
@@ -119,17 +113,6 @@ export function SupplierForm({ mode, supplier }: { mode: "create" | "edit"; supp
     }
     return activeTypes;
   }, [types, o]);
-
-  // Keep a deactivated owner visible on edit (same reasoning as types).
-  const ownerOptions = React.useMemo(() => {
-    if (o?.owner && !owners.some((m) => m.id === o.owner!.id)) {
-      return [
-        { id: o.owner.id, name: `${o.owner.name} (inactive)`, email: o.owner.email, jobTitle: o.owner.jobTitle },
-        ...owners,
-      ];
-    }
-    return owners;
-  }, [owners, o]);
 
   // On create the Type is auto-preselected to the first active option, so the baseline
   // must hold that same default — otherwise the preselect alone would read as a user edit.
@@ -158,8 +141,7 @@ export function SupplierForm({ mode, supplier }: { mode: "create" | "edit"; supp
       customPaymentTerms !== (o?.customPaymentTerms ?? "") ||
       currency !== (o?.currency ?? "GBP") ||
       leadTimeDays !== (o?.leadTimeDays != null ? String(o.leadTimeDays) : "") ||
-      notes !== (o?.notes ?? "") ||
-      ownerUserId !== (o?.ownerUserId ?? ""));
+      notes !== (o?.notes ?? ""));
 
   useReportDirty("supplier-form", isDirty);
 
@@ -249,7 +231,6 @@ export function SupplierForm({ mode, supplier }: { mode: "create" | "edit"; supp
           currency,
           leadTimeDays: leadTimeDays.trim() || undefined,
           notes: notes.trim() || undefined,
-          ownerUserId: ownerUserId || undefined,
         });
         setSaved(true);
         pushToast(`Supplier ${created.code} created.`, "success");
@@ -282,7 +263,6 @@ export function SupplierForm({ mode, supplier }: { mode: "create" | "edit"; supp
           currency,
           leadTimeDays: leadTimeDays.trim(),
           notes: notes.trim(),
-          ownerUserId, // "" clears the owner
         });
         setSaved(true);
         pushToast("Supplier updated.", "success");
@@ -601,7 +581,7 @@ export function SupplierForm({ mode, supplier }: { mode: "create" | "edit"; supp
             </div>
           </FormSection>
 
-          <FormSection title="Operations" description="Lead time, internal owner and notes.">
+          <FormSection title="Operations" description="Lead time and notes.">
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className={labelCls}>Lead time (days)</label>
@@ -620,22 +600,6 @@ export function SupplierForm({ mode, supplier }: { mode: "create" | "edit"; supp
                 <FieldError id="err-leadTimeDays" message={errors.leadTimeDays} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">
                   Typical delivery lead time in days.
-                </p>
-              </div>
-              <div>
-                <label className={labelCls}>Internal owner</label>
-                <Select
-                  value={ownerUserId}
-                  onChange={(v) => setOwnerUserId(v)}
-                  ariaLabel="Internal owner"
-                  placeholder="— No owner assigned —"
-                  options={ownerOptions.map((m) => ({
-                    value: m.id,
-                    label: m.jobTitle ? `${m.name} — ${m.jobTitle}` : m.name,
-                  }))}
-                />
-                <p className="mt-1.5 text-[11px] text-[var(--faint)]">
-                  Optional — the staff member responsible for this supplier.
                 </p>
               </div>
               <div className="sm:col-span-2">

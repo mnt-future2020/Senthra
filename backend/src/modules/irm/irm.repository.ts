@@ -7,16 +7,6 @@ import { escapeRegex } from "../../utils/search.js";
 // Soft-deleted items (deletedAt set) are excluded from normal reads — BUT the SKU
 // uniqueness lookup deliberately scans them too (SKUs are reserved forever).
 
-const ownerSelect = {
-  id: true,
-  firstName: true,
-  lastName: true,
-  email: true,
-  status: true,
-  jobTitle: true,
-  role: { select: { name: true } },
-} satisfies Prisma.UserSelect;
-
 type SupplierLink = {
   id: string;
   supplierId: string;
@@ -30,9 +20,6 @@ type SupplierLink = {
 export type IrmItemWithRelations = IrmItem & {
   irmType: { id: string; name: string } | null;
   irmCategory: { id: string; name: string } | null;
-  owner:
-    | { id: string; firstName: string; lastName: string; email: string; status: string; jobTitle: string | null; role: { name: string } | null }
-    | null;
   suppliers: SupplierLink[];
 };
 
@@ -44,7 +31,6 @@ export type IrmItemListRow = Omit<IrmItemWithRelations, "barcodeDataUri">;
 const withRelations = {
   irmType: { select: { id: true, name: true } },
   irmCategory: { select: { id: true, name: true } },
-  owner: { select: ownerSelect },
   suppliers: {
     orderBy: [{ isPrimary: "desc" }, { priority: "asc" }],
     select: {
@@ -212,17 +198,6 @@ export function updateBarcodeImage(id: string, barcodeDataUri: string): Promise<
 // supplier that still supplies catalogue items is blocked.
 export function countBySupplier(supplierId: string): Promise<number> {
   return prisma.irmItemSupplier.count({ where: { supplierId, irmItem: { is: { deletedAt: null } } } });
-}
-
-// Active staff users for the owner picker (minimal slice, name-sorted).
-export function findOwnerOptions(): Promise<
-  { id: string; firstName: string; lastName: string; email: string; jobTitle: string | null; role: { name: string } | null }[]
-> {
-  return prisma.user.findMany({
-    where: { status: "active", deletedAt: null },
-    select: { id: true, firstName: true, lastName: true, email: true, jobTitle: true, role: { select: { name: true } } },
-    orderBy: [{ firstName: "asc" }, { lastName: "asc" }],
-  });
 }
 
 // Replace ALL supplier-junction rows for an item (delete + recreate), atomically. Wrapped in a

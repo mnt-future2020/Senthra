@@ -2,7 +2,6 @@ import { Router } from "express";
 
 import * as irmController from "./irm.controller.js";
 import {
-  requireAnyPermission,
   requireAuth,
   requirePermission,
 } from "../../middleware/auth.middleware.js";
@@ -13,14 +12,6 @@ import { createIrmItemSchema, updateIrmItemSchema } from "./irm.validation.js";
 const router = Router();
 
 router.use(requireAuth);
-
-// Static route BEFORE the /:id param route. The owner picker is needed by anyone who can
-// view/create/edit an IRM item.
-router.get(
-  "/owner-options",
-  requireAnyPermission("irm.view", "irm.create", "irm.edit"),
-  irmController.listOwnerOptions,
-);
 
 router.get("/", requirePermission("irm.view"), irmController.listIrmItems);
 router.get("/:id", requirePermission("irm.view"), irmController.getIrmItem);

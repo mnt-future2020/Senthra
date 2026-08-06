@@ -5,7 +5,6 @@ import type { IrmItemWithRelations, IrmItemListRow, SupplierLinkRow } from "./ir
 import * as irmTypeService from "#modules/irm-type/irm-type.service.js";
 import * as irmCategoryService from "#modules/irm-category/irm-category.service.js";
 import * as supplierService from "#modules/supplier/supplier.service.js";
-import * as userRepo from "#modules/user/user.repository.js";
 import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import * as grnRepo from "#modules/goods-in/goods-in.repository.js";
 import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
@@ -22,12 +21,6 @@ const STATUSES = ["active", "inactive"] as const;
 
 type SupplierLink = IrmItemWithRelations["suppliers"][number];
 
-export interface PublicIrmOwner {
-  id: string;
-  name: string;
-  email: string;
-  jobTitle: string | null;
-}
 export interface PublicIrmRef {
   id: string;
   name: string;
@@ -66,13 +59,9 @@ export interface PublicIrmItem {
   // Unit.
   baseUnit: string | null;
   packSize: number | null;
-  conversionRatio: number | null;
   // Stock policies (advisory).
-  minimumStock: number | null;
   reorderLevel: number | null;
-  reorderQuantity: number | null;
   maximumStock: number | null;
-  safetyStock: number | null;
   criticalLevel: number | null;
   // Cost (internal only).
   standardCostPence: number | null;
@@ -83,10 +72,7 @@ export interface PublicIrmItem {
   trackInventory: boolean;
   trackSerialNumbers: boolean;
   trackBatchNumbers: boolean;
-  allowNegativeStock: boolean;
   // Operations.
-  ownerUserId: string | null;
-  owner: PublicIrmOwner | null;
   notes: string | null;
   // Stock rollups — ZERO until the inventory ledger module is built (master-data only).
   onHand: number;
@@ -111,11 +97,6 @@ const trimToNull = (v: string | null | undefined): string | null => {
   const t = v?.trim();
   return t ? t : null;
 };
-
-function toOwner(o: IrmItemWithRelations["owner"]): PublicIrmOwner | null {
-  if (!o) return null;
-  return { id: o.id, name: `${o.firstName} ${o.lastName}`.trim() || o.email, email: o.email, jobTitle: o.jobTitle ?? o.role?.name ?? null };
-}
 
 function toSupplierLink(l: SupplierLink): PublicIrmSupplierLink {
   return {
@@ -154,12 +135,8 @@ function toPublic(i: IrmItemWithRelations | IrmItemListRow): PublicIrmItem {
     primarySupplier: primary?.supplier ? { id: primary.supplier.id, code: primary.supplier.code, name: primary.supplier.name } : null,
     baseUnit: i.baseUnit,
     packSize: i.packSize,
-    conversionRatio: i.conversionRatio,
-    minimumStock: i.minimumStock,
     reorderLevel: i.reorderLevel,
-    reorderQuantity: i.reorderQuantity,
     maximumStock: i.maximumStock,
-    safetyStock: i.safetyStock,
     criticalLevel: i.criticalLevel,
     standardCostPence: i.standardCostPence,
     standardCost: i.standardCostPence != null ? i.standardCostPence / 100 : null,
@@ -168,9 +145,6 @@ function toPublic(i: IrmItemWithRelations | IrmItemListRow): PublicIrmItem {
     trackInventory: i.trackInventory ?? true,
     trackSerialNumbers: i.trackSerialNumbers ?? false,
     trackBatchNumbers: i.trackBatchNumbers ?? false,
-    allowNegativeStock: i.allowNegativeStock ?? false,
-    ownerUserId: i.ownerUserId,
-    owner: toOwner(i.owner),
     notes: i.notes,
     onHand: 0,
     available: 0,
@@ -180,15 +154,6 @@ function toPublic(i: IrmItemWithRelations | IrmItemListRow): PublicIrmItem {
     createdAt: i.createdAt.toISOString(),
     updatedAt: i.updatedAt.toISOString(),
   };
-}
-
-async function resolveOwner(ownerUserId: string | null | undefined): Promise<string | null> {
-  const id = ownerUserId?.trim();
-  if (!id) return null;
-  const user = await userRepo.findById(id);
-  if (!user) throw badRequest("Selected owner no longer exists.");
-  if (user.status !== "active") throw badRequest("Selected owner is not an active user.");
-  return user.id;
 }
 
 // Normalise supplier rows to junction rows. Suppliers are optional, so the list may be empty;
@@ -255,12 +220,8 @@ function irmColumns(input: CreateIrmItemInput, skuLower: string | null, standard
     skuLower,
     baseUnit: input.baseUnit,
     packSize: input.packSize ?? null,
-    conversionRatio: input.conversionRatio ?? null,
-    minimumStock: input.minimumStock ?? null,
     reorderLevel: input.reorderLevel ?? null,
-    reorderQuantity: input.reorderQuantity ?? null,
     maximumStock: input.maximumStock ?? null,
-    safetyStock: input.safetyStock ?? null,
     criticalLevel: input.criticalLevel ?? null,
     standardCostPence,
     currency: input.currency ?? "GBP",
@@ -268,7 +229,6 @@ function irmColumns(input: CreateIrmItemInput, skuLower: string | null, standard
     trackInventory: input.trackInventory ?? true,
     trackSerialNumbers: input.trackSerialNumbers ?? false,
     trackBatchNumbers: input.trackBatchNumbers ?? false,
-    allowNegativeStock: input.allowNegativeStock ?? false,
     notes: trimToNull(input.notes),
     status: input.status ?? "active",
   };
@@ -342,7 +302,6 @@ export async function createIrmItem(input: CreateIrmItemInput, actor?: AuditActo
 
   await irmTypeService.requireActiveIrmType(input.typeId);
   await irmCategoryService.requireActiveIrmCategory(input.irmCategoryId);
-  const ownerUserId = await resolveOwner(input.ownerUserId);
   const { skuLower } = await resolveSku(input.sku);
   const supplierRows = await buildSupplierRows(input.suppliers ?? []);
   const standardCostPence = costToPence(input.standardCost);
@@ -357,7 +316,6 @@ export async function createIrmItem(input: CreateIrmItemInput, actor?: AuditActo
         ...irmColumns(input, skuLower, standardCostPence),
         irmType: { connect: { id: input.typeId } },
         irmCategory: { connect: { id: input.irmCategoryId } },
-        ...(ownerUserId ? { owner: { connect: { id: ownerUserId } } } : {}),
         createdBy: actorLabel,
         updatedBy: actorLabel,
       },
@@ -392,21 +350,39 @@ export async function updateIrmItem(id: string, input: UpdateIrmItemInput, actor
   if (input.mpn !== undefined) data.mpn = trimToNull(input.mpn);
   if (input.baseUnit !== undefined) data.baseUnit = input.baseUnit;
   if (input.packSize !== undefined) data.packSize = input.packSize;
-  if (input.conversionRatio !== undefined) data.conversionRatio = input.conversionRatio;
-  if (input.minimumStock !== undefined) data.minimumStock = input.minimumStock;
   if (input.reorderLevel !== undefined) data.reorderLevel = input.reorderLevel;
-  if (input.reorderQuantity !== undefined) data.reorderQuantity = input.reorderQuantity;
   if (input.maximumStock !== undefined) data.maximumStock = input.maximumStock;
-  if (input.safetyStock !== undefined) data.safetyStock = input.safetyStock;
   if (input.criticalLevel !== undefined) data.criticalLevel = input.criticalLevel;
 
-  // Cross-field: maximum ≥ minimum must hold on the MERGED record. A partial PATCH may send
-  // only one of the two, so validate the effective values (incoming if present, else stored)
-  // — not just what's in this request (the zod refine only sees the request).
-  const effectiveMin = input.minimumStock !== undefined ? input.minimumStock : existing.minimumStock;
-  const effectiveMax = input.maximumStock !== undefined ? input.maximumStock : existing.maximumStock;
-  if (typeof effectiveMin === "number" && typeof effectiveMax === "number" && effectiveMax < effectiveMin) {
-    throw badRequest("Maximum stock must be greater than or equal to minimum stock.");
+  // Cross-field coherence on the MERGED record. A partial PATCH may send only one of a pair, so the
+  // effective values (incoming if present, else stored) are what must stack — the zod refine only
+  // ever sees this request. Previously this compared maximum against `minimumStock`, a field the
+  // reorder engine never read, so the guard protected a number that changed nothing.
+  //
+  // Each rule only fires when this request TOUCHES one of its two fields. Rows saved before these
+  // rules existed can violate them (nothing enforced max ≥ reorder, and criticalLevel had no rule at
+  // all), and a guard that ran unconditionally would refuse to rename such an item — a 400 about
+  // stock policy on a request that never mentioned it, with no way to clear it from the form. Same
+  // reasoning as the supplier/type pickers: an old value you didn't touch never blocks the edit in
+  // front of you. Touch either half of a pair and you own it, and the merged check applies in full.
+  const eff = <K extends "reorderLevel" | "maximumStock" | "criticalLevel">(k: K) =>
+    input[k] !== undefined ? input[k] : existing[k];
+  const effReorder = eff("reorderLevel");
+  const effMax = eff("maximumStock");
+  const effCritical = eff("criticalLevel");
+  const touched = (...keys: ("reorderLevel" | "maximumStock" | "criticalLevel")[]) =>
+    keys.some((k) => input[k] !== undefined);
+  if (touched("reorderLevel", "maximumStock") && typeof effReorder === "number" && typeof effMax === "number" && effMax < effReorder) {
+    throw badRequest("Maximum stock must be greater than or equal to the reorder level — an order has to lift stock clear of the line that triggered it.");
+  }
+  if (touched("reorderLevel", "criticalLevel") && typeof effReorder === "number" && typeof effCritical === "number" && effCritical > effReorder) {
+    throw badRequest("Critical level must be at or below the reorder level — it is the more urgent line, not a second trigger.");
+  }
+  // Closes the chain. Both rules above hinge on the reorder level, so with it blank nothing compared
+  // these two and critical 200 against a maximum of 50 passed — an ordering the comment claimed but
+  // the code only half-enforced. Same touched() gate: an untouched legacy pair never blocks an edit.
+  if (touched("criticalLevel", "maximumStock") && typeof effCritical === "number" && typeof effMax === "number" && effCritical > effMax) {
+    throw badRequest("Critical level must be at or below the maximum stock — it is the lowest of the three lines.");
   }
 
   if (input.currency !== undefined) data.currency = input.currency;
@@ -414,7 +390,6 @@ export async function updateIrmItem(id: string, input: UpdateIrmItemInput, actor
   if (input.trackInventory !== undefined) data.trackInventory = input.trackInventory;
   if (input.trackSerialNumbers !== undefined) data.trackSerialNumbers = input.trackSerialNumbers;
   if (input.trackBatchNumbers !== undefined) data.trackBatchNumbers = input.trackBatchNumbers;
-  if (input.allowNegativeStock !== undefined) data.allowNegativeStock = input.allowNegativeStock;
   if (input.notes !== undefined) data.notes = trimToNull(input.notes);
 
   // Cost: pounds → pence.
@@ -439,13 +414,6 @@ export async function updateIrmItem(id: string, input: UpdateIrmItemInput, actor
 
   const events: string[] = [];
 
-  // Owner change-detection (mirror supplier/warehouse).
-  if (input.ownerUserId !== undefined && input.ownerUserId !== existing.ownerUserId) {
-    const resolved = input.ownerUserId === null ? null : await resolveOwner(input.ownerUserId);
-    data.ownerUserId = resolved;
-    events.push(resolved ? "irm.owner_assigned" : "irm.owner_removed");
-  }
-
   // Status transitions.
   if (input.status !== undefined && input.status !== existing.status) {
     data.status = input.status;
@@ -465,7 +433,7 @@ export async function updateIrmItem(id: string, input: UpdateIrmItemInput, actor
   }
 
   // Generic "updated" when any non-transition scalar changed.
-  const IGNORE = new Set(["updatedBy", "status", "ownerUserId", "skuLower"]);
+  const IGNORE = new Set(["updatedBy", "status", "skuLower"]);
   let scalarChanged = false;
   for (const [k, v] of Object.entries(data)) {
     if (IGNORE.has(k)) continue;
@@ -527,16 +495,6 @@ export async function deleteIrmItem(id: string, actor?: AuditActor): Promise<voi
     targetId: id,
     targetLabel: `${i.name} (${i.code})`,
   });
-}
-
-export async function listOwnerOptions(): Promise<PublicIrmOwner[]> {
-  const users = await irmRepo.findOwnerOptions();
-  return users.map((u) => ({
-    id: u.id,
-    name: `${u.firstName} ${u.lastName}`.trim() || u.email,
-    email: u.email,
-    jobTitle: u.jobTitle ?? u.role?.name ?? null,
-  }));
 }
 
 // Plug-in seam for FUTURE procurement/inventory modules: assert an item id points to an

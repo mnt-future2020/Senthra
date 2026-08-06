@@ -3,7 +3,6 @@ import type { Prisma } from "@prisma/client";
 import * as supplierRepo from "./supplier.repository.js";
 import type { SupplierWithRelations } from "./supplier.repository.js";
 import * as supplierTypeService from "#modules/supplier-type/supplier-type.service.js";
-import * as userRepo from "#modules/user/user.repository.js";
 import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import * as prfRepo from "#modules/purchase-request/purchase-request.repository.js";
 import * as irmRepo from "#modules/irm/irm.repository.js";
@@ -16,14 +15,6 @@ import type { CreateSupplierInput, UpdateSupplierInput } from "./supplier.valida
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 const STATUSES = ["active", "inactive"] as const;
-
-// An owner as surfaced on a supplier (resolved live from the User record).
-export interface PublicSupplierOwner {
-  id: string;
-  name: string;
-  email: string;
-  jobTitle: string | null; // designation or role name — for the "Name — Role" dropdown
-}
 
 // The supplier's classification (resolved from the SupplierType master).
 export interface PublicSupplierTypeRef {
@@ -63,9 +54,6 @@ export interface PublicSupplier {
   // Operational.
   leadTimeDays: number | null;
   notes: string | null;
-  // Internal owner.
-  ownerUserId: string | null;
-  owner: PublicSupplierOwner | null;
   // Audit.
   createdBy: string | null;
   updatedBy: string | null;
@@ -79,16 +67,6 @@ export interface PagedSuppliers {
   page: number;
   pageSize: number;
   totalPages: number;
-}
-
-function toOwner(o: SupplierWithRelations["owner"]): PublicSupplierOwner | null {
-  if (!o) return null;
-  return {
-    id: o.id,
-    name: `${o.firstName} ${o.lastName}`.trim() || o.email,
-    email: o.email,
-    jobTitle: o.jobTitle ?? o.role?.name ?? null,
-  };
 }
 
 function toPublic(s: SupplierWithRelations): PublicSupplier {
@@ -119,8 +97,6 @@ function toPublic(s: SupplierWithRelations): PublicSupplier {
     currency: s.currency ?? "GBP",
     leadTimeDays: s.leadTimeDays,
     notes: s.notes,
-    ownerUserId: s.ownerUserId,
-    owner: toOwner(s.owner),
     createdBy: s.createdBy,
     updatedBy: s.updatedBy,
     createdAt: s.createdAt.toISOString(),
@@ -132,17 +108,6 @@ const trimToNull = (v: string | null | undefined): string | null => {
   const t = v?.trim();
   return t ? t : null;
 };
-
-// Resolve + validate the optional owner. Returns the user id to store (or null).
-// Throws if the id doesn't point to an active staff user.
-async function resolveOwner(ownerUserId: string | null | undefined): Promise<string | null> {
-  const id = ownerUserId?.trim();
-  if (!id) return null;
-  const user = await userRepo.findById(id); // excludes soft-deleted
-  if (!user) throw badRequest("Selected owner no longer exists.");
-  if (user.status !== "active") throw badRequest("Selected owner is not an active user.");
-  return user.id;
-}
 
 // Common scalar columns from create input (name/type/owner set by the caller). Country
 // defaults to United Kingdom; currency to GBP; customPaymentTerms only kept for "Custom".
@@ -212,14 +177,12 @@ export async function createSupplier(
 
   // Type is required + must be an active SupplierType.
   await supplierTypeService.requireActiveSupplierType(input.typeId);
-  const ownerUserId = await resolveOwner(input.ownerUserId);
   const actorLabel = actor?.email ?? null;
 
   const created = await supplierRepo.createWithCode({
     name,
     ...supplierColumns(input),
     supplierType: { connect: { id: input.typeId } },
-    ...(ownerUserId ? { owner: { connect: { id: ownerUserId } } } : {}),
     createdBy: actorLabel,
     updatedBy: actorLabel,
   });
@@ -242,7 +205,7 @@ export async function updateSupplier(
   const existing = await supplierRepo.findById(id);
   if (!existing) throw notFound("Supplier not found.");
 
-  // Unchecked input lets us set the scalar `typeId` / `ownerUserId` FKs directly.
+  // Unchecked input lets us set the scalar `typeId` FK directly.
   const data: Prisma.SupplierUncheckedUpdateInput = {};
   if (typeof input.name === "string" && input.name.trim()) data.name = input.name.trim();
   if (input.legalName !== undefined) data.legalName = trimToNull(input.legalName);
@@ -289,14 +252,6 @@ export async function updateSupplier(
 
   // --- granular events derived from old → new transitions -------------------
   const events: string[] = [];
-
-  // Owner: only touch the relationship when it ACTUALLY changes (so editing other fields
-  // still works after an owner was deactivated). Clear via the scalar FK.
-  if (input.ownerUserId !== undefined && input.ownerUserId !== existing.ownerUserId) {
-    const resolved = input.ownerUserId === null ? null : await resolveOwner(input.ownerUserId);
-    data.ownerUserId = resolved;
-    events.push(resolved ? "supplier.owner_assigned" : "supplier.owner_removed");
-  }
 
   // Status: active ↔ inactive transitions are activate / deactivate events.
   if (input.status !== undefined && input.status !== existing.status) {
@@ -384,17 +339,6 @@ export async function deleteSupplier(id: string, actor?: AuditActor): Promise<vo
     targetId: id,
     targetLabel: `${s.name} (${s.code})`,
   });
-}
-
-// Active staff users for the owner dropdown (id + display name + email + job title).
-export async function listOwnerOptions(): Promise<PublicSupplierOwner[]> {
-  const users = await supplierRepo.findOwnerOptions();
-  return users.map((u) => ({
-    id: u.id,
-    name: `${u.firstName} ${u.lastName}`.trim() || u.email,
-    email: u.email,
-    jobTitle: u.jobTitle ?? u.role?.name ?? null,
-  }));
 }
 
 // Plug-in seam for FUTURE procurement modules (IRM Catalogue, Goods In, Purchase Orders):

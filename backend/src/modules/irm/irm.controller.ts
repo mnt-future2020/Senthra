@@ -20,11 +20,6 @@ export const listIrmItems = asyncHandler(async (req, res) => {
   res.json(result);
 });
 
-// GET /irm-items/owner-options — active staff users for the owner picker.
-export const listOwnerOptions = asyncHandler(async (_req, res) => {
-  res.json({ owners: await irmService.listOwnerOptions() });
-});
-
 // GET /irm-items/:id  (id or code)
 export const getIrmItem = asyncHandler(async (req, res) => {
   const item = await irmService.getIrmItem(param(req, "id"));

@@ -13,7 +13,6 @@ const base = {
   plannedDemand: 0,
   reorderLevel: null as number | null,
   criticalLevel: null as number | null,
-  reorderQuantity: null as number | null,
   maximumStock: null as number | null,
   packSize: null as number | null,
 };
@@ -83,12 +82,6 @@ describe("computeReorderMath — netting", () => {
 describe("computeReorderMath — target fallbacks + pack rounding", () => {
   it("target = maximumStock when set", () => {
     expect(computeReorderMath({ ...base, onHand: 12, reorderLevel: 30, maximumStock: 100 })!.suggestedQty).toBe(88);
-  });
-
-  it("target falls back to reorderLevel + reorderQuantity", () => {
-    const r = computeReorderMath({ ...base, onHand: 12, reorderLevel: 30, reorderQuantity: 50 });
-    expect(r!.target).toBe(80);
-    expect(r!.suggestedQty).toBe(68);
   });
 
   it("target falls back to the reorder level alone", () => {

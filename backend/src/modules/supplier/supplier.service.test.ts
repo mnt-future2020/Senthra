@@ -7,7 +7,6 @@ vi.mock("./supplier.repository.js", () => ({
   update: vi.fn(),
   softDelete: vi.fn(),
 }));
-vi.mock("#modules/user/user.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/supplier-type/supplier-type.service.js", () => ({
   requireActiveSupplierType: vi.fn(),
 }));
@@ -18,7 +17,6 @@ vi.mock("#modules/goods-in/goods-in.repository.js", () => ({ countBySupplier: vi
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 
 import * as supplierRepo from "./supplier.repository.js";
-import * as userRepo from "#modules/user/user.repository.js";
 import * as supplierTypeService from "#modules/supplier-type/supplier-type.service.js";
 import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import * as irmRepo from "#modules/irm/irm.repository.js";
@@ -31,9 +29,6 @@ const mockIrmCount = irmRepo.countBySupplier as ReturnType<typeof vi.fn>;
 const mockGrnCount = grnRepo.countBySupplier as ReturnType<typeof vi.fn>;
 
 const SUP_ID = "f".repeat(24);
-const ACTIVE_OWNER = "a".repeat(24);
-const INACTIVE_OWNER = "b".repeat(24);
-const NEW_ACTIVE_OWNER = "c".repeat(24);
 const TYPE_ID = "d".repeat(24);
 const NEW_TYPE_ID = "e".repeat(24);
 
@@ -65,8 +60,6 @@ function sRow(over: Record<string, unknown> = {}) {
     currency: "GBP",
     leadTimeDays: null,
     notes: null,
-    ownerUserId: null,
-    owner: null,
     deletedAt: null,
     createdBy: null,
     updatedBy: null,
@@ -79,7 +72,6 @@ function sRow(over: Record<string, unknown> = {}) {
 const mockFindById = supplierRepo.findById as ReturnType<typeof vi.fn>;
 const mockUpdate = supplierRepo.update as ReturnType<typeof vi.fn>;
 const mockSoftDelete = supplierRepo.softDelete as ReturnType<typeof vi.fn>;
-const mockUserFindById = userRepo.findById as ReturnType<typeof vi.fn>;
 const mockRequireType = supplierTypeService.requireActiveSupplierType as ReturnType<typeof vi.fn>;
 const mockAudit = audit.record as ReturnType<typeof vi.fn>;
 
@@ -94,55 +86,6 @@ beforeEach(() => {
   mockPoCount.mockResolvedValue(0);
   mockIrmCount.mockResolvedValue(0);
   mockGrnCount.mockResolvedValue(0);
-});
-
-describe("updateSupplier — owner change handling", () => {
-  it("edits other fields when the existing owner is INACTIVE — no error, owner untouched", async () => {
-    mockFindById.mockResolvedValue(
-      sRow({
-        ownerUserId: INACTIVE_OWNER,
-        owner: { id: INACTIVE_OWNER, firstName: "Ina", lastName: "Ctive", email: "ina@x.com", status: "inactive", jobTitle: null, role: null },
-      }),
-    );
-    await expect(
-      updateSupplier(SUP_ID, { name: "Corning UK", ownerUserId: INACTIVE_OWNER }),
-    ).resolves.toMatchObject({ name: "Corning UK" });
-    expect(mockUserFindById).not.toHaveBeenCalled();
-    expect("ownerUserId" in mockUpdate.mock.calls[0][1]).toBe(false);
-    expect(auditActions()).toContain("supplier.updated");
-  });
-
-  it("changes an inactive owner to a different ACTIVE owner → owner_assigned", async () => {
-    mockFindById.mockResolvedValue(sRow({ ownerUserId: INACTIVE_OWNER }));
-    mockUserFindById.mockResolvedValue({ id: NEW_ACTIVE_OWNER, status: "active" });
-    await expect(updateSupplier(SUP_ID, { ownerUserId: NEW_ACTIVE_OWNER })).resolves.toBeTruthy();
-    expect(mockUpdate.mock.calls[0][1].ownerUserId).toBe(NEW_ACTIVE_OWNER);
-    expect(auditActions()).toContain("supplier.owner_assigned");
-  });
-
-  it("clears the owner via the scalar FK → owner_removed", async () => {
-    mockFindById.mockResolvedValue(sRow({ ownerUserId: ACTIVE_OWNER }));
-    await expect(updateSupplier(SUP_ID, { ownerUserId: null })).resolves.toBeTruthy();
-    expect(mockUserFindById).not.toHaveBeenCalled();
-    expect(mockUpdate.mock.calls[0][1].ownerUserId).toBeNull();
-    expect(auditActions()).toContain("supplier.owner_removed");
-  });
-
-  it("edits a supplier that has NO owner — succeeds, owner untouched", async () => {
-    mockFindById.mockResolvedValue(sRow({ ownerUserId: null }));
-    await expect(updateSupplier(SUP_ID, { name: "Renamed", ownerUserId: null })).resolves.toBeTruthy();
-    expect(mockUserFindById).not.toHaveBeenCalled();
-    expect("ownerUserId" in mockUpdate.mock.calls[0][1]).toBe(false);
-  });
-
-  it("rejects assigning an INACTIVE owner", async () => {
-    mockFindById.mockResolvedValue(sRow({ ownerUserId: null }));
-    mockUserFindById.mockResolvedValue({ id: INACTIVE_OWNER, status: "inactive" });
-    await expect(updateSupplier(SUP_ID, { ownerUserId: INACTIVE_OWNER })).rejects.toThrow(
-      /not an active user/i,
-    );
-    expect(mockUpdate).not.toHaveBeenCalled();
-  });
 });
 
 describe("updateSupplier — status / type", () => {
