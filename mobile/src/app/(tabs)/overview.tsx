@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 import Ionicons from "@expo/vector-icons/Ionicons";
@@ -9,7 +9,7 @@ import { useLoad } from "@/lib/useLoad";
 import { useSocketRefresh } from "@/lib/useSocketRefresh";
 import { Badge, Card, EmptyState, ErrorText, Button, ListSkeleton, Screen, SectionTitle, Skeleton } from "@/components/ui";
 import { colors } from "@/lib/theme";
-import { formatDate, signed, timeAgo } from "@/lib/format";
+import { formatDate, signed } from "@/lib/format";
 import type { EngineerOverview, EngineerOverviewJob, Movement } from "@/types";
 
 // Engineer dashboard — the field engineer's day at a glance, mirroring the web's
@@ -20,7 +20,6 @@ const SUBTITLE = "Your jobs, stock and activity at a glance.";
 // The dashboard fans in four socket domains, so one action can emit a burst of
 // events — coalesce them into a single refetch this long after the last one.
 const REFRESH_DEBOUNCE_MS = 250;
-const CAPTION_TICK_MS = 30_000;
 
 const DASH_EVENTS = [
   "job:new",
@@ -142,7 +141,7 @@ export default function OverviewScreen() {
         getOwnOverview(),
         getOwnMovements({ limit: 6 }).catch(() => ({ movements: [] as Movement[], nextCursor: null, hasMore: false })),
       ]);
-      return { overview, recent: moves.movements, updatedAt: new Date().toISOString() };
+      return { overview, recent: moves.movements };
     }, []),
   );
 
@@ -158,13 +157,6 @@ export default function OverviewScreen() {
     },
     [],
   );
-
-  // Re-render the "Updated X ago" caption on a tick, without refetching.
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    const t = setInterval(() => setTick((n) => n + 1), CAPTION_TICK_MS);
-    return () => clearInterval(t);
-  }, []);
 
   if (loading)
     return (
@@ -360,9 +352,8 @@ export default function OverviewScreen() {
     <Screen refreshing={refreshing} onRefresh={() => void refresh()}>
       <View style={s.headerRow}>
         <Text style={s.subtitle}>{SUBTITLE}</Text>
-        <Pressable style={s.updatedRow} onPress={() => void reload()} hitSlop={8}>
-          <Text style={s.updatedText}>Updated {timeAgo(data.updatedAt)}</Text>
-          <Ionicons name="refresh" size={13} color={colors.faint} />
+        <Pressable style={s.updatedRow} onPress={() => void reload()} hitSlop={10}>
+          <Ionicons name="refresh" size={15} color={colors.faint} />
         </Pressable>
       </View>
       <ErrorText message={error} />
@@ -477,8 +468,7 @@ const s = StyleSheet.create({
   flex1: { flex: 1 },
   headerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
   subtitle: { fontSize: 13, color: colors.muted, flex: 1 },
-  updatedRow: { flexDirection: "row", alignItems: "center", gap: 4 },
-  updatedText: { fontSize: 11, color: colors.faint },
+  updatedRow: { flexDirection: "row", alignItems: "center" },
   statRow: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
   statCard: { flexBasis: "47%", flexGrow: 1, gap: 4 },
   statIcon: { width: 30, height: 30, borderRadius: 10, alignItems: "center", justifyContent: "center" },

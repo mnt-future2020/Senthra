@@ -1,0 +1,53 @@
+# When this file exists, EAS CLI uses IT (not .gitignore) to decide what gets
+# uploaded with a build. It exists for exactly one difference: google-services.json
+# must reach the EAS build (app.json's googleServicesFile points at it and the
+# Android build fails without it) while staying OUT of git. Everything else
+# mirrors .gitignore — keep the two in sync when adding entries.
+
+# dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Metro
+.metro-health-check*
+
+# debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# OS junk
+.DS_Store
+Thumbs.db
+*.pem
+
+# local env files — dev builds load JS from Metro (which reads .env locally),
+# and preview/production builds get EXPO_PUBLIC_API_URL from eas.json env.
+.env
+.env*.local
+
+# typescript
+*.tsbuildinfo
+
+example
+
+# generated native folders — EAS prebuilds these in the cloud from app.json,
+# which is what applies googleServicesFile + the expo-notifications plugin.
+/ios
+/android
+
+# NOTE: google-services.json is deliberately NOT listed — it ships with the build.
