@@ -87,7 +87,11 @@ const sharedIrmFields = {
   mpn: z.string().trim().max(120).optional(),
   typeId: optionalTypeIdField,
   irmCategoryId: optionalCategoryIdField,
-  sku: z.string().trim().max(80).optional(),
+  // SKU is MANDATORY on both create and update — every IRM item carries one. It stays `optional()`
+  // here in the 3-state sense (omitted = no change on update; blank on create = let the server
+  // generate one from the name + category), but an explicitly EMPTY value is rejected: once an item
+  // has a SKU it can never go back to having none. The service normalizes the shape.
+  sku: z.string().trim().min(1, "SKU is required.").max(80).optional(),
   baseUnit: baseUnitUpdate,
   packSize: packSizeField,
   reorderLevel: optionalInt(1_000_000, "Reorder level"),

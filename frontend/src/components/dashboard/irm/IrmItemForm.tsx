@@ -25,6 +25,7 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { FieldError, FormAsideCard, FormField, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import type { UserStatus } from "@/types/user";
 import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
+import { buildSkuCandidate, categoryPrefix, findSkuPrefixMismatch, normalizeSku } from "@/lib/irmSku";
 
 // The IRM catalogue now lives in the Inventory Hub (Inventory → IRM → Catalogue), so that's the
 // fallback "list" destination when there's no in-app history to go back to.
@@ -53,6 +54,9 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
   const [mpn, setMpn] = React.useState(o?.mpn ?? "");
   const [status, setStatus] = React.useState<"active" | "inactive">(o?.status ?? "active");
   const [sku, setSku] = React.useState(o?.sku ?? "");
+  // On CREATE the SKU follows the name + category until the user types their own. On EDIT it never
+  // auto-follows: the item already has a SKU, and changing it burns the old one forever.
+  const [skuTouched, setSkuTouched] = React.useState(mode === "edit");
   const [baseUnit, setBaseUnit] = React.useState(o?.baseUnit ?? "Each");
   const [packSize, setPackSize] = React.useState(numStr(o?.packSize));
   const [reorderLevel, setReorderLevel] = React.useState(numStr(o?.reorderLevel));
@@ -143,9 +147,45 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
     return opts;
   }, [suppliers, o]);
 
+  // The category's NAME drives the SKU prefix (Cable -> CAB), so it has to be resolved from the
+  // loaded master rather than the selected id alone.
+  const selectedCategoryName = React.useMemo(
+    () => categories.find((c) => c.id === irmCategoryId)?.name ?? o?.category?.name ?? null,
+    [categories, irmCategoryId, o],
+  );
+  // Suggest nothing until there is a name to build from — otherwise a freshly-opened create form
+  // would start with a bare category code in the box and count as unsaved work straight away.
+  const suggestedSku = name.trim() ? buildSkuCandidate(name, selectedCategoryName) : "";
+  // What the field shows, what gets validated, and what gets sent. Deriving it (rather than writing
+  // state from an effect) keeps the auto-fill out of React's render cycle entirely.
+  const effectiveSku = skuTouched ? sku : suggestedSku;
+
+  // On EDIT the SKU never re-follows the category — it is a permanent identifier, and rewriting it
+  // would strand printed labels (the goods/van-stock scan resolves on skuLower) and disagree with
+  // the SKU already snapshotted onto every past PO, GRN and kit line. But an item re-categorised
+  // after its SKU was set does end up carrying the wrong category's code, so say so and let the
+  // person decide. Only fires when the leading segment is ANOTHER CATEGORY's code: a hand-written
+  // SKU like CAT6-305-BOX or LC-UPC-SM matches no category and is left alone.
+  // The field auto-follows the name + category on create until the user types their own, so a
+  // "use the suggestion" control only has work to do once they HAVE typed something different.
+  // Shown then and only then — a button that restores the state you are already in is furniture.
+  // Edit deliberately has no such control: the SKU there is a live identifier, and one click that
+  // rewrites it would strand printed labels and burn the old value forever. The one case worth
+  // acting on (the item was re-categorised) is offered by skuPrefixMismatch below instead.
+  const canUseSuggestedSku =
+    mode === "create" && skuTouched && Boolean(suggestedSku) && normalizeSku(effectiveSku) !== suggestedSku;
+
+  const skuPrefixMismatch = React.useMemo(
+    () =>
+      mode === "edit" && suggestedSku
+        ? findSkuPrefixMismatch(effectiveSku, selectedCategoryName, categories, irmCategoryId)
+        : null,
+    [mode, suggestedSku, effectiveSku, selectedCategoryName, categories, irmCategoryId],
+  );
+
   // Dirty detection — snapshot of every field captured on the first render.
   const liveKey = JSON.stringify({
-    name, typeId, irmCategoryId, description, brand, manufacturer, mpn, status, sku,
+    name, typeId, irmCategoryId, description, brand, manufacturer, mpn, status, sku: effectiveSku,
     baseUnit, packSize, reorderLevel, maximumStock, criticalLevel, standardCost, currency, vatRatePercent, trackInventory, trackSerialNumbers, trackBatchNumbers,
     notes, supplierRows,
   });
@@ -234,6 +274,9 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
     if (!typeId) errs.typeId = "Select an IRM type.";
     if (!irmCategoryId) errs.irmCategoryId = "Select an IRM category.";
     if (!baseUnit) errs.baseUnit = "Select a base unit.";
+    // Mandatory on create AND edit. The auto-suggestion normally fills this, so an empty box means
+    // the user deliberately cleared it — which the server refuses too.
+    if (!normalizeSku(effectiveSku)) errs.sku = "SKU is required.";
 
     // Suppliers are optional — an item may have none. Only the shape of the rows that DO name a
     // supplier is checked: unique, and at most one primary.
@@ -298,7 +341,7 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
     manufacturer: manufacturer.trim(),
     mpn: mpn.trim(),
     status,
-    sku: sku.trim(),
+    sku: normalizeSku(effectiveSku),
     suppliers: buildSuppliersPayload(),
     baseUnit,
     packSize: packSize.trim(),
@@ -463,12 +506,60 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
             </div>
           </FormSection>
 
-          <FormSection title="Identification" description="The item's internal SKU (optional). Unique forever once used. The printable Code128 label is generated separately from the item code.">
+          {/* Don't explain the barcode here: the Code128 label is rendered FROM the item's `code`,
+              and BarcodePanel says so where the barcode actually lives. */}
+          <FormSection title="Identification" description="The item's internal SKU — suggested from the name and category, and unique forever once used.">
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
-                <label className={labelCls}>SKU</label>
-                <input className={inputCls} value={sku} onChange={(e) => setSku(e.target.value)} maxLength={80} placeholder="e.g. IRM-CAT6-305" />
-                <p className="mt-1.5 text-[11px] text-[var(--faint)]">Your internal code. Unique forever — it can&apos;t be reused once set.</p>
+                <div className="flex items-end justify-between gap-2">
+                  <label className={labelCls} htmlFor="irm-sku">
+                    SKU<RequiredMark />
+                  </label>
+                  {canUseSuggestedSku && (
+                    <button
+                      type="button"
+                      className="mb-1.5 text-[11px] font-bold text-[var(--accent)] hover:underline"
+                      // Hands the field back to the name + category rather than pasting a frozen
+                      // value, so changing either afterwards keeps updating it.
+                      onClick={() => { setSkuTouched(false); clearError("sku"); }}
+                      title={`Use ${suggestedSku}`}
+                    >
+                      Use suggested
+                    </button>
+                  )}
+                </div>
+                <input
+                  id="irm-sku"
+                  className={inputCls}
+                  value={effectiveSku}
+                  onChange={(e) => { setSkuTouched(true); setSku(e.target.value); clearError("sku"); }}
+                  // Fold to the stored shape once they look away, so the box matches what the server
+                  // will save rather than surprising them with a rewrite after submit.
+                  onBlur={() => skuTouched && setSku((cur) => normalizeSku(cur))}
+                  maxLength={80}
+                  placeholder="e.g. CAB-CAT6-305M"
+                  aria-invalid={Boolean(errors.sku)}
+                  aria-describedby={errors.sku ? "err-sku" : undefined}
+                />
+                <FieldError id="err-sku" message={errors.sku} />
+                {skuPrefixMismatch && (
+                  <p className="mt-1.5 text-[11px] text-amber-600">
+                    Starts {skuPrefixMismatch.head}- ({skuPrefixMismatch.owner}), not {categoryPrefix(selectedCategoryName)}-.{" "}
+                    <button
+                      type="button"
+                      className="font-bold underline"
+                      onClick={() => { setSku(suggestedSku); setSkuTouched(true); clearError("sku"); }}
+                    >
+                      Use {suggestedSku}
+                    </button>{" "}
+                    — only if no labels are printed yet.
+                  </p>
+                )}
+                <p className="mt-1.5 text-[11px] text-[var(--faint)]">
+                  {mode === "create" && !skuTouched
+                    ? "Following the item name and category. Type here to set your own."
+                    : "Unique forever — it can’t be reused once set, even by a removed item."}
+                </p>
               </div>
             </div>
           </FormSection>

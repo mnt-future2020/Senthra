@@ -15,8 +15,13 @@ import type { AuditActor } from "#modules/audit/audit.service.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import { paginate } from "../../utils/pagination.js";
 import type { CreateIrmItemInput, SupplierRowInput, UpdateIrmItemInput } from "./irm.validation.js";
+import { buildSkuCandidate, normalizeSku, withSuffix } from "./sku.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
+// How many times a GENERATED SKU is re-derived after losing a race to the unique index. Two rivals
+// landing on the same candidate is already unlikely; a third would mean something other than
+// concurrency is wrong, and looping on it would just delay the error.
+const SKU_RACE_RETRIES = 2;
 const STATUSES = ["active", "inactive"] as const;
 
 type SupplierLink = IrmItemWithRelations["suppliers"][number];
@@ -192,17 +197,58 @@ function suppliersDiffer(existing: SupplierLink[], incoming: SupplierLinkRow[]):
 const costToPence = (pounds: number | null | undefined): number | null =>
   pounds == null ? null : Math.round(pounds * 100);
 
-// Resolve the SKU + its lowercase mirror; enforce GLOBAL FOREVER uniqueness (scans all rows
-// incl. soft-deleted). `selfId` excludes the item being edited.
-async function resolveSku(sku: string | null | undefined, selfId?: string): Promise<{ sku: string | null; skuLower: string | null }> {
-  const trimmed = trimToNull(sku);
-  if (!trimmed) return { sku: null, skuLower: null };
-  const skuLower = trimmed.toLowerCase();
-  const clash = await irmRepo.findBySkuLower(skuLower);
-  if (clash && clash.id !== selfId) {
-    throw skuConflict(trimmed);
+// Is this SKU free to use? Checks the two ways it can be taken:
+//   1. another item already owns it as a SKU (global + forever, soft-deleted rows included), and
+//   2. another item owns it as its display CODE — see irmRepo.findIdByCode for why that matters.
+async function isSkuFree(sku: string, selfId?: string): Promise<boolean> {
+  const clash = await irmRepo.findBySkuLower(sku.toLowerCase());
+  if (clash && clash.id !== selfId) return false;
+  const codeOwner = await irmRepo.findIdByCode(sku);
+  return !codeOwner || codeOwner.id === selfId;
+}
+
+// Walk the generated candidate's suffixes (CAB-CAT6, CAB-CAT6-2, …) until one is free. Only ever
+// used for SKUs the SERVER invented: a SKU a person typed is rejected on collision rather than
+// silently renamed, because they need to know the one they chose was taken.
+async function uniqueSku(candidate: string, selfId?: string): Promise<string> {
+  for (let n = 1; n <= 50; n++) {
+    const attempt = withSuffix(candidate, n);
+    if (await isSkuFree(attempt, selfId)) return attempt;
   }
-  return { sku: trimmed, skuLower };
+  throw conflict(`Could not generate a free SKU from "${candidate}". Enter one manually.`);
+}
+
+// `generated` separates a SKU the SERVER invented from one a PERSON chose. It decides who owns a
+// losing race against the unique index: our value is ours to replace silently, theirs is not.
+interface ResolvedSku {
+  sku: string;
+  skuLower: string;
+  generated: boolean;
+}
+
+// Resolve the SKU + its lowercase mirror. Every IRM item has one: a blank SKU is GENERATED from the
+// item's name and category rather than stored as null. `selfId` excludes the item being edited.
+async function resolveSku(
+  raw: string | null | undefined,
+  ctx: { name: string; categoryName?: string | null; codePrefix: string; selfId?: string },
+): Promise<ResolvedSku> {
+  const typed = normalizeSku(raw);
+
+  // Nothing usable typed → generate. The form fills this in as you type, so in practice this is
+  // the API-client path; it exists so "every item has a SKU" holds without trusting the caller.
+  if (!typed) {
+    const generated = await uniqueSku(buildSkuCandidate(ctx.name, ctx.categoryName), ctx.selfId);
+    return { sku: generated, skuLower: generated.toLowerCase(), generated: true };
+  }
+
+  // Reserve the shape of a FUTURE item code (IRM-0042) as well as the codes already issued. The
+  // code counter only ever climbs, so blocking the shape now is what stops a scan collision the
+  // day it reaches that number — by then the SKU would be far too entrenched to change.
+  if (new RegExp(`^${ctx.codePrefix}-\\d+$`).test(typed)) {
+    throw badRequest(`"${typed}" is the shape of an item code, which would break barcode scanning. Choose a different SKU.`);
+  }
+  if (!(await isSkuFree(typed, ctx.selfId))) throw skuConflict(typed);
+  return { sku: typed, skuLower: typed.toLowerCase(), generated: false };
 }
 
 // Friendly 409 for a duplicate SKU — used both by the app-level pre-check (resolveSku) and
@@ -210,14 +256,18 @@ async function resolveSku(sku: string | null | undefined, selfId?: string): Prom
 const skuConflict = (sku: string | null | undefined) =>
   conflict(`SKU "${(sku ?? "").trim()}" is already in use. SKUs are never reused, even from removed items.`);
 
-function irmColumns(input: CreateIrmItemInput, skuLower: string | null, standardCostPence: number | null) {
+function irmColumns(
+  input: CreateIrmItemInput,
+  resolvedSku: { sku: string; skuLower: string },
+  standardCostPence: number | null,
+) {
   return {
     description: trimToNull(input.description),
     brand: trimToNull(input.brand),
     manufacturer: trimToNull(input.manufacturer),
     mpn: trimToNull(input.mpn),
-    sku: trimToNull(input.sku),
-    skuLower,
+    sku: resolvedSku.sku,
+    skuLower: resolvedSku.skuLower,
     baseUnit: input.baseUnit,
     packSize: input.packSize ?? null,
     reorderLevel: input.reorderLevel ?? null,
@@ -301,29 +351,38 @@ export async function createIrmItem(input: CreateIrmItemInput, actor?: AuditActo
   if (!name) throw badRequest("Item name is required.");
 
   await irmTypeService.requireActiveIrmType(input.typeId);
-  await irmCategoryService.requireActiveIrmCategory(input.irmCategoryId);
-  const { skuLower } = await resolveSku(input.sku);
+  const category = await irmCategoryService.requireActiveIrmCategory(input.irmCategoryId);
+  const codePrefix = await getIrmCodePrefix();
+  const resolvedSku = await resolveSku(input.sku, { name, categoryName: category.name, codePrefix });
   const supplierRows = await buildSupplierRows(input.suppliers ?? []);
   const standardCostPence = costToPence(input.standardCost);
-  const codePrefix = await getIrmCodePrefix();
   const actorLabel = actor?.email ?? null;
 
-  let created: IrmItemWithRelations;
-  try {
-    created = await irmRepo.createWithCode(
-      {
-        name,
-        ...irmColumns(input, skuLower, standardCostPence),
-        irmType: { connect: { id: input.typeId } },
-        irmCategory: { connect: { id: input.irmCategoryId } },
-        createdBy: actorLabel,
-        updatedBy: actorLabel,
-      },
-      codePrefix,
-    );
-  } catch (e) {
-    if (irmRepo.isSkuConflict(e)) throw skuConflict(input.sku);
-    throw e;
+  // The pre-check in resolveSku can lose a race to a concurrent create, and the partial unique
+  // index then rejects the write. What happens next depends on WHO chose the SKU: one the server
+  // generated is re-derived onto the next free suffix (the caller never picked it, so a 409 over it
+  // would be nonsense), while one a person typed is reported back to them — silently renaming their
+  // chosen identifier would be worse than failing.
+  let resolved = resolvedSku;
+  let created: IrmItemWithRelations | null = null;
+  for (let attempt = 0; created === null; attempt++) {
+    try {
+      created = await irmRepo.createWithCode(
+        {
+          name,
+          ...irmColumns(input, resolved, standardCostPence),
+          irmType: { connect: { id: input.typeId } },
+          irmCategory: { connect: { id: input.irmCategoryId } },
+          createdBy: actorLabel,
+          updatedBy: actorLabel,
+        },
+        codePrefix,
+      );
+    } catch (e) {
+      if (!irmRepo.isSkuConflict(e)) throw e;
+      if (!resolved.generated || attempt >= SKU_RACE_RETRIES) throw skuConflict(resolved.sku);
+      resolved = await resolveSku(undefined, { name, categoryName: category.name, codePrefix });
+    }
   }
   await irmRepo.replaceSuppliers(created.id, supplierRows);
   const full = (await irmRepo.findById(created.id))!;
@@ -395,12 +454,28 @@ export async function updateIrmItem(id: string, input: UpdateIrmItemInput, actor
   // Cost: pounds → pence.
   if (input.standardCost !== undefined) data.standardCostPence = costToPence(input.standardCost);
 
-  // SKU: global-forever uniqueness; only re-check when it actually changes.
+  // SKU: required, and never clearable — an item that has one can't go back to having none.
+  // Re-resolved ONLY when it actually changes, so the common edit (which resends the unchanged SKU)
+  // costs no lookups. Note the value is normalized first, so re-sending 'FBR-SM12- G652D' as
+  // 'FBR-SM12-G652D' is correctly seen as no change rather than a rename that burns the old one.
   if (input.sku !== undefined) {
-    const { sku, skuLower } = await resolveSku(input.sku, id);
-    data.sku = sku;
-    data.skuLower = skuLower;
+    const typed = normalizeSku(input.sku);
+    if (!typed) throw badRequest("SKU is required.");
+    if (typed !== existing.sku) {
+      const resolved = await resolveSku(typed, {
+        name: input.name?.trim() || existing.name,
+        categoryName: existing.irmCategory?.name,
+        codePrefix: await getIrmCodePrefix(),
+        selfId: id,
+      });
+      data.sku = resolved.sku;
+      data.skuLower = resolved.skuLower;
+    }
   }
+  // What the write will actually try to store, for the racing-conflict message below. `input.sku` is
+  // the raw request field: reporting that would quote 'fbr-sm12- g652d' back at someone who is
+  // looking at FBR-SM12-G652D on screen.
+  const attemptedSku = typeof data.sku === "string" ? data.sku : existing.sku;
 
   // Type / category: validate + change only when a different active one is chosen.
   if (input.typeId !== undefined && input.typeId !== existing.typeId) {
@@ -450,7 +525,9 @@ export async function updateIrmItem(id: string, input: UpdateIrmItemInput, actor
   try {
     result = await irmRepo.update(id, data);
   } catch (e) {
-    if (irmRepo.isSkuConflict(e)) throw skuConflict(input.sku);
+    // No retry here, unlike create: an update's SKU is always one a person typed (a blank is
+    // rejected above), so it is never ours to silently replace.
+    if (irmRepo.isSkuConflict(e)) throw skuConflict(attemptedSku);
     throw e;
   }
   if (suppliersChanged && supplierRows) {

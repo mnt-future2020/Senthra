@@ -138,4 +138,13 @@ describe("updateIrmItemSchema", () => {
   it("accepts an empty suppliers array (clears every link)", () => {
     expect(updateIrmItemSchema.safeParse({ suppliers: [] }).success).toBe(true);
   });
+
+  it("rejects clearing the SKU — an item that has one can never go back to having none", () => {
+    expect(updateIrmItemSchema.safeParse({ sku: "" }).success).toBe(false);
+    expect(updateIrmItemSchema.safeParse({ sku: "   " }).success).toBe(false);
+  });
+
+  it("still allows omitting the SKU entirely (no change)", () => {
+    expect(updateIrmItemSchema.safeParse({ name: "Renamed" }).success).toBe(true);
+  });
 });

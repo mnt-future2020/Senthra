@@ -136,6 +136,14 @@ export function findBySkuLower(skuLower: string): Promise<{ id: string } | null>
   return prisma.irmItem.findFirst({ where: { skuLower }, select: { id: true } });
 }
 
+// Does any item already own this string as its display CODE? A SKU that equals another item's code
+// makes findActiveByCodeOrBarcode ambiguous: the same scan matches one row on `code` and another on
+// `skuLower`, and findFirst silently resolves whichever Mongo hands back first. Soft-deleted rows
+// count — codes are never reused, so a restored item would resurrect the clash.
+export function findIdByCode(code: string): Promise<{ id: string } | null> {
+  return prisma.irmItem.findFirst({ where: { code }, select: { id: true } });
+}
+
 // Enforce GLOBAL-FOREVER SKU uniqueness at the database with a PARTIAL unique index.
 // Prisma can't express partial/sparse indexes for MongoDB — a plain `@unique` on an optional
 // field creates a NON-sparse index that rejects a SECOND null, and most items have no SKU

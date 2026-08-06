@@ -405,11 +405,14 @@ model IrmItem {
 
   status String @default("active") // active | inactive
 
-  // Identification. `sku` is GLOBALLY unique FOREVER (never reused, even after soft-delete).
-  // Enforced at the DB by a PARTIAL unique index on `skuLower` (created in the seed step via
-  // irmRepo.ensureSkuUniqueIndex) PLUS an app-level pre-check. Do NOT add `@unique` here:
-  // Prisma would create a non-sparse index that rejects a second null SKU (prisma#23870),
-  // and most items have no SKU. The partial index only covers string skuLower values.
+  // Identification. `sku` is MANDATORY (irm.validation.ts requires it on create and update, and the
+  // service generates one from the name + category when a caller sends none) and GLOBALLY unique
+  // FOREVER — never reused, even after soft-delete. Enforced at the DB by a PARTIAL unique index on
+  // `skuLower` (created in the seed step via irmRepo.ensureSkuUniqueIndex) PLUS an app-level
+  // pre-check. Do NOT add `@unique` here: Prisma would create a non-sparse index that rejects a
+  // second null (prisma#23870). Do NOT make it required either — on MongoDB that enforces nothing
+  // and only turns any row predating the rule into a read crash. The partial index covers string
+  // skuLower values, which is now every row (see scripts/backfill-irm-sku.ts).
   sku      String?
   skuLower String?
   // Free-text / manufacturer barcode (e.g. an EAN). UNIQUE across all rows, enforced by a PARTIAL
