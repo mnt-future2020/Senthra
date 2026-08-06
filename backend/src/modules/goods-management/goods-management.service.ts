@@ -648,7 +648,9 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
   // Realtime: notify the engineer + all office staff watching the jobs list.
   const issuePayload = { jobId: job.id, movementId: created.id, code: created.code, direction: "issue" };
   emitToUser(job.assignedEngineerId!, "goods:issued", issuePayload);
-  notify(job.assignedEngineerId!, { title: "Kit ready to collect", body: `Stock for ${job.jobNumber} has been issued — collect it from the warehouse.`, data: { type: "job", jobId: job.id } });
+  // "Issued" is warehouse jargon (the system-side scan-out) — the engineer just
+  // needs to know their kit is ready and where to get it.
+  notify(job.assignedEngineerId!, { title: "Kit ready to collect", body: `Your kit for ${job.jobNumber} is ready at the warehouse — come and collect it.`, data: { type: "job", jobId: job.id } });
   emitToRoom(OFFICE_JOBS_ROOM, "goods:updated", issuePayload);
 
   return toPublic(created);

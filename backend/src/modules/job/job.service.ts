@@ -1078,7 +1078,10 @@ export async function cancelJob(id: string, reason: string | undefined, actor?: 
   const pub = await withGoodsTallies(toPublic(updated));
   if (pub.assignedEngineerId) {
     emitToUser(pub.assignedEngineerId, "job:updated", pub);
-    notify(pub.assignedEngineerId, { title: "Job cancelled", body: `${pub.jobNumber} — ${pub.name} was cancelled.`, data: { type: "job", jobId: pub.id } });
+    // Body is just the job's identity — the title carries the verb. Folding the
+    // name into a sentence misreads when the name itself is a phrase
+    // ("Server Change was cancelled").
+    notify(pub.assignedEngineerId, { title: "Job cancelled", body: `${pub.jobNumber} · ${pub.name}`, data: { type: "job", jobId: pub.id } });
   }
   emitToRoom(OFFICE_JOBS_ROOM, "job:updated", pub); // office Jobs-list watchers
   return pub;
