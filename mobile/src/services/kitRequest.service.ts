@@ -43,3 +43,26 @@ export function searchKitItems(q: string, jobId?: string): Promise<KitItemOption
     (r) => r.items,
   );
 }
+
+/**
+ * Live availability for the composer, keyed by item id. Server-side the figures
+ * arrive net of other jobs' planned demand; `heldByEngineers` excludes this
+ * job's own engineer. Advisory only — the authoritative check is at approve.
+ */
+export interface KitAvailabilityMap {
+  irm: Record<string, { quantityOnHand: number; heldByEngineers: number }>;
+  cse: Record<string, { qty: number }>;
+}
+
+export function kitItemAvailabilityFor(
+  jobId: string,
+  irmItemIds: string[],
+  cseIds: string[],
+): Promise<KitAvailabilityMap> {
+  if (irmItemIds.length === 0 && cseIds.length === 0) {
+    return Promise.resolve({ irm: {}, cse: {} });
+  }
+  return api<KitAvailabilityMap>(
+    `/job-kit-requests/item-availability${qs({ jobId, irm: irmItemIds.join(","), cse: cseIds.join(",") })}`,
+  );
+}

@@ -17,8 +17,10 @@ import { useToast } from "@/lib/toast";
 import {
   crossWarehouseReturnNote,
   GOODS_STATUS_LABELS,
+  kitLineOutcome,
   kitLineSourceSplit,
   LINE_TYPE_LABEL,
+  outstandingKit,
   returnLocationNote,
 } from "@/lib/jobKit";
 import { WarehousePickupModal } from "@/components/WarehousePickupModal";
@@ -41,21 +43,24 @@ import type { JobKitLine, JobKitWarehouse, KitRequest, KitRequestLine } from "@/
 function KitLineCard({
   line,
   lines,
+  jobCancelled,
   onWarehousePress,
 }: {
   line: JobKitLine;
   lines: JobKitLine[];
+  jobCancelled: boolean;
   onWarehousePress: (w: JobKitWarehouse) => void;
 }) {
   const crossNote = crossWarehouseReturnNote(line, lines);
   // A line MERGES origins: some units collected from its warehouse, some handed over from another
   // engineer's van. Show each with its quantity — how many to collect vs how many are coming to you.
-  // When the van supplied everything, the warehouse pickup link is suppressed entirely: it stores the
-  // RETURN warehouse, and showing it as a pickup would send the engineer to collect stock a colleague
-  // is already bringing them.
+  // The warehouse chip shows its whole SHARE (issued from it + still to collect), so a freshly split
+  // line with nothing issued yet still names its pickup. When the van covers everything, the link is
+  // suppressed: it stores the RETURN warehouse, not a pickup.
   const hasVanSources = line.vanSources.length > 0;
-  const split = kitLineSourceSplit(line);
-  const showWarehouse = !hasVanSources || split.warehouseQty > 0;
+  const split = kitLineSourceSplit(line, { jobCancelled });
+  const showWarehouse = !hasVanSources || split.warehouseShare > 0;
+  const returnNote = hasVanSources ? returnLocationNote(line, split) : "";
   return (
     <Card>
       <View style={s.lineTop}>
@@ -75,15 +80,18 @@ function KitLineCard({
           <Text style={s.warehouseLink}>
             {line.warehouse.name}
             {line.warehouse.code ? ` (${line.warehouse.code})` : ""}
-            {hasVanSources ? ` ×${split.warehouseQty}` : ""}
+            {hasVanSources ? ` ×${split.warehouseShare}` : ""}
           </Text>
         </Pressable>
       ) : showWarehouse && line.warehouseName ? (
         <Text style={s.lineMeta}>
           {line.warehouseName}
           {line.warehouseCode ? ` (${line.warehouseCode})` : ""}
-          {hasVanSources ? ` ×${split.warehouseQty}` : ""}
+          {hasVanSources ? ` ×${split.warehouseShare}` : ""}
         </Text>
+      ) : null}
+      {split.outstandingWarehouseQty > 0 && split.warehouseQty > 0 ? (
+        <Text style={s.toCollect}>{split.outstandingWarehouseQty} to collect</Text>
       ) : null}
       <Text style={s.lineTallies}>
         Issued {line.issued} · Used {line.used} · Returned {line.returned} · On van {line.remaining}
@@ -92,12 +100,22 @@ function KitLineCard({
       {line.vanSources.length > 0 ? (
         <>
           {line.vanSources.map((v, i) => (
-            <Text key={`${v.transferCode}-${i}`} style={s.vanSource}>
-              From van: {v.engineerName} ×{v.quantity}
-              {v.status === "pending" ? " · awaiting handover" : ""}
-            </Text>
+            <View key={`${v.transferCode}-${i}`} style={s.vanSourceRow}>
+              <Text style={s.vanSource}>From van: </Text>
+              {v.engineerPhone ? (
+                <Pressable onPress={() => void Linking.openURL(`tel:${v.engineerPhone}`)}>
+                  <Text style={s.vanSourcePhone}>{v.engineerName}</Text>
+                </Pressable>
+              ) : (
+                <Text style={s.vanSource}>{v.engineerName}</Text>
+              )}
+              <Text style={s.vanSource}>
+                {" "}×{v.quantity}
+                {v.status === "pending" ? " · awaiting handover" : ""}
+              </Text>
+            </View>
           ))}
-          <Text style={s.lineMeta}>{returnLocationNote(line)}</Text>
+          {returnNote ? <Text style={s.lineMeta}>{returnNote}</Text> : null}
         </>
       ) : null}
       {line.notes ? <Text style={s.lineMeta}>Notes: {line.notes}</Text> : null}
@@ -105,20 +123,57 @@ function KitLineCard({
   );
 }
 
-function KitLineChips({ lines }: { lines: KitRequestLine[] }) {
+/**
+ * Kit-request lines with the reviewer's per-line outcome, mirroring the web's
+ * KitRequestLines: an excluded line is struck through showing the ASKED qty
+ * with a "Not approved" pill; a trimmed line shows the granted qty plus
+ * "of N asked".
+ */
+function KitRequestLines({ lines }: { lines: KitRequestLine[] }) {
+  if (lines.length === 0) return null;
   return (
-    <View style={s.chipsRow}>
+    <View style={s.krLines}>
       {lines.map((l) => {
-        const tint =
-          l.source === "customer_stock"
-            ? { bg: colors.accentSoft, fg: colors.accent }
-            : l.source === "misc"
-              ? { bg: colors.mutedSoft, fg: colors.muted }
-              : { bg: colors.card, fg: colors.text };
+        const o = kitLineOutcome(l);
         return (
-          <View key={l.id} style={[s.krChip, { backgroundColor: tint.bg }]}>
-            <Text style={[s.krChipText, { color: tint.fg }]}>
-              {l.itemName} ×{l.qty}
+          <View key={l.id} style={[s.krLine, o.excluded && s.krLineExcluded]}>
+            <View style={s.krLineMain}>
+              <View style={s.krLineTop}>
+                <Text style={[s.krLineName, o.excluded && s.krStruck]} numberOfLines={1}>
+                  {l.itemName}
+                </Text>
+                {l.source === "customer_stock" ? (
+                  <View style={[s.krPill, { backgroundColor: colors.accentSoft }]}>
+                    <Text style={[s.krPillText, { color: colors.accent }]}>Customer stock</Text>
+                  </View>
+                ) : null}
+                {l.source === "misc" ? (
+                  <View style={[s.krPill, { backgroundColor: colors.mutedSoft }]}>
+                    <Text style={[s.krPillText, { color: colors.muted }]}>Misc</Text>
+                  </View>
+                ) : null}
+                {o.excluded ? (
+                  <View style={[s.krPill, { backgroundColor: colors.dangerSoft }]}>
+                    <Text style={[s.krPillText, { color: colors.danger }]}>Not approved</Text>
+                  </View>
+                ) : null}
+              </View>
+              {l.source === "customer_stock" && l.warehouseName ? (
+                <Text style={s.krWarehouse}>
+                  {l.warehouseName}
+                  {l.warehouseCode ? ` (${l.warehouseCode})` : ""}
+                </Text>
+              ) : null}
+            </View>
+            <Text style={s.krQty}>
+              {o.excluded ? (
+                <Text style={s.krStruck}>×{l.qty}</Text>
+              ) : (
+                <>
+                  ×{o.qty}
+                  {o.trimmed ? <Text style={s.krAsked}> of {l.qty} asked</Text> : null}
+                </>
+              )}
             </Text>
           </View>
         );
@@ -398,11 +453,30 @@ export default function JobDetailScreen() {
       ) : null}
 
       <SectionTitle>Kit ({job.kitLines.length})</SectionTitle>
+      {(() => {
+        // Web parity: a cancelled job with stock still on the van gets a return
+        // advisory — nothing more is to be collected.
+        const held = outstandingKit(job.kitLines);
+        return job.status === "cancelled" && held.units > 0 ? (
+          <Card style={s.warnCard}>
+            <Text style={s.warnText}>
+              This job was cancelled. Return the {held.units} unit{held.units === 1 ? "" : "s"}{" "}
+              you&rsquo;re still holding to the warehouse — nothing more is to be collected.
+            </Text>
+          </Card>
+        ) : null;
+      })()}
       {job.kitLines.length === 0 ? (
         <EmptyState title="No kit lines on this job" />
       ) : (
         job.kitLines.map((line) => (
-          <KitLineCard key={line.id} line={line} lines={job.kitLines} onWarehousePress={setPickupWarehouse} />
+          <KitLineCard
+            key={line.id}
+            line={line}
+            lines={job.kitLines}
+            jobCancelled={job.status === "cancelled"}
+            onWarehousePress={setPickupWarehouse}
+          />
         ))
       )}
 
@@ -435,7 +509,7 @@ export default function JobDetailScreen() {
                     <Text style={s.krDate}>{formatDate(kr.createdAt)}</Text>
                   </View>
                 </View>
-                <KitLineChips lines={kr.lines} />
+                <KitRequestLines lines={kr.lines} />
                 {kr.reason ? <Text style={s.krReason}>&ldquo;{kr.reason}&rdquo;</Text> : null}
                 {kr.status === "declined" && kr.decisionNote ? (
                   <Text style={s.lineMeta}>Planner: {kr.decisionNote}</Text>
@@ -495,18 +569,26 @@ const s = StyleSheet.create({
   lineMeta: { fontSize: 12, color: colors.muted },
   lineTallies: { fontSize: 12, color: colors.info, fontWeight: "600" },
   crossNote: { fontSize: 12, color: colors.warn, fontWeight: "600" },
+  toCollect: { fontSize: 12, color: colors.warn, fontWeight: "700" },
+  vanSourceRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap" },
   vanSource: { fontSize: 12, color: colors.warn },
+  vanSourcePhone: { fontSize: 12, color: colors.accent, fontWeight: "600" },
   warehouseRow: { flexDirection: "row", alignItems: "center", gap: 4 },
   warehouseLink: { fontSize: 13, fontWeight: "600", color: colors.accent },
-  chipsRow: { flexDirection: "row", flexWrap: "wrap", gap: 6 },
-  krChip: {
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: colors.border,
-    paddingHorizontal: 10,
-    paddingVertical: 3,
-  },
-  krChipText: { fontSize: 12, fontWeight: "600" },
+  warnCard: { borderColor: colors.warn, backgroundColor: colors.warnSoft },
+  warnText: { fontSize: 13, color: colors.warn },
+  krLines: { gap: 6 },
+  krLine: { flexDirection: "row", alignItems: "flex-start", gap: 8 },
+  krLineExcluded: { opacity: 0.6 },
+  krLineMain: { flex: 1, gap: 2 },
+  krLineTop: { flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" },
+  krLineName: { fontSize: 13, fontWeight: "700", color: colors.text, flexShrink: 1 },
+  krStruck: { textDecorationLine: "line-through", color: colors.muted },
+  krPill: { borderRadius: 6, paddingHorizontal: 6, paddingVertical: 1 },
+  krPillText: { fontSize: 9, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5 },
+  krWarehouse: { fontSize: 11, color: colors.muted },
+  krQty: { fontSize: 13, fontWeight: "700", color: colors.text },
+  krAsked: { fontSize: 11, fontWeight: "400", color: colors.faint },
   krCode: { fontSize: 13, fontWeight: "700", color: colors.accent },
   krRight: { flexDirection: "row", alignItems: "center", gap: 8 },
   krDate: { fontSize: 12, color: colors.muted },

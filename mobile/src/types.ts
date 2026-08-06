@@ -202,6 +202,7 @@ export interface JobKitWarehouse {
 export interface KitLineVanSource {
   transferCode: string;
   engineerName: string;
+  engineerPhone: string | null; // snapshot from the transfer — null when the holder had no phone on file
   quantity: number;
   status: string; // pending | completed
 }
@@ -569,7 +570,10 @@ export interface KitRequestLine {
   itemName: string;
   sku: string | null;
   uom: string | null;
-  qty: number;
+  qty: number; // what the ENGINEER asked for — never rewritten
+  // What the reviewer approved: null = in full (and every pre-trim row), 0 = the
+  // line was EXCLUDED, N < qty = trimmed. Readers fall back to `qty` on null.
+  approvedQty: number | null;
   jobKitLineId: string | null;
   warehouseName: string | null;
   warehouseCode: string | null;
@@ -633,6 +637,10 @@ export interface KitItemIrmOption {
   name: string;
   sku: string | null;
   uom: string | null;
+  // Live availability, net of other jobs' planned demand (server-side): free
+  // warehouse stock, and spare stock on OTHER engineers' vans.
+  quantityOnHand: number;
+  heldByEngineers: number;
 }
 
 export interface KitItemCustomerStockOption {

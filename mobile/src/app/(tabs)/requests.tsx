@@ -29,6 +29,7 @@ import {
 } from "@/components/ui";
 import { colors } from "@/lib/theme";
 import { formatDateTime, timeAgo, titleCase } from "@/lib/format";
+import { kitLineOutcome } from "@/lib/jobKit";
 import type { EngineerTransfer, VanStockRequest } from "@/types";
 
 const TABS = [
@@ -501,8 +502,21 @@ export default function RequestsScreen() {
                     <Badge status={kr.status} />
                   </View>
                   <Text style={s.title}>{kr.jobNumber}</Text>
+                  {/* Web's collapsed summary: granted qty per line; an excluded
+                      line is struck through showing the asked qty. */}
                   <Text style={s.meta} numberOfLines={2}>
-                    {kr.lines.map((l) => `${l.itemName} ×${l.qty}`).join(", ")}
+                    {kr.lines.slice(0, 3).map((l, i) => {
+                      const o = kitLineOutcome(l);
+                      return (
+                        <Text key={l.id}>
+                          {i > 0 ? " • " : ""}
+                          <Text style={o.excluded ? s.struck : undefined}>
+                            {l.itemName} ×{o.excluded ? l.qty : o.qty}
+                          </Text>
+                        </Text>
+                      );
+                    })}
+                    {kr.lines.length > 3 ? ` • +${kr.lines.length - 3} more` : ""}
                   </Text>
                   {kr.status === "declined" && kr.decisionNote ? (
                     <Text style={s.meta}>Planner: {kr.decisionNote}</Text>
@@ -534,6 +548,7 @@ const s = StyleSheet.create({
   title: { fontSize: 14, fontWeight: "700", color: colors.text },
   phone: { color: colors.accent, fontWeight: "600" },
   meta: { fontSize: 12, color: colors.muted },
+  struck: { textDecorationLine: "line-through", color: colors.faint },
   hint: { fontSize: 13, color: colors.muted },
   buttonRow: { flexDirection: "row", gap: 10 },
   flex1: { flex: 1 },
