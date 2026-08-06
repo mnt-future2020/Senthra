@@ -15,7 +15,8 @@ import type {
 import { useDashboard } from "@/hooks/useDashboard";
 import { readFileAsDataUrl } from "@/lib/image";
 import { VanStockCartTable, VanStockItemSearch, type VanStockCartItem } from "@/components/dashboard/van-requests/vanRequestUi";
-import { FormPageHeader, FormSection, FormAsideCard, RequiredMark } from "@/components/ui/FormScaffold";
+import { FieldError, FormPageHeader, FormSection, FormAsideCard, RequiredMark } from "@/components/ui/FormScaffold";
+import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 import { Notice } from "@/components/ui/Notice";
 import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -87,6 +88,10 @@ export function RestockComposerPage() {
   const { pushToast } = useDashboard();
   const [cart, setCart] = React.useState<VanStockCartItem[]>([]);
   const [reason, setReason] = React.useState("");
+  // Field-level error for the reason box. Separate from `msg`, which carries the CART-wide problems
+  // (empty cart, over-cap, unplaced item) and server failures — those aren't about one control.
+  const [reasonError, setReasonError] = React.useState<string | undefined>(undefined);
+  const noticeRef = React.useRef<HTMLDivElement>(null);
   const [priority, setPriority] = React.useState<VanStockPriority>("normal");
   // irmItemId → the warehouse this line is collected from. Replaces the single request-level
   // "collect from": the engineer picks per item, seeing that warehouse's free stock.
@@ -216,7 +221,7 @@ export function RestockComposerPage() {
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (cart.length === 0) { setMsg({ type: "error", text: "Add at least one item." }); return; }
+    if (cart.length === 0) { setMsg({ type: "error", text: "Add at least one item." }); noticeRef.current?.scrollIntoView({ block: "nearest" }); return; }
     if (overCap) {
       const free = shelfByItem.get(overCap.irmItemId) ?? 0;
       setMsg({ type: "error", text: `Only ${free} of "${overCap.name}" are free at the warehouse you picked — lower the quantity or collect it from somewhere else.` });
@@ -227,7 +232,8 @@ export function RestockComposerPage() {
       setMsg({ type: "error", text: `No warehouse has "${unplaced[0]!.name}" in stock — remove it or ask the office to order it.` });
       return;
     }
-    if (!reason.trim()) { setMsg({ type: "error", text: "Tell the warehouse why you need this." }); return; }
+    if (!reason.trim()) { setReasonError("Tell the warehouse why you need this."); focusFirstInvalid(); return; }
+    setReasonError(undefined);
     setSubmitting(true);
     setMsg(null);
     try {
@@ -326,16 +332,20 @@ export function RestockComposerPage() {
                 <Select ariaLabel="Priority" value={priority} onChange={(v) => setPriority((v || "normal") as VanStockPriority)} options={PRIORITY_OPTIONS} />
               </div>
               <div>
-                <label className={labelCls}>Reason <RequiredMark /></label>
+                <label className={labelCls} htmlFor="restock-reason">Reason <RequiredMark /></label>
                 <textarea
+                  id="restock-reason"
                   value={reason}
-                  onChange={(e) => setReason(e.target.value)}
+                  onChange={(e) => { setReason(e.target.value); if (reasonError) setReasonError(undefined); }}
                   rows={2}
                   maxLength={2000}
                   placeholder="e.g. Van consumables low — cable ties nearly out; crimping tool damaged."
                   className={`${inputCls} resize-none`}
                   aria-required
+                  aria-invalid={Boolean(reasonError)}
+                  aria-describedby={reasonError ? "restock-reason-error" : undefined}
                 />
+                <FieldError id="restock-reason-error" message={reasonError} />
               </div>
               <div>
                 <label className={labelCls}>Attachments (optional)</label>
@@ -370,7 +380,7 @@ export function RestockComposerPage() {
                   onChange={(e) => { const f = e.target.files?.[0]; if (f) void onFile(f); }}
                 />
               </div>
-              <Notice msg={msg} />
+              <div ref={noticeRef}><Notice msg={msg} /></div>
             </div>
           </FormSection>
         </div>
@@ -417,6 +427,10 @@ export function ReturnComposerPage() {
   const [warehouseId, setWarehouseId] = React.useState("");
   const [warehouses, setWarehouses] = React.useState<Array<{ id: string; name: string; code: string | null }>>([]);
   const [reason, setReason] = React.useState("");
+  // Field-level error for the reason box. Separate from `msg`, which carries the CART-wide problems
+  // (empty cart, over-cap, unplaced item) and server failures — those aren't about one control.
+  const [reasonError, setReasonError] = React.useState<string | undefined>(undefined);
+  const noticeRef = React.useRef<HTMLDivElement>(null);
   const [submitting, setSubmitting] = React.useState(false);
   const [holdingsError, setHoldingsError] = React.useState(false); // fetch failed — distinct from "nothing to return"
   const [msg, setMsg] = React.useState<Msg>(null);
@@ -440,7 +454,8 @@ export function ReturnComposerPage() {
     e.preventDefault();
     if (cart.length === 0) { setMsg({ type: "error", text: "Pick at least one item to return." }); return; }
     if (!warehouseId) { setMsg({ type: "error", text: "Pick the warehouse you'll return the stock to." }); return; }
-    if (!reason.trim()) { setMsg({ type: "error", text: "Say why you're returning this stock." }); return; }
+    if (!reason.trim()) { setReasonError("Say why you're returning this stock."); focusFirstInvalid(); return; }
+    setReasonError(undefined);
     setSubmitting(true);
     setMsg(null);
     try {
@@ -528,18 +543,22 @@ export function ReturnComposerPage() {
                 />
               </div>
               <div>
-                <label className={labelCls}>Reason <RequiredMark /></label>
+                <label className={labelCls} htmlFor="return-reason">Reason <RequiredMark /></label>
                 <textarea
+                  id="return-reason"
                   value={reason}
-                  onChange={(e) => setReason(e.target.value)}
+                  onChange={(e) => { setReason(e.target.value); if (reasonError) setReasonError(undefined); }}
                   rows={2}
                   maxLength={2000}
                   placeholder="e.g. Over-stocked after last month's jobs — returning the excess."
                   className={`${inputCls} resize-none`}
                   aria-required
+                  aria-invalid={Boolean(reasonError)}
+                  aria-describedby={reasonError ? "return-reason-error" : undefined}
                 />
+                <FieldError id="return-reason-error" message={reasonError} />
               </div>
-              <Notice msg={msg} />
+              <div ref={noticeRef}><Notice msg={msg} /></div>
             </div>
           </FormSection>
         </div>

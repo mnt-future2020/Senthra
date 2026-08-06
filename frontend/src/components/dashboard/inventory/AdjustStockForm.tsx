@@ -10,12 +10,13 @@ import { listWarehouses } from "@/services/warehouse.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useAuth } from "@/hooks/useAuth";
 import { inputCls, ghostBtn, labelCls, primaryBtn } from "@/components/ui/styles";
-import { FormAsideCard, FormSection } from "@/components/ui/FormScaffold";
+import { FieldError, FormAsideCard, FormSection } from "@/components/ui/FormScaffold";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { clampQuantityInput } from "@/lib/quantity";
 import { Select } from "@/components/ui/Select";
 import { Notice } from "@/components/ui/Notice";
 import type { Availability } from "@/types/inventory";
+import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -33,11 +34,6 @@ const REASONS: { value: AdjustStockReason; label: string }[] = [
 
 type ItemOption = { id: string; code: string; name: string; sku: string | null; baseUnit: string | null };
 type WarehouseOption = { id: string; name: string; code: string };
-
-function FieldError({ message }: { message?: string }) {
-  if (!message) return null;
-  return <p className="mt-1.5 text-[11px] font-semibold text-[var(--neg)]">{message}</p>;
-}
 
 interface AdjustStockFormProps {
   /** Called after a successful adjustment or when the user cancels */
@@ -244,6 +240,7 @@ export function AdjustStockForm({ onDone }: AdjustStockFormProps) {
     if (Object.keys(fieldErrors).length > 0) {
       setErrors(fieldErrors);
       pushToast("Please fix the highlighted fields.", "alert");
+      focusFirstInvalid();
       return;
     }
     setErrors({});

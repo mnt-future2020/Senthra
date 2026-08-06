@@ -1,4 +1,4 @@
-import { api } from "@/lib/api";
+import { api, LONG_WRITE_TIMEOUT } from "@/lib/api";
 import type { JobKitWarehouse } from "@/types/job";
 
 // Typed wrapper around the non-job Van Stock Request API. Engineers raise restocks/returns and
@@ -247,7 +247,8 @@ export function getVanStockAvailability(irmItemIds: string[]): Promise<Warehouse
 }
 
 export function uploadVanStockAttachment(image: string): Promise<string> {
-  return api<{ url: string }>("/van-stock-requests/attachments", { method: "POST", body: { image } }).then((r) => r.url);
+  // Cloudinary relay — see LONG_WRITE_TIMEOUT.
+  return api<{ url: string }>("/van-stock-requests/attachments", { method: "POST", body: { image }, timeout: LONG_WRITE_TIMEOUT }).then((r) => r.url);
 }
 
 export function cancelVanStockRequest(id: string): Promise<VanStockRequest> {
@@ -293,7 +294,8 @@ export function vanStockScanLookup(requestId: string, warehouseId: string, code:
 }
 
 export function fulfilVanStockRequest(id: string, warehouseId: string, entries: FulfilEntryPayload[]): Promise<VanStockRequest> {
-  return api<{ request: VanStockRequest }>(`/van-stock-requests/${id}/fulfil`, { method: "POST", body: { warehouseId, entries } }).then((r) => r.request);
+  // Posts EVERY scanned entry in one transaction — see LONG_WRITE_TIMEOUT.
+  return api<{ request: VanStockRequest }>(`/van-stock-requests/${id}/fulfil`, { method: "POST", body: { warehouseId, entries }, timeout: LONG_WRITE_TIMEOUT }).then((r) => r.request);
 }
 
 // warehouseId = the warehouse tab being closed short from; the backend writes off only THAT warehouse's
@@ -307,5 +309,6 @@ export function createVanStockWalkIn(payload: { engineerId: string; warehouseId:
 }
 
 export function uploadVanStockDamagePhoto(image: string): Promise<string> {
-  return api<{ url: string }>("/van-stock-requests/damage-photo", { method: "POST", body: { image } }).then((r) => r.url);
+  // Cloudinary relay — see LONG_WRITE_TIMEOUT. Photographed in the field, on a field connection.
+  return api<{ url: string }>("/van-stock-requests/damage-photo", { method: "POST", body: { image }, timeout: LONG_WRITE_TIMEOUT }).then((r) => r.url);
 }

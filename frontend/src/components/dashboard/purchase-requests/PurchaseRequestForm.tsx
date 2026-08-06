@@ -18,12 +18,13 @@ import { PaymentTermsField } from "@/components/ui/PaymentTermsField";
 import { INCOTERM_OPTIONS } from "@/lib/incoterms";
 import { resolveSupplierPaymentTerms } from "@/lib/paymentTerms";
 import { viewDataUriInNewTab } from "@/lib/download";
-import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
+import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { formatMoney } from "./prfStatus";
 import type { PurchaseRequest } from "@/types/purchase-request";
 import type { Supplier } from "@/types/supplier";
 import type { Warehouse } from "@/types/warehouse";
 import type { IrmItem } from "@/types/irm";
+import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 
 const PRF_LIST = "/dashboard/purchase-requests";
 
@@ -38,11 +39,6 @@ type LineRow = { _key: string; irmItemId: string; quantity: string; unitPrice: s
 type PendingFile = { _key: string; fileName: string; fileType: string; fileSizeBytes: number; data: string };
 const ATTACH_EXT: Record<string, string> = { pdf: "pdf", docx: "docx", png: "png", jpg: "jpg", jpeg: "jpg" };
 const MAX_ATTACH_BYTES = 10 * 1024 * 1024;
-
-function FieldError({ id, message }: { id: string; message?: string }) {
-  if (!message) return null;
-  return <p id={id} className="mt-1.5 text-[11px] font-semibold text-[var(--neg)]">{message}</p>;
-}
 
 const dateInput = (iso: string | null | undefined) => (iso ? iso.slice(0, 10) : "");
 const today = () => new Date().toISOString().slice(0, 10);
@@ -271,6 +267,7 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
     if (Object.keys(fieldErrors).length > 0) {
       setErrors(fieldErrors);
       pushToast("Please fix the highlighted fields.", "alert");
+      focusFirstInvalid();
       return;
     }
     setErrors({});

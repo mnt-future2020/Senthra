@@ -5,14 +5,11 @@ import { Loader2, RotateCcw } from "lucide-react";
 
 import { restoreDamaged } from "@/services/stockPosition.service";
 import { useDashboard } from "@/hooks/useDashboard";
+import { FieldError } from "@/components/ui/FormScaffold";
 import { inputCls, labelCls, ghostBtn, primaryBtn } from "@/components/ui/styles";
 import { NumberInput } from "@/components/ui/NumberInput";
 import type { StockPosition } from "@/types/stock-position";
-
-function FieldError({ message }: { message?: string }) {
-  if (!message) return null;
-  return <p className="mt-1.5 text-[11px] font-semibold text-[var(--neg)]">{message}</p>;
-}
+import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 
 interface RestoreDamagedDialogProps {
   row: StockPosition;
@@ -63,6 +60,7 @@ export function RestoreDamagedDialog({ row, onDone }: RestoreDamagedDialogProps)
     if (Object.keys(fieldErrors).length > 0) {
       setErrors(fieldErrors);
       pushToast("Please fix the highlighted fields.", "alert");
+      focusFirstInvalid();
       return;
     }
     setErrors({});

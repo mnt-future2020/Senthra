@@ -485,7 +485,9 @@ export function EngineerJobDetail({ id }: { id: string }) {
           <p className="text-sm text-[var(--muted)]">No kit lines on this job.</p>
         ) : (
           <TableCard headers={KIT_HEADERS} minWidth={1040}>
-            {job.kitLines.map((line) => (
+            {job.kitLines.map((line) => {
+              const isMisc = line.lineType === "misc";
+              return (
               <tr key={line.id} className="border-b border-[var(--border)] last:border-0">
                 <td className="px-4 py-3 font-semibold text-[var(--ink)]">
                   {line.itemName}
@@ -570,13 +572,20 @@ export function EngineerJobDetail({ id }: { id: string }) {
                     <span className="font-semibold text-[var(--ink)]">{line.warehouseName ?? "—"}</span>
                   )}
                 </td>
+                {/* Planned + Issued are real for a misc line — it IS planned and handed over by count.
+                    Used / Returned / Remaining are not: misc is free text with no barcode and no stock
+                    balance, so it can never be scanned back, the Complete form leaves it out, and
+                    reconcile skips it entirely. Those three would therefore sit at 0 / 0 / issued
+                    forever, and "Remaining 5" on a job already marked Reconciled reads as five units
+                    the engineer still owes. An em dash says the column doesn't apply — the same thing
+                    the Goods Management queue shows for misc. */}
                 <td className="px-4 py-3 font-bold text-[var(--ink)]">{line.qty}</td>
                 <td className="px-4 py-3 text-[var(--ink)]">{line.issued}</td>
-                <td className="px-4 py-3 text-[var(--ink)]">{line.used}</td>
+                <td className="px-4 py-3 text-[var(--ink)]">{isMisc ? "—" : line.used}</td>
                 <td className="px-4 py-3 text-[var(--ink)]">
                   <div className="flex flex-col items-start gap-1">
-                    <span>{line.returned}</span>
-                    {line.returned > line.issued && (
+                    <span>{isMisc ? "—" : line.returned}</span>
+                    {!isMisc && line.returned > line.issued && (
                       <span className="inline-flex items-center gap-1 rounded-md bg-indigo-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-600" title="Returned here but issued from another warehouse">
                         <ArrowLeftRight className="h-2.5 w-2.5 shrink-0" />
                         {crossWarehouseReturnNote(line, job.kitLines)}
@@ -584,10 +593,11 @@ export function EngineerJobDetail({ id }: { id: string }) {
                     )}
                   </div>
                 </td>
-                <td className="px-4 py-3 font-bold text-[var(--ink)]">{line.remaining}</td>
+                <td className="px-4 py-3 font-bold text-[var(--ink)]">{isMisc ? "—" : line.remaining}</td>
                 <td className="px-4 py-3 text-[var(--muted)]">{line.notes ?? "—"}</td>
               </tr>
-            ))}
+              );
+            })}
           </TableCard>
         )}
       </Card>

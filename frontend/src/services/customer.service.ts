@@ -1,4 +1,4 @@
-import { api, apiFile } from "@/lib/api";
+import { api, LONG_WRITE_TIMEOUT, apiFile } from "@/lib/api";
 import { downloadBlob, filenameFromDisposition } from "@/lib/download";
 import { registerClientCache } from "@/lib/clientCache";
 import type {
@@ -154,7 +154,7 @@ export function createCustomer(payload: CreateCustomerPayload): Promise<CreateCu
   return api<CreateCustomerResult>("/customers", {
     method: "POST",
     body: payload,
-    timeout: 60_000,
+    timeout: LONG_WRITE_TIMEOUT,
   }).then((r) => {
     listCache.clear();
     return r;
@@ -165,7 +165,7 @@ export function updateCustomer(id: string, payload: UpdateCustomerPayload): Prom
   return api<{ customer: CustomerSummary }>(`/customers/${id}`, {
     method: "PUT",
     body: payload,
-    timeout: 60_000,
+    timeout: LONG_WRITE_TIMEOUT,
   }).then((r) => {
     listCache.clear();
     return r.customer;

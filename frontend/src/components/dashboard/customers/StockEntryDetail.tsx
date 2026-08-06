@@ -9,7 +9,7 @@ import { listCategories, getCachedCategories } from "@/services/category.service
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
-import { FormSection, FormAsideCard, RequiredMark } from "@/components/ui/FormScaffold";
+import { FieldError, FormAsideCard, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { Select } from "@/components/ui/Select";
 import { inputCls, labelCls, primaryBtn, secondaryBtn, hintCls } from "@/components/ui/styles";
 import { printLabels, parseCopiesParam } from "@/lib/printBarcode";
@@ -17,14 +17,10 @@ import { BarcodePanel } from "@/components/dashboard/irm/BarcodePanel";
 import type { CustomerStockEntry, StockEntryStatus } from "@/types/customer";
 import type { Category } from "@/types/category";
 import { formatDate as fmtDate } from "@/lib/formatDate";
+import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 
 // Standard units of measure — mirrors the IRM item form + backend UOM_OPTIONS.
 const UOM_OPTIONS = ["Each", "Metre", "Roll", "Pack", "Box", "Set", "Pair", "Reel"];
-
-function FieldError({ message }: { message?: string }) {
-  if (!message) return null;
-  return <p className="mt-1.5 text-[11px] font-semibold text-[var(--neg)]">{message}</p>;
-}
 
 const STATUS_STYLE: Record<StockEntryStatus, { label: string; cls: string }> = {
   draft: { label: "Draft", cls: "border-amber-400/30 bg-amber-400/10 text-amber-600" },
@@ -125,6 +121,7 @@ export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
       setErrors(errs);
       // The barcode requirement lives at the bottom of the form, so flag it with a toast too.
       pushToast("Please fix the highlighted fields.", "alert");
+      focusFirstInvalid();
       return;
     }
     setSaving(true);

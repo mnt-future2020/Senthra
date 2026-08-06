@@ -9,12 +9,13 @@ import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import { reachabilityWarnings } from "@/lib/roleReachability";
-import { applyImplied, grantableGroups, stripUngrantable } from "@/lib/permissionImplications";
+import { applyImplied, capabilityGrant, grantableGroups, stripUngrantable } from "@/lib/permissionImplications";
 import type { PermissionGroup, Role, RoleCapabilities } from "@/types/role";
 import { inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { PermissionMatrix } from "./PermissionMatrix";
+import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 
 const ROLES_LIST = "/dashboard/users?tab=roles";
 
@@ -110,17 +111,36 @@ export function RoleForm({ mode, role }: { mode: "create" | "edit"; role?: Role 
   const onPermissionsChange = (next: string[]) =>
     setPermissions(applyImplied(next, groups, isWarehouseScoped));
 
-  // Flipping the capability changes nothing about the SELECTION — it only changes which modules
-  // are on offer. What a non-field role can't hold is filtered out of `effectivePermissions`
-  // below, so turning "Field role" off hides the Engineer Portal and turning it back on brings
-  // the same selection back untouched.
+  // Turning "Field role" OFF never touches the selection — the keys a non-field role can't hold are
+  // filtered out of `effectivePermissions` below, so switching back on brings them straight back.
   //
   // The earlier version deleted the keys from state and kept a ref of what it deleted so it could
   // undo. That was broken twice over: a ref mutated INSIDE a setState updater is impure, and React
   // re-invokes updaters (StrictMode does it on every call in dev), so the second run read an
   // already-cleared ref and restored nothing. Deriving instead of deleting removes the problem
-  // rather than patching it.
-  const onCapabilityChange = (next: boolean) => setCanHoldStock(next);
+  // rather than patching it — and that is still how OFF works.
+  //
+  // Turning it ON now GRANTS the capability's modules and reveals them. The toggle's own copy says
+  // it "offers the Engineer Portal permissions below", but the modules appeared collapsed and empty,
+  // so the next step — scroll, find the section, expand it, tick everything — was manual every time
+  // for the one outcome nearly every field role wants.
+  //
+  // Only when nothing in those modules is selected yet. That covers the case this exists for (a new
+  // field role) while leaving a curated selection alone: an edit that toggles off and back on gets
+  // its own picks restored, not silently replaced with everything.
+  const [reveal, setReveal] = React.useState<string[] | undefined>(undefined);
+
+  const onCapabilityChange = (next: boolean) => {
+    setCanHoldStock(next);
+    if (!next) return;
+    const grant = capabilityGrant(groups, permissions, "field_ops");
+    if (!grant) return; // nothing tagged, or the user has already curated it
+    // Through applyImplied so the grant pulls in whatever these keys depend on, exactly as ticking
+    // them by hand would.
+    setPermissions(applyImplied([...new Set([...permissions, ...grant.keys])], groups, isWarehouseScoped));
+    // A fresh array — the matrix keys its reveal effect on identity.
+    setReveal(grant.categories);
+  };
 
   // What a save would actually store: the selection minus anything this role's capabilities can't
   // support. Mirrors the server's splitByCapability, so the summary and the dirty check describe
@@ -182,6 +202,7 @@ export function RoleForm({ mode, role }: { mode: "create" | "edit"; role?: Role 
     if (Object.keys(fieldErrors).length > 0) {
       setErrors(fieldErrors);
       pushToast("Please fix the highlighted fields.", "alert");
+      focusFirstInvalid();
       return;
     }
     setErrors({});
@@ -370,6 +391,9 @@ export function RoleForm({ mode, role }: { mode: "create" | "edit"; role?: Role 
                    array and come straight back if the capability is switched on again. */
                 granted={permissions}
                 onChange={onPermissionsChange}
+                /* Opens the modules that "Field role" just granted, so the tick marks land somewhere
+                   the user can actually see rather than inside a collapsed section. */
+                revealCategories={reveal}
               />
             )}
           </FormSection>

@@ -58,6 +58,27 @@ export function isStaleStateError(err: unknown): boolean {
 // (e.g. sending a test email) can override this with a longer value.
 const DEFAULT_TIMEOUT = 20_000;
 
+/**
+ * For requests where the SERVER may legitimately take longer than the default.
+ *
+ * Two kinds qualify, and both are real:
+ *  - **Image uploads.** The endpoint base64-relays the file to Cloudinary, so the call carries a
+ *    second network round-trip the client can't see. A signature drawn on a phone in a van is the
+ *    worst case and the one that matters most.
+ *  - **Multi-entity writes.** Approving a kit request, fulfilling a van-stock request, reconciling a
+ *    job or completing a goods receipt each walk every line inside ONE transaction, and the backend's
+ *    own ceiling for that is 20s (`withTransaction` in backend lib/prisma).
+ *
+ * Both used to sit on the 20s default — the SAME 20s as the server's transaction ceiling — so the
+ * client gave up at the exact moment the server was still committing. Users saw "the request timed
+ * out" for work that had in fact gone through, and then retried it. Waiting PAST the server's own
+ * ceiling is what makes a reported failure mean a real one.
+ *
+ * This is not a licence to slow down error reporting generally: anything that can't plausibly run
+ * long should keep the default and fail fast.
+ */
+export const LONG_WRITE_TIMEOUT = 60_000;
+
 // Axios instance — always sends the httpOnly auth cookies and JSON by default.
 const client = axios.create({
   baseURL: env.apiUrl,

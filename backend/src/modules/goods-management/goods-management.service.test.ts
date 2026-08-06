@@ -4,7 +4,7 @@ vi.mock("../../lib/prisma.js", () => ({ withTransaction: (fn: (tx: unknown) => u
 vi.mock("../../lib/realtime.js", () => ({ emitToUser: vi.fn(), emitToRoom: vi.fn(), OFFICE_JOBS_ROOM: "jobs:office" }));
 vi.mock("./goods-management.repository.js", () => ({
   createMovementWithCode: vi.fn(), findMovementsByJob: vi.fn(), findMovementsByJobs: vi.fn(), findIssuedQtyByKitLine: vi.fn(), getSummary: vi.fn(), getSummariesByJobs: vi.fn(), upsertSummaryTx: vi.fn(),
-  upsertCustomerHoldingTx: vi.fn(), findCustomerHoldingTx: vi.fn(), insertCustomerHoldingTxnTx: vi.fn(), findCustomerHoldingsByEngineer: vi.fn(),
+  upsertCustomerHoldingTx: vi.fn(), findCustomerHoldingTx: vi.fn(), insertCustomerHoldingTxnTx: vi.fn(), findCustomerHoldingsByEngineer: vi.fn(), findCustomerHoldingQuantitiesByEngineers: vi.fn(),
   adjustCustomerStockEntryQtyTx: vi.fn(), findCustomerStockEntryById: vi.fn(), findCustomerStockEntriesByIds: vi.fn(), findCustomerStockEntryByBarcode: vi.fn(),
   upsertDamagedBalanceTx: vi.fn(), insertDamagedTxnTx: vi.fn(), findDamagedByWarehouse: vi.fn(), findDamagedByCustomer: vi.fn(), findAllDamaged: vi.fn(), findOldIssueMovementsForJobs: vi.fn(), findSummariesByGoodsStatuses: vi.fn(), findCustomerHolding: vi.fn(),
   findLatestDamagedTxnsByBalances: vi.fn(), findDamagedBalance: vi.fn(), findDamagedTxnsByKey: vi.fn(), openReturnOnCancel: vi.fn(),
@@ -13,7 +13,7 @@ vi.mock("#modules/job/job.repository.js", () => ({ findById: vi.fn(), findActive
 vi.mock("#modules/irm/irm.service.js", () => ({ requireActiveIrmItem: vi.fn(), findActiveByCodeOrBarcode: vi.fn() }));
 vi.mock("#modules/inventory/inventory.repository.js", () => ({ findBalancePair: vi.fn(), findBalancesByItemsAndWarehouses: vi.fn(), findBalancePairTx: vi.fn(), upsertBalanceTx: vi.fn(), insertTransactionTx: vi.fn() }));
 vi.mock("#modules/inventory/inventory.service.js", () => ({ applyOutbound: vi.fn(), applyInbound: vi.fn() }));
-vi.mock("#modules/engineer-stock/engineer-stock.repository.js", () => ({ upsertEngineerBalanceTx: vi.fn(), insertEngineerTxnTx: vi.fn(), findEngineerBalanceTx: vi.fn(), findEngineerBalance: vi.fn(), findEngineerBalances: vi.fn() }));
+vi.mock("#modules/engineer-stock/engineer-stock.repository.js", () => ({ upsertEngineerBalanceTx: vi.fn(), insertEngineerTxnTx: vi.fn(), findEngineerBalanceTx: vi.fn(), findEngineerBalance: vi.fn(), findEngineerBalances: vi.fn(), findBalanceQuantitiesByEngineers: vi.fn() }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 // The overdue window comes from Settings now, so the service reaches for it whenever a caller doesn't
 // pass an explicit `days`. Mocked to the shipped default so these tests stay about goods logic.
@@ -296,8 +296,10 @@ describe("listQueue", () => {
   const mockMovesBatch = repo.findMovementsByJobs as ReturnType<typeof vi.fn>;
   const mockBalances = inventoryRepo.findBalancesByItemsAndWarehouses as ReturnType<typeof vi.fn>;
   const mockCseByIds = repo.findCustomerStockEntriesByIds as ReturnType<typeof vi.fn>;
-  const mockEngBalances = engineerStockRepo.findEngineerBalances as ReturnType<typeof vi.fn>;
-  const mockCustHoldings = repo.findCustomerHoldingsByEngineer as ReturnType<typeof vi.fn>;
+  // listQueue reads the BATCHED (whole-page) variants — one query each for every engineer on the
+  // page, so their rows carry the engineerId.
+  const mockEngBalances = engineerStockRepo.findBalanceQuantitiesByEngineers as ReturnType<typeof vi.fn>;
+  const mockCustHoldings = repo.findCustomerHoldingQuantitiesByEngineers as ReturnType<typeof vi.fn>;
   const mockIssuedByLine = repo.findIssuedQtyByKitLine as ReturnType<typeof vi.fn>;
   // Stage issued-per-kit-line totals for the pre-pagination "is there work here?" filter. Kept as an
   // explicit helper rather than derived from the movement fixtures: the two feed different stages
@@ -336,7 +338,7 @@ describe("listQueue", () => {
 
   it("reports the engineer's REAL held balance per line (the cap for what can be returned)", async () => {
     mockFindActive.mockResolvedValue([job(JOB_ID, "JOB-1")]);
-    mockEngBalances.mockResolvedValue([{ irmItemId: IRM_ID, quantityOnHand: 3 }]);
+    mockEngBalances.mockResolvedValue([{ engineerId: ENG_ID, irmItemId: IRM_ID, quantityOnHand: 3 }]);
     const res = await listQueue({ warehouseId: WH_ID });
     expect(res.rows[0].kitLines[0].engineerHeld).toBe(3);
   });

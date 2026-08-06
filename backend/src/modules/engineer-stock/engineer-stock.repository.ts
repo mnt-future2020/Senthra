@@ -48,6 +48,23 @@ export function insertEngineerTxnTx(tx: Prisma.TransactionClient, data: Prisma.E
 }
 
 // --- engineer-stock reads --------------------------------------------------------------------
+/**
+ * On-hand quantities for MANY engineers in one query.
+ *
+ * The goods queue used to call `findEngineerBalances` once per engineer on the page — up to 20
+ * sequential round trips at ~70ms each on a remote cluster, purely to build a lookup map. It also
+ * dropped the `irmItem` join those callers never read: this is arithmetic, not display.
+ */
+export function findBalanceQuantitiesByEngineers(
+  engineerIds: string[],
+): Promise<{ engineerId: string; irmItemId: string; quantityOnHand: number }[]> {
+  if (engineerIds.length === 0) return Promise.resolve([]);
+  return prisma.engineerStockBalance.findMany({
+    where: { engineerId: { in: engineerIds }, quantityOnHand: { gt: 0 } },
+    select: { engineerId: true, irmItemId: true, quantityOnHand: true },
+  });
+}
+
 export function findEngineerBalances(engineerId: string) {
   return prisma.engineerStockBalance.findMany({
     where: { engineerId, quantityOnHand: { gt: 0 } },

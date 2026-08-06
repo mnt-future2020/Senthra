@@ -43,6 +43,7 @@ export function AuditEntryDrawer({
             <p className="mt-0.5 font-mono text-[11px] text-[var(--muted)]">{entry.action}</p>
           </div>
           <button
+            type="button"
             onClick={onClose}
             className="shrink-0 rounded-lg p-1.5 text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--ink)]"
             aria-label="Close"

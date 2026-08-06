@@ -146,6 +146,46 @@ export function findByNumber(jobNumber: string): Promise<JobWithRelations | null
   return prisma.job.findFirst({ where: { jobNumber, deletedAt: null }, include: withRelations });
 }
 
+// The goods queue's job projection — see findActiveForGoodsManagement below for why it is narrow.
+const goodsQueueSelect = {
+  id: true,
+  jobNumber: true,
+  name: true,
+  status: true,
+  customerId: true,
+  customerName: true,
+  createdAt: true,
+  completionDate: true,
+  assignedEngineerId: true,
+  assignedEngineerName: true,
+  assignedEngineerEmail: true,
+  // Fallback display name for jobs assigned before assignedEngineerName was snapshotted.
+  assignedEngineer: { select: { id: true, firstName: true, lastName: true, email: true } },
+  kitLines: {
+    // SAME ordering as withRelations — dropping it would let the queue render a job's kit lines in a
+    // different order from the job detail and the engineer's view, for no reason anyone could see.
+    orderBy: { createdAt: "asc" },
+    select: {
+      id: true,
+      lineType: true,
+      qty: true,
+      itemName: true,
+      irmItemId: true,
+      customerStockEntryId: true,
+      warehouseId: true,
+      warehouseName: true,
+      warehouseCode: true,
+      hasVanSource: true,
+      // `code` ONLY — the queue copies it into the scan box (scanCodeFor) and strips it off the
+      // snapshotted line name (stripCodePrefix). Deliberately NOT `irmItemSelect`, which also carries
+      // id + name for the detail views: reusing that shared slice here would mean widening it for a
+      // detail view silently widens every queue load too.
+      irmItem: { select: { code: true } },
+    },
+  },
+} satisfies Prisma.JobSelect;
+export type GoodsQueueJob = Prisma.JobGetPayload<{ select: typeof goodsQueueSelect }>;
+
 // --- goods-management queue read: active jobs (accepted / in_progress / completed) -----------
 // Returns jobs whose kit lines have at least one line pointing at a warehouse the actor can access.
 // Candidate jobs for ONE warehouse's Goods Management queue: any job with a kit line stocked at this
@@ -157,7 +197,7 @@ export function findByNumber(jobNumber: string): Promise<JobWithRelations | null
 // isn't homed here; without it the queue could never find a van return away from its nominal home.
 // It's an indexed boolean lookup, NOT a growing job-id list, so it stays O(1) as history grows. The
 // service then confirms per line that van stock is actually still returnable before showing the row.
-export function findActiveForGoodsManagement(warehouseId: string, search?: string): Promise<JobWithRelations[]> {
+export function findActiveForGoodsManagement(warehouseId: string, search?: string): Promise<GoodsQueueJob[]> {
   const candidateOr: Prisma.JobWhereInput[] = [
     { kitLines: { some: { OR: [{ warehouseId }, { lineType: "misc" }] } } },
     { kitLines: { some: { hasVanSource: true } } },
@@ -183,21 +223,65 @@ export function findActiveForGoodsManagement(warehouseId: string, search?: strin
         : []),
     ],
   };
-  return prisma.job.findMany({ where, include: withRelations, orderBy: { createdAt: "desc" } });
+  // Projection is EXACTLY what goods-management reads (verified against the service: it never touches
+  // job.site, job.project or job.supplier, and kit lines carry warehouseName/warehouseCode as their own
+  // snapshot columns, so the warehouse relation is dead weight here too). `withRelations` was pulling
+  // all of that for every candidate job — 353 KB and ~384ms per queue load against a remote cluster,
+  // versus 23 KB and ~168ms for this.
+  //
+  // A LEAN projection is only safe while it stays in step with the consumer: if listQueue ever needs
+  // another field, add it HERE — the typechecker will say so rather than silently handing back
+  // undefined, because this returns its own type and not the full Job row.
+  return prisma.job.findMany({ where, select: goodsQueueSelect, orderBy: { createdAt: "desc" } });
 }
 
 // --- open-demand read: every active job that may still draw warehouse stock ------------------
 // Jobs from assignment through completion (NOT draft / cancelled / rejected) — the service then keeps
 // only the ones whose goods aren't fully issued and sums their not-yet-issued kit lines into "open
 // demand" per item+warehouse. excludeJobId drops the job currently being edited from the totals.
-export function findActiveWithKitLines(excludeJobId?: string): Promise<JobWithRelations[]> {
+/**
+ * Every active job's kit lines, in the shape `getOpenDemand` reads — and nothing else.
+ *
+ * This is the widest read in the app: EVERY active job, and it runs on every kit-request approval,
+ * every availability check and the demand board. It used to return `withRelations`, so each job also
+ * carried its customer, project, site, supplier, engineer and every kit line's IRM item plus the
+ * warehouse's full address block — none of which the demand maths touches. `itemName` and
+ * `warehouseName` are SNAPSHOT COLUMNS on the kit line, not relations, so they survive the narrowing.
+ */
+export interface ActiveKitLinesForDemand {
+  id: string;
+  kitLines: {
+    id: string;
+    lineType: string;
+    qty: number;
+    irmItemId: string | null;
+    customerStockEntryId: string | null;
+    warehouseId: string | null;
+    itemName: string;
+    warehouseName: string | null;
+  }[];
+}
+export function findActiveWithKitLines(excludeJobId?: string): Promise<ActiveKitLinesForDemand[]> {
   return prisma.job.findMany({
     where: {
       deletedAt: null,
       status: { in: ["assigned", "accepted", "in_progress", "completed"] },
       ...(excludeJobId ? { id: { not: excludeJobId } } : {}),
     },
-    include: withRelations,
+    select: {
+      id: true,
+      kitLines: {
+        // SAME ordering as withRelations. The demand maths only SUMS, so nothing here depends on it —
+        // but leaving it off would make this the one kit-line read in the file with a different order
+        // for no stated reason, and the next person to add a first-match or a display to this read
+        // would inherit that silently.
+        orderBy: { createdAt: "asc" },
+        select: {
+          id: true, lineType: true, qty: true, irmItemId: true,
+          customerStockEntryId: true, warehouseId: true, itemName: true, warehouseName: true,
+        },
+      },
+    },
     orderBy: { createdAt: "desc" },
   });
 }
@@ -257,10 +341,28 @@ export function findKitLineTypesByJobs(jobIds: string[]): Promise<{ id: string; 
 // back outside its job) and kit-request availability began offering the same units to other jobs as
 // "on another van". The stock is committed until it is physically returned, not until the paperwork
 // says the work is off.
-export function findActiveByEngineerWithKitLines(engineerId: string): Promise<JobWithRelations[]> {
+/**
+ * The engineer's live kit lines — ONLY the four fields `jobCommittedByEngineer` actually reads.
+ *
+ * It used to hand back `withRelations`: every job's customer, project, site, supplier, engineer and
+ * each kit line's full IRM item and warehouse ADDRESS block. For one engineer with 13 jobs that was
+ * 294 KB over the wire to add up quantities, and it runs inside kit-request approval — once per
+ * holding engineer — against a remote Atlas cluster where every round trip already costs ~70ms.
+ *
+ * Keep the WHERE exactly as it is. `cancelled` belongs in the list: those units are still on the van
+ * (see job.repository.test), and dropping the status would offer the same stock to another job.
+ */
+export interface EngineerCommittedKitLines {
+  id: string;
+  kitLines: { id: string; lineType: string; irmItemId: string | null }[];
+}
+export function findActiveByEngineerWithKitLines(engineerId: string): Promise<EngineerCommittedKitLines[]> {
   return prisma.job.findMany({
     where: { deletedAt: null, assignedEngineerId: engineerId, status: { in: ["accepted", "in_progress", "completed", "cancelled"] } },
-    include: withRelations,
+    // Kit lines keep withRelations' ordering for the same reason as findActiveWithKitLines above: the
+    // committed tally only sums, but a kit-line read that quietly orders differently from every other
+    // one is a trap for whoever extends it.
+    select: { id: true, kitLines: { orderBy: { createdAt: "asc" }, select: { id: true, lineType: true, irmItemId: true } } },
     orderBy: { createdAt: "asc" },
   });
 }

@@ -18,7 +18,7 @@ import { Avatar } from "@/components/ui/Avatar";
 import { Select } from "@/components/ui/Select";
 import { MultiSelect } from "@/components/ui/MultiSelect";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
+import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { TempPasswordModal } from "@/components/ui/TempPasswordModal";
 import { PostcodeField } from "@/components/ui/PostcodeField";
 import {
@@ -35,6 +35,7 @@ import {
 import { MAX_IMAGE_BYTES, readFileAsDataUrl } from "@/lib/image";
 import { DepartmentCombobox } from "@/components/dashboard/users-roles/departments/DepartmentCombobox";
 import { JobTitleCombobox } from "@/components/dashboard/users-roles/job-titles/JobTitleCombobox";
+import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 
 const USERS_LIST = "/dashboard/users";
 
@@ -133,14 +134,6 @@ function validateUserForm(v: {
 }
 
 // One field's validation message, linked to its input via aria-describedby.
-function FieldError({ id, message }: { id: string; message?: string }) {
-  if (!message) return null;
-  return (
-    <p id={id} className="mt-1.5 text-[11px] font-semibold text-[var(--neg)]">
-      {message}
-    </p>
-  );
-}
 
 // Full-page Add/Edit user form: full-width two-column layout (form + a sticky
 // photo/summary aside), nav-guarded against losing edits, and (on create) reveals
@@ -330,6 +323,7 @@ export function UserForm({
     if (Object.keys(fieldErrors).length > 0) {
       setErrors(fieldErrors);
       pushToast("Please fix the highlighted fields.", "alert");
+      focusFirstInvalid();
       return;
     }
     setErrors({});

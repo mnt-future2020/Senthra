@@ -22,8 +22,9 @@ import { NumberInput } from "@/components/ui/NumberInput";
 import { CreatableSelect } from "@/components/ui/CreatableSelect";
 import { Select } from "@/components/ui/Select";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { FormAsideCard, FormField, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
+import { FieldError, FormAsideCard, FormField, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import type { UserStatus } from "@/types/user";
+import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 
 // The IRM catalogue now lives in the Inventory Hub (Inventory → IRM → Catalogue), so that's the
 // fallback "list" destination when there's no in-app history to go back to.
@@ -33,15 +34,6 @@ const CURRENCY_OPTIONS = ["GBP", "EUR"];
 const CURRENCY_LABELS: Record<string, string> = { GBP: "GBP (£)", EUR: "EUR (€)" };
 
 type SupplierRow = { supplierId: string; isPrimary: boolean; priority: string; supplierSku: string; leadTimeDays: string };
-
-function FieldError({ id, message }: { id: string; message?: string }) {
-  if (!message) return null;
-  return (
-    <p id={id} className="mt-1.5 text-[11px] font-semibold text-[var(--neg)]">
-      {message}
-    </p>
-  );
-}
 
 const numStr = (n: number | null | undefined): string => (n == null ? "" : String(n));
 
@@ -331,6 +323,7 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
     if (Object.keys(fieldErrors).length > 0) {
       setErrors(fieldErrors);
       pushToast("Please fix the highlighted fields.", "alert");
+      focusFirstInvalid();
       return;
     }
     setErrors({});

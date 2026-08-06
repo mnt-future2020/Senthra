@@ -34,7 +34,7 @@ export function SignatureCard({ style }: { style?: React.CSSProperties }) {
       const data = await readFileAsDataUrl(file);
       const updated = await userService.uploadMySignature(data, file.name);
       setUrl(updated.signatureUrl);
-      setMsg({ type: "success", text: "Signature saved." });
+      setMsg({ type: "success", text: "Document signature saved." });
     } catch (e) {
       setMsg({ type: "error", text: e instanceof Error ? e.message : "Upload failed." });
     } finally {
@@ -49,7 +49,7 @@ export function SignatureCard({ style }: { style?: React.CSSProperties }) {
     try {
       const updated = await userService.removeMySignature();
       setUrl(updated.signatureUrl);
-      setMsg({ type: "success", text: "Signature removed." });
+      setMsg({ type: "success", text: "Document signature removed." });
     } catch (e) {
       setMsg({ type: "error", text: e instanceof Error ? e.message : "Remove failed." });
     } finally {
@@ -64,17 +64,22 @@ export function SignatureCard({ style }: { style?: React.CSSProperties }) {
     >
       <div className="flex items-center gap-2">
         <PenLine className="h-4 w-4 text-[var(--accent)]" />
-        <h2 className="text-sm font-extrabold text-[var(--ink)]">Signature</h2>
+        <h2 className="text-sm font-extrabold text-[var(--ink)]">Document signature</h2>
       </div>
+      {/* Names the ONE place this image is used. Called just "Signature", it read as a signature for
+          everything, so people expected it to stand in for the stock-handover acknowledgement too —
+          which is drawn fresh each time on purpose: a stored image would prove nothing about who
+          actually received the goods. */}
       <p className="mt-1 text-xs text-[var(--muted)]">
         Printed on documents you issue — like the Purchase Orders you send to suppliers. Optional.
+        Signing for received stock is done separately, by hand, at the handover.
       </p>
 
       <div className="mt-4 flex flex-col items-start gap-3 sm:flex-row sm:items-center">
         <div className="flex h-20 w-48 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-dashed border-[var(--border)] bg-[var(--surface-2)]">
           {url ? (
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={url} alt="Your signature" className="max-h-full max-w-full object-contain p-2" />
+            <img src={url} alt="Your document signature" className="max-h-full max-w-full object-contain p-2" />
           ) : (
             <span className="text-[11px] text-[var(--faint)]">No signature</span>
           )}

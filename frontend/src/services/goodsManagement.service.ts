@@ -1,4 +1,4 @@
-import { api } from "@/lib/api";
+import { api, LONG_WRITE_TIMEOUT } from "@/lib/api";
 import type {
   ScanMatch,
   QueuePage,
@@ -92,6 +92,9 @@ export function postIssue(jobId: string, payload: Omit<PostMovementPayload, "dir
   return api<{ movement: PublicMovement }>(`/goods-management/jobs/${jobId}/issue`, {
     method: "POST",
     body: { ...payload, direction: "issue" } satisfies PostMovementPayload,
+    // Every scanned line moves stock, updates a balance and writes a ledger row inside ONE
+    // transaction — see LONG_WRITE_TIMEOUT.
+    timeout: LONG_WRITE_TIMEOUT,
   }).then((r) => r.movement);
 }
 
@@ -102,6 +105,7 @@ export function postReturn(jobId: string, payload: Omit<PostMovementPayload, "di
   return api<{ movement: PublicMovement }>(`/goods-management/jobs/${jobId}/return`, {
     method: "POST",
     body: { ...payload, direction: "return" } satisfies PostMovementPayload,
+    timeout: LONG_WRITE_TIMEOUT, // as postIssue above
   }).then((r) => r.movement);
 }
 
@@ -120,6 +124,10 @@ export function closeReconcile(jobId: string, writeOff?: CloseReconcilePayload):
   return api<CloseReconcileResult>(`/goods-management/jobs/${jobId}/close`, {
     method: "POST",
     body: writeOff ?? {},
+    // Walks every kit line on the job and, with writeOffLost, books each unaccounted unit — see
+    // LONG_WRITE_TIMEOUT. This one LOCKS the job, so a timeout the user reads as failure (and
+    // retries) is the worst possible outcome.
+    timeout: LONG_WRITE_TIMEOUT,
   });
 }
 
@@ -183,6 +191,7 @@ export function uploadDamagePhoto(dataUri: string): Promise<string> {
   return api<{ url: string }>("/goods-management/damage-photo", {
     method: "POST",
     body: { image: dataUri },
+    timeout: LONG_WRITE_TIMEOUT, // Cloudinary relay
   }).then((r) => r.url);
 }
 

@@ -19,9 +19,10 @@ import { PostcodeField } from "@/components/ui/PostcodeField";
 import { CreatableSelect } from "@/components/ui/CreatableSelect";
 import { Select } from "@/components/ui/Select";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
+import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { EMAIL_RE, UK_POSTCODE_RE, isPhone } from "@/lib/validation";
 import type { UserStatus } from "@/types/user";
+import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 
 const SUPPLIERS_LIST = "/dashboard/suppliers";
 
@@ -36,15 +37,6 @@ const CURRENCY_LABELS: Record<string, string> = { GBP: "GBP (£)", EUR: "EUR (�
 const PAYMENT_TERMS_OPTIONS = [...STANDARD_PAYMENT_TERMS, CUSTOM_PAYMENT_TERM];
 // Lenient website check — empty, a bare domain, or a full URL (mirrors the backend).
 const WEBSITE_RE = /^(https?:\/\/)?[\w-]+(\.[\w-]+)+([/?#].*)?$/i;
-
-function FieldError({ id, message }: { id: string; message?: string }) {
-  if (!message) return null;
-  return (
-    <p id={id} className="mt-1.5 text-[11px] font-semibold text-[var(--neg)]">
-      {message}
-    </p>
-  );
-}
 
 // Full-page Add/Edit supplier form — mirrors the warehouse/customer forms: titled
 // sections plus a sticky summary aside, nav-guarded against losing edits. Code is
@@ -226,6 +218,7 @@ export function SupplierForm({ mode, supplier }: { mode: "create" | "edit"; supp
     if (Object.keys(fieldErrors).length > 0) {
       setErrors(fieldErrors);
       pushToast("Please fix the highlighted fields.", "alert");
+      focusFirstInvalid();
       return;
     }
     setErrors({});

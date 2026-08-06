@@ -17,7 +17,7 @@ import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardP
 import { ProjectModal } from "@/components/dashboard/customers/ProjectModal";
 import { optionalFor } from "@/lib/formPayload";
 import { inputCls, labelCls } from "@/components/ui/styles";
-import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
+import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { Select } from "@/components/ui/Select";
 import { PostcodeField } from "@/components/ui/PostcodeField";
@@ -33,6 +33,7 @@ import {
 } from "./jobStatus";
 import type { CustomerProject, CustomerSite, CustomerStockEntry } from "@/types/customer";
 import type { Job, JobLineType } from "@/types/job";
+import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 
 const JOBS_LIST = "/dashboard/jobs";
 const dateInput = (iso: string | null | undefined) => (iso ? iso.slice(0, 10) : "");
@@ -92,11 +93,6 @@ const newKitLine = (): KitLine => ({
   issued: 0,
   lockedQty: 0,
 });
-
-function FieldError({ message }: { message?: string }) {
-  if (!message) return null;
-  return <p className="mt-1.5 text-[11px] font-semibold text-[var(--neg)]">{message}</p>;
-}
 
 // Vertical step wrapper: a numbered FormSection. Steps stack in the left column.
 // `title` is a ReactNode (FormSection's own type) so a step can carry a RequiredMark — the Kit list
@@ -621,6 +617,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
     if (Object.keys(fieldErrors).length > 0) {
       setErrors(fieldErrors);
       pushToast("Please fix the highlighted fields.", "alert");
+      focusFirstInvalid();
       return;
     }
     setErrors({});

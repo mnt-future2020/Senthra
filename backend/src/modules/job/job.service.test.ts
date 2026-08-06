@@ -43,11 +43,12 @@ vi.mock("#modules/customer/customer.repository.js", () => ({
   findProjectById: vi.fn(),
   findSiteById: vi.fn(),
   findStockEntryById: vi.fn(),
+  findStockEntryQuantitiesByIds: vi.fn(async () => []),
 }));
 vi.mock("#modules/supplier/supplier.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/irm/irm.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/warehouse/warehouse.repository.js", () => ({ findById: vi.fn() }));
-vi.mock("#modules/inventory/inventory.repository.js", () => ({ findBalancePair: vi.fn() }));
+vi.mock("#modules/inventory/inventory.repository.js", () => ({ findBalancePair: vi.fn(), findBalancesByItemsAndWarehouses: vi.fn(async () => []) }));
 vi.mock("#modules/user/user.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/engineer-transfer/engineer-transfer.repository.js", () => ({ findVanSourcesByKitLines: vi.fn() }));
 vi.mock("#modules/engineer-transfer/engineer-transfer.service.js", () => ({ cancelPendingForJob: vi.fn() }));
@@ -414,7 +415,11 @@ describe("updateJob (destination is mandatory on edit too)", () => {
 });
 
 describe("updateJob (H1 backend stock cap)", () => {
-  const mockBalancePair = inventoryRepo.findBalancePair as ReturnType<typeof vi.fn>;
+  // Availability is read for the WHOLE kit list in one query now, so stock is staged as balance
+  // ROWS (item + warehouse + qty) rather than a single pair.
+  const mockBalances = inventoryRepo.findBalancesByItemsAndWarehouses as ReturnType<typeof vi.fn>;
+  const stageStock = (quantityOnHand: number, quantityReserved = 0) =>
+    mockBalances.mockResolvedValue([{ irmItemId: "i1", warehouseId: "w1", quantityOnHand, quantityReserved }]);
   const mockIrmFind = irmRepo.findById as ReturnType<typeof vi.fn>;
   const mockWhFind = warehouseRepo.findById as ReturnType<typeof vi.fn>;
   const liveEmptyJob = { ...baseJob, status: "in_progress", kitLines: [] };
@@ -428,7 +433,7 @@ describe("updateJob (H1 backend stock cap)", () => {
   });
 
   it("rejects adding a kit line that exceeds warehouse stock", async () => {
-    mockBalancePair.mockResolvedValue({ quantityOnHand: 5, quantityReserved: 0 });
+    stageStock(5);
     await expect(
       updateJob(JOB_ID, { kitLines: [{ lineType: "irm", itemName: "CAT6", irmItemId: "i1", warehouseId: "w1", qty: 10 }] } as never, { email: "a@x.com" } as never),
     ).rejects.toThrow(/only 5 in stock/i);
@@ -436,7 +441,7 @@ describe("updateJob (H1 backend stock cap)", () => {
   });
 
   it("allows adding a kit line within warehouse stock", async () => {
-    mockBalancePair.mockResolvedValue({ quantityOnHand: 50, quantityReserved: 0 });
+    stageStock(50);
     await updateJob(JOB_ID, { kitLines: [{ lineType: "irm", itemName: "CAT6", irmItemId: "i1", warehouseId: "w1", qty: 10 }] } as never, { email: "a@x.com" } as never);
     expect(mockMergeKitLines).toHaveBeenCalledTimes(1);
   });

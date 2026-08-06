@@ -1,4 +1,4 @@
-import { api } from "@/lib/api";
+import { api, LONG_WRITE_TIMEOUT } from "@/lib/api";
 import { registerClientCache } from "@/lib/clientCache";
 import type { PurchaseRequest } from "@/types/purchase-request";
 
@@ -172,9 +172,10 @@ export function generateReorderPrfs(rows: ReorderGenerateRow[], requiredByDate?:
 
 // --- attachments ------------------------------------------------------------
 // A longer timeout than the 20s default: the request base64-uploads the file to Cloudinary
-// server-side, a network round-trip that can legitimately take longer than a plain JSON call
-// (mirrors apiBlob's reasoning). Without this a slow-but-succeeding upload spuriously "times out".
-const ATTACHMENT_TIMEOUT_MS = 60_000;
+// server-side, a network round-trip that can legitimately take longer than a plain JSON call.
+// Aliased to the shared value so every upload in the app waits the same amount — see
+// LONG_WRITE_TIMEOUT for the full reasoning.
+const ATTACHMENT_TIMEOUT_MS = LONG_WRITE_TIMEOUT;
 export function addAttachment(id: string, payload: PrfAttachmentPayload): Promise<PurchaseRequest> {
   return mutate(
     api<{ purchaseRequest: PurchaseRequest }>(`/purchase-requests/${id}/attachments`, {

@@ -10,21 +10,17 @@ import { listWarehouses } from "@/services/warehouse.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import { inputCls, ghostBtn, labelCls, primaryBtn } from "@/components/ui/styles";
-import { FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
+import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { Select } from "@/components/ui/Select";
 import type { Availability } from "@/types/inventory";
+import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 
 const INVENTORY_LIST = "/dashboard/inventory";
 const today = () => new Date().toISOString().slice(0, 10);
 
 type ItemOption = { id: string; code: string; name: string; sku: string | null; baseUnit: string | null };
 type WarehouseOption = { id: string; name: string; code: string };
-
-function FieldError({ message }: { message?: string }) {
-  if (!message) return null;
-  return <p className="mt-1.5 text-[11px] font-semibold text-[var(--neg)]">{message}</p>;
-}
 
 export function TransferForm() {
   const router = useRouter();
@@ -127,6 +123,7 @@ export function TransferForm() {
     if (Object.keys(fieldErrors).length > 0) {
       setErrors(fieldErrors);
       pushToast("Please fix the highlighted fields.", "alert");
+      focusFirstInvalid();
       return;
     }
     setErrors({});
