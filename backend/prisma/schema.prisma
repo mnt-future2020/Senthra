@@ -412,7 +412,7 @@ model IrmItem {
   // pre-check. Do NOT add `@unique` here: Prisma would create a non-sparse index that rejects a
   // second null (prisma#23870). Do NOT make it required either — on MongoDB that enforces nothing
   // and only turns any row predating the rule into a read crash. The partial index covers string
-  // skuLower values, which is now every row (see scripts/backfill-irm-sku.ts).
+  // skuLower values, which is every row a create can produce.
   sku      String?
   skuLower String?
   // Free-text / manufacturer barcode (e.g. an EAN). UNIQUE across all rows, enforced by a PARTIAL
