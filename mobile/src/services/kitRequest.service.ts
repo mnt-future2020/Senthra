@@ -1,4 +1,4 @@
-import { api, qs } from "../lib/api";
+import { api, LONG_WRITE_TIMEOUT, qs } from "../lib/api";
 import type {
   CreateKitRequestPayload,
   KitItemOption,
@@ -18,9 +18,12 @@ export interface ListParams {
 }
 
 export function createKitRequest(payload: CreateKitRequestPayload): Promise<KitRequest> {
-  return api<{ request: KitRequest }>("/job-kit-requests", { method: "POST", body: payload }).then(
-    (r) => r.request,
-  );
+  // Walks every line in one backend transaction — see LONG_WRITE_TIMEOUT.
+  return api<{ request: KitRequest }>("/job-kit-requests", {
+    method: "POST",
+    body: payload,
+    timeout: LONG_WRITE_TIMEOUT,
+  }).then((r) => r.request);
 }
 
 export function listMyKitRequests(params: ListParams = {}): Promise<PagedKitRequests> {

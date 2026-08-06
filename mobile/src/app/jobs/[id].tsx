@@ -93,8 +93,14 @@ function KitLineCard({
       {split.outstandingWarehouseQty > 0 && split.warehouseQty > 0 ? (
         <Text style={s.toCollect}>{split.outstandingWarehouseQty} to collect</Text>
       ) : null}
+      {/* Misc is free text with no barcode and no stock balance: never scanned
+          back, left out of Complete, skipped by reconcile — so Used/Returned/
+          Remaining would sit at 0/0/issued forever. An em dash says the column
+          doesn't apply (web parity). */}
       <Text style={s.lineTallies}>
-        Issued {line.issued} · Used {line.used} · Returned {line.returned} · On van {line.remaining}
+        Issued {line.issued} · Used {line.lineType === "misc" ? "—" : line.used} · Returned{" "}
+        {line.lineType === "misc" ? "—" : line.returned} · On van{" "}
+        {line.lineType === "misc" ? "—" : line.remaining}
       </Text>
       {crossNote ? <Text style={s.crossNote}>{crossNote}</Text> : null}
       {line.vanSources.length > 0 ? (

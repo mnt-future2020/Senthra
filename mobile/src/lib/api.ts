@@ -13,6 +13,16 @@ import * as SecureStore from "expo-secure-store";
 const BASE = (process.env.EXPO_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/+$/, "");
 const TOKEN_KEY = "senthra_access_token";
 const DEFAULT_TIMEOUT = 20_000;
+/**
+ * For requests where the SERVER may legitimately take longer than the default:
+ * image uploads (the endpoint relays base64 to Cloudinary — a second network
+ * hop, drawn/photographed on a van connection) and multi-line writes that run
+ * in one backend transaction whose own ceiling is 20s. Waiting PAST that
+ * ceiling is what makes a reported failure mean a real one — on the default,
+ * the client gave up exactly as the server was committing, and users retried
+ * work that had gone through. Mirrors the web's LONG_WRITE_TIMEOUT.
+ */
+export const LONG_WRITE_TIMEOUT = 60_000;
 const NO_REFRESH = ["/auth/refresh", "/auth/login"];
 
 let accessToken: string | null = null;

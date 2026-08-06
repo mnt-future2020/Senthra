@@ -1,4 +1,4 @@
-import { api, qs } from "../lib/api";
+import { api, LONG_WRITE_TIMEOUT, qs } from "../lib/api";
 import type {
   CreateVanStockRequestPayload,
   HoldingOption,
@@ -107,9 +107,12 @@ export function getVanStockAvailability(irmItemIds: string[]): Promise<Warehouse
 
 /** Upload an image data URI to Cloudinary via the backend and get back a URL. */
 export function uploadVanStockAttachment(image: string): Promise<string> {
-  return api<{ url: string }>("/van-stock-requests/attachments", { method: "POST", body: { image } }).then(
-    (r) => r.url,
-  );
+  // Cloudinary relay — see LONG_WRITE_TIMEOUT.
+  return api<{ url: string }>("/van-stock-requests/attachments", {
+    method: "POST",
+    body: { image },
+    timeout: LONG_WRITE_TIMEOUT,
+  }).then((r) => r.url);
 }
 
 /** Item ids already on the engineer's OPEN requests of a type (duplicate guard hint). */

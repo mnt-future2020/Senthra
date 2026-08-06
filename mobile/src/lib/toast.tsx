@@ -14,6 +14,8 @@ interface ToastItem {
   id: number;
   kind: ToastKind;
   message: string;
+  /** How many times this exact message+kind fired while it was on screen. */
+  count: number;
 }
 
 interface ToastApi {
@@ -46,11 +48,13 @@ function ToastCard({ item, onDone }: { item: ToastItem; onDone: (id: number) => 
     );
   }, [anim, item.id, onDone]);
 
+  // Keyed on count too: a merged repeat restarts the clock, so the toast lives a
+  // full window from the LATEST occurrence (web toastStack parity).
   useEffect(() => {
     Animated.spring(anim, { toValue: 1, useNativeDriver: true, damping: 16, stiffness: 220 }).start();
     const t = setTimeout(dismiss, AUTO_DISMISS_MS);
     return () => clearTimeout(t);
-  }, [anim, dismiss]);
+  }, [anim, dismiss, item.count]);
 
   const icon = ICONS[item.kind];
   return (
@@ -68,6 +72,11 @@ function ToastCard({ item, onDone }: { item: ToastItem; onDone: (id: number) => 
         <Text style={s.message} numberOfLines={3}>
           {item.message}
         </Text>
+        {item.count > 1 ? (
+          <View style={s.countBadge}>
+            <Text style={s.countBadgeText}>×{item.count}</Text>
+          </View>
+        ) : null}
       </Pressable>
     </Animated.View>
   );
@@ -79,7 +88,16 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   const insets = useSafeAreaInsets();
 
   const push = useCallback((kind: ToastKind, message: string) => {
-    setToasts((prev) => [...prev.slice(-(MAX_VISIBLE - 1)), { id: nextId.current++, kind, message }]);
+    setToasts((prev) => {
+      // A repeat of a toast still on screen MERGES into it (dedup key: text +
+      // kind) — the count badge ticks up instead of the stack filling with
+      // copies, and the card restarts its own dismiss clock on the bump.
+      const existing = prev.find((t) => t.message === message && t.kind === kind);
+      if (existing) {
+        return prev.map((t) => (t === existing ? { ...t, count: t.count + 1 } : t));
+      }
+      return [...prev.slice(-(MAX_VISIBLE - 1)), { id: nextId.current++, kind, message, count: 1 }];
+    });
   }, []);
 
   const remove = useCallback((id: number) => {
@@ -126,4 +144,11 @@ const s = StyleSheet.create({
   },
   cardInner: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: 14, paddingVertical: 12 },
   message: { flex: 1, fontSize: 13.5, fontWeight: "600", color: "#ffffff", lineHeight: 18 },
+  countBadge: {
+    borderRadius: 999,
+    backgroundColor: "rgba(255,255,255,0.18)",
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+  },
+  countBadgeText: { fontSize: 11, fontWeight: "800", color: "#ffffff", fontVariant: ["tabular-nums"] },
 });

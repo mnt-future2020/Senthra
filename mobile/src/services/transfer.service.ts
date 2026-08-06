@@ -1,4 +1,4 @@
-import { api, qs } from "../lib/api";
+import { api, LONG_WRITE_TIMEOUT, qs } from "../lib/api";
 import type {
   CompanyCandidate,
   CreateTransferPayload,
@@ -54,9 +54,12 @@ export function cancelTransfer(id: string): Promise<EngineerTransfer> {
 
 /** Recipient signs for received stock (data-URI PNG from the signature pad). */
 export function acknowledgeTransfer(id: string, signature: string): Promise<EngineerTransfer> {
+  // The signature PNG is base64-relayed to Cloudinary server-side — drawn on a
+  // phone, in a van, on whatever signal is going. See LONG_WRITE_TIMEOUT.
   return api<{ transfer: EngineerTransfer }>(`/engineer-transfers/${id}/acknowledge`, {
     method: "POST",
     body: { signature },
+    timeout: LONG_WRITE_TIMEOUT,
   }).then((r) => r.transfer);
 }
 
@@ -65,6 +68,7 @@ export function uploadAttachment(image: string): Promise<string> {
   return api<{ url: string }>("/engineer-transfers/attachments", {
     method: "POST",
     body: { image },
+    timeout: LONG_WRITE_TIMEOUT, // Cloudinary relay
   }).then((r) => r.url);
 }
 

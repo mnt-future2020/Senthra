@@ -54,6 +54,22 @@ function availabilityParts(warehouse: number, van: number): string {
   return parts.join(" · ");
 }
 
+/**
+ * A requested quantity clamped to what is actually free (web kitRequestQty.ts
+ * twin). Clamped at READ time — the number on screen and in the payload are the
+ * same by construction. `free === null` stays uncapped (misc lines, or a failed
+ * advisory lookup — approve() re-checks before stock moves). `free <= 0`
+ * returns 0 and IGNORES `min`: the obvious max(min, min(qty, free)) returns 1
+ * for a cart row with nothing free, so a row reading "None free to request"
+ * still shipped a quantity of 1 to the planner. A zero here fails the qty > 0
+ * check and the line drops out of the request.
+ */
+function capQty(qty: number, free: number | null, min = 0): number {
+  if (free === null) return qty;
+  if (free <= 0) return 0;
+  return Math.max(min, Math.min(qty, free));
+}
+
 /** Search-row gate: figures come on the item-search response itself. */
 function kitItemAvailability(opt: KitItemOption): { requestable: boolean; label: string } {
   if (opt.source === "customer_stock") {
@@ -256,7 +272,7 @@ export default function NewKitRequestScreen() {
     // the web's buildLines semantics.
     const merged = new Map<string, KitRequestLinePayload>();
     for (const p of plannedOptions) {
-      const qty = extras[p.key] ?? 0;
+      const qty = capQty(extras[p.key] ?? 0, freeFor(p.source, p.irmItemId, p.customerStockEntryId), 0);
       if (qty > 0) {
         merged.set(p.key, {
           source: p.source,
@@ -268,15 +284,19 @@ export default function NewKitRequestScreen() {
       }
     }
     for (const l of lines) {
+      // A cart row with nothing free drops out (capQty → 0) rather than
+      // shipping the floor of 1 alongside "None free to request".
+      const qty = capQty(l.qty, freeFor(l.source, l.irmItemId, l.customerStockEntryId), 1);
+      if (qty <= 0) continue;
       const existing = merged.get(l.key);
-      if (existing) existing.qty += l.qty;
+      if (existing) existing.qty += qty;
       else {
         merged.set(l.key, {
           source: l.source,
           irmItemId: l.irmItemId,
           customerStockEntryId: l.customerStockEntryId,
           itemName: l.itemName,
-          qty: l.qty,
+          qty,
         });
       }
     }
@@ -323,6 +343,8 @@ export default function NewKitRequestScreen() {
           {plannedOptions.map((p) => {
             const stock = stockFor(p.source, p.irmItemId, p.customerStockEntryId);
             const free = stock ? stock.warehouse + stock.van : null;
+            // Clamped at read time so the number on screen IS the payload number.
+            const shown = capQty(extras[p.key] ?? 0, free, 0);
             return (
               <Card key={p.key}>
                 <View style={s.lineRow}>
@@ -330,10 +352,10 @@ export default function NewKitRequestScreen() {
                     <Text style={s.lineName} numberOfLines={2}>
                       {p.itemName}
                     </Text>
-                    <AvailabilityLine stock={stock} want={extras[p.key] ?? 0} />
+                    <AvailabilityLine stock={stock} want={shown} />
                   </View>
                   <Stepper
-                    value={extras[p.key] ?? 0}
+                    value={shown}
                     min={0}
                     max={free ?? undefined}
                     onChange={(next) => setExtras((prev) => ({ ...prev, [p.key]: next }))}
@@ -399,6 +421,9 @@ export default function NewKitRequestScreen() {
         lines.map((line) => {
           const stock = stockFor(line.source, line.irmItemId, line.customerStockEntryId);
           const free = freeFor(line.source, line.irmItemId, line.customerStockEntryId);
+          // Clamped at read time so the number on screen IS the payload number —
+          // a row with nothing free shows 0 and drops out of the request.
+          const shown = capQty(line.qty, free, 1);
           return (
             <Card key={line.key}>
               <View style={s.lineRow}>
@@ -407,10 +432,10 @@ export default function NewKitRequestScreen() {
                     {line.itemName}
                   </Text>
                   <Text style={s.meta}>{line.detail}</Text>
-                  <AvailabilityLine stock={stock} want={line.qty} />
+                  <AvailabilityLine stock={stock} want={shown} />
                 </View>
                 <Stepper
-                  value={line.qty}
+                  value={shown}
                   min={1}
                   max={free == null ? undefined : Math.max(1, free)}
                   onChange={(next) =>
