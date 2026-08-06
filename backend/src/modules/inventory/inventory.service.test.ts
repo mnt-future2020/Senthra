@@ -28,11 +28,13 @@ vi.mock("#modules/irm/irm.service.js", () => ({ requireActiveIrmItem: vi.fn() })
 vi.mock("#modules/purchase-order/purchase-order.service.js", () => ({ incomingForItemWarehouse: vi.fn() }));
 vi.mock("#modules/goods-in/goods-in.repository.js", () => ({ receivedHistoryForItemWarehouse: vi.fn() }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
+vi.mock("#modules/goods-management/demand.js", () => ({ getOpenDemand: vi.fn() }));
 
 import * as inventoryRepo from "./inventory.repository.js";
 import * as warehouseService from "#modules/warehouse/warehouse.service.js";
 import * as irmService from "#modules/irm/irm.service.js";
 import * as audit from "#modules/audit/audit.service.js";
+import { getOpenDemand } from "#modules/goods-management/demand.js";
 import { addStock, applyInbound, applyOutbound, listInventory, transferStock } from "./inventory.service.js";
 
 const IRM_ID = "c".repeat(24);
@@ -52,6 +54,7 @@ const mockCreateAdjustment = inventoryRepo.createStockAdjustmentWithCode as Retu
 const mockReqWarehouse = warehouseService.requireActiveWarehouse as ReturnType<typeof vi.fn>;
 const mockReqItem = irmService.requireActiveIrmItem as ReturnType<typeof vi.fn>;
 const mockAudit = audit.record as ReturnType<typeof vi.fn>;
+const mockGetOpenDemand = getOpenDemand as ReturnType<typeof vi.fn>;
 
 // An InventoryBalance row with the relations the list/transfer DTOs read.
 function balRow(over: { onHand?: number; reserved?: number; item?: Record<string, unknown> } = {}) {
@@ -85,6 +88,10 @@ function balRow(over: { onHand?: number; reserved?: number; item?: Record<string
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Default: nothing planned anywhere. transferStock reads open demand on every call, so without a
+  // resolved default each unrelated test would fail on `undefined.values()` rather than on its own
+  // subject. Tests that care about demand override this.
+  mockGetOpenDemand.mockResolvedValue(new Map());
 });
 
 describe("applyInbound / applyOutbound (inventory primitives)", () => {
@@ -306,5 +313,107 @@ describe("addStock — manual add (existing / opening stock)", () => {
     mockReqItem.mockResolvedValue(item(over));
     await expect(addStock(base, actor)).rejects.toThrow(/Goods In/i);
     expect(mockCreateAdjustment).not.toHaveBeenCalled();
+  });
+});
+
+// Moving stock OUT of a warehouse where a job has already planned it strands that job: the kit line
+// still points at the source, and the shortfall only surfaces later as a raw "below zero" at the scan
+// gun, with the engineer already standing at the counter. The available figure here was
+// `quantityOnHand - quantityReserved`, and quantityReserved is dead (the schema marks it "FUTURE;
+// 0 now") — so it was raw on-hand, blind to demand.
+//
+// Blocked rather than warned, because a transfer is a deliberate admin action with a quantity the
+// operator can lower: telling them 3 of 5 are spoken for is actionable, whereas discovering it at
+// issue time is not. Rebalancing the committed units stays possible — the planner re-homes the kit
+// line first, which is the step that keeps the job honest.
+describe("transferStock — planned demand at the source", () => {
+  const base = { irmItemId: IRM_ID, fromWarehouseId: FROM_WH, toWarehouseId: TO_WH, quantity: 5, movementDate: "2026-06-15" };
+
+  beforeEach(() => {
+    mockReqWarehouse.mockImplementation((id: string) =>
+      Promise.resolve(id === FROM_WH ? { id: FROM_WH, name: "Leeds", code: "WH-0001" } : { id: TO_WH, name: "Manchester", code: "WH-0002" }),
+    );
+    mockFindPairRel.mockResolvedValue(balRow({ onHand: 5 }));
+    mockGetOpenDemand.mockResolvedValue(new Map());
+  });
+
+  const demandAt = (warehouseId: string, demand: number) =>
+    new Map([["k", { irmItemId: IRM_ID, customerStockEntryId: null, warehouseId, itemName: "CAT6", warehouseName: "Leeds", demand }]]);
+
+  it("refuses to move units a job has already planned at the source", async () => {
+    mockGetOpenDemand.mockResolvedValue(demandAt(FROM_WH, 3));
+    await expect(transferStock(base)).rejects.toThrow(/2 available/i);
+    expect(mockCreateTransfer).not.toHaveBeenCalled();
+  });
+
+  it("names the planned quantity so the operator knows what to do about it", async () => {
+    mockGetOpenDemand.mockResolvedValue(demandAt(FROM_WH, 3));
+    await expect(transferStock(base)).rejects.toThrow(/3 .*planned/i);
+  });
+
+  it("allows the portion that is genuinely spare", async () => {
+    mockGetOpenDemand.mockResolvedValue(demandAt(FROM_WH, 3));
+    await expect(transferStock({ ...base, quantity: 2 })).resolves.toBeDefined();
+    expect(mockCreateTransfer).toHaveBeenCalled();
+  });
+
+  // Demand booked at the DESTINATION is irrelevant — the stock is arriving there, not leaving.
+  it("ignores demand at the destination warehouse", async () => {
+    mockGetOpenDemand.mockResolvedValue(demandAt(TO_WH, 99));
+    await expect(transferStock(base)).resolves.toBeDefined();
+  });
+
+  it("still moves everything when nothing is planned", async () => {
+    await expect(transferStock(base)).resolves.toBeDefined();
+    expect(mockCreateTransfer).toHaveBeenCalled();
+  });
+});
+
+// The Inventory table shows On hand / Reserved / Available. `quantityReserved` is the dead column the
+// schema marks "FUTURE (Goods Out / allocation); 0 now", so Reserved always rendered 0 and Available
+// always equalled On hand — an item with every unit planned onto a job read as fully available, on a
+// screen whose columns claim to be authoritative. The real number existed all along; only the Demand
+// board consumed it, so the two screens disagreed about the same stock.
+//
+// `reserved` keeps its honest meaning (the DB field), and planned demand is surfaced as its own
+// figure — conflating them would have made the reorder projection double-count, since that math takes
+// onHand, reserved and plannedDemand as three separate inputs.
+describe("listInventory — Available reflects what jobs have planned", () => {
+  const plannedAt = (irmItemId: string, warehouseId: string, demand: number) =>
+    new Map([["k", { irmItemId, customerStockEntryId: null, warehouseId, itemName: "CAT6", warehouseName: "Leeds", demand }]]);
+
+  beforeEach(() => {
+    mockFindAll.mockResolvedValue([balRow({ onHand: 10 })]);
+  });
+
+  it("subtracts planned demand from Available", async () => {
+    mockGetOpenDemand.mockResolvedValue(plannedAt(IRM_ID, WH_ID, 4));
+    const res = await listInventory({});
+    expect(res.inventory[0]).toMatchObject({ onHand: 10, plannedDemand: 4, available: 6 });
+  });
+
+  it("reports zero available when everything is planned", async () => {
+    mockGetOpenDemand.mockResolvedValue(plannedAt(IRM_ID, WH_ID, 10));
+    const res = await listInventory({});
+    expect(res.inventory[0]).toMatchObject({ plannedDemand: 10, available: 0 });
+  });
+
+  // Floored — demand can exceed stock, and a negative Available helps nobody read a table.
+  it("floors Available at zero when demand exceeds stock", async () => {
+    mockGetOpenDemand.mockResolvedValue(plannedAt(IRM_ID, WH_ID, 25));
+    const res = await listInventory({});
+    expect(res.inventory[0].available).toBe(0);
+  });
+
+  // Demand is per item+warehouse: another site's commitments must not shrink this row.
+  it("ignores demand booked at a different warehouse", async () => {
+    mockGetOpenDemand.mockResolvedValue(plannedAt(IRM_ID, "f".repeat(24), 9));
+    const res = await listInventory({});
+    expect(res.inventory[0]).toMatchObject({ plannedDemand: 0, available: 10 });
+  });
+
+  it("leaves Available at On hand when nothing is planned", async () => {
+    const res = await listInventory({});
+    expect(res.inventory[0]).toMatchObject({ plannedDemand: 0, available: 10 });
   });
 });

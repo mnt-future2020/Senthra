@@ -645,9 +645,15 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
                   const need = trims[l.id] ?? l.requestedQty;
                   return (
                   <tr key={l.id} className="border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]/50">
+                    {/* The NAME is the copy target, matching the goods queue — it is the thing being
+                        read, and the scan box for this very request sits further down the page. The
+                        code is NOT printed underneath: it is on the hover tooltip and in the "Copied
+                        IRM-0004" confirmation, so a permanent second line would repeat what the row
+                        already offers and push every row taller for it. */}
                     <td className="px-4 py-3">
-                      <div className="font-semibold text-[var(--ink)]">{l.itemName}</div>
-                      {l.code && <div className="mt-0.5"><CopyableCode code={l.code} /></div>}
+                      <div className="font-semibold text-[var(--ink)]">
+                        {l.code ? <CopyableCode code={l.code} label={l.itemName} className="text-left" onCopied={(c) => pushToast(`Copied ${c}`)} /> : l.itemName}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-[var(--muted)]">{l.requestedQty}</td>
                     <td className="px-4 py-3">

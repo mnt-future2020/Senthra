@@ -52,6 +52,9 @@ export interface JobKitLine {
 export interface KitLineVanSource {
   transferCode: string;
   engineerName: string;
+  /** Snapshot from the transfer, so the engineer can call the holder to arrange the handover
+   *  directly. Null when the holder had no phone on file. */
+  engineerPhone: string | null;
   quantity: number;
   status: string; // pending (awaiting their approval) | completed (already handed over)
 }

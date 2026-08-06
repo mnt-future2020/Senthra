@@ -7,7 +7,7 @@ vi.mock("./goods-management.repository.js", () => ({
   upsertCustomerHoldingTx: vi.fn(), findCustomerHoldingTx: vi.fn(), insertCustomerHoldingTxnTx: vi.fn(), findCustomerHoldingsByEngineer: vi.fn(),
   adjustCustomerStockEntryQtyTx: vi.fn(), findCustomerStockEntryById: vi.fn(), findCustomerStockEntriesByIds: vi.fn(), findCustomerStockEntryByBarcode: vi.fn(),
   upsertDamagedBalanceTx: vi.fn(), insertDamagedTxnTx: vi.fn(), findDamagedByWarehouse: vi.fn(), findDamagedByCustomer: vi.fn(), findAllDamaged: vi.fn(), findOldIssueMovementsForJobs: vi.fn(), findSummariesByGoodsStatuses: vi.fn(), findCustomerHolding: vi.fn(),
-  findLatestDamagedTxnsByBalances: vi.fn(), findDamagedBalance: vi.fn(), findDamagedTxnsByKey: vi.fn(),
+  findLatestDamagedTxnsByBalances: vi.fn(), findDamagedBalance: vi.fn(), findDamagedTxnsByKey: vi.fn(), openReturnOnCancel: vi.fn(),
 }));
 vi.mock("#modules/job/job.repository.js", () => ({ findById: vi.fn(), findActiveForGoodsManagement: vi.fn(), findActiveWithKitLines: vi.fn(), findKitLineTypesByJobs: vi.fn(), findGoodsActiveJobIds: vi.fn(), completeIfInProgressTx: vi.fn() }));
 vi.mock("#modules/irm/irm.service.js", () => ({ requireActiveIrmItem: vi.fn(), findActiveByCodeOrBarcode: vi.fn() }));
@@ -525,6 +525,36 @@ describe("listQueue", () => {
 
     const res = await listQueue({ warehouseId: WH_ID });
     expect(res.rows[0].kitLines[0].vanReturnableQty).toBe(10);
+  });
+
+  // CUSTOMER stock is not IRM. It has no per-warehouse balance — a CustomerStockEntry IS one location,
+  // and a return credits that entry — so "hand it back anywhere" has nowhere to land: the entry would
+  // say the customer's stock is at a warehouse that doesn't physically have it. Every path that MOVES
+  // stock already refuses it (scanLookup and postReturn only do away-from-home returns for irm, and
+  // the queue's own job-level widening is irm-only). Only this row said otherwise, so a consignment
+  // line rendered "Any warehouse ×1" and stayed actionable at a warehouse where the scan then replied
+  // "is on this job but assigned to a different warehouse".
+  it("never offers a customer-stock line for return away from its entry's warehouse", async () => {
+    const cseJob = {
+      ...job(JOB_ID, "JOB-1"),
+      kitLines: [{ id: `${JOB_ID}-k1`, lineType: "customer_stock", irmItemId: null, customerStockEntryId: CSE_ID, warehouseId: WH_ID, itemName: "mouse123", qty: 5, warehouseName: "WH1", warehouseCode: "W1" }],
+    };
+    mockFindActive.mockResolvedValue([cseJob]);
+    mockSummaries.mockResolvedValue([{ jobId: JOB_ID, goodsStatus: "issued" }]);
+    stageIssued({ [`${JOB_ID}-k1`]: 3 });
+    mockMovesBatch.mockResolvedValue([
+      { jobId: JOB_ID, status: "posted", direction: "issue", items: [{ jobKitLineId: `${JOB_ID}-k1`, qty: 3 }] },
+    ]);
+    // A job-scoped transfer really did hand 1 unit over from another engineer's van…
+    (transferRepo.findVanSourcesByKitLines as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Map([[`${JOB_ID}-k1`, [{ transferCode: "ENG-1", engineerName: "Kansha M", quantity: 1, status: "completed" }]]]),
+    );
+
+    const res = await listQueue({ warehouseId: WH_ID });
+    // …and it still owes the entry's own warehouse.
+    expect(res.rows[0].kitLines[0].vanReturnableQty).toBe(0);
+    // The source split is still reported — the row shows where the units came from either way.
+    expect(res.rows[0].kitLines[0].vanIssuedQty).toBe(1);
   });
 
   it("reports 0 van-returnable for a warehouse-issued line", async () => {
@@ -2001,7 +2031,7 @@ describe("listOverdue", () => {
   });
 });
 
-import { dueStateOf, dueWindow } from "./goods-management.service.js";
+import { dueStateOf, dueWindow, scanCodeFor, stripCodePrefix } from "./goods-management.service.js";
 
 // The due window is resolved from the SERVER's clock. It is the only date filter on the active queue,
 // and it deliberately reads Job.completionDate rather than the last-activity timestamp the Closed tab
@@ -2102,5 +2132,298 @@ describe("dueStateOf", () => {
     const justAfterUkMidnight = new Date("2026-08-03T23:30:00.000Z"); // 00:30 on 4 Aug in London
     expect(dueStateOf(on("2026-08-04"), justAfterUkMidnight, TZ)).toBe("today");
     expect(dueStateOf(on("2026-08-03"), justAfterUkMidnight, TZ)).toBe("past_due");
+  });
+});
+
+// The queue offers a copy-to-clipboard code so a manager can paste straight into an issue/return
+// scan. It has to mirror scanLookup exactly: a code this hands out that the scan then REJECTS is
+// worse than offering nothing — the warehouse pastes it, gets "not on this job's kit list", and
+// stops trusting the button.
+describe("scanCodeFor", () => {
+  const irmLine = { lineType: "irm", customerStockEntryId: null };
+  const cseLine = (id: string | null) => ({ lineType: "customer_stock", customerStockEntryId: id });
+  const noBarcodes = new Map<string, string | null>();
+
+  // An IRM line always copies its own code. `code` is `String @unique` and auto-allocated, so it is
+  // always there — and it is the only identifier the manager can see, since this app renders its
+  // Code128 label from `code` and every screen displays it. The manufacturer's EAN
+  // (`IrmItem.barcode`) is deliberately not consulted: different physical label, shown nowhere here.
+  it("copies the item code", () => {
+    expect(scanCodeFor(irmLine, { code: "IRM-0009" }, noBarcodes)).toBe("IRM-0009");
+  });
+
+  it("treats a whitespace-only code as absent rather than copying blanks", () => {
+    expect(scanCodeFor(irmLine, { code: "  " }, noBarcodes)).toBeNull();
+  });
+
+  // A customer-stock line is matched by BARCODE ONLY — scanLookup has no code/sku arm for it.
+  it("uses the customer entry's barcode", () => {
+    expect(scanCodeFor(cseLine("e1"), null, new Map([["e1", "CSE-00001"]]))).toBe("CSE-00001");
+  });
+
+  // A draft entry genuinely has nothing scannable, so the row must offer nothing rather than
+  // fall back to something the customer arm would never resolve.
+  it("returns null for a customer entry with no barcode — never falls back to a code", () => {
+    expect(scanCodeFor(cseLine("e1"), { code: "IRM-0009" }, new Map([["e1", null]]))).toBeNull();
+    expect(scanCodeFor(cseLine("e1"), null, noBarcodes)).toBeNull();
+  });
+
+  it("returns null for a misc line — free text with no source record", () => {
+    expect(scanCodeFor({ lineType: "misc", customerStockEntryId: null }, null, noBarcodes)).toBeNull();
+  });
+
+  it("returns null for an IRM line whose item didn't load", () => {
+    expect(scanCodeFor(irmLine, null, noBarcodes)).toBeNull();
+  });
+});
+
+// The stored itemName is a snapshot of the job form's picker LABEL, which is `${code} — ${name}`.
+// With the code now copyable from the row, repeating it inside the name is noise in a wide column.
+describe("stripCodePrefix", () => {
+  it("drops the item's own code prefix", () => {
+    expect(stripCodePrefix("IRM-0009 — Fibre Cable", "IRM-0009")).toBe("Fibre Cable");
+  });
+
+  // The trap: product names contain em dashes of their own, so splitting on the separator would
+  // amputate half the name. Anchoring to the actual code is what makes this safe.
+  it("keeps em dashes that belong to the NAME", () => {
+    expect(stripCodePrefix("IRS-0009 — Single-Mode Fibre Optic Cable — 12-Core G.652D", "IRS-0009"))
+      .toBe("Single-Mode Fibre Optic Cable — 12-Core G.652D");
+  });
+
+  it("leaves a name that doesn't start with the code alone", () => {
+    expect(stripCodePrefix("CAT6 U/UTP Cable, 305m box", "IRM-0009")).toBe("CAT6 U/UTP Cable, 305m box");
+  });
+
+  // A code appearing mid-name is part of the name, not a prefix.
+  it("only strips at the START", () => {
+    expect(stripCodePrefix("Spare for IRM-0009 — legacy", "IRM-0009")).toBe("Spare for IRM-0009 — legacy");
+  });
+
+  it("accepts the other dash characters a name might have been typed with", () => {
+    expect(stripCodePrefix("IRM-1 - Widget", "IRM-1")).toBe("Widget");
+    expect(stripCodePrefix("IRM-1 – Widget", "IRM-1")).toBe("Widget");
+  });
+
+  // Customer-stock and misc lines have no IRM code — nothing to anchor to.
+  it("returns the name unchanged when there is no code", () => {
+    expect(stripCodePrefix("Loose item", null)).toBe("Loose item");
+    expect(stripCodePrefix("Loose item", undefined)).toBe("Loose item");
+  });
+
+  // Never leave a row with a blank Item column.
+  it("keeps the original when stripping would empty the name", () => {
+    expect(stripCodePrefix("IRM-1 — ", "IRM-1")).toBe("IRM-1 — ");
+  });
+});
+
+// ── The warehouse must not issue units a VAN is already bringing ──────────────────────────────
+//
+// A kit line stores a planned quantity and ONE warehouse; the split ("1 from stock, 2 off Kansha's
+// van") lives on the kit REQUEST, not on the line. So `qty - already` — the only cap the scan had —
+// let the warehouse hand over the whole line while a transfer for part of it was still in flight.
+// Planned 3, warehouse issues 3, Kansha's pending 2 lands later: the engineer ends up holding 5
+// against a 3-unit line, and nothing anywhere objects.
+//
+// Only PENDING van units are reserved. A completed transfer already writes an attributed movement, so
+// it is inside `already` and subtracting it again would double-count; a declined one leaves "pending"
+// entirely, which correctly hands the capacity back to the warehouse.
+describe("scanLookup (issue) — capacity a pending van transfer has already claimed", () => {
+  const mockVanSources = transferRepo.findVanSourcesByKitLines as ReturnType<typeof vi.fn>;
+  const van = (quantity: number, status: string) => ({ transferCode: "ENG-1", engineerName: "Kansha M", engineerPhone: null, quantity, status });
+
+  beforeEach(() => {
+    mockJob.mockResolvedValue({ id: JOB_ID, status: "accepted", assignedEngineerId: "c".repeat(24),
+      kitLines: [{ id: "k1", lineType: "irm", irmItemId: IRM_ID, warehouseId: WH_ID, itemName: "CAT6", qty: 3 }] });
+    mockBal.mockResolvedValue({ quantityOnHand: 50, quantityReserved: 0 });
+  });
+
+  it("reserves the pending van portion, leaving only the warehouse's share issuable", async () => {
+    mockVanSources.mockResolvedValue(new Map([["k1", [van(2, "pending")]]]));
+    const m = await scanLookup({ jobId: JOB_ID, direction: "issue", warehouseId: WH_ID, code: "IRM-0004" });
+    expect(m.remainingIssuable).toBe(1); // 3 planned − 0 issued − 2 promised by a van
+  });
+
+  it("leaves the whole line issuable when no van is involved", async () => {
+    const m = await scanLookup({ jobId: JOB_ID, direction: "issue", warehouseId: WH_ID, code: "IRM-0004" });
+    expect(m.remainingIssuable).toBe(3);
+  });
+
+  // A completed transfer is already counted as issued against the line, so reserving it again would
+  // subtract the same units twice and understate what the warehouse still owes.
+  it("does not double-count a transfer that has already been handed over", async () => {
+    mockVanSources.mockResolvedValue(new Map([["k1", [van(2, "completed")]]]));
+    const m = await scanLookup({ jobId: JOB_ID, direction: "issue", warehouseId: WH_ID, code: "IRM-0004" });
+    expect(m.remainingIssuable).toBe(3);
+  });
+
+  // A refused hand-over releases the reservation — the warehouse has to be able to cover the line again.
+  it("hands the capacity back when the transfer is declined", async () => {
+    mockVanSources.mockResolvedValue(new Map([["k1", [van(2, "declined")]]]));
+    const m = await scanLookup({ jobId: JOB_ID, direction: "issue", warehouseId: WH_ID, code: "IRM-0004" });
+    expect(m.remainingIssuable).toBe(3);
+  });
+
+  it("never goes negative when a van claims more than is left", async () => {
+    mockVanSources.mockResolvedValue(new Map([["k1", [van(9, "pending")]]]));
+    const m = await scanLookup({ jobId: JOB_ID, direction: "issue", warehouseId: WH_ID, code: "IRM-0004" });
+    expect(m.remainingIssuable).toBe(0);
+  });
+});
+
+
+// ── cancelled jobs: the kit still has to come home ────────────────────────────────────────────
+// Every exit was shut on a cancelled job. postReturn refused it outright, and since a cancelled job
+// can never transition to `completed`, its summary could never reach `awaiting_return` — which is the
+// only state closeReconcile unlocks from, so even "write off as lost" was unreachable. Meanwhile the
+// overdue chase list (rightly) kept listing it. A permanent dead end for real, physical stock.
+import { openReturnsOnCancel } from "./goods-management.service.js";
+
+describe("openReturnsOnCancel", () => {
+  const mockOpen = repo.openReturnOnCancel as ReturnType<typeof vi.fn>;
+
+  beforeEach(() => { mockOpen.mockResolvedValue(1); });
+
+  it("moves the job into awaiting_return so the return and reconcile flows unlock", async () => {
+    await openReturnsOnCancel(JOB_ID);
+    expect(mockOpen).toHaveBeenCalledWith(JOB_ID);
+  });
+});
+
+describe("postReturn — a cancelled job's stock can still be scanned back in", () => {
+  beforeEach(() => {
+    mockMoves.mockResolvedValue([
+      { status: "posted", direction: "issue", items: [{ jobKitLineId: "k1", qty: 10 }, { jobKitLineId: "k2", qty: 10 }] },
+    ]);
+    mockCreateMovement.mockImplementation(async (_h: unknown, _l: unknown, apply: (tx: unknown, id: string, code: string) => Promise<void>) => {
+      await apply({}, "m9", "GM-0009");
+      return { id: "m9", code: "GM-0009", direction: "return", warehouseId: WH_ID, items: [], job: { id: JOB_ID } };
+    });
+    mockFindEngBalTxForReturn.mockResolvedValue({ quantityOnHand: 8 });
+    mockUpsertEngForReturn.mockResolvedValue({ quantityOnHand: 3 });
+    mockApplyInbound.mockResolvedValue(undefined);
+    mockUpsertSummaryTx.mockResolvedValue({});
+    (repo.getSummary as ReturnType<typeof vi.fn>).mockResolvedValue({ goodsStatus: "awaiting_return" });
+  });
+
+  const ret = (status: string) => {
+    mockJob.mockResolvedValue({ ...returnBaseJob, status });
+    return postReturn(
+      JOB_ID,
+      { direction: "return", warehouseId: WH_ID, lines: [{ source: "irm", irmItemId: IRM_ID, qty: 3, condition: "good", jobKitLineId: "k1" }] },
+      { email: "wm@x.com" } as never,
+    );
+  };
+
+  it("accepts a return against a cancelled job", async () => {
+    await expect(ret("cancelled")).resolves.toBeDefined();
+  });
+
+  // The statuses stock can never have been issued against stay shut — a return there would credit a
+  // warehouse for units it never released.
+  it("still refuses statuses no stock could have been issued against", async () => {
+    await expect(ret("draft")).rejects.toThrow(/can only be returned/i);
+    await expect(ret("assigned")).rejects.toThrow(/can only be returned/i);
+  });
+});
+
+
+// ── Overdue write-off ─────────────────────────────────────────────────────────────────────────
+// The Overdue tab exists for ONE situation: the engineer has gone quiet. Its "Write off (lost)" button
+// was the escape hatch — and it was locked in exactly that situation. closeReconcile only unlocked from
+// `awaiting_return`, which a job reaches when the engineer presses Complete (or, now, when the job is
+// cancelled). An engineer who simply stops answering does neither, so the job sits at issued /
+// partially_issued and the button 409s. The window comes from Settings, never the caller, so this
+// cannot be used to close a job whose stock went out yesterday.
+describe("closeReconcile — writing off stock the engineer never brought back", () => {
+  const OVERDUE_JOB = "d3".padEnd(24, "0");
+  const daysAgo = (n: number) => new Date(Date.now() - n * 24 * 60 * 60 * 1000);
+
+  const stage = (goodsStatus: string, issuedAt: Date) => {
+    mockJob.mockResolvedValue({
+      id: OVERDUE_JOB, status: "accepted", assignedEngineerId: ENG_ID, assignedEngineerName: "Bob Smith", assignedEngineerEmail: "bob@x.com",
+      kitLines: [{ id: "k1", lineType: "irm", irmItemId: IRM_ID, customerStockEntryId: null, warehouseId: WH_ID, itemName: "CAT6", qty: 10, warehouseName: "WH1", warehouseCode: "W1" }],
+    });
+    (repo.getSummary as ReturnType<typeof vi.fn>).mockResolvedValue({ goodsStatus, workSummary: null, lastMovementAt: issuedAt });
+    mockMoves.mockResolvedValue([{ ...makeMovement("issue", [{ jobKitLineId: "k1", irmItemId: IRM_ID, customerStockEntryId: null, qty: 10 }]), createdAt: issuedAt }]);
+    mockFindEngBalancesAll.mockResolvedValue([{ irmItemId: IRM_ID, quantityOnHand: 10 }]);
+    mockFindCustHoldingsAll.mockResolvedValue([]);
+    mockFindEngBalTx.mockResolvedValue({ quantityOnHand: 10 });
+    mockUpsertEngBalTx.mockResolvedValue({ quantityOnHand: 0 });
+    mockInsertEngTxnTx.mockResolvedValue({});
+    mockUpsertSummaryTx.mockResolvedValue({});
+    mockCreateMovement.mockImplementation(async (_h: unknown, _l: unknown, apply: (tx: unknown, id: string, code: string) => Promise<void>) => {
+      await apply({}, "m7", "GM-0007");
+      return { id: "m7", code: "GM-0007", direction: "consume", items: [], job: { id: OVERDUE_JOB } };
+    });
+  };
+
+  const writeOff = () => closeReconcile(OVERDUE_JOB, { writeOffLost: true, writeOffReason: "not_returned", fromOverdue: true }, { email: "wm@x.com" } as never);
+
+  it("writes off a job whose stock is past the configured window", async () => {
+    stage("partially_issued", daysAgo(30)); // window is 14 in these tests
+    await writeOff();
+    expect(mockUpsertSummaryTx).toHaveBeenCalledWith(expect.anything(), OVERDUE_JOB, expect.objectContaining({ goodsStatus: "reconciled" }));
+  });
+
+  // The modal has to be able to SHOW what it is about to write off, and that pre-flight call carries no
+  // writeOffLost flag. Refusing it left the button dead before the confirmation even opened.
+  it("lists what would be written off without closing the job", async () => {
+    stage("partially_issued", daysAgo(30));
+    const r = await closeReconcile(OVERDUE_JOB, { fromOverdue: true }, { email: "wm@x.com" } as never);
+    expect(r.unaccounted).toEqual([{ itemName: "CAT6", itemCode: null, qty: 10 }]);
+    expect(mockUpsertSummaryTx).not.toHaveBeenCalledWith(expect.anything(), OVERDUE_JOB, expect.objectContaining({ goodsStatus: "reconciled" }));
+  });
+
+  // The guard that matters: this must not become a way to close a live job early from any screen.
+  it("still refuses a job whose stock went out inside the window", async () => {
+    stage("partially_issued", daysAgo(3));
+    await expect(writeOff()).rejects.toThrow(/can only be reconciled/i);
+  });
+
+  // Nothing has been issued at all, so there is nothing out to write off — no age makes that true.
+  it("still refuses a job with no issue movement at all", async () => {
+    stage("not_issued", daysAgo(30));
+    mockMoves.mockResolvedValue([]);
+    await expect(writeOff()).rejects.toThrow(/can only be reconciled/i);
+  });
+
+  it("still refuses a job that is already reconciled and locked", async () => {
+    stage("reconciled", daysAgo(30));
+    await expect(writeOff()).rejects.toThrow(/already reconciled/i);
+  });
+
+  // The relaxation belongs to the Overdue tab and nowhere else. Both screens post to the SAME endpoint,
+  // so without an explicit marker the everyday Goods Management scan panel — used dozens of times a day
+  // by people moving boxes — inherited it, and could reconcile (and write off) a job the engineer is
+  // still working, locking it against any further issue or return. `fromOverdue` says which screen is
+  // asking; the WINDOW is still checked server-side, so the flag can never close a job that isn't
+  // genuinely overdue.
+  it("refuses the same job when the request doesn't come from the Overdue tab", async () => {
+    stage("partially_issued", daysAgo(30));
+    await expect(
+      closeReconcile(OVERDUE_JOB, { writeOffLost: true, writeOffReason: "not_returned" }, { email: "wm@x.com" } as never),
+    ).rejects.toThrow(/can only be reconciled/i);
+  });
+
+  it("refuses the preview from the scan panel too, so the button can't half-work", async () => {
+    stage("partially_issued", daysAgo(30));
+    await expect(closeReconcile(OVERDUE_JOB, {}, { email: "wm@x.com" } as never)).rejects.toThrow(/can only be reconciled/i);
+  });
+
+  // The flag is a routing marker, never an override: claiming to be the Overdue tab for a job whose
+  // stock went out yesterday still gets nowhere.
+  it("the flag cannot close a job that isn't actually overdue", async () => {
+    stage("partially_issued", daysAgo(3));
+    await expect(writeOff()).rejects.toThrow(/can only be reconciled/i);
+  });
+
+  // One definition of "overdue", owned by Settings — the same rule the tab selected the row with.
+  it("reads the window from settings rather than a constant", async () => {
+    const { getOverdueAfterDays } = await import("#modules/settings/settings.service.js");
+    (getOverdueAfterDays as ReturnType<typeof vi.fn>).mockResolvedValue(60);
+    stage("partially_issued", daysAgo(30)); // overdue at 14 days, NOT at 60
+    await expect(writeOff()).rejects.toThrow(/can only be reconciled/i);
+    (getOverdueAfterDays as ReturnType<typeof vi.fn>).mockResolvedValue(14);
   });
 });

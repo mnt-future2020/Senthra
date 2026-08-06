@@ -6,6 +6,7 @@ import { Check, ExternalLink, Loader2, MapPin, Plus, Search, Trash2 } from "luci
 import * as vanStockSvc from "@/services/vanStockRequest.service";
 import type { VanStockFulfilment, VanStockItemOption, VanStockLine, VanStockRequest } from "@/services/vanStockRequest.service";
 import { CopyableCode } from "@/components/ui/CopyableCode";
+import { useDashboard } from "@/hooks/useDashboard";
 import { fmtDateTime } from "@/components/dashboard/portal/portalUi";
 import { WarehousePickupModal } from "@/components/dashboard/engineer/WarehousePickupModal";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -188,6 +189,7 @@ export function VanRequestLinesTable({ lines, variant, className }: { lines: Van
   // Every hook runs before the empty-lines bail-out: a socket refresh can swap a request's lines for
   // an empty array and back, and a bail-out ABOVE this hook would change the hook count between those
   // renders ("rendered fewer hooks than expected" — the whole list unmounts).
+  const { pushToast } = useDashboard();
   const [pickup, setPickup] = React.useState<VanStockLine["sourceWarehouse"]>(null);
   // The Source column earns its space only on a split; otherwise it's noise (every line ships from the
   // same place, and the caption already names it).
@@ -199,8 +201,10 @@ export function VanRequestLinesTable({ lines, variant, className }: { lines: Van
       <table className="w-full text-left text-xs">
         <thead>
           <tr className="border-b border-[var(--border)] text-[10px] font-bold uppercase tracking-wider text-[var(--faint)]">
+            {/* No Code column: the item name copies the code, shows it on hover and names it in the
+                "Copied IRM-0004" confirmation, so a permanent column repeated it and cost width this
+                table has better uses for. */}
             <th className="px-3 py-2">Item</th>
-            <th className="px-3 py-2">Code</th>
             {/* The engineer's job is to GO there, so name the action, not the accounting concept. */}
             {showSource && <th className="px-3 py-2">{variant === "engineer" ? "Collect From" : "Fulfilment Source"}</th>}
             {showProgress && <th className="px-3 py-2">Progress</th>}
@@ -215,8 +219,13 @@ export function VanRequestLinesTable({ lines, variant, className }: { lines: Van
             const qty = variant === "reviewer" ? l.approvedQty ?? l.requestedQty : l.requestedQty;
             return (
               <tr key={l.id} className={`border-b border-[var(--border)] last:border-0 ${excluded ? "opacity-60" : ""}`}>
-                <td className={`px-3 py-2 font-semibold ${excluded ? "text-[var(--muted)] line-through" : "text-[var(--ink)]"}`}>{l.itemName}</td>
-                <td className="px-3 py-2">{l.code ? <CopyableCode code={l.code} /> : <span className="text-[var(--faint)]">—</span>}</td>
+                {/* Name is the copy target (see VanRequestDetail) — the Code column keeps showing the
+                    value but plain, so the row has one copy affordance rather than two identical ones.
+                    An EXCLUDED line stays plain text: nothing is being issued for it, so offering a
+                    code to scan would invite exactly the action the exclusion just refused. */}
+                <td className={`px-3 py-2 font-semibold ${excluded ? "text-[var(--muted)] line-through" : "text-[var(--ink)]"}`}>
+                  {l.code && !excluded ? <CopyableCode code={l.code} label={l.itemName} className="text-left" onCopied={(c) => pushToast(`Copied ${c}`)} /> : l.itemName}
+                </td>
                 {showSource && (
                   <td className="px-3 py-2 text-[var(--muted)]">
                     {/* For the ENGINEER the warehouse is a destination, so it opens the pickup address
@@ -483,6 +492,7 @@ export function VanStockCartTable({
   // issues from ONE counter and has no such choice — simply omits it and gets no column.
   warehouseCell?: (item: VanStockCartItem) => React.ReactNode;
 }) {
+  const { pushToast } = useDashboard();
   if (cart.length === 0) return <p className="text-xs text-[var(--muted)]">{emptyText}</p>;
   return (
     // overflow-x-AUTO, not overflow-hidden. The fixed columns below come to ~390px on their own, so
@@ -522,8 +532,10 @@ export function VanStockCartTable({
             return (
               <tr key={c.irmItemId} className="border-b border-[var(--border)] last:border-0">
                 <td className="px-3 py-2">
-                  <span className="font-semibold text-[var(--ink)]">{c.name}</span>
-                  {c.code && <div className="mt-0.5"><CopyableCode code={c.code} /></div>}
+                  <span className="font-semibold text-[var(--ink)]">
+                    {c.code ? <CopyableCode code={c.code} label={c.name} className="text-left" onCopied={(t) => pushToast(`Copied ${t}`)} /> : c.name}
+                  </span>
+
                   {/* "Holding N" (returns cap) is redundant when a shelf figure is shown — the shelf line
                       already states the number and colours it — so only render it when there's no shelf. */}
                   {typeof c.maxQty === "number" && typeof shelf !== "number" && <div className="text-[10px] text-[var(--faint)]">Holding {c.maxQty}</div>}

@@ -15,6 +15,9 @@ const projectSelect = { id: true, name: true } satisfies Prisma.CustomerProjectS
 const siteSelect = { id: true, name: true } satisfies Prisma.CustomerSiteSelect;
 const supplierSelect = { id: true, name: true } satisfies Prisma.SupplierSelect;
 const engineerSelect = { id: true, firstName: true, lastName: true, email: true } satisfies Prisma.UserSelect;
+// `code` doubles as the string the goods queue offers for copy-into-scan — see scanCodeFor in
+// goods-management.service. Deliberately NOT `barcode` too: that is the manufacturer's EAN, which
+// nothing here reads, so fetching it would load a column on every job query for no consumer.
 const irmItemSelect = { id: true, code: true, name: true } satisfies Prisma.IrmItemSelect;
 // Per-kit-line pickup warehouse with its LIVE address — surfaced to the engineer (who has no
 // warehouse-module access) so they know exactly where to collect each item.
@@ -159,9 +162,13 @@ export function findActiveForGoodsManagement(warehouseId: string, search?: strin
     { kitLines: { some: { OR: [{ warehouseId }, { lineType: "misc" }] } } },
     { kitLines: { some: { hasVanSource: true } } },
   ];
+  // `cancelled` is in the window so the warehouse can still take the kit BACK. Cancelling doesn't
+  // return anything, and the job is unreachable from every other flow afterwards, so leaving it out
+  // meant the one screen that can scan the stock in could no longer find the job. listQueue then drops
+  // the cancelled jobs that never had stock issued, and postIssue keeps issuing shut regardless.
   const where: Prisma.JobWhereInput = {
     deletedAt: null,
-    status: { in: ["accepted", "in_progress", "completed"] },
+    status: { in: ["accepted", "in_progress", "completed", "cancelled"] },
     AND: [
       { OR: candidateOr },
       ...(search
@@ -209,12 +216,16 @@ export function findActiveWithKitLines(excludeJobId?: string): Promise<JobWithRe
 // has to. That one answers "what work is live?", so a cancelled job rightly drops off the Queue. This
 // one answers "whose stock is unaccounted for?", and cancelling is the moment stock is most likely to
 // be stranded: `cancelJob` is reachable from accepted/in_progress, has no guard on outstanding stock,
-// and never touches goodsStatus — the engineer is simply still holding the kit for a job nobody is
-// tracking any more. Mirroring the Queue's window here dropped exactly that stock off the chase list
-// and out of the Hub's overdue count. Nothing downstream is a dead end: goods-management's flows don't
-// gate on job status, so the engineer's return still posts, moves the summary to `awaiting_return`,
-// and lets the remainder be written off. `completed` is likewise terminal and already listed, so the
-// cost argument doesn't distinguish the two — and cancelled is by far the smaller set.
+// and the engineer is simply still holding the kit for a job nobody is tracking any more. Mirroring the
+// Queue's window here dropped exactly that stock off the chase list and out of the Hub's overdue count.
+// `completed` is likewise terminal and already listed, so the cost argument doesn't distinguish the two
+// — and cancelled is by far the smaller set.
+//
+// Listing it here is only worth anything if the chase can END somewhere: cancelJob now moves the
+// summary to `awaiting_return` (goodsManagementService.openReturnsOnCancel) and postReturn accepts a
+// cancelled job, so the scan-in and the write-off both work. An earlier version of this comment
+// asserted that goods-management "doesn't gate on job status" — it does, and that gate was the dead
+// end this list used to point at.
 export function findGoodsActiveJobIds(): Promise<{ id: string }[]> {
   return prisma.job.findMany({
     where: { deletedAt: null, status: { in: ["accepted", "in_progress", "completed", "cancelled"] } },
@@ -239,9 +250,16 @@ export function findKitLineTypesByJobs(jobIds: string[]): Promise<{ id: string; 
 // subtracts it so job stock can't be handed back outside the job). Statuses mirror
 // findActiveForGoodsManagement — goods are only issued once accepted/in progress; a reconciled or older
 // job's movements net to 0 and contribute nothing.
+//
+// `cancelled` is included, and that is a correctness requirement rather than a nicety. A cancel doesn't
+// move a single unit: the engineer walks away still holding the kit. Dropping the status here released
+// all of it in one step — the field-stock return flow stopped subtracting it (job stock could be handed
+// back outside its job) and kit-request availability began offering the same units to other jobs as
+// "on another van". The stock is committed until it is physically returned, not until the paperwork
+// says the work is off.
 export function findActiveByEngineerWithKitLines(engineerId: string): Promise<JobWithRelations[]> {
   return prisma.job.findMany({
-    where: { deletedAt: null, assignedEngineerId: engineerId, status: { in: ["accepted", "in_progress", "completed"] } },
+    where: { deletedAt: null, assignedEngineerId: engineerId, status: { in: ["accepted", "in_progress", "completed", "cancelled"] } },
     include: withRelations,
     orderBy: { createdAt: "asc" },
   });

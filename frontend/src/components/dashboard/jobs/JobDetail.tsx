@@ -25,6 +25,8 @@ import {
   formatDate,
   formatDateTime,
 } from "./jobStatus";
+import { Notice } from "@/components/ui/Notice";
+import { outstandingKitWarning } from "./outstandingKit";
 import type { Job, JobLineType, JobPriority, JobType } from "@/types/job";
 
 export function JobDetail({ idOrCode }: { idOrCode: string }) {
@@ -141,29 +143,48 @@ function JobView({ initial }: { initial: Job }) {
                         with quantities rather than naming a single place. */}
                     <td className="px-4 py-3 text-[var(--muted)]">
                       {(() => {
-                        const s = kitLineSourceSplit(l);
+                        const s = kitLineSourceSplit(l, { jobCancelled: job.status === "cancelled" });
                         if (!l.vanSources?.length) return l.warehouseName ?? "—";
                         return (
+                          // Sources wrap on ONE line rather than stacking — see the note in
+                          // EngineerJobDetail; a split row was standing twice as tall as its neighbours.
                           <div className="flex flex-col gap-0.5">
-                            {s.warehouseQty > 0 && l.warehouseName && (
+                            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                            {/* warehouseSHARE — see the note in EngineerJobDetail. warehouseQty counts
+                                only issued units, so a freshly split line showed no warehouse at all
+                                and the planner couldn't see their own split. */}
+                            {s.warehouseShare > 0 && l.warehouseName && (
                               <span className="text-[var(--ink)]">
-                                {l.warehouseName} <span className="text-[var(--faint)]">×{s.warehouseQty}</span>
+                                {l.warehouseName} <span className="text-[var(--faint)]">×{s.warehouseShare}</span>
+                                {s.outstandingWarehouseQty > 0 && s.warehouseQty > 0 && (
+                                  <span className="ml-1 text-[10px] font-bold text-amber-600">{s.outstandingWarehouseQty} to collect</span>
+                                )}
                               </span>
                             )}
                             {l.vanSources.map((v) => (
                               <span key={v.transferCode} className="font-semibold text-[var(--ink)]" title={`${v.transferCode} — ${v.quantity} from ${v.engineerName}`}>
-                                {v.engineerName} <span className="font-normal text-[var(--faint)]">×{v.quantity}</span>
+                                {/* Callable here too: a planner chasing a handover shouldn't have to
+                                    open the transfer to find the holder's number. */}
+                                {v.engineerPhone ? (
+                                  <a href={`tel:${v.engineerPhone}`} className="text-[var(--accent)] hover:underline" title={`Call ${v.engineerName} on ${v.engineerPhone}`}>
+                                    {v.engineerName}
+                                  </a>
+                                ) : (
+                                  v.engineerName
+                                )}{" "}
+                                <span className="font-normal text-[var(--faint)]">×{v.quantity}</span>
                                 {v.status === "pending" && <span className="ml-1 text-[10px] font-bold text-amber-600">awaiting handover</span>}
                               </span>
                             ))}
+                            </div>
                             {/* Van stock owes no warehouse, so it goes back anywhere; warehouse-issued
                                 units owe their own site. A MERGED line has both, so state each part
                                 — the server enforces exactly this split on return. */}
                             <span className="text-[10px] text-[var(--faint)]">
                               {s.vanOnly
                                 ? "Return at any warehouse"
-                                : s.vanQty > 0 && s.warehouseQty > 0 && l.warehouseName
-                                  ? `Return ×${s.warehouseQty} at ${l.warehouseName}, ×${s.vanQty} at any warehouse`
+                                : s.vanReturnableQty > 0 && s.warehouseQty > 0 && l.warehouseName
+                                  ? `Return ×${s.warehouseQty} at ${l.warehouseName}, ×${s.vanReturnableQty} at any warehouse`
                                   : l.warehouseName
                                     ? `Return at ${l.warehouseName}`
                                     : ""}
@@ -287,6 +308,7 @@ function JobView({ initial }: { initial: Job }) {
       {cancelOpen && (
         <ReasonDialog
           busy={busy}
+          warning={outstandingKitWarning(job.kitLines, job.assignedEngineerName)}
           onClose={() => setCancelOpen(false)}
           onConfirm={(reason) => { setCancelOpen(false); run(() => jobService.cancelJob(job.id, reason || undefined), "Job cancelled."); }}
         />
@@ -346,12 +368,22 @@ function ReassignDialog({ current, busy, onConfirm, onClose }: { current: string
   );
 }
 
-function ReasonDialog({ busy, onConfirm, onClose }: { busy: boolean; onConfirm: (reason: string) => void; onClose: () => void }) {
+// `warning` is ADVISORY, never a blocker — see outstandingKitWarning for why cancelling can't wait for
+// the van. It renders as a warn-tier Notice, not an error: nothing has gone wrong, there is simply
+// something left to settle afterwards.
+function ReasonDialog({ busy, warning, onConfirm, onClose }: { busy: boolean; warning: string | null; onConfirm: (reason: string) => void; onClose: () => void }) {
   const [value, setValue] = React.useState("");
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
       <div className="w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-2xl" onClick={(e) => e.stopPropagation()}>
         <h3 className="text-sm font-extrabold text-[var(--ink)]">Cancel job</h3>
+        {/* Bare, like every other Notice in the app — it draws its own amber panel (NOTICE_TONE_CLS +
+            NOTICE_SIZE_CLS); a wrapper with its own border/background nests a second box inside it. */}
+        {warning && (
+          <div className="mt-3">
+            <Notice msg={{ type: "warn", text: warning }} size="sm" />
+          </div>
+        )}
         <textarea autoFocus value={value} onChange={(e) => setValue(e.target.value)} rows={3} maxLength={500} placeholder="Reason (optional)" className="mt-3 w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]" />
         <div className="mt-4 flex justify-end gap-2">
           <button type="button" onClick={onClose} className="rounded-xl border border-[var(--border)] px-3.5 py-2 text-xs font-bold text-[var(--ink)] hover:bg-[var(--surface-2)]">Keep</button>

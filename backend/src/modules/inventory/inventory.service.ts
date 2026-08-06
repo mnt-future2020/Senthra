@@ -88,7 +88,13 @@ export interface PublicInventoryBalance {
   warehouseName: string;
   warehouseCode: string;
   onHand: number;
+  /** The DB reservation field. Currently always 0 — the schema marks it "FUTURE (Goods Out /
+   *  allocation)". Kept honest rather than repurposed: the reorder projection takes onHand, reserved
+   *  and plannedDemand as three separate inputs, so conflating two of them would double-count. */
   reserved: number;
+  /** Unissued quantity of active jobs' kit lines homed here — the real commitment against this row. */
+  plannedDemand: number;
+  /** What is genuinely free to commit: onHand − reserved − plannedDemand, floored at 0. */
   available: number;
   reorderLevel: number | null;
   unitCostPence: number;
@@ -177,7 +183,7 @@ function statusOf(onHand: number, reorderLevel: number | null): InventoryStatus 
   return "in_stock";
 }
 
-function toBalanceDTO(b: InventoryBalanceWithRelations): PublicInventoryBalance {
+function toBalanceDTO(b: InventoryBalanceWithRelations, plannedDemand = 0): PublicInventoryBalance {
   const onHand = b.quantityOnHand;
   const reserved = b.quantityReserved;
   const unitCostPence = b.irmItem.standardCostPence ?? 0;
@@ -195,7 +201,11 @@ function toBalanceDTO(b: InventoryBalanceWithRelations): PublicInventoryBalance 
     warehouseCode: b.warehouse.code,
     onHand,
     reserved,
-    available: onHand - reserved, // server-authoritative
+    plannedDemand,
+    // Server-authoritative, and floored: demand can exceed stock, and a negative Available helps
+    // nobody read a table. Before this, `reserved` was the only deduction — and it is permanently 0 —
+    // so an item with every unit planned onto a job rendered as fully available.
+    available: Math.max(0, onHand - reserved - plannedDemand),
     reorderLevel: b.irmItem.reorderLevel,
     unitCostPence,
     valuePence,
@@ -265,8 +275,32 @@ async function filteredBalanceDTOs(params: ListInventoryParams, actor?: AuditAct
     warehouseIds: warehouseScopeFilter(actor),
   });
   const status = params.status && ["in_stock", "low_stock", "out_of_stock"].includes(params.status) ? (params.status as InventoryStatus) : undefined;
-  const dtos = rows.map(toBalanceDTO);
+  const planned = await plannedDemandByKey();
+  const dtos = rows.map((b) => toBalanceDTO(b, planned.get(`${b.irmItemId}|${b.warehouseId}`) ?? 0));
   return status ? dtos.filter((d) => d.status === status) : dtos;
+}
+
+// Planned demand keyed `irmItemId|warehouseId`.
+//
+// Read live on every call, NOT memoised. A short TTL was tried and removed: this figure is the one
+// deciding whether an item reads as available, so serving a stale one is the same class of lie the
+// permanently-zero `reserved` column already was — and the window would sit exactly where a planner
+// adds a kit line then checks stock. The reorder summary below does memoise, but its maths is far
+// heavier (PO + PRF lookups on top of this) and it answers "should we buy more?", where seconds of
+// lag cost nothing. If profiling ever says otherwise, memoise deliberately with an invalidation hook
+// rather than a blind TTL.
+async function plannedDemandByKey(): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  try {
+    for (const d of (await getOpenDemand()).values()) {
+      if (!d.irmItemId || !d.warehouseId) continue; // customer consignment isn't an InventoryBalance row
+      const k = `${d.irmItemId}|${d.warehouseId}`;
+      out.set(k, (out.get(k) ?? 0) + d.demand);
+    }
+  } catch {
+    return out; // advisory — a failed lookup must not break the inventory list
+  }
+  return out;
 }
 
 export async function listInventory(params: ListInventoryParams = {}, actor?: AuditActor): Promise<PagedInventory> {
@@ -289,7 +323,9 @@ async function loadBalanceOrThrow(balanceId: string): Promise<InventoryBalanceWi
 export async function getInventory(balanceId: string, actor?: AuditActor): Promise<PublicInventoryDetail> {
   const b = await loadBalanceOrThrow(balanceId);
   assertWarehouseAccess(actor, b.warehouseId);
-  const dto = toBalanceDTO(b);
+  // Same demand netting as the list — the detail card is the same row opened up, and two screens
+  // disagreeing about one item's availability is the whole problem this fixes.
+  const dto = toBalanceDTO(b, (await plannedDemandByKey()).get(`${b.irmItemId}|${b.warehouseId}`) ?? 0);
   const incoming = await poService.incomingForItemWarehouse(b.irmItemId, b.warehouseId);
   return { ...dto, incoming, outgoing: b.quantityReserved };
 }
@@ -552,8 +588,24 @@ export async function transferStock(input: CreateTransferInput, actor?: AuditAct
   if (item.trackSerialNumbers || item.trackBatchNumbers) {
     throw conflict("Serial-tracked and batch-tracked items can't be transferred yet — serial-level transfer is a future feature.");
   }
-  const available = source.quantityOnHand - source.quantityReserved;
-  if (input.quantity > available) throw conflict(`Only ${available} available at ${fromWh.name}. Reduce the quantity.`);
+  // Stock a job has already PLANNED at the source can't be moved away — the kit line still points
+  // here, so the shortfall would surface only at the scan gun, with the engineer already at the
+  // counter. `quantityReserved` never covered this: the schema marks it "FUTURE … 0 now", so this
+  // check was raw on-hand. Blocked rather than warned because a transfer is a deliberate action with
+  // an operator-controlled quantity — "3 of 5 are planned" is something they can act on. Rebalancing
+  // committed units is still possible; the planner re-homes the kit line first, which is the step
+  // that keeps the job honest.
+  const plannedHere = [...(await getOpenDemand()).values()]
+    .filter((d) => d.irmItemId === input.irmItemId && d.warehouseId === fromWh.id)
+    .reduce((n, d) => n + d.demand, 0);
+  const available = Math.max(0, source.quantityOnHand - source.quantityReserved - plannedHere);
+  if (input.quantity > available) {
+    throw conflict(
+      plannedHere > 0
+        ? `Only ${available} available to move at ${fromWh.name} — ${plannedHere} of the ${source.quantityOnHand} on hand are planned for active jobs there. Reduce the quantity, or re-home those kit lines first.`
+        : `Only ${available} available at ${fromWh.name}. Reduce the quantity.`,
+    );
+  }
 
   const actorEmail = actor?.email ?? null;
   const transfer = await inventoryRepo.createTransferWithCode(

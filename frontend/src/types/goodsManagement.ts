@@ -105,6 +105,12 @@ export interface QueueKitLine {
   irmItemId: string | null;
   customerStockEntryId: string | null;
   itemName: string;
+  /**
+   * The string that resolves this line in the goods scan box, or null when the line isn't scannable
+   * (a misc line, or a customer entry with no barcode). Resolved SERVER-side to mirror scanLookup —
+   * never guessed here, because a code the scan then rejects is worse than offering none.
+   */
+  scanCode: string | null;
   warehouseId: string | null;
   warehouseName: string | null;
   warehouseCode: string | null;
@@ -129,6 +135,12 @@ export interface QueueRow {
   jobName: string;
   engineerId: string | null;
   engineerName: string | null;
+  /**
+   * The JOB's own lifecycle status, distinct from `goodsStatus` below. The queue reaches past
+   * `completed` to `cancelled` so a cancelled job's kit can still be scanned back in, and that is the
+   * one status where the panel's Issue half must not be offered — see scanDirections.
+   */
+  status: string;
   goodsStatus: GoodsStatus;
   /** When the job was raised — the age anchor for a job that has never had a goods movement. */
   createdAt: string;
@@ -287,6 +299,8 @@ export interface OverdueRow {
   issuedAt: string; // when the issue movement was posted
   daysOut: number;
   goodsStatus: GoodsStatus;
+  /** The JOB's own status — a cancelled job's stock can only come back or be written off. */
+  status: string;
   movementId: string;
   movementCode: string;
 }
@@ -344,6 +358,15 @@ export interface CloseReconcilePayload {
   writeOffReason?: WriteOffReason;
   /** Required by the server when the reason is "other". */
   writeOffNotes?: string;
+  /**
+   * Sent ONLY by the Overdue tab — its "the engineer isn't coming back" escape hatch.
+   *
+   * Both that tab and the everyday scan panel post to the same endpoint. The server relaxes its
+   * "engineer must have completed the job first" rule only for requests carrying this, so the scan
+   * panel can't reconcile (or write off) a job someone is still working. It is a routing marker, not
+   * an override: the server still checks the job's stock against the configured overdue window.
+   */
+  fromOverdue?: boolean;
 }
 
 export interface CloseReconcileResult {

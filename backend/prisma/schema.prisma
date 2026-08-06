@@ -1388,7 +1388,14 @@ model JobKitRequestLine {
   itemName String  // snapshot
   sku      String? // snapshot
   uom      String? // snapshot
-  qty      Int
+  qty      Int // what the ENGINEER asked for — never rewritten, so the request stays a faithful record
+
+  // What the reviewer actually approved, set on approve. NULL = approved in full (also every row
+  // predating the trim), so readers fall back to `qty`. ZERO = the line was EXCLUDED — refused
+  // individually while the rest of the request went through. Stored because the grown kit alone
+  // can't answer "what did they ask for versus what did they get": an excluded line leaves no kit
+  // line at all, so without this the request history silently loses the refusal.
+  approvedQty Int?
 
   // Set on approve → the JobKitLine this request line grew (loose socket, mirrors
   // JobStockMovementLine.jobKitLineId). Lets a transfer fulfilment attribute its qty to the kit line.
@@ -1399,13 +1406,15 @@ model JobKitRequestLine {
   // another engineer's van holds the rest. So the SOURCE is chosen per line, not per request.
   //   warehouse → collected from sourceWarehouseId (a Goods-Management issue, as before)
   //   engineer  → transferred from sourceEngineerId's van (joins that engineer's transfer)
-  // A line is fulfilled ENTIRELY from one source — quantities are never split across sources, which
-  // keeps every downstream qty check, transfer line and audit entry one-to-one with a request line.
+  // A line MAY be split across both: part comes off the van, the remainder is collected from the
+  // warehouse. Such a line carries BOTH ids and is stamped sourceType = engineer, so the two ids are
+  // NOT mutually exclusive — never pick one by reading sourceType alone or you drop the pickup
+  // location for the remainder. Only a line coming WHOLLY from a van has no warehouse of its own.
   // Null on pending/declined requests and on rows approved before per-line sourcing shipped; readers
   // must fall back to the request-level fulfillmentMode for those.
-  sourceType        String? // warehouse | engineer
-  sourceWarehouseId String? @db.ObjectId // when sourceType = warehouse (misc lines stay null)
-  sourceEngineerId  String? @db.ObjectId // when sourceType = engineer
+  sourceType        String? // warehouse | engineer — the PRIMARY source; engineer may still have a warehouse
+  sourceWarehouseId String? @db.ObjectId // warehouse-sourced, or the remainder of a split (misc lines stay null)
+  sourceEngineerId  String? @db.ObjectId // set when any part of the line comes off a van
 
   createdAt DateTime @default(now())
 

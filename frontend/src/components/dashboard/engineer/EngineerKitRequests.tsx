@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { Check, Loader2, PackagePlus, Plus, Search, Trash2 } from "lucide-react";
+import { Check, ChevronRight, Loader2, PackagePlus, Plus, Search, Trash2 } from "lucide-react";
 
 import * as kitRequestService from "@/services/jobKitRequest.service";
 import type { KitItemCustomerStockOption, KitItemOption, KitRequest, KitRequestLinePayload } from "@/services/jobKitRequest.service";
@@ -16,6 +16,7 @@ import { RequiredMark } from "@/components/ui/FormScaffold";
 import { EmptyState, fmtDate } from "@/components/dashboard/portal/portalUi";
 import type { Job } from "@/types/job";
 import type { Msg } from "@/components/ui/types";
+import { availabilityParts, kitItemAvailability } from "./kitItemAvailability";
 
 // Engineer-portal panel on a job: raise a request for MORE kit (extra units of a planned item, or a
 // new item picked from the catalogue) for the planner to review, and track the status of the
@@ -34,27 +35,123 @@ export function KitRequestStatusChip({ value }: { value: KitRequest["status"] })
   return <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider ${s.cls}`}>{s.label}</span>;
 }
 
-// Requested items as readable chips (one per line) instead of a cramped comma-joined sentence — each
-// chip is the item name + a qty pill, with a subtle tint per source (customer stock / misc) so company
-// IRM is distinguishable from customer-owned at a glance. Shared by the engineer's own request list and
-// the PM review card, so both read the same.
-export function KitLineChips({ lines }: { lines: KitRequest["lines"] }) {
+// Requested items, rendered the way the Field Stock (VSR) list renders its lines — a compact one-line
+// summary that expands to a real table. Shared by the engineer's own request list and the PM review
+// card, so those two can't drift from each other either.
+//
+// This replaced a flat row of chips. Chips read fine for two or three items, but a request carrying
+// eight wrapped into a block that filled the card and buried the code, status and Approve/Decline
+// underneath it — and the quantity, the thing a reviewer is actually checking, was a tiny pill inside
+// each chip rather than a column you can scan down. VSR had already solved exactly this.
+const KIT_SUMMARY_MAX = 3;
+
+// What the reviewer actually granted. `approvedQty` is null on a pending request and on every line
+// approved before the trim shipped, so null means "as asked" — never 0. Zero is a real decision: the
+// planner refused that one item and approved the rest, and it is the only trace an excluded line
+// leaves, because it grows no kit line at all.
+function kitLineOutcome(l: KitRequest["lines"][number]): { qty: number; excluded: boolean; trimmed: boolean } {
+  if (l.approvedQty == null) return { qty: l.qty, excluded: false, trimmed: false };
+  return { qty: l.approvedQty, excluded: l.approvedQty === 0, trimmed: l.approvedQty < l.qty };
+}
+
+// Source tint, matching the chips this replaced: company IRM plain, customer consignment accented,
+// misc muted — a reviewer sourcing the request needs to see at a glance which pool each line comes
+// from, because they're fulfilled from different places.
+function KitSourceBadge({ source }: { source: KitRequest["lines"][number]["source"] }) {
+  if (source === "customer_stock") {
+    return <span className="shrink-0 rounded border border-[var(--accent)]/30 bg-[var(--accent-10)] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-[var(--accent)]">Customer stock</span>;
+  }
+  if (source === "misc") {
+    return <span className="shrink-0 rounded border border-[var(--border)] bg-[var(--surface)] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-[var(--faint)]">Misc</span>;
+  }
+  return null;
+}
+
+export function KitRequestLines({ lines }: { lines: KitRequest["lines"] }) {
+  const [open, setOpen] = React.useState(false);
+  if (lines.length === 0) return null;
+
+  const shown = lines.slice(0, KIT_SUMMARY_MAX);
+  const extra = lines.length - shown.length;
+
   return (
-    <div className="mt-1.5 flex flex-wrap gap-1.5">
-      {lines.map((l) => {
-        const tint =
-          l.source === "customer_stock"
-            ? "border-[var(--accent)]/30 bg-[var(--accent-10)] text-[var(--accent)]"
-            : l.source === "misc"
-              ? "border-[var(--border)] bg-[var(--surface)] text-[var(--muted)]"
-              : "border-[var(--border)] bg-[var(--surface)] text-[var(--ink)]";
-        return (
-          <span key={l.id} className={`inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-semibold ${tint}`}>
-            <span className="truncate">{l.itemName}</span>
-            <span className="rounded bg-[var(--surface-2)] px-1.5 py-0.5 text-[10px] font-bold text-[var(--faint)]">×{l.qty}</span>
-          </span>
-        );
-      })}
+    <div className="mt-1.5">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="flex w-full min-w-0 items-center gap-1.5 text-left text-xs text-[var(--muted)] transition-colors hover:text-[var(--ink)]"
+      >
+        <ChevronRight aria-hidden className={`h-3.5 w-3.5 shrink-0 transition-transform ${open ? "rotate-90" : ""}`} />
+        <span className="shrink-0 font-semibold">{lines.length} item{lines.length === 1 ? "" : "s"}</span>
+        <span aria-hidden className="shrink-0 text-[var(--faint)]">·</span>
+        <span className="min-w-0 truncate">
+          {shown.map((l, i) => {
+            const o = kitLineOutcome(l);
+            return (
+              <React.Fragment key={l.id}>
+                {i > 0 && <span className="text-[var(--faint)]"> • </span>}
+                <span className={o.excluded ? "line-through opacity-70" : ""}>
+                  {l.itemName} <span className="font-semibold text-[var(--ink)]">×{o.excluded ? l.qty : o.qty}</span>
+                </span>
+              </React.Fragment>
+            );
+          })}
+        </span>
+        {extra > 0 && (
+          <span className="shrink-0 rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-1.5 py-0.5 text-[10px] font-bold text-[var(--faint)]">+{extra} more</span>
+        )}
+      </button>
+
+      {open && (
+        // `relative` contains the table's sr-only header labels — see the note in vanRequestUi.tsx.
+        <div className="relative mt-2 overflow-x-auto rounded-xl border border-[var(--border)] bg-[var(--surface)]">
+          <table className="w-full min-w-[18rem] text-left text-xs">
+            <thead>
+              <tr className="border-b border-[var(--border)] text-[10px] font-bold uppercase tracking-wider text-[var(--faint)]">
+                <th className="px-3 py-2">Item</th>
+                <th className="px-3 py-2 text-right">Qty</th>
+              </tr>
+            </thead>
+            <tbody>
+              {lines.map((l) => {
+                const o = kitLineOutcome(l);
+                return (
+                <tr key={l.id} className={`border-b border-[var(--border)] last:border-0 ${o.excluded ? "opacity-60" : ""}`}>
+                  <td className="px-3 py-2">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <span className={`truncate font-semibold ${o.excluded ? "text-[var(--muted)] line-through" : "text-[var(--ink)]"}`}>{l.itemName}</span>
+                      <KitSourceBadge source={l.source} />
+                      {o.excluded && <span className="shrink-0 rounded border border-[var(--neg)]/30 bg-[var(--neg)]/10 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-[var(--neg)]">Not approved</span>}
+                    </div>
+                    {/* The warehouse a consignment line is issued from — the planner can't change it,
+                        and it is the one thing the item name doesn't already say. */}
+                    {l.warehouseName && (
+                      <div className="text-[10px] text-[var(--muted)]">
+                        {l.warehouseName}{l.warehouseCode ? ` (${l.warehouseCode})` : ""}
+                      </div>
+                    )}
+                  </td>
+                  {/* The GRANTED quantity, with the ask beside it when the planner trimmed — "asked 5,
+                      got 4" is the question this table exists to answer, and showing only one number
+                      loses half of it. */}
+                  <td className="whitespace-nowrap px-3 py-2 text-right font-semibold text-[var(--ink)]">
+                    {o.excluded ? (
+                      <span className="text-[var(--muted)] line-through">×{l.qty}</span>
+                    ) : (
+                      <>
+                        ×{o.qty}
+                        {o.trimmed && <span className="ml-1 font-normal text-[11px] text-[var(--faint)]">of {l.qty} asked</span>}
+                      </>
+                    )}
+                  </td>
+                </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -135,14 +232,25 @@ export function EngineerKitRequests({ job, locked, open, onOpenChange }: { job: 
         <ul className="space-y-2">
           {requests.map((r) => (
             <li key={r.id} className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-3">
+              {/* Only the HEADER shares a row with the action. The lines table and the notes sit
+                  BELOW it at full card width — inside the flex row they were bounded by the button,
+                  so a pending request's table stopped short while a cancelled one (no button) ran to
+                  the edge, and the two rows in the same list didn't line up. VSR lays its expanded
+                  lines out the same way, below the row rather than beside the controls. */}
               <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-mono text-xs font-bold text-[var(--ink)]">{r.code}</span>
-                    <KitRequestStatusChip value={r.status} />
-                    <span className="text-[11px] text-[var(--faint)]">{fmtDate(r.createdAt)}</span>
-                  </div>
-                  <KitLineChips lines={r.lines} />
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
+                  <span className="font-mono text-xs font-bold text-[var(--ink)]">{r.code}</span>
+                  <KitRequestStatusChip value={r.status} />
+                  <span className="text-[11px] text-[var(--faint)]">{fmtDate(r.createdAt)}</span>
+                </div>
+                {r.status === "pending" && (
+                  <button type="button" onClick={() => setConfirmId(r.id)} disabled={cancellingId === r.id} className="shrink-0 rounded-lg border border-[var(--border)] px-2.5 py-1 text-[11px] font-bold text-[var(--ink)] hover:bg-[var(--surface)] disabled:opacity-60">
+                    {cancellingId === r.id ? "…" : "Cancel"}
+                  </button>
+                )}
+              </div>
+              <div className="min-w-0">
+                  <KitRequestLines lines={r.lines} />
                   {r.reason && <p className="mt-1 text-[11px] italic text-[var(--faint)]">“{r.reason}”</p>}
                   {r.status === "declined" && r.decisionNote && <p className="mt-0.5 text-[11px] text-[var(--neg)]">Planner: {r.decisionNote}</p>}
                   {/* "mixed" = some items from stock, some from another van. It must say BOTH: the two
@@ -164,12 +272,6 @@ export function EngineerKitRequests({ job, locked, open, onOpenChange }: { job: 
                   {r.status === "approved" && r.fulfillmentMode === "warehouse_issue" && (
                     <p className="mt-0.5 text-[11px] text-[var(--pos)]">Approved — collect from the warehouse.</p>
                   )}
-                </div>
-                {r.status === "pending" && (
-                  <button type="button" onClick={() => setConfirmId(r.id)} disabled={cancellingId === r.id} className="shrink-0 rounded-lg border border-[var(--border)] px-2.5 py-1 text-[11px] font-bold text-[var(--ink)] hover:bg-[var(--surface)] disabled:opacity-60">
-                    {cancellingId === r.id ? "…" : "Cancel"}
-                  </button>
-                )}
               </div>
             </li>
           ))}
@@ -242,12 +344,59 @@ function plannedOptionsFrom(job: Job): PlannedOption[] {
 function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void; onSent: () => void }) {
   const [planned, setPlanned] = React.useState<PlannedOption[]>(() => plannedOptionsFrom(job));
   const [cart, setCart] = React.useState<CartItem[]>([]);
+  // Stock behind the rows the composer already holds. The search annotates its own hits, but the
+  // planned-item rows come from the job's kit list and the cart rows from an earlier search, so both
+  // rendered a bare quantity box with nothing to check it against — an engineer could ask for 50 of
+  // an item with 2 free and only find out when the planner couldn't source it.
+  const [avail, setAvail] = React.useState<kitRequestService.KitAvailabilityMap>({ irm: {}, cse: {} });
   const [reason, setReason] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
   const [msg, setMsg] = React.useState<Msg>(null);
 
   // Keys already on the request (planned IRM + customer-stock lines + everything in the cart) — so the
   // search can grey out an item that's already added and the cart can't hold duplicates.
+  // Keyed on the item SET only: quantities change on every keystroke of a stepper, and refetching
+  // stock because someone typed "3" would be pure noise.
+  const availKey = React.useMemo(() => {
+    const irm = [...planned.filter((p) => p.source === "irm" && p.irmItemId).map((p) => p.irmItemId!), ...cart.filter((c) => c.source === "irm" && c.irmItemId).map((c) => c.irmItemId!)];
+    const cse = [...planned.filter((p) => p.source === "customer_stock" && p.customerStockEntryId).map((p) => p.customerStockEntryId!), ...cart.filter((c) => c.source === "customer_stock" && c.customerStockEntryId).map((c) => c.customerStockEntryId!)];
+    return JSON.stringify({ irm: [...new Set(irm)].sort(), cse: [...new Set(cse)].sort() });
+  }, [planned, cart]);
+
+  React.useEffect(() => {
+    let active = true;
+    const { irm, cse } = JSON.parse(availKey) as { irm: string[]; cse: string[] };
+    kitRequestService
+      .kitItemAvailabilityFor(job.id, irm, cse)
+      .then((a) => { if (active) setAvail(a); })
+      // Advisory only — losing it must never block the request. The steppers simply go uncapped, and
+      // approve() still re-checks before any stock moves.
+      .catch(() => { if (active) setAvail({ irm: {}, cse: {} }); });
+    return () => { active = false; };
+  }, [availKey, job.id]);
+
+  // Where a row's stock actually is — kept SPLIT rather than merged. The cap needs the total, but the
+  // engineer needs to know how much of it is a collection versus a transfer off a colleague's van;
+  // showing only the sum is what made this modal read "1995 free to request" for an item the
+  // field-stock composer showed as "1992 in stock", with nothing explaining the difference.
+  // `null` = unknown (misc lines, or the lookup failed) — never cap on a guess.
+  const stockFor = (source: string, irmItemId: string | null, cseId: string | null): { warehouse: number; van: number } | null => {
+    if (source === "irm" && irmItemId) {
+      const a = avail.irm[irmItemId];
+      return a ? { warehouse: a.quantityOnHand, van: a.heldByEngineers } : null;
+    }
+    if (source === "customer_stock" && cseId) {
+      // Consignment has no van figure by design — see the note on qty in jobKitRequest.service.
+      const a = avail.cse[cseId];
+      return a ? { warehouse: a.qty, van: 0 } : null;
+    }
+    return null;
+  };
+  const freeFor = (source: string, irmItemId: string | null, cseId: string | null): number | null => {
+    const s = stockFor(source, irmItemId, cseId);
+    return s ? s.warehouse + s.van : null;
+  };
+
   const excludeKeys = React.useMemo(
     () =>
       new Set<string>([
@@ -350,14 +499,35 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
                   </tr>
                 </thead>
                 <tbody>
-                  {planned.map((p) => (
-                    <tr key={p.key} className="border-b border-[var(--border)] last:border-0">
-                      <td className="px-3 py-2 font-semibold text-[var(--ink)]">{p.itemName}</td>
-                      <td className="px-3 py-2">
-                        <input type="number" min={0} step={1} value={p.qty} aria-label={`Extra quantity for ${p.itemName}`} onChange={(e) => setPlannedQty(p.key, Math.max(0, Math.floor(Number(e.target.value) || 0)))} className={`${inputCls} py-1.5 text-right`} />
-                      </td>
-                    </tr>
-                  ))}
+                  {planned.map((p) => {
+                    const free = freeFor(p.source, p.irmItemId, p.customerStockEntryId);
+                    return (
+                      <tr key={p.key} className="border-b border-[var(--border)] last:border-0">
+                        <td className="px-3 py-2">
+                          <span className="font-semibold text-[var(--ink)]">{p.itemName}</span>
+                          <AvailabilityLine stock={stockFor(p.source, p.irmItemId, p.customerStockEntryId)} want={p.qty} />
+                        </td>
+                        <td className="px-3 py-2">
+                          {/* Capped at what could actually be sourced, so the box can't promise more
+                              than exists. Uncapped when free is unknown (misc, or the lookup failed) —
+                              never guess a limit. */}
+                          <input
+                            type="number"
+                            min={0}
+                            max={free ?? undefined}
+                            step={1}
+                            value={p.qty}
+                            aria-label={`Extra quantity for ${p.itemName}`}
+                            onChange={(e) => {
+                              const raw = Math.max(0, Math.floor(Number(e.target.value) || 0));
+                              setPlannedQty(p.key, free == null ? raw : Math.min(raw, free));
+                            }}
+                            className={`${inputCls} py-1.5 text-right`}
+                          />
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -387,9 +557,23 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
                           {c.source === "customer_stock" && <span className="rounded border border-[var(--accent)]/30 bg-[var(--accent-10)] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-[var(--accent)]">Customer stock</span>}
                         </div>
                         {c.code && <div className={c.source === "customer_stock" ? "text-[10px] text-[var(--muted)]" : "font-mono text-[10px] text-[var(--muted)]"}>{c.code}</div>}
+                        <AvailabilityLine stock={stockFor(c.source, c.irmItemId, c.customerStockEntryId)} want={c.qty} />
                       </td>
                       <td className="px-3 py-2">
-                        <input type="number" min={1} step={1} value={c.qty} aria-label={`Quantity for ${c.name}`} onChange={(e) => setCartQty(c.key, Math.max(1, Math.floor(Number(e.target.value) || 1)))} className={`${inputCls} py-1.5`} />
+                        <input
+                          type="number"
+                          min={1}
+                          max={freeFor(c.source, c.irmItemId, c.customerStockEntryId) ?? undefined}
+                          step={1}
+                          value={c.qty}
+                          aria-label={`Quantity for ${c.name}`}
+                          onChange={(e) => {
+                            const raw = Math.max(1, Math.floor(Number(e.target.value) || 1));
+                            const free = freeFor(c.source, c.irmItemId, c.customerStockEntryId);
+                            setCartQty(c.key, free == null ? raw : Math.min(raw, Math.max(1, free)));
+                          }}
+                          className={`${inputCls} py-1.5`}
+                        />
                       </td>
                       <td className="px-3 py-2 text-right">
                         <button type="button" onClick={() => removeCart(c.key)} aria-label="Remove item" className="rounded-lg border border-[var(--border)] p-1.5 text-[var(--muted)] transition-all hover:border-[var(--neg)] hover:text-[var(--neg)]">
@@ -412,6 +596,24 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
         {msg && <Notice msg={msg} />}
       </div>
     </Modal>
+  );
+}
+
+
+// The stock line under a composer row. Silent when availability is unknown (a misc line has none, and
+// a failed lookup must not render a confident "0") — saying nothing beats saying something wrong.
+// Turns negative once the asked-for quantity passes what could be sourced, which is the moment the
+// planner would have had to reject it.
+function AvailabilityLine({ stock, want }: { stock: { warehouse: number; van: number } | null; want: number }) {
+  if (stock == null) return null;
+  const free = stock.warehouse + stock.van;
+  if (free <= 0) return <div className="text-[10px] font-semibold text-[var(--neg)]">None free to request</div>;
+  const short = want > free;
+  return (
+    <div className={`text-[10px] font-semibold ${short ? "text-amber-600" : "text-[var(--muted)]"}`}>
+      {availabilityParts(stock.warehouse, stock.van)}
+      {short ? " — more than that isn’t available" : ""}
+    </div>
   );
 }
 
@@ -479,18 +681,37 @@ function KitItemSearch({ jobId, excludeKeys, onAddItem, onAddCustom }: { jobId: 
           {results.map((it) => {
             const key = it.source === "irm" ? `irm:${it.irmItemId}` : `cse:${it.customerStockEntryId}`;
             const added = excludeKeys.has(key);
+            // An item no warehouse and no van holds can't be approved from any source, so it is
+            // offered but not selectable — see kitItemAvailability. Shown rather than filtered out:
+            // an item that silently vanishes from a search teaches nothing, so the engineer just
+            // retypes; one that says "out of stock" answers the question and sends them to the misc
+            // escape hatch below instead.
+            const avail = kitItemAvailability(it);
+            const locked = added || !avail.requestable;
             // Sub-line: IRM shows its catalogue code (mono); customer stock shows warehouse · qty · serial.
             const sub = it.source === "irm" ? it.code : customerStockLabel(it);
             return (
-              <button key={key} type="button" disabled={added} onClick={() => onAddItem(it)} className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left transition-all ${added ? "cursor-default border-[var(--border)] bg-[var(--surface-2)] opacity-60" : "border-[var(--border)] bg-[var(--surface-2)] hover:border-[var(--accent)]"}`}>
+              <button
+                key={key}
+                type="button"
+                disabled={locked}
+                onClick={() => onAddItem(it)}
+                title={avail.requestable ? undefined : avail.label}
+                className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left transition-all ${locked ? "cursor-not-allowed border-[var(--border)] bg-[var(--surface-2)] opacity-60" : "border-[var(--border)] bg-[var(--surface-2)] hover:border-[var(--accent)]"}`}
+              >
                 <span className="min-w-0">
                   <span className="flex items-center gap-2">
                     <span className="truncate text-sm font-semibold text-[var(--ink)]">{it.name}</span>
                     {it.source === "customer_stock" && <span className="shrink-0 rounded border border-[var(--accent)]/30 bg-[var(--accent-10)] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-[var(--accent)]">Customer stock</span>}
                   </span>
                   {sub && <span className={`block truncate text-[11px] text-[var(--muted)] ${it.source === "irm" ? "font-mono" : ""}`}>{sub}</span>}
+                  {avail.label && (
+                    <span className={`block truncate text-[11px] font-semibold ${avail.requestable ? "text-[var(--muted)]" : "text-[var(--neg)]"}`}>
+                      {avail.label}
+                    </span>
+                  )}
                 </span>
-                {added ? <Check className="h-4 w-4 shrink-0 text-[var(--pos)]" /> : <Plus className="h-4 w-4 shrink-0 text-[var(--accent)]" />}
+                {added ? <Check className="h-4 w-4 shrink-0 text-[var(--pos)]" /> : !avail.requestable ? null : <Plus className="h-4 w-4 shrink-0 text-[var(--accent)]" />}
               </button>
             );
           })}

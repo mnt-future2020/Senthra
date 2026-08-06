@@ -142,6 +142,9 @@ export function findById(id: string): Promise<TransferWithLines | null> {
 export interface KitLineVanSource {
   transferCode: string;
   engineerName: string;
+  /** Snapshot taken when the transfer opened — the schema keeps it precisely "so the recipient can
+   *  call the holder to coordinate handover". Null when the holder had no phone on file. */
+  engineerPhone: string | null;
   quantity: number;
   status: string; // pending | completed | declined | cancelled
 }
@@ -158,13 +161,14 @@ export async function findVanSourcesByKitLines(jobKitLineIds: string[]): Promise
   if (jobKitLineIds.length === 0) return out;
   const lines = await prisma.engineerStockTransferLine.findMany({
     where: { jobKitLineId: { in: jobKitLineIds }, transfer: { status: { in: ["pending", "completed"] }, deletedAt: null } },
-    select: { jobKitLineId: true, quantity: true, transfer: { select: { code: true, fromEngineerName: true, status: true } } },
+    select: { jobKitLineId: true, quantity: true, transfer: { select: { code: true, fromEngineerName: true, fromEngineerPhone: true, status: true } } },
   });
   for (const l of lines) {
     if (!l.jobKitLineId || !l.transfer) continue;
     const entry: KitLineVanSource = {
       transferCode: l.transfer.code,
       engineerName: l.transfer.fromEngineerName,
+      engineerPhone: l.transfer.fromEngineerPhone ?? null,
       quantity: l.quantity,
       status: l.transfer.status,
     };
@@ -680,6 +684,17 @@ export async function declineTx(transferId: string, declinedBy: string, declineR
       data: { status: "declined", declinedBy, declineReason: declineReason ?? null, declinedAt: new Date() },
       include: { lines: true },
     });
+  });
+}
+
+// Every still-open handover raised against ONE job. Read when the job is cancelled: those requests ask
+// another engineer to give stock to work that is no longer happening, so they are withdrawn rather than
+// left on the holder's list forever. Only `pending` — completed transfers have already moved stock and
+// are history, declined/cancelled ones are closed.
+export function findPendingByJob(jobId: string): Promise<TransferWithLines[]> {
+  return prisma.engineerStockTransfer.findMany({
+    where: { jobId, status: "pending", deletedAt: null },
+    include: { lines: true },
   });
 }
 

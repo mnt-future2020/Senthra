@@ -15,6 +15,7 @@ import { Select } from "@/components/ui/Select";
 import type { PagedPositions, StockPosition } from "@/types/stock-position";
 import { OwnerTag, PositionStatusBadge, TableSkeletonRows } from "./hubUi";
 import { formatDate } from "./inventoryStatus";
+import { CopyableCode } from "@/components/ui/CopyableCode";
 
 type Col =
   | "item"
@@ -91,9 +92,9 @@ function cellValue(r: StockPosition, c: Col): React.ReactNode {
       return (
         <div className="min-w-0">
           <div className="truncate font-semibold text-[var(--ink)]">{r.itemName}</div>
-          {r.itemCode ? (
-            <div className="font-mono text-[11px] text-[var(--faint)]">{r.itemCode}</div>
-          ) : null}
+          {/* Copy the CODE, not the name — the row navigates on click, and CopyableCode stops
+              propagation so copying never doubles as opening the item. */}
+          {r.itemCode ? <CopyableCode code={r.itemCode} className="text-[11px] text-[var(--faint)]" /> : null}
         </div>
       );
     case "sku":

@@ -16,7 +16,12 @@ export interface InventoryBalance {
   warehouseName: string;
   warehouseCode: string;
   onHand: number;
+  /** The DB reservation field — currently always 0 (schema: "FUTURE (Goods Out / allocation)").
+   *  Not what the table shows; see plannedDemand. */
   reserved: number;
+  /** Unissued quantity of active jobs' kit lines homed at this warehouse — the real commitment. */
+  plannedDemand: number;
+  /** Free to commit: onHand − reserved − plannedDemand, floored at 0. */
   available: number;
   reorderLevel: number | null;
   unitCostPence: number;

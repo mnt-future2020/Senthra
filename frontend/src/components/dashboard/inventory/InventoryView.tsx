@@ -19,6 +19,7 @@ import { ghostBtn } from "@/components/ui/styles";
 import { ReportDamageModal, type ReportDamageTarget } from "@/components/dashboard/goods-management/ReportDamageModal";
 import { INVENTORY_STATUS_LABELS, InventoryStatusBadge, formatDate, formatMoney } from "./inventoryStatus";
 import type { InventoryStatus } from "@/types/inventory";
+import { CopyableCode } from "@/components/ui/CopyableCode";
 
 const PAGE_SIZE = 20;
 
@@ -29,7 +30,7 @@ function TableSkeleton() {
         <thead>
           <tr className="border-b border-[var(--border)] text-left text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
             <th className="px-4 py-3">Item</th><th className="px-4 py-3">SKU</th><th className="px-4 py-3">Warehouse</th>
-            <th className="px-4 py-3">Category</th><th className="px-4 py-3">On hand</th><th className="px-4 py-3">Reserved</th>
+            <th className="px-4 py-3">Category</th><th className="px-4 py-3">On hand</th><th className="px-4 py-3">Planned</th>
             <th className="px-4 py-3">Available</th><th className="px-4 py-3">Value</th><th className="px-4 py-3">Last movement</th><th className="px-4 py-3">Status</th>
           </tr>
         </thead>
@@ -218,7 +219,7 @@ export function InventoryView({ warehouseId, embedded }: { warehouseId?: string;
                 <thead className="sticky top-0 z-10 bg-[var(--surface)]">
                   <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
                     <th className="px-4 py-3">Item</th><th className="px-4 py-3">SKU</th><th className="px-4 py-3">Warehouse</th>
-                    <th className="px-4 py-3">Category</th><th className="px-4 py-3 text-right">On hand</th><th className="px-4 py-3 text-right">Reserved</th>
+                    <th className="px-4 py-3">Category</th><th className="px-4 py-3 text-right">On hand</th><th className="px-4 py-3 text-right" title="Unissued quantity on active jobs' kit lines here">Planned</th>
                     <th className="px-4 py-3 text-right">Available</th><th className="px-4 py-3 text-right">Value</th><th className="px-4 py-3">Last movement</th><th className="px-4 py-3">Status</th>
                     {canReportDamage && <th className="px-4 py-3"><span className="sr-only">Actions</span></th>}
                   </tr>
@@ -228,13 +229,20 @@ export function InventoryView({ warehouseId, embedded }: { warehouseId?: string;
                     <tr key={r.id} onClick={() => router.push(`/dashboard/inventory/${r.id}`)} className="cursor-pointer border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]">
                       <td className="px-4 py-3">
                         <div className="font-semibold text-[var(--ink)]">{r.itemName}</div>
-                        <div className="font-mono text-[11px] text-[var(--faint)]">{r.itemCode}</div>
+                        {/* The CODE is the copy target here, not the name: this row navigates to the
+                            item on click, so a copy button on the name would swallow the navigation
+                            everyone already expects. CopyableCode stops propagation, so copying the
+                            code doesn't open the item either. */}
+                        <CopyableCode code={r.itemCode} className="text-[11px] text-[var(--faint)]" />
                       </td>
                       <td className="px-4 py-3 text-[var(--muted)]">{r.sku ?? "—"}</td>
                       <td className="px-4 py-3 text-[var(--muted)]">{r.warehouseName}</td>
                       <td className="px-4 py-3 text-[var(--muted)]">{r.categoryName ?? "—"}</td>
                       <td className="px-4 py-3 text-right font-semibold text-[var(--ink)]">{r.onHand}{r.baseUnit ? <span className="ml-1 text-[11px] font-normal text-[var(--faint)]">{r.baseUnit}</span> : null}</td>
-                      <td className="px-4 py-3 text-right text-[var(--muted)]">{r.reserved}</td>
+                      {/* The DB `reserved` field is permanently 0 (schema: "FUTURE"), so a column bound to it
+                        always read 0 while real commitments sat on the Demand board — two screens
+                        disagreeing about one item. This shows the commitment that actually exists. */}
+                      <td className="px-4 py-3 text-right text-[var(--muted)]">{r.plannedDemand}</td>
                       <td className="px-4 py-3 text-right font-semibold text-[var(--ink)]">{r.available}</td>
                       <td className="px-4 py-3 text-right text-[var(--muted)]">{formatMoney(r.value, r.currency)}</td>
                       <td className="px-4 py-3 text-[var(--muted)]">{formatDate(r.lastMovementAt)}</td>

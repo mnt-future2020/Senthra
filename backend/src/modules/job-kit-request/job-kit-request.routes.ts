@@ -17,6 +17,8 @@ router.use(requireAuth);
 router.get("/mine", requirePermission("engineer.jobs.request_kit"), ctrl.listMine);
 // GET /job-kit-requests/item-search?q=&jobId=  (composer search: IRM catalogue + the job's own customer stock; static before /:id)
 router.get("/item-search", requirePermission("engineer.jobs.request_kit"), ctrl.itemSearch);
+// GET /job-kit-requests/item-availability?jobId=&irm=&cse=  (composer steppers; static before /:id)
+router.get("/item-availability", requirePermission("engineer.jobs.request_kit"), ctrl.itemAvailability);
 
 // ---- PM/planner review queue -----------------------------------------------------------------
 // GET /job-kit-requests/pending-count?jobId=

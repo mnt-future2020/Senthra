@@ -8,7 +8,9 @@ const GM_CODE_PREFIX = "GM";
 
 const withRelations = {
   items: { include: { irmItem: { select: { id: true, code: true, name: true, baseUnit: true } } } },
-  job: { select: { id: true, jobNumber: true, name: true, customerId: true, customerName: true } },
+  // `status` rides along for the Overdue tab: a cancelled job's stock is chased differently (it can
+  // only come back or be written off), and the row gave no hint of that.
+  job: { select: { id: true, jobNumber: true, name: true, status: true, customerId: true, customerName: true } },
 } satisfies Prisma.JobStockMovementInclude;
 export type JobStockMovementWithRelations = Prisma.JobStockMovementGetPayload<{ include: typeof withRelations }>;
 
@@ -198,6 +200,22 @@ export async function recomputeGoodsStatus(jobId: string): Promise<void> {
   }
 }
 
+// Cancelling a job is the moment its kit has to start coming back, so move the summary into the state
+// the return/reconcile flows unlock from. Narrow on purpose:
+//   - `not_issued` (or no summary at all) means nothing ever left a warehouse — there is nothing to
+//     return, and inventing a summary would put a clean job on the return queue forever.
+//   - `awaiting_return` is already right.
+//   - `reconciled` is terminal and locked; regressing it would re-open a closed job's ledger.
+// One conditional updateMany, evaluated atomically by Mongo — no read-then-write race with a return
+// posting at the same instant. Returns how many rows moved (0 = nothing to do, not a failure).
+export async function openReturnOnCancel(jobId: string): Promise<number> {
+  const res = await prisma.jobStockSummary.updateMany({
+    where: { jobId, goodsStatus: { in: ["issued", "partially_issued"] } },
+    data: { goodsStatus: "awaiting_return" },
+  });
+  return res.count;
+}
+
 export function findMovementsByJob(jobId: string): Promise<JobStockMovementWithRelations[]> {
   return prisma.jobStockMovement.findMany({ where: { jobId, deletedAt: null }, include: withRelations, orderBy: { createdAt: "asc" } });
 }
@@ -299,9 +317,12 @@ export function findCustomerStockEntryById(entryId: string) {
   });
 }
 // Batch active customer-stock entries (id + quantity) for queue-page "available" tallies — ONE query.
-export function findCustomerStockEntriesByIds(ids: string[]): Promise<{ id: string; quantity: number }[]> {
+// `barcode` rides along on the SAME query the quantities already come from — a customer-stock line is
+// scannable by barcode ONLY (scanLookup has no code/sku arm for it), so this is the one string that
+// works in the scan box. No extra round trip.
+export function findCustomerStockEntriesByIds(ids: string[]): Promise<{ id: string; quantity: number; barcode: string | null }[]> {
   if (ids.length === 0) return Promise.resolve([]);
-  return prisma.customerStockEntry.findMany({ where: { id: { in: ids }, status: "active" }, select: { id: true, quantity: true } });
+  return prisma.customerStockEntry.findMany({ where: { id: { in: ids }, status: "active" }, select: { id: true, quantity: true, barcode: true } });
 }
 export function findCustomerStockEntryQtyTx(tx: Prisma.TransactionClient, entryId: string) {
   return tx.customerStockEntry.findUnique({ where: { id: entryId }, select: { quantity: true } });
@@ -406,14 +427,19 @@ export async function findCustomerEntryMetaByIds(ids: string[]): Promise<Map<str
 }
 // Resolve the warehouse each customer-stock entry is stored in, by id — batched (one query) for the
 // kit-request approve modal, which shows the pickup location per customer_stock line read-only.
-export async function findCustomerEntryWarehousesByIds(ids: string[]): Promise<Map<string, { name: string | null; code: string | null }>> {
-  const out = new Map<string, { name: string | null; code: string | null }>();
+export async function findCustomerEntryWarehousesByIds(
+  ids: string[],
+): Promise<Map<string, { name: string | null; code: string | null; quantity: number }>> {
+  const out = new Map<string, { name: string | null; code: string | null; quantity: number }>();
   if (!ids.length) return out;
   const rows = await prisma.customerStockEntry.findMany({
     where: { id: { in: ids } },
-    select: { id: true, warehouse: { select: { name: true, code: true } } },
+    // `quantity` rides along so a reviewer sees how much the entry actually holds, the same way an
+    // IRM line shows its warehouse's free stock. Without it consignment was the one source you could
+    // over-approve against without ever seeing the number you were exceeding.
+    select: { id: true, quantity: true, warehouse: { select: { name: true, code: true } } },
   });
-  for (const r of rows) out.set(r.id, { name: r.warehouse?.name ?? null, code: r.warehouse?.code ?? null });
+  for (const r of rows) out.set(r.id, { name: r.warehouse?.name ?? null, code: r.warehouse?.code ?? null, quantity: r.quantity });
   return out;
 }
 

@@ -28,6 +28,17 @@ export function Toasts() {
             <div className="flex-1">
               <p className="text-xs font-bold leading-normal">{t.msg}</p>
             </div>
+            {/* A repeat merges into the toast already on screen rather than stacking another (see
+                pushToast). The tally is what stops that merge from looking like the later clicks did
+                nothing — without it, copying the same code twice shows one unchanged toast. */}
+            {t.count > 1 && (
+              <span
+                title={`Repeated ${t.count} times`}
+                className="shrink-0 rounded-full bg-white/15 px-1.5 py-0.5 text-[10px] font-extrabold tabular-nums dark:bg-black/10"
+              >
+                ×{t.count}
+              </span>
+            )}
             <button
               onClick={() => d.dismissToast(t.id)}
               className="p-0.5 text-gray-400 hover:text-white dark:text-gray-500 dark:hover:text-black transition-colors shrink-0"

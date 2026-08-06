@@ -159,6 +159,15 @@ export async function jobCommittedByEngineer(engineerId: string): Promise<Map<st
 
 // Current goods-lifecycle status for a job ("not_issued" if no stock has moved yet). The job module
 // uses this to lock the kit list once stock has been issued (changing it would orphan movements).
+// Cancelling a job with stock still out. Called by jobs' cancelJob, best-effort on its side: a failure
+// here must not cost the planner their cancel, and the job stays on the overdue chase list either way
+// (findGoodsActiveJobIds keeps cancelled), so nothing goes unseen. Moving to `awaiting_return` is what
+// unlocks postReturn's normal scan-in and, once the engineer has handed back what they can,
+// closeReconcile's write-off for anything that never comes home.
+export async function openReturnsOnCancel(jobId: string): Promise<void> {
+  await goodsManagementRepo.openReturnOnCancel(jobId);
+}
+
 export async function getGoodsStatus(jobId: string): Promise<string> {
   const summary = await goodsManagementRepo.getSummary(jobId);
   return summary?.goodsStatus ?? "not_issued";
@@ -272,6 +281,30 @@ async function findAwayReturnKitLine<T extends { id: string; warehouseId: string
   return best;
 }
 
+// Units of a kit line a PENDING van transfer has already claimed.
+//
+// A kit line stores a planned quantity and one warehouse; the split ("1 from stock, 2 off a
+// colleague's van") lives on the kit REQUEST, not on the line. So `qty - already` — the cap the scan
+// used — let a warehouse issue the whole line while a transfer for part of it was in flight, and the
+// engineer ended up holding more than the line ever planned.
+//
+// PENDING only. A completed transfer already writes a movement attributed to the kit line, so it sits
+// inside `already` and subtracting it again would double-count. A declined or cancelled one leaves
+// this set entirely, which correctly returns the capacity to the warehouse.
+async function pendingVanQtyByKitLine(kitLineIds: string[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  if (kitLineIds.length === 0) return out;
+  // The empty fallback needs the same type as the real result, or `.catch` widens it to Map<any, any>
+  // and the reduce below silently loses its typing.
+  type VanSources = Awaited<ReturnType<typeof transferRepo.findVanSourcesByKitLines>>;
+  const sources: VanSources = await transferRepo.findVanSourcesByKitLines(kitLineIds).catch(() => new Map() as VanSources);
+  for (const [kitLineId, list] of sources) {
+    const pending = list.filter((v) => v.status === "pending").reduce((n, v) => n + v.quantity, 0);
+    if (pending > 0) out.set(kitLineId, pending);
+  }
+  return out;
+}
+
 export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Promise<ScanMatch> {
   const job = await jobRepo.findById(input.jobId);
   if (!job) throw notFound("Job not found.");
@@ -323,7 +356,9 @@ export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Pr
     const held = Math.min(awayCap ?? lineOutstanding, globalHeld);
     return {
       source: "irm", irmItemId: irmItem.id, jobKitLineId: kit.id, itemName: irmItem.name, uom: irmItem.baseUnit,
-      plannedQty: kit.qty, alreadyIssued: already, remainingIssuable: kit.qty - already,
+      plannedQty: kit.qty, alreadyIssued: already,
+      // Minus what a pending van transfer is already bringing — see pendingVanQtyByKitLine.
+      remainingIssuable: Math.max(0, kit.qty - already - ((await pendingVanQtyByKitLine([kit.id])).get(kit.id) ?? 0)),
       heldByEngineer: held, available,
     };
   }
@@ -349,7 +384,9 @@ export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Pr
     const held = Math.min(lineOutstanding, globalHeld);
     return {
       source: "customer", customerStockEntryId: entry.id, jobKitLineId: kit.id, itemName: entry.itemName, uom: entry.uom,
-      plannedQty: kit.qty, alreadyIssued: already, remainingIssuable: kit.qty - already,
+      plannedQty: kit.qty, alreadyIssued: already,
+      // Minus what a pending van transfer is already bringing — see pendingVanQtyByKitLine.
+      remainingIssuable: Math.max(0, kit.qty - already - ((await pendingVanQtyByKitLine([kit.id])).get(kit.id) ?? 0)),
       heldByEngineer: held, available: entry.quantity,
     };
   }
@@ -446,8 +483,17 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
     const kit = (job.kitLines ?? []).find((k) => k.id === line.jobKitLineId);
     if (!kit) throw badRequest("Kit line not found on this job.");
     const already = issuedForKitLine(movements, kit.id);
-    if (line.qty > kit.qty - already) {
-      throw conflict(`${kit.itemName}: only ${kit.qty - already} remaining on the kit list.`);
+    // The authoritative cap. Reserves what a pending van transfer is bringing, so a warehouse can't
+    // hand over units a colleague is already committed to — which would leave the engineer holding
+    // more than the line plans for, with nothing downstream objecting.
+    const vanReserved = (await pendingVanQtyByKitLine([kit.id])).get(kit.id) ?? 0;
+    const issuable = Math.max(0, kit.qty - already - vanReserved);
+    if (line.qty > issuable) {
+      throw conflict(
+        vanReserved > 0
+          ? `${kit.itemName}: only ${issuable} left to issue here — ${vanReserved} of the ${kit.qty} planned are coming from another engineer's van.`
+          : `${kit.itemName}: only ${issuable} remaining on the kit list.`,
+      );
     }
     if (line.source === "irm") {
       const irm = await irmService.requireActiveIrmItem(line.irmItemId!);
@@ -602,6 +648,12 @@ export interface QueueKitLine {
   irmItemId: string | null;
   customerStockEntryId: string | null;
   itemName: string;
+  /**
+   * The string that resolves this line in the goods scan box, or null when the line isn't scannable
+   * (misc, or a customer entry with no barcode). Lets the queue offer copy-to-clipboard so a manager
+   * can paste straight into an issue/return scan instead of hunting the item up. See `scanCodeFor`.
+   */
+  scanCode: string | null;
   warehouseId: string | null;
   warehouseName: string | null;
   warehouseCode: string | null;
@@ -773,6 +825,67 @@ export interface QueueParams {
 const DEFAULT_QUEUE_PAGE_SIZE = 20;
 const MAX_QUEUE_PAGE_SIZE = 100;
 
+/**
+ * The exact string that resolves THIS kit line in the goods scan box, or null if the line can't be
+ * scanned at all.
+ *
+ * Mirrors `scanLookup`, and must keep mirroring it — a value this returns that the scan then rejects
+ * is worse than offering nothing, because the warehouse would paste it, get "not on this job's kit
+ * list", and distrust the feature:
+ *   - irm            → its own `code`. Always present (`code String @unique`, auto-allocated), always
+ *                      accepted by the scan, and the ONLY identifier a manager can see: this app
+ *                      renders its Code128 label from `code` (generateBarcode), and the queue row, the
+ *                      item page and the kit list all display it.
+ *   - customer_stock → matched on BARCODE ONLY. There is no code/sku arm for it, so an entry with no
+ *                      barcode (a draft, or one never printed) genuinely has nothing scannable.
+ *   - misc           → free text with no source record. Never scannable.
+ *
+ * Deliberately does NOT consider `IrmItem.barcode`. That field is the manufacturer's EAN off the
+ * supplier's carton — a different physical label, shown nowhere in this app, and in practice always
+ * null (the IRM form has no input for it and irm.validation accepts no such field). Falling back to it
+ * could never fire either, since `code` cannot be absent. It would be a branch that never runs handing
+ * over a value nobody is looking at.
+ *
+ * `scanLookup` keeps its own `barcode` arm on purpose — that one lets a physical gun resolve a
+ * supplier's EAN if the data ever holds one. Reading a label and choosing what to copy are different
+ * questions; narrowing this one does not narrow that one.
+ */
+export function scanCodeFor(
+  line: { lineType: string; customerStockEntryId: string | null },
+  irmItem: { code: string } | null | undefined,
+  customerBarcodes: Map<string, string | null>,
+): string | null {
+  if (line.lineType === "irm") return irmItem?.code?.trim() || null;
+  if (line.lineType === "customer_stock" && line.customerStockEntryId) {
+    return customerBarcodes.get(line.customerStockEntryId)?.trim() || null;
+  }
+  return null;
+}
+
+/**
+ * The kit line's item name with its own code prefix removed — "IRM-0009 — Fibre Cable" → "Fibre Cable".
+ *
+ * The stored `itemName` is a SNAPSHOT of what the job form's picker displayed, and that picker labels
+ * options `${code} — ${name}` so a planner can tell two similar items apart. Once the goods queue can
+ * copy the code on click, repeating it inside the name is just noise in an already-wide column.
+ *
+ * Anchored to the ITEM'S ACTUAL CODE, never a dash split: item names legitimately contain em dashes
+ * ("Single-Mode Fibre Optic Cable — 12-Core G.652D"), so splitting on the separator would amputate
+ * half the product name. Anything that doesn't start with this exact code is returned untouched.
+ *
+ * Display only — the stored snapshot stays as it is. It is deliberately history-safe (it must keep
+ * reading the way it did when the job was raised, even after the item is renamed), so it is not the
+ * thing to rewrite.
+ */
+export function stripCodePrefix(itemName: string, code: string | null | undefined): string {
+  if (!code) return itemName;
+  for (const sep of [" — ", " – ", " - "]) {
+    const prefix = `${code}${sep}`;
+    if (itemName.startsWith(prefix)) return itemName.slice(prefix.length).trim() || itemName;
+  }
+  return itemName;
+}
+
 // Assemble one QueueKitLine from pre-batched lookups: warehouse availability, the movement split
 // (issued/used/returned) and the engineer's real holding. Shared by the queue list and the single-job
 // detail so the two views can never drift on how "available"/"held"/the split are computed (the bug the
@@ -788,10 +901,14 @@ function buildKitLineRow(
     warehouseName: string | null;
     warehouseCode: string | null;
     qty: number;
+    // Present on the Prisma row via the job include; declared optional so the single-job detail and
+    // the queue can both pass their rows without a cast.
+    irmItem?: { code: string } | null;
   },
   movements: Awaited<ReturnType<typeof goodsManagementRepo.findMovementsByJob>>,
   balByKey: Map<string, Awaited<ReturnType<typeof inventoryRepo.findBalancesByItemsAndWarehouses>>[number]>,
   cseQty: Map<string, number>,
+  cseBarcode: Map<string, string | null>,
   engineerHeld: number,
   vanQty: number, // qty on this line handed over from a van (completed transfers only)
 ): QueueKitLine {
@@ -808,7 +925,8 @@ function buildKitLineRow(
     lineType: kl.lineType,
     irmItemId: kl.irmItemId,
     customerStockEntryId: kl.customerStockEntryId,
-    itemName: kl.itemName,
+    itemName: stripCodePrefix(kl.itemName, kl.irmItem?.code),
+    scanCode: scanCodeFor(kl, kl.irmItem, cseBarcode),
     warehouseId: kl.warehouseId,
     warehouseName: kl.warehouseName,
     warehouseCode: kl.warehouseCode,
@@ -818,7 +936,14 @@ function buildKitLineRow(
     returnedQty: split.returned,
     engineerHeld,
     available,
-    vanReturnableQty: vanReturnableAwayFromHome(movements, kl.id, kl.warehouseId, vanQty),
+    // IRM ONLY. Van-sourced IRM owes no warehouse, so any may receive it — but customer stock has no
+    // per-warehouse balance: a CustomerStockEntry IS one location, and a return credits that entry, so
+    // there is nowhere for an away-from-home consignment return to land without the record claiming
+    // the customer's stock sits at a warehouse that doesn't physically have it. Every path that moves
+    // stock already agrees (scanLookup + postReturn do away-returns for irm only, and listQueue's
+    // job-level widening is irm-only); this row was the one place that said otherwise, so the queue
+    // rendered "Any warehouse ×1" on a consignment line and the scan then refused it.
+    vanReturnableQty: kl.lineType === "irm" ? vanReturnableAwayFromHome(movements, kl.id, kl.warehouseId, vanQty) : 0,
     vanIssuedQty: Math.min(vanQty, split.issued), // clamp: a transfer can outlive a since-reduced line
   };
 }
@@ -888,7 +1013,12 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
     return true;
   };
 
-  const byStatus = jobs.filter((j) => matchesStatus(goodsStatusOf(j.id)) && inActivityWindow(j.id) && inDueWindow(j));
+  // A cancelled job belongs here ONLY while its kit is still out — that is the whole reason the
+  // candidate query now reaches past `completed`. One that never had stock issued has nothing to scan
+  // back, so it would be permanent noise on every warehouse's tab. (Issuing stays blocked either way:
+  // postIssue accepts accepted/in_progress only.)
+  const isActionable = (j: (typeof jobs)[number]) => j.status !== "cancelled" || goodsStatusOf(j.id) !== "not_issued";
+  const byStatus = jobs.filter((j) => isActionable(j) && matchesStatus(goodsStatusOf(j.id)) && inActivityWindow(j.id) && inDueWindow(j));
 
   // 2b) Drop jobs the DB matched ONLY through the warehouse-blind misc arm of the kit-line filter
   // (see jobRepo.findActiveForGoodsManagement) once that misc work is finished. A misc line carries
@@ -974,7 +1104,10 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
   const balByKey = new Map(
     (await inventoryRepo.findBalancesByItemsAndWarehouses([...irmItemIds], [...whIds])).map((b) => [`${b.irmItemId}|${b.warehouseId}`, b]),
   );
-  const cseQty = new Map((await goodsManagementRepo.findCustomerStockEntriesByIds([...cseIds])).map((e) => [e.id, e.quantity]));
+  // One query, two lookups: quantity for the Available column, barcode for the scan-code chip.
+  const cseRows = await goodsManagementRepo.findCustomerStockEntriesByIds([...cseIds]);
+  const cseQty = new Map(cseRows.map((e) => [e.id, e.quantity]));
+  const cseBarcode = new Map(cseRows.map((e) => [e.id, e.barcode]));
 
   // Engineer's REAL holding per item (same balance the return scan checks) — keyed by
   // `${engineerId}|${itemId}`. The holding is global per item (shared across jobs/warehouses), so this
@@ -997,7 +1130,7 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
       const itemId = kl.irmItemId ?? kl.customerStockEntryId;
       return itemId ? engHeld.get(`${job.assignedEngineerId}|${itemId}`) ?? 0 : 0;
     };
-    const kitLines: QueueKitLine[] = (job.kitLines ?? []).map((kl) => buildKitLineRow(kl, movements, balByKey, cseQty, heldOf(kl), vanQtyByLine.get(kl.id) ?? 0));
+    const kitLines: QueueKitLine[] = (job.kitLines ?? []).map((kl) => buildKitLineRow(kl, movements, balByKey, cseQty, cseBarcode, heldOf(kl), vanQtyByLine.get(kl.id) ?? 0));
     return {
       jobId: job.id,
       jobNumber: job.jobNumber,
@@ -1050,7 +1183,10 @@ export async function getJobGoods(jobId: string, actor?: AuditActor): Promise<Jo
   const balByKey = new Map(
     (await inventoryRepo.findBalancesByItemsAndWarehouses([...irmItemIds], [...whIds])).map((b) => [`${b.irmItemId}|${b.warehouseId}`, b]),
   );
-  const cseQty = new Map((await goodsManagementRepo.findCustomerStockEntriesByIds([...cseIds])).map((e) => [e.id, e.quantity]));
+  // One query, two lookups: quantity for the Available column, barcode for the scan-code chip.
+  const cseRows = await goodsManagementRepo.findCustomerStockEntriesByIds([...cseIds]);
+  const cseQty = new Map(cseRows.map((e) => [e.id, e.quantity]));
+  const cseBarcode = new Map(cseRows.map((e) => [e.id, e.barcode]));
   // Engineer's REAL holding per item (global per item) — batched once for the job's single engineer.
   const engHeld = new Map<string, number>();
   if (job.assignedEngineerId) {
@@ -1064,7 +1200,7 @@ export async function getJobGoods(jobId: string, actor?: AuditActor): Promise<Jo
     return itemId ? engHeld.get(itemId) ?? 0 : 0;
   };
   const vanQtyByLine = await completedVanQtyByKitLine((job.kitLines ?? []).map((k) => k.id));
-  const lines: QueueKitLine[] = (job.kitLines ?? []).map((kl) => buildKitLineRow(kl, movements, balByKey, cseQty, heldOf(kl), vanQtyByLine.get(kl.id) ?? 0));
+  const lines: QueueKitLine[] = (job.kitLines ?? []).map((kl) => buildKitLineRow(kl, movements, balByKey, cseQty, cseBarcode, heldOf(kl), vanQtyByLine.get(kl.id) ?? 0));
 
   return {
     job: {
@@ -1089,7 +1225,12 @@ export async function getJobGoods(jobId: string, actor?: AuditActor): Promise<Jo
 export async function postReturn(jobId: string, input: PostMovementInput, actor?: AuditActor): Promise<PublicMovement> {
   if (input.direction !== "return") throw badRequest("Wrong direction for return.");
   const job = await loadJobOrThrow(jobId);
-  if (!["accepted", "in_progress", "completed"].includes(job.status)) {
+  // `cancelled` belongs here. It is reachable from accepted/in_progress, so the engineer is usually
+  // still holding the kit when it lands — and a cancelled job can never become `completed`, so it can
+  // never reach awaiting_return through the engineer, which is the only door closeReconcile opens
+  // from. Leaving it out made a cancelled job's stock unreturnable AND unwriteable-off: it sat on the
+  // overdue chase list permanently with no action that could clear it. See openReturnsOnCancel.
+  if (!["accepted", "in_progress", "completed", "cancelled"].includes(job.status)) {
     throw conflict("Stock can only be returned for an accepted/in-progress/completed job.");
   }
   const returnSummary = await goodsManagementRepo.getSummary(job.id);
@@ -1789,6 +1930,9 @@ export interface OverdueRow {
    *  selected the row (a browser clock running slow would otherwise show 13 days for a 14-day row). */
   daysOut: number;
   goodsStatus: string;
+  /** The JOB's own status. A cancelled job on this list can only be returned or written off — the row
+   *  showed no sign of it, so the state was visible inside the scan panel and nowhere else. */
+  status: string;
   lines: { source: string; irmItemId: string | null; customerStockEntryId: string | null; itemName: string; qty: number }[];
 }
 
@@ -1914,6 +2058,7 @@ async function listOverdueWithin(days: number, actor?: AuditActor, opts: Overdue
     issuedAt: m.createdAt,
     daysOut: Math.max(0, Math.floor((now - m.createdAt.getTime()) / 86_400_000)),
     goodsStatus: goodsStatusByJob.get(m.jobId) ?? "issued",
+    status: m.job?.status ?? "",
     lines: m.items.map((l) => ({
       source: l.source,
       irmItemId: l.irmItemId,
@@ -2045,14 +2190,40 @@ export async function closeReconcile(
     throw conflict("This job is already reconciled and locked.");
   }
 
+  const movements = await goodsManagementRepo.findMovementsByJob(job.id);
+
   // Guard: reconcile ONLY once the engineer has completed the job (goodsStatus "awaiting_return").
   // Before that the stock is still in use on site — reconciling would write off live stock as "lost"
   // and lock the job. Issued / partially_issued jobs must wait for the engineer to declare usage.
+  //
+  // …with ONE exception, which is the whole reason the Overdue tab exists: an engineer who has simply
+  // gone quiet never presses Complete, so their job never reaches awaiting_return, so the tab's
+  // "Write off (lost)" was locked in precisely the situation it was built for. A job whose stock has
+  // been out longer than the configured window is past waiting for that declaration.
+  //
+  // TWO independent conditions, and both must hold:
+  //
+  //  1. `input.fromOverdue` — the request came from the Overdue tab. This screen is a deliberate, rare
+  //     manager action; the warehouse SCAN PANEL posts to this same endpoint dozens of times a day, and
+  //     without the marker it inherited the relaxation and could reconcile (and write off) a job the
+  //     engineer is still working, locking it against any further issue or return.
+  //  2. The stock really is past the window. Read from Settings, NEVER from the caller — the same rule,
+  //     read the same way, that selected the row on the Overdue tab in the first place (see
+  //     listOverdueWithin). So the marker in (1) is routing, not authority: it cannot close a job whose
+  //     stock went out yesterday. `firstIssueAt` comes from the job's own posted issue movements — no
+  //     issue at all means nothing is out, and no amount of age makes that writeable-off.
   if (existingSummary?.goodsStatus !== "awaiting_return") {
-    throw conflict("This job can only be reconciled after the engineer completes it and declares what was used.");
+    if (!input.fromOverdue) {
+      throw conflict("This job can only be reconciled after the engineer completes it and declares what was used.");
+    }
+    const firstIssueAt = movements
+      .filter((m) => m.status === "posted" && m.direction === "issue")
+      .reduce<Date | null>((oldest, m) => (!oldest || m.createdAt < oldest ? m.createdAt : oldest), null);
+    const cutoff = new Date(Date.now() - (await getOverdueAfterDays()) * 24 * 60 * 60 * 1000);
+    if (!firstIssueAt || firstIssueAt >= cutoff) {
+      throw conflict("This job can only be reconciled after the engineer completes it and declares what was used.");
+    }
   }
-
-  const movements = await goodsManagementRepo.findMovementsByJob(job.id);
   const tallies = computeTallies(movements, job.kitLines ?? []);
 
   // "Unaccounted" must reflect what the engineer ACTUALLY still holds — not raw per-line issued −

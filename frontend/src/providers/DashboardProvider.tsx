@@ -8,8 +8,11 @@ import {
 } from "@/lib/appearance";
 import { useBranding } from "@/hooks/useBranding";
 
-type ToastType = "success" | "info" | "alert";
-type Toast = { id: string; msg: string; type: ToastType };
+import { pushToastStack, type Toast, type ToastType } from "@/lib/toastStack";
+
+// How long a toast survives. The STACK rules (merge a repeat, cap the total) live in lib/toastStack,
+// which is pure and therefore testable — this suite has no DOM renderer.
+const TOAST_MS = 4000;
 
 export type DashboardContextValue = {
   // Appearance (synced to CSS variables). The accent follows the global brand
@@ -48,22 +51,62 @@ export function DashboardProvider({ children }: { children: React.ReactNode }) {
   const [radius, setRadius] = React.useState(() => readAppearanceCookie().radius);
 
   const [toasts, setToasts] = React.useState<Toast[]>([]);
+  // `toastsRef` mirrors `toasts` and is the value pushToast READS. Deciding "is this message already
+  // on screen?" needs the current list, but doing it inside a setState updater would put a setTimeout
+  // in there — updaters must be pure, and StrictMode runs them twice, which would double every timer.
+  // The ref is written synchronously by `commit`, so two pushes in one tick still see each other.
+  const toastsRef = React.useRef<Toast[]>([]);
+  const toastTimers = React.useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const toastSeq = React.useRef(0);
+
+  React.useEffect(() => {
+    const timers = toastTimers.current;
+    return () => { for (const t of timers.values()) clearTimeout(t); };
+  }, []);
+
+  const commitToasts = React.useCallback((next: Toast[]) => {
+    toastsRef.current = next;
+    setToasts(next);
+  }, []);
+
+  const cancelToastTimer = React.useCallback((id: string) => {
+    clearTimeout(toastTimers.current.get(id));
+    toastTimers.current.delete(id);
+  }, []);
+
+  // (Re)start a toast's dismissal clock. Restarting matters for a repeat: the merged toast should
+  // live from the LATEST occurrence, not disappear on the first one's timer.
+  const scheduleToastDismiss = React.useCallback((id: string) => {
+    cancelToastTimer(id);
+    toastTimers.current.set(
+      id,
+      setTimeout(() => {
+        toastTimers.current.delete(id);
+        commitToasts(toastsRef.current.filter((t) => t.id !== id));
+      }, TOAST_MS),
+    );
+  }, [cancelToastTimer, commitToasts]);
 
   const pushToast = React.useCallback(
     (msg: string, type: ToastType = "success") => {
-      const id = Math.random().toString(36).slice(2, 7);
-      setToasts((prev) => [...prev, { id, msg, type }]);
-      setTimeout(
-        () => setToasts((prev) => prev.filter((t) => t.id !== id)),
-        4000,
+      toastSeq.current += 1;
+      const { toasts: next, keepAlive, dropped } = pushToastStack(
+        toastsRef.current,
+        msg,
+        type,
+        `t${toastSeq.current}`,
       );
+      for (const id of dropped) cancelToastTimer(id);
+      scheduleToastDismiss(keepAlive);
+      commitToasts(next);
     },
-    [],
+    [cancelToastTimer, commitToasts, scheduleToastDismiss],
   );
 
   const dismissToast = React.useCallback((id: string) => {
-    setToasts((prev) => prev.filter((t) => t.id !== id));
-  }, []);
+    cancelToastTimer(id);
+    commitToasts(toastsRef.current.filter((t) => t.id !== id));
+  }, [cancelToastTimer, commitToasts]);
 
   // Keep CSS variables in sync, and persist the personal prefs (theme/density/
   // radius) to the cookie so they survive reloads and SSR correctly next time.

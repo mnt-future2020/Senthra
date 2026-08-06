@@ -14,6 +14,8 @@ import { ghostBtn, primaryBtn } from "@/components/ui/styles";
 import { fmtDate, fmtDateTime, JobStatusChip, PortalHeader, TableCard } from "@/components/dashboard/portal/portalUi";
 import { GoodsStatusChip } from "@/components/dashboard/jobs/jobStatus";
 import { crossWarehouseReturnNote, kitLineSourceSplit } from "@/components/dashboard/jobs/jobStatus";
+import { outstandingKit } from "@/components/dashboard/jobs/outstandingKit";
+import { Notice } from "@/components/ui/Notice";
 import { FormError, FormPageSkeleton } from "@/components/ui/FormScaffold";
 import type { Job, JobKitLine, JobKitWarehouse } from "@/types/job";
 import { WarehousePickupModal } from "./WarehousePickupModal";
@@ -462,6 +464,23 @@ export function EngineerJobDetail({ id }: { id: string }) {
       </div>
 
       <Card title="Kit list">
+        {/* The engineer is the person physically holding the stock, so a cancelled job's one remaining
+            instruction belongs here, above the kit. Non-blocking and only while something is actually
+            out — see outstandingKitWarning for the office-side twin. */}
+        {job.status === "cancelled" &&
+          (() => {
+            const { units } = outstandingKit(job.kitLines);
+            if (units === 0) return null;
+            return (
+              // Bare — Notice already draws the amber panel; a bordered wrapper nested a second box.
+              <div className="mb-3">
+                <Notice
+                  msg={{ type: "warn", text: `This job was cancelled. Return the ${units} unit${units === 1 ? "" : "s"} you're still holding to the warehouse — nothing more is to be collected.` }}
+                  size="sm"
+                />
+              </div>
+            );
+          })()}
         {job.kitLines.length === 0 ? (
           <p className="text-sm text-[var(--muted)]">No kit lines on this job.</p>
         ) : (
@@ -485,32 +504,56 @@ export function EngineerJobDetail({ id }: { id: string }) {
                     // engineer sees each with its quantity — how many to collect vs how many a
                     // colleague is handing over — then where the leftovers go back.
                     (() => {
-                      const s = kitLineSourceSplit(line);
+                      const s = kitLineSourceSplit(line, { jobCancelled: job.status === "cancelled" });
                       return (
+                        // Sources wrap on ONE line instead of stacking: a split row was three stacked
+                        // lines (warehouse, van, return note) and stood twice as tall as its
+                        // neighbours. Wrapping only kicks in when there genuinely are several
+                        // holders, which is the case that has earned the height.
                         <div className="flex flex-col items-start gap-0.5">
-                          {s.warehouseQty > 0 && line.warehouse && (
+                          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                          {/* warehouseSHARE, not warehouseQty: the latter counts only units already
+                              issued, so on a line the planner has just split it is 0 and the whole
+                              warehouse row vanished — the engineer saw the van hand-over and was
+                              never told where to collect the rest. */}
+                          {s.warehouseShare > 0 && line.warehouse && (
                             <button type="button" onClick={() => setWhModal(line.warehouse)} className="inline-flex max-w-[200px] items-center gap-1 font-semibold text-[var(--accent)] hover:underline" title="View pickup address">
                               <MapPin className="h-3.5 w-3.5 shrink-0" />
                               <span className="truncate">{line.warehouse.name}</span>
-                              <span className="font-normal text-[var(--faint)]">×{s.warehouseQty}</span>
+                              <span className="font-normal text-[var(--faint)]">×{s.warehouseShare}</span>
+                              {s.outstandingWarehouseQty > 0 && s.warehouseQty > 0 && (
+                                <span className="text-[10px] font-bold text-amber-600">{s.outstandingWarehouseQty} to collect</span>
+                              )}
                             </button>
                           )}
                           {line.vanSources.map((v) => (
                             <span key={v.transferCode} className="inline-flex items-center gap-1 font-semibold text-[var(--ink)]" title={`${v.transferCode} — ${v.quantity} from ${v.engineerName}`}>
                               <Truck className="h-3.5 w-3.5 shrink-0 text-[var(--muted)]" />
-                              <span className="truncate">{v.engineerName}</span>
+                              {/* Tappable, because the handover is arranged person-to-person and a kit
+                                  list can name two or three different holders. The request-level
+                                  "View transfer & contact" link only ever points at one of them, so
+                                  the engineer had to guess which. The phone is already snapshotted on
+                                  the transfer for exactly this. */}
+                              {v.engineerPhone ? (
+                                <a href={`tel:${v.engineerPhone}`} className="truncate text-[var(--accent)] hover:underline" title={`Call ${v.engineerName} on ${v.engineerPhone}`}>
+                                  {v.engineerName}
+                                </a>
+                              ) : (
+                                <span className="truncate">{v.engineerName}</span>
+                              )}
                               <span className="font-normal text-[var(--faint)]">×{v.quantity}</span>
                               {v.status === "pending" && <span className="text-[10px] font-bold text-amber-600">awaiting handover</span>}
                             </span>
                           ))}
+                          </div>
                           {/* Van stock never left a warehouse, so it can be handed in anywhere;
                               warehouse-issued units owe their own site. A merged line has both, so
                               spell each part out — the server enforces exactly this on return. */}
                           <span className="text-[10px] text-[var(--faint)]">
                             {s.vanOnly
                               ? "Return at any warehouse"
-                              : s.vanQty > 0 && s.warehouseQty > 0 && line.warehouseName
-                                ? `Return ×${s.warehouseQty} at ${line.warehouseName}, ×${s.vanQty} at any warehouse`
+                              : s.vanReturnableQty > 0 && s.warehouseQty > 0 && line.warehouseName
+                                ? `Return ×${s.warehouseQty} at ${line.warehouseName}, ×${s.vanReturnableQty} at any warehouse`
                                 : line.warehouseName
                                   ? `Return at ${line.warehouseName}`
                                   : ""}

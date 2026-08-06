@@ -1097,9 +1097,25 @@ export async function searchRequestableItems(q: string): Promise<WarehouseItemOp
   const rows = (await irmRepo.findMany({ search: term, status: "active" }, 0, 20, "name")).filter((r) => !r.trackSerialNumbers && !r.trackBatchNumbers);
   if (rows.length === 0) return [];
   const warehouses = await warehouseRepo.findMany({ status: "active" }, 0, 200);
-  const balances = await inventoryRepo.findBalancesByItemsAndWarehouses(rows.map((r) => r.id), warehouses.map((w) => w.id));
+  const [balances, demand] = await Promise.all([
+    inventoryRepo.findBalancesByItemsAndWarehouses(rows.map((r) => r.id), warehouses.map((w) => w.id)),
+    // Same arithmetic as availability() below, and for the same reason. This search decides which
+    // items are SELECTABLE, so on raw on-hand it would pass an item the very next screen then showed
+    // as "0 free" — the gate and the guidance disagreeing about the same stock. Netted per warehouse
+    // and floored there, so one over-committed site can't wipe out stock standing at another.
+    getOpenDemand(),
+  ]);
+  const demandByKey = new Map<string, number>();
+  for (const d of demand.values()) {
+    if (!d.irmItemId || !d.warehouseId) continue;
+    const k = `${d.warehouseId}:${d.irmItemId}`;
+    demandByKey.set(k, (demandByKey.get(k) ?? 0) + d.demand);
+  }
   const totalByItem = new Map<string, number>();
-  for (const b of balances) totalByItem.set(b.irmItemId, (totalByItem.get(b.irmItemId) ?? 0) + b.quantityOnHand);
+  for (const b of balances) {
+    const free = Math.max(0, b.quantityOnHand - (demandByKey.get(`${b.warehouseId}:${b.irmItemId}`) ?? 0));
+    totalByItem.set(b.irmItemId, (totalByItem.get(b.irmItemId) ?? 0) + free);
+  }
   return rows.map((r) => ({
     irmItemId: r.id,
     code: r.code,
@@ -1135,10 +1151,22 @@ export async function searchWarehouseItems(actor: AuditActor, warehouseId: strin
   if (term.length < 1) {
     // No query yet → BROWSE list: everything this warehouse physically holds (on-hand > 0), so the
     // counter can pick straight off the shelf without typing. Active + non-serial/batch, name-sorted, capped.
-    const balances = await inventoryRepo.findInStockBalancesByWarehouse(warehouseId, WALK_IN_BROWSE_LIMIT);
+    const [balances, demand] = await Promise.all([
+      inventoryRepo.findInStockBalancesByWarehouse(warehouseId, WALK_IN_BROWSE_LIMIT),
+      // Same netting as the typed search below — the browse list is the same shelf answering the same
+      // question, and if only one of them subtracted demand then typing a single letter would change
+      // what the counter believes it can hand out.
+      getOpenDemand(),
+    ]);
+    const browseDemand = new Map<string, number>();
+    for (const d of demand.values()) {
+      if (!d.irmItemId || d.warehouseId !== warehouseId) continue;
+      browseDemand.set(d.irmItemId, (browseDemand.get(d.irmItemId) ?? 0) + d.demand);
+    }
     return balances
       .filter((b) => !b.irmItem.trackSerialNumbers && !b.irmItem.trackBatchNumbers)
-      .map((b) => ({ irmItemId: b.irmItemId, code: b.irmItem.code, name: b.irmItem.name, sku: b.irmItem.sku ?? null, uom: b.irmItem.baseUnit ?? null, quantityOnHand: b.quantityOnHand, reorderLevel: b.irmItem.reorderLevel ?? null }))
+      .map((b) => ({ irmItemId: b.irmItemId, code: b.irmItem.code, name: b.irmItem.name, sku: b.irmItem.sku ?? null, uom: b.irmItem.baseUnit ?? null, quantityOnHand: Math.max(0, b.quantityOnHand - (browseDemand.get(b.irmItemId) ?? 0)), reorderLevel: b.irmItem.reorderLevel ?? null }))
+      .filter((it) => it.quantityOnHand > 0)
       .sort((a, b) => a.name.localeCompare(b.name));
   }
   // Typed search spans the catalogue (matches code/name/sku), then is narrowed to what THIS warehouse
@@ -1147,8 +1175,21 @@ export async function searchWarehouseItems(actor: AuditActor, warehouseId: strin
   // this counter no longer appears as a phantom "out of stock" row.)
   const rows = (await irmRepo.findMany({ search: term, status: "active" }, 0, 20, "name")).filter((r) => !r.trackSerialNumbers && !r.trackBatchNumbers);
   if (rows.length === 0) return [];
-  const balances = await inventoryRepo.findBalancesByItemsAndWarehouses(rows.map((r) => r.id), [warehouseId]);
-  const onHand = new Map(balances.map((b) => [b.irmItemId, b.quantityOnHand]));
+  const [balances, demand] = await Promise.all([
+    inventoryRepo.findBalancesByItemsAndWarehouses(rows.map((r) => r.id), [warehouseId]),
+    // Netted like every other "what can leave this shelf" figure. The counter is the FASTEST way to
+    // drain a warehouse, and it was the one door that ignored what jobs had planned — hand out the
+    // last 3 units a kit is counting on and the job is stranded, discovered only when its engineer
+    // turns up at this same counter. Scoped to THIS warehouse's demand: another site's commitments
+    // are a different physical shelf.
+    getOpenDemand(),
+  ]);
+  const demandHere = new Map<string, number>();
+  for (const d of demand.values()) {
+    if (!d.irmItemId || d.warehouseId !== warehouseId) continue;
+    demandHere.set(d.irmItemId, (demandHere.get(d.irmItemId) ?? 0) + d.demand);
+  }
+  const onHand = new Map(balances.map((b) => [b.irmItemId, Math.max(0, b.quantityOnHand - (demandHere.get(b.irmItemId) ?? 0))]));
   return rows
     .map((r) => ({
       irmItemId: r.id,

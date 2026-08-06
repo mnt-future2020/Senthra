@@ -33,6 +33,12 @@ export interface WriteOffTarget {
   jobNumber: string;
   /** What the engineer still holds — from the preview call, so the user sees it before agreeing. */
   unaccounted: { itemName: string; itemCode: string | null; qty: number }[];
+  /**
+   * Set by the OVERDUE tab only. Carried on the target rather than passed to the modal separately so
+   * the preview that produced `unaccounted` and the write-off that follows can never disagree about
+   * which screen is asking — the server relaxes its rule for one of them and not the other.
+   */
+  fromOverdue?: boolean;
 }
 
 export function WriteOffLostModal({
@@ -74,6 +80,7 @@ export function WriteOffLostModal({
         writeOffLost: true,
         writeOffReason: reason as WriteOffReason,
         writeOffNotes: notes.trim() || undefined,
+        fromOverdue: target.fromOverdue,
       });
       onWrittenOff();
       onClose();
