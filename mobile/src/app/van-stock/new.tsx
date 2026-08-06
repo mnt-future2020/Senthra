@@ -45,8 +45,11 @@ export default function NewVanStockScreen() {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<RequestableItemOption[]>([]);
   const [searching, setSearching] = useState(false);
+  const [searchFailed, setSearchFailed] = useState(false);
   const [lines, setLines] = useState<DraftLine[]>([]);
-  const [warehouseId, setWarehouseId] = useState<string | null>(null);
+  // irmItemId → the warehouse this line is collected from. Replaces the single request-level
+  // "collect from": the engineer picks per item, seeing that warehouse's free stock.
+  const [lineWarehouses, setLineWarehouses] = useState<Record<string, string>>({});
   const [priority, setPriority] = useState<VanStockPriority>("normal");
   const [reason, setReason] = useState("");
   const [attachments, setAttachments] = useState<string[]>([]);
@@ -58,20 +61,33 @@ export default function NewVanStockScreen() {
   const availSeq = useRef(0);
 
   // Advisory duplicate guard — items already on my OPEN restock requests.
-  const { data: openLines } = useLoad(useCallback(() => myOpenLineItems("restock"), []));
+  const {
+    data: openLines,
+    refreshing,
+    refresh: refreshOpenLines,
+  } = useLoad(useCallback(() => myOpenLineItems("restock"), []));
+  // Bumped by pull-to-refresh so the live shelf counts refetch too.
+  const [availTick, setAvailTick] = useState(0);
 
   const runSearch = useCallback(async (q: string) => {
     if (q.trim().length < 2) {
       setResults([]);
+      setSearchFailed(false);
       return;
     }
     const seq = ++searchSeq.current;
     setSearching(true);
     try {
       const found = await searchRequestableItems(q.trim());
-      if (seq === searchSeq.current) setResults(found);
+      if (seq === searchSeq.current) {
+        setResults(found);
+        setSearchFailed(false);
+      }
     } catch {
-      if (seq === searchSeq.current) setResults([]);
+      if (seq === searchSeq.current) {
+        setResults([]);
+        setSearchFailed(true);
+      }
     } finally {
       if (seq === searchSeq.current) setSearching(false);
     }
@@ -102,7 +118,7 @@ export default function NewVanStockScreen() {
       .catch(() => {
         if (seq === availSeq.current) setAvailabilityError(true);
       });
-  }, [itemIdsKey]);
+  }, [itemIdsKey, availTick]);
 
   const addItem = (item: VanStockItemOption) => {
     if (!lines.some((l) => l.irmItemId === item.irmItemId)) {
@@ -110,42 +126,90 @@ export default function NewVanStockScreen() {
     }
     setQuery("");
     setResults([]);
+    setSearchFailed(false);
     searchSeq.current++; // drop any in-flight search so it can't repopulate results
     debouncedSearch(""); // supersede any pending debounce tick
   };
 
   const duplicates = lines.filter((l) => (openLines ?? []).some((o) => o.irmItemId === l.irmItemId));
 
-  // Warehouse options ranked by how many cart items they have on the shelf.
-  const warehouseOptions = useMemo(() => {
-    return availability
-      .map((w) => {
-        const inStock = lines.filter(
-          (l) => (w.items.find((i) => i.irmItemId === l.irmItemId)?.quantityOnHand ?? 0) > 0,
-        ).length;
-        return { ...w, inStock };
-      })
-      .sort((a, b) => b.inStock - a.inStock)
-      .map((w) => ({
-        key: w.warehouseId,
-        label: `${w.warehouseName}${w.warehouseCode ? ` (${w.warehouseCode})` : ""} — ${w.inStock}/${lines.length} in stock`,
-      }));
+  // Per ITEM: the warehouses that actually hold it, most stock first, each labelled with its free
+  // count — the engineer's whole basis for choosing. Warehouses with none of that item are left OUT
+  // rather than shown disabled: the row is about this one item, so a warehouse with none of it is
+  // simply not an answer.
+  const warehouseOptionsByItem = useMemo(() => {
+    const map = new Map<string, { key: string; label: string; free: number }[]>();
+    for (const l of lines) {
+      const opts = availability
+        .map((w) => {
+          const free = w.items.find((i) => i.irmItemId === l.irmItemId)?.quantityOnHand ?? 0;
+          const name = w.warehouseCode ? `${w.warehouseName} (${w.warehouseCode})` : w.warehouseName;
+          return { key: w.warehouseId, label: `${name} — ${free} free`, free };
+        })
+        .filter((o) => o.free > 0)
+        .sort((a, b) => b.free - a.free || a.label.localeCompare(b.label));
+      map.set(l.irmItemId, opts);
+    }
+    return map;
   }, [availability, lines]);
 
-  const shelfCount = (irmItemId: string): number | null => {
-    if (!warehouseId) return null;
-    const w = availability.find((a) => a.warehouseId === warehouseId);
-    if (!w) return null;
-    return w.items.find((i) => i.irmItemId === irmItemId)?.quantityOnHand ?? 0;
-  };
+  // What each line ACTUALLY collects from: the engineer's explicit pick when they made one and it is
+  // still stocked there, otherwise the warehouse holding the most of that item. Derived during render
+  // rather than written back by an effect, so `lineWarehouses` keeps meaning exactly one thing: what
+  // the ENGINEER chose. A pick that stops being valid (stock ran out there between refreshes)
+  // silently falls back instead of leaving the line pointing at an empty shelf.
+  const effectiveWarehouses = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const l of lines) {
+      const opts = warehouseOptionsByItem.get(l.irmItemId) ?? [];
+      const picked = lineWarehouses[l.irmItemId];
+      const valid = picked && opts.some((o) => o.key === picked);
+      const chosen = valid ? picked : opts[0]?.key;
+      if (chosen) out[l.irmItemId] = chosen;
+    }
+    return out;
+  }, [lines, warehouseOptionsByItem, lineWarehouses]);
+
+  // How many separate places this request sends the engineer to. Shown while it can still be changed.
+  const stops = useMemo(() => new Set(Object.values(effectiveWarehouses)).size, [effectiveWarehouses]);
+  const unplaced = lines.filter((l) => !effectiveWarehouses[l.irmItemId]);
+
+  // Free stock at the warehouse THIS line is collected from — the cap the qty stepper is judged against.
+  const shelfByItem = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const l of lines) {
+      const whId = effectiveWarehouses[l.irmItemId];
+      if (!whId) continue;
+      const free = availability
+        .find((a) => a.warehouseId === whId)
+        ?.items.find((i) => i.irmItemId === l.irmItemId)?.quantityOnHand;
+      if (typeof free === "number") m.set(l.irmItemId, free);
+    }
+    return m;
+  }, [availability, lines, effectiveWarehouses]);
+
+  // Switching a line to a warehouse with less stock leaves an already-set qty above the new cap
+  // (clamping it silently would rewrite a number the engineer chose), so it's caught here instead.
+  const overCap = lines.find((l) => {
+    const free = shelfByItem.get(l.irmItemId);
+    return typeof free === "number" && l.qty > free;
+  });
 
   const submit = async () => {
     if (lines.length === 0) {
       setError("Add at least one item.");
       return;
     }
-    if (!warehouseId) {
-      setError("Pick the warehouse you'll collect from.");
+    if (overCap) {
+      const free = shelfByItem.get(overCap.irmItemId) ?? 0;
+      setError(
+        `Only ${free} of "${overCap.itemName}" are free at the warehouse you picked — lower the quantity or collect it from somewhere else.`,
+      );
+      return;
+    }
+    if (unplaced.length > 0) {
+      // Only reachable when an item is stocked NOWHERE (auto-select fills every other case).
+      setError(`No warehouse has "${unplaced[0]!.itemName}" in stock — remove it or ask the office to order it.`);
       return;
     }
     if (!reason.trim()) {
@@ -159,26 +223,38 @@ export default function NewVanStockScreen() {
         type: "restock",
         reason: reason.trim(),
         priority,
-        preferredWarehouseId: warehouseId,
+        // No request-level warehouse: the collection point is derived server-side from the lines.
         attachments: attachments.length ? attachments : undefined,
-        lines: lines.map((l) => ({ irmItemId: l.irmItemId, itemName: l.itemName, qty: l.qty })),
+        lines: lines.map((l) => ({
+          irmItemId: l.irmItemId,
+          itemName: l.itemName,
+          qty: l.qty,
+          warehouseId: effectiveWarehouses[l.irmItemId]!,
+        })),
       });
       toast.success("Restock request sent to the warehouse.");
       router.back();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not create the request.");
+      setError(err instanceof Error ? err.message : "Could not send the request.");
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <Screen>
+    <Screen
+      refreshing={refreshing}
+      onRefresh={() => {
+        void refreshOpenLines();
+        setAvailTick((t) => t + 1);
+      }}
+    >
       <Text style={s.hint}>
         The warehouse reviews, confirms the fulfilment warehouse and scans it out to you.
       </Text>
 
       <SectionTitle>Add items</SectionTitle>
+      <Text style={s.hint}>Search the catalogue for the stock you need.</Text>
       <Input
         placeholder="Search the item you need…"
         value={query}
@@ -189,6 +265,12 @@ export default function NewVanStockScreen() {
         autoCapitalize="none"
       />
       {searching ? <Text style={s.hint}>Searching…</Text> : null}
+      {searchFailed ? (
+        <Text style={s.searchError}>Couldn&rsquo;t run the search just now. Check your connection and try again.</Text>
+      ) : null}
+      {query.trim().length >= 2 && !searching && !searchFailed && results.length === 0 ? (
+        <Text style={s.hint}>No matching item in the catalogue.</Text>
+      ) : null}
       {results.map((item) => {
         // Out of stock at EVERY warehouse — no warehouse can fulfil it, so show it (the engineer sees
         // the item exists) but don't let it be added. Mirrors the web restock composer.
@@ -216,7 +298,8 @@ export default function NewVanStockScreen() {
         );
       })}
 
-      <SectionTitle>Selected items ({lines.length})</SectionTitle>
+      <SectionTitle>{lines.length ? `Selected items (${lines.length})` : "Selected items"}</SectionTitle>
+      <Text style={s.hint}>Set the quantity, and where you&rsquo;ll collect each item from.</Text>
       {duplicates.length > 0 ? (
         <Card style={s.warnCard}>
           <Text style={s.warnText}>
@@ -229,7 +312,9 @@ export default function NewVanStockScreen() {
         <EmptyState title="Nothing added yet" subtitle="Search above to add items." />
       ) : (
         lines.map((line) => {
-          const shelf = shelfCount(line.irmItemId);
+          const opts = warehouseOptionsByItem.get(line.irmItemId) ?? [];
+          const shelf = shelfByItem.get(line.irmItemId);
+          const over = typeof shelf === "number" && line.qty > shelf;
           return (
             <Card key={line.irmItemId}>
               <View style={s.lineRow}>
@@ -238,30 +323,39 @@ export default function NewVanStockScreen() {
                     {line.itemName}
                   </Text>
                   <Text style={s.meta}>{line.code}</Text>
-                  {shelf !== null ? (
+                  {typeof shelf === "number" ? (
                     <Text
                       style={[
                         s.meta,
-                        { color: shelf === 0 ? colors.danger : shelf < line.qty ? colors.warn : colors.success },
+                        { color: shelf === 0 ? colors.danger : over ? colors.warn : colors.success },
                       ]}
                     >
-                      On shelf there: {shelf}
-                      {shelf === 0
-                        ? " — out of stock at that warehouse"
-                        : shelf < line.qty
-                          ? " — less than you're asking"
-                          : ""}
+                      Free there: {shelf}
+                      {shelf === 0 ? " — out of stock" : over ? " — less than you're asking" : ""}
                     </Text>
                   ) : null}
                 </View>
                 <Stepper
                   value={line.qty}
                   min={1}
+                  max={shelf}
                   onChange={(next) =>
                     setLines((prev) => prev.map((l) => (l.irmItemId === line.irmItemId ? { ...l, qty: next } : l)))
                   }
                 />
               </View>
+              {opts.length === 0 ? (
+                <Text style={[s.meta, { color: colors.danger, fontWeight: "700" }]}>
+                  No warehouse has this in stock
+                </Text>
+              ) : (
+                <Select
+                  label="Collect from"
+                  options={opts.map(({ key, label }) => ({ key, label }))}
+                  value={effectiveWarehouses[line.irmItemId] ?? null}
+                  onChange={(key) => setLineWarehouses((prev) => ({ ...prev, [line.irmItemId]: key }))}
+                />
+              )}
               <Button
                 title="Remove"
                 variant="ghost"
@@ -273,31 +367,25 @@ export default function NewVanStockScreen() {
         })
       )}
 
-      <SectionTitle>Collection &amp; priority</SectionTitle>
-      <Text style={s.hint}>
-        Your request goes to that warehouse&rsquo;s team — they confirm (or change) it on approval.
-      </Text>
-      {availabilityError ? (
-        <Text style={s.hint}>
-          Couldn&rsquo;t load stock levels — warehouse counts may be unavailable. You can still send the request.
-        </Text>
+      {stops > 1 ? (
+        // The engineer is the one who drives, so the cost of their own split is stated while they can
+        // still change it — this used to be a reviewer's decision they learned about only after approval.
+        <Card style={s.warnCard}>
+          <Text style={s.warnText}>
+            This request collects from {stops} warehouses — you&rsquo;ll need {stops} stops. Move a line to a
+            shared warehouse if one has everything.
+          </Text>
+        </Card>
       ) : null}
-      {lines.length === 0 ? (
-        <Text style={s.hint}>Add items first to see stock…</Text>
-      ) : (
-        <>
-          <Select
-            label="Collect from"
-            required
-            options={warehouseOptions}
-            value={warehouseId}
-            onChange={setWarehouseId}
-            placeholder="Pick a warehouse…"
-          />
-          <Text style={s.hint}>Stock counts are a live snapshot, not a reservation.</Text>
-        </>
-      )}
+      {availabilityError ? (
+        <Card style={s.warnCard}>
+          <Text style={s.warnText}>
+            Couldn&rsquo;t load stock levels — warehouse counts may be unavailable. You can still send the request.
+          </Text>
+        </Card>
+      ) : null}
 
+      <SectionTitle>Priority</SectionTitle>
       <Segmented
         options={[
           { key: "normal", label: "Normal" },
@@ -328,6 +416,7 @@ export default function NewVanStockScreen() {
 
 const s = StyleSheet.create({
   hint: { fontSize: 13, color: colors.muted },
+  searchError: { fontSize: 13, color: colors.danger },
   lineName: { fontSize: 14, fontWeight: "700", color: colors.text },
   meta: { fontSize: 12, color: colors.muted },
   lineRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 },

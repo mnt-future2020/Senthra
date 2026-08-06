@@ -34,10 +34,18 @@ export default function ReturnVanStockScreen() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const { data: holdings, loading } = useLoad(useCallback(() => myHoldings(), []));
-  const { data: warehouses } = useLoad(useCallback(() => listWarehousesLite(), []));
+  const {
+    data: holdings,
+    loading,
+    refreshing,
+    refresh: refreshHoldings,
+    error: holdingsError,
+  } = useLoad(useCallback(() => myHoldings(), []));
+  const { data: warehouses, error: warehousesError, reload: reloadWarehouses } = useLoad(
+    useCallback(() => listWarehousesLite(), []),
+  );
   // Advisory duplicate guard — items already on my OPEN return requests.
-  const { data: openLines } = useLoad(useCallback(() => myOpenLineItems("return"), []));
+  const { data: openLines, reload: reloadOpenLines } = useLoad(useCallback(() => myOpenLineItems("return"), []));
 
   const duplicates = (holdings ?? []).filter(
     (h) => (quantities[h.irmItemId] ?? 0) > 0 && (openLines ?? []).some((o) => o.irmItemId === h.irmItemId),
@@ -71,7 +79,7 @@ export default function ReturnVanStockScreen() {
       toast.success("Return raised — drive in and the warehouse will scan it in.");
       router.back();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not create the return.");
+      setError(err instanceof Error ? err.message : "Could not raise the return.");
     } finally {
       setBusy(false);
     }
@@ -85,12 +93,21 @@ export default function ReturnVanStockScreen() {
     );
 
   return (
-    <Screen>
-      <Text style={s.hint}>
-        Pick the quantities you&rsquo;re bringing back. The warehouse scans them in when you arrive.
-      </Text>
+    <Screen
+      refreshing={refreshing}
+      onRefresh={() => {
+        void refreshHoldings();
+        void reloadWarehouses();
+        void reloadOpenLines();
+      }}
+    >
+      <Text style={s.hint}>No approval needed — the warehouse scans it in when you arrive.</Text>
 
-      <SectionTitle>Your van holdings</SectionTitle>
+      <SectionTitle>Pick from your stock</SectionTitle>
+      <Text style={s.hint}>
+        Only your free field stock — anything issued for a job goes back when you complete that job,
+        not here.
+      </Text>
       {duplicates.length > 0 ? (
         <Card style={s.warnCard}>
           <Text style={s.warnText}>
@@ -99,7 +116,9 @@ export default function ReturnVanStockScreen() {
           </Text>
         </Card>
       ) : null}
-      {(holdings ?? []).length === 0 ? (
+      {holdingsError ? (
+        <ErrorText message="Couldn't load your on-hand stock. Refresh and try again." />
+      ) : (holdings ?? []).length === 0 ? (
         <EmptyState title="You're not holding any returnable stock right now" />
       ) : (
         (holdings ?? []).map((h) => (
@@ -126,6 +145,9 @@ export default function ReturnVanStockScreen() {
         ))
       )}
 
+      {warehousesError ? (
+        <ErrorText message="Couldn't load warehouses. Refresh and try again." />
+      ) : null}
       <Select
         label="Return to warehouse"
         required
@@ -145,7 +167,7 @@ export default function ReturnVanStockScreen() {
         placeholder="e.g. Over-stocked after last month's jobs — returning the excess."
       />
       <ErrorText message={error} />
-      <Button title="Submit Return" onPress={() => void submit()} loading={busy} />
+      <Button title="Raise return" onPress={() => void submit()} loading={busy} />
     </Screen>
   );
 }

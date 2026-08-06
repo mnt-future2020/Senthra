@@ -1,8 +1,10 @@
-import React, { useContext, useEffect, useState } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   ActivityIndicator,
   Animated,
+  Keyboard,
+  KeyboardAvoidingView,
   Modal,
   Platform,
   Pressable,
@@ -44,6 +46,13 @@ export function GlassSurface({ edge, variant = "light" }: { edge: "top" | "botto
   return <View style={[StyleSheet.absoluteFill, s.glassFallback, hairline]} />;
 }
 
+/**
+ * Lets a focused field ask the enclosing Screen to scroll it clear of the
+ * keyboard. Provided by Screen; null outside one (e.g. login's standalone
+ * layout), where consumers simply no-op.
+ */
+export const FieldFocusContext = createContext<((input: TextInput | null) => void) | null>(null);
+
 export function Screen({
   children,
   refreshing,
@@ -65,26 +74,76 @@ export function Screen({
     ? { paddingTop: headerHeight + 16, paddingBottom: tabBarHeight + 24 }
     : undefined;
 
+  const scrollRef = useRef<ScrollView>(null);
+  const scrollYRef = useRef(0);
+
+  // Scroll the focused input above the keyboard. Neither OS does this for a
+  // plain ScrollView: Android's built-in reveal needs a real window resize
+  // (gone under edge-to-edge) and iOS never had one. Window coordinates make
+  // it self-correcting — if the OS already moved the field clear, overlap ≤ 0.
+  const ensureVisible = useCallback((input?: TextInput | null) => {
+    const target = input ?? (TextInput.State.currentlyFocusedInput() as TextInput | null);
+    const keyboard = Keyboard.metrics();
+    if (!target || !keyboard) return;
+    // Wait out the keyboard-driven relayout (the avoider's padding applies on a
+    // later frame) — measuring or scrolling before it settles clamps short.
+    setTimeout(() => {
+      if (!target.isFocused()) return;
+      target.measureInWindow((_x, y, _w, h) => {
+        const overlap = y + h + 24 - keyboard.screenY;
+        if (overlap > 0) {
+          scrollRef.current?.scrollTo({ y: Math.max(0, scrollYRef.current + overlap), animated: true });
+        }
+      });
+    }, 80);
+  }, []);
+
+  // The tap that OPENS the keyboard: focus fires before the keyboard has a
+  // frame, so the reveal can only run once it reports shown.
+  useEffect(() => {
+    const sub = Keyboard.addListener("keyboardDidShow", () => ensureVisible());
+    return () => sub.remove();
+  }, [ensureVisible]);
+
   if (!scroll) return <View style={s.screen}>{children}</View>;
   return (
-    <ScrollView
+    // Keyboard avoidance lives here so every screen gets it. "padding" on BOTH
+    // platforms: under edge-to-edge Android the window no longer resizes for the
+    // keyboard, so without this the scroll area keeps its full height and the
+    // bottom-most fields have no room to scroll clear — the avoider's overlap
+    // math zeroes itself out on devices where the window does still resize.
+    // Offset: in tabs the view runs under the translucent header from window top
+    // (0); in stacks it starts below the opaque header (headerHeight).
+    <KeyboardAvoidingView
       style={s.screen}
-      contentContainerStyle={[s.screenContent, inset]}
-      keyboardShouldPersistTaps="handled"
-      scrollIndicatorInsets={inTabs ? { top: headerHeight, bottom: tabBarHeight } : undefined}
-      refreshControl={
-        onRefresh ? (
-          <RefreshControl
-            refreshing={!!refreshing}
-            onRefresh={onRefresh}
-            tintColor={colors.accent}
-            progressViewOffset={inTabs ? headerHeight : undefined}
-          />
-        ) : undefined
-      }
+      behavior="padding"
+      keyboardVerticalOffset={inTabs ? 0 : headerHeight}
     >
-      {children}
-    </ScrollView>
+      <ScrollView
+        ref={scrollRef}
+        style={s.screenScroll}
+        contentContainerStyle={[s.screenContent, inset]}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+        onScroll={(e) => {
+          scrollYRef.current = e.nativeEvent.contentOffset.y;
+        }}
+        scrollEventThrottle={16}
+        scrollIndicatorInsets={inTabs ? { top: headerHeight, bottom: tabBarHeight } : undefined}
+        refreshControl={
+          onRefresh ? (
+            <RefreshControl
+              refreshing={!!refreshing}
+              onRefresh={onRefresh}
+              tintColor={colors.accent}
+              progressViewOffset={inTabs ? headerHeight : undefined}
+            />
+          ) : undefined
+        }
+      >
+        <FieldFocusContext.Provider value={ensureVisible}>{children}</FieldFocusContext.Provider>
+      </ScrollView>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -275,6 +334,8 @@ export function Input({
   style,
   ...props
 }: TextInputProps & { label?: string; required?: boolean }) {
+  const ensureVisible = useContext(FieldFocusContext);
+  const inputRef = useRef<TextInput>(null);
   return (
     <View style={s.inputWrap}>
       {label ? (
@@ -284,9 +345,22 @@ export function Input({
         </Text>
       ) : null}
       <TextInput
+        ref={inputRef}
         placeholderTextColor={colors.faint}
         style={[s.input, props.multiline && s.inputMultiline, style]}
         {...props}
+        onFocus={(e) => {
+          props.onFocus?.(e);
+          // Tapping a field with the keyboard already up fires no keyboard
+          // event — the reveal has to come from the focus itself.
+          ensureVisible?.(inputRef.current);
+        }}
+        onContentSizeChange={(e) => {
+          props.onContentSizeChange?.(e);
+          // A growing multiline box (reason fields) sinks line by line under
+          // the keyboard as text wraps — keep the caret's line clear.
+          if (props.multiline && inputRef.current?.isFocused()) ensureVisible?.(inputRef.current);
+        }}
       />
     </View>
   );
@@ -368,7 +442,8 @@ export function Pager({
     <View style={s.pagerWrap}>
       {total !== undefined ? (
         <Text style={s.pagerTotal}>
-          Total: {total} {label ?? "items"}
+          {/* Singularize the label for exactly one, like the web's Pagination. */}
+          Total: {total} {total === 1 ? (label ?? "items").replace(/s$/, "") : (label ?? "items")}
         </Text>
       ) : null}
       {showControls ? (
@@ -490,6 +565,7 @@ export function Stepper({
 
 const s = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
+  screenScroll: { flex: 1 },
   screenContent: { padding: 16, paddingBottom: 40, gap: 12 },
   glassIos: { backgroundColor: "rgba(255,255,255,0.55)" },
   glassFallback: { backgroundColor: "rgba(255,255,255,0.92)" },
@@ -554,13 +630,16 @@ const s = StyleSheet.create({
     flexDirection: "row",
     backgroundColor: colors.mutedSoft,
     borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
     padding: 3,
     gap: 3,
   },
   segment: { flex: 1, borderRadius: 10, paddingVertical: 8, alignItems: "center" },
-  segmentActive: { backgroundColor: colors.card },
+  // Accent-filled active state, matching the web's tab pills and the Chips row.
+  segmentActive: { backgroundColor: colors.accent },
   segmentText: { fontSize: 13, fontWeight: "600", color: colors.muted },
-  segmentTextActive: { color: colors.text },
+  segmentTextActive: { color: "#ffffff", fontWeight: "700" },
   chips: { gap: 8, paddingVertical: 2 },
   chip: {
     borderRadius: 999,

@@ -1,8 +1,7 @@
 import React, { useState } from "react";
-import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { KeyboardAvoidingView, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Image } from "expo-image";
 import { useRouter } from "expo-router";
-import { forgotPassword } from "@/services/account.service";
 import { principalName, useAuth } from "@/lib/auth";
 import { useBranding } from "@/lib/branding";
 import { useToast } from "@/lib/toast";
@@ -19,30 +18,12 @@ export default function LoginScreen() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [forgotBusy, setForgotBusy] = useState(false);
   const finishLogin = (principal: Principal) => {
     toast.success(`Welcome, ${principalName(principal)}`);
     if (principal.type === "user" && principal.mustResetPassword) {
       router.replace("/set-password");
     } else {
       router.replace("/overview");
-    }
-  };
-
-  const forgot = async () => {
-    if (!email.trim()) {
-      setError("Enter your email above first.");
-      return;
-    }
-    setError(null);
-    setForgotBusy(true);
-    try {
-      await forgotPassword(email.trim().toLowerCase());
-      toast.success("Reset link sent — check your email.");
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Could not send the reset link.");
-    } finally {
-      setForgotBusy(false);
     }
   };
 
@@ -64,10 +45,9 @@ export default function LoginScreen() {
   };
 
   return (
-    <KeyboardAvoidingView
-      style={s.flex}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-    >
+    // "padding" on both platforms — edge-to-edge Android no longer resizes the
+    // window for the keyboard, so without it the fields sit underneath.
+    <KeyboardAvoidingView style={s.flex} behavior="padding">
       <ScrollView contentContainerStyle={s.container} keyboardShouldPersistTaps="handled">
         <View style={s.brandWrap}>
           {branding?.logoUrl ? (
@@ -105,8 +85,8 @@ export default function LoginScreen() {
           />
           <ErrorText message={error} />
           <Button title="Sign In" onPress={submit} loading={busy} />
-          <Pressable onPress={() => void forgot()} disabled={forgotBusy} hitSlop={8}>
-            <Text style={s.forgotLink}>{forgotBusy ? "Sending reset link…" : "Forgot password?"}</Text>
+          <Pressable onPress={() => router.push("/forgot-password")} hitSlop={8}>
+            <Text style={s.forgotLink}>Forgot password?</Text>
           </Pressable>
         </View>
       </ScrollView>

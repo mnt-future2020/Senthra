@@ -11,6 +11,7 @@ import {
 import { AttachmentThumbs } from "@/components/AttachmentPicker";
 import { useAuth } from "@/lib/auth";
 import { useLoad } from "@/lib/useLoad";
+import { useSocketRefresh } from "@/lib/useSocketRefresh";
 import { useToast } from "@/lib/toast";
 import {
   Badge,
@@ -31,25 +32,31 @@ export default function TransferDetailScreen() {
   const router = useRouter();
   const { principal } = useAuth();
   const toast = useToast();
-  const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [declining, setDeclining] = useState(false);
   const [declineReason, setDeclineReason] = useState("");
 
-  const { data: transfer, setData, loading, refreshing, error, refresh } = useLoad(
+  const { data: transfer, setData, loading, refreshing, error, refresh, reload } = useLoad(
     useCallback(() => getTransfer(id), [id]),
   );
 
-  const run = async (key: string, fn: () => Promise<typeof transfer>, successMsg?: string) => {
+  // Live update while the screen is open — the other party approving/cancelling
+  // shows instantly, like the web list's socket refetch. Skipped mid-action so a
+  // reload can't clobber the optimistic result an in-flight action returns.
+  useSocketRefresh(["engineer:transfer_updated"], () => {
+    if (!busy) void reload();
+  });
+
+  // Failures toast the server's reason, with the web's per-action fallbacks.
+  const run = async (key: string, fn: () => Promise<typeof transfer>, successMsg: string, failMsg: string) => {
     setBusy(key);
-    setActionError(null);
     try {
       const next = await fn();
       if (next) setData(next);
       setDeclining(false);
-      if (successMsg) toast.success(successMsg);
+      toast.success(successMsg);
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Action failed.");
+      toast.error(err instanceof Error ? err.message : failMsg);
     } finally {
       setBusy(null);
     }
@@ -152,8 +159,6 @@ export default function TransferDetailScreen() {
         </>
       ) : null}
 
-      <ErrorText message={actionError} />
-
       {transfer.status === "pending" && isHolder ? (
         <Card>
           <SectionTitle>You hold this stock</SectionTitle>
@@ -168,7 +173,8 @@ export default function TransferDetailScreen() {
                   { text: "Cancel", style: "cancel" },
                   {
                     text: "Approve transfer",
-                    onPress: () => void run("approve", () => approveTransfer(transfer.id), "Transfer approved."),
+                    onPress: () =>
+                      void run("approve", () => approveTransfer(transfer.id), "Transfer approved.", "Approve failed."),
                   },
                 ],
               )
@@ -193,6 +199,7 @@ export default function TransferDetailScreen() {
                     "decline",
                     () => declineTransfer(transfer.id, declineReason.trim() || undefined),
                     "Transfer declined.",
+                    "Failed to decline.",
                   )
                 }
               />
@@ -218,7 +225,8 @@ export default function TransferDetailScreen() {
                 {
                   text: "Cancel transfer",
                   style: "destructive",
-                  onPress: () => void run("cancel", () => cancelTransfer(transfer.id), "Transfer cancelled."),
+                  onPress: () =>
+                    void run("cancel", () => cancelTransfer(transfer.id), "Transfer cancelled.", "Cancel failed."),
                 },
               ],
             )

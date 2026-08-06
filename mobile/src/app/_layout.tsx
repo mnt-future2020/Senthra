@@ -81,6 +81,7 @@ function RootStack() {
     >
       <Stack.Screen name="index" options={{ headerShown: false }} />
       <Stack.Screen name="login" options={{ headerShown: false }} />
+      <Stack.Screen name="forgot-password" options={{ headerShown: false }} />
       <Stack.Screen name="set-password" options={{ headerShown: false }} />
       {/* Tab screens sit under the purple header, so their status icons go light. The tab layout
           stays registered for everyone — it renders its own "No engineer access" explanation

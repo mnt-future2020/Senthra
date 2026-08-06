@@ -164,6 +164,10 @@ export default function TabsLayout() {
         headerRight: () => <HeaderLogo />,
         tabBarActiveTintColor: colors.accent,
         tabBarInactiveTintColor: colors.faint,
+        // The bar floats over content, so when Android's adjustResize shrinks the
+        // window it would ride up and sit exactly over the focused input — hide it
+        // while the keyboard is open instead. (iOS keyboards cover the bar anyway.)
+        tabBarHideOnKeyboard: true,
         tabBarStyle: {
           position: "absolute",
           backgroundColor: "transparent",

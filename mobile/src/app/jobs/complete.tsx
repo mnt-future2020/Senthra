@@ -21,7 +21,7 @@ export default function CompleteJobScreen() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const { data: job, loading } = useLoad(useCallback(() => getOwnJob(id), [id]));
+  const { data: job, loading, refreshing, refresh } = useLoad(useCallback(() => getOwnJob(id), [id]));
 
   const stockLines = useMemo(() => (job?.kitLines ?? []).filter((l) => l.lineType !== "misc"), [job]);
 
@@ -45,7 +45,7 @@ export default function CompleteJobScreen() {
       toast.success("Job marked as complete. Well done!");
       router.back();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not complete the job.");
+      setError(err instanceof Error ? err.message : "Could not complete this job.");
     } finally {
       setBusy(false);
     }
@@ -66,7 +66,7 @@ export default function CompleteJobScreen() {
   }
 
   return (
-    <Screen>
+    <Screen refreshing={refreshing} onRefresh={() => void refresh()}>
       <Card>
         <Text style={s.jobNumber}>{job.jobNumber}</Text>
         <Text style={s.jobName}>{job.name}</Text>

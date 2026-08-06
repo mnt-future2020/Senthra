@@ -90,11 +90,26 @@ const VSR_STATUS_LABELS: Record<string, string> = {
   cancelled: "Cancelled",
 };
 
-/** Web's VanRequestItemsSummary: "Item ×2 • Other ×1 • +3 more". */
+/** Web's VanRequestItemsSummary: up to 3 items — "Item ×2 • Other ×1 • +3 more". */
 function itemsSummary(r: VanStockRequest): string {
-  const parts = r.lines.slice(0, 2).map((l) => `${l.itemName} ×${l.requestedQty}`);
-  const more = r.lines.length - 2;
+  const parts = r.lines.slice(0, 3).map((l) => `${l.itemName} ×${l.requestedQty}`);
+  const more = r.lines.length - 3;
   return parts.join(" • ") + (more > 0 ? ` • +${more} more` : "");
+}
+
+/** Web's VanStockCompletionBadge: how a closed request ended, if not cleanly. */
+function completionBadge(r: VanStockRequest): { label: string; status: string } | null {
+  if (r.completionType !== "cancelled_remaining" && r.completionType !== "closed_short") return null;
+  const collectedSome = r.lines.some((l) => l.fulfilledQty > 0);
+  if (r.completionType === "cancelled_remaining") {
+    return { label: collectedSome ? "Rest cancelled" : "Cancelled", status: "cancelled" };
+  }
+  return { label: collectedSome ? "Rest closed short" : "Closed short", status: "high" };
+}
+
+/** Approved or partly fulfilled — the states with an unfulfilled remainder to cancel. */
+function hasRemainder(r: VanStockRequest): boolean {
+  return r.status === "approved" || r.status === "partially_fulfilled";
 }
 
 function transferNeedsSign(t: EngineerTransfer): boolean {
@@ -139,7 +154,7 @@ export default function RequestsScreen() {
   const vQuery = useDebounced(vQ);
   const [vanPage, setVanPage] = useState(1);
 
-  const { data: vanRequests, loading: l2, fetching: f2, error: vanError, refresh: refreshVan, reload: reloadVan } = useLoad(
+  const { data: vanRequests, loading: l2, fetching: f2, refreshing: vanRefreshing, error: vanError, refresh: refreshVan, reload: reloadVan } = useLoad(
     useCallback(async () => {
       const r = await listMyVanStockRequests({
         status: vStatus || undefined,
@@ -157,7 +172,7 @@ export default function RequestsScreen() {
 
   // ── Kit (mobile-only cross-job list; web shows kit requests per job) ────────
   const [kitPage, setKitPage] = useState(1);
-  const { data: kitRequests, loading: l3, fetching: f3, error: kitError, refresh: refreshKit, reload: reloadKit } = useLoad(
+  const { data: kitRequests, loading: l3, fetching: f3, refreshing: kitRefreshing, error: kitError, refresh: refreshKit, reload: reloadKit } = useLoad(
     useCallback(async () => {
       const r = await listMyKitRequests({ page: kitPage, pageSize: PAGE_SIZE });
       if (r.totalPages > 0 && kitPage > r.totalPages) setKitPage(r.totalPages);
@@ -170,6 +185,7 @@ export default function RequestsScreen() {
   useEffect(() => {
     const tabParam = params.tab;
     if (typeof tabParam !== "string" || !tabParam) return;
+    if (!TABS.some((t) => t.key === tabParam)) return;
     const view = params.view;
     const status = params.status;
     const t = setTimeout(() => {
@@ -193,7 +209,7 @@ export default function RequestsScreen() {
   useSocketRefresh(["kit_request:updated"], () => void reloadKit());
 
   const confirmVanAction = (r: VanStockRequest) => {
-    const remaining = r.status === "partially_fulfilled";
+    const remaining = hasRemainder(r);
     Alert.alert(
       remaining ? "Cancel the remaining quantity?" : "Cancel this request?",
       remaining
@@ -219,17 +235,12 @@ export default function RequestsScreen() {
     );
   };
 
-  if (l1 || l2 || l3)
-    return (
-      <Screen>
-        <ListSkeleton />
-      </Screen>
-    );
-
+  // Pull-to-refresh targets whichever tab is on screen.
+  const refreshingNow = tab === "van" ? vanRefreshing : tab === "kit" ? kitRefreshing : refreshing;
   const onRefresh = () => {
-    void refresh();
-    void refreshVan();
-    void refreshKit();
+    if (tab === "van") void refreshVan();
+    else if (tab === "kit") void refreshKit();
+    else void refresh();
   };
 
   const tFiltered = Boolean(tStatus || tQuery);
@@ -238,10 +249,11 @@ export default function RequestsScreen() {
   );
 
   return (
-    <Screen refreshing={refreshing} onRefresh={onRefresh}>
+    <Screen refreshing={refreshingNow} onRefresh={onRefresh}>
       <Segmented options={TABS} value={tab} onChange={setTab} />
 
-      {tab === "transfers" ? (
+      {tab === "transfers" && l1 ? <ListSkeleton /> : null}
+      {tab === "transfers" && !l1 ? (
         <>
           <Button title="Request stock" variant="secondary" onPress={() => router.push("/transfers/new")} />
           <Segmented
@@ -365,7 +377,8 @@ export default function RequestsScreen() {
         </>
       ) : null}
 
-      {tab === "van" ? (
+      {tab === "van" && l2 ? <ListSkeleton /> : null}
+      {tab === "van" && !l2 ? (
         <>
           <View style={s.buttonRow}>
             <Button title="Request stock" variant="secondary" small style={s.flex1} onPress={() => router.push("/van-stock/new")} />
@@ -427,30 +440,34 @@ export default function RequestsScreen() {
                 subtitle="Raise a restock when your consumables run low, or return excess stock to a warehouse."
               />
             ) : (
-              (vanRequests?.requests ?? []).map((r) => (
-                <Card key={r.id} onPress={() => router.push({ pathname: "/van-stock/[id]", params: { id: r.id } })}>
-                  <View style={s.rowTop}>
-                    <Text style={s.code}>{r.code}</Text>
-                    <Badge status={r.status} label={VSR_STATUS_LABELS[r.status]} />
-                  </View>
-                  <View style={s.badgeRow}>
-                    <Badge status={r.type} label={titleCase(r.type)} />
-                    {r.createdVia === "walk_in" ? <Badge status="draft" label="Walk-in" /> : null}
-                    {r.stale ? <Badge status="high" label="Stale" /> : null}
-                    {r.priority !== "normal" ? <Badge status={r.priority} /> : null}
-                  </View>
-                  <Text style={s.meta} numberOfLines={1}>
-                    {r.lines.length} item{r.lines.length === 1 ? "" : "s"} · {itemsSummary(r)}
-                  </Text>
-                  <Text style={s.meta}>{formatDateTime(r.createdAt)}</Text>
-                  {r.status === "pending" ? (
-                    <Button title="Cancel" variant="secondary" small onPress={() => confirmVanAction(r)} />
-                  ) : null}
-                  {r.status === "partially_fulfilled" ? (
-                    <Button title="Cancel remaining" variant="secondary" small onPress={() => confirmVanAction(r)} />
-                  ) : null}
-                </Card>
-              ))
+              (vanRequests?.requests ?? []).map((r) => {
+                const completion = completionBadge(r);
+                return (
+                  <Card key={r.id} onPress={() => router.push({ pathname: "/van-stock/[id]", params: { id: r.id } })}>
+                    <View style={s.rowTop}>
+                      <Text style={s.code}>{r.code}</Text>
+                      <Badge status={r.status} label={VSR_STATUS_LABELS[r.status]} />
+                    </View>
+                    <View style={s.badgeRow}>
+                      <Badge status={r.type} label={titleCase(r.type)} />
+                      {r.createdVia === "walk_in" ? <Badge status="draft" label="Walk-in" /> : null}
+                      {completion ? <Badge status={completion.status} label={completion.label} /> : null}
+                      {r.stale ? <Badge status="high" label="Stale" /> : null}
+                      {r.priority !== "normal" ? <Badge status={r.priority} /> : null}
+                    </View>
+                    <Text style={s.meta} numberOfLines={1}>
+                      {r.lines.length} item{r.lines.length === 1 ? "" : "s"} · {itemsSummary(r)}
+                    </Text>
+                    <Text style={s.meta}>{formatDateTime(r.createdAt)}</Text>
+                    {r.status === "pending" ? (
+                      <Button title="Cancel" variant="secondary" small onPress={() => confirmVanAction(r)} />
+                    ) : null}
+                    {hasRemainder(r) ? (
+                      <Button title="Cancel remaining" variant="secondary" small onPress={() => confirmVanAction(r)} />
+                    ) : null}
+                  </Card>
+                );
+              })
             )}
             {vanRequests ? (
               <Pager
@@ -466,7 +483,8 @@ export default function RequestsScreen() {
         </>
       ) : null}
 
-      {tab === "kit" ? (
+      {tab === "kit" && l3 ? <ListSkeleton /> : null}
+      {tab === "kit" && !l3 ? (
         <>
           <Text style={s.hint}>Raise kit requests from a job&rsquo;s detail page.</Text>
           {kitError ? (

@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text } from "react-native";
+import { KeyboardAvoidingView, ScrollView, StyleSheet, Text } from "react-native";
 import { useRouter } from "expo-router";
 import { changeOwnPassword } from "@/services/account.service";
 import { useAuth } from "@/lib/auth";
@@ -24,7 +24,7 @@ export default function SetPasswordScreen() {
       return;
     }
     if (password !== confirm) {
-      setError("Passwords do not match.");
+      setError("Passwords don't match.");
       return;
     }
     setBusy(true);
@@ -35,14 +35,14 @@ export default function SetPasswordScreen() {
       toast.success("Password updated.");
       router.replace("/overview");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not set the password.");
+      setError(err instanceof Error ? err.message : "Could not set your password.");
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <KeyboardAvoidingView style={s.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+    <KeyboardAvoidingView style={s.flex} behavior="padding">
       <ScrollView contentContainerStyle={s.container} keyboardShouldPersistTaps="handled">
         <Text style={s.title}>Set your password</Text>
         <Text style={s.subtitle}>
@@ -54,6 +54,7 @@ export default function SetPasswordScreen() {
           onChangeText={setPassword}
           secureTextEntry
           editable={!busy}
+          placeholder="At least 8 characters"
         />
         <Input
           label="Confirm password"
@@ -62,9 +63,10 @@ export default function SetPasswordScreen() {
           secureTextEntry
           editable={!busy}
           onSubmitEditing={submit}
+          placeholder="Re-enter your new password"
         />
         <ErrorText message={error} />
-        <Button title="Save and Continue" onPress={submit} loading={busy} />
+        <Button title="Set password & continue" onPress={submit} loading={busy} />
         <Button
           title="Sign out"
           variant="ghost"

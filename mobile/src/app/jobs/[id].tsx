@@ -17,6 +17,7 @@ import { useToast } from "@/lib/toast";
 import {
   crossWarehouseReturnNote,
   GOODS_STATUS_LABELS,
+  kitLineSourceSplit,
   LINE_TYPE_LABEL,
   returnLocationNote,
 } from "@/lib/jobKit";
@@ -47,6 +48,14 @@ function KitLineCard({
   onWarehousePress: (w: JobKitWarehouse) => void;
 }) {
   const crossNote = crossWarehouseReturnNote(line, lines);
+  // A line MERGES origins: some units collected from its warehouse, some handed over from another
+  // engineer's van. Show each with its quantity — how many to collect vs how many are coming to you.
+  // When the van supplied everything, the warehouse pickup link is suppressed entirely: it stores the
+  // RETURN warehouse, and showing it as a pickup would send the engineer to collect stock a colleague
+  // is already bringing them.
+  const hasVanSources = line.vanSources.length > 0;
+  const split = kitLineSourceSplit(line);
+  const showWarehouse = !hasVanSources || split.warehouseQty > 0;
   return (
     <Card>
       <View style={s.lineTop}>
@@ -60,18 +69,20 @@ function KitLineCard({
         {LINE_TYPE_LABEL[line.lineType] ?? titleCase(line.lineType)}
         {line.seCode ? ` · ${line.seCode}` : ""}
       </Text>
-      {line.warehouse ? (
+      {showWarehouse && line.warehouse ? (
         <Pressable style={s.warehouseRow} onPress={() => onWarehousePress(line.warehouse!)}>
           <Ionicons name="location" size={14} color={colors.accent} />
           <Text style={s.warehouseLink}>
             {line.warehouse.name}
             {line.warehouse.code ? ` (${line.warehouse.code})` : ""}
+            {hasVanSources ? ` ×${split.warehouseQty}` : ""}
           </Text>
         </Pressable>
-      ) : line.warehouseName ? (
+      ) : showWarehouse && line.warehouseName ? (
         <Text style={s.lineMeta}>
           {line.warehouseName}
           {line.warehouseCode ? ` (${line.warehouseCode})` : ""}
+          {hasVanSources ? ` ×${split.warehouseQty}` : ""}
         </Text>
       ) : null}
       <Text style={s.lineTallies}>
@@ -121,7 +132,6 @@ export default function JobDetailScreen() {
   const router = useRouter();
   const { can } = useAuth();
   const toast = useToast();
-  const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [rejecting, setRejecting] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
@@ -161,16 +171,17 @@ export default function JobDetailScreen() {
     },
   );
 
-  const run = async (key: string, fn: () => Promise<typeof job>, successMsg?: string) => {
+  const run = async (key: string, fn: () => Promise<typeof job>, successMsg: string, failMsg: string) => {
     setBusy(key);
-    setActionError(null);
     try {
       const next = await fn();
       if (next) setJob(next);
       setRejecting(false);
-      if (successMsg) toast.success(successMsg);
+      toast.success(successMsg);
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Action failed.");
+      // Toast the server's reason (e.g. "This job can't be started right now.") —
+      // a generic message would hide what the engineer should do next.
+      toast.error(err instanceof Error ? err.message : failMsg);
     } finally {
       setBusy(null);
     }
@@ -251,14 +262,15 @@ export default function JobDetailScreen() {
       </Card>
 
       <ErrorText message={error} />
-      <ErrorText message={actionError} />
 
       {job.status === "assigned" ? (
         <Card>
-          <SectionTitle>Respond to assignment</SectionTitle>
+          <SectionTitle>{rejecting ? "Reject this job" : "Respond to assignment"}</SectionTitle>
           <Button
             title="Accept job"
-            onPress={() => void run("accept", () => acceptOwnJob(job.id), "Job accepted.")}
+            onPress={() =>
+              void run("accept", () => acceptOwnJob(job.id), "Job accepted.", "Could not accept this job.")
+            }
             loading={busy === "accept"}
           />
           {rejecting ? (
@@ -284,6 +296,7 @@ export default function JobDetailScreen() {
                     "reject",
                     () => rejectOwnJob(job.id, rejectReason),
                     "Job rejected. The project manager has been notified.",
+                    "Could not reject this job.",
                   )
                 }
               />
@@ -300,7 +313,9 @@ export default function JobDetailScreen() {
           <Button
             title="Start work"
             disabled={!goodsCollected}
-            onPress={() => void run("start", () => startOwnJob(job.id), "Job started. You are now on site.")}
+            onPress={() =>
+              void run("start", () => startOwnJob(job.id), "Job started. You are now on site.", "Could not start this job.")
+            }
             loading={busy === "start"}
           />
           {!goodsCollected ? <Text style={s.hint}>Collect your kit from the warehouse first</Text> : null}
@@ -394,6 +409,10 @@ export default function JobDetailScreen() {
       {showKitCard ? (
         <>
           <SectionTitle>Additional kit</SectionTitle>
+          <Text style={s.hint}>
+            Need more? Request extra units of a planned item or a new item — the planner reviews and
+            issues it.
+          </Text>
           {kitLocked ? (
             <Text style={s.hint}>Goods reconciled — kit locked, no more requests.</Text>
           ) : (
@@ -425,7 +444,9 @@ export default function JobDetailScreen() {
                   kr.fulfillmentMode === "engineer_transfer" || kr.fulfillmentMode === "mixed" ? (
                     <>
                       <Text style={s.lineMeta}>
-                        Approved — some items are coming from another engineer&rsquo;s van.
+                        {kr.fulfillmentMode === "mixed"
+                          ? "Approved — some items come from another engineer, the rest from the warehouse."
+                          : "Approved — coming via an engineer transfer."}
                       </Text>
                       <Button
                         title="View transfer &amp; contact"

@@ -8,6 +8,7 @@ import {
   getVanStockRequest,
 } from "@/services/vanStock.service";
 import { useLoad } from "@/lib/useLoad";
+import { useSocketRefresh } from "@/lib/useSocketRefresh";
 import { useToast } from "@/lib/toast";
 import { AttachmentThumbs } from "@/components/AttachmentPicker";
 import { WarehousePickupModal } from "@/components/WarehousePickupModal";
@@ -34,44 +35,74 @@ const VSR_STATUS_LABELS: Record<string, string> = {
   cancelled: "Cancelled",
 };
 
-/** Web's lineProgress: Excluded / Fulfilled / "n/m done" / Awaiting. */
+/** Web's lineProgress ladder, incl. the closed-short / cancelled-remainder outcomes. */
 function lineProgress(line: VanStockLine): string {
   if (line.approvedQty === 0) return "Excluded";
   const target = line.approvedQty ?? line.requestedQty;
-  if (line.fulfilledQty >= target) return "Fulfilled";
+  if (line.fulfilledQty >= target && target > 0) return "Fulfilled";
+  if ((line.closedShortQty ?? 0) > 0 && line.fulfilledQty > 0)
+    return `${line.fulfilledQty}/${target} — rest closed short`;
+  if ((line.closedShortQty ?? 0) > 0) return "Closed short";
+  if ((line.cancelledQty ?? 0) > 0 && line.fulfilledQty > 0)
+    return `${line.fulfilledQty}/${target} — rest cancelled`;
+  if ((line.cancelledQty ?? 0) > 0) return "Cancelled";
   if (line.fulfilledQty > 0) return `${line.fulfilledQty}/${target} done`;
   return "Awaiting";
 }
 
-/** Web's warehouseCaption (engineer variant). */
+/** Web's warehouseCaption (engineer variant): always "Collect from", derived from the lines. */
 function warehouseCaption(r: VanStockRequest): string {
-  if (r.type === "return") return `Returning to: ${r.warehouseName ?? r.preferredWarehouseName ?? "—"}`;
-  if (r.status === "pending") return `Requested warehouse: ${r.preferredWarehouseName ?? "—"} (pending review)`;
+  if (r.type === "return") {
+    const name = r.warehouseName ?? r.preferredWarehouseName;
+    if (!name) return "—";
+    const code = r.warehouseName ? r.warehouseCode : r.preferredWarehouseCode;
+    return `Returning to: ${name}${code ? ` (${code})` : ""}`;
+  }
+  const suffix = r.status === "pending" ? " (pending review)" : "";
   const sourceIds = new Set(r.lines.map((l) => l.sourceWarehouseId).filter(Boolean));
-  if (sourceIds.size > 1) return `Collect from ${sourceIds.size} warehouses — see each line below`;
-  return `Collect from: ${r.warehouseName ?? r.lines.find((l) => l.sourceWarehouseName)?.sourceWarehouseName ?? "—"}`;
+  if (sourceIds.size > 1) return `Collect from ${sourceIds.size} warehouses — see each line below${suffix}`;
+  const single =
+    r.lines.find((l) => l.sourceWarehouseName)?.sourceWarehouseName ??
+    r.warehouseName ??
+    r.preferredWarehouseName ??
+    "—";
+  return `Collect from: ${single}${suffix}`;
+}
+
+/** Web's VanStockCompletionBadge: how a closed request ended, if not cleanly. */
+function completionBadge(r: VanStockRequest): { label: string; status: string } | null {
+  if (r.completionType !== "cancelled_remaining" && r.completionType !== "closed_short") return null;
+  const collectedSome = r.lines.some((l) => l.fulfilledQty > 0);
+  if (r.completionType === "cancelled_remaining") {
+    return { label: collectedSome ? "Rest cancelled" : "Cancelled", status: "cancelled" };
+  }
+  return { label: collectedSome ? "Rest closed short" : "Closed short", status: "high" };
 }
 
 export default function VanStockDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const toast = useToast();
-  const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [pickupWarehouse, setPickupWarehouse] = useState<JobKitWarehouse | null>(null);
 
-  const { data: request, setData, loading, refreshing, error, refresh } = useLoad(
+  const { data: request, setData, loading, refreshing, error, refresh, reload } = useLoad(
     useCallback(() => getVanStockRequest(id), [id]),
   );
 
-  const run = async (key: string, fn: () => Promise<typeof request>, successMsg?: string) => {
+  // Live update while open — warehouse approvals/fulfilments land instantly,
+  // like the web list's socket refetch. Skipped mid-action (see transfer detail).
+  useSocketRefresh(["van_stock_request:updated"], () => {
+    if (!busy) void reload();
+  });
+
+  const run = async (key: string, fn: () => Promise<typeof request>, successMsg: string) => {
     setBusy(key);
-    setActionError(null);
     try {
       const next = await fn();
       if (next) setData(next);
-      if (successMsg) toast.success(successMsg);
+      toast.success(successMsg);
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Action failed.");
+      toast.error(err instanceof Error ? err.message : "Could not cancel the request.");
     } finally {
       setBusy(null);
     }
@@ -123,6 +154,10 @@ export default function VanStockDetailScreen() {
         <View style={s.badgeRow}>
           <Badge status={request.type} label={titleCase(request.type)} />
           {request.createdVia === "walk_in" ? <Badge status="draft" label="Walk-in" /> : null}
+          {(() => {
+            const completion = completionBadge(request);
+            return completion ? <Badge status={completion.status} label={completion.label} /> : null;
+          })()}
           {request.stale ? <Badge status="high" label="Stale" /> : null}
           <Badge status={request.priority} />
         </View>
@@ -211,8 +246,6 @@ export default function VanStockDetailScreen() {
         </>
       ) : null}
 
-      <ErrorText message={actionError} />
-
       {request.status === "pending" ? (
         <Button
           title="Cancel Request"
@@ -221,7 +254,7 @@ export default function VanStockDetailScreen() {
           onPress={() => confirmCancel(false)}
         />
       ) : null}
-      {request.status === "partially_fulfilled" ? (
+      {request.status === "approved" || request.status === "partially_fulfilled" ? (
         <Button
           title="Cancel Remaining"
           variant="secondary"

@@ -38,7 +38,7 @@ function optionKey(opt: KitItemOption): string {
 }
 
 function customerStockDetail(opt: Extract<KitItemOption, { source: "customer_stock" }>): string {
-  return `Customer stock · ${opt.warehouseName}${opt.warehouseCode ? ` (${opt.warehouseCode})` : ""} · ${opt.qty} in stock${opt.serialNumber ? ` · SN ${opt.serialNumber}` : ""}`;
+  return `Customer stock · ${opt.warehouseName || "Stored location"}${opt.warehouseCode ? ` (${opt.warehouseCode})` : ""} · ${opt.qty} in stock${opt.serialNumber ? ` · SN ${opt.serialNumber}` : ""}`;
 }
 
 // FE→PM additional-kit request for a live job, mirroring the web's "Request
@@ -52,6 +52,7 @@ export default function NewKitRequestScreen() {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<KitItemOption[]>([]);
   const [searching, setSearching] = useState(false);
+  const [searchFailed, setSearchFailed] = useState(false);
   const [extras, setExtras] = useState<Record<string, number>>({});
   const [lines, setLines] = useState<DraftLine[]>([]);
   const [reason, setReason] = useState("");
@@ -59,7 +60,7 @@ export default function NewKitRequestScreen() {
   const [busy, setBusy] = useState(false);
   const searchSeq = useRef(0);
 
-  const { data: job, loading } = useLoad(useCallback(() => getOwnJob(jobId), [jobId]));
+  const { data: job, loading, refreshing, refresh } = useLoad(useCallback(() => getOwnJob(jobId), [jobId]));
 
   // One row per distinct planned kit line (same identity merged), like the web's
   // "More of a planned item" table.
@@ -95,9 +96,15 @@ export default function NewKitRequestScreen() {
       setSearching(true);
       try {
         const found = await searchKitItems(q.trim(), jobId);
-        if (seq === searchSeq.current) setResults(found);
+        if (seq === searchSeq.current) {
+          setResults(found);
+          setSearchFailed(false);
+        }
       } catch {
-        if (seq === searchSeq.current) setResults([]);
+        if (seq === searchSeq.current) {
+          setResults([]);
+          setSearchFailed(true);
+        }
       } finally {
         if (seq === searchSeq.current) setSearching(false);
       }
@@ -110,6 +117,7 @@ export default function NewKitRequestScreen() {
   const clearSearch = () => {
     setQuery("");
     setResults([]);
+    setSearchFailed(false);
     searchSeq.current++; // drop any in-flight search so it can't repopulate results
     debouncedSearch(""); // supersede any pending debounce tick
   };
@@ -138,7 +146,7 @@ export default function NewKitRequestScreen() {
     if (!trimmed) return;
     // Web blocks the misc escape hatch when the name is already a planned line.
     if (plannedOptions.some((p) => p.itemName.toLowerCase() === trimmed.toLowerCase())) {
-      setError(`"${trimmed}" is already planned — request extra of it above.`);
+      setError(`“${trimmed}” is already listed above under “More of a planned item” — set its extra quantity there.`);
       return;
     }
     setError(null);
@@ -194,7 +202,7 @@ export default function NewKitRequestScreen() {
       toast.success("Request sent to the planner.");
       router.back();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not create the kit request.");
+      setError(err instanceof Error ? err.message : "Could not send the request.");
     } finally {
       setBusy(false);
     }
@@ -209,7 +217,7 @@ export default function NewKitRequestScreen() {
 
   const escapeTerm = query.trim();
   return (
-    <Screen>
+    <Screen refreshing={refreshing} onRefresh={() => void refresh()}>
       <Text style={s.hint}>
         Request extra kit for {jobNumber ?? "this job"}. The planner reviews it and decides where
         each item comes from.
@@ -237,7 +245,7 @@ export default function NewKitRequestScreen() {
 
       <SectionTitle>Add another item</SectionTitle>
       <Input
-        placeholder="Search IRM and customer stock…"
+        placeholder="Search the item you need…"
         value={query}
         onChangeText={(v) => {
           setQuery(v);
@@ -246,6 +254,12 @@ export default function NewKitRequestScreen() {
         autoCapitalize="none"
       />
       {searching ? <Text style={s.hint}>Searching…</Text> : null}
+      {searchFailed ? (
+        <Text style={s.searchError}>Couldn&rsquo;t run the search just now. Check your connection and try again.</Text>
+      ) : null}
+      {escapeTerm.length >= 2 && !searching && !searchFailed && results.length === 0 ? (
+        <Text style={s.hint}>No matching catalogue or customer-stock item.</Text>
+      ) : null}
       {results.map((opt) => {
         const key = optionKey(opt);
         const added = lines.some((l) => l.key === key);
@@ -307,7 +321,7 @@ export default function NewKitRequestScreen() {
         onChangeText={setReason}
         multiline
         maxLength={2000}
-        placeholder="e.g. two extra patch panels damaged in transit"
+        placeholder="e.g. Two cables damaged during install; need extras to finish."
       />
       <ErrorText message={error} />
       <Button title="Send request" onPress={() => void submit()} loading={busy} />
@@ -317,6 +331,7 @@ export default function NewKitRequestScreen() {
 
 const s = StyleSheet.create({
   hint: { fontSize: 13, color: colors.muted },
+  searchError: { fontSize: 13, color: colors.danger },
   lineName: { fontSize: 14, fontWeight: "700", color: colors.text, flex: 1 },
   meta: { fontSize: 12, color: colors.muted },
   lineRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 },

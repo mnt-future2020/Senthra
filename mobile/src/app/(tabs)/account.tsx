@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from "react";
+import React, { useCallback, useContext, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { Image } from "expo-image";
 import * as ImagePicker from "expo-image-picker";
@@ -13,6 +13,7 @@ import {
   updateMyProfile,
   uploadMySignature,
 } from "@/services/account.service";
+import { lookupPostcode } from "@/services/geo.service";
 import { principalName, useAuth } from "@/lib/auth";
 import { useLoad } from "@/lib/useLoad";
 import { useToast } from "@/lib/toast";
@@ -21,6 +22,7 @@ import {
   Button,
   Card,
   ErrorText,
+  FieldFocusContext,
   InfoRow,
   ListSkeleton,
   Screen,
@@ -44,7 +46,7 @@ function scorePassword(pw: string): number {
   return score;
 }
 const STRENGTH_LABELS = ["Too short", "Weak", "Fair", "Good", "Strong"];
-const STRENGTH_COLORS = [colors.danger, colors.danger, colors.warn, colors.info, colors.success];
+const STRENGTH_COLORS = [colors.danger, colors.danger, colors.warn, colors.accent, colors.success];
 
 function deviceLabel(ua: string | null): string {
   if (!ua) return "Unknown device";
@@ -112,11 +114,14 @@ function PasswordInput({
   placeholder?: string;
 }) {
   const [show, setShow] = useState(false);
+  const ensureVisible = useContext(FieldFocusContext);
+  const inputRef = useRef<TextInput>(null);
   return (
     <View style={s.pwWrap}>
       <Text style={s.pwLabel}>{label}</Text>
       <View style={s.pwRow}>
         <TextInput
+          ref={inputRef}
           value={value}
           onChangeText={onChangeText}
           secureTextEntry={!show}
@@ -124,6 +129,7 @@ function PasswordInput({
           placeholderTextColor={colors.faint}
           autoCapitalize="none"
           style={s.pwInput}
+          onFocus={() => ensureVisible?.(inputRef.current)}
         />
         <Pressable style={s.pwEye} hitSlop={8} onPress={() => setShow((v) => !v)}>
           <Ionicons name={show ? "eye-off" : "eye"} size={18} color={colors.muted} />
@@ -149,9 +155,21 @@ export default function AccountScreen() {
   const [avatarRemoved, setAvatarRemoved] = useState(false);
   const [profileMsg, setProfileMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [savingProfile, setSavingProfile] = useState(false);
+  const [pcMsg, setPcMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [lookingUp, setLookingUp] = useState(false);
+  // The city value the postcode lookup filled — editing the postcode clears it again.
+  const autofilledCity = useRef<string | null>(null);
   const seeded = useRef(false);
 
-  const { data: profile, setData: setProfile, loading } = useLoad(
+  const {
+    data: profile,
+    setData: setProfile,
+    loading,
+    refreshing,
+    refresh: refreshProfile,
+    error: profileError,
+    reload: reloadProfile,
+  } = useLoad(
     useCallback(async () => {
       const p = await getMyProfile();
       // Seed the edit form once — a focus refetch must not clobber edits in progress.
@@ -179,6 +197,43 @@ export default function AccountScreen() {
     setAvatarPreview(picked.dataUri);
     setAvatarData(picked.dataUri);
     setAvatarRemoved(false);
+  };
+
+  // Web's PostcodeField: uppercase as typed; editing after an autofill clears the
+  // city it filled, so a stale lookup can't linger behind a changed postcode.
+  const onPostcodeChange = (v: string) => {
+    setPostcode(v.toUpperCase());
+    setPcMsg(null);
+    if (autofilledCity.current && city === autofilledCity.current) {
+      setCity("");
+      autofilledCity.current = null;
+    }
+  };
+
+  const findAddress = async () => {
+    const trimmed = postcode.trim();
+    if (!trimmed) {
+      setPcMsg({ ok: false, text: "Enter a postcode first." });
+      return;
+    }
+    setLookingUp(true);
+    setPcMsg(null);
+    try {
+      const found = await lookupPostcode(trimmed);
+      if (!found) {
+        setPcMsg({ ok: false, text: "Couldn't find that postcode — enter the address manually." });
+        return;
+      }
+      if (found.city) {
+        setCity(found.city);
+        autofilledCity.current = found.city;
+      }
+      setPcMsg({ ok: true, text: "Filled from postcode — check and adjust if needed." });
+    } catch {
+      setPcMsg({ ok: false, text: "Couldn't look up that postcode right now." });
+    } finally {
+      setLookingUp(false);
+    }
   };
 
   const saveProfile = async () => {
@@ -237,6 +292,9 @@ export default function AccountScreen() {
       setNewPassword("");
       setConfirm("");
       toast.success("Password updated.");
+      // The backend signs every OTHER device out on a password change — refetch so
+      // the Devices card doesn't keep listing sessions that are already dead.
+      void reloadSessions();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not change your password.");
     } finally {
@@ -263,8 +321,8 @@ export default function AccountScreen() {
       setProfile(updated);
       setSigMsg(null);
       toast.success("Signature saved.");
-    } catch {
-      toast.error("Upload failed.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Upload failed.");
     } finally {
       setSigBusy(false);
     }
@@ -278,15 +336,20 @@ export default function AccountScreen() {
       setProfile(updated);
       setSigMsg(null);
       toast.success("Signature removed.");
-    } catch {
-      toast.error("Remove failed.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Remove failed.");
     } finally {
       setSigBusy(false);
     }
   };
 
   // ── Devices ─────────────────────────────────────────────────────────────────
-  const { data: sessions, reload: reloadSessions } = useLoad(useCallback(() => getSessions(), []));
+  const {
+    data: sessions,
+    loading: sessionsLoading,
+    error: sessionsError,
+    reload: reloadSessions,
+  } = useLoad(useCallback(() => getSessions(), []));
   const [revoking, setRevoking] = useState(false);
   const others = (sessions ?? []).filter((x) => !x.current).length;
 
@@ -296,8 +359,8 @@ export default function AccountScreen() {
       await revokeOtherSessions();
       await reloadSessions();
       toast.success("Signed out other devices.");
-    } catch {
-      toast.error("Couldn't sign out the other devices.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't sign out the other devices.");
     } finally {
       setRevoking(false);
     }
@@ -334,7 +397,13 @@ export default function AccountScreen() {
     .toUpperCase();
 
   return (
-    <Screen>
+    <Screen
+      refreshing={refreshing}
+      onRefresh={() => {
+        void refreshProfile();
+        void reloadSessions();
+      }}
+    >
       {/* Summary (web's sticky aside ProfileCard) */}
       <Card>
         <View style={s.summaryRow}>
@@ -361,6 +430,12 @@ export default function AccountScreen() {
       </Card>
 
       <SectionTitle>Edit profile</SectionTitle>
+      {profileError && !profile ? (
+        <Card>
+          <ErrorText message={profileError ?? "Could not load your profile."} />
+          <Button title="Retry" variant="secondary" small onPress={() => void reloadProfile()} />
+        </Card>
+      ) : (
       <Card>
         <Text style={s.desc}>
           Update your photo, phone and address. Your name, role and email are managed by an
@@ -397,12 +472,33 @@ export default function AccountScreen() {
         <Input label="City" value={city} onChangeText={setCity} />
         <Input label="Address line 1" value={address1} onChangeText={setAddress1} />
         <Input label="Address line 2" value={address2} onChangeText={setAddress2} />
-        <Input label="Postcode" value={postcode} onChangeText={setPostcode} autoCapitalize="characters" />
+        <View style={s.postcodeRow}>
+          <View style={s.flex1}>
+            <Input
+              label="Postcode"
+              value={postcode}
+              onChangeText={onPostcodeChange}
+              autoCapitalize="characters"
+              placeholder="e.g. LS1 4DY"
+              maxLength={12}
+            />
+          </View>
+          <Button
+            title="Find"
+            variant="secondary"
+            small
+            loading={lookingUp}
+            disabled={!postcode.trim()}
+            onPress={() => void findAddress()}
+          />
+        </View>
+        {pcMsg ? <Text style={pcMsg.ok ? s.okText : s.errText}>{pcMsg.text}</Text> : null}
         {profileMsg ? (
           <Text style={profileMsg.ok ? s.okText : s.errText}>{profileMsg.text}</Text>
         ) : null}
         <Button title="Save" onPress={() => void saveProfile()} loading={savingProfile} />
       </Card>
+      )}
 
       <SectionTitle>Password</SectionTitle>
       <Card>
@@ -506,7 +602,17 @@ export default function AccountScreen() {
             </View>
           ) : null}
         </View>
-        {(sessions ?? []).length === 0 ? (
+        {sessionsLoading ? (
+          <View style={s.sessionRow}>
+            <Skeleton width={18} height={18} radius={6} />
+            <View style={[s.flex1, { gap: 5 }]}>
+              <Skeleton width="45%" height={12} />
+              <Skeleton width="65%" height={10} />
+            </View>
+          </View>
+        ) : sessionsError ? (
+          <ErrorText message={sessionsError} />
+        ) : (sessions ?? []).length === 0 ? (
           <Text style={s.desc}>No active devices.</Text>
         ) : (
           (sessions ?? []).map((session: SessionInfo) => (
@@ -610,6 +716,7 @@ const s = StyleSheet.create({
   sigImage: { width: "100%", height: "100%" },
   sigPlaceholder: { fontSize: 13, color: colors.faint },
   buttonRow: { flexDirection: "row", gap: 10 },
+  postcodeRow: { flexDirection: "row", alignItems: "flex-end", gap: 10 },
   devicesHeader: { flexDirection: "row", alignItems: "flex-start", gap: 10 },
   countPill: { backgroundColor: colors.mutedSoft, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 2 },
   countPillText: { fontSize: 11, fontWeight: "700", color: colors.muted },

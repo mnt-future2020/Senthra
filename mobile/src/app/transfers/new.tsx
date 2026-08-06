@@ -157,7 +157,7 @@ export default function NewTransferScreen() {
       toast.success("Transfer request sent.");
       router.back();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not create the request.");
+      setError(err instanceof Error ? err.message : "Failed to create transfer.");
     } finally {
       setBusy(false);
     }
@@ -222,7 +222,7 @@ export default function NewTransferScreen() {
           {c.code ? <Text style={s.codeText}>{c.code}</Text> : null}
           <Text style={s.meta}>
             {isCompany(c)
-              ? "IRM (Company)"
+              ? "IRM"
               : `Customer${(c as CustomerCandidate).customerName ? ` · ${(c as CustomerCandidate).customerName}` : ""}`}
             {" · held by "}
             {c.engineerName}
@@ -230,9 +230,9 @@ export default function NewTransferScreen() {
         </Card>
       ))}
 
-      <SectionTitle>Requested items ({lines.length})</SectionTitle>
+      <SectionTitle>{lines.length ? `Selected items (${lines.length})` : "Selected items"}</SectionTitle>
       {lines.length === 0 ? (
-        <EmptyState title="Nothing added yet" subtitle="Search above to add items." />
+        <EmptyState title="No items added yet" subtitle="Add one or more items above to build the transfer." />
       ) : (
         lines.map((line) => (
           <Card key={line.key}>
@@ -242,7 +242,7 @@ export default function NewTransferScreen() {
                   {line.itemName}
                 </Text>
                 <Text style={s.meta}>
-                  {line.ownership === "company" ? "IRM (Company)" : "Customer"} · max {line.max}
+                  {line.ownership === "company" ? "IRM" : "Customer"} · max {line.max}
                 </Text>
               </View>
               <Stepper

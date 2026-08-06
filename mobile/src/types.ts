@@ -429,6 +429,8 @@ export interface VanStockLine {
   approvedQty: number | null;
   fulfilledQty: number;
   remainingQty: number;
+  closedShortQty: number | null;
+  cancelledQty: number | null;
   sourceWarehouseId: string | null;
   sourceWarehouseName: string | null;
   sourceWarehouseCode: string | null;
@@ -514,6 +516,10 @@ export interface VanStockLinePayload {
   irmItemId: string;
   itemName: string;
   qty: number;
+  // RESTOCK only: the warehouse this line is collected from. The engineer picks it per item against
+  // that warehouse's live free stock; the server stores it as the line's sourceWarehouseId, which is
+  // what routes the request to each warehouse's queue. Omitted on a return (one destination).
+  warehouseId?: string;
 }
 
 export interface CreateVanStockRequestPayload {
@@ -522,7 +528,7 @@ export interface CreateVanStockRequestPayload {
   notes?: string;
   priority?: VanStockPriority;
   attachments?: string[];
-  preferredWarehouseId?: string; // restock — required (routes the request to that warehouse's queue)
+  preferredWarehouseId?: string; // never sent on a restock — DERIVED server-side from the lines
   warehouseId?: string; // return — final warehouse
   lines: VanStockLinePayload[];
 }

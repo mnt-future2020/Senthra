@@ -207,20 +207,26 @@ export default function StockScreen() {
   useEffect(() => {
     const section = params.section;
     if (typeof section !== "string" || !section) return;
+    if (!SECTIONS.some((s) => s.key === section)) return;
     const timer = setTimeout(() => setTab(section), 0);
     return () => clearTimeout(timer);
   }, [params.section, params.t]);
 
   // ── Stock tabs ──────────────────────────────────────────────────────────────
-  const { data: irm, loading: l1, refreshing, error, refresh, reload: reloadIrm } = useLoad(getOwnStock);
-  const { data: customer, reload: reloadCustomer } = useLoad(getOwnCustomerStock);
-  const { data: misc, reload: reloadMisc } = useLoad(getOwnMiscStock);
+  // One load per tab so each keeps its own loading/error state, like the web's
+  // per-section fetches.
+  const irmLoad = useLoad(getOwnStock);
+  const customerLoad = useLoad(getOwnCustomerStock);
+  const miscLoad = useLoad(getOwnMiscStock);
+  const irm = irmLoad.data;
+  const customer = customerLoad.data;
+  const misc = miscLoad.data;
 
   // Like the web: a goods event refetches only the tab being looked at.
   useSocketRefresh(GOODS_EVENTS, () => {
-    if (tab === "irm") void reloadIrm();
-    else if (tab === "customer") void reloadCustomer();
-    else if (tab === "misc") void reloadMisc();
+    if (tab === "irm") void irmLoad.reload();
+    else if (tab === "customer") void customerLoad.reload();
+    else if (tab === "misc") void miscLoad.reload();
   });
 
   // Client-side search / sort / pagination per tab (15/page, like the web).
@@ -266,16 +272,28 @@ export default function StockScreen() {
     [ownership, mtype, dateFrom, dateTo],
   );
 
-  const { loading: l2, fetching: fMov } = useLoad(
+  const movementsLoad = useLoad(
     useCallback(async () => {
       const req = ++movReq.current;
-      const page = await getOwnMovements({ limit: PAGE, ...filterParams() });
-      if (req === movReq.current) {
-        setMovements(page.movements);
-        setCursor(page.nextCursor);
-        setHasMore(page.hasMore);
+      try {
+        const page = await getOwnMovements({ limit: PAGE, ...filterParams() });
+        if (req === movReq.current) {
+          setMovements(page.movements);
+          setCursor(page.nextCursor);
+          setHasMore(page.hasMore);
+        }
+        return page;
+      } catch (err) {
+        // Like the web: a failed page-1 fetch resets the feed so rows from the
+        // previous filters can't sit under the new ones, and the error message
+        // takes the empty-state slot.
+        if (req === movReq.current) {
+          setMovements([]);
+          setCursor(null);
+          setHasMore(false);
+        }
+        throw err instanceof Error ? err : new Error("Could not load movements.");
       }
-      return page;
     }, [filterParams]),
   );
 
@@ -326,156 +344,191 @@ export default function StockScreen() {
     }
   };
 
-  if (l1 || l2)
-    return (
-      <Screen>
-        <ListSkeleton />
-      </Screen>
-    );
+  // Pull-to-refresh targets whichever tab is on screen.
+  const activeLoad =
+    tab === "customer" ? customerLoad : tab === "misc" ? miscLoad : tab === "movements" ? movementsLoad : irmLoad;
 
   return (
-    <Screen refreshing={refreshing} onRefresh={() => void refresh()}>
+    <Screen refreshing={activeLoad.refreshing} onRefresh={() => void activeLoad.refresh()}>
       <Chips options={SECTIONS} value={tab} onChange={setTab} />
       <Text style={s.caption}>{SECTION_CAPTIONS[tab]}</Text>
-      <ErrorText message={error} />
 
+      {/* Each tab mirrors the web's branch order: loading → skeleton; error with
+          no rows → banner only; source empty → empty state; else search + rows
+          (an error with cached rows keeps the stale list under the banner). */}
       {tab === "irm" ? (
-        <>
-          <Input
-            placeholder="Search item or code…"
-            value={irmTable.query}
-            onChangeText={irmTable.setQuery}
-            autoCapitalize="none"
-            returnKeyType="search"
-          />
-          <FilterRow>
-            <Select options={IRM_SORTS} value={irmTable.sort} onChange={irmTable.setSort} />
-          </FilterRow>
-          {(irm ?? []).length === 0 ? (
-            <EmptyState title="No IRM stock on hand" subtitle="Stock dispatched to you from a warehouse will appear here." />
-          ) : irmTable.noMatches ? (
-            <NoMatches />
-          ) : (
-            irmTable.rows.map((item) => (
-              <Card key={item.irmItemId}>
-                <View style={s.rowTop}>
-                  <Text style={s.itemName} numberOfLines={2}>
-                    {item.itemName}
-                  </Text>
-                  <Text style={s.qtyBig}>
-                    {item.quantityOnHand}
-                    {item.baseUnit ? ` ${item.baseUnit}` : ""}
-                  </Text>
-                </View>
-                <Text style={s.code}>{item.itemCode}</Text>
-                <Text style={s.meta}>Last updated {formatDate(item.lastMovedAt)}</Text>
-              </Card>
-            ))
-          )}
-          {irmTable.total > 0 ? (
-            <Pager
-              page={irmTable.page}
-              totalPages={irmTable.totalPages}
-              onPage={irmTable.setPage}
-              total={irmTable.total}
-              label="items"
-            />
-          ) : null}
-        </>
+        irmLoad.loading ? (
+          <ListSkeleton />
+        ) : (
+          <>
+            <ErrorText message={irmLoad.error} />
+            {(irm ?? []).length === 0 ? (
+              irmLoad.error ? null : (
+                <EmptyState
+                  title="No IRM stock on hand"
+                  subtitle="Stock dispatched to you from a warehouse will appear here."
+                />
+              )
+            ) : (
+              <>
+                <Input
+                  placeholder="Search item or code…"
+                  value={irmTable.query}
+                  onChangeText={irmTable.setQuery}
+                  autoCapitalize="none"
+                  returnKeyType="search"
+                />
+                <FilterRow>
+                  <Select options={IRM_SORTS} value={irmTable.sort} onChange={irmTable.setSort} />
+                </FilterRow>
+                {irmTable.noMatches ? (
+                  <NoMatches />
+                ) : (
+                  irmTable.rows.map((item) => (
+                    <Card key={item.irmItemId}>
+                      <View style={s.rowTop}>
+                        <Text style={s.itemName} numberOfLines={2}>
+                          {item.itemName}
+                        </Text>
+                        <Text style={s.qtyBig}>
+                          {item.quantityOnHand}
+                          {item.baseUnit ? ` ${item.baseUnit}` : ""}
+                        </Text>
+                      </View>
+                      <Text style={s.code}>{item.itemCode}</Text>
+                      <Text style={s.meta}>Last updated {formatDate(item.lastMovedAt)}</Text>
+                    </Card>
+                  ))
+                )}
+                {irmTable.total > 0 ? (
+                  <Pager
+                    page={irmTable.page}
+                    totalPages={irmTable.totalPages}
+                    onPage={irmTable.setPage}
+                    total={irmTable.total}
+                    label="items"
+                  />
+                ) : null}
+              </>
+            )}
+          </>
+        )
       ) : null}
 
       {tab === "customer" ? (
-        <>
-          <Input
-            placeholder="Search item or customer…"
-            value={customerTable.query}
-            onChangeText={customerTable.setQuery}
-            autoCapitalize="none"
-            returnKeyType="search"
-          />
-          <FilterRow>
-            {customerOptions.length > 2 || activeCustomer !== "" ? (
-              <Select
-                options={customerOptions}
-                value={activeCustomer}
-                onChange={(key) => {
-                  setCustomerFilter(key);
-                  customerTable.setPage(1);
-                }}
-              />
-            ) : null}
-            <Select options={CUSTOMER_SORTS} value={customerTable.sort} onChange={customerTable.setSort} />
-          </FilterRow>
-          {(customer ?? []).length === 0 ? (
-            <EmptyState
-              title="No customer stock held"
-              subtitle="Customer consignment items issued to you for a job will appear here."
-            />
-          ) : customerTable.noMatches ? (
-            <NoMatches />
-          ) : (
-            customerTable.rows.map((item) => (
-              <Card key={item.id}>
-                <View style={s.rowTop}>
-                  <Text style={s.itemName} numberOfLines={2}>
-                    {item.itemName}
-                  </Text>
-                  <Text style={s.qtyBig}>{item.quantityOnHand}</Text>
-                </View>
-                <Text style={s.meta}>{item.customerName ?? "—"}</Text>
-              </Card>
-            ))
-          )}
-          {customerTable.total > 0 ? (
-            <Pager
-              page={customerTable.page}
-              totalPages={customerTable.totalPages}
-              onPage={customerTable.setPage}
-              total={customerTable.total}
-              label="items"
-            />
-          ) : null}
-        </>
+        customerLoad.loading ? (
+          <ListSkeleton />
+        ) : (
+          <>
+            <ErrorText message={customerLoad.error} />
+            {(customer ?? []).length === 0 ? (
+              customerLoad.error ? null : (
+                <EmptyState
+                  title="No customer stock held"
+                  subtitle="Customer consignment items issued to you for a job will appear here."
+                />
+              )
+            ) : (
+              <>
+                <Input
+                  placeholder="Search item or customer…"
+                  value={customerTable.query}
+                  onChangeText={customerTable.setQuery}
+                  autoCapitalize="none"
+                  returnKeyType="search"
+                />
+                <FilterRow>
+                  {customerOptions.length > 2 || activeCustomer !== "" ? (
+                    <Select
+                      options={customerOptions}
+                      value={activeCustomer}
+                      onChange={(key) => {
+                        setCustomerFilter(key);
+                        customerTable.setPage(1);
+                      }}
+                    />
+                  ) : null}
+                  <Select options={CUSTOMER_SORTS} value={customerTable.sort} onChange={customerTable.setSort} />
+                </FilterRow>
+                {customerTable.noMatches ? (
+                  <NoMatches />
+                ) : (
+                  customerTable.rows.map((item) => (
+                    <Card key={item.id}>
+                      <View style={s.rowTop}>
+                        <Text style={s.itemName} numberOfLines={2}>
+                          {item.itemName}
+                        </Text>
+                        <Text style={s.qtyBig}>{item.quantityOnHand}</Text>
+                      </View>
+                      <Text style={s.meta}>{item.customerName ?? "—"}</Text>
+                    </Card>
+                  ))
+                )}
+                {customerTable.total > 0 ? (
+                  <Pager
+                    page={customerTable.page}
+                    totalPages={customerTable.totalPages}
+                    onPage={customerTable.setPage}
+                    total={customerTable.total}
+                    label="items"
+                  />
+                ) : null}
+              </>
+            )}
+          </>
+        )
       ) : null}
 
       {tab === "misc" ? (
-        <>
-          <Input
-            placeholder="Search item…"
-            value={miscTable.query}
-            onChangeText={miscTable.setQuery}
-            autoCapitalize="none"
-            returnKeyType="search"
-          />
-          <FilterRow>
-            <Select options={MISC_SORTS} value={miscTable.sort} onChange={miscTable.setSort} />
-          </FilterRow>
-          {(misc ?? []).length === 0 ? (
-            <EmptyState title="No misc items" subtitle="Misc kit items issued to you for a job will appear here." />
-          ) : miscTable.noMatches ? (
-            <NoMatches />
-          ) : (
-            miscTable.rows.map((item, i) => (
-              <Card key={`${item.itemName}-${i}`}>
-                <View style={s.rowTop}>
-                  <Text style={s.itemName} numberOfLines={2}>
-                    {item.itemName}
-                  </Text>
-                  <Text style={s.qtyBig}>{item.quantityOnHand}</Text>
-                </View>
-              </Card>
-            ))
-          )}
-          {miscTable.total > 0 ? (
-            <Pager
-              page={miscTable.page}
-              totalPages={miscTable.totalPages}
-              onPage={miscTable.setPage}
-              total={miscTable.total}
-              label="items"
-            />
-          ) : null}
-        </>
+        miscLoad.loading ? (
+          <ListSkeleton />
+        ) : (
+          <>
+            <ErrorText message={miscLoad.error} />
+            {(misc ?? []).length === 0 ? (
+              miscLoad.error ? null : (
+                <EmptyState title="No misc items" subtitle="Misc kit items issued to you for a job will appear here." />
+              )
+            ) : (
+              <>
+                <Input
+                  placeholder="Search item…"
+                  value={miscTable.query}
+                  onChangeText={miscTable.setQuery}
+                  autoCapitalize="none"
+                  returnKeyType="search"
+                />
+                <FilterRow>
+                  <Select options={MISC_SORTS} value={miscTable.sort} onChange={miscTable.setSort} />
+                </FilterRow>
+                {miscTable.noMatches ? (
+                  <NoMatches />
+                ) : (
+                  miscTable.rows.map((item, i) => (
+                    <Card key={`${item.itemName}-${i}`}>
+                      <View style={s.rowTop}>
+                        <Text style={s.itemName} numberOfLines={2}>
+                          {item.itemName}
+                        </Text>
+                        <Text style={s.qtyBig}>{item.quantityOnHand}</Text>
+                      </View>
+                    </Card>
+                  ))
+                )}
+                {miscTable.total > 0 ? (
+                  <Pager
+                    page={miscTable.page}
+                    totalPages={miscTable.totalPages}
+                    onPage={miscTable.setPage}
+                    total={miscTable.total}
+                    label="items"
+                  />
+                ) : null}
+              </>
+            )}
+          </>
+        )
       ) : null}
 
       {tab === "movements" ? (
@@ -513,20 +566,24 @@ export default function StockScreen() {
             </Card>
           ) : null}
 
-          <ListFade dimmed={fMov}>
-            {movements.length === 0 ? (
-              <EmptyState title="No movements match these filters" />
-            ) : (
-              <>
-                {movements.map((m) => (
-                  <MovementCard key={m.id} m={m} />
-                ))}
-                {hasMore ? (
-                  <Button title="Load more" variant="secondary" loading={loadingMore} onPress={() => void loadMore()} />
-                ) : null}
-              </>
-            )}
-          </ListFade>
+          {movementsLoad.loading ? (
+            <ListSkeleton />
+          ) : (
+            <ListFade dimmed={movementsLoad.fetching}>
+              {movements.length === 0 ? (
+                <EmptyState title={movementsLoad.error ?? "No movements match these filters"} />
+              ) : (
+                <>
+                  {movements.map((m) => (
+                    <MovementCard key={m.id} m={m} />
+                  ))}
+                  {hasMore ? (
+                    <Button title="Load more" variant="secondary" loading={loadingMore} onPress={() => void loadMore()} />
+                  ) : null}
+                </>
+              )}
+            </ListFade>
+          )}
         </>
       ) : null}
     </Screen>
