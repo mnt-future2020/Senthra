@@ -19,9 +19,20 @@ Desktop.ini
 # Qodo AI workspace (local, regenerated)
 .qodo/
 
-# Claude Code — ignore only the per-machine local config; the shared
-# .claude/ config and CLAUDE.md stay tracked.
+# Claude Code — ignore the per-machine local config.
 .claude/settings.local.json
+
+# Agent instruction files and internal design docs: LOCAL ONLY, never pushed.
+# They stay on disk and keep working for the tooling that reads them — they are
+# untracked (git rm --cached), not deleted. The .md summaries the client sees
+# (PROJECT-DOCUMENTATION.md, the per-app READMEs) and docs/diagrams/*.png stay tracked.
+/CLAUDE.md
+/frontend/CLAUDE.md
+/frontend/AGENTS.md
+/mobile/CLAUDE.md
+/mobile/AGENTS.md
+/docs/*.md
+/docs/superpowers/
 
 # Logs
 *.log
