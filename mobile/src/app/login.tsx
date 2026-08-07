@@ -5,7 +5,7 @@ import { useRouter } from "expo-router";
 import { principalName, useAuth } from "@/lib/auth";
 import { useBranding } from "@/lib/branding";
 import { useToast } from "@/lib/toast";
-import { Button, ErrorText, Input } from "@/components/ui";
+import { Button, ErrorText, Input, PasswordInput } from "@/components/ui";
 import { colors } from "@/lib/theme";
 import type { Principal } from "@/types";
 
@@ -74,11 +74,10 @@ export default function LoginScreen() {
             placeholder="you@company.com"
             editable={!busy}
           />
-          <Input
+          <PasswordInput
             label="Password"
             value={password}
             onChangeText={setPassword}
-            secureTextEntry
             placeholder="••••••••"
             editable={!busy}
             onSubmitEditing={submit}

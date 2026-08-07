@@ -14,7 +14,7 @@
         "buildType": "apk"
       },
       "env": {
-        "EXPO_PUBLIC_API_URL": "http://192.168.29.30:8000"
+        "EXPO_PUBLIC_API_URL": "https://senthra-backend.vercel.app"
       }
     },
     "production": {

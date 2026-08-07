@@ -1,5 +1,5 @@
-import React, { useCallback, useContext, useRef, useState } from "react";
-import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import React, { useCallback, useRef, useState } from "react";
+import { StyleSheet, Text, View } from "react-native";
 import { Image } from "expo-image";
 import * as ImagePicker from "expo-image-picker";
 import { useRouter } from "expo-router";
@@ -22,9 +22,9 @@ import {
   Button,
   Card,
   ErrorText,
-  FieldFocusContext,
   InfoRow,
   ListSkeleton,
+  PasswordInput,
   Screen,
   SectionTitle,
   Skeleton,
@@ -100,43 +100,6 @@ async function pickImage(): Promise<{ dataUri: string; fileName: string } | { er
   if (mime !== "image/png" && mime !== "image/jpeg") return { error: "Use a PNG or JPG image." };
   if ((asset.fileSize ?? base64.length * 0.75) > MAX_IMAGE_BYTES) return { error: "Image must be under 2 MB." };
   return { dataUri: `data:${mime};base64,${base64}`, fileName: asset.fileName ?? "image.jpg" };
-}
-
-function PasswordInput({
-  label,
-  value,
-  onChangeText,
-  placeholder,
-}: {
-  label: string;
-  value: string;
-  onChangeText: (v: string) => void;
-  placeholder?: string;
-}) {
-  const [show, setShow] = useState(false);
-  const ensureVisible = useContext(FieldFocusContext);
-  const inputRef = useRef<TextInput>(null);
-  return (
-    <View style={s.pwWrap}>
-      <Text style={s.pwLabel}>{label}</Text>
-      <View style={s.pwRow}>
-        <TextInput
-          ref={inputRef}
-          value={value}
-          onChangeText={onChangeText}
-          secureTextEntry={!show}
-          placeholder={placeholder}
-          placeholderTextColor={colors.faint}
-          autoCapitalize="none"
-          style={s.pwInput}
-          onFocus={() => ensureVisible?.(inputRef.current)}
-        />
-        <Pressable style={s.pwEye} hitSlop={8} onPress={() => setShow((v) => !v)}>
-          <Ionicons name={show ? "eye-off" : "eye"} size={18} color={colors.muted} />
-        </Pressable>
-      </View>
-    </View>
-  );
 }
 
 export default function AccountScreen() {
@@ -682,21 +645,6 @@ const s = StyleSheet.create({
     justifyContent: "center",
   },
   avatarInitials: { fontSize: 18, fontWeight: "800", color: colors.accent },
-  pwWrap: { gap: 6 },
-  pwLabel: { fontSize: 13, fontWeight: "600", color: colors.muted },
-  pwRow: { position: "relative" },
-  pwInput: {
-    backgroundColor: colors.card,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 11,
-    paddingRight: 40,
-    fontSize: 15,
-    color: colors.text,
-  },
-  pwEye: { position: "absolute", right: 12, top: 0, bottom: 0, justifyContent: "center" },
   strengthWrap: { flexDirection: "row", alignItems: "center", gap: 10 },
   strengthBars: { flexDirection: "row", gap: 4, flex: 1 },
   strengthBar: { flex: 1, height: 4, borderRadius: 2 },

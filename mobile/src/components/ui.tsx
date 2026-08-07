@@ -34,10 +34,12 @@ import { titleCase } from "../lib/format";
  */
 export function GlassSurface({ edge, variant = "light" }: { edge: "top" | "bottom"; variant?: "light" | "accent" }) {
   if (variant === "accent") {
+    // A visible bottom edge — without it, accent-coloured content (e.g. a
+    // primary button) scrolling under the solid accent header merges into it.
     if (Platform.OS === "ios") {
-      return <BlurView tint="dark" intensity={40} style={[StyleSheet.absoluteFill, s.glassAccentIos]} />;
+      return <BlurView tint="dark" intensity={40} style={[StyleSheet.absoluteFill, s.glassAccentIos, s.accentEdge]} />;
     }
-    return <View style={[StyleSheet.absoluteFill, s.glassAccent]} />;
+    return <View style={[StyleSheet.absoluteFill, s.glassAccent, s.accentEdge]} />;
   }
   const hairline = edge === "top" ? s.glassBorderBottom : s.glassBorderTop;
   if (Platform.OS === "ios") {
@@ -366,6 +368,45 @@ export function Input({
   );
 }
 
+/** Password field with an eye toggle to show/hide what's typed. */
+export function PasswordInput({
+  label,
+  required,
+  style,
+  ...props
+}: TextInputProps & { label?: string; required?: boolean }) {
+  const [show, setShow] = useState(false);
+  const ensureVisible = useContext(FieldFocusContext);
+  const inputRef = useRef<TextInput>(null);
+  return (
+    <View style={s.inputWrap}>
+      {label ? (
+        <Text style={s.inputLabel}>
+          {label}
+          {required ? <Text style={s.requiredStar}> *</Text> : null}
+        </Text>
+      ) : null}
+      <View style={s.pwRow}>
+        <TextInput
+          ref={inputRef}
+          placeholderTextColor={colors.faint}
+          secureTextEntry={!show}
+          autoCapitalize="none"
+          style={[s.input, s.pwInput, style]}
+          {...props}
+          onFocus={(e) => {
+            props.onFocus?.(e);
+            ensureVisible?.(inputRef.current);
+          }}
+        />
+        <Pressable style={s.pwEye} hitSlop={8} onPress={() => setShow((v) => !v)}>
+          <Ionicons name={show ? "eye-off" : "eye"} size={18} color={colors.muted} />
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
 export function Segmented({
   options,
   value,
@@ -571,6 +612,15 @@ const s = StyleSheet.create({
   glassFallback: { backgroundColor: "rgba(255,255,255,0.92)" },
   glassAccentIos: { backgroundColor: "rgba(123,110,240,0.88)" },
   glassAccent: { backgroundColor: colors.accent },
+  accentEdge: {
+    borderBottomWidth: 2,
+    borderBottomColor: "rgba(30, 18, 80, 0.35)",
+    elevation: 8, // Android: soft drop shadow so content reads as sliding UNDER the header
+    shadowColor: "#1e1250",
+    shadowOpacity: 0.3,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 3 },
+  },
   glassBorderBottom: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   glassBorderTop: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
   listFade: { gap: 12 },
@@ -626,6 +676,9 @@ const s = StyleSheet.create({
     color: colors.text,
   },
   inputMultiline: { minHeight: 80, textAlignVertical: "top" },
+  pwRow: { position: "relative" },
+  pwInput: { paddingRight: 44 },
+  pwEye: { position: "absolute", right: 12, top: 0, bottom: 0, justifyContent: "center" },
   segmented: {
     flexDirection: "row",
     backgroundColor: colors.mutedSoft,

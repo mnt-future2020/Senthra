@@ -4,7 +4,7 @@ import { useRouter } from "expo-router";
 import { changeOwnPassword } from "@/services/account.service";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/lib/toast";
-import { Button, ErrorText, Input } from "@/components/ui";
+import { Button, ErrorText, PasswordInput } from "@/components/ui";
 import { colors } from "@/lib/theme";
 
 // First-login forced password change: the backend walls off every permission-gated
@@ -48,19 +48,17 @@ export default function SetPasswordScreen() {
         <Text style={s.subtitle}>
           You signed in with a temporary password. Choose a new one to continue.
         </Text>
-        <Input
+        <PasswordInput
           label="New password"
           value={password}
           onChangeText={setPassword}
-          secureTextEntry
           editable={!busy}
           placeholder="At least 8 characters"
         />
-        <Input
+        <PasswordInput
           label="Confirm password"
           value={confirm}
           onChangeText={setConfirm}
-          secureTextEntry
           editable={!busy}
           onSubmitEditing={submit}
           placeholder="Re-enter your new password"
