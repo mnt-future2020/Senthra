@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { postcodeField as ukPostcode } from "../../utils/postcode.js";
+import { isHttpUrl } from "../../utils/http-url.js";
 
 // Job (field-work) validation. Job number / status / snapshots / timestamps are SYSTEM-owned and
 // never accepted from the client. lineType/priority/installerType/jobType are validated here (the
@@ -154,7 +155,13 @@ const sharedHeader = {
   plannerName: z.string().trim().max(160).optional(),
   plannerPhone: z.string().trim().max(60).optional(),
   notes: z.string().trim().max(4000).optional(),
-  attachments: z.array(z.string().trim().max(1000)).max(50).optional(),
+  // http(s) only. These are typed in as free text and rendered as links — on the customer portal
+  // now, not just the office page — and `javascript:` / `data:` are valid URLs that execute when
+  // clicked. A shape check would pass both, so the SCHEME is what this pins (utils/http-url).
+  attachments: z
+    .array(z.string().trim().max(1000).refine(isHttpUrl, "Attachments must be an http:// or https:// link."))
+    .max(50)
+    .optional(),
 };
 
 export const createJobSchema = z

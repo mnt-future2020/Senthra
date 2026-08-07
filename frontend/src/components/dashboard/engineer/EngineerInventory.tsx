@@ -9,7 +9,7 @@ import type { MiscHeldItem } from "@/services/engineer.service";
 import { Notice } from "@/components/ui/Notice";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
-import { EmptyState, fmtDate, PortalHeader, TableCard, TableCardSkeleton } from "@/components/dashboard/portal/portalUi";
+import { EmptyState, fmtDate, TableCard, TableCardSkeleton } from "@/components/dashboard/portal/portalUi";
 import { PortalSearch, SortHeader, usePortalTable } from "@/components/dashboard/portal/portalTable";
 import { MovementFeed, type MovementFetcher } from "@/components/dashboard/inventory/MovementFeed";
 import type { EngineerStockItem } from "@/types/engineer";
@@ -298,8 +298,6 @@ export function EngineerInventory() {
 
   return (
     <div className="flex h-full flex-col gap-5">
-      <PortalHeader title="Stock" subtitle="Company (IRM), customer consignment and misc items currently assigned to you." />
-
       {/* Sub-tabs */}
       <div className="flex shrink-0 items-center gap-2">
         {SECTIONS.map(({ key, label, icon: Icon }) => (

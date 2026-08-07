@@ -14,7 +14,6 @@ import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
 import { useJobSocket } from "@/hooks/useJobSocket";
 import { subscribe } from "@/lib/socket";
-import { ListPageHeader } from "@/components/ui/ListPageHeader";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -228,8 +227,6 @@ export function JobsView() {
 
   return (
     <div className="flex h-full flex-col gap-5">
-      <ListPageHeader title="Jobs" subtitle="Create and assign installation, survey and maintenance jobs. Assigning a job notifies the engineer in real time; they accept it from their portal." />
-
       <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:flex-wrap lg:items-center">
         <div className="relative w-full lg:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
@@ -350,7 +347,14 @@ export function JobsView() {
         </div>
       )}
 
-      <ConfirmDialog open={confirm.open} title="Remove job?" message={<>This deletes job <strong className="text-[var(--ink)]">{confirm.job?.jobNumber}</strong>. Only draft or cancelled jobs can be deleted.</>} confirmLabel="Remove" danger busy={deleting} onConfirm={onDelete} onClose={() => setConfirm({ open: false, job: null })} />
+      <ConfirmDialog open={confirm.open} title="Remove job?" // States BOTH rules the server enforces. Saying only "draft or cancelled" was a half-truth: a
+        // cancelled job holding stock is refused too, so someone reading this, seeing the job IS
+        // cancelled, and confirming got a rejection that looked like a bug rather than the rule.
+        // Deliberately NOT hidden or disabled instead — the row has no kit lines (see the LIST
+        // projection in job.repository.ts), so the page cannot know what is outstanding without a
+        // per-row tally, and goodsStatus is not a safe proxy: "awaiting return" also covers a job whose
+        // stock is all back but unreconciled, which the server WOULD let you delete.
+        message={<>This deletes job <strong className="text-[var(--ink)]">{confirm.job?.jobNumber}</strong>. A job can only be deleted once it&rsquo;s draft or cancelled and has no stock out with the engineer.</>} confirmLabel="Remove" danger busy={deleting} onConfirm={onDelete} onClose={() => setConfirm({ open: false, job: null })} />
     </div>
   );
 }

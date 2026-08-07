@@ -16,7 +16,7 @@ import inventoryRoutes from "#modules/inventory/inventory.routes.js";
 import irmRoutes from "#modules/irm/irm.routes.js";
 import irmCategoryRoutes from "#modules/irm-category/irm-category.routes.js";
 import irmTypeRoutes from "#modules/irm-type/irm-type.routes.js";
-import jobRoutes from "#modules/job/job.routes.js";
+import jobRoutes, { portalRouter as customerJobRoutes } from "#modules/job/job.routes.js";
 import jobKitRequestRoutes from "#modules/job-kit-request/job-kit-request.routes.js";
 import jobTitleRoutes from "#modules/jobTitle/jobTitle.routes.js";
 import notificationRoutes from "#modules/notification/notification.routes.js";
@@ -65,6 +65,11 @@ router.use("/job-titles", jobTitleRoutes);
 router.use("/email-templates", emailTemplateRoutes);
 // Customer master-data (admin/PM) + the read-only customer portal API.
 router.use("/customers", customerRoutes);
+// Jobs on the portal live in the JOB module (it owns the model and its repository), so they mount
+// as their own sub-path. Declared BEFORE /customer: both prefixes match this URL, and while the
+// portal router below happens to have no /jobs route to shadow it, relying on that would make a
+// future route added there silently take precedence over this one.
+router.use("/customer/jobs", customerJobRoutes);
 router.use("/customer", customerPortalRoutes);
 // Engineer self-service portal API (staff-only, permission-gated, scoped to the signed-in user).
 router.use("/engineer", engineerRoutes);

@@ -583,7 +583,10 @@ interface Paged {
   pageSize: number;
   totalPages: number;
 }
-const portalQs = (p: PortalListParams): string => {
+// Exported so the portal's Jobs list (job.service.ts — jobs are the job module's domain, but they
+// are a portal LIST like any other) builds its query string from the same place. The names here are
+// a contract with the backend's portalListParams; a second copy would drift the moment one changes.
+export const portalQs = (p: PortalListParams): string => {
   const qs = new URLSearchParams();
   if (p.q) qs.set("q", p.q);
   if (p.status) qs.set("status", p.status);

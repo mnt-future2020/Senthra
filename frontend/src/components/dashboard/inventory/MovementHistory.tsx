@@ -6,7 +6,7 @@ import { ArrowLeft, ArrowLeftRight, Search } from "lucide-react";
 
 import * as inventoryService from "@/services/inventory.service";
 import { useAuth } from "@/hooks/useAuth";
-import { ListPageHeader } from "@/components/ui/ListPageHeader";
+import { toolbarActionsCls, toolbarPrimaryBtn } from "@/components/ui/styles";
 import { Pagination } from "@/components/ui/Pagination";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { formatDate } from "./inventoryStatus";
@@ -76,23 +76,22 @@ export function MovementHistory() {
       <button onClick={() => router.push("/dashboard/inventory")} className="flex items-center gap-1.5 text-[11px] font-bold text-[var(--muted)] transition-colors hover:text-[var(--ink)]">
         <ArrowLeft className="h-3.5 w-3.5" /> Back to inventory
       </button>
-      <ListPageHeader
-        title="Stock movements"
-        subtitle="Every warehouse-to-warehouse transfer, most recent first."
-        right={
-          can("inventory.move") && (
-            <button onClick={() => router.push("/dashboard/inventory/move")} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90">
-              <ArrowLeftRight className="h-4 w-4" /> Move stock
-            </button>
-          )
-        }
-      />
-
-      <div className="shrink-0 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs">
+      <div className="flex shrink-0 flex-col gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center">
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="Search TRF, item or warehouse…" className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]" />
         </div>
+
+        {/* The page's action, at the right-hand end of the search row rather than in the top bar —
+            up there it sat against the browser's own chrome, a screen's width from the list. The row
+            gains `sm:flex-row` for this; it held only the search box before. */}
+        {can("inventory.move") && (
+          <div className={`${toolbarActionsCls} sm:ml-auto`}>
+            <button onClick={() => router.push("/dashboard/inventory/move")} className={toolbarPrimaryBtn}>
+              <ArrowLeftRight className="h-3.5 w-3.5" /> Move stock
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">

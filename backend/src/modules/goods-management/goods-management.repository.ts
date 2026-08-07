@@ -559,6 +559,18 @@ export type DamagedBalanceWithWarehouse = Prisma.DamagedStockBalanceGetPayload<{
 export function findDamagedByWarehouse(warehouseId: string): Promise<DamagedBalanceWithWarehouse[]> {
   return prisma.damagedStockBalance.findMany({ where: { warehouseId, quantity: { gt: 0 } }, include: damagedBalanceInclude, orderBy: { updatedAt: "desc" } });
 }
+/**
+ * Damaged units held at a warehouse — the delete guard for it.
+ *
+ * Nothing else covers this: the inventory checker counts InventoryBalance, which a unit has already
+ * left by the time it lands in the damaged pool. So a warehouse whose only remaining contents are
+ * damaged looks empty to every other check, and deleting it strands the pool behind a warehouse id
+ * that no read resolves — findDamagedByWarehouse above being the only way back to it.
+ */
+export function countDamagedByWarehouse(warehouseId: string): Promise<number> {
+  return prisma.damagedStockBalance.count({ where: { warehouseId, quantity: { gt: 0 } } });
+}
+
 export function findDamagedByCustomer(customerId: string): Promise<DamagedBalanceWithWarehouse[]> {
   return prisma.damagedStockBalance.findMany({ where: { customerId, quantity: { gt: 0 } }, include: damagedBalanceInclude, orderBy: { updatedAt: "desc" } });
 }

@@ -66,7 +66,7 @@ import * as userRepo from "#modules/user/user.repository.js";
 import * as emailService from "#modules/email/email.service.js";
 import * as transferService from "#modules/engineer-transfer/engineer-transfer.service.js";
 import * as kitRequestService from "#modules/job-kit-request/job-kit-request.service.js";
-import { startJobForEngineer, completeJobForEngineer, updateJob, kitLinesChanged, getJob, cancelJob, assignJob } from "./job.service.js";
+import { startJobForEngineer, completeJobForEngineer, updateJob, kitLinesChanged, getJob, cancelJob, assignJob, deleteJob } from "./job.service.js";
 
 const JOB_ID = "a".repeat(24);
 const ENG_ID = "b".repeat(24);
@@ -615,5 +615,97 @@ describe("assignJob — reassigning must not wipe the goods columns either", () 
     (emailService.sendTemplatedEmail as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
     const job = await assignJob(JOB_ID, OTHER_ENG);
     expect(job.kitLines[0]).toMatchObject({ issued: 2, remaining: 2 });
+  });
+});
+
+// A job holding stock must not be deletable, whatever its status.
+//
+// The bug this locks down: `cancelled` is a deletable status and cancelling has no stock guard, so
+// accepted → cancel → delete removed a job with units still out. Every read filters `deletedAt: null`,
+// so the job left the goods queue and could never be scanned back or reconciled — and because
+// `jobCommittedByEngineer` also skips deleted jobs, those units quietly stopped counting as
+// job-committed and became free van stock, walking around the field-return guard that exists to stop
+// exactly that. Two real jobs (JOB-2026-0028, JOB-2026-0030) reached that state, 23 units between them.
+describe("deleteJob — stock still out blocks deletion", () => {
+  const mockSoftDelete = jobRepo.softDelete as ReturnType<typeof vi.fn>;
+  const mockTallies = goodsManagementService.getJobKitTallies as ReturnType<typeof vi.fn>;
+
+  const jobWith = (status: string, kitLines: unknown[] = []) => ({ ...baseJob, status, kitLines });
+  const tally = (remaining: number) => ({ issued: remaining, used: 0, returned: 0, remaining });
+
+  it("deletes a cancelled job that has nothing out", async () => {
+    mockFindById.mockResolvedValue(jobWith("cancelled", [{ ...KIT_LINE, id: "kl1" }]));
+    mockTallies.mockResolvedValue({ kl1: tally(0) });
+    await deleteJob(JOB_ID);
+    expect(mockSoftDelete).toHaveBeenCalledWith(JOB_ID);
+  });
+
+  it("deletes a draft job with no kit at all", async () => {
+    mockFindById.mockResolvedValue(jobWith("draft"));
+    mockTallies.mockResolvedValue({});
+    await deleteJob(JOB_ID);
+    expect(mockSoftDelete).toHaveBeenCalledWith(JOB_ID);
+  });
+
+  // THE regression: this is exactly what happened to JOB-2026-0030.
+  it("REFUSES a cancelled job that still has units out, and does not soft-delete", async () => {
+    mockFindById.mockResolvedValue(jobWith("cancelled", [{ ...KIT_LINE, id: "kl1" }]));
+    mockTallies.mockResolvedValue({ kl1: tally(3) });
+    await expect(deleteJob(JOB_ID)).rejects.toThrow(/3 units out with the engineer/i);
+    expect(mockSoftDelete).not.toHaveBeenCalled();
+  });
+
+  it("closes the cancel → delete bypass for every deletable status", async () => {
+    for (const status of ["draft", "assigned", "rejected", "cancelled"]) {
+      mockSoftDelete.mockClear();
+      mockFindById.mockResolvedValue(jobWith(status, [{ ...KIT_LINE, id: "kl1" }]));
+      mockTallies.mockResolvedValue({ kl1: tally(2) });
+      await expect(deleteJob(JOB_ID)).rejects.toThrow(/out with the engineer/i);
+      expect(mockSoftDelete).not.toHaveBeenCalled();
+    }
+  });
+
+  it("sums what is out across several kit lines", async () => {
+    mockFindById.mockResolvedValue(jobWith("cancelled", [{ ...KIT_LINE, id: "kl1" }, { ...KIT_LINE, id: "kl2" }]));
+    mockTallies.mockResolvedValue({ kl1: tally(3), kl2: tally(7) });
+    await expect(deleteJob(JOB_ID)).rejects.toThrow(/10 units/);
+  });
+
+  it("says \"1 unit\", not \"1 units\"", async () => {
+    mockFindById.mockResolvedValue(jobWith("cancelled", [{ ...KIT_LINE, id: "kl1" }]));
+    mockTallies.mockResolvedValue({ kl1: tally(1) });
+    await expect(deleteJob(JOB_ID)).rejects.toThrow(/1 unit out/);
+  });
+
+  // Misc is free text, handed over by count and never stock-tracked, so it can never be returned. If it
+  // counted here, a job carrying one would be undeletable for ever with no action that could clear it.
+  it("ignores a misc line that can never be returned", async () => {
+    mockFindById.mockResolvedValue(jobWith("cancelled", [
+      { ...KIT_LINE, id: "kl1", lineType: "misc", irmItemId: null, warehouseId: null },
+    ]));
+    mockTallies.mockResolvedValue({ kl1: tally(5) });
+    await deleteJob(JOB_ID);
+    expect(mockSoftDelete).toHaveBeenCalledWith(JOB_ID);
+  });
+
+  // The guard already holds the whole job. Letting getJobKitTallies fall back to its own findById
+  // costs a second full `withRelations` load — every kit line's irmItem join plus each pickup
+  // warehouse's address block — to read one scalar and four fields per line. getJobForCustomer takes
+  // the prefetch path for exactly this reason; the delete path should not be the one that doesn't.
+  it("tallies from the job it already loaded instead of fetching it a second time", async () => {
+    const kitLines = [{ ...KIT_LINE, id: "kl1" }];
+    mockFindById.mockResolvedValue(jobWith("cancelled", kitLines));
+    mockTallies.mockResolvedValue({ kl1: tally(0) });
+    await deleteJob(JOB_ID);
+    expect(mockFindById).toHaveBeenCalledTimes(1);
+    expect(mockTallies).toHaveBeenCalledWith(JOB_ID, { assignedEngineerId: ENG_ID, kitLines });
+  });
+
+  // The pre-existing status rule still stands, and must fail BEFORE the tally lookup.
+  it("still refuses a live job outright", async () => {
+    mockFindById.mockResolvedValue(jobWith("in_progress", [{ ...KIT_LINE, id: "kl1" }]));
+    await expect(deleteJob(JOB_ID)).rejects.toThrow(/can't be deleted/i);
+    expect(mockTallies).not.toHaveBeenCalled();
+    expect(mockSoftDelete).not.toHaveBeenCalled();
   });
 });

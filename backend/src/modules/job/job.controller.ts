@@ -2,6 +2,7 @@ import * as jobService from "./job.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
 import { param, queryInt, queryStr } from "../../utils/request.js";
+import { unauthorized } from "../../utils/http-error.js";
 import type { AssignJobInput, CancelJobInput, CreateJobInput, UpdateJobInput } from "./job.validation.js";
 
 
@@ -55,4 +56,32 @@ export const assignJob = asyncHandler(async (req, res) => {
 export const cancelJob = asyncHandler(async (req, res) => {
   const { reason } = req.body as CancelJobInput;
   res.json({ job: await jobService.cancelJob(param(req, "id"), reason, actorFrom(req)) });
+});
+
+// --- customer portal --------------------------------------------------------
+// The scope comes from the SESSION, never the query string. requireCustomer on the route has
+// already rejected anyone who isn't a customer; this re-reads the principal because that is what
+// makes the customerId a fact TypeScript can see, and because a route mounted without the
+// middleware must fail closed rather than serve every job in the system.
+function customerId(req: import("express").Request): string {
+  if (req.principal?.type !== "customer") throw unauthorized("Customer access required.");
+  return req.principal.customerId;
+}
+
+// GET /customer/jobs?q=&status=&sort=&page=&pageSize=
+export const getOwnJobs = asyncHandler(async (req, res) => {
+  res.json(
+    await jobService.listJobsForCustomer(customerId(req), {
+      search: queryStr(req.query.q),
+      status: queryStr(req.query.status),
+      sort: queryStr(req.query.sort),
+      page: queryInt(req.query.page),
+      pageSize: queryInt(req.query.pageSize),
+    }),
+  );
+});
+
+// GET /customer/jobs/:id
+export const getOwnJob = asyncHandler(async (req, res) => {
+  res.json({ job: await jobService.getJobForCustomer(customerId(req), param(req, "id")) });
 });

@@ -1,7 +1,7 @@
 import { Router } from "express";
 
 import * as jobController from "./job.controller.js";
-import { requireAuth, requirePermission } from "../../middleware/auth.middleware.js";
+import { requireAuth, requireCustomer, requirePermission } from "../../middleware/auth.middleware.js";
 import { writeLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import { assignJobSchema, cancelJobSchema, createJobSchema, updateJobSchema } from "./job.validation.js";
@@ -21,4 +21,20 @@ router.delete("/:id", requirePermission("jobs.delete"), writeLimiter, jobControl
 router.post("/:id/assign", requirePermission("jobs.assign"), writeLimiter, validateBody(assignJobSchema), jobController.assignJob);
 router.post("/:id/cancel", requirePermission("jobs.cancel"), writeLimiter, validateBody(cancelJobSchema), jobController.cancelJob);
 
+// ----------------------------------------------------------------------------
+// Customer-facing portal surface — mounted at /customer/jobs by the route aggregator, alongside the
+// customer module's own portal router. Read-only, and scoped to the signed-in customer's company.
+//
+// A SEPARATE router rather than an entry on the one above: every route above is gated by a
+// `jobs.*` staff permission, which a customer principal does not and must not hold. Keeping the two
+// apart means the portal route can never inherit a staff gate, and no staff route can ever be
+// reached by adding requireCustomer in the wrong place.
+// ----------------------------------------------------------------------------
+const portalRouter = Router();
+portalRouter.use(requireAuth, requireCustomer);
+
+portalRouter.get("/", jobController.getOwnJobs);
+portalRouter.get("/:id", jobController.getOwnJob);
+
+export { portalRouter };
 export default router;

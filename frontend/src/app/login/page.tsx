@@ -31,10 +31,24 @@ declare global {
 const inputCls =
   "w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3.5 py-2.5 text-sm text-[var(--ink)] outline-none transition-all placeholder:text-[var(--faint)] focus:border-[var(--accent)]";
 
-// Dev-only quick-login shortcuts. Credentials come from gitignored .env.local
-// (NEXT_PUBLIC_QUICK_*), NEVER hardcoded in source, and the whole block is compiled out of
-// production builds by the NODE_ENV gate below. A button renders only when both its email
-// and password env vars are set, so a missing/empty var simply hides that shortcut.
+// One-tap login shortcuts. Credentials come from NEXT_PUBLIC_QUICK_* env vars and are NEVER
+// hardcoded in source — a password in a file is a password in git history, permanently, however
+// short-lived the account turns out to be.
+//
+// A button renders only when BOTH its email and password vars are set, so an unset pair simply
+// hides that shortcut and a build with no vars at all shows nothing.
+//
+// ── Read this before turning it on anywhere but your own machine ──────────────────────────────
+// `NEXT_PUBLIC_*` is INLINED INTO THE CLIENT BUNDLE at build time. It is not a secret and cannot
+// be made one: anyone who opens the page reads every credential here in devtools.
+//
+// Note what that means for the switch below — it decides whether the BUTTONS render, and nothing
+// more. A build with QUICK_LOGIN unset but the pairs set still ships those passwords (confirmed by
+// grepping .next/static after such a build). The only thing that keeps a credential out of a
+// bundle is not setting it for that build.
+//
+// Fine for a throwaway demo whose accounts and data are disposable. Not fine pointed at anything
+// you would mind a stranger signing into.
 const QUICK_LOGINS: { label: string; email?: string; password?: string }[] = [
   { label: "🔑 Admin", email: process.env.NEXT_PUBLIC_QUICK_ADMIN_EMAIL, password: process.env.NEXT_PUBLIC_QUICK_ADMIN_PASSWORD },
   { label: "👤 Customer", email: process.env.NEXT_PUBLIC_QUICK_CUSTOMER_EMAIL, password: process.env.NEXT_PUBLIC_QUICK_CUSTOMER_PASSWORD },
@@ -42,6 +56,18 @@ const QUICK_LOGINS: { label: string; email?: string; password?: string }[] = [
   { label: "💷 Finance", email: process.env.NEXT_PUBLIC_QUICK_FINANCE_EMAIL, password: process.env.NEXT_PUBLIC_QUICK_FINANCE_PASSWORD },
   { label: "📋 PM", email: process.env.NEXT_PUBLIC_QUICK_PM_EMAIL, password: process.env.NEXT_PUBLIC_QUICK_PM_PASSWORD },
 ].filter((q) => q.email && q.password);
+
+/**
+ * Whether to offer the shortcuts at all.
+ *
+ * Local dev keeps working with nothing to set, as before. Any OTHER build — the client demo
+ * included — has to ask for them explicitly with NEXT_PUBLIC_QUICK_LOGIN=true, so the real
+ * production deployment gets them by NOT opting in rather than by remembering to opt out. That
+ * ordering is the whole point: a build that forgets this variable shows no shortcuts, even if the
+ * credentials are still sitting in its environment.
+ */
+const QUICK_LOGIN_ENABLED =
+  process.env.NODE_ENV === "development" || process.env.NEXT_PUBLIC_QUICK_LOGIN === "true";
 
 export default function LoginPage() {
   const { principal, loading, login, loginWithGoogle } = useAuth();
@@ -249,8 +275,9 @@ export default function LoginPage() {
         </button>
       </form>
 
-      {/* Quick dev logins — dev build only; creds come from gitignored .env.local, never source. */}
-      {process.env.NODE_ENV === "development" && QUICK_LOGINS.length > 0 && (
+      {/* Quick logins — dev, or a build that opted in with NEXT_PUBLIC_QUICK_LOGIN. Creds come from
+          env vars, never source. See the note above QUICK_LOGINS. */}
+      {QUICK_LOGIN_ENABLED && QUICK_LOGINS.length > 0 && (
         <div className="mt-6 space-y-2">
           <div className="flex items-center gap-3">
             <div className="h-px flex-1 bg-[var(--border)]" />

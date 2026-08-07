@@ -16,6 +16,7 @@ import {
   LayoutDashboard,
   FolderKanban,
   MapPin,
+  ClipboardCheck,
   ClipboardList,
   Warehouse,
   Truck,
@@ -99,8 +100,12 @@ export const NAV: NavItem[] = [
 // The customer portal nav — a separate, read-only surface (no staff permissions).
 // Everything is view-only except Stock Submissions (the one place a customer writes).
 // Settings reuses the shared account page (profile + password).
-const CUSTOMER_NAV: NavItem[] = [
+// Exported alongside NAV so pageTitle.test.ts can assert every destination has a top-bar title.
+export const CUSTOMER_NAV: NavItem[] = [
   { href: "/dashboard/portal", label: "Dashboard", icon: LayoutDashboard, perms: [] },
+  // Above Projects and Sites: a job is the thing actually HAPPENING to the customer, where the
+  // other two are the structure it hangs off. It is what they open the portal to check.
+  { href: "/dashboard/portal/jobs", label: "Jobs", icon: ClipboardCheck, perms: [] },
   { href: "/dashboard/portal/projects", label: "Projects", icon: FolderKanban, perms: [] },
   { href: "/dashboard/portal/sites", label: "Sites", icon: MapPin, perms: [] },
   { href: "/dashboard/stock", label: "My Stock", icon: Package, perms: [] },
@@ -117,7 +122,7 @@ const CUSTOMER_NAV: NavItem[] = [
 // The engineer portal nav — a separate, isolated surface for staff field engineers, exactly like the
 // customer portal above. Shown ONLY when the engineer portal is the user's only surface (see
 // `isEngineer` below) — it is NEVER mixed into the admin nav.
-const ENGINEER_NAV: NavItem[] = [
+export const ENGINEER_NAV: NavItem[] = [
   { href: "/dashboard/engineer", label: "Dashboard", icon: LayoutDashboard, perms: ["engineer.dashboard.view"] },
   { href: "/dashboard/engineer/jobs", label: "Jobs", icon: ClipboardList, perms: ["engineer.jobs.view"] },
   { href: "/dashboard/engineer/inventory", label: "Stock", icon: Boxes, perms: ["engineer.inventory.view"] },

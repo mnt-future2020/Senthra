@@ -4,7 +4,7 @@ import * as React from "react";
 
 import { Skeleton } from "@/components/ui/Skeleton";
 import type { StockRequestStatus } from "@/types/customer";
-import type { JobStatus } from "@/types/job";
+import type { JobStatus, PortalJobStage } from "@/types/job";
 
 // Shared presentation helpers for the customer portal pages. Keeping them in one
 // place keeps the portal's look (header cards, status pills, dates, tables, and the
@@ -14,8 +14,11 @@ import type { JobStatus } from "@/types/job";
 // Re-exported under this module's existing names so the portal's importers are unchanged.
 export { formatDate as fmtDate, formatDateTime as fmtDateTime } from "@/lib/formatDate";
 
-// Page header rendered as a surface card (mirrors the admin list pages), with an
-// optional right-aligned action (e.g. the "Request stock" button).
+// Header card for something the top bar CANNOT already say: a record's own identity (a job's name
+// and number) or a greeting ("Welcome, Acme Ltd"). NOT for a page title — the top bar carries that,
+// and repeating it here is what this card used to do on nine portal and engineer screens, costing
+// ~110px of a laptop viewport apiece to restate a word already on the page. Page-level TABS and
+// ACTIONS belong in PageActions, which renders them into the top bar itself.
 export function PortalHeader({
   title,
   subtitle,
@@ -133,6 +136,35 @@ export function JobStatusChip({ value }: { value: string }) {
     </span>
   );
 }
+
+// The CUSTOMER's four stages, not the seven statuses above. Separate from JobStatusChip on purpose:
+// that one is the engineer/office view of our own workflow, and pointing both at one style map
+// would mean the next status added to the machine quietly appears on a customer's screen with
+// whatever internal word we happened to give it. The server never sends a status here — see
+// PortalJobStage — so there is nothing to fall through to but a stage.
+const JOB_STAGE_STYLE: Record<PortalJobStage, { cls: string; dot: string; label: string }> = {
+  scheduled: { cls: "border-[var(--accent)]/30 bg-[var(--accent-10)] text-[var(--accent)]", dot: "bg-[var(--accent)]", label: "Scheduled" },
+  in_progress: { cls: "border-blue-500/30 bg-blue-500/10 text-blue-600", dot: "bg-blue-500", label: "In progress" },
+  completed: { cls: "border-[var(--pos)]/30 bg-[var(--pos)]/10 text-[var(--pos)]", dot: "bg-[var(--pos)]", label: "Completed" },
+  cancelled: { cls: "border-[var(--neg)]/30 bg-[var(--neg)]/10 text-[var(--neg)]", dot: "bg-[var(--neg)]", label: "Cancelled" },
+};
+
+export function JobStageChip({ value }: { value: PortalJobStage }) {
+  const s = JOB_STAGE_STYLE[value] ?? JOB_STAGE_STYLE.scheduled;
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-wider ${s.cls}`}
+    >
+      <span className={`h-1.5 w-1.5 rounded-full ${s.dot}`} />
+      {s.label}
+    </span>
+  );
+}
+
+/** The stage filter's options, sharing the labels above so the dropdown and the column agree. */
+export const JOB_STAGE_OPTIONS: { value: PortalJobStage; label: string }[] = (
+  Object.keys(JOB_STAGE_STYLE) as PortalJobStage[]
+).map((v) => ({ value: v, label: JOB_STAGE_STYLE[v].label }));
 
 // Empty-state card with an icon, title and hint.
 export function EmptyState({

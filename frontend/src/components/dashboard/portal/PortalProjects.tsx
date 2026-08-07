@@ -15,8 +15,6 @@ import type { Msg } from "@/components/ui/types";
 import {
   EmptyState,
   fmtDate,
-  HeaderCardSkeleton,
-  PortalHeader,
   StatusChip,
   TableCard,
   TableCardSkeleton,
@@ -95,7 +93,6 @@ export function PortalProjects() {
   if (loading && paged === null) {
     return (
       <div className="space-y-6">
-        <HeaderCardSkeleton />
         <TableCardSkeleton headers={HEADERS} cells={SKELETON_CELLS} minWidth={680} />
       </div>
     );
@@ -103,8 +100,6 @@ export function PortalProjects() {
 
   return (
     <div className="space-y-6">
-      <PortalHeader title="Projects" subtitle="The projects your account team is running for you." />
-
       {msg && <Notice msg={msg} />}
 
       {/* Toolbar — search + sort */}

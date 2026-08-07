@@ -21,14 +21,13 @@ import { subscribe } from "@/lib/socket";
 import {
   EmptyState,
   fmtDateTime,
-  PortalHeader,
   TableCardSkeleton,
 } from "@/components/dashboard/portal/portalUi";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Modal } from "@/components/ui/Modal";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
-import { inputCls, labelCls, primaryBtn, secondaryBtn } from "@/components/ui/styles";
+import { inputCls, labelCls, primaryBtn, secondaryBtn, toolbarActionsCls, toolbarPrimaryBtn } from "@/components/ui/styles";
 import type { EngineerTransfer, PagedTransfers } from "@/services/engineerTransfer.service";
 import { backingSize, isBlank, normalisePoint, type Stroke } from "./signaturePad";
 
@@ -729,6 +728,15 @@ function TransferList({ role }: { role: "incoming" | "outgoing" }) {
           ]}
           ariaLabel="Sort order"
         />
+
+        {/* The page's action, at the right-hand end of the row rather than in the top bar — up there
+            it sat against the browser's own chrome, a screen's width from the list it acts on.
+            `lg:` because THIS toolbar becomes a row at lg. */}
+        <div className={`${toolbarActionsCls} lg:ml-auto`}>
+          <button type="button" onClick={() => router.push("/dashboard/engineer/transfers/new")} className={toolbarPrimaryBtn}>
+            <ArrowRightLeft className="h-3.5 w-3.5" /> Request stock
+          </button>
+        </div>
       </div>
 
       {loading ? (
@@ -805,15 +813,6 @@ export function EngineerTransfers() {
 
   return (
     <div className="flex h-full flex-col gap-5">
-      <PortalHeader
-        title="Transfers"
-        subtitle="Request stock from another engineer, or act on incoming requests."
-        action={
-          <button type="button" onClick={() => router.push("/dashboard/engineer/transfers/new")} className={primaryBtn}>
-            <ArrowRightLeft className="h-3.5 w-3.5" /> Request stock
-          </button>
-        }
-      />
 
       {/* Tabs */}
       <div className="flex shrink-0 items-center gap-2">

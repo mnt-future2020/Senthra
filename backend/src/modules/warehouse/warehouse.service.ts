@@ -8,6 +8,10 @@ import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import * as prfRepo from "#modules/purchase-request/purchase-request.repository.js";
 import * as grnRepo from "#modules/goods-in/goods-in.repository.js";
 import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
+import * as jobRepo from "#modules/job/job.repository.js";
+import * as customerRepo from "#modules/customer/customer.repository.js";
+import * as goodsManagementRepo from "#modules/goods-management/goods-management.repository.js";
+import * as vanStockRequestRepo from "#modules/van-stock-request/van-stock-request.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
@@ -370,22 +374,49 @@ export async function updateWarehouse(
   return withManagers(updated);
 }
 
-// A future dependency-checker: returns how many records of a given kind reference this
-// warehouse. Each inventory-era module registers one here; all are no-ops today.
+// A dependency checker: how many records of a given kind still reference this warehouse. Each module
+// that stores a warehouseId registers one here.
 type DependencyChecker = { label: string; count: (warehouseId: string) => Promise<number> };
 const DELETE_DEPENDENCY_CHECKERS: DependencyChecker[] = [
   { label: "purchase requests", count: (id) => prfRepo.countByWarehouse(id) },
   { label: "purchase orders", count: (id) => poRepo.countByWarehouse(id) },
   { label: "goods receipts", count: (id) => grnRepo.countByWarehouse(id) },
   { label: "inventory", count: (id) => inventoryRepo.countBalancesWithStockByWarehouse(id) },
-  // FUTURE: { label: "jobs", count: (id) => jobRepo.countByWarehouse(id) },
-  // FUTURE: { label: "transfers", count: (id) => transferRepo.countOpenByWarehouse(id) },
-  // FUTURE: { label: "allocations", count: (id) => allocationRepo.countByWarehouse(id) },
+  // These two were left as FUTURE while the modules were being built. They have shipped, and the
+  // comment going stale left a real hole: a warehouse holding NO stock but still named as the pickup
+  // point on live job kit lines, or still storing a customer's consignment entries, could be deleted.
+  // Every read filters deleted warehouses out, so those rows were left pointing at nothing — the
+  // engineer's job pack could no longer say where to collect.
+  { label: "jobs", count: (id) => jobRepo.countLiveKitLinesByWarehouse(id) },
+  { label: "customer stock", count: (id) => customerRepo.countStockEntriesWithStockByWarehouse(id) },
+  // The last two models that carry a warehouseId. Damaged stock is invisible to the `inventory`
+  // checker above — a unit has already left InventoryBalance by the time it lands in the damaged
+  // pool — so a warehouse holding nothing else reads as empty and deleting it strands the pool.
+  // An open van-stock request is the job-kit-line case again: it names where the engineer collects.
+  { label: "damaged stock", count: (id) => goodsManagementRepo.countDamagedByWarehouse(id) },
+  { label: "van stock requests", count: (id) => vanStockRequestRepo.countOpenByWarehouse(id) },
+  // Customer stock arriving, as opposed to customer stock already here. An unreceived assignment has
+  // created no CustomerStockEntry yet, so the `customer stock` checker above reads zero for a
+  // warehouse whose only tie to a customer is an inbound delivery — and deleting it loses that
+  // delivery out of the Incoming queue.
+  { label: "incoming customer deliveries", count: (id) => customerRepo.countOpenAssignmentsByWarehouse(id) },
+  // Engineer-to-engineer transfers are van-to-van and hold no warehouse reference, so there is
+  // nothing for them to check here.
+  //
+  // Not every model carrying a warehouseId is checked, and that is deliberate rather than a gap:
+  //   - InventoryTransaction, StockAdjustment, JobStockMovement, DamagedStockTransaction are LEDGERS.
+  //     They only ever grow, so blocking on them would make any warehouse that ever moved a unit
+  //     permanently undeletable — a guard nobody could satisfy. They snapshot warehouseName/Code for
+  //     exactly this reason and read correctly without the warehouse row.
+  //   - UserWarehouseAssignment is a staff posting, not stock. The rows go inert on delete and no
+  //     read breaks; demanding managers be unassigned first would be ceremony, not safety.
+  // What IS covered is every model where a live row means physical stock, or a person, is still
+  // expected at this warehouse. Add a checker when a new model joins THAT set.
 ];
 
-// Blocks deletion when ANY dependency still references the warehouse. No-op today (the
-// checker list is empty until the inventory-era modules ship), but the seam is here so
-// adding a checker is the only change needed later.
+// Blocks deletion when ANY dependency still references the warehouse. Sequential, not Promise.all:
+// the first checker that finds something ends it, and the common case (a warehouse in active use)
+// trips on the first or second, so there is nothing to gain by running the whole list every time.
 async function assertWarehouseDeletable(warehouseId: string): Promise<void> {
   for (const checker of DELETE_DEPENDENCY_CHECKERS) {
     if ((await checker.count(warehouseId)) > 0) {

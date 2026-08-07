@@ -49,6 +49,32 @@ export const toolbarInputCls =
 export const toolbarDateCls =
   "rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-60";
 
-/** Button sized to sit in a list toolbar beside a `<Select size="sm">` — e.g. Clear. */
+/** Button sized to sit in a list toolbar beside a `<Select size="sm">` — e.g. Clear, Export CSV. */
 export const toolbarBtn =
   "flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-60";
+
+/**
+ * The toolbar's PRIMARY action — "Submit stock", "Move stock". Accent fill so it reads as the
+ * page's main verb, but on `toolbarBtn`'s geometry (`rounded-lg`, `py-2.5`, `text-xs`) rather than
+ * `primaryBtn`'s form geometry (`rounded-xl`, `px-5`), which sits visibly taller and rounder than
+ * the Select and Clear beside it.
+ */
+export const toolbarPrimaryBtn =
+  "flex shrink-0 items-center gap-1.5 rounded-lg bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 disabled:opacity-60";
+
+/**
+ * Wrapper that pushes a toolbar's ACTIONS to the right-hand end of the row, away from the filters.
+ *
+ * Page actions live here rather than in the top bar via `<PageActions>`. The top bar is right for a
+ * TabPills switcher — navigation, which people scan for at the top — but an action that operates on
+ * the list is a different thing: on a wide screen the top bar's right edge is most of a screen away
+ * from the rows it acts on, and it sits close enough to the browser's own chrome to read as part of
+ * it. The toolbar row already exists and its right half is empty, so this costs no vertical space.
+ *
+ * The `ml-auto` that does the pushing is left to the CALL SITE, and must carry that toolbar's own
+ * row breakpoint — `sm:ml-auto` on the portal lists, `lg:ml-auto` on the audit filter bar. Baking
+ * one in here would push the group to the right edge while the toolbar was still stacked in a
+ * column, leaving the actions marooned opposite the filters on exactly the narrow screens where
+ * they should sit directly under them.
+ */
+export const toolbarActionsCls = "flex flex-wrap items-center gap-2";

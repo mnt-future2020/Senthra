@@ -88,10 +88,23 @@ export interface KitLineTally {
   remaining: number; // still held by the engineer = issued − used − returned
 }
 
+/**
+ * The only parts of a job getJobKitTallies reads. Structural on purpose: a caller that ALREADY holds
+ * the job — the customer portal fetches a narrow projection of it to render the page, the delete
+ * guard has just loaded the whole thing — can hand it over instead of paying for a second, full
+ * `findById` (which loads every kit line with its irmItem join and each pickup warehouse's whole
+ * address block, for four fields).
+ */
+export interface KitTallyJob {
+  assignedEngineerId: string | null;
+  kitLines: { id: string; lineType: string; irmItemId: string | null; customerStockEntryId: string | null }[];
+}
+
 // Per-kit-line goods tallies for a single job, keyed by jobKitLineId. Used on the job-detail "job
 // pack" views so the engineer/office can see issued / returned / remaining per item.
-export async function getJobKitTallies(jobId: string): Promise<Record<string, KitLineTally>> {
-  const job = await jobRepo.findById(jobId);
+export async function getJobKitTallies(jobId: string, prefetched?: KitTallyJob): Promise<Record<string, KitLineTally>> {
+  // Omitting `prefetched` keeps the original behaviour exactly — every existing caller is unchanged.
+  const job = prefetched ?? (await jobRepo.findById(jobId));
   const movements = await goodsManagementRepo.findMovementsByJob(jobId);
   const acc: Record<string, { issued: number; returned: number; consumed: number }> = {};
   for (const m of movements) {
@@ -120,7 +133,7 @@ export async function getJobKitTallies(jobId: string): Promise<Record<string, Ki
   // per-line "remaining" sums to the engineer's true holding. Misc lines aren't engineer-tracked, so
   // they keep their raw remaining. Keyed by current kit lines (orphaned movements are ignored).
   const out: Record<string, KitLineTally> = {};
-  const groups = new Map<string, NonNullable<JobWithRelations["kitLines"]>>();
+  const groups = new Map<string, KitTallyJob["kitLines"]>();
   for (const kl of job?.kitLines ?? []) {
     const key = kl.irmItemId ? `irm:${kl.irmItemId}` : kl.customerStockEntryId ? `cse:${kl.customerStockEntryId}` : `misc:${kl.id}`;
     const g = groups.get(key);

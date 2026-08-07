@@ -17,6 +17,7 @@ import { roleGrants } from "#modules/role/permissions.js";
 import { emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
 import { conflict, forbidden, notFound, badRequest } from "../../utils/http-error.js";
 import { startOfDayIn } from "../../utils/filter-date.js";
+import { safeHttpUrls } from "../../utils/http-url.js";
 import { getCompanyTimezone } from "#modules/settings/settings.service.js";
 import { paginate } from "../../utils/pagination.js";
 import type { CreateJobInput, JobKitLineInput, UpdateJobInput, CompleteJobInput } from "./job.validation.js";
@@ -217,7 +218,11 @@ function toPublic(j: JobWithRelations | JobListRow): PublicJob {
     plannerName: j.plannerName,
     plannerPhone: j.plannerPhone,
     notes: j.notes,
-    attachments: j.attachments ?? [],
+    // Same scheme filter as the portal read, and for the same reason: these render as `href`s, and a
+    // row written before the validation rule existed can still hold a `javascript:`/`data:` link.
+    // Staff click their own job pages far more often than customers do, so exempting the office side
+    // would leave the bigger surface as the unguarded one.
+    attachments: safeHttpUrls(j.attachments),
     kitLines: kitLines.map((l) => ({
       id: l.id,
       lineType: l.lineType,
@@ -1095,6 +1100,44 @@ export async function deleteJob(id: string, actor?: AuditActor): Promise<void> {
   if (!DELETABLE_STATUSES.has(existing.status)) {
     throw conflict(`A ${existing.status.replace("_", " ")} job can't be deleted — cancel it instead.`);
   }
+
+  // A job holding stock cannot be deleted, WHATEVER its status.
+  //
+  // The status list above protects a live job's history, but it was walked around in two clicks:
+  // cancelling has no stock guard and `cancelled` is deletable, so accepted → cancel → delete removed
+  // a job with units still out with the engineer. Every read filters `deletedAt: null`, so the job
+  // vanished from the goods queue and could never be scanned back or reconciled.
+  //
+  // Worse than stranding it: `jobCommittedByEngineer` also filters deleted jobs out, so those units
+  // silently stopped counting as job-committed and became FREE van stock — walking straight around the
+  // field-return guard that exists precisely to stop job stock going back that way ("else it'd be
+  // stranded", van-stock-request.service). The stock came home as anonymous van stock and the job it
+  // belonged to was gone.
+  //
+  // Measured with the SAME tally the reconcile screen uses, so it can't disagree with what the user is
+  // told to do about it: `remaining` is already capped at the engineer's real holding, which keeps a
+  // phantom shortfall (stock handed back under another job) from making a job undeletable. `misc` is
+  // excluded — free text, never stock-tracked, never returnable, so counting it would freeze such a
+  // job as undeletable for ever.
+  //
+  // The job is handed over rather than re-fetched — `existing` above is already the full record, and
+  // without it getJobKitTallies loads the whole thing again (every kit line's irmItem join and each
+  // pickup warehouse's address block) to read one scalar and four fields per line. Same reason
+  // getJobForCustomer prefetches.
+  const tallies = await goodsManagementService.getJobKitTallies(id, {
+    assignedEngineerId: existing.assignedEngineerId,
+    kitLines: existing.kitLines,
+  });
+  const outstanding = (existing.kitLines ?? [])
+    .filter((kl) => kl.lineType !== "misc")
+    .reduce((n, kl) => n + (tallies[kl.id]?.remaining ?? 0), 0);
+  if (outstanding > 0) {
+    throw conflict(
+      `This job still has ${outstanding} unit${outstanding === 1 ? "" : "s"} out with the engineer. ` +
+        `Return the stock, or write it off from Goods Management, before deleting.`,
+    );
+  }
+
   await jobRepo.softDelete(id);
   // Dual-emit (same contract as job:new): the assigned engineer isn't in OFFICE_JOBS_ROOM, so a
   // room-only emit would leave a now-deleted job sitting in their list (and 404 on click).
@@ -1266,4 +1309,273 @@ export async function completeJobForEngineer(jobId: string, engineerId: string, 
   emitToRoom(OFFICE_JOBS_ROOM, "job:updated", pub);
   audit.record({ actor, action: "job.completed", targetType: "job", targetId: jobId, targetLabel: job.jobNumber });
   return pub;
+}
+
+// ── Customer portal (scoped to the signed-in customer's own company) ──────────────────────────
+//
+// Two things separate this from every other read in the module, and both are deliberate:
+//
+//  1. It never returns `PublicJob`. That DTO carries `notes`, `attachments`, `cancelReason`,
+//     `rejectReason`, `plannerPhone`, `createdBy` and the engineer's email — internal to a fault.
+//     The portal gets its own narrow shape, fed by a narrow SELECT (job.repository), so a field
+//     added to Job or to PublicJob later cannot arrive here without someone deciding it should.
+//  2. It never returns the raw `status`. See PortalJobStage below.
+
+/**
+ * What a job looks like from the outside.
+ *
+ * The stored status machine has six states, three of which are about OUR staffing rather than the
+ * customer's work: `assigned` and `accepted` differ only by whether the engineer has tapped Accept,
+ * and `rejected` means they declined and the office must reassign. To the customer all three mean
+ * the same thing — the job is booked and hasn't started — so they collapse into one stage.
+ *
+ * Collapsing rather than relabelling matters. Sending `rejected` under a friendlier label would
+ * still leak the event through anything that reads the value (a saved link, a CSV, the next
+ * feature built on this payload) — and "Rejected" on a customer's own job reads as us refusing
+ * their work, which is the opposite of what happened.
+ */
+export type PortalJobStage = "scheduled" | "in_progress" | "completed" | "cancelled";
+
+const STAGE_OF: Record<string, PortalJobStage> = {
+  assigned: "scheduled",
+  accepted: "scheduled",
+  rejected: "scheduled",
+  in_progress: "in_progress",
+  completed: "completed",
+  cancelled: "cancelled",
+};
+
+/** Stored status → the stage the customer sees. Unknown statuses fall back to the least
+ *  committal stage rather than throwing: a job the customer can see is a job they should see
+ *  SOMETHING for, and a new internal state must never 500 their list. */
+export function portalStage(status: string): PortalJobStage {
+  return STAGE_OF[status] ?? "scheduled";
+}
+
+// Inverted from STAGE_OF rather than written out a second time — a hand-kept mirror is exactly the
+// kind of pair that drifts when a status is added, and the drift is silent (a status quietly absent
+// from every filter still shows in the unfiltered list, so nothing looks broken).
+const STATUSES_IN_STAGE = Object.entries(STAGE_OF).reduce<Record<string, string[]>>((acc, [status, stage]) => {
+  (acc[stage] ??= []).push(status);
+  return acc;
+}, {});
+
+/** The stages that mean "still happening" — what the portal dashboard counts. */
+const ACTIVE_STAGES: PortalJobStage[] = ["scheduled", "in_progress"];
+const ACTIVE_STATUSES = ACTIVE_STAGES.flatMap((s) => STATUSES_IN_STAGE[s] ?? []);
+
+// What the ?status filter accepts: the four stages, plus "active" as a pseudo-stage spanning two of
+// them. It exists so the dashboard's Active-jobs card can link to a list showing exactly the jobs it
+// counted — a figure the customer cannot trace is a figure they have to phone about. Resolved HERE,
+// from the same ACTIVE_STATUSES the count uses, so the card and the list cannot disagree. (Same
+// device as OPEN_REQUEST_STATUSES on the submissions list.)
+const FILTERABLE_STATUSES: Record<string, string[]> = { ...STATUSES_IN_STAGE, active: ACTIVE_STATUSES };
+
+export interface PortalJob {
+  id: string;
+  jobNumber: string;
+  name: string;
+  jobType: string;
+  technology: string | null;
+  customerRef: string | null;
+  schemeNo: string | null;
+  projectId: string;
+  projectName: string | null;
+  siteId: string | null;
+  siteName: string | null;
+  addressLine1: string | null;
+  addressLine2: string | null;
+  city: string | null;
+  county: string | null;
+  postcode: string | null;
+  country: string | null;
+  /** The date the job is due to be completed. */
+  completionDate: string | null;
+  /** When the work was actually finished. Null until it is. */
+  completedAt: string | null;
+  stage: PortalJobStage;
+  /** The engineer attending, when there is one — see the note in toPortalJob. */
+  engineerName: string | null;
+  createdAt: string;
+}
+
+export interface PagedPortalJobs {
+  jobs: PortalJob[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+/** One kit line as the customer's detail table renders it — the office's own columns. */
+export interface PortalJobKitLine {
+  id: string;
+  lineType: string;
+  seCode: string | null;
+  itemName: string;
+  description: string | null;
+  warehouseName: string | null;
+  qty: number;
+  issued: number;
+  used: number;
+  returned: number;
+  remaining: number;
+}
+
+/**
+ * The detail payload — the list row plus everything the office's four cards show.
+ *
+ * A separate, wider type rather than widening PortalJob: the list is server-paged over an unbounded
+ * history, so every field added there is paid for on every row of every page. The office makes the
+ * same split (JobListRow vs JobWithRelations) for the same reason.
+ */
+export interface PortalJobDetail extends PortalJob {
+  customerName: string | null;
+  priority: string;
+  trsArea: string | null;
+  floor: string | null;
+  suite: string | null;
+  rack: string | null;
+  shelf: string | null;
+  /** Their own planner contact, snapshotted off their job pack — not one of ours. */
+  plannerName: string | null;
+  plannerPhone: string | null;
+  /** The original job-pack files, which the customer sent us. */
+  attachments: string[];
+  assignedAt: string | null;
+  acceptedAt: string | null;
+  startedAt: string | null;
+  cancelledAt: string | null;
+  /** Why the job was called off. Included where `rejectReason` is not: a cancellation is a decision
+   *  about the customer's work, a rejection is one of our engineers declining to take it. */
+  cancelReason: string | null;
+  kitLines: PortalJobKitLine[];
+}
+
+function toPortalJob(j: jobRepo.PortalJobRow): PortalJob {
+  return {
+    id: j.id,
+    jobNumber: j.jobNumber,
+    name: j.name,
+    jobType: j.jobType,
+    technology: j.technology,
+    customerRef: j.customerRef,
+    schemeNo: j.schemeNo,
+    projectId: j.projectId,
+    // Live relation first, snapshot second — same precedence as toPublic, so a renamed project
+    // reads the same on both surfaces instead of the customer and the office quoting each other
+    // different names for it.
+    projectName: j.project?.name ?? j.projectName ?? null,
+    siteId: j.siteId,
+    siteName: j.site?.name ?? j.siteName ?? null,
+    addressLine1: j.addressLine1,
+    addressLine2: j.addressLine2,
+    city: j.city,
+    county: j.county,
+    postcode: j.postcode,
+    country: j.country,
+    completionDate: iso(j.completionDate),
+    completedAt: iso(j.completedAt),
+    stage: portalStage(j.status),
+    // Blanked while the job is between engineers. `assignedEngineerName` is a snapshot that SURVIVES
+    // a rejection, so a rejected job still names the engineer who declined it — presenting them as
+    // the customer's engineer would be wrong twice over: they are not attending, and the customer
+    // would chase someone with no part in the job.
+    engineerName: j.status === "rejected" ? null : j.assignedEngineerName,
+    createdAt: j.createdAt.toISOString(),
+  };
+}
+
+export interface ListCustomerJobsParams {
+  /** A PortalJobStage, or the "active" pseudo-stage. Anything else is ignored (see below). */
+  status?: string;
+  search?: string;
+  sort?: string;
+  page?: number;
+  pageSize?: number;
+}
+
+/**
+ * The customer's own jobs, paged. Scoped by the customerId taken from the SESSION — never from the
+ * query string — so the only jobs reachable here are the signed-in company's.
+ *
+ * An unrecognised `status` widens to all stages rather than matching nothing. This value comes from
+ * a URL the customer can edit or share, and an empty table is the one response that misleads: "no
+ * jobs" is a statement about their account, not about a typo in a query string.
+ */
+export async function listJobsForCustomer(customerId: string, params: ListCustomerJobsParams = {}): Promise<PagedPortalJobs> {
+  const filters = { search: params.search, statuses: params.status ? FILTERABLE_STATUSES[params.status] : undefined };
+  const total = await jobRepo.countByCustomerPortal(customerId, filters);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const rows = await jobRepo.findManyByCustomerPortal(customerId, filters, skip, pageSize, params.sort);
+  return { jobs: rows.map(toPortalJob), total, page, pageSize, totalPages };
+}
+
+/**
+ * One of the customer's jobs, for the portal detail page.
+ *
+ * "Not found" covers every way a job can be out of reach — another company's, soft-deleted, still a
+ * draft — because they are one answer to the customer: there is no such job here. Distinguishing
+ * them would turn this into an oracle for guessing at job ids that exist but aren't theirs.
+ *
+ * The kit tallies come from goods-management in ONE batched call, exactly as the office detail does
+ * (withGoodsTallies) — the alternative, a tally lookup per line, is a round-trip per row.
+ */
+export async function getJobForCustomer(customerId: string, jobId: string): Promise<PortalJobDetail> {
+  const job = await jobRepo.findByIdForCustomer(jobId, customerId);
+  if (!job) throw notFound("Job not found.");
+
+  // The job is handed over rather than re-fetched: without it, getJobKitTallies loads the WHOLE job
+  // again — every kit line with its irmItem join and each pickup warehouse's full address block — to
+  // read four fields off it. On a remote Atlas that is a wasted round-trip on every page view.
+  const tallies = await goodsManagementService.getJobKitTallies(job.id, {
+    assignedEngineerId: job.assignedEngineerId,
+    kitLines: job.kitLines,
+  });
+  return {
+    ...toPortalJob(job),
+    customerName: job.customer?.name ?? job.customerName ?? null,
+    priority: job.priority ?? "normal",
+    trsArea: job.trsArea,
+    floor: job.floor,
+    suite: job.suite,
+    rack: job.rack,
+    shelf: job.shelf,
+    plannerName: job.plannerName,
+    plannerPhone: job.plannerPhone,
+    // Filtered, not just passed through. Validation only guards WRITES, so rows stored before the
+    // http(s) rule existed still hold whatever was typed — and this surface renders them as links in
+    // a customer's browser. Dropping the ones we can't vouch for is the only version of this that
+    // covers data already in the database.
+    attachments: safeHttpUrls(job.attachments),
+    assignedAt: iso(job.assignedAt),
+    acceptedAt: iso(job.acceptedAt),
+    startedAt: iso(job.startedAt),
+    cancelledAt: iso(job.cancelledAt),
+    cancelReason: job.cancelReason,
+    kitLines: job.kitLines.map((l) => {
+      // Zeroes, not nulls, for a line the warehouse has not touched — the same default the office
+      // page shows. A null would render as an em dash, which in that table means "not applicable"
+      // (misc lines), not "nothing issued yet".
+      const t = tallies[l.id];
+      return {
+        id: l.id,
+        lineType: l.lineType,
+        seCode: l.seCode,
+        itemName: l.itemName,
+        description: l.description,
+        warehouseName: l.warehouseName,
+        qty: l.qty,
+        issued: t?.issued ?? 0,
+        used: t?.used ?? 0,
+        returned: t?.returned ?? 0,
+        remaining: t?.remaining ?? 0,
+      };
+    }),
+  };
+}
+
+/** Count of the customer's jobs that are still happening — the portal dashboard's Jobs card. */
+export function countActiveJobsForCustomer(customerId: string): Promise<number> {
+  return jobRepo.countByCustomerPortal(customerId, { statuses: ACTIVE_STATUSES });
 }

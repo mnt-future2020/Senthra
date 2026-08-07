@@ -22,8 +22,21 @@ vi.mock("#modules/purchase-request/purchase-request.repository.js", () => ({ cou
 vi.mock("#modules/purchase-order/purchase-order.repository.js", () => ({ countByWarehouse: vi.fn().mockResolvedValue(0) }));
 vi.mock("#modules/goods-in/goods-in.repository.js", () => ({ countByWarehouse: vi.fn().mockResolvedValue(0) }));
 vi.mock("#modules/inventory/inventory.repository.js", () => ({ countBalancesWithStockByWarehouse: vi.fn().mockResolvedValue(0) }));
+// Mocked for the same reason as the four above — without these the checkers would reach real Prisma
+// and a "unit" test would quietly depend on whatever the live database happens to contain.
+vi.mock("#modules/job/job.repository.js", () => ({ countLiveKitLinesByWarehouse: vi.fn().mockResolvedValue(0) }));
+vi.mock("#modules/customer/customer.repository.js", () => ({
+  countStockEntriesWithStockByWarehouse: vi.fn().mockResolvedValue(0),
+  countOpenAssignmentsByWarehouse: vi.fn().mockResolvedValue(0),
+}));
+vi.mock("#modules/goods-management/goods-management.repository.js", () => ({ countDamagedByWarehouse: vi.fn().mockResolvedValue(0) }));
+vi.mock("#modules/van-stock-request/van-stock-request.repository.js", () => ({ countOpenByWarehouse: vi.fn().mockResolvedValue(0) }));
 
 import * as warehouseRepo from "./warehouse.repository.js";
+import * as jobRepo from "#modules/job/job.repository.js";
+import * as customerRepo from "#modules/customer/customer.repository.js";
+import * as goodsManagementRepo from "#modules/goods-management/goods-management.repository.js";
+import * as vanStockRequestRepo from "#modules/van-stock-request/van-stock-request.repository.js";
 import * as userWarehouseRepo from "#modules/user/user-warehouse.repository.js";
 import * as warehouseTypeService from "#modules/warehouse-type/warehouse-type.service.js";
 import * as audit from "#modules/audit/audit.service.js";
@@ -196,5 +209,73 @@ describe("deleteWarehouse — default protection", () => {
     mockFindById.mockResolvedValue(null);
     await expect(deleteWarehouse(WH_ID)).rejects.toThrow(/not found/i);
     expect(mockSoftDelete).not.toHaveBeenCalled();
+  });
+});
+
+// A warehouse holding no stock could still be deleted while jobs named it as their pickup point or a
+// customer's consignment sat in it. Both checkers existed only as `// FUTURE:` comments long after the
+// modules shipped, and every read filters a deleted warehouse out — so those rows were left pointing
+// at an id nothing resolves, and an engineer's job pack could no longer say where to collect.
+describe("deleteWarehouse — in-use checks beyond stock on hand", () => {
+  const liveWarehouse = { id: WH_ID, name: "Leeds Depot", code: "WH-0001", isDefault: false };
+  const mockKitLines = jobRepo.countLiveKitLinesByWarehouse as ReturnType<typeof vi.fn>;
+  const mockEntries = customerRepo.countStockEntriesWithStockByWarehouse as ReturnType<typeof vi.fn>;
+  const mockDamaged = goodsManagementRepo.countDamagedByWarehouse as ReturnType<typeof vi.fn>;
+  const mockVanRequests = vanStockRequestRepo.countOpenByWarehouse as ReturnType<typeof vi.fn>;
+  const mockIncoming = customerRepo.countOpenAssignmentsByWarehouse as ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    (warehouseRepo.findById as ReturnType<typeof vi.fn>).mockResolvedValue(liveWarehouse);
+    mockKitLines.mockResolvedValue(0);
+    mockEntries.mockResolvedValue(0);
+    mockDamaged.mockResolvedValue(0);
+    mockVanRequests.mockResolvedValue(0);
+    mockIncoming.mockResolvedValue(0);
+  });
+
+  it("deletes a warehouse nothing references", async () => {
+    await expect(deleteWarehouse(WH_ID)).resolves.toBeUndefined();
+    expect(warehouseRepo.softDelete).toHaveBeenCalledWith(WH_ID);
+  });
+
+  it("REFUSES one still named on a LIVE job's kit line", async () => {
+    mockKitLines.mockResolvedValue(6);
+    await expect(deleteWarehouse(WH_ID)).rejects.toThrow(/in use/i);
+    expect(warehouseRepo.softDelete).not.toHaveBeenCalled();
+  });
+
+  it("REFUSES one still storing a customer's consignment stock", async () => {
+    mockEntries.mockResolvedValue(2);
+    await expect(deleteWarehouse(WH_ID)).rejects.toThrow(/in use/i);
+    expect(warehouseRepo.softDelete).not.toHaveBeenCalled();
+  });
+
+  // Damaged stock is held at a warehouse but counted nowhere else: the inventory checker above reads
+  // InventoryBalance, and a damaged unit has already left it. So a warehouse whose only remaining
+  // contents are damaged reads as empty to every other checker, and deleting it strands the pool —
+  // findDamagedByWarehouse is how anyone would ever have got to it again.
+  it("REFUSES one still holding stock in the damaged pool", async () => {
+    mockDamaged.mockResolvedValue(3);
+    await expect(deleteWarehouse(WH_ID)).rejects.toThrow(/in use/i);
+    expect(warehouseRepo.softDelete).not.toHaveBeenCalled();
+  });
+
+  // Same shape as the job kit line above: an open restock names the warehouse the engineer collects
+  // from, and an approved-but-unscanned one is stock the warehouse has already committed.
+  it("REFUSES one an engineer still has an open van-stock request against", async () => {
+    mockVanRequests.mockResolvedValue(1);
+    await expect(deleteWarehouse(WH_ID)).rejects.toThrow(/in use/i);
+    expect(warehouseRepo.softDelete).not.toHaveBeenCalled();
+  });
+
+  // The half the `customer stock` checker structurally cannot see. An assignment that hasn't been
+  // received has produced no CustomerStockEntry, so countStockEntriesWithStockByWarehouse reads 0 for
+  // a warehouse whose only tie to a customer is a delivery still on its way — every stock checker
+  // agrees it's empty, and deleting it drops the delivery out of the Incoming queue with no warehouse
+  // left to receive it against.
+  it("REFUSES one with an incoming customer delivery still addressed to it", async () => {
+    mockIncoming.mockResolvedValue(1);
+    await expect(deleteWarehouse(WH_ID)).rejects.toThrow(/in use/i);
+    expect(warehouseRepo.softDelete).not.toHaveBeenCalled();
   });
 });

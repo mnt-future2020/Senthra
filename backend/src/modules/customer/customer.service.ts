@@ -16,6 +16,8 @@ import { issueResetEmail } from "#modules/auth/auth.service.js";
 import * as sessionService from "#modules/auth/session.service.js";
 import { getCustomerStock, type CustomerStock } from "./customer.stock.service.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
+import * as jobRepo from "#modules/job/job.repository.js";
+import * as jobService from "#modules/job/job.service.js";
 import { withTransactionRetry } from "../../lib/prisma.js";
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
 import { geocodePostcode, geocodePostcodesBulk, canonicalPostcode } from "../../lib/geocode.js";
@@ -761,6 +763,63 @@ export async function updateCustomer(
 export async function deleteCustomer(id: string, actor?: AuditActor): Promise<void> {
   const customer = await customerRepo.findById(id);
   if (!customer) throw notFound("Customer not found.");
+
+  // A company that still has consignment stock in our warehouses, or work in flight, can't be removed.
+  // The delete is soft, so nothing is destroyed — but every read filters deleted customers out, which
+  // left their stock sitting in a warehouse with no owner anyone could name, and live jobs pointing at
+  // a company that no longer appears anywhere. Deactivate such a customer instead; delete once the
+  // stock is out and the work is closed.
+  //
+  // Their stock is asked about in THREE places, because it lives in three and each one empties into
+  // the next: on a warehouse shelf, out in an engineer's van, or in the damaged pool. Issuing to an
+  // engineer decrements the shelf quantity, so the entry count alone reads zero for a company whose
+  // whole consignment is in the field — and if the job it went out on has since been completed or
+  // cancelled, the open-jobs count reads zero too. Checking only the shelf let exactly the stock we
+  // are still holding be the stock that no check could see.
+  // Stock they've SENT is the fourth place, and the one none of the three above can see: an approved
+  // or assigned request that hasn't landed yet has produced no entry, no holding and no damaged unit,
+  // so a company with a delivery in transit passes every stock check there is. Counted through
+  // countOpenStockRequestsByCustomer so this guard and the "Open submissions" number on their own
+  // dashboard resolve `open` from one definition — a guard looser than the count the customer is
+  // looking at is a guard that lets you delete work they can see.
+  const [entries, engineerHeld, damaged, liveJobs, openRequests] = await Promise.all([
+    customerRepo.countStockEntriesWithStockByCustomer(id),
+    customerRepo.countEngineerHoldingsByCustomer(id),
+    customerRepo.countDamagedByCustomer(id),
+    jobRepo.countOpenByCustomer(id),
+    customerRepo.countOpenStockRequestsByCustomer(id),
+  ]);
+  if (entries > 0) {
+    throw conflict(
+      `${customer.name} still has stock in ${entries} ${entries === 1 ? "entry" : "entries"} in your warehouses. ` +
+        `Dispatch or remove the stock before deleting the customer.`,
+    );
+  }
+  if (engineerHeld > 0) {
+    throw conflict(
+      `${customer.name} still has stock out with an engineer. ` +
+        `Have it returned or written off before deleting the customer.`,
+    );
+  }
+  if (damaged > 0) {
+    throw conflict(
+      `${customer.name} still has stock in the damaged pool. ` +
+        `Clear it from Goods Management before deleting the customer.`,
+    );
+  }
+  if (liveJobs > 0) {
+    throw conflict(
+      `${customer.name} still has ${liveJobs} job${liveJobs === 1 ? "" : "s"} in progress. ` +
+        `Complete or cancel them before deleting the customer.`,
+    );
+  }
+  if (openRequests > 0) {
+    throw conflict(
+      `${customer.name} still has ${openRequests} open stock request${openRequests === 1 ? "" : "s"}. ` +
+        `Receive or close them before deleting the customer.`,
+    );
+  }
+
   // End every portal user's sessions so a removed company can't keep browsing.
   const users = await customerRepo.findUsersByCustomer(id);
   await customerRepo.softDelete(id);
@@ -1937,6 +1996,9 @@ export interface CustomerOverview {
     /** Units declared on a submission that were short-closed and are never arriving. 0 for almost
      *  every customer, which is why the UI only surfaces it when it isn't. */
     notReceivedUnits: number;
+    /** Jobs still happening — scheduled or in progress. Owned by the job module (jobService
+     *  decides which statuses those are) so this number and the Jobs page can't disagree. */
+    activeJobs: number;
   };
   /** Units per warehouse, biggest holding first. Empty when the customer has no stock with us.
    *  Carries the id so the dashboard row can link straight to My Stock filtered to that warehouse. */
@@ -1992,6 +2054,7 @@ export async function getOwnOverview(customerId: string): Promise<CustomerOvervi
     activeProjects,
     totalProjects,
     totalSites,
+    activeJobs,
   ] = await Promise.all([
     customerRepo.findStockRequestsByCustomer(customerId, {}, { skip: 0, take: 5 }),
     // OPEN, not just `pending`. "Pending" alone read as 0 for a customer with stock sitting approved
@@ -2006,6 +2069,11 @@ export async function getOwnOverview(customerId: string): Promise<CustomerOvervi
     customerRepo.countProjectsByCustomer(customerId, { status: "active" }),
     customerRepo.countProjectsByCustomer(customerId),
     customerRepo.countSitesByCustomer(customerId),
+    // Through the job SERVICE, not its repository: which statuses count as "still happening" (and
+    // which are hidden from the customer entirely) is the job module's rule, and the Jobs page reads
+    // it from the same place. Counted here rather than derived from a list — a customer's job history
+    // grows without bound, so this must stay a COUNT, and it rides the existing Promise.all for free.
+    jobService.countActiveJobsForCustomer(customerId),
   ]);
 
   // Only the warehouses actually holding this customer's stock are fetched — the grouping already
@@ -2031,6 +2099,7 @@ export async function getOwnOverview(customerId: string): Promise<CustomerOvervi
       stockEntries,
       stockUnits,
       notReceivedUnits,
+      activeJobs,
     },
     stockByWarehouse,
     // PORTAL mapper — this is the customer's own dashboard. Using the admin `toStockRequest` here sent
@@ -2288,6 +2357,20 @@ export async function generateStockEntryBarcode(
   throw new Error("Could not allocate a unique stock entry barcode.");
 }
 
+// Anything that would be left pointing at a missing row. This entry is HARD-deleted — the model has
+// no archive state, deliberately — and MongoDB enforces no foreign keys, so nothing but this list
+// stands between a delete and a dangling reference. Mirrors the checker registry IRM already uses.
+//
+// Same class of bug as deleting a job that still had stock out: the record goes, the stock and the
+// rows that describe it stay, and nothing joins them up again.
+type StockEntryDependency = { count: (entryId: string) => Promise<number>; reason: string };
+const STOCK_ENTRY_DELETE_CHECKERS: StockEntryDependency[] = [
+  { reason: "units are still out with an engineer", count: (id) => customerRepo.countEngineerHoldingsByStockEntry(id) },
+  { reason: "it is planned on a job's kit list", count: (id) => customerRepo.countKitLinesByStockEntry(id) },
+  { reason: "it has goods movements recorded against it", count: (id) => customerRepo.countMovementLinesByStockEntry(id) },
+  { reason: "units of it are in the damaged pool", count: (id) => customerRepo.countDamagedByStockEntry(id) },
+];
+
 export async function deleteStockEntry(
   entryId: string,
   actor?: AuditActor,
@@ -2295,6 +2378,20 @@ export async function deleteStockEntry(
   const entry = await customerRepo.findStockEntryById(entryId);
   if (!entry) throw notFound("Stock entry not found.");
   assertWarehouseAccess(actor, entry.warehouseId);
+
+  // Stock still on the shelf goes first: deleting it would remove the units with no ledger entry
+  // anywhere, which is the one loss that leaves no trace at all.
+  if (entry.quantity > 0) {
+    throw conflict(
+      `"${entry.itemName}" still has ${entry.quantity} unit${entry.quantity === 1 ? "" : "s"} in stock. ` +
+        `Move or dispatch the stock before deleting the entry.`,
+    );
+  }
+  for (const dep of STOCK_ENTRY_DELETE_CHECKERS) {
+    if ((await dep.count(entryId)) > 0) {
+      throw conflict(`"${entry.itemName}" can't be deleted — ${dep.reason}.`);
+    }
+  }
 
   await customerRepo.deleteStockEntry(entryId);
 
