@@ -1,6 +1,7 @@
 import { api, LONG_WRITE_TIMEOUT } from "@/lib/api";
 import { registerClientCache } from "@/lib/clientCache";
-import type { Job, JobSummary } from "@/types/job";
+import { portalQs, type PortalListParams } from "@/services/customer.service";
+import type { Job, JobSummary, PortalJob, PortalJobDetail } from "@/types/job";
 
 // Typed wrappers around the backend /jobs endpoints (office CRUD + assign/cancel). The
 // create/assign flow snapshots the engineer and emits a realtime "job:new" to them.
@@ -126,3 +127,26 @@ const action = (id: string, name: string, body?: unknown): Promise<Job> =>
 
 export const assignJob = (id: string, engineerId: string) => action(id, "assign", { engineerId });
 export const cancelJob = (id: string, reason?: string) => action(id, "cancel", { reason: reason ?? "" });
+
+// --- customer portal --------------------------------------------------------
+// A separate endpoint, a separate type, and NOT part of `listCache` above: that cache is keyed by
+// the office list's filters and cleared by office mutations, neither of which applies to a customer
+// — who cannot mutate a job at all, and must never be served a page another session cached.
+export type PagedPortalJobs = {
+  jobs: PortalJob[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+};
+
+/** The signed-in customer's own jobs. Scoped server-side from the session cookie — there is no
+ *  customer id to pass, and passing one would not widen it. */
+export function getOwnJobs(params: PortalListParams = {}): Promise<PagedPortalJobs> {
+  return api<PagedPortalJobs>(`/customer/jobs${portalQs(params)}`);
+}
+
+/** One of the customer's own jobs. 404s for anything outside their company — see getJobForCustomer. */
+export function getOwnJob(id: string): Promise<PortalJobDetail> {
+  return api<{ job: PortalJobDetail }>(`/customer/jobs/${id}`).then((r) => r.job);
+}

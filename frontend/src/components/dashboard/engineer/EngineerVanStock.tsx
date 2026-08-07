@@ -12,8 +12,8 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Notice } from "@/components/ui/Notice";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
-import { primaryBtn, secondaryBtn } from "@/components/ui/styles";
-import { EmptyState, fmtDateTime, PortalHeader } from "@/components/dashboard/portal/portalUi";
+import { toolbarActionsCls, toolbarBtn, toolbarPrimaryBtn } from "@/components/ui/styles";
+import { EmptyState, fmtDateTime } from "@/components/dashboard/portal/portalUi";
 import { singlePickup, VanRequestItemsSummary, VanRequestLinesTable, VanRequestListSkeleton, VanStockAttachments, VanStockCompletionBadge, VanStockPostings, VanStockWalkInBadge, warehouseCaption } from "@/components/dashboard/van-requests/vanRequestUi";
 import { WarehousePickupModal } from "./WarehousePickupModal";
 import type { Msg } from "@/components/ui/types";
@@ -188,23 +188,6 @@ export function EngineerVanStock() {
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-4">
-      <div className="shrink-0">
-        <PortalHeader
-          title="Field stock"
-          subtitle="Request a top-up from a warehouse, or return excess stock — no job needed."
-          action={
-            <div className="flex gap-2">
-              <button type="button" onClick={() => router.push("/dashboard/engineer/van-stock/return")} className={secondaryBtn}>
-                <Undo2 className="h-3.5 w-3.5" /> Return stock
-              </button>
-              <button type="button" onClick={() => router.push("/dashboard/engineer/van-stock/new")} className={primaryBtn}>
-                <PackagePlus className="h-3.5 w-3.5" /> Request stock
-              </button>
-            </div>
-          }
-        />
-      </div>
-
       {/* Toolbar — search + filters + sort. Same pattern (and same URL-state approach) as the engineer
           Jobs and Transfers pages; the reviewer board offers the mirror-image filters over the same
           list, so both sides can ask the same questions of it. */}
@@ -224,6 +207,19 @@ export function EngineerVanStock() {
         <Select size="sm" ariaLabel="Filter by type" value={type} onChange={onFilter("type")} options={TYPE_OPTIONS} />
         <Select size="sm" ariaLabel="Filter by origin" value={createdVia} onChange={onFilter("origin")} options={ORIGIN_OPTIONS} />
         <Select size="sm" ariaLabel="Sort order" value={sort} onChange={onFilter("sort")} options={SORT_OPTIONS} />
+
+        {/* The page's actions, at the right-hand end of the row rather than in the top bar. Up there
+            they sat against the browser's own chrome, a screen's width from the list they act on —
+            and this is an engineer on a van, working one-handed. `lg:` because THIS toolbar becomes
+            a row at lg. Toolbar geometry, so they sit level with the Selects beside them. */}
+        <div className={`${toolbarActionsCls} lg:ml-auto`}>
+          <button type="button" onClick={() => router.push("/dashboard/engineer/van-stock/return")} className={toolbarBtn}>
+            <Undo2 className="h-3.5 w-3.5" /> Return stock
+          </button>
+          <button type="button" onClick={() => router.push("/dashboard/engineer/van-stock/new")} className={toolbarPrimaryBtn}>
+            <PackagePlus className="h-3.5 w-3.5" /> Request stock
+          </button>
+        </div>
       </div>
 
       {msg && <div className="shrink-0"><Notice msg={msg} /></div>}

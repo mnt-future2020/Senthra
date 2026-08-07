@@ -3,7 +3,6 @@
 import * as React from "react";
 import { MinusCircle, X } from "lucide-react";
 
-import { ListPageHeader } from "@/components/ui/ListPageHeader";
 import { InventoryView } from "./InventoryView";
 import { MovementsTable } from "./MovementsTable";
 import { StockPositionTable } from "./StockPositionTable";
@@ -135,12 +134,6 @@ export function InventoryHub() {
           scrolling table, so the header is pinned and costs its height on every screen. On a 1024px
           laptop that matters — five stacked bands (this, the summary, the lens tabs, the sub-tabs and
           the filter row) sit above the data. */}
-      <ListPageHeader
-        collapsible="inventoryHub"
-        title="Inventory Hub"
-        subtitle="Everything the business is accountable for — by ownership and current location."
-      />
-
       <SummaryCards key={`cards-${refreshKey}`} active={lens} onSelect={switchLens} />
 
       {/* Lens tabs */}

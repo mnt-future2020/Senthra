@@ -1,12 +1,14 @@
-// Shortfall summary for a customer's own submission.
+// Shortfall summary for a customer's own submission, and the words the portal says it in.
 //
 // A submission whose warehouse legs are all finished reads "Completed" in the portal even when some
 // of what the customer declared never turned up — "completed" means there is no receiving left to
 // do, which is true, and is the right word for the status. But on its own it tells the customer
-// their stock arrived. This is the line that says otherwise, next to the chip.
+// their stock arrived. This is what says otherwise, next to the chip.
 //
 // Pure and separate from the view so it can be tested (the frontend suite has no DOM), mirroring
-// stockSubmissionFilter.ts on the admin side.
+// stockSubmissionFilter.ts on the admin side. The WORDING lives here too, not in the component:
+// getting it wrong is what caused the confusion this file exists to prevent, so it belongs
+// somewhere a test can hold it still.
 
 import type { PortalWarehouseAssignment } from "@/types/customer";
 
@@ -51,4 +53,38 @@ export function summariseShortfall(
   // something to report — there is no missing stock to explain.
   if (units === 0) return null;
   return { units, received, total, reasons };
+}
+
+/**
+ * The badge beside the status chip: what ARRIVED, as a fraction of what was submitted.
+ *
+ * It used to read "23 not received", which put a denial next to a chip saying "Completed" — two
+ * halves of one cell contradicting each other, leaving the customer to work out which to believe.
+ * They are both true and about different things (the chip is the PROCESS, this is the GOODS), so
+ * the fix is to stop phrasing this one as a negative: "Completed · 2 of 25 received" reads as one
+ * statement, and nothing has to be un-said.
+ *
+ * "2 of 25 received" is also the number the customer can act on. The 23 is closed — the account
+ * team has already dealt with it — whereas the 2 is what they actually hold and plan around.
+ *
+ * And it is the wording the rest of this screen already uses: the detail panel prints exactly this
+ * per warehouse leg. The badge was the only place speaking differently about the same fact.
+ */
+export function shortfallBadgeText(short: Pick<Shortfall, "received" | "total">): string {
+  return `${short.received} of ${short.total} received`;
+}
+
+/**
+ * The badge's hover. Carries what the badge no longer says out loud — the missing count — plus the
+ * warehouse's reason, so hovering ADDS information rather than repeating the label.
+ *
+ * "not received", NOT "short". "Short" is warehouse trade language (short shipment, picking short)
+ * and the reader is a customer; on its own "23 short" can even parse as an adjective. Unlike
+ * "missing" it states the fact without implying a cause, which matters when the commonest cause is
+ * that the customer simply shipped fewer than they declared. Nothing was lost; it never arrived.
+ * Used verbatim in the detail panel too, so opening a row never renames what the hover just said.
+ */
+export function shortfallTooltip(short: Pick<Shortfall, "units" | "reasons">): string {
+  const missing = `${short.units} not received`;
+  return short.reasons.length > 0 ? `${missing} — ${short.reasons.join(" · ")}` : missing;
 }

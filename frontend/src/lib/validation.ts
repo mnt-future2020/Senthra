@@ -38,6 +38,26 @@ export const WEBSITE_RE = /^(https?:\/\/)?[\w-]+(\.[\w-]+)+([/?#].*)?$/i;
 // Normalize then test a UK phone number (tolerates spaces, hyphens and parens).
 export const isPhone = (v: string): boolean => UK_PHONE_RE.test(v.replace(/[\s()-]/g, ""));
 
+// A link a browser can safely be handed as an `href`. MUST stay in lockstep with the backend's
+// utils/http-url.ts, which is what job.validation.ts enforces on save.
+//
+// Note this asks about the SCHEME, not the shape — unlike WEBSITE_RE above, which is deliberately
+// lenient because a bare "acme.co.uk" typed into a company profile is a reasonable thing to accept.
+// This one guards values that get rendered as links, and `javascript:alert(1)` / `data:text/html,…`
+// are both perfectly well-formed URLs that execute when clicked. A shape check passes both, so an
+// allow-list of schemes is the only check that rejects anything that matters.
+export function isHttpUrl(value: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    // Not a URL at all (a filename, a note typed into the wrong box). Relative paths land here too,
+    // and that is right: an attachment must say where it lives.
+    return false;
+  }
+  return url.protocol === "http:" || url.protocol === "https:";
+}
+
 // ---------------------------------------------------------------------------
 // Calendar dates + staff date policy
 //

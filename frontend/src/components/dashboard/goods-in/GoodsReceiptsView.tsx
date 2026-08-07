@@ -8,7 +8,6 @@ import { MoreHorizontal, PackageCheck, Pencil, Search, Trash2 } from "lucide-rea
 import * as grnService from "@/services/goods-in.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
-import { ListPageHeader } from "@/components/ui/ListPageHeader";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -99,8 +98,9 @@ function TableSkeleton({ actions }: { actions: boolean }) {
   );
 }
 
-// `warehouseId` locks the list to one warehouse and `embedded` drops the standalone page header —
-// both used when this renders inside the Warehouse detail "Incoming stock" Company (GRN) pane.
+// `warehouseId` locks the list to one warehouse and `embedded` tightens the layout and hides the
+// Receive delivery button — both used when this renders inside the Warehouse detail "Incoming
+// stock" Company (GRN) pane.
 // No props = the global GRN page. Either way the view fills its (bounded) parent and only the
 // table body scrolls, with a sticky header row. Mirrors InventoryView's embedded contract.
 export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { warehouseId?: string; warehouseCode?: string; embedded?: boolean } = {}) {
@@ -211,13 +211,6 @@ export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { wa
 
   return (
     <div className={`flex h-full flex-col ${embedded ? "gap-4" : "gap-5"}`}>
-      {!embedded && (
-        <ListPageHeader
-          title="Goods Receipt Notes (GRN)"
-          subtitle="Search, track and audit goods receipts across every warehouse. Receive a delivery here, from a Purchase Order, or from a warehouse's Incoming stock — all feed the same flow."
-        />
-      )}
-
       <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center">
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />

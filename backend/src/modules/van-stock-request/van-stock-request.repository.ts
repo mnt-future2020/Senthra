@@ -275,6 +275,20 @@ export async function findOpenLineItems(engineerId: string, type: string): Promi
   return rows.flatMap((r) => r.lines.map((l) => ({ irmItemId: l.irmItemId, code: r.code })));
 }
 
+/**
+ * Requests still in flight against a warehouse — the delete guard for it.
+ *
+ * Same shape as a live job's kit line naming its pickup point: an open restock says where the
+ * engineer collects, and an approved-but-unscanned one is stock the warehouse has already committed
+ * (it credits the van when the warehouse finally scans it out). Deleting the warehouse under either
+ * leaves the request pointing at an id every read filters away.
+ */
+export function countOpenByWarehouse(warehouseId: string): Promise<number> {
+  return prisma.vanStockRequest.count({
+    where: { warehouseId, deletedAt: null, status: { in: ["pending", "approved", "partially_fulfilled"] } },
+  });
+}
+
 // How many requests are still in flight for a group of engineers — pending, approved, or partly
 // fulfilled. An approved-but-unscanned restock credits the engineer's van when the warehouse
 // finally scans it out, so a role that loses the field capability while one is open would end up

@@ -34,6 +34,7 @@ import {
 import type { CustomerProject, CustomerSite, CustomerStockEntry } from "@/types/customer";
 import type { Job, JobLineType } from "@/types/job";
 import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
+import { isHttpUrl } from "@/lib/validation";
 
 const JOBS_LIST = "/dashboard/jobs";
 const dateInput = (iso: string | null | undefined) => (iso ? iso.slice(0, 10) : "");
@@ -552,6 +553,14 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
         }
       }
     }
+    // Mirrors createJobSchema's `attachments` rule (job.validation.ts → utils/http-url.ts): http(s)
+    // only, because these render as links and `javascript:` / `data:` are valid URLs that execute
+    // when clicked. The server rejects them either way — what only this side can do is say WHICH box
+    // is wrong. Without it a bad link on row 3 of 5 came back as a bare toast naming no field.
+    const badLink = attachments.map((a) => a.trim()).filter(Boolean).find((a) => !isHttpUrl(a));
+    if (badLink) {
+      e.attachments = `"${badLink}" isn't a link. Attachments must start with http:// or https://.`;
+    }
     return e;
   };
 
@@ -1000,6 +1009,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
                   ))}
                   <button type="button" onClick={addAttachment} className="flex items-center gap-1.5 rounded-lg border border-dashed border-[var(--border)] px-3 py-1.5 text-xs font-bold text-[var(--accent)] hover:bg-[var(--surface-2)]"><Plus className="h-3.5 w-3.5" /> Add link</button>
                 </div>
+                <FieldError message={errors.attachments} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Paste a URL to a document, drawing, or photo. Optional.</p>
               </div>
               <div>

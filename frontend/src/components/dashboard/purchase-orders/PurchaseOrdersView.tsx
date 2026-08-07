@@ -9,7 +9,6 @@ import * as poService from "@/services/purchase-order.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { usePurchaseOrderSocket } from "@/hooks/usePurchaseOrderSocket";
-import { ListPageHeader } from "@/components/ui/ListPageHeader";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -249,8 +248,6 @@ export function PurchaseOrdersView() {
 
   return (
     <div className="flex h-full flex-col gap-5">
-      <ListPageHeader title="Purchase Orders" subtitle="Raise, approve and issue orders to suppliers. Goods are received later by Goods In." />
-
       <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center">
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />

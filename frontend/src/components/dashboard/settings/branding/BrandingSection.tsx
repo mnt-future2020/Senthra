@@ -6,6 +6,7 @@ import { Image as ImageIcon, Loader2, Paintbrush, Trash2, Upload } from "lucide-
 import { useBranding } from "@/hooks/useBranding";
 import { useAuth } from "@/hooks/useAuth";
 import * as brandingService from "@/services/branding.service";
+import { useDashboard } from "@/hooks/useDashboard";
 import * as settingsService from "@/services/settings.service";
 import type { Branding, Settings } from "@/types/settings";
 import { SettingsCard } from "@/components/dashboard/settings/ui/SettingsCard";
@@ -175,7 +176,12 @@ export function BrandingSection() {
 
   const [saving, setSaving] = React.useState(false);
   const [uploading, setUploading] = React.useState<"logo" | "favicon" | null>(null);
+  // ERRORS ONLY. A failure has to stay on screen until it is fixed; the success is a moment and
+  // goes to a toast. Keeping both here put the receipt in direct contradiction with this card's
+  // OWN SaveBar: edit something after saving and the bar said "unsaved changes" while the banner
+  // above it still said "saved". The bar states the state; the toast marks the event.
   const [msg, setMsg] = React.useState<Msg>(null);
+  const { pushToast } = useDashboard();
 
   React.useEffect(() => {
     (async () => {
@@ -229,10 +235,7 @@ export function BrandingSection() {
       if (type === "logo") setLogoUrl(url);
       else setFaviconUrl(url);
       setBranding(brandingFromSettings(settings));
-      setMsg({
-        type: "success",
-        text: `${type === "logo" ? "Logo" : "Favicon"} uploaded.`,
-      });
+      pushToast(`${type === "logo" ? "Logo" : "Favicon"} uploaded.`);
     } catch (err) {
       setMsg({
         type: "error",
@@ -311,7 +314,7 @@ export function BrandingSection() {
         stockCodePrefix: settings.stockCodePrefix,
         irmCodePrefix: settings.irmCodePrefix,
       });
-      setMsg({ type: "success", text: "Branding saved." });
+      pushToast("Branding saved.");
     } catch (err) {
       setMsg({
         type: "error",

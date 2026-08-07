@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 
 import * as templateService from "@/services/emailTemplate.service";
+import { useDashboard } from "@/hooks/useDashboard";
 import { useAuth } from "@/hooks/useAuth";
 import type { EmailPreview, EmailTemplate } from "@/types/emailTemplate";
 import { Field } from "@/components/ui/Field";
@@ -121,7 +122,12 @@ export function EmailTemplateEditor({
   const [testing, setTesting] = React.useState(false);
   const [testTo, setTestTo] = React.useState("");
   const [confirmAction, setConfirmAction] = React.useState<null | "restore" | "delete">(null);
+  // ERRORS ONLY. A failure has to stay on screen until it is fixed; the success is a moment and
+  // goes to a toast. Keeping both here left the receipt under the form while the user typed new
+  // changes into it — a "saved" that had stopped being true, and this card has no dirty bar to
+  // contradict it.
   const [msg, setMsg] = React.useState<Msg>(null);
+  const { pushToast } = useDashboard();
 
   // Required variables (system templates only) can't be removed without a save failing,
   // so surface them first and flag them. Falls back to an empty set for custom templates
@@ -198,7 +204,7 @@ export function EmailTemplateEditor({
     setMsg(null);
     try {
       await templateService.updateTemplate(template.id, { name, subject, textContent: message });
-      setMsg({ type: "success", text: "Template saved." });
+      pushToast("Template saved.");
       onChanged();
     } catch (e) {
       setMsg({ type: "error", text: e instanceof Error ? e.message : "Save failed." });
@@ -218,7 +224,7 @@ export function EmailTemplateEditor({
     try {
       await templateService.updateTemplate(template.id, { name, subject, textContent: message });
       const res = await templateService.sendTest(template.id, testTo.trim());
-      setMsg({ type: "success", text: res.message });
+      pushToast(res.message);
       onChanged();
     } catch (e) {
       setMsg({ type: "error", text: e instanceof Error ? e.message : "Test failed." });
@@ -232,7 +238,7 @@ export function EmailTemplateEditor({
     try {
       await templateService.duplicateTemplate(template.id);
       onChanged();
-      setMsg({ type: "success", text: "Duplicated — find the copy in the list." });
+      pushToast("Duplicated — find the copy in the list.");
     } catch (e) {
       setMsg({ type: "error", text: e instanceof Error ? e.message : "Duplicate failed." });
     }
@@ -247,7 +253,7 @@ export function EmailTemplateEditor({
       setName(t.name);
       setSubject(t.subject);
       setMessage(t.textContent);
-      setMsg({ type: "success", text: "Default content restored." });
+      pushToast("Default content restored.");
       onChanged();
     } catch (e) {
       setMsg({ type: "error", text: e instanceof Error ? e.message : "Restore failed." });

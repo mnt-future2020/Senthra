@@ -4,6 +4,7 @@ import * as React from "react";
 import { ArrowRightLeft, Clock, Loader2 } from "lucide-react";
 
 import * as settingsService from "@/services/settings.service";
+import { useDashboard } from "@/hooks/useDashboard";
 import { useAuth } from "@/hooks/useAuth";
 import { SettingsCard } from "@/components/dashboard/settings/ui/SettingsCard";
 import { ReadOnlyNotice } from "@/components/dashboard/settings/ui/ReadOnlyNotice";
@@ -28,7 +29,12 @@ export function OperationsSection() {
   // cleared mid-edit.
   const [overdueDays, setOverdueDays] = React.useState(String(DEFAULT_OVERDUE_DAYS));
   const [saving, setSaving] = React.useState(false);
+  // ERRORS ONLY. A failure has to stay on screen until it is fixed; the success is a moment and
+  // goes to a toast. Keeping both here left the receipt under the form while the user typed new
+  // changes into it — a "saved" that had stopped being true, and this card has no dirty bar to
+  // contradict it.
   const [msg, setMsg] = React.useState<Msg>(null);
+  const { pushToast } = useDashboard();
 
   React.useEffect(() => {
     (async () => {
@@ -59,7 +65,7 @@ export function OperationsSection() {
         engineerTransferRequireSignature: requireSignature,
         overdueAfterDays: overdueNum,
       });
-      setMsg({ type: "success", text: "Operations settings saved." });
+      pushToast("Operations settings saved.");
     } catch (err) {
       setMsg({ type: "error", text: err instanceof Error ? err.message : "Save failed." });
     } finally {

@@ -203,3 +203,53 @@ describe("completionDate is required on BOTH create and update", () => {
     if (r.success) expect(r.data.completionDate).toBe("2026-09-01");
   });
 });
+
+// Attachments are free text that ends up in an `href` — on the office job page and, since the portal
+// shipped, on the customer's too. The check that matters is the SCHEME, not the shape: `new URL()`
+// accepts `javascript:alert(1)` and `data:text/html,…` quite happily, and both execute when clicked,
+// so a "is it a URL" test rejects nothing worth rejecting.
+//
+// The client mirrors this in lib/validation.ts (`isHttpUrl`) so the bad box can be named inline.
+// These are the cases both sides must agree on.
+describe("attachments are http(s) links, not just well-formed URLs", () => {
+  const withAttachments = (attachments: unknown) =>
+    createJobSchema.safeParse({
+      name: "Job",
+      customerId: A,
+      projectId: B,
+      assignedEngineerId: C,
+      addressLine1: "1 Basinghall Street",
+      completionDate: "2026-08-10",
+      kitLines: [misc("Cable ties")],
+      attachments,
+    });
+
+  it("accepts http and https links", () => {
+    expect(withAttachments(["http://docs.test/a.pdf", "https://docs.test/b.png"]).success).toBe(true);
+  });
+
+  it("accepts the key being absent — attachments are optional", () => {
+    expect(withAttachments(undefined).success).toBe(true);
+  });
+
+  it("REJECTS a javascript: link, which is a valid URL that executes when clicked", () => {
+    const r = withAttachments(["javascript:alert(1)"]);
+    expect(r.success).toBe(false);
+    if (!r.success) expect(r.error.issues.some((i) => i.path.includes("attachments"))).toBe(true);
+  });
+
+  it("REJECTS a data: link for the same reason", () => {
+    expect(withAttachments(["data:text/html,<script>alert(1)</script>"]).success).toBe(false);
+  });
+
+  it("REJECTS things that aren't links at all — a filename, or a note in the wrong box", () => {
+    expect(withAttachments(["drawing-rev-c.pdf"]).success).toBe(false);
+    expect(withAttachments(["ask Dave for the drawing"]).success).toBe(false);
+  });
+
+  // One bad row must sink the save even when the rest are fine, or the array is only as strict as
+  // its first element.
+  it("REJECTS the whole array when a single entry is bad", () => {
+    expect(withAttachments(["https://docs.test/a.pdf", "javascript:alert(1)"]).success).toBe(false);
+  });
+});

@@ -11,7 +11,6 @@ import type { IrmCategory } from "@/types/irm-category";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
-import { ListPageHeader } from "@/components/ui/ListPageHeader";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -47,7 +46,7 @@ function TableSkeleton() {
 }
 
 // `warehouseId` locks the view to one warehouse (hides the warehouse filter/column) and
-// `embedded` drops the standalone page header + full-height layout — both used when this is
+// `embedded` tightens the layout for a host that supplies its own framing — used when this is
 // rendered inside the Warehouse detail "IRM stock" tab. No props = the global inventory page.
 export function InventoryView({ warehouseId, embedded }: { warehouseId?: string; embedded?: boolean } = {}) {
   const router = useRouter();
@@ -151,15 +150,7 @@ export function InventoryView({ warehouseId, embedded }: { warehouseId?: string;
     // DamagedStockView use. `embedded` used to switch this off and let the host scroll the whole
     // component, which meant the search box and the warehouse/category/status filters scrolled away
     // with the rows: you'd lose the controls exactly when a long list makes you want them.
-    // `embedded` now controls only whether the page header renders.
     <div className={`flex h-full flex-col ${embedded ? "gap-4" : "gap-5"}`}>
-      {!embedded && (
-        <ListPageHeader
-          title="Warehouse Inventory"
-          subtitle="Live on-hand stock per item and warehouse. Move stock between warehouses or open a record for its full movement history."
-        />
-      )}
-
       <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:flex-wrap lg:items-center">
         <div className="relative w-full lg:min-w-64 lg:max-w-xs lg:flex-1">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />

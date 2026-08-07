@@ -5,6 +5,7 @@ import { Building2 } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
 import * as settingsService from "@/services/settings.service";
+import { useDashboard } from "@/hooks/useDashboard";
 import { SettingsCard } from "@/components/dashboard/settings/ui/SettingsCard";
 import { ReadOnlyNotice } from "@/components/dashboard/settings/ui/ReadOnlyNotice";
 import { SaveBar } from "@/components/dashboard/settings/ui/SaveBar";
@@ -64,7 +65,12 @@ export function CompanyProfileSection() {
   const [form, setForm] = React.useState<CompanyForm>(EMPTY);
   const [saved, setSaved] = React.useState<CompanyForm>(EMPTY);
   const [saving, setSaving] = React.useState(false);
+  // ERRORS ONLY. A failure has to stay on screen until it is fixed; the success is a moment and
+  // goes to a toast. Keeping both here put the receipt in direct contradiction with this card's
+  // OWN SaveBar: edit something after saving and the bar said "unsaved changes" while the banner
+  // above it still said "saved". The bar states the state; the toast marks the event.
   const [msg, setMsg] = React.useState<Msg>(null);
+  const { pushToast } = useDashboard();
 
   const set = (k: keyof CompanyForm, v: string) => setForm((f) => ({ ...f, [k]: v }));
   // Adapt the single form-object to the (Dispatch<SetStateAction<string>>) setters that
@@ -96,7 +102,7 @@ export function CompanyProfileSection() {
       const s = await settingsService.updateSettings({ ...form });
       setForm(pick(s));
       setSaved(pick(s));
-      setMsg({ type: "success", text: "Company profile saved." });
+      pushToast("Company profile saved.");
     } catch (err) {
       setMsg({ type: "error", text: err instanceof Error ? err.message : "Save failed." });
     } finally {

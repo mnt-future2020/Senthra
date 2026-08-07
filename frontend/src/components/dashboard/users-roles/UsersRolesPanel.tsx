@@ -4,7 +4,8 @@ import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Briefcase, Building2, Shield, Users2 } from "lucide-react";
 
-import { ListPageHeader } from "@/components/ui/ListPageHeader";
+import { PageActions } from "@/components/ui/PageActions";
+import { TabPills } from "@/components/ui/TabPills";
 import { RolesView } from "@/components/dashboard/users-roles/roles/RolesView";
 import { UsersView } from "./users/UsersView";
 import { DepartmentsView } from "@/components/dashboard/users-roles/departments/DepartmentsView";
@@ -39,30 +40,9 @@ export function UsersRolesPanel() {
 
   return (
     <div className="flex h-full flex-col gap-6">
-      <ListPageHeader
-        title="Users & Roles"
-        subtitle="Create the people who run the system and the roles they hold."
-        right={
-          visibleTabs.length > 1 && (
-            <div className="flex gap-1 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-1">
-              {visibleTabs.map((t) => (
-                <button
-                  key={t.id}
-                  onClick={() => selectTab(t.id)}
-                  className={`flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-bold transition-all ${
-                    activeTab === t.id
-                      ? "bg-[var(--accent)] text-white shadow-xs"
-                      : "text-[var(--muted)] hover:text-[var(--ink)]"
-                  }`}
-                >
-                  <t.icon className="h-4 w-4" />
-                  {t.label}
-                </button>
-              ))}
-            </div>
-          )
-        }
-      />
+      <PageActions>
+        <TabPills tabs={visibleTabs} active={activeTab} onSelect={selectTab} ariaLabel="Users & Roles sections" />
+      </PageActions>
 
       <div className="flex min-h-0 flex-1 flex-col">
         {activeTab === "users" ? (

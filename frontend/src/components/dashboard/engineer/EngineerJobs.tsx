@@ -9,7 +9,7 @@ import type { PagedOwnJobs } from "@/services/engineer.service";
 import { useJobSocket } from "@/hooks/useJobSocket";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
-import { EmptyState, fmtDate, JobStatusChip, PortalHeader, TableCard, TableCardSkeleton } from "@/components/dashboard/portal/portalUi";
+import { EmptyState, fmtDate, JobStatusChip, TableCard, TableCardSkeleton } from "@/components/dashboard/portal/portalUi";
 
 // Engineer Portal — My assigned jobs. Filtered + PAGED like every other list (an engineer's job
 // history grows unbounded, so the list never fetches it all). Filters live in the URL
@@ -109,8 +109,6 @@ export function EngineerJobs() {
 
   return (
     <div className="flex h-full flex-col gap-6">
-      <PortalHeader title="Jobs" subtitle="Your assigned jobs." />
-
       {/* Toolbar — search + status filter + sort (same pattern as the Transfers page) */}
       <div className="flex shrink-0 flex-col gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-xs lg:flex-row lg:flex-wrap lg:items-center">
         <div className="relative w-full lg:max-w-xs">

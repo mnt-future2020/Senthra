@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { summariseShortfall } from "./stockRequestShortfall";
+import { shortfallBadgeText, shortfallTooltip, summariseShortfall } from "./stockRequestShortfall";
 import type { PortalWarehouseAssignment } from "@/types/customer";
 
 type Leg = PortalWarehouseAssignment;
@@ -107,5 +107,64 @@ describe("summariseShortfall", () => {
     expect(result).not.toBeNull();
     expect(result!.received + result!.units).toBe(result!.total);
     expect(result).toEqual({ units: 11, received: 14, total: 25, reasons: ["Customer shipped 15 only"] });
+  });
+});
+
+// The badge sits directly beside a chip that says "Completed", so its wording is the whole reason
+// this pair does or does not contradict itself. It read "23 not received" — a denial next to a
+// completion — and customers asked which half to believe. These pin the replacement.
+describe("shortfallBadgeText", () => {
+  it("states what arrived, not what didn't", () => {
+    expect(shortfallBadgeText({ received: 2, total: 25 })).toBe("2 of 25 received");
+  });
+
+  // The exact case that started this: "Completed · 2 of 25 received" must read as one statement.
+  it("never phrases the badge as a negative", () => {
+    const text = shortfallBadgeText({ received: 2, total: 25 });
+    expect(text).not.toMatch(/not|missing|short|fail/i);
+  });
+
+  it("handles nothing arriving without special-casing it", () => {
+    expect(shortfallBadgeText({ received: 0, total: 25 })).toBe("0 of 25 received");
+  });
+});
+
+describe("shortfallTooltip", () => {
+  // The hover must ADD to the badge, not repeat it — so it carries the count the badge stopped
+  // saying out loud, plus the warehouse's explanation.
+  it("carries the missing count and the reason", () => {
+    expect(shortfallTooltip({ units: 23, reasons: ["Lost in transit"] })).toBe("23 not received — Lost in transit");
+  });
+
+  it("joins several reasons from a split submission", () => {
+    expect(shortfallTooltip({ units: 15, reasons: ["Customer shipped 15 only", "Lost in transit"] })).toBe(
+      "15 not received — Customer shipped 15 only · Lost in transit",
+    );
+  });
+
+  // The reason is enforced on the way in, so this is defensive — a missing explanation must never
+  // swallow the count, which is the part the badge is no longer showing.
+  it("still states the count when no reason was recorded", () => {
+    expect(shortfallTooltip({ units: 23, reasons: [] })).toBe("23 not received");
+  });
+
+  // "short" is warehouse trade language and the reader is a customer; "missing" implies a cause,
+  // when the commonest one is that they shipped fewer than they declared.
+  it("says 'not received', never 'short' or 'missing'", () => {
+    const text = shortfallTooltip({ units: 23, reasons: ["Lost in transit"] });
+    expect(text).toContain("not received");
+    expect(text).not.toMatch(/\bshort\b|\bmissing\b/i);
+  });
+
+  // The badge shows `received of total`, the hover shows `units`. They come from the SAME summary,
+  // so a reader who does the subtraction must land on the number the hover already gave them.
+  it("reconciles with the badge beside it", () => {
+    const short = summariseShortfall([
+      leg({ quantity: 12, receivedQuantity: 12 }),
+      closedShort({ warehouseName: "Leeds Depot", quantity: 13, receivedQuantity: 2 }),
+    ])!;
+    expect(shortfallBadgeText(short)).toBe("14 of 25 received");
+    expect(shortfallTooltip(short)).toBe("11 not received — Customer shipped 15 only");
+    expect(short.received + short.units).toBe(short.total);
   });
 });

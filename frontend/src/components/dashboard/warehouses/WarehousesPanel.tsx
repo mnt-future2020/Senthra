@@ -4,7 +4,8 @@ import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Boxes, Warehouse as WarehouseIcon } from "lucide-react";
 
-import { ListPageHeader } from "@/components/ui/ListPageHeader";
+import { PageActions } from "@/components/ui/PageActions";
+import { TabPills } from "@/components/ui/TabPills";
 import { WarehousesView } from "./WarehousesView";
 import { WarehouseTypesView } from "./WarehouseTypesView";
 import { useAuth } from "@/hooks/useAuth";
@@ -32,30 +33,9 @@ export function WarehousesPanel() {
 
   return (
     <div className="flex h-full flex-col gap-6">
-      <ListPageHeader
-        title="Warehouses"
-        subtitle="Physical stock locations and the type list used to classify them."
-        right={
-          visibleTabs.length > 1 && (
-            <div className="flex gap-1 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-1">
-              {visibleTabs.map((t) => (
-                <button
-                  key={t.id}
-                  onClick={() => selectTab(t.id)}
-                  className={`flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-bold transition-all ${
-                    activeTab === t.id
-                      ? "bg-[var(--accent)] text-white shadow-xs"
-                      : "text-[var(--muted)] hover:text-[var(--ink)]"
-                  }`}
-                >
-                  <t.icon className="h-4 w-4" />
-                  {t.label}
-                </button>
-              ))}
-            </div>
-          )
-        }
-      />
+      <PageActions>
+        <TabPills tabs={visibleTabs} active={activeTab} onSelect={selectTab} ariaLabel="Warehouses sections" />
+      </PageActions>
 
       <div className="flex min-h-0 flex-1 flex-col">
         {activeTab === "warehouses" ? <WarehousesView /> : <WarehouseTypesView />}

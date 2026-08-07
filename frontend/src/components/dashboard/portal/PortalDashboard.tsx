@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { Boxes, ClipboardList, FolderKanban, MapPin, ArrowRight, Warehouse } from "lucide-react";
+import { Boxes, ClipboardCheck, ClipboardList, FolderKanban, MapPin, ArrowRight, Warehouse } from "lucide-react";
 
 import * as customerService from "@/services/customer.service";
 import { Notice } from "@/components/ui/Notice";
@@ -71,7 +71,7 @@ export function PortalDashboard() {
         subtitle="Your stock with us, and the submissions still in flight."
       />
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
         {/* Units first and accented — the holding, not the row count. `stockEntries` stays as the
             sub-line because it's what the linked page lists, so the click is predictable. */}
         <StatCard
@@ -81,6 +81,17 @@ export function PortalDashboard() {
           sub={`across ${counts.stockEntries} ${counts.stockEntries === 1 ? "entry" : "entries"}`}
           href="/dashboard/stock"
           accent
+        />
+        {/* ACTIVE, not total. A lifetime job count only ever grows and stops meaning anything; what
+            the customer is checking is what is still coming. Links to the list ALREADY FILTERED —
+            `?status=active` resolves through the same status set the count is computed from, so the
+            number here and the row count there always agree, exactly like Open submissions. */}
+        <StatCard
+          icon={ClipboardCheck}
+          label="Active jobs"
+          value={counts.activeJobs}
+          sub="scheduled or in progress"
+          href="/dashboard/portal/jobs?status=active"
         />
         {/* Links to the list ALREADY FILTERED to open. `?status=open` resolves through the same
             OPEN_REQUEST_STATUSES the count is computed from, so the number here and the row count
@@ -313,8 +324,8 @@ function DashboardSkeleton() {
     <div className="space-y-6">
       <HeaderCardSkeleton />
 
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {Array.from({ length: 4 }).map((_, i) => (
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+        {Array.from({ length: 5 }).map((_, i) => (
           <StatCardSkeleton key={i} />
         ))}
       </div>

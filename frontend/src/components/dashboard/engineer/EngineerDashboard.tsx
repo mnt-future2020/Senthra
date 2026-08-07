@@ -5,7 +5,7 @@ import { RefreshCw } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
 import { Notice } from "@/components/ui/Notice";
-import { PortalHeader } from "@/components/dashboard/portal/portalUi";
+import { PageActions } from "@/components/ui/PageActions";
 import { relativeTime } from "@/components/dashboard/audit/auditDisplay";
 import { useEngineerOverview } from "./overview/useEngineerOverview";
 import { buildStatCards, buildAttentionRows } from "./overview/engineerDashboardModel";
@@ -20,7 +20,6 @@ import { DashboardSkeleton } from "./overview/DashboardSkeleton";
 // "Needs your attention" strip, the next jobs by due date, quick actions and the recent stock feed.
 // Thin orchestrator: the data + realtime live in useEngineerOverview; the card / attention logic is a
 // pure, unit-tested view-model (engineerDashboardModel); each piece is its own component under overview/.
-const SUBTITLE = "Your jobs, stock and activity at a glance.";
 const CAPTION_TICK_MS = 30_000;
 
 export function EngineerDashboard() {
@@ -37,7 +36,6 @@ export function EngineerDashboard() {
   if (loading && !overview) {
     return (
       <div className="space-y-6">
-        <PortalHeader title="Dashboard" subtitle={SUBTITLE} />
         <DashboardSkeleton />
       </div>
     );
@@ -46,7 +44,6 @@ export function EngineerDashboard() {
   if (!overview) {
     return (
       <div className="space-y-6">
-        <PortalHeader title="Dashboard" subtitle={SUBTITLE} />
         {error && <Notice msg={{ type: "error", text: error }} />}
         <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-8 text-center">
           <p className="text-sm text-[var(--muted)]">We couldn&apos;t load your dashboard.</p>
@@ -67,25 +64,21 @@ export function EngineerDashboard() {
 
   return (
     <div className="space-y-6">
-      <PortalHeader
-        title="Dashboard"
-        subtitle={SUBTITLE}
-        action={
-          <div className="flex items-center gap-1.5 text-xs text-[var(--muted)]">
-            <span>Updated {relativeTime(updatedAt ?? new Date().toISOString())}</span>
-            <button
-              type="button"
-              onClick={reload}
-              disabled={refreshing}
-              aria-label="Refresh dashboard"
-              title="Refresh"
-              className="rounded p-0.5 text-[var(--faint)] transition-colors hover:text-[var(--accent)] disabled:cursor-default"
-            >
-              <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
-            </button>
-          </div>
-        }
-      />
+      <PageActions>{
+        <div className="flex items-center gap-1.5 text-xs text-[var(--muted)]">
+        <span>Updated {relativeTime(updatedAt ?? new Date().toISOString())}</span>
+        <button
+        type="button"
+        onClick={reload}
+        disabled={refreshing}
+        aria-label="Refresh dashboard"
+        title="Refresh"
+        className="rounded p-0.5 text-[var(--faint)] transition-colors hover:text-[var(--accent)] disabled:cursor-default"
+        >
+        <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
+        </button>
+        </div>
+      }</PageActions>
       {error && <Notice msg={{ type: "error", text: error }} />}
 
       <EngineerStatCards cards={cards} />
