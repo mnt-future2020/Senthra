@@ -46,7 +46,7 @@
 | **GM** | Goods Management movement (`GM-0001`) — job-scoped issue/return/consume scan session. |
 | **Senthra Code** | Manual fallback code when a Code-128 barcode isn't scannable (per-customer format, e.g. `CSE-00001`). |
 
-Supporting docs live in [docs/](docs/): [Senthra_Complete_Business_Flow.md](docs/Senthra_Complete_Business_Flow.md) (14 operational flows), [ARCHITECTURE.md](docs/ARCHITECTURE.md), [Client_Requirements.md](docs/Client_Requirements.md), Figma diagram exports in [docs/diagrams/](docs/diagrams/), and a spec-driven paper trail (16 design specs, 9 implementation plans) in [docs/superpowers/](docs/superpowers/).
+Supporting material — the business-flow write-up, architecture notes, client requirements, Figma diagram exports and the spec-driven paper trail (16 design specs, 9 implementation plans) — is kept in a `docs/` folder that is deliberately NOT in this repository. It mixes internal design notes with commercial client documents, so it is held outside version control; ask the team if you need it. This file is the tracked entry point.
 
 ---
 
@@ -80,7 +80,7 @@ Two independent apps in one git repo (not a workspace — each has its own `pack
 | Domain utilities | `@zxing/browser` (barcode scanning), `xlsx` (Excel site import/export), `zod` |
 | Dev/test | `typescript` 5, `eslint` + `eslint-config-next`, `vitest` 4 |
 
-⚠️ The frontend is a **customized Next.js 16 build with breaking changes vs. stock Next.js** — [frontend/AGENTS.md](frontend/AGENTS.md) instructs developers/agents to read `node_modules/next/dist/docs/` before writing Next.js code. Observed Next 16 patterns: async `cookies()`, `generateMetadata` + `React.cache`, `<Link onNavigate>`, `useSearchParams` requiring `<Suspense>`.
+⚠️ The frontend is a **customized Next.js 16 build with breaking changes vs. stock Next.js**. Read `node_modules/next/dist/docs/` before writing Next.js code — your training data and the public Next.js docs will both be wrong in places. Observed Next 16 patterns: async `cookies()`, `generateMetadata` + `React.cache`, `<Link onNavigate>`, `useSearchParams` requiring `<Suspense>`.
 
 ---
 
@@ -88,9 +88,8 @@ Two independent apps in one git repo (not a workspace — each has its own `pack
 
 ```
 e:\Senthra
-├── CLAUDE.md                  # AI/dev instructions for the repo
-├── docs/                      # Business flows, architecture, client requirements, diagrams, specs/plans
-├── reference/                 # Reference material
+├── PROJECT-DOCUMENTATION.md   # This file — the tracked entry point
+├── reference/                 # Reference material (local only)
 ├── backend/
 │   ├── api/index.js           # Vercel serverless entry (exports the compiled Express app)
 │   ├── prisma/schema.prisma   # Single Prisma schema (~2,260 lines, ~60 models)
@@ -527,7 +526,7 @@ Socket.IO rooms (long-lived server only): PRF/PO watcher rooms, van-stock review
 
 - **Backend on Vercel**: [vercel.json](backend/vercel.json) rewrites every request to `/api`; [api/index.js](backend/api/index.js) exports the compiled Express app as the serverless handler. Build command `vercel-build` = `prisma generate && tsc`. Prisma `binaryTargets` include `rhel-openssl-3.0.x` for the Vercel runtime. `trust proxy = 1` makes client IPs / rate limiting correct behind the proxy. **Note:** Socket.IO realtime is wired only in `server.ts` (long-lived mode) — the serverless path has no realtime.
 - **Frontend**: standard Next.js build (`pnpm build` / `start`); requires `NEXT_PUBLIC_API_URL`. No hosting config committed.
-- **CI/CD**: no `.github/workflows/` or other CI pipeline files found in the repo. Development follows a PR-per-feature-branch flow (recent PRs #34–#47) with design specs and implementation plans committed under `docs/superpowers/`.
+- **CI/CD**: no `.github/workflows/` or other CI pipeline files found in the repo. Development follows a PR-per-feature-branch flow, each feature preceded by a written design spec and implementation plan (kept in the untracked `docs/` folder).
 - **Database migrations**: none (MongoDB) — schema/index changes are applied with `npx prisma db push`; partial unique indexes are (re)created idempotently by the startup seed.
 
 ---
