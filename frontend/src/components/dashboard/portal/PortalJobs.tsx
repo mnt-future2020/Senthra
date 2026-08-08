@@ -132,14 +132,14 @@ export function PortalJobs() {
   // and a skeleton for a card that never arrives makes the page jump as it settles.
   if (loading && paged === null) {
     return (
-      <div className="space-y-6">
-        <TableCardSkeleton headers={HEADERS} cells={SKELETON_CELLS} minWidth={860} />
+      <div className="stack flex h-full flex-col">
+        <TableCardSkeleton headers={HEADERS} cells={SKELETON_CELLS} minWidth={860} fill />
       </div>
     );
   }
 
   return (
-    <div className="space-y-6">
+    <div className="stack flex h-full flex-col">
       {msg && <Notice msg={msg} />}
 
       {/* Toolbar — search + status + sort */}
@@ -179,7 +179,7 @@ export function PortalJobs() {
       </div>
 
       {msg?.type === "error" ? null : loading ? (
-        <TableCardSkeleton headers={HEADERS} cells={SKELETON_CELLS} minWidth={860} />
+        <TableCardSkeleton headers={HEADERS} cells={SKELETON_CELLS} minWidth={860} fill />
       ) : jobs.length === 0 ? (
         <EmptyState
           icon={ClipboardCheck}
@@ -192,7 +192,21 @@ export function PortalJobs() {
         />
       ) : (
         <>
-          <TableCard headers={HEADERS} minWidth={860}>
+          <TableCard
+            headers={HEADERS}
+            minWidth={860}
+            fill
+            footer={
+              <Pagination
+                embedded
+                page={paged?.page ?? 1}
+                totalPages={paged?.totalPages ?? 1}
+                total={paged?.total ?? 0}
+                label="jobs"
+                onPage={(p) => patchParams({ page: p > 1 ? String(p) : null })}
+              />
+            }
+          >
             {jobs.map((j) => (
               // Opens the job's detail page. Keyboard-reachable and announced as a button, so the
               // drill-down isn't mouse-only — a <tr> with an onClick is invisible to a keyboard.
@@ -210,8 +224,8 @@ export function PortalJobs() {
                 aria-label={`View details for job ${j.jobNumber}, ${j.name}`}
                 className={clickableRowCls}
               >
-                <td className="px-4 py-3 align-top font-mono text-xs text-[var(--muted)]">{j.jobNumber}</td>
-                <td className="px-4 py-3 align-top">
+                <td className="cell-y px-4 align-top font-mono text-xs text-[var(--muted)]">{j.jobNumber}</td>
+                <td className="cell-y px-4 align-top">
                   <div className="font-semibold text-[var(--ink)]">{j.name}</div>
                   <div className="mt-0.5 text-[11px] text-[var(--muted)]">
                     {JOB_TYPE_LABELS[j.jobType as JobType] ?? j.jobType}
@@ -220,7 +234,7 @@ export function PortalJobs() {
                     {j.customerRef && <span className="ml-1.5">· Ref {j.customerRef}</span>}
                   </div>
                 </td>
-                <td className="px-4 py-3 align-top">
+                <td className="cell-y px-4 align-top">
                   <div className="text-[var(--ink)]">{j.siteName ?? "—"}</div>
                   {(j.city || j.postcode) && (
                     <div className="mt-0.5 text-[11px] text-[var(--muted)]">
@@ -228,23 +242,25 @@ export function PortalJobs() {
                     </div>
                   )}
                 </td>
-                <td className="px-4 py-3 align-top text-[var(--muted)]">{j.engineerName ?? "—"}</td>
-                <td className="px-4 py-3 align-top">
+                <td className="cell-y px-4 align-top text-[var(--muted)]">{j.engineerName ?? "—"}</td>
+                <td className="cell-y px-4 align-top">
                   <JobStageChip value={j.stage} />
                 </td>
-                <td className="px-4 py-3 align-top text-[var(--muted)]">
+                {/* A red date when the job is past due and still live — the same server-derived flag
+                    the office and engineer lists mark, so all three agree about this customer's job.
+                    No "Nd late" chip here, unlike the internal lists: the customer has the date and
+                    can count, and a running total on their own job reads as an accusation rather than
+                    a status. Not hiding it either — a due date shown as though nothing were wrong is
+                    the version they would be right to object to. */}
+                <td
+                  className={`cell-y px-4 align-top ${j.overdue ? "font-semibold text-[var(--neg)]" : "text-[var(--muted)]"}`}
+                  title={j.overdue ? "Past the planned completion date" : undefined}
+                >
                   {j.completionDate ? fmtDate(j.completionDate) : "—"}
                 </td>
               </tr>
             ))}
           </TableCard>
-          <Pagination
-            page={paged?.page ?? 1}
-            totalPages={paged?.totalPages ?? 1}
-            total={paged?.total ?? 0}
-            label="jobs"
-            onPage={(p) => patchParams({ page: p > 1 ? String(p) : null })}
-          />
         </>
       )}
     </div>

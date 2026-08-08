@@ -489,18 +489,18 @@ export function EngineerJobDetail({ id }: { id: string }) {
               const isMisc = line.lineType === "misc";
               return (
               <tr key={line.id} className="border-b border-[var(--border)] last:border-0">
-                <td className="px-4 py-3 font-semibold text-[var(--ink)]">
+                <td className="cell-y px-4 font-semibold text-[var(--ink)]">
                   {line.itemName}
                   {line.description ? (
                     <span className="block text-xs font-normal text-[var(--muted)]">{line.description}</span>
                   ) : null}
                 </td>
-                <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{line.seCode ?? "—"}</td>
-                <td className="px-4 py-3 text-[var(--muted)]">{LINE_TYPE_LABEL[line.lineType] ?? line.lineType}</td>
+                <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">{line.seCode ?? "—"}</td>
+                <td className="cell-y px-4 text-[var(--muted)]">{LINE_TYPE_LABEL[line.lineType] ?? line.lineType}</td>
                 {/* Where this stock actually comes FROM. A van-sourced line still stores a warehouse
                     (leftovers are returned there), so showing that warehouse as the pickup location
                     would send the engineer to collect stock a colleague is already handing them. */}
-                <td className="px-4 py-3">
+                <td className="cell-y px-4">
                   {line.vanSources?.length ? (
                     // A row can carry BOTH origins (kit lines merge same item + warehouse), so the
                     // engineer sees each with its quantity — how many to collect vs how many a
@@ -579,10 +579,10 @@ export function EngineerJobDetail({ id }: { id: string }) {
                     forever, and "Remaining 5" on a job already marked Reconciled reads as five units
                     the engineer still owes. An em dash says the column doesn't apply — the same thing
                     the Goods Management queue shows for misc. */}
-                <td className="px-4 py-3 font-bold text-[var(--ink)]">{line.qty}</td>
-                <td className="px-4 py-3 text-[var(--ink)]">{line.issued}</td>
-                <td className="px-4 py-3 text-[var(--ink)]">{isMisc ? "—" : line.used}</td>
-                <td className="px-4 py-3 text-[var(--ink)]">
+                <td className="cell-y px-4 font-bold text-[var(--ink)]">{line.qty}</td>
+                <td className="cell-y px-4 text-[var(--ink)]">{line.issued}</td>
+                <td className="cell-y px-4 text-[var(--ink)]">{isMisc ? "—" : line.used}</td>
+                <td className="cell-y px-4 text-[var(--ink)]">
                   <div className="flex flex-col items-start gap-1">
                     <span>{isMisc ? "—" : line.returned}</span>
                     {!isMisc && line.returned > line.issued && (
@@ -593,8 +593,8 @@ export function EngineerJobDetail({ id }: { id: string }) {
                     )}
                   </div>
                 </td>
-                <td className="px-4 py-3 font-bold text-[var(--ink)]">{isMisc ? "—" : line.remaining}</td>
-                <td className="px-4 py-3 text-[var(--muted)]">{line.notes ?? "—"}</td>
+                <td className="cell-y px-4 font-bold text-[var(--ink)]">{isMisc ? "—" : line.remaining}</td>
+                <td className="cell-y px-4 text-[var(--muted)]">{line.notes ?? "—"}</td>
               </tr>
               );
             })}

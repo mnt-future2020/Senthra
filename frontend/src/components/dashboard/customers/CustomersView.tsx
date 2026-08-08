@@ -14,10 +14,19 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { TempPasswordModal } from "@/components/ui/TempPasswordModal";
 import { Select } from "@/components/ui/Select";
+import { CELL_ONE_LINE, colClass, tableMinWidth } from "@/components/ui/tableLayout";
+import { EntityCountPill } from "@/components/dashboard/shell/TabCount";
+import { useEntityAttention } from "@/hooks/useEntityAttention";
 import type { CustomerStatus, CustomerSummary } from "@/types/customer";
 import type { UserStatus } from "@/types/user";
 
 const PAGE_SIZE = 20;
+
+// Code · Company · Contact · Email · Status · Needs attention · actions.
+// This table declared NO minimum at all, so it shrank without limit and wrapped hardest of the lot —
+// an address like "testmailforbuss001@gmail.com" needs ~210px on its own. Email steps aside on a
+// narrow screen; it is a contact detail, not something the list is scanned by.
+const TABLE_MIN_WIDTH = tableMinWidth(["normal", "wide", "normal", "wide", "narrow", "narrow", "narrow"]);
 type Sort = "newest" | "oldest" | "name";
 
 function MenuItem({
@@ -159,26 +168,28 @@ function CustomerRowActions({
 function CustomersTableSkeleton({ actions }: { actions: boolean }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full text-sm">
+      <table className="w-full text-sm" style={{ minWidth: TABLE_MIN_WIDTH }}>
         <thead>
           <tr className="border-b border-[var(--border)] text-left text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-            <th className="px-4 py-3">Code</th>
-            <th className="px-4 py-3">Company</th>
-            <th className="px-4 py-3">Contact</th>
-            <th className="px-4 py-3">Email</th>
-            <th className="px-4 py-3">Status</th>
-            {actions && <th className="px-4 py-3" />}
+            <th className="cell-y px-4">Code</th>
+            <th className="cell-y px-4">Company</th>
+            <th className="cell-y px-4">Contact</th>
+            <th className={`cell-y px-4 ${colClass("lg")}`}>Email</th>
+            <th className="cell-y px-4">Status</th>
+            <th className="cell-y px-4">Needs attention</th>
+            {actions && <th className="cell-y px-4" />}
           </tr>
         </thead>
         <tbody>
           {Array.from({ length: 6 }).map((_, i) => (
             <tr key={i} className="border-b border-[var(--border)] last:border-0">
-              <td className="px-4 py-3"><Skeleton className="h-3 w-16" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-32" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-24" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-40" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-5 w-16 rounded-full" /></td>
-              {actions && <td className="px-4 py-3"><Skeleton className="ml-auto h-6 w-6 rounded-lg" /></td>}
+              <td className="cell-y px-4"><Skeleton className="h-3 w-16" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-3 w-32" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-3 w-24" /></td>
+              <td className={`cell-y px-4 ${colClass("lg")}`}><Skeleton className="h-3 w-40" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-5 w-16 rounded-full" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-4 w-6 rounded-full" /></td>
+              {actions && <td className="cell-y px-4"><Skeleton className="ml-auto h-6 w-6 rounded-lg" /></td>}
             </tr>
           ))}
         </tbody>
@@ -243,6 +254,10 @@ export function CustomersView() {
   const canEdit = can("customers.edit");
   const canDelete = can("customers.delete");
   const showActions = canEdit || canDelete;
+
+  // Each customer's own pending work. Server-filtered to the queues this actor may act on, so a user
+  // who can approve submissions but not resend invites gets a column counting only submissions.
+  const { rows: attention } = useEntityAttention("customer");
 
   // Debounce the search input into ?q in the URL.
   React.useEffect(() => {
@@ -322,7 +337,7 @@ export function CustomersView() {
   };
 
   return (
-    <div className="flex h-full flex-col gap-5">
+    <div className="stack flex h-full flex-col">
       {/* No page header here — CustomersPanel owns it, so it stays put while you switch tabs
           (same split as WarehousesView / SuppliersView). */}
       {/* Toolbar: search + filter + sort + add */}
@@ -390,15 +405,21 @@ export function CustomersView() {
           </div>
         ) : (
           <div className="min-h-0 flex-1 overflow-auto">
-            <table className="w-full text-left text-sm">
+            <table className="w-full text-left text-sm" style={{ minWidth: TABLE_MIN_WIDTH }}>
               <thead>
                 <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                  <th className="px-4 py-3">Code</th>
-                  <th className="px-4 py-3">Company</th>
-                  <th className="px-4 py-3">Contact</th>
-                  <th className="px-4 py-3">Email</th>
-                  <th className="px-4 py-3">Status</th>
-                  {showActions && <th className="px-4 py-3" />}
+                  <th className="cell-y px-4">Code</th>
+                  <th className="cell-y px-4">Company</th>
+                  <th className="cell-y px-4">Contact</th>
+                  <th className={`cell-y px-4 ${colClass("lg")}`}>Email</th>
+                  <th className="cell-y px-4">Status</th>
+                  {/* Stock submissions awaiting review and portal invites never accepted. Both are
+                      worked on the customer's own page, so this row is the only way in — the module
+                      chip bar that used to carry these numbers could only link back to this list. */}
+                  <th className="cell-y px-4" title="Stock submissions to review and portal invites not yet accepted">
+                    Needs attention
+                  </th>
+                  {showActions && <th className="cell-y px-4" />}
                 </tr>
               </thead>
               <tbody>
@@ -408,15 +429,22 @@ export function CustomersView() {
                     onClick={() => router.push(`/dashboard/customers/${c.customerCode}`)}
                     className="cursor-pointer border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]"
                   >
-                    <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{c.customerCode}</td>
-                    <td className="px-4 py-3 font-semibold text-[var(--ink)]">{c.name}</td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{c.contactPerson ?? "—"}</td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{c.email}</td>
-                    <td className="px-4 py-3">
+                    <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">{c.customerCode}</td>
+                    <td className={`cell-y px-4 font-semibold text-[var(--ink)] ${CELL_ONE_LINE}`} title={c.name}>{c.name}</td>
+                    <td className="cell-y px-4 text-[var(--muted)]">{c.contactPerson ?? "—"}</td>
+                    <td className={`cell-y px-4 text-[var(--muted)] ${CELL_ONE_LINE} ${colClass("lg")}`} title={c.email}>{c.email}</td>
+                    <td className="cell-y px-4">
                       <StatusBadge status={c.status as UserStatus} />
                     </td>
+                    <td className="cell-y px-4">
+                      {attention[c.id] ? (
+                        <EntityCountPill row={attention[c.id]} at={c.name} />
+                      ) : (
+                        <span className="text-[var(--faint)]">—</span>
+                      )}
+                    </td>
                     {showActions && (
-                      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                      <td className="cell-y px-4" onClick={(e) => e.stopPropagation()}>
                         <CustomerRowActions
                           canEdit={canEdit}
                           canDelete={canDelete}
@@ -432,19 +460,16 @@ export function CustomersView() {
             </table>
           </div>
         )}
+        {data && data.total > 0 && (
+            <Pagination embedded
+              page={data.page}
+              totalPages={data.totalPages}
+              total={data.total}
+              label="customers"
+              onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)}
+            />
+        )}
       </div>
-
-      {data && data.total > 0 && (
-        <div className="shrink-0">
-          <Pagination
-            page={data.page}
-            totalPages={data.totalPages}
-            total={data.total}
-            label="customers"
-            onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)}
-          />
-        </div>
-      )}
 
       <ConfirmDialog
         open={resendTarget !== null}

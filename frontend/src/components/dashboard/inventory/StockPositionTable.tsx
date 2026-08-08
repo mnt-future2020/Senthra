@@ -14,22 +14,20 @@ import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import type { PagedPositions, StockPosition } from "@/types/stock-position";
 import { OwnerTag, PositionStatusBadge, TableSkeletonRows } from "./hubUi";
+import {
+  activeFilterCount as countActiveFilters,
+  clearFilterPatch,
+  columnClass,
+  tableMinWidth,
+  type StockCol,
+} from "./columnPriority";
+import { FilterPopover } from "@/components/ui/FilterPopover";
 import { formatDate } from "./inventoryStatus";
 import { CopyableCode } from "@/components/ui/CopyableCode";
 
-type Col =
-  | "item"
-  | "sku"
-  | "ownership"
-  | "location"
-  | "customer"
-  | "engineer"
-  | "warehouse"
-  | "qty"
-  | "available"
-  | "value"
-  | "status"
-  | "lastMovement";
+// Defined in columnPriority alongside the responsive budget that decides which of them survive a
+// narrow screen — the two are the same list and must not drift.
+type Col = StockCol;
 
 const COL_LABELS: Record<Col, string> = {
   item: "Item",
@@ -138,6 +136,32 @@ function cellValue(r: StockPosition, c: Col): React.ReactNode {
   }
 }
 
+/**
+ * The plain text behind a cell, for its `title` — so a truncated value is still readable on hover.
+ *
+ * Only the columns that can realistically outrun their width. Numbers, badges and dates are short by
+ * construction, and a tooltip repeating "42" is noise that also swallows any tooltip the cell's own
+ * content already sets.
+ */
+function cellText(r: StockPosition, c: Col): string | undefined {
+  switch (c) {
+    case "item":
+      return r.itemCode ? `${r.itemName} · ${r.itemCode}` : r.itemName;
+    case "sku":
+      return r.sku ?? undefined;
+    case "location":
+      return r.locationLabel;
+    case "customer":
+      return r.customerName ?? undefined;
+    case "engineer":
+      return r.locationType === "engineer" ? r.locationLabel.replace(/^Eng:\s*/, "") : undefined;
+    case "warehouse":
+      return r.locationType === "warehouse" || r.locationType === "damaged" ? r.locationLabel : undefined;
+    default:
+      return undefined;
+  }
+}
+
 /** Compute a row-level navigation href if applicable; otherwise null (row stays non-clickable). */
 function rowHref(r: StockPosition): string | null {
   // Company row with an inventory balance — links to the inventory balance detail.
@@ -190,6 +214,11 @@ export function StockPositionTable({
   const [warehouses, setWarehouses] = React.useState<{ value: string; label: string }[]>([]);
   const [categories, setCategories] = React.useState<{ value: string; label: string }[]>([]);
   const [customers, setCustomers] = React.useState<{ value: string; label: string }[]>([]);
+
+  // Only the filters this lens configures count — a stale `?customer=` left over from another lens
+  // must not claim a narrowing this screen can neither show nor clear. See columnPriority.
+  const activeFilterCount = countActiveFilters(filters, (k) => searchParams.get(k));
+  const clearFilters = () => patch(clearFilterPatch(filters));
 
   const showWarehouse = filters.includes("warehouse");
   const showOwner = filters.includes("owner");
@@ -317,63 +346,73 @@ export function StockPositionTable({
           />
         </div>
 
-        {showOwner && (
-          <Select
-            size="sm"
-            value={ownerFilter}
-            onChange={(v) => patch({ owner: v || null })}
-            options={OWNERSHIP_OPTIONS}
-            ariaLabel="Filter by owner"
-          />
-        )}
-        {showLocation && (
-          <Select
-            size="sm"
-            value={locationFilter}
-            onChange={(v) => patch({ location: v || null })}
-            options={LOCATION_OPTIONS}
-            ariaLabel="Filter by location"
-          />
-        )}
-        {showWarehouse && (
-          <Select
-            size="sm"
-            value={warehouseFilter}
-            onChange={(v) => patch({ warehouse: v || null })}
-            options={[{ value: "", label: "All warehouses" }, ...warehouses]}
-            ariaLabel="Filter by warehouse"
-          />
-        )}
-        {showCategory && (
-          <Select
-            size="sm"
-            value={categoryFilter}
-            onChange={(v) => patch({ category: v || null })}
-            options={[{ value: "", label: "All categories" }, ...categories]}
-            ariaLabel="Filter by category"
-          />
-        )}
-        {showStatus && (
-          <Select
-            size="sm"
-            value={statusFilter}
-            onChange={(v) => patch({ status: v || null })}
-            options={STATUS_OPTIONS}
-            ariaLabel="Filter by status"
-          />
-        )}
-        {showCustomer && (
-          <Select
-            size="sm"
-            value={customerFilter}
-            onChange={(v) => patch({ customer: v || null })}
-            options={[{ value: "", label: "All customers" }, ...customers]}
-            ariaLabel="Filter by customer"
-          />
-        )}
-
-        {exportable && can("inventory.export") && (
-          <div className="flex items-center gap-2 lg:ml-auto">
+        {/* Filters + Export grouped at the RIGHT end of the row.
+            Every configured filter sits behind ONE control: six Selects beside a search box wrapped
+            the row onto a second line at 1024px — ~56px of a screen that was showing four rows of
+            data — and most of them are set once and left alone. The trigger carries the ACTIVE count,
+            which is what makes hiding them safe: a narrowed list must never be mistakable for a short
+            one.
+            The trigger sat mid-row before, which put its panel over the Item column — the column you
+            read the list by. From the right end the panel opens into the table's trailing columns
+            instead (and popoverPlacement flips it if even that doesn't fit). */}
+        <div className="flex items-center gap-2 lg:ml-auto">
+        <FilterPopover activeCount={activeFilterCount} onClear={clearFilters}>
+          {showOwner && (
+            <Select
+              size="sm"
+              value={ownerFilter}
+              onChange={(v) => patch({ owner: v || null })}
+              options={OWNERSHIP_OPTIONS}
+              ariaLabel="Filter by owner"
+            />
+          )}
+          {showLocation && (
+            <Select
+              size="sm"
+              value={locationFilter}
+              onChange={(v) => patch({ location: v || null })}
+              options={LOCATION_OPTIONS}
+              ariaLabel="Filter by location"
+            />
+          )}
+          {showWarehouse && (
+            <Select
+              size="sm"
+              value={warehouseFilter}
+              onChange={(v) => patch({ warehouse: v || null })}
+              options={[{ value: "", label: "All warehouses" }, ...warehouses]}
+              ariaLabel="Filter by warehouse"
+            />
+          )}
+          {showCategory && (
+            <Select
+              size="sm"
+              value={categoryFilter}
+              onChange={(v) => patch({ category: v || null })}
+              options={[{ value: "", label: "All categories" }, ...categories]}
+              ariaLabel="Filter by category"
+            />
+          )}
+          {showStatus && (
+            <Select
+              size="sm"
+              value={statusFilter}
+              onChange={(v) => patch({ status: v || null })}
+              options={STATUS_OPTIONS}
+              ariaLabel="Filter by status"
+            />
+          )}
+          {showCustomer && (
+            <Select
+              size="sm"
+              value={customerFilter}
+              onChange={(v) => patch({ customer: v || null })}
+              options={[{ value: "", label: "All customers" }, ...customers]}
+              ariaLabel="Filter by customer"
+            />
+          )}
+        </FilterPopover>
+          {exportable && can("inventory.export") && (
             <button
               onClick={onExport}
               disabled={exporting || rows.length === 0}
@@ -383,21 +422,24 @@ export function StockPositionTable({
               {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
               Export CSV
             </button>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
         <div className="min-h-0 flex-1 overflow-auto">
-          <table className="w-full min-w-[760px] text-left text-sm">
+          {/* Sized from the column count instead of a flat 760px. That flat minimum let nine columns
+              squeeze to ~84px each, so Location wrapped to three lines and every row stood ~72px
+              instead of ~45px — on a 1024px laptop that turned 7 rows of table space into 4. */}
+          <table className="w-full text-left text-sm" style={{ minWidth: tableMinWidth(columns) }}>
             <thead className="sticky top-0 z-10 bg-[var(--surface)]">
               <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
                 {columns.map((c) => (
-                  <th key={c} className={`px-4 py-3 ${RIGHT.has(c) ? "text-right" : ""}`}>
+                  <th key={c} className={`cell-y px-4 ${columnClass(c)} ${RIGHT.has(c) ? "text-right" : ""}`}>
                     {COL_LABELS[c]}
                   </th>
                 ))}
-                {rowAction ? <th className="px-4 py-3 text-right">Action</th> : null}
+                {rowAction ? <th className="cell-y px-4 text-right">Action</th> : null}
               </tr>
             </thead>
             {showSkeleton ? (
@@ -411,17 +453,23 @@ export function StockPositionTable({
                       key={r.id}
                       className={`border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)] ${href ? "cursor-pointer" : ""}`}
                     >
+                      {/* The SAME responsive class as the header cell — a `hidden` cell leaves the
+                          layout entirely, so a mismatch here would shift the whole row by one column.
+                          `truncate` is the guard that keeps this fix true for data we haven't seen:
+                          however long a location or customer name gets, the row stays one line and
+                          the full value is in the title. */}
                       {columns.map((c) => (
                         <td
                           key={c}
                           onClick={() => href && router.push(href)}
-                          className={`px-4 py-3 ${RIGHT.has(c) ? "text-right" : ""}`}
+                          title={cellText(r, c)}
+                          className={`cell-y max-w-[22rem] truncate px-4 ${columnClass(c)} ${RIGHT.has(c) ? "text-right" : ""}`}
                         >
                           {cellValue(r, c)}
                         </td>
                       ))}
                       {rowAction ? (
-                        <td className="px-4 py-3 text-right">{rowAction(r)}</td>
+                        <td className="cell-y px-4 text-right">{rowAction(r)}</td>
                       ) : null}
                     </tr>
                   );
@@ -440,19 +488,19 @@ export function StockPositionTable({
             )}
           </table>
         </div>
-      </div>
 
-      {data && data.total > 0 ? (
-        <div className="shrink-0">
+        {/* Inside the table's card, not a card of its own below it — see Pagination's `embedded`. */}
+        {data && data.total > 0 ? (
           <Pagination
+            embedded
             page={data.page}
             totalPages={data.totalPages}
             total={data.total}
             label="records"
             onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)}
           />
-        </div>
-      ) : null}
+        ) : null}
+      </div>
     </div>
   );
 }

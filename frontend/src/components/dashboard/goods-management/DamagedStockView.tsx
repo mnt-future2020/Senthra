@@ -134,17 +134,17 @@ export function DamagedStockView({
     <table className="w-full text-left text-sm" style={{ minWidth: 700 }}>
       <thead className={fill ? "sticky top-0 z-10 bg-[var(--surface)]" : undefined}>
         <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-              <th className="px-4 py-3">Photo</th>
-              <th className="px-4 py-3">Item</th>
-              <th className="px-4 py-3">Owner</th>
-              {warehouseId ? null : <th className="px-4 py-3">Warehouse</th>}
+              <th className="cell-y px-4">Photo</th>
+              <th className="cell-y px-4">Item</th>
+              <th className="cell-y px-4">Owner</th>
+              {warehouseId ? null : <th className="cell-y px-4">Warehouse</th>}
               {/* "Latest" is load-bearing: the row aggregates every report for this item, so the
                   reason shown belongs to the most recent one only. The History column is where the
                   earlier ones live. */}
-              <th className="px-4 py-3">Latest reason</th>
-              <th className="px-4 py-3 text-right">Qty</th>
-              <th className="px-4 py-3">Last updated</th>
-              <th className="px-4 py-3"><span className="sr-only">History</span></th>
+              <th className="cell-y px-4">Latest reason</th>
+              <th className="cell-y px-4 text-right">Qty</th>
+              <th className="cell-y px-4">Last updated</th>
+              <th className="cell-y px-4"><span className="sr-only">History</span></th>
             </tr>
           </thead>
           <tbody>
@@ -154,9 +154,9 @@ export function DamagedStockView({
               // Skeleton rows — same layout as real data, so the table doesn't jump when it loads.
               Array.from({ length: 6 }).map((_, i) => (
                 <tr key={i} className="border-b border-[var(--border)] last:border-0">
-                  <td className="px-4 py-3"><Skeleton className="h-10 w-10 rounded-lg" /></td>
+                  <td className="cell-y px-4"><Skeleton className="h-10 w-10 rounded-lg" /></td>
                   {Array.from({ length: cols - 1 }).map((__, j) => (
-                    <td key={j} className="px-4 py-3"><Skeleton className={`h-4 ${j === cols - 2 ? "w-16" : "w-24"}`} /></td>
+                    <td key={j} className="cell-y px-4"><Skeleton className={`h-4 ${j === cols - 2 ? "w-16" : "w-24"}`} /></td>
                   ))}
                 </tr>
               ))
@@ -187,7 +187,7 @@ export function DamagedStockView({
               pageRows.map((row) => (
                 <tr key={row.id} className="border-b border-[var(--border)] align-middle last:border-0">
                   {/* Photo thumbnail — opens the in-app preview modal */}
-                  <td className="px-4 py-3">
+                  <td className="cell-y px-4">
                     {row.photoUrl ? (
                       <button
                         type="button"
@@ -206,17 +206,17 @@ export function DamagedStockView({
                       <span className="text-xs text-[var(--faint)]">—</span>
                     )}
                   </td>
-                  <td className="px-4 py-3 font-semibold text-[var(--ink)]">{row.itemName}</td>
-                  <td className="px-4 py-3">
+                  <td className="cell-y px-4 font-semibold text-[var(--ink)]">{row.itemName}</td>
+                  <td className="cell-y px-4">
                     <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${row.ownerType === "company" ? "bg-[var(--accent)]/12 text-[var(--accent)]" : "bg-indigo-500/12 text-indigo-600"}`}>
                       {row.ownerType === "company" ? "Company (IRM)" : "Customer"}
                     </span>
                   </td>
-                  {warehouseId ? null : <td className="px-4 py-3 text-xs text-[var(--muted)]">{row.warehouseName ?? "—"}</td>}
-                  <td className="max-w-[180px] px-4 py-3 text-xs text-[var(--muted)]">{row.reason ?? <span className="text-[var(--faint)]">—</span>}</td>
-                  <td className="px-4 py-3 text-right font-bold text-[var(--neg)]">{row.quantity}</td>
-                  <td className="px-4 py-3 text-xs text-[var(--muted)]">{fmtDate(row.updatedAt)}</td>
-                  <td className="px-4 py-3">
+                  {warehouseId ? null : <td className="cell-y px-4 text-xs text-[var(--muted)]">{row.warehouseName ?? "—"}</td>}
+                  <td className="max-w-[180px] cell-y px-4 text-xs text-[var(--muted)]">{row.reason ?? <span className="text-[var(--faint)]">—</span>}</td>
+                  <td className="cell-y px-4 text-right font-bold text-[var(--neg)]">{row.quantity}</td>
+                  <td className="cell-y px-4 text-xs text-[var(--muted)]">{fmtDate(row.updatedAt)}</td>
+                  <td className="cell-y px-4">
                     <div className="flex justify-end">
                       <button
                         type="button"
@@ -258,17 +258,22 @@ export function DamagedStockView({
           scroll container at the table's full width and drags the whole PAGE into a horizontal
           scroll on a phone, while every visible element stays inside the viewport. See the note in
           van-requests/vanRequestUi.tsx. */}
+      {/* Pagination lives INSIDE the card in both layouts — as a card of its own it paid a second
+          border, a shadow and the parent's flex gap for a footer belonging to the table above it. */}
       {fill ? (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
           <div className="relative min-h-0 flex-1 overflow-auto">{table}</div>
+          {rows && total > 0 ? (
+            <Pagination embedded page={safePage} totalPages={totalPages} total={total} label="damaged items" onPage={setPage} />
+          ) : null}
         </div>
       ) : (
-        <div className="relative overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">{table}</div>
-      )}
-
-      {rows && total > 0 && (
-        <div className="shrink-0">
-          <Pagination page={safePage} totalPages={totalPages} total={total} label="damaged items" onPage={setPage} />
+        <div className="relative rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+          {/* Scroller inside, so the footer isn't dragged sideways with a wide table. */}
+          <div className="overflow-x-auto">{table}</div>
+          {rows && total > 0 ? (
+            <Pagination embedded page={safePage} totalPages={totalPages} total={total} label="damaged items" onPage={setPage} />
+          ) : null}
         </div>
       )}
 

@@ -171,6 +171,21 @@ export function findMany(filters: GoodsReceiptListFilters = {}, skip = 0, take =
 export function count(filters: GoodsReceiptListFilters = {}): Promise<number> {
   return prisma.goodsReceipt.count({ where: buildWhere(filters) });
 }
+/**
+ * Draft receipts split PER WAREHOUSE — the per-row half of the attention catalog's `wh.grn_drafts`.
+ *
+ * The flat count answers "is there work?"; this answers "where?", which is the question a manager who
+ * can reach several warehouses actually has. Warehouses with none are simply absent from the map
+ * (groupBy emits no row for an empty group), so callers must treat missing as zero.
+ */
+export async function countDraftsByWarehouse(warehouseIds?: string[]): Promise<Record<string, number>> {
+  const rows = await prisma.goodsReceipt.groupBy({
+    by: ["warehouseId"],
+    where: { deletedAt: null, status: "draft", ...(warehouseIds ? { warehouseId: { in: warehouseIds } } : {}) },
+    _count: { _all: true },
+  });
+  return Object.fromEntries(rows.map((r) => [r.warehouseId, r._count._all]));
+}
 export function findById(id: string): Promise<GoodsReceiptWithRelations | null> {
   if (!id) return Promise.resolve(null);
   return prisma.goodsReceipt.findFirst({ where: { id, deletedAt: null }, include: withRelations });

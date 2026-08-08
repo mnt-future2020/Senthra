@@ -226,7 +226,21 @@ function engineerWhere(engineerId: string, role: "incoming" | "outgoing" | "all"
 // outgoing (engineer is the recipient) + completed + requireSignature + not yet acknowledged.
 export function countAwaitingSignature(engineerId: string): Promise<number> {
   return prisma.engineerStockTransfer.count({
-    where: { AND: [engineerWhere(engineerId, "outgoing", "completed"), { requireSignature: true, acknowledgedAt: null }] },
+    where: {
+      AND: [
+        engineerWhere(engineerId, "outgoing", "completed"),
+        { requireSignature: true },
+        // MONGO TRAP. `acknowledgedAt: null` matches only an EXPLICIT null, and nothing writes this
+        // field on create — acknowledgeTransfer is the only path that ever sets it. So on every
+        // transfer still awaiting a signature it is ABSENT, and absent is not null.
+        //
+        // Which made this count permanently ZERO: the engineer's dashboard never once told them a
+        // delivery was waiting on their signature. Worse than the same trap on the PO overdue filter,
+        // where it hid some rows — here it hid the entire queue, and a badge stuck at 0 reads as "all
+        // clear" rather than as a bug, so nobody goes looking.
+        { OR: [{ acknowledgedAt: null }, { acknowledgedAt: { isSet: false } }] },
+      ],
+    },
   });
 }
 

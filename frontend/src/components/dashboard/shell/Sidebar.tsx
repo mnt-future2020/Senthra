@@ -31,6 +31,7 @@ import { useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import { BrandMark } from "@/components/branding/BrandMark";
 import { optimizeCloudinaryUrl } from "@/lib/utils";
 import { isAdminNavItemVisible } from "@/lib/nav";
+import { NavBadge } from "./NavBadge";
 
 type NavItem = {
   href: string;
@@ -235,7 +236,7 @@ export function Sidebar({
           }}
           onClick={onCloseMobile}
           title={collapsed ? item.label : undefined}
-          className={`w-full flex items-center border-l-4 border-transparent rounded-xl text-xs font-bold transition-all duration-300 cursor-pointer text-left
+          className={`relative w-full flex items-center border-l-4 border-transparent rounded-xl text-xs font-bold transition-all duration-300 cursor-pointer text-left
             ${collapsed ? "justify-center p-2.5 gap-0" : "px-3.5 py-2.5 gap-3"}
             ${
               active
@@ -255,6 +256,11 @@ export function Sidebar({
           >
             {item.label}
           </span>
+          {/* Pending-work count for this row. Keyed on the row's own href — which IS the attention
+              catalog's nav key — so the NAV table below needs no extra field and cannot drift out of
+              sync with it. Rows with nothing pending (and every engineer/customer row, which the
+              catalog doesn't cover yet) render nothing at all. */}
+          <NavBadge navHref={item.href} collapsed={collapsed} />
         </Link>
       );
     });

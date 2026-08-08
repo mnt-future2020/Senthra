@@ -152,6 +152,8 @@ describe("getGoodsReceipt — previouslyReceived freshness", () => {
     expect(mockPoRepoFindById).toHaveBeenCalledWith(PO_ID);
   });
 
+  // A completed GRN's own units are now IN the PO line's receivedQuantity, so a live read would
+  // count them as "previously received" against itself. Its snapshot is the history.
   it("keeps a COMPLETED GRN's frozen snapshot (no live lookup)", async () => {
     mockFindById.mockResolvedValue(
       grnRow({ status: "completed", items: [grnItem({ orderedQuantity: 100, previouslyReceived: 70, receivedQuantity: 30 })] }),
@@ -161,6 +163,24 @@ describe("getGoodsReceipt — previouslyReceived freshness", () => {
 
     expect(grn.items[0].previouslyReceived).toBe(70);
     expect(mockPoRepoFindById).not.toHaveBeenCalled();
+  });
+
+  // A cancelled receipt never posted, so — exactly like a draft — the PO's live figure excludes it
+  // and is the honest answer. Reverting it to the creation-time snapshot made Prev. visibly CHANGE at
+  // the moment of cancelling (1 → 0 in the case that surfaced this), which reads as though cancelling
+  // had reversed a receipt somewhere. Cancelling moves no stock and moves no PO quantity.
+  it("recomputes a CANCELLED GRN's previouslyReceived live, so cancelling never moves the number", async () => {
+    const items = [grnItem({ orderedQuantity: 100, previouslyReceived: 0, receivedQuantity: 30 })];
+    mockPoRepoFindById.mockResolvedValue({ id: PO_ID, items: [{ id: POI_ID, quantity: 100, receivedQuantity: 70 }] });
+
+    mockFindById.mockResolvedValue(grnRow({ status: "draft", items }));
+    const asDraft = await getGoodsReceipt(GRN_ID);
+
+    mockFindById.mockResolvedValue(grnRow({ status: "cancelled", items }));
+    const asCancelled = await getGoodsReceipt(GRN_ID);
+
+    expect(asCancelled.items[0].previouslyReceived).toBe(70);
+    expect(asCancelled.items[0].previouslyReceived).toBe(asDraft.items[0].previouslyReceived);
   });
 });
 

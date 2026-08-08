@@ -191,7 +191,7 @@ export function WarehouseTypesView() {
   };
 
   return (
-    <div className="flex h-full flex-col gap-5">
+    <div className="stack flex h-full flex-col">
       {/* Header + search + inline add */}
       <div className="shrink-0 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -415,19 +415,16 @@ export function WarehouseTypesView() {
             </ul>
           </div>
         )}
+        {!loading && !error && filtered.length > 0 && (
+            <Pagination embedded
+              page={safePage}
+              totalPages={totalPages}
+              total={filtered.length}
+              label="warehouse types"
+              onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)}
+            />
+        )}
       </div>
-
-      {!loading && !error && filtered.length > 0 && (
-        <div className="shrink-0">
-          <Pagination
-            page={safePage}
-            totalPages={totalPages}
-            total={filtered.length}
-            label="warehouse types"
-            onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)}
-          />
-        </div>
-      )}
 
       <ConfirmDialog
         open={confirm.open}

@@ -32,6 +32,7 @@ vi.mock("../../lib/cloudinary.js", () => ({ uploadFileToCloudinary: vi.fn() }));
 // Realtime is fire-and-forget; mock it so we can assert every transition fans a refetch signal out
 // to the procurement watchers (a stale detail page is what let a user re-send an already-sent PO).
 vi.mock("../../lib/realtime.js", () => ({
+  emitAttentionChanged: vi.fn(),
   emitToRoom: vi.fn(),
   emitToUser: vi.fn(),
   PURCHASE_ORDER_WATCHERS_ROOM: "purchase_orders:watchers",

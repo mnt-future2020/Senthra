@@ -150,8 +150,11 @@ export function SummaryCards({ active, onSelect }: SummaryCardsProps) {
   // Collapsed: ONE line that still carries every figure and stays clickable, so collapsing trades
   // detail (£ value, "27 overdue") for rows — it never costs you the totals or the lens switch.
   if (collapsed) {
+    // Scrolls sideways rather than wrapping. Collapsed is meant to be ONE line, but at 1024px the
+    // toggle plus four figures needed two — so the state that exists to give rows back was quietly
+    // taking a second band. Overflow keeps the promise at any width; the figures stay reachable.
     return (
-      <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2 shadow-xs">
+      <div className="flex shrink-0 items-center gap-x-4 overflow-x-auto rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2 shadow-xs">
         {toggleBtn}
         {cards.map(({ key, label, icon: Icon, value }) => {
           const isActive = active === key;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { canAccessDashboard, canSeeOverview, firstDashboardPath, homeFor, principalCan } from "./auth";
+import { canAccessDashboard, canSeeAttention, canSeeOverview, firstDashboardPath, homeFor, principalCan } from "./auth";
 import type { AdminPrincipal, UserPrincipal } from "@/types/auth";
 
 const admin: AdminPrincipal = { type: "admin", id: "a", email: "a@x.com", name: "Admin" };
@@ -106,6 +106,32 @@ describe("canSeeOverview", () => {
   it("a customer never sees the staff Overview", () => {
     const customer = { type: "customer" as const, id: "c", email: "c@x.com", name: "Cust", customerId: "c1" };
     expect(canSeeOverview(customer as never)).toBe(false);
+  });
+});
+
+describe("canSeeAttention", () => {
+  // Deliberately NOT the OVERVIEW_PERMS question. The attention catalog lives on the backend and is
+  // keyed on ACTION permissions; the server filters it per caller. Gating the fetch on a client-side
+  // permission list silently blanked the badges of any role whose perms weren't in that list.
+  it("a warehouse customer-stock role still fetches — the regression this guards", () => {
+    // stock_requests.* appears in the attention catalog but NOT in OVERVIEW_PERMS. Under the old
+    // canSeeOverview gate this role never fetched, so its four badges were permanently blank.
+    expect(canSeeAttention(makeUser(["stock_requests.view", "stock_requests.complete"]))).toBe(true);
+  });
+  it("a role with no attention-bearing permission still fetches (the server returns empty)", () => {
+    // One short-circuiting request beats a hand-mirrored list that drifts the next time the catalog
+    // grows. The server answers the permission question in exactly one place.
+    expect(canSeeAttention(makeUser(["users.view"]))).toBe(true);
+  });
+  it("the super-admin fetches", () => {
+    expect(canSeeAttention(admin)).toBe(true);
+  });
+  it("a customer never does — attention is a staff surface", () => {
+    const customer = { type: "customer" as const, id: "c", email: "c@x.com", name: "Cust", customerId: "c1" };
+    expect(canSeeAttention(customer as never)).toBe(false);
+  });
+  it("a logged-out visitor never does", () => {
+    expect(canSeeAttention(null)).toBe(false);
   });
 });
 

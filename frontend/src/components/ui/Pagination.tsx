@@ -1,5 +1,6 @@
 "use client";
 
+import type * as React from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
 const navBtn =
@@ -25,17 +26,46 @@ export function Pagination({
   total,
   label = "items",
   onPage,
+  embedded = false,
+  note,
 }: {
   page: number;
   totalPages: number;
   total: number;
   label?: string;
   onPage: (page: number) => void;
+  /**
+   * Render as a strip INSIDE the table's own card instead of as a card of its own.
+   *
+   * A standalone card costs its border, its shadow, its rounding and — the part that actually hurt —
+   * the parent's flex gap above it. On a 1024px laptop that was ~35px of a screen already down to
+   * four rows of data, spent on separating a footer from the table it belongs to. Embedded it reads
+   * as one surface and the rows get the space back.
+   */
+  embedded?: boolean;
+  /**
+   * A short caption rendered beside the total.
+   *
+   * For the one thing a footer is well placed to say: what a column on this table adds up to, and why
+   * that figure may not match a number elsewhere on screen. It sits next to "Total: 9 warehouses"
+   * because that is where someone is already reading counts, rather than as a banner nobody asked
+   * for.
+   */
+  note?: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-col items-center justify-between gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 py-3 shadow-xs sm:flex-row">
-      <span className="text-xs font-bold text-[var(--faint)]">
-        Total: {total} {total === 1 ? singularize(label) : label}
+    <div
+      className={`flex flex-col items-center justify-between gap-3 px-4 py-3 sm:flex-row ${
+        embedded
+          ? "shrink-0 border-t border-[var(--border)]"
+          : "rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-xs"
+      }`}
+    >
+      <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs font-bold text-[var(--faint)]">
+        <span>
+          Total: {total} {total === 1 ? singularize(label) : label}
+        </span>
+        {note}
       </span>
       {totalPages > 1 && (
         <div className="flex items-center gap-2">

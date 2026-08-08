@@ -54,7 +54,7 @@ export function TableSkeletonRows({ cols, rows = 8 }: { cols: number; rows?: num
       {Array.from({ length: rows }).map((_, i) => (
         <tr key={i} className="border-b border-[var(--border)] last:border-0">
           {Array.from({ length: cols }).map((__, j) => (
-            <td key={j} className="px-4 py-3">
+            <td key={j} className="cell-y px-4">
               <Skeleton className="h-3 w-16" />
             </td>
           ))}

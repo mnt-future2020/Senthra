@@ -13,6 +13,7 @@ import { DetailHeader } from "@/components/ui/DetailHeader";
 import { actionLabel, actionTone, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
 import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
 import { GRN_QUALITY_LABELS, GrnStatusBadge, formatDate } from "./grnStatus";
+import { acceptedWording } from "./acceptedWording";
 import { AttachmentGrid, DocPicker, attachmentToDoc, type PickedDoc } from "./DeliveryDocuments";
 import { Pagination } from "@/components/ui/Pagination";
 import type { AuditEntry } from "@/types/audit";
@@ -66,7 +67,7 @@ export function GoodsReceiptDetail({ initial }: { initial: GoodsReceipt }) {
     actions.push(<ActionBtn key="cancel" icon={XCircle} onClick={() => { setReason(""); setCancelOpen(true); }} disabled={busy}>Cancel</ActionBtn>);
 
   return (
-    <div className="flex h-full flex-col gap-5">
+    <div className="stack flex h-full flex-col">
       <DetailHeader
         storageKey="grn-detail"
         title={grn.code}
@@ -156,6 +157,9 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 function Overview({ grn }: { grn: GoodsReceipt }) {
+  // "Accepted" is captured when the receipt is raised, not when stock moves — completing is the only
+  // action that writes inventory. So the wording follows the status; see acceptedWording.ts.
+  const wording = acceptedWording(grn.status);
   return (
     <div className="space-y-4">
       <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
@@ -163,25 +167,27 @@ function Overview({ grn }: { grn: GoodsReceipt }) {
           <table className="w-full min-w-[720px] text-left text-sm">
             <thead>
               <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                <th className="px-4 py-3">Item</th><th className="px-4 py-3">Ordered</th><th className="px-4 py-3">Prev.</th>
-                <th className="px-4 py-3">Received</th><th className="px-4 py-3">Damaged</th><th className="px-4 py-3">Accepted</th>
+                <th className="cell-y px-4">Item</th><th className="cell-y px-4">Ordered</th>
+                <th className="cell-y px-4" title="Units already booked in against this purchase order line by other receipts">Prev.</th>
+                <th className="cell-y px-4">Received</th><th className="cell-y px-4">Damaged</th>
+                <th className="cell-y px-4" title={wording.hint}>{wording.column}</th>
               </tr>
             </thead>
             <tbody>
               {grn.items.map((i) => (
                 <tr key={i.id} className="border-b border-[var(--border)] align-top last:border-0">
-                  <td className="px-4 py-3">
+                  <td className="cell-y px-4">
                     <div className="font-semibold text-[var(--ink)]">{i.itemName}</div>
                     {i.sku && <div className="text-[11px] text-[var(--faint)]">{i.sku}</div>}
                     {i.serials.length > 0 && <div className="mt-1 text-[11px] text-[var(--muted)]">Serials: {i.serials.map((s) => s.serialNumber).join(", ")}</div>}
                     {i.batches.length > 0 && <div className="mt-1 text-[11px] text-[var(--muted)]">Batches: {i.batches.map((b) => `${b.batchNumber} (${b.quantity}${b.expiryDate ? `, exp ${formatDate(b.expiryDate)}` : ""})`).join("; ")}</div>}
                     {i.notes && <div className="mt-1 text-[11px] italic text-[var(--faint)]">{i.notes}</div>}
                   </td>
-                  <td className="px-4 py-3 text-[var(--muted)]">{i.orderedQuantity}</td>
-                  <td className="px-4 py-3 text-[var(--muted)]">{i.previouslyReceived}</td>
-                  <td className="px-4 py-3 text-[var(--muted)]">{i.receivedQuantity}{i.baseUnit ? ` ${i.baseUnit}` : ""}</td>
-                  <td className="px-4 py-3 text-[var(--muted)]">{i.damagedQuantity}</td>
-                  <td className="px-4 py-3 font-semibold text-[var(--ink)]">{i.acceptedQuantity}</td>
+                  <td className="cell-y px-4 text-[var(--muted)]">{i.orderedQuantity}</td>
+                  <td className="cell-y px-4 text-[var(--muted)]">{i.previouslyReceived}</td>
+                  <td className="cell-y px-4 text-[var(--muted)]">{i.receivedQuantity}{i.baseUnit ? ` ${i.baseUnit}` : ""}</td>
+                  <td className="cell-y px-4 text-[var(--muted)]">{i.damagedQuantity}</td>
+                  <td className="cell-y px-4 font-semibold text-[var(--ink)]">{i.acceptedQuantity}</td>
                 </tr>
               ))}
             </tbody>
@@ -190,7 +196,11 @@ function Overview({ grn }: { grn: GoodsReceipt }) {
         <div className="flex flex-wrap justify-end gap-x-8 gap-y-1 border-t border-[var(--border)] p-4 text-sm">
           <span className="text-[var(--muted)]">Received <strong className="text-[var(--ink)]">{grn.totalReceived}</strong></span>
           <span className="text-[var(--muted)]">Damaged <strong className="text-[var(--ink)]">{grn.totalDamaged}</strong></span>
-          <span className="text-[var(--muted)]">Accepted into stock <strong className="text-[var(--ink)]">{grn.totalAccepted}</strong></span>
+          {/* Was hardcoded to "Accepted into stock", which on a cancelled receipt contradicted the
+              "Stock impact: None (cancelled)" field a few centimetres below it. */}
+          <span className="text-[var(--muted)]" title={wording.hint}>
+            {wording.total} <strong className="text-[var(--ink)]">{grn.totalAccepted}</strong>
+          </span>
         </div>
       </div>
 

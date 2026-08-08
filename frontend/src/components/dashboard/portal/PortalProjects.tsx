@@ -92,14 +92,14 @@ export function PortalProjects() {
 
   if (loading && paged === null) {
     return (
-      <div className="space-y-6">
-        <TableCardSkeleton headers={HEADERS} cells={SKELETON_CELLS} minWidth={680} />
+      <div className="stack flex h-full flex-col">
+        <TableCardSkeleton headers={HEADERS} cells={SKELETON_CELLS} minWidth={680} fill />
       </div>
     );
   }
 
   return (
-    <div className="space-y-6">
+    <div className="stack flex h-full flex-col">
       {msg && <Notice msg={msg} />}
 
       {/* Toolbar — search + sort */}
@@ -138,7 +138,7 @@ export function PortalProjects() {
       </div>
 
       {msg?.type === "error" ? null : loading ? (
-        <TableCardSkeleton headers={HEADERS} cells={SKELETON_CELLS} minWidth={680} />
+        <TableCardSkeleton headers={HEADERS} cells={SKELETON_CELLS} minWidth={680} fill />
       ) : projects.length === 0 ? (
         <EmptyState
           icon={FolderKanban}
@@ -147,11 +147,25 @@ export function PortalProjects() {
         />
       ) : (
         <>
-          <TableCard headers={HEADERS} minWidth={680}>
+          <TableCard
+            headers={HEADERS}
+            minWidth={680}
+            fill
+            footer={
+              <Pagination
+                embedded
+                page={paged?.page ?? 1}
+                totalPages={paged?.totalPages ?? 1}
+                total={paged?.total ?? 0}
+                label="projects"
+                onPage={(p) => patchParams({ page: p > 1 ? String(p) : null })}
+              />
+            }
+          >
             {projects.map((p) => (
               <tr key={p.id} className="border-b border-[var(--border)] align-top last:border-0">
-                <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{p.code ?? "—"}</td>
-                <td className="px-4 py-3">
+                <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">{p.code ?? "—"}</td>
+                <td className="cell-y px-4">
                   <div className="font-semibold text-[var(--ink)]">{p.name}</div>
                   {p.description && (
                     <div className="mt-0.5 max-w-md text-[11px] text-[var(--muted)]">
@@ -159,22 +173,15 @@ export function PortalProjects() {
                     </div>
                   )}
                 </td>
-                <td className="px-4 py-3 text-[var(--muted)]">{p.type ?? "—"}</td>
-                <td className="px-4 py-3 text-[var(--muted)]">{fmtDate(p.startDate)}</td>
-                <td className="px-4 py-3 text-[var(--muted)]">{fmtDate(p.endDate)}</td>
-                <td className="px-4 py-3">
+                <td className="cell-y px-4 text-[var(--muted)]">{p.type ?? "—"}</td>
+                <td className="cell-y px-4 text-[var(--muted)]">{fmtDate(p.startDate)}</td>
+                <td className="cell-y px-4 text-[var(--muted)]">{fmtDate(p.endDate)}</td>
+                <td className="cell-y px-4">
                   <StatusChip value={p.status} />
                 </td>
               </tr>
             ))}
           </TableCard>
-          <Pagination
-            page={paged?.page ?? 1}
-            totalPages={paged?.totalPages ?? 1}
-            total={paged?.total ?? 0}
-            label="projects"
-            onPage={(p) => patchParams({ page: p > 1 ? String(p) : null })}
-          />
         </>
       )}
     </div>

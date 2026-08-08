@@ -12,7 +12,7 @@ import * as userRepo from "#modules/user/user.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
 import { notify } from "#modules/notification/notification.service.js";
-import { emitToRoom, emitToUser, VAN_STOCK_REVIEWERS_ROOM } from "../../lib/realtime.js";
+import { emitAttentionChanged, emitToRoom, emitToUser, VAN_STOCK_REVIEWERS_ROOM } from "../../lib/realtime.js";
 import { assertWarehouseAccess, getAccessibleWarehouseIds, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
 import * as vsrRepo from "./van-stock-request.repository.js";
@@ -323,6 +323,7 @@ export function toPublic(r: RequestWithLines, now: Date, scope: string[] | undef
 function emitUpdate(engineerId: string, data: { id: string; code: string; status: string; type: string }): void {
   emitToUser(engineerId, "van_stock_request:updated", data);
   emitToRoom(VAN_STOCK_REVIEWERS_ROOM, "van_stock_request:updated", data);
+  emitAttentionChanged("van_stock");
 }
 
 // "Is this actor a WAREHOUSE REVIEWER (vs the requesting engineer)?" — used only by getOne to gate

@@ -15,6 +15,21 @@ export const PO_STATUS_LABELS: Record<PoStatus, string> = {
   cancelled: "Cancelled",
 };
 
+// DERIVED pseudo-statuses — filter values the list accepts that are not stored on a PO. Each is
+// resolved server-side in purchase-order.repository's buildWhere, and each is the exact predicate an
+// attention badge counts by, so clicking a badge opens precisely the rows it counted. Labelled as
+// QUEUES so they read as distinct from the real statuses above (a "Send queue" spans Approved and
+// PM Review; an "Approval queue" spans PRF-born drafts and Pending Approval).
+export const PO_DERIVED_STATUS_OPTIONS = [
+  { value: "awaiting_approval", label: "Approval queue" },
+  { value: "awaiting_send", label: "Send queue" },
+  // Everything the warehouse can still book in — Sent, Supplier Accepted and Partially Received.
+  // "Deliveries to receive" opened `?status=sent` before, which is one of those three, so the chip
+  // said 14 and the list showed 7.
+  { value: "receivable", label: "Receiving queue" },
+  { value: "overdue", label: "Delivery overdue" },
+];
+
 // Statuses at which the supplier's acknowledgement may be recorded. MIRRORS the backend's
 // ACCEPTANCE_RECORDABLE set (purchase-order.service.ts) — the server is authoritative; this only
 // decides whether to show the control. Keep the two in sync.

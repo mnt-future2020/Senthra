@@ -2,7 +2,7 @@ import type { Prisma } from "@prisma/client";
 
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
 import { notify } from "#modules/notification/notification.service.js";
-import { emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
+import { emitAttentionChanged, emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import * as settingsService from "#modules/settings/settings.service.js";
@@ -131,6 +131,7 @@ function emitBoth(fromEngineerId: string, toEngineerId: string, data: { id: stri
   emitToUser(toEngineerId, "engineer:transfer_updated", data);
   // Office staff (admins + anyone with jobs.view) live-update the admin transfer board.
   emitToRoom(OFFICE_JOBS_ROOM, "engineer:transfer_updated", data);
+  emitAttentionChanged("engineer_transfers");
 }
 
 // Resolve name from User (no single `name` field — compose firstName + lastName).

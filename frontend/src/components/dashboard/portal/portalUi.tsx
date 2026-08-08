@@ -194,11 +194,31 @@ export function TableCard({
   headers,
   minWidth = 640,
   fill = false,
+  footer,
   children,
 }: {
   headers: React.ReactNode[];
   minWidth?: number;
+  /**
+   * Full-height card whose TABLE BODY scrolls, rather than a card that grows and takes the page with
+   * it. Set it on every LIST; leave it off inside a detail page, where the record scrolls as a whole.
+   *
+   * Portal Jobs, Projects and Sites were missing it, so those three scrolled the entire page — the
+   * toolbar and the column headers slid away, and the paginator only appeared once you had reached
+   * the bottom. Every other list in the product (admin, engineer, and the portal's own Stock
+   * Submissions and My Stock) pins the toolbar, keeps the headers sticky and holds the footer in
+   * place. Requires the parent to be a `flex h-full flex-col` so `flex-1` has a height to fill.
+   */
   fill?: boolean;
+  /**
+   * Rendered as a strip INSIDE the card, below the table — for pagination.
+   *
+   * It used to sit outside as a card of its own, which cost its border, its shadow and the parent's
+   * flex gap for a footer that belongs to the table above it. On a 1024px laptop that is ~35px of a
+   * screen already short of rows. Passing it here also means every portal and engineer list gets the
+   * same treatment from one change rather than eight.
+   */
+  footer?: React.ReactNode;
   children: React.ReactNode;
 }) {
   const table = (
@@ -206,7 +226,7 @@ export function TableCard({
       <thead className={fill ? "sticky top-0 z-10 bg-[var(--surface)]" : undefined}>
         <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
           {headers.map((h, i) => (
-            <th key={i} className={`px-4 py-3 ${h === "" ? "" : "font-bold"}`}>
+            <th key={i} className={`cell-y px-4 ${h === "" ? "" : "font-bold"}`}>
               {h}
             </th>
           ))}
@@ -217,14 +237,18 @@ export function TableCard({
   );
   if (!fill) {
     return (
-      <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
-        {table}
+      <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+        {/* The scroller moved INSIDE so the footer isn't dragged sideways with the table — a
+            paginator that scrolls out of view horizontally is worse than one in a card of its own. */}
+        <div className="overflow-x-auto">{table}</div>
+        {footer}
       </div>
     );
   }
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
       <div className="min-h-0 flex-1 overflow-auto">{table}</div>
+      {footer}
     </div>
   );
 }
@@ -251,7 +275,7 @@ export function TableCardSkeleton({
       {Array.from({ length: rows }).map((_, r) => (
         <tr key={r} className="border-b border-[var(--border)] last:border-0">
           {cells.map((cls, c) => (
-            <td key={c} className="px-4 py-3">
+            <td key={c} className="cell-y px-4">
               <Skeleton className={cls} />
             </td>
           ))}

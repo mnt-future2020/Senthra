@@ -34,6 +34,7 @@ vi.mock("#modules/goods-management/goods-management.service.js", () => ({
 
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 vi.mock("../../lib/realtime.js", () => ({
+  emitAttentionChanged: vi.fn(),
   emitToUser: vi.fn(),
   emitToRoom: vi.fn(),
   OFFICE_JOBS_ROOM: "office_jobs",

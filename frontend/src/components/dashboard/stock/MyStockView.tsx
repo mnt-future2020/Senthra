@@ -350,7 +350,21 @@ export function MyStockView() {
         )
       ) : (
         <>
-          <TableCard headers={HEADERS} minWidth={750} fill>
+          <TableCard
+            headers={HEADERS}
+            minWidth={750}
+            fill
+            footer={
+              <Pagination
+                embedded
+                page={paged?.page ?? 1}
+                totalPages={paged?.totalPages ?? 1}
+                total={paged?.total ?? 0}
+                label="entries"
+                onPage={setPage}
+              />
+            }
+          >
             {entries.map((e) => (
               // Opens the detail panel. Keyboard-reachable and announced as a button, so the drill-down
               // isn't mouse-only — a <tr> with an onClick and nothing else is invisible to a keyboard.
@@ -368,32 +382,23 @@ export function MyStockView() {
                 aria-label={`View details for ${e.itemName}`}
                 className={clickableRowCls}
               >
-                <td className="px-4 py-3 font-semibold text-[var(--ink)]">{e.itemName}</td>
-                <td className="px-4 py-3">
+                <td className="cell-y px-4 font-semibold text-[var(--ink)]">{e.itemName}</td>
+                <td className="cell-y px-4">
                   <div className="text-[var(--ink)]">{e.warehouseName}</div>
                   <div className="font-mono text-[11px] text-[var(--faint)]">{e.warehouseCode}</div>
                 </td>
-                <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.sku ?? "—"}</td>
+                <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">{e.sku ?? "—"}</td>
                 {/* The unit rides with the number here too — a bare count leaves "25" ambiguous. */}
-                <td className="px-4 py-3 font-bold text-[var(--ink)]">
+                <td className="cell-y px-4 font-bold text-[var(--ink)]">
                   {e.quantity}
                   {e.uom && <span className="ml-1 text-[11px] font-semibold text-[var(--muted)]">{e.uom}</span>}
                 </td>
-                <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.barcode ?? "—"}</td>
-                <td className="px-4 py-3"><StatusPill status={e.status} /></td>
-                <td className="px-4 py-3 text-xs text-[var(--muted)]">{fmtDate(e.receivedAt ?? e.createdAt)}</td>
+                <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">{e.barcode ?? "—"}</td>
+                <td className="cell-y px-4"><StatusPill status={e.status} /></td>
+                <td className="cell-y px-4 text-xs text-[var(--muted)]">{fmtDate(e.receivedAt ?? e.createdAt)}</td>
               </tr>
             ))}
           </TableCard>
-          <div className="shrink-0">
-            <Pagination
-              page={paged?.page ?? 1}
-              totalPages={paged?.totalPages ?? 1}
-              total={paged?.total ?? 0}
-              label="entries"
-              onPage={setPage}
-            />
-          </div>
         </>
       )}
 

@@ -33,19 +33,19 @@ function TableSkeleton() {
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-[var(--border)] text-left text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-            <th className="px-4 py-3">When</th>
-            <th className="px-4 py-3">Action</th>
-            <th className="px-4 py-3">Actor</th>
-            <th className="px-4 py-3">Target</th>
+            <th className="cell-y px-4">When</th>
+            <th className="cell-y px-4">Action</th>
+            <th className="cell-y px-4">Actor</th>
+            <th className="cell-y px-4">Target</th>
           </tr>
         </thead>
         <tbody>
           {Array.from({ length: 8 }).map((_, i) => (
             <tr key={i} className="border-b border-[var(--border)] last:border-0">
-              <td className="px-4 py-3"><Skeleton className="h-3 w-16" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-5 w-40 rounded-full" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-32" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-28" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-3 w-16" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-5 w-40 rounded-full" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-3 w-32" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-3 w-28" /></td>
             </tr>
           ))}
         </tbody>
@@ -151,7 +151,7 @@ export function AuditLogPanel() {
   };
 
   return (
-    <div className="flex h-full flex-col gap-5">
+    <div className="stack flex h-full flex-col">
       {/* Filter bar — carries the Export action at its right-hand end. */}
       <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:items-center lg:flex-wrap">
         <div className="relative w-full lg:max-w-xs">
@@ -262,10 +262,10 @@ export function AuditLogPanel() {
             <table className="w-full text-left text-sm">
               <thead className="sticky top-0 z-10 bg-[var(--surface)]">
                 <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                  <th className="px-4 py-3">When</th>
-                  <th className="px-4 py-3">Action</th>
-                  <th className="px-4 py-3">Actor</th>
-                  <th className="px-4 py-3">Target</th>
+                  <th className="cell-y px-4">When</th>
+                  <th className="cell-y px-4">Action</th>
+                  <th className="cell-y px-4">Actor</th>
+                  <th className="cell-y px-4">Target</th>
                 </tr>
               </thead>
               <tbody>
@@ -275,23 +275,23 @@ export function AuditLogPanel() {
                     onClick={() => setSelected(e)}
                     className="cursor-pointer border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]"
                   >
-                    <td className="px-4 py-3 text-[var(--muted)]" title={absoluteTime(e.createdAt)}>
+                    <td className="cell-y px-4 text-[var(--muted)]" title={absoluteTime(e.createdAt)}>
                       {relativeTime(e.createdAt)}
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="cell-y px-4">
                       <span
                         className={`inline-block rounded-full px-2.5 py-1 text-[11px] font-bold ${TONE_CLASSES[actionTone(e.action)]}`}
                       >
                         {actionLabel(e.action)}
                       </span>
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="cell-y px-4">
                       <span className="text-[var(--ink)]">{e.actorEmail ?? "—"}</span>
                       <span className="ml-2 text-[10px] font-bold uppercase tracking-wide text-[var(--faint)]">
                         {e.actorType}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-[var(--muted)]">
+                    <td className="cell-y px-4 text-[var(--muted)]">
                       {e.targetType ? (
                         <>
                           <span className="font-semibold text-[var(--ink)]">{e.targetType}</span>
@@ -307,19 +307,16 @@ export function AuditLogPanel() {
             </table>
           </div>
         )}
+        {data && data.total > 0 && (
+            <Pagination embedded
+              page={data.page}
+              totalPages={data.totalPages}
+              total={data.total}
+              label="entries"
+              onPage={setPage}
+            />
+        )}
       </div>
-
-      {data && data.total > 0 && (
-        <div className="shrink-0">
-          <Pagination
-            page={data.page}
-            totalPages={data.totalPages}
-            total={data.total}
-            label="entries"
-            onPage={setPage}
-          />
-        </div>
-      )}
 
       <AuditEntryDrawer entry={selected} onClose={() => setSelected(null)} />
     </div>

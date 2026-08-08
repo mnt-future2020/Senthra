@@ -17,7 +17,12 @@ import type { AuditActor } from "#modules/audit/audit.service.js";
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
 import { withTransaction } from "../../lib/prisma.js";
-import { emitToRoom, PURCHASE_ORDER_WATCHERS_ROOM, PURCHASE_REQUEST_WATCHERS_ROOM } from "../../lib/realtime.js";
+import {
+  emitAttentionChanged,
+  emitToRoom,
+  PURCHASE_ORDER_WATCHERS_ROOM,
+  PURCHASE_REQUEST_WATCHERS_ROOM,
+} from "../../lib/realtime.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import { paginate } from "../../utils/pagination.js";
@@ -466,6 +471,7 @@ function emitPrfUpdated(prf: { id: string; code: string; status: string }): void
     code: prf.code,
     status: prf.status,
   });
+  emitAttentionChanged("purchase_requests");
 }
 
 export async function submitPurchaseRequest(id: string, actor?: AuditActor): Promise<PublicPurchaseRequest> {

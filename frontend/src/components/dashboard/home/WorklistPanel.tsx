@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import type { WorklistItemDTO } from "@/services/dashboard.service";
+import { AttentionBar } from "@/components/dashboard/shell/AttentionBar";
 
 // "Awaiting Your Action" — the role-aware worklist. A dashboard summary widget, so it shows only the
 // most urgent items at a fixed height (no in-widget expand — the enterprise-dashboard convention).
@@ -60,6 +61,10 @@ export function WorklistPanel({
           </span>
         ) : null}
       </div>
+
+      {/* Whole-backlog counts, including queues this list carries no rows for. Renders nothing when
+          there is no pending work, so the "All clear" state below stays clean. */}
+      <AttentionBar className="mb-3 flex flex-wrap items-center gap-1.5 border-b border-[var(--border)] pb-3" />
 
       {items.length === 0 ? (
         <div className="py-8 text-center text-sm text-[var(--muted)]">All clear ✓ — nothing needs your action.</div>

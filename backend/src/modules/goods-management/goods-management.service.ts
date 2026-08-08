@@ -18,7 +18,14 @@ import { getOpenDemand } from "./demand.js";
 import type { CloseReconcileInput, PostMovementInput, ReportDamageInput, RestoreDamagedInput, ScanLookupInput } from "./goods-management.validation.js";
 import { withTransaction } from "../../lib/prisma.js";
 import { notify } from "#modules/notification/notification.service.js";
-import { emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
+import { emitAttentionChanged, emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
+
+// Issue / return / reconcile each move a goods attention queue (to-issue, awaiting-return, overdue
+// holdings), so the office event and the attention signal fire together — see emitJobsRoom.
+function emitGoodsRoom(event: string, payload: unknown): void {
+  emitToRoom(OFFICE_JOBS_ROOM, event, payload);
+  emitAttentionChanged("goods_management");
+}
 
 export interface ScanMatch {
   source: "irm" | "customer";
@@ -662,7 +669,7 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
   const issuePayload = { jobId: job.id, movementId: created.id, code: created.code, direction: "issue" };
   emitToUser(job.assignedEngineerId!, "goods:issued", issuePayload);
   notify(job.assignedEngineerId!, { title: "Kit ready to collect", body: `Stock for ${job.jobNumber} has been issued — collect it from the warehouse.`, data: { type: "job", jobId: job.id } });
-  emitToRoom(OFFICE_JOBS_ROOM, "goods:updated", issuePayload);
+  emitGoodsRoom("goods:updated", issuePayload);
 
   return toPublic(created);
 }
@@ -1590,7 +1597,7 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
   // Realtime: notify the engineer + all office staff.
   const returnPayload = { jobId: job.id, movementId: created.id, code: created.code, direction: "return" };
   emitToUser(job.assignedEngineerId!, "goods:returned", returnPayload);
-  emitToRoom(OFFICE_JOBS_ROOM, "goods:updated", returnPayload);
+  emitGoodsRoom("goods:updated", returnPayload);
 
   return toPublic(created);
 }
@@ -2451,7 +2458,7 @@ export async function closeReconcile(
   // Realtime: notify the engineer + all office staff.
   const reconcilePayload = { jobId: job.id, direction: "reconcile" };
   emitToUser(job.assignedEngineerId!, "goods:returned", reconcilePayload);
-  emitToRoom(OFFICE_JOBS_ROOM, "goods:updated", reconcilePayload);
+  emitGoodsRoom("goods:updated", reconcilePayload);
 
   const updatedSummary = await goodsManagementRepo.getSummary(job.id);
   return {

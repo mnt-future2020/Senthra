@@ -81,7 +81,7 @@ export function IrmItemDetail({ initial }: { initial: IrmItem }) {
   };
 
   return (
-    <div className="flex h-full flex-col gap-5">
+    <div className="stack flex h-full flex-col">
       <DetailHeader
         storageKey="irm-detail"
         title={i.name}

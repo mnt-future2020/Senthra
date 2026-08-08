@@ -13,10 +13,16 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Select } from "@/components/ui/Select";
+import { CELL_ONE_LINE, colClass, tableMinWidth } from "@/components/ui/tableLayout";
 import type { Supplier, SupplierStatus } from "@/types/supplier";
 import type { UserStatus } from "@/types/user";
 
 const PAGE_SIZE = 20;
+
+// Code · Supplier · Type · Primary Contact · Payment Terms · Currency · Lead Time · Status · actions.
+// Supplier and contact names are the long values; nine columns at `min-w-[1100px]` gave each ~122px.
+// Currency and Lead Time step aside on a narrow screen — both are reference detail.
+const TABLE_MIN_WIDTH = tableMinWidth(["normal", "wide", "normal", "wide", "normal", "narrow", "narrow", "narrow", "narrow"]);
 type Sort = "newest" | "oldest" | "name" | "code";
 
 // Payment terms cell: a "Custom" term shows the free-text value instead of the word.
@@ -159,32 +165,32 @@ function SupplierRowActions({
 function SuppliersTableSkeleton({ actions }: { actions: boolean }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[1100px] text-sm">
+      <table className="w-full text-sm" style={{ minWidth: TABLE_MIN_WIDTH }}>
         <thead>
           <tr className="border-b border-[var(--border)] text-left text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-            <th className="px-4 py-3">Code</th>
-            <th className="px-4 py-3">Supplier</th>
-            <th className="px-4 py-3">Type</th>
-            <th className="px-4 py-3">Primary Contact</th>
-            <th className="px-4 py-3">Payment Terms</th>
-            <th className="px-4 py-3">Currency</th>
-            <th className="px-4 py-3">Lead Time</th>
-            <th className="px-4 py-3">Status</th>
-            {actions && <th className="px-4 py-3" />}
+            <th className="cell-y px-4">Code</th>
+            <th className="cell-y px-4">Supplier</th>
+            <th className="cell-y px-4">Type</th>
+            <th className="cell-y px-4">Primary Contact</th>
+            <th className="cell-y px-4">Payment Terms</th>
+            <th className={`cell-y px-4 ${colClass("xl")}`}>Currency</th>
+            <th className={`cell-y px-4 ${colClass("xl")}`}>Lead Time</th>
+            <th className="cell-y px-4">Status</th>
+            {actions && <th className="cell-y px-4" />}
           </tr>
         </thead>
         <tbody>
           {Array.from({ length: 6 }).map((_, i) => (
             <tr key={i} className="border-b border-[var(--border)] last:border-0">
-              <td className="px-4 py-3"><Skeleton className="h-3 w-16" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-36" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-24" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-24" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-20" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-10" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-12" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-5 w-16 rounded-full" /></td>
-              {actions && <td className="px-4 py-3"><Skeleton className="ml-auto h-6 w-6 rounded-lg" /></td>}
+              <td className="cell-y px-4"><Skeleton className="h-3 w-16" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-3 w-36" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-3 w-24" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-3 w-24" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-3 w-20" /></td>
+              <td className={`cell-y px-4 ${colClass("xl")}`}><Skeleton className="h-3 w-10" /></td>
+              <td className={`cell-y px-4 ${colClass("xl")}`}><Skeleton className="h-3 w-12" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-5 w-16 rounded-full" /></td>
+              {actions && <td className="cell-y px-4"><Skeleton className="ml-auto h-6 w-6 rounded-lg" /></td>}
             </tr>
           ))}
         </tbody>
@@ -312,7 +318,7 @@ export function SuppliersView() {
   };
 
   return (
-    <div className="flex h-full flex-col gap-5">
+    <div className="stack flex h-full flex-col">
       <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center">
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
@@ -378,18 +384,18 @@ export function SuppliersView() {
           </div>
         ) : (
           <div className="min-h-0 flex-1 overflow-auto">
-            <table className="w-full min-w-[1100px] text-left text-sm">
+            <table className="w-full text-left text-sm" style={{ minWidth: TABLE_MIN_WIDTH }}>
               <thead>
                 <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                  <th className="px-4 py-3">Code</th>
-                  <th className="px-4 py-3">Supplier</th>
-                  <th className="px-4 py-3">Type</th>
-                  <th className="px-4 py-3">Primary Contact</th>
-                  <th className="px-4 py-3">Payment Terms</th>
-                  <th className="px-4 py-3">Currency</th>
-                  <th className="px-4 py-3">Lead Time</th>
-                  <th className="px-4 py-3">Status</th>
-                  {showActions && <th className="px-4 py-3" />}
+                  <th className="cell-y px-4">Code</th>
+                  <th className="cell-y px-4">Supplier</th>
+                  <th className="cell-y px-4">Type</th>
+                  <th className="cell-y px-4">Primary Contact</th>
+                  <th className="cell-y px-4">Payment Terms</th>
+                  <th className={`cell-y px-4 ${colClass("xl")}`}>Currency</th>
+                  <th className={`cell-y px-4 ${colClass("xl")}`}>Lead Time</th>
+                  <th className="cell-y px-4">Status</th>
+                  {showActions && <th className="cell-y px-4" />}
                 </tr>
               </thead>
               <tbody>
@@ -399,23 +405,23 @@ export function SuppliersView() {
                     onClick={() => router.push(`/dashboard/suppliers/${s.code}`)}
                     className="cursor-pointer border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]"
                   >
-                    <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{s.code}</td>
-                    <td className="px-4 py-3">
+                    <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">{s.code}</td>
+                    <td className="cell-y px-4">
                       <div className="font-semibold text-[var(--ink)]">{s.name}</div>
                       {s.legalName && <div className="text-[11px] text-[var(--faint)]">{s.legalName}</div>}
                     </td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{s.type?.name ?? "—"}</td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{s.contactPerson ?? "—"}</td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{paymentTermsLabel(s)}</td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{s.currency ?? "—"}</td>
-                    <td className="px-4 py-3 text-[var(--muted)]">
+                    <td className="cell-y px-4 text-[var(--muted)]">{s.type?.name ?? "—"}</td>
+                    <td className={`cell-y px-4 text-[var(--muted)] ${CELL_ONE_LINE}`} title={s.contactPerson ?? undefined}>{s.contactPerson ?? "—"}</td>
+                    <td className="cell-y px-4 text-[var(--muted)]">{paymentTermsLabel(s)}</td>
+                    <td className={`cell-y px-4 text-[var(--muted)] ${colClass("xl")}`}>{s.currency ?? "—"}</td>
+                    <td className={`cell-y px-4 text-[var(--muted)] ${colClass("xl")}`}>
                       {s.leadTimeDays != null ? `${s.leadTimeDays} days` : "—"}
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="cell-y px-4">
                       <StatusBadge status={s.status as UserStatus} />
                     </td>
                     {showActions && (
-                      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                      <td className="cell-y px-4" onClick={(e) => e.stopPropagation()}>
                         <SupplierRowActions
                           supplier={s}
                           canEdit={canEdit}
@@ -432,19 +438,16 @@ export function SuppliersView() {
             </table>
           </div>
         )}
+        {data && data.total > 0 && (
+            <Pagination embedded
+              page={data.page}
+              totalPages={data.totalPages}
+              total={data.total}
+              label="suppliers"
+              onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)}
+            />
+        )}
       </div>
-
-      {data && data.total > 0 && (
-        <div className="shrink-0">
-          <Pagination
-            page={data.page}
-            totalPages={data.totalPages}
-            total={data.total}
-            label="suppliers"
-            onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)}
-          />
-        </div>
-      )}
 
       <ConfirmDialog
         open={confirm.open}

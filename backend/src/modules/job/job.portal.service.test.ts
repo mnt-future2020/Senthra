@@ -26,7 +26,7 @@ vi.mock("#modules/email/email.service.js", () => ({ sendTemplatedEmail: vi.fn() 
 vi.mock("#modules/notification/notification.service.js", () => ({ notify: vi.fn() }));
 vi.mock("#modules/role/permissions.js", () => ({ roleGrants: vi.fn() }));
 vi.mock("#modules/settings/settings.service.js", () => ({ getCompanyTimezone: vi.fn() }));
-vi.mock("../../lib/realtime.js", () => ({ emitToUser: vi.fn(), emitToRoom: vi.fn(), OFFICE_JOBS_ROOM: "office_jobs" }));
+vi.mock("../../lib/realtime.js", () => ({ emitAttentionChanged: vi.fn(), emitToUser: vi.fn(), emitToRoom: vi.fn(), OFFICE_JOBS_ROOM: "office_jobs" }));
 vi.mock("../../lib/prisma.js", () => ({ withTransaction: (fn: (tx: unknown) => unknown) => fn({}) }));
 
 import * as jobRepo from "./job.repository.js";
@@ -245,8 +245,13 @@ describe("listJobsForCustomer — what the row carries", () => {
     expect(Object.keys(jobs[0]!).sort()).toEqual(
       [
         "addressLine1", "addressLine2", "city", "completedAt", "completionDate", "country", "county",
-        "createdAt", "customerRef", "engineerName", "id", "jobNumber", "jobType", "name", "postcode",
-        "projectId", "projectName", "schemeNo", "siteId", "siteName", "stage", "technology",
+        "createdAt", "customerRef", "engineerName", "id", "jobNumber", "jobType", "name",
+        // Past the planned date and still live. Added deliberately: the customer already has the due
+        // date, so showing it as though nothing were wrong is the version they would rightly object
+        // to. It is a FLAG only — no day count, which on their own job reads as an accusation rather
+        // than a status, and no internal status vocabulary.
+        "overdue",
+        "postcode", "projectId", "projectName", "schemeNo", "siteId", "siteName", "stage", "technology",
       ].sort(),
     );
   });
@@ -335,8 +340,11 @@ describe("getJobForCustomer — the detail page", () => {
         // Location
         "addressLine1", "addressLine2", "city", "county", "postcode", "country",
         "floor", "suite", "rack", "shelf",
-        // Schedule & engineer
-        "completionDate", "stage", "engineerName", "plannerName", "plannerPhone",
+        // Schedule & engineer. `overdue` rides along from the shared portal mapper but is always
+        // FALSE here: the detail read resolves no company-timezone day start, because one date the
+        // reader is already looking at does not need a marker, and a page marking late from the wrong
+        // clock would contradict the list they arrived from. Present in the shape, inert in effect.
+        "completionDate", "overdue", "stage", "engineerName", "plannerName", "plannerPhone",
         "assignedAt", "acceptedAt", "startedAt", "completedAt", "cancelledAt", "cancelReason",
         // The rest
         "attachments", "kitLines", "createdAt",
@@ -412,5 +420,48 @@ describe("countActiveJobsForCustomer — the dashboard card", () => {
     expect(filters.statuses).not.toContain("completed");
     expect(filters.statuses).not.toContain("cancelled");
     expect(filters.statuses).not.toContain("draft");
+  });
+});
+
+// The office and engineer lists redden a past-due row; the portal has to agree, because it is the
+// same job. Asserting the field EXISTS is not enough — that is exactly how this shipped broken once,
+// with `overdue` present on every row and true on none. These pin the VALUE, both ways.
+//
+// Dates are deliberately absurd (2020 / 2099) so the assertions do not depend on when the suite runs.
+describe("listJobsForCustomer — overdue", () => {
+  const listOne = async (over: Record<string, unknown>) => {
+    findMany.mockResolvedValue([row(over)]);
+    count.mockResolvedValue(1);
+    const { jobs } = await listJobsForCustomer(CUST);
+    return jobs[0]!;
+  };
+
+  it("marks a past-due job the customer can still be waiting on", async () => {
+    for (const status of ["assigned", "accepted", "in_progress"]) {
+      const job = await listOne({ status, completionDate: new Date("2020-01-01T00:00:00.000Z") });
+      expect(job.overdue, status).toBe(true);
+    }
+  });
+
+  it("leaves finished and called-off work alone, however old", async () => {
+    for (const status of ["completed", "cancelled", "rejected"]) {
+      const job = await listOne({ status, completionDate: new Date("2020-01-01T00:00:00.000Z") });
+      expect(job.overdue, status).toBe(false);
+    }
+  });
+
+  it("says nothing about a job that is not due yet, or has no due date", async () => {
+    expect((await listOne({ status: "accepted", completionDate: new Date("2099-01-01T00:00:00.000Z") })).overdue).toBe(false);
+    expect((await listOne({ status: "accepted", completionDate: null })).overdue).toBe(false);
+  });
+
+  // The day boundary is resolved from the COMPANY's timezone, server-side. If this stopped being
+  // read, every row would quietly fall back to the caller's clock — the failure the whole
+  // server-derived flag exists to prevent.
+  it("resolves the day boundary from the company timezone", async () => {
+    const tz = vi.mocked((await import("#modules/settings/settings.service.js")).getCompanyTimezone);
+    tz.mockClear();
+    await listOne({ status: "accepted", completionDate: new Date("2020-01-01T00:00:00.000Z") });
+    expect(tz).toHaveBeenCalled();
   });
 });

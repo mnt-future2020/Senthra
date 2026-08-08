@@ -14,9 +14,10 @@ import type { AuditActor } from "#modules/audit/audit.service.js";
 import { sendTemplatedEmail } from "#modules/email/email.service.js";
 import { notify } from "#modules/notification/notification.service.js";
 import { roleGrants } from "#modules/role/permissions.js";
-import { emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
+import { emitAttentionChanged, emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
 import { conflict, forbidden, notFound, badRequest } from "../../utils/http-error.js";
 import { startOfDayIn } from "../../utils/filter-date.js";
+import { jobOverdue } from "./job-overdue.js";
 import { safeHttpUrls } from "../../utils/http-url.js";
 import { getCompanyTimezone } from "#modules/settings/settings.service.js";
 import { paginate } from "../../utils/pagination.js";
@@ -30,6 +31,14 @@ import * as transferService from "#modules/engineer-transfer/engineer-transfer.s
 import * as kitRequestService from "#modules/job-kit-request/job-kit-request.service.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
+
+// Every office-visible job event also moves a job attention queue (awaiting
+// acceptance, rejected, overdue), so the two signals travel together through one wrapper rather than
+// each of the ~10 call sites remembering to fire both. Same shape as emitPoUpdated / emitPrfUpdated.
+function emitJobsRoom(event: string, payload: unknown): void {
+  emitToRoom(OFFICE_JOBS_ROOM, event, payload);
+  emitAttentionChanged("jobs");
+}
 
 // ── Status state machine (forward-only; backend-enforced). A job is born "assigned" (it always has
 // an engineer). Completed + Cancelled are terminal. Re-assign keeps it at "assigned". ───────────────
@@ -125,6 +134,16 @@ export interface PublicJob {
   rack: string | null;
   shelf: string | null;
   completionDate: string | null;
+  /**
+   * Past its completion date and still active — the same predicate `?status=overdue` filters on and
+   * the "Jobs overdue" badge counts. Sent so the LIST can mark the rows: a client that derived this
+   * from its own clock would draw the red marks against a different midnight than the badge counted
+   * against, for anyone not sitting in the company's timezone. Populated on the list reads only
+   * (false elsewhere, like goodsStatus).
+   */
+  overdue: boolean;
+  /** Whole days past due when `overdue`, else null. Server-derived for the same reason. */
+  daysLate: number | null;
   priority: string;
   assignedEngineerId: string | null;
   assignedEngineerName: string | null;
@@ -205,6 +224,11 @@ function toPublic(j: JobWithRelations | JobListRow): PublicJob {
     rack: j.rack,
     shelf: j.shelf,
     completionDate: iso(j.completionDate),
+    // Overwritten by the list reads, which resolve the company-timezone day boundary. Defaulting to
+    // "not overdue" is the safe direction: a detail view that never marks late is merely quiet, while
+    // one that marked late from the wrong clock would contradict the badge beside it.
+    overdue: false,
+    daysLate: null,
     priority: j.priority ?? "normal",
     assignedEngineerId: j.assignedEngineerId,
     assignedEngineerName: eng ? `${eng.firstName} ${eng.lastName}`.trim() : j.assignedEngineerName ?? null,
@@ -453,7 +477,22 @@ export interface ListJobsParams {
 }
 
 export async function listJobs(params: ListJobsParams = {}, _actor?: AuditActor): Promise<PagedJobs> {
-  const filters = { search: params.search, status: params.status, customerId: params.customer, assignedEngineerId: params.engineer, projectId: params.project };
+  // "Overdue" is derived, not stored — resolve the company-timezone day boundary here (the service
+  // owns settings, the repository doesn't) exactly as listJobsForEngineer does.
+  //
+  // Resolved for EVERY list read, not just `?status=overdue`, because each row now carries its own
+  // `overdue` flag so the table can mark late work in place. Before that, the count in the badge was
+  // the only way to know any job was late: the Due date column rendered every date in the same grey,
+  // so "Jobs overdue 4" could only be resolved by clicking it. One settings read, already memoised.
+  const dayStart = startOfDayIn(await getCompanyTimezone(), new Date());
+  const filters = {
+    search: params.search,
+    status: params.status,
+    customerId: params.customer,
+    assignedEngineerId: params.engineer,
+    projectId: params.project,
+    overdueBefore: params.status === "overdue" ? dayStart : undefined,
+  };
   const total = await jobRepo.count(filters);
   const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
   const rows = await jobRepo.findMany(filters, skip, pageSize, params.sort);
@@ -467,6 +506,7 @@ export async function listJobs(params: ListJobsParams = {}, _actor?: AuditActor)
     const pub = toPublic(r);
     pub.goodsStatus = goodsStatusByJob.get(r.id) ?? "not_issued";
     pub.pendingKitRequestCount = pendingByJob.get(r.id) ?? 0;
+    Object.assign(pub, jobOverdue(r.completionDate, pub.status, dayStart));
     return pub;
   });
   return { jobs, total, page, pageSize, totalPages };
@@ -576,7 +616,7 @@ export async function createJob(input: CreateJobInput, actor?: AuditActor): Prom
     emitToUser(job.assignedEngineerId, "job:new", job); // engineer's portal list
     notify(job.assignedEngineerId, { title: "New job assigned", body: `${job.jobNumber} · ${job.name}`, data: { type: "job", jobId: job.id } });
   }
-  emitToRoom(OFFICE_JOBS_ROOM, "job:new", job); // every office Jobs-list watcher
+  emitJobsRoom("job:new", job); // every office Jobs-list watcher
   audit.record({ actor, action: "job.created", targetType: "job", targetId: created.id, targetLabel: created.jobNumber });
   notifyAssignedEngineer(job);
   return job;
@@ -848,7 +888,7 @@ export async function updateJob(id: string, input: UpdateJobInput, actor?: Audit
       emitToUser(job.assignedEngineerId, "job:new", job);
       notify(job.assignedEngineerId, { title: "New job assigned", body: `${job.jobNumber} · ${job.name}`, data: { type: "job", jobId: job.id } });
     }
-    emitToRoom(OFFICE_JOBS_ROOM, "job:new", job);
+    emitJobsRoom("job:new", job);
     audit.record({
       actor,
       action: "job.assigned",
@@ -862,7 +902,7 @@ export async function updateJob(id: string, input: UpdateJobInput, actor?: Audit
     // A plain header/kit edit (reschedule, address, kit-line change) must reach the assigned
     // engineer's open list/detail and every office watcher — dual-emit like the status transitions.
     if (job.assignedEngineerId) emitToUser(job.assignedEngineerId, "job:updated", job);
-    emitToRoom(OFFICE_JOBS_ROOM, "job:updated", job);
+    emitJobsRoom("job:updated", job);
   }
   return job;
 }
@@ -1019,7 +1059,7 @@ export async function assignJob(id: string, engineerId: string, actor?: AuditAct
     emitToUser(job.assignedEngineerId, "job:new", job);
     notify(job.assignedEngineerId, { title: "New job assigned", body: `${job.jobNumber} · ${job.name}`, data: { type: "job", jobId: job.id } });
   }
-  emitToRoom(OFFICE_JOBS_ROOM, "job:new", job);
+  emitJobsRoom("job:new", job);
   audit.record({
     actor,
     action: "job.assigned",
@@ -1085,7 +1125,7 @@ export async function cancelJob(id: string, reason: string | undefined, actor?: 
     emitToUser(pub.assignedEngineerId, "job:updated", pub);
     notify(pub.assignedEngineerId, { title: "Job cancelled", body: `${pub.jobNumber} — ${pub.name} was cancelled.`, data: { type: "job", jobId: pub.id } });
   }
-  emitToRoom(OFFICE_JOBS_ROOM, "job:updated", pub); // office Jobs-list watchers
+  emitJobsRoom("job:updated", pub); // office Jobs-list watchers
   return pub;
 }
 
@@ -1143,7 +1183,7 @@ export async function deleteJob(id: string, actor?: AuditActor): Promise<void> {
   // room-only emit would leave a now-deleted job sitting in their list (and 404 on click).
   const pub = toPublic(existing);
   if (existing.assignedEngineerId) emitToUser(existing.assignedEngineerId, "job:deleted", pub);
-  emitToRoom(OFFICE_JOBS_ROOM, "job:deleted", pub);
+  emitJobsRoom("job:deleted", pub);
   audit.record({ actor, action: "job.deleted", targetType: "job", targetId: id, targetLabel: existing.jobNumber });
 }
 
@@ -1160,16 +1200,24 @@ export interface ListEngineerJobsParams {
 export async function listJobsForEngineer(engineerId: string, params: ListEngineerJobsParams = {}): Promise<PagedJobs> {
   // "Today" for the derived overdue filter is a company-timezone question, so it's resolved here and
   // handed to the repository — the same boundary the dashboard card and the warehouse Due filter use.
+  // Resolved for every read, not just the overdue filter — the engineer's rows carry the same flag as
+  // the office list, so the two surfaces can never mark different jobs late.
+  const dayStart = startOfDayIn(await getCompanyTimezone(), new Date());
   const filters = {
     status: params.status,
     search: params.search,
-    overdueBefore: params.status === "overdue" ? startOfDayIn(await getCompanyTimezone(), new Date()) : undefined,
+    overdueBefore: params.status === "overdue" ? dayStart : undefined,
   };
   const total = await jobRepo.countByEngineer(engineerId, filters);
   const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
   // LIST projection (no kit lines) — the engineer's list renders only header fields.
   const rows = await jobRepo.findManyByEngineerList(engineerId, filters, skip, pageSize, params.sort);
-  return { jobs: rows.map(toPublic), total, page, pageSize, totalPages };
+  const jobs = rows.map((r) => {
+    const pub = toPublic(r);
+    Object.assign(pub, jobOverdue(r.completionDate, pub.status, dayStart));
+    return pub;
+  });
+  return { jobs, total, page, pageSize, totalPages };
 }
 
 // The engineer's ACTIVE jobs (assigned / accepted / in_progress) as slim public rows — one bounded,
@@ -1206,7 +1254,7 @@ export async function acceptJobForEngineer(engineerId: string, jobId: string, ac
   if (!updated) throw notFound("Job not found.");
 
   const job = toPublic(updated);
-  emitToRoom(OFFICE_JOBS_ROOM, "job:accepted", job); // every office Jobs-list watcher (incl. the creator)
+  emitJobsRoom("job:accepted", job); // every office Jobs-list watcher (incl. the creator)
   audit.record({ actor, action: "job.accepted", targetType: "job", targetId: updated.id, targetLabel: updated.jobNumber });
   return job;
 }
@@ -1237,7 +1285,7 @@ export async function rejectJobForEngineer(
 
   const job = toPublic(updated);
   // Notify every office Jobs-list watcher (incl. the creator), so they can reassign or cancel.
-  emitToRoom(OFFICE_JOBS_ROOM, "job:rejected", job);
+  emitJobsRoom("job:rejected", job);
   // Email the creator too — a rejection needs prompt reassignment and they may not be watching.
   notifyJobCreatorOfRejection(job, updated.createdByUserId ?? null);
   audit.record({
@@ -1277,7 +1325,7 @@ export async function startJobForEngineer(jobId: string, engineerId: string, act
   // `remaining` to cap declared usage, so a bare toPublic (all tallies 0) would leave it unusable.
   const pub = await withGoodsTallies(toPublic(updated));
   emitToUser(engineerId, "job:updated", pub);
-  emitToRoom(OFFICE_JOBS_ROOM, "job:updated", pub);
+  emitJobsRoom("job:updated", pub);
   audit.record({ actor, action: "job.started", targetType: "job", targetId: jobId, targetLabel: job.jobNumber });
   return pub;
 }
@@ -1306,7 +1354,7 @@ export async function completeJobForEngineer(jobId: string, engineerId: string, 
   // the used/remaining state, consistent with getJobForEngineer.
   const pub = await withGoodsTallies(toPublic(updated!));
   emitToUser(engineerId, "job:updated", pub);
-  emitToRoom(OFFICE_JOBS_ROOM, "job:updated", pub);
+  emitJobsRoom("job:updated", pub);
   audit.record({ actor, action: "job.completed", targetType: "job", targetId: jobId, targetLabel: job.jobNumber });
   return pub;
 }
@@ -1393,6 +1441,17 @@ export interface PortalJob {
   completionDate: string | null;
   /** When the work was actually finished. Null until it is. */
   completedAt: string | null;
+  /**
+   * Past its due date and still live — the SAME predicate the office and engineer lists use, so the
+   * three surfaces can never disagree about whether a customer's job is late.
+   *
+   * Deliberately NO day count on this DTO, unlike the internal lists. The customer already knows the
+   * date and can do the arithmetic; a "36d late" chip on their own job turns a status into an
+   * accusation, and the portal's language is deliberately stages ("booked", "in progress") rather
+   * than our internal SLA vocabulary. What they are owed is that the date is not presented as though
+   * nothing were wrong — a red date says that, a running total performs it.
+   */
+  overdue: boolean;
   stage: PortalJobStage;
   /** The engineer attending, when there is one — see the note in toPortalJob. */
   engineerName: string | null;
@@ -1452,7 +1511,15 @@ export interface PortalJobDetail extends PortalJob {
   kitLines: PortalJobKitLine[];
 }
 
-function toPortalJob(j: jobRepo.PortalJobRow): PortalJob {
+/**
+ * @param dayStart start of today in the COMPANY timezone, when the caller has resolved it.
+ *
+ * Optional because the single-job read has no reason to pay for a settings lookup — the detail page
+ * shows one date the reader is already looking at, not a list to scan. Omitted means "not overdue",
+ * which is the safe direction: a detail page that stays quiet is merely quiet, while one marking late
+ * from the wrong clock would contradict the list the customer arrived from.
+ */
+function toPortalJob(j: jobRepo.PortalJobRow, dayStart?: Date): PortalJob {
   return {
     id: j.id,
     jobNumber: j.jobNumber,
@@ -1476,6 +1543,9 @@ function toPortalJob(j: jobRepo.PortalJobRow): PortalJob {
     country: j.country,
     completionDate: iso(j.completionDate),
     completedAt: iso(j.completedAt),
+    // Same rule as the office and engineer lists, so all three agree about a customer's job. The day
+    // count jobOverdue also returns is deliberately dropped here — see the `overdue` field's note.
+    overdue: dayStart ? jobOverdue(j.completionDate, j.status, dayStart).overdue : false,
     stage: portalStage(j.status),
     // Blanked while the job is between engineers. `assignedEngineerName` is a snapshot that SURVIVES
     // a rejection, so a rejected job still names the engineer who declined it — presenting them as
@@ -1508,7 +1578,11 @@ export async function listJobsForCustomer(customerId: string, params: ListCustom
   const total = await jobRepo.countByCustomerPortal(customerId, filters);
   const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
   const rows = await jobRepo.findManyByCustomerPortal(customerId, filters, skip, pageSize, params.sort);
-  return { jobs: rows.map(toPortalJob), total, page, pageSize, totalPages };
+  // Resolved once for the page, from the COMPANY timezone — the same boundary the office and engineer
+  // lists use. A customer in another timezone must not see a different set of jobs marked late than
+  // the people working them do.
+  const dayStart = startOfDayIn(await getCompanyTimezone(), new Date());
+  return { jobs: rows.map((r) => toPortalJob(r, dayStart)), total, page, pageSize, totalPages };
 }
 
 /**

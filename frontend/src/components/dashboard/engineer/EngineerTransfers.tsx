@@ -434,13 +434,13 @@ function TransferRow({
         onClose={() => setConfirm(null)}
       />
       <tr className="border-b border-[var(--border)] last:border-0">
-        <td className="px-4 py-3">
+        <td className="cell-y px-4">
           <div className="font-mono text-xs font-bold text-[var(--ink)]">{transfer.code}</div>
           <div className="flex items-center gap-1 text-[11px] text-[var(--faint)]">
             <Clock className="h-3 w-3" /> {requestAge(transfer.createdAt)}
           </div>
         </td>
-        <td className="px-4 py-3 text-sm text-[var(--ink)]">
+        <td className="cell-y px-4 text-sm text-[var(--ink)]">
           {/* Incoming = I'm the HOLDER being asked → show the RECIPIENT who's requesting my stock.
               My requests (outgoing) = I'm the RECIPIENT → show the HOLDER I collect from, with their
               phone so I can call to coordinate the handover. */}
@@ -457,8 +457,8 @@ function TransferRow({
             </div>
           )}
         </td>
-        <td className="px-4 py-3 text-xs text-[var(--muted)]">{transfer.reason}</td>
-        <td className="px-4 py-3">
+        <td className="cell-y px-4 text-xs text-[var(--muted)]">{transfer.reason}</td>
+        <td className="cell-y px-4">
           <StatusBadge status={transfer.status} />
           {needsSign && (
             <span className="ml-1 rounded-full bg-[var(--accent-10)] px-1.5 py-0.5 text-[10px] font-bold text-[var(--accent)]">
@@ -466,7 +466,7 @@ function TransferRow({
             </span>
           )}
         </td>
-        <td className="px-4 py-3">
+        <td className="cell-y px-4">
           <div className="flex items-center gap-2">
             {/* Incoming pending → Approve + Decline */}
             {role === "incoming" && transfer.status === "pending" && (
@@ -767,7 +767,7 @@ function TransferList({ role }: { role: "incoming" | "outgoing" }) {
                 <thead className="sticky top-0 z-10 bg-[var(--surface)]">
                   <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
                     {headers.map((h, i) => (
-                      <th key={i} className="px-4 py-3">{h}</th>
+                      <th key={i} className="cell-y px-4">{h}</th>
                     ))}
                   </tr>
                 </thead>
@@ -778,18 +778,17 @@ function TransferList({ role }: { role: "incoming" | "outgoing" }) {
                 </tbody>
               </table>
             </div>
-          </div>
-          {paged && paged.total > 0 && (
-            <div className="shrink-0">
+            {paged && paged.total > 0 && (
               <Pagination
+                embedded
                 page={paged.page}
                 totalPages={paged.totalPages}
                 total={paged.total}
                 label="transfers"
                 onPage={(p) => patchParams({ page: p > 1 ? String(p) : null })}
               />
-            </div>
-          )}
+            )}
+          </div>
         </>
       )}
     </div>
@@ -812,7 +811,7 @@ export function EngineerTransfers() {
   };
 
   return (
-    <div className="flex h-full flex-col gap-5">
+    <div className="stack flex h-full flex-col">
 
       {/* Tabs */}
       <div className="flex shrink-0 items-center gap-2">

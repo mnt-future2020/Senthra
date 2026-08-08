@@ -23,7 +23,7 @@ vi.mock("#modules/user/user.repository.js", () => ({}));
 vi.mock("#modules/warehouse/warehouse.repository.js", () => ({ findMany: vi.fn() }));
 vi.mock("../../lib/cloudinary.js", () => ({ uploadToCloudinary: vi.fn() }));
 vi.mock("#modules/notification/notification.service.js", () => ({ notify: vi.fn() }));
-vi.mock("../../lib/realtime.js", () => ({ emitToRoom: vi.fn(), emitToUser: vi.fn(), VAN_STOCK_REVIEWERS_ROOM: "vsr" }));
+vi.mock("../../lib/realtime.js", () => ({ emitAttentionChanged: vi.fn(), emitToRoom: vi.fn(), emitToUser: vi.fn(), VAN_STOCK_REVIEWERS_ROOM: "vsr" }));
 // The repository also exports pure helpers the service uses at module scope; stub the ones it binds.
 vi.mock("./van-stock-request.repository.js", () => ({
   lineDone: vi.fn(),
