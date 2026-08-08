@@ -22,6 +22,7 @@ vi.mock("../../lib/prisma.js", () => ({
 }));
 
 import {
+  count as countJobs,
   countByCustomerPortal,
   countLiveKitLinesByWarehouse,
   countOpenByCustomer,
@@ -29,9 +30,11 @@ import {
   findActiveForGoodsManagement,
   findByIdForCustomer,
   findGoodsActiveJobIds,
+  findMany as findManyJobs,
   findManyByCustomerPortal,
   PORTAL_JOB_STATUSES,
 } from "./job.repository.js";
+import { OVERDUE_ELIGIBLE_STATUSES, jobOverdue } from "./job-overdue.js";
 
 // A chase list exists to surface stock nobody is looking at any more, so the one status that must NOT
 // silently drop out of it is the one where everybody stops looking: cancelled. `cancelJob` is reachable
@@ -287,5 +290,60 @@ describe("customer-portal reads — the scope is the boundary", () => {
     }
     // Kit lines carry the same rule: the office's Notes column is staff-to-staff free text.
     expect(select.kitLines.select).not.toHaveProperty("notes");
+  });
+});
+
+describe("office job list — the `overdue` derived pseudo-status", () => {
+  const DAY_START = new Date("2026-08-07T00:00:00.000Z");
+
+  it("narrows to ACTIVE jobs past their completion date, not a stored status", () => {
+    // "Overdue" is never written to the row — it is the same predicate the overdue dashboard card and
+    // the Jobs attention badge use, so all three agree about what is late.
+    findManyJobs({ status: "overdue", overdueBefore: DAY_START });
+    const where = findMany.mock.calls.at(-1)![0].where;
+    expect(where.status).toEqual({ in: ["assigned", "accepted", "in_progress"] });
+    expect(where.completionDate).toEqual({ lt: DAY_START });
+    expect(where.deletedAt).toBeNull();
+  });
+
+  it("excludes completed and cancelled jobs — a finished job is never a backlog", () => {
+    findManyJobs({ status: "overdue", overdueBefore: DAY_START });
+    const statuses = findMany.mock.calls.at(-1)![0].where.status.in;
+    expect(statuses).not.toContain("completed");
+    expect(statuses).not.toContain("cancelled");
+    expect(statuses).not.toContain("draft"); // never assigned, so nothing is late yet
+  });
+
+  it("applies the same window to the COUNT, so page totals match the rows", () => {
+    countJobs({ status: "overdue", overdueBefore: DAY_START });
+    expect(count.mock.calls.at(-1)![0].where.completionDate).toEqual({ lt: DAY_START });
+  });
+
+  it("THROWS without a day boundary rather than quietly reporting nothing overdue", () => {
+    expect(() => findManyJobs({ status: "overdue" })).toThrow(/overdueBefore is required/);
+  });
+
+  // The list now marks each late row in place (red date + "Nd late") instead of leaving the badge as
+  // the only way to know. That marker and this filter MUST select the same jobs — a red row the
+  // filter doesn't return, or a returned row that isn't red, is the same broken promise as a badge
+  // whose count disagrees with the list it opens. Both read this one array, and this pins that.
+  it("filters on exactly the statuses the per-row overdue flag marks", () => {
+    findManyJobs({ status: "overdue", overdueBefore: DAY_START });
+    expect(findMany.mock.calls.at(-1)![0].where.status.in).toEqual([...OVERDUE_ELIGIBLE_STATUSES]);
+  });
+
+  // `<`, not `<=` — and jobOverdue applies the same strict comparison, so a job due today is "due"
+  // on both sides rather than late on one of them.
+  it("treats the boundary day as due, not late — same as the row flag", () => {
+    findManyJobs({ status: "overdue", overdueBefore: DAY_START });
+    expect(findMany.mock.calls.at(-1)![0].where.completionDate).toEqual({ lt: DAY_START });
+    expect(jobOverdue(DAY_START, "accepted", DAY_START).overdue).toBe(false);
+  });
+
+  it("leaves a real status as a plain equality filter", () => {
+    findManyJobs({ status: "rejected" });
+    const where = findMany.mock.calls.at(-1)![0].where;
+    expect(where.status).toBe("rejected");
+    expect(where.completionDate).toBeUndefined();
   });
 });

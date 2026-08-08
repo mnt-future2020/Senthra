@@ -152,32 +152,53 @@ export function EngineerJobs() {
         />
       ) : (
         <>
-          <TableCard headers={HEADERS} minWidth={640} fill>
+          <TableCard
+            headers={HEADERS}
+            minWidth={640}
+            fill
+            footer={
+              <Pagination
+                embedded
+                page={paged?.page ?? 1}
+                totalPages={paged?.totalPages ?? 1}
+                total={paged?.total ?? 0}
+                label="jobs"
+                onPage={(p) => patchParams({ page: p > 1 ? String(p) : null })}
+              />
+            }
+          >
             {jobs.map((j) => (
               <tr
                 key={j.id}
                 onClick={() => router.push(`/dashboard/engineer/jobs/${j.id}`)}
                 className="cursor-pointer border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]"
               >
-                <td className="px-4 py-3 font-mono text-xs text-[var(--accent)]">{j.jobNumber}</td>
-                <td className="px-4 py-3 font-semibold text-[var(--ink)]">{j.name}</td>
-                <td className="px-4 py-3 text-[var(--muted)]">{j.customerName ?? "—"}</td>
-                <td className="px-4 py-3 text-[var(--muted)]">{fmtDate(j.completionDate)}</td>
-                <td className="px-4 py-3">
+                <td className="cell-y px-4 font-mono text-xs text-[var(--accent)]">{j.jobNumber}</td>
+                <td className="cell-y px-4 font-semibold text-[var(--ink)]">{j.name}</td>
+                <td className="cell-y px-4 text-[var(--muted)]">{j.customerName ?? "—"}</td>
+                {/* The same marker the office list carries, from the same server-derived flag — the
+                    engineer could already FILTER to Overdue but had no way to see which of these rows
+                    were, which is the office list's old problem repeated on the surface where the
+                    work actually happens. */}
+                <td className={`cell-y px-4 ${j.overdue ? "font-semibold text-[var(--neg)]" : "text-[var(--muted)]"}`}>
+                  <span className="inline-flex flex-wrap items-center gap-1.5">
+                    {fmtDate(j.completionDate)}
+                    {j.overdue && j.daysLate != null && (
+                      <span
+                        title={`Due ${fmtDate(j.completionDate)} — still open`}
+                        className="whitespace-nowrap rounded-full bg-[var(--neg)]/12 px-1.5 py-0.5 text-[10px] font-bold text-[var(--neg)]"
+                      >
+                        {j.daysLate}d late
+                      </span>
+                    )}
+                  </span>
+                </td>
+                <td className="cell-y px-4">
                   <JobStatusChip value={j.status} />
                 </td>
               </tr>
             ))}
           </TableCard>
-          <div className="shrink-0">
-            <Pagination
-              page={paged?.page ?? 1}
-              totalPages={paged?.totalPages ?? 1}
-              total={paged?.total ?? 0}
-              label="jobs"
-              onPage={(p) => patchParams({ page: p > 1 ? String(p) : null })}
-            />
-          </div>
         </>
       )}
     </div>

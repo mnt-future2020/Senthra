@@ -1,5 +1,6 @@
 import { Router } from "express";
 
+import attentionRoutes from "#modules/attention/attention.routes.js";
 import auditRoutes from "#modules/audit/audit.routes.js";
 import authRoutes from "#modules/auth/auth.routes.js";
 import engineerTransferRoutes from "#modules/engineer-transfer/engineer-transfer.routes.js";
@@ -42,6 +43,8 @@ router.get("/", (_req, res) => {
 router.use("/auth", authRoutes);
 router.use("/audit", auditRoutes);
 router.use("/dashboard", dashboardRoutes);
+// Global pending-work counts (sidebar badges + dashboard strip + module tab counts — one source).
+router.use("/attention", attentionRoutes);
 router.use("/settings", settingsRoutes);
 router.use("/users", userRoutes);
 router.use("/roles", roleRoutes);

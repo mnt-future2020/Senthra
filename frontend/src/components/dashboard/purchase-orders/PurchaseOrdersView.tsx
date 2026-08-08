@@ -11,12 +11,20 @@ import { useDashboard } from "@/hooks/useDashboard";
 import { usePurchaseOrderSocket } from "@/hooks/usePurchaseOrderSocket";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
+import { CELL_ONE_LINE, colClass, colClassAt, tableMinWidth, type ColPriority } from "@/components/ui/tableLayout";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
-import { PO_STATUS_LABELS, PoPriorityLabel, PoStatusBadge, formatDate, formatMoney } from "./poStatus";
+import { AttentionBar } from "@/components/dashboard/shell/AttentionBar";
+import { PO_DERIVED_STATUS_OPTIONS, PO_STATUS_LABELS, PoPriorityLabel, PoStatusBadge, formatDate, formatMoney } from "./poStatus";
 import type { PoStatus, PurchaseOrder } from "@/types/purchase-order";
 
 const PAGE_SIZE = 20;
+
+// Code · Supplier · Warehouse · Status · Priority · Order Date · Expected · Grand Total · actions.
+// The flat `min-w-[1000px]` this replaces gave each ~111px, while "pex Telecom Solutions" needs ~197
+// and "London Fulfillment Centre" ~227 — so both wrapped, the dates wrapped, and every row ran to two
+// or three lines. Priority and Order Date step aside on a narrow screen.
+const TABLE_MIN_WIDTH = tableMinWidth(["normal", "wide", "wide", "narrow", "narrow", "normal", "normal", "normal", "narrow"]);
 
 function MenuItem({ icon: Icon, danger, onClick, children }: { icon: React.ElementType; danger?: boolean; onClick: () => void; children: React.ReactNode }) {
   return (
@@ -107,28 +115,32 @@ function PoRowActions({ po, canEdit, canDelete, onEdit, onDelete }: { po: Purcha
   );
 }
 
+// One array drives BOTH rows below, which is the rule colClass exists to enforce: a placeholder cell
+// that stays visible while its header is hidden shifts every cell after it.
+const SKELETON_COLS: ColPriority[] = ["always", "always", "always", "always", "xl", "lg", "always", "always"];
+
 function PoTableSkeleton({ actions }: { actions: boolean }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[1000px] text-sm">
+      <table className="w-full text-sm" style={{ minWidth: TABLE_MIN_WIDTH }}>
         <thead>
           <tr className="border-b border-[var(--border)] text-left text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-            <th className="px-4 py-3">Code</th>
-            <th className="px-4 py-3">Supplier</th>
-            <th className="px-4 py-3">Warehouse</th>
-            <th className="px-4 py-3">Status</th>
-            <th className="px-4 py-3">Priority</th>
-            <th className="px-4 py-3">Order Date</th>
-            <th className="px-4 py-3">Expected</th>
-            <th className="px-4 py-3">Grand Total</th>
-            {actions && <th className="px-4 py-3" />}
+            <th className="cell-y px-4">Code</th>
+            <th className="cell-y px-4">Supplier</th>
+            <th className="cell-y px-4">Warehouse</th>
+            <th className="cell-y px-4">Status</th>
+            <th className={`cell-y px-4 ${colClass("xl")}`}>Priority</th>
+            <th className={`cell-y px-4 ${colClass("lg")}`}>Order Date</th>
+            <th className="cell-y px-4">Expected</th>
+            <th className="cell-y px-4">Grand Total</th>
+            {actions && <th className="cell-y px-4" />}
           </tr>
         </thead>
         <tbody>
           {Array.from({ length: 6 }).map((_, i) => (
             <tr key={i} className="border-b border-[var(--border)] last:border-0">
               {Array.from({ length: actions ? 9 : 8 }).map((__, j) => (
-                <td key={j} className="px-4 py-3"><Skeleton className="h-3 w-20" /></td>
+                <td key={j} className={`cell-y px-4 ${colClassAt(SKELETON_COLS, j)}`}><Skeleton className="h-3 w-20" /></td>
               ))}
             </tr>
           ))}
@@ -145,7 +157,10 @@ export function PurchaseOrdersView() {
   const { pushToast } = useDashboard();
 
   // Derive filter state from URL params
-  const statusFilter = (searchParams.get("status") as "all" | PoStatus) ?? "all";
+  // "overdue" is a DERIVED pseudo-status the server resolves (receivable POs whose confirmed-or-
+  // expected ETA is before the company-timezone start of today) — the same predicate as the overdue
+  // dashboard card and the Deliveries-overdue badge. Not a PoStatus: it never reaches a status chip.
+  const statusFilter = (searchParams.get("status") as "all" | "overdue" | PoStatus) ?? "all";
   // "Awaiting my action" — the PM worklist (orders in pm_review assigned to me). Overrides the
   // status filter while active; only offered to users who can actually send (i.e. act as a PM).
   const awaitingMine = searchParams.get("awaiting") === "1";
@@ -247,8 +262,20 @@ export function PurchaseOrdersView() {
   };
 
   return (
-    <div className="flex h-full flex-col gap-5">
-      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center">
+    <div className="stack flex h-full flex-col">
+      {/* Breakdown of the sidebar's Purchase Orders badge — approvals, sends, supplier acceptances,
+          overdue deliveries and receipts ready to close.
+          INSIDE the toolbar card rather than in a block of its own above it: these chips narrow this
+          list exactly as the controls below them do, and as a separate block they also paid the
+          layout's 20px flex gap on top of their own height. Not inlined into the filter row (as on
+          Jobs) because this row carries up to six chips — enough to wrap the filters onto a second
+          line, which would cost more than it saved. */}
+      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs">
+        <AttentionBar
+          nav="/dashboard/purchase-orders"
+          className="flex flex-wrap items-center gap-1.5 border-b border-[var(--border)] pb-3"
+        />
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input
@@ -258,7 +285,7 @@ export function PurchaseOrdersView() {
             className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
           />
         </div>
-        <Select size="sm" value={statusFilter} onChange={(v) => patchParams({ status: v === "all" ? null : v, awaiting: null }, true)} options={[{ value: "all", label: "All statuses" }, ...(Object.keys(PO_STATUS_LABELS) as PoStatus[]).map((s) => ({ value: s, label: PO_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" disabled={awaitingMine} />
+        <Select size="sm" value={statusFilter} onChange={(v) => patchParams({ status: v === "all" ? null : v, awaiting: null }, true)} options={[{ value: "all", label: "All statuses" }, ...PO_DERIVED_STATUS_OPTIONS, ...(Object.keys(PO_STATUS_LABELS) as PoStatus[]).map((s) => ({ value: s, label: PO_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" disabled={awaitingMine} />
         {/* PM worklist quick filter — orders routed to ME for review + send. */}
         {can("purchase_orders.send") && (
           <button
@@ -275,6 +302,7 @@ export function PurchaseOrdersView() {
             <Plus className="h-4 w-4" /> New order
           </button>
         )}
+        </div>
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
@@ -294,33 +322,33 @@ export function PurchaseOrdersView() {
           </div>
         ) : (
           <div className="min-h-0 flex-1 overflow-auto">
-            <table className="w-full min-w-[1000px] text-left text-sm">
+            <table className="w-full text-left text-sm" style={{ minWidth: TABLE_MIN_WIDTH }}>
               <thead>
                 <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                  <th className="px-4 py-3">Code</th>
-                  <th className="px-4 py-3">Supplier</th>
-                  <th className="px-4 py-3">Warehouse</th>
-                  <th className="px-4 py-3">Status</th>
-                  <th className="px-4 py-3">Priority</th>
-                  <th className="px-4 py-3">Order Date</th>
-                  <th className="px-4 py-3">Expected</th>
-                  <th className="px-4 py-3">Grand Total</th>
-                  {showActions && <th className="px-4 py-3" />}
+                  <th className="cell-y px-4">Code</th>
+                  <th className="cell-y px-4">Supplier</th>
+                  <th className="cell-y px-4">Warehouse</th>
+                  <th className="cell-y px-4">Status</th>
+                  <th className={`cell-y px-4 ${colClass("xl")}`}>Priority</th>
+                  <th className={`cell-y px-4 ${colClass("lg")}`}>Order Date</th>
+                  <th className="cell-y px-4">Expected</th>
+                  <th className="cell-y px-4">Grand Total</th>
+                  {showActions && <th className="cell-y px-4" />}
                 </tr>
               </thead>
               <tbody>
                 {orders.map((po) => (
                   <tr key={po.id} onClick={() => router.push(`/dashboard/purchase-orders/${po.code}`)} className="cursor-pointer border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]">
-                    <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{po.code}</td>
-                    <td className="px-4 py-3 font-semibold text-[var(--ink)]">{po.supplierName ?? po.supplier?.name ?? "—"}</td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{po.warehouse?.name ?? "—"}</td>
-                    <td className="px-4 py-3"><PoStatusBadge status={po.status} /></td>
-                    <td className="px-4 py-3 text-xs"><PoPriorityLabel priority={po.priority} /></td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{formatDate(po.orderDate)}</td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{formatDate(po.expectedDeliveryDate)}</td>
-                    <td className="px-4 py-3 font-semibold text-[var(--ink)]">{formatMoney(po.grandTotal, po.currency)}</td>
+                    <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">{po.code}</td>
+                    <td className={`cell-y px-4 font-semibold text-[var(--ink)] ${CELL_ONE_LINE}`} title={po.supplierName ?? po.supplier?.name ?? undefined}>{po.supplierName ?? po.supplier?.name ?? "—"}</td>
+                    <td className={`cell-y px-4 text-[var(--muted)] ${CELL_ONE_LINE}`} title={po.warehouse?.name ?? undefined}>{po.warehouse?.name ?? "—"}</td>
+                    <td className="cell-y px-4"><PoStatusBadge status={po.status} /></td>
+                    <td className={`cell-y px-4 text-xs ${colClass("xl")}`}><PoPriorityLabel priority={po.priority} /></td>
+                    <td className={`cell-y px-4 text-[var(--muted)] ${colClass("lg")}`}>{formatDate(po.orderDate)}</td>
+                    <td className="cell-y px-4 text-[var(--muted)]">{formatDate(po.expectedDeliveryDate)}</td>
+                    <td className="cell-y px-4 font-semibold text-[var(--ink)]">{formatMoney(po.grandTotal, po.currency)}</td>
                     {showActions && (
-                      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                      <td className="cell-y px-4" onClick={(e) => e.stopPropagation()}>
                         <PoRowActions po={po} canEdit={canEdit} canDelete={canDelete} onEdit={() => router.push(`/dashboard/purchase-orders/${po.code}/edit`)} onDelete={() => setConfirm({ open: true, po })} />
                       </td>
                     )}
@@ -330,13 +358,10 @@ export function PurchaseOrdersView() {
             </table>
           </div>
         )}
+        {data && data.total > 0 && (
+            <Pagination embedded page={data.page} totalPages={data.totalPages} total={data.total} label="purchase orders" onPage={(p) => patchParams({ page: p > 1 ? String(p) : null }, false)} />
+        )}
       </div>
-
-      {data && data.total > 0 && (
-        <div className="shrink-0">
-          <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="purchase orders" onPage={(p) => patchParams({ page: p > 1 ? String(p) : null }, false)} />
-        </div>
-      )}
 
       <ConfirmDialog
         open={confirm.open}

@@ -241,7 +241,7 @@ export function PurchaseRequestDetail({ initial }: { initial: PurchaseRequest })
     actions.push(<ActionBtn key="cancel" icon={XCircle} onClick={() => { setReason(""); setReasonFor("cancel"); }} disabled={busy}>Cancel</ActionBtn>);
 
   return (
-    <div className="flex h-full flex-col gap-5">
+    <div className="stack flex h-full flex-col">
       <DetailHeader
         storageKey="purchase-request-detail"
         title={prf.code}
@@ -369,24 +369,24 @@ function Overview({ prf }: { prf: PurchaseRequest }) {
           <table className="w-full min-w-[680px] text-left text-sm">
             <thead>
               <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                <th className="px-4 py-3">Item</th>
-                <th className="px-4 py-3">Qty</th>
-                <th className="px-4 py-3">Quoted Price</th>
-                <th className="px-4 py-3">VAT</th>
-                <th className="px-4 py-3">Line Total</th>
+                <th className="cell-y px-4">Item</th>
+                <th className="cell-y px-4">Qty</th>
+                <th className="cell-y px-4">Quoted Price</th>
+                <th className="cell-y px-4">VAT</th>
+                <th className="cell-y px-4">Line Total</th>
               </tr>
             </thead>
             <tbody>
               {prf.items.map((i) => (
                 <tr key={i.id} className="border-b border-[var(--border)] last:border-0">
-                  <td className="px-4 py-3">
+                  <td className="cell-y px-4">
                     <div className="font-semibold text-[var(--ink)]">{i.itemName}</div>
                     {i.sku && <div className="text-[11px] text-[var(--faint)]">{i.sku}</div>}
                   </td>
-                  <td className="px-4 py-3 text-[var(--muted)]">{i.quantity}{i.baseUnit ? ` ${i.baseUnit}` : ""}</td>
-                  <td className="px-4 py-3 text-[var(--muted)]">{formatMoney(i.unitPrice, prf.currency)}</td>
-                  <td className="px-4 py-3 text-[var(--muted)]">{i.vatRate}%</td>
-                  <td className="px-4 py-3 font-semibold text-[var(--ink)]">{formatMoney(i.lineTotal, prf.currency)}</td>
+                  <td className="cell-y px-4 text-[var(--muted)]">{i.quantity}{i.baseUnit ? ` ${i.baseUnit}` : ""}</td>
+                  <td className="cell-y px-4 text-[var(--muted)]">{formatMoney(i.unitPrice, prf.currency)}</td>
+                  <td className="cell-y px-4 text-[var(--muted)]">{i.vatRate}%</td>
+                  <td className="cell-y px-4 font-semibold text-[var(--ink)]">{formatMoney(i.lineTotal, prf.currency)}</td>
                 </tr>
               ))}
             </tbody>

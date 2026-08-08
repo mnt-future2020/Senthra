@@ -32,6 +32,22 @@ import { toCsv } from "../../utils/csv.js";
 import { hashPassword } from "../../utils/password.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
+import { emitAttentionChanged } from "../../lib/realtime.js";
+
+// The customer module has no realtime surface, but four attention queues live here (stock requests
+// awaiting review, open warehouse assignments, stock-entry drafts, portal invites never signed in).
+// Those move across ~10 mutations written in two different audit shapes, with more to come — so the
+// signal is derived from the audit line every one of them already writes, instead of an emit call
+// each site has to remember. Fired unconditionally rather than filtered by action prefix: every
+// action here is a rare admin/portal mutation (creating a customer, importing sites), the receiving
+// clients debounce, and the counts are indexed `count()`s — so the cost of over-signalling is far
+// below the cost of a queue that silently stops updating when someone adds action #15.
+// Known lag: a portal invite is cleared by the customer's FIRST LOGIN, which happens in the auth
+// module and writes no customer audit — that one count settles on the next signal or safety refresh.
+function recordCustomerAudit(entry: Parameters<typeof audit.record>[0]): void {
+  audit.record(entry);
+  emitAttentionChanged("customers");
+}
 import { sendTemplatedEmail } from "#modules/email/email.service.js";
 
 // Upload a company logo to Cloudinary (random public id, "senthra/customers"
@@ -645,7 +661,7 @@ export async function createCustomer(
     throw e;
   }
 
-  audit.record({
+  recordCustomerAudit({
     actor,
     action: "customer.created",
     targetType: "customer",
@@ -750,7 +766,7 @@ export async function updateCustomer(
   data.updatedBy = actor?.email ?? null;
 
   const updated = await customerRepo.update(id, data);
-  audit.record({
+  recordCustomerAudit({
     actor,
     action: "customer.updated",
     targetType: "customer",
@@ -824,7 +840,7 @@ export async function deleteCustomer(id: string, actor?: AuditActor): Promise<vo
   const users = await customerRepo.findUsersByCustomer(id);
   await customerRepo.softDelete(id);
   await Promise.all(users.map((u) => sessionService.endAll(u.id, "customer")));
-  audit.record({
+  recordCustomerAudit({
     actor,
     action: "customer.deleted",
     targetType: "customer",
@@ -847,7 +863,7 @@ export async function resendInvite(
 
   const temporaryPassword = await reissueLogin(user.id);
   await sessionService.endAll(user.id, "customer");
-  audit.record({
+  recordCustomerAudit({
     actor,
     action: "customer.invite_resent",
     targetType: "customer",
@@ -876,7 +892,7 @@ function auditNested(
   customer: Customer,
   label: string,
 ): void {
-  audit.record({
+  recordCustomerAudit({
     actor,
     action,
     targetType: "customer",
@@ -1113,7 +1129,7 @@ export async function bulkAddSites(
 
   const created = await customerRepo.createSitesBulk(customerId, staged);
 
-  audit.record({
+  recordCustomerAudit({
     actor,
     action: "customer.sites.bulk_imported",
     targetType: "customer",
@@ -1351,7 +1367,7 @@ export async function submitStockRequest(
     requestedBy.name,
     data,
   );
-  audit.record({
+  recordCustomerAudit({
     actor: { id: requestedBy.userId, type: "customer", email: requestedBy.email },
     action: "customer.stock_request.submitted",
     targetType: "customer",
@@ -1373,7 +1389,7 @@ export async function createStockRequestForCustomer(
   const customer = await requireCustomer(customerId);
   const data = await resolveStockRequestData(customerId, input);
   const created = await customerRepo.createStockRequest(customerId, null, requestedByName, data);
-  audit.record({
+  recordCustomerAudit({
     actor,
     action: "customer.stock_request.created_by_admin",
     targetType: "customer",
@@ -1764,7 +1780,7 @@ export async function closeAssignmentShort(
   // the audit line would understate what arrived. This label is the whole point of the feature; it
   // has to be the number that is actually true at the moment of closing.
   const outstanding = updated.quantity - updated.receivedQuantity;
-  audit.record({
+  recordCustomerAudit({
     actor,
     action: "customer.stock_request.closed_short",
     targetType: "customer_stock_assignment",
@@ -1826,7 +1842,7 @@ export async function receiveStockAssignment(
     return { updated, stockEntry };
   });
 
-  audit.record({
+  recordCustomerAudit({
     actor,
     action: "customer.stock_request.received",
     targetType: "customer_stock_assignment",
@@ -2277,7 +2293,7 @@ export async function updateStockEntry(
     status: "active",
   });
 
-  audit.record({
+  recordCustomerAudit({
     actor,
     action: "customer.stock_entry.updated",
     targetType: "customer_stock_entry",
@@ -2315,7 +2331,7 @@ export async function generateStockEntryBarcode(
   assertWarehouseAccess(actor, entry.warehouseId);
 
   const recordGenerated = (barcodeValue: string) =>
-    audit.record({
+    recordCustomerAudit({
       actor,
       action: "customer.stock_entry.barcode_generated",
       targetType: "customer_stock_entry",
@@ -2395,7 +2411,7 @@ export async function deleteStockEntry(
 
   await customerRepo.deleteStockEntry(entryId);
 
-  audit.record({
+  recordCustomerAudit({
     actor,
     action: "customer.stock_entry.deleted",
     targetType: "customer_stock_entry",
@@ -2470,7 +2486,7 @@ export async function createDirectStockEntry(
     receivedAt: new Date(),
   });
 
-  audit.record({
+  recordCustomerAudit({
     actor,
     action: "customer.stock_entry.created",
     targetType: "customer_stock_entry",
@@ -2515,7 +2531,7 @@ export async function transferCustomerStock(
 
   if (!updatedSource || !updatedDest) throw conflict("Transfer failed — stock changed concurrently. Refresh and try again.");
 
-  audit.record({
+  recordCustomerAudit({
     actor,
     action: "customer_stock.transferred",
     targetType: "customer_stock_entry",

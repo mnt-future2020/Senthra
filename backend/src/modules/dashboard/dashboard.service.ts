@@ -1,5 +1,6 @@
 import { principalGrants } from "../../types/principal.js";
 import * as settingsService from "#modules/settings/settings.service.js";
+import { startOfDayIn } from "../../utils/filter-date.js";
 import type { Principal } from "../../types/principal.js";
 import { warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import * as prfRepo from "#modules/purchase-request/purchase-request.repository.js";
@@ -171,7 +172,11 @@ export async function buildDashboardSummary(
     // Scope-keyed + short-TTL inside the inventory service: the reorder maths is far heavier than a
     // repo count, and this card is fetched on every dashboard load. See getReorderSummary.
     section("reorderNeeded", canInv, async () => inventoryService.getReorderSummary(actor)),
-    section("expectedThisWeek", canPo, async () => poRepo.expectedDeliveries(now, scope)),
+    // Delivery windows share the company-timezone day boundary with jobs + goods-management, so an
+    // "overdue" delivery and an "overdue" job flip at the same moment.
+    section("expectedThisWeek", canPo, async () =>
+      poRepo.expectedDeliveries(now, startOfDayIn(await settingsService.getCompanyTimezone(), now), scope),
+    ),
     section("goodsReceived", canGrn, async () => {
       // One read covers both figures: the 8-week spark and the 7-day pulse count.
       const rows = await grnRepo.completedReceiptsSince(sparkSince, scope);

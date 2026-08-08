@@ -171,7 +171,7 @@ export function OverdueHoldingsView({ warehouseId }: { warehouseId?: string }) {
         <thead>
           <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
             {OVERDUE_HEADERS.map((h, i) => (
-              <th key={i} className={`px-4 py-3 ${i === 4 ? "text-right" : ""}`}>{h}</th>
+              <th key={i} className={`cell-y px-4 ${i === 4 ? "text-right" : ""}`}>{h}</th>
             ))}
           </tr>
         </thead>
@@ -179,7 +179,7 @@ export function OverdueHoldingsView({ warehouseId }: { warehouseId?: string }) {
           {Array.from({ length: 5 }).map((_, i) => (
             <tr key={i} className="border-b border-[var(--border)] last:border-0">
               {OVERDUE_HEADERS.map((_h, j) => (
-                <td key={j} className="px-4 py-3"><Skeleton className="h-3 w-20" /></td>
+                <td key={j} className="cell-y px-4"><Skeleton className="h-3 w-20" /></td>
               ))}
             </tr>
           ))}
@@ -234,14 +234,14 @@ export function OverdueHoldingsView({ warehouseId }: { warehouseId?: string }) {
       <table className="w-full text-left text-sm" style={{ minWidth: 650 }}>
         <thead className="sticky top-0 z-10 bg-[var(--surface)]">
           <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-            <th className="px-4 py-3">Job</th>
-            <th className="px-4 py-3">Engineer</th>
-            <th className="px-4 py-3">Issued</th>
-            <th className="px-4 py-3">Status</th>
+            <th className="cell-y px-4">Job</th>
+            <th className="cell-y px-4">Engineer</th>
+            <th className="cell-y px-4">Issued</th>
+            <th className="cell-y px-4">Status</th>
             {/* Days out sits beside the action so the right edge reads as one aligned group. On its own
                 between two left-aligned text columns, the number looked stranded. */}
-            <th className="px-4 py-3 text-right">Days out</th>
-            <th className="px-4 py-3" />
+            <th className="cell-y px-4 text-right">Days out</th>
+            <th className="cell-y px-4" />
           </tr>
         </thead>
         <tbody>
@@ -250,7 +250,7 @@ export function OverdueHoldingsView({ warehouseId }: { warehouseId?: string }) {
               key={row.movementId}
               className="border-b border-[var(--border)] align-middle last:border-0"
             >
-              <td className="px-4 py-3">
+              <td className="cell-y px-4">
                 {/* Same rose chip as the Jobs list, the queue row and the scan panel — one state, one
                     look. A cancelled job here isn't waiting on an engineer to finish: its stock can
                     only come back or be written off, which changes how the chase reads. */}
@@ -264,20 +264,20 @@ export function OverdueHoldingsView({ warehouseId }: { warehouseId?: string }) {
                   {row.movementCode}
                 </div>
               </td>
-              <td className="px-4 py-3 text-xs text-[var(--muted)]">
+              <td className="cell-y px-4 text-xs text-[var(--muted)]">
                 {row.engineerName ?? "—"}
               </td>
-              <td className="px-4 py-3 text-xs text-[var(--muted)]">
+              <td className="cell-y px-4 text-xs text-[var(--muted)]">
                 {fmtDate(row.issuedAt)}
               </td>
-              <td className="px-4 py-3">{statusChip(row.goodsStatus)}</td>
-              <td className="px-4 py-3 text-right font-bold tabular-nums text-[var(--neg)]">
+              <td className="cell-y px-4">{statusChip(row.goodsStatus)}</td>
+              <td className="cell-y px-4 text-right font-bold tabular-nums text-[var(--neg)]">
                 {row.daysOut}
               </td>
               {/* Anchored to the right edge like the action column in Inventory. `text-right` alone
                   wouldn't do it — the button is itself a flex container, so it would stretch across
                   the cell and sit wherever the column happened to start. */}
-              <td className="px-4 py-3">
+              <td className="cell-y px-4">
                 <div className="flex justify-end">
                 {/* Opens the write-off modal rather than confirming inline: the row has nowhere to show
                     WHAT would be lost or to ask why, and both are required now. */}
@@ -299,15 +299,14 @@ export function OverdueHoldingsView({ warehouseId }: { warehouseId?: string }) {
         </tbody>
       </table>
       </div>
-      </div>
-      <div className="shrink-0">
-        <Pagination
-          page={serverPage}
-          totalPages={totalPages}
-          total={total}
-          label="jobs"
-          onPage={(p) => patch({ gmOvPage: p > 1 ? String(p) : null }, false)}
-        />
+      <Pagination
+        embedded
+        page={serverPage}
+        totalPages={totalPages}
+        total={total}
+        label="jobs"
+        onPage={(p) => patch({ gmOvPage: p > 1 ? String(p) : null }, false)}
+      />
       </div>
       </>
       )}

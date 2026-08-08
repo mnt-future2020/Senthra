@@ -390,7 +390,7 @@ export function UsersView() {
     Boolean(search) || statusFilter !== "all" || roleFilter !== "all";
 
   return (
-    <div className="flex h-full flex-col gap-5">
+    <div className="stack flex h-full flex-col">
       {/* Toolbar */}
       <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center">
         <div className="relative w-full sm:max-w-xs">
@@ -536,19 +536,16 @@ export function UsersView() {
             </table>
           </div>
         )}
+        {!showSkeleton && !error && total > 0 && (
+            <Pagination embedded
+              page={page}
+              totalPages={totalPages}
+              total={total}
+              label="users"
+              onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)}
+            />
+        )}
       </div>
-
-      {!showSkeleton && !error && total > 0 && (
-        <div className="shrink-0">
-          <Pagination
-            page={page}
-            totalPages={totalPages}
-            total={total}
-            label="users"
-            onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)}
-          />
-        </div>
-      )}
 
       <ConfirmDialog
         open={confirm.open}

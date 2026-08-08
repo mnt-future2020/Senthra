@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowLeftRight, CheckCircle2, ChevronDown, ChevronRight, ClipboardList, Loader2, RefreshCw, Search } from "lucide-react";
 
 import * as inventoryService from "@/services/inventory.service";
@@ -13,6 +13,7 @@ import { useDashboard } from "@/hooks/useDashboard";
 import { Modal } from "@/components/ui/Modal";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { Select } from "@/components/ui/Select";
+import { tableMinWidth } from "@/components/ui/tableLayout";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { formatMoney } from "./inventoryStatus";
 
@@ -21,6 +22,10 @@ import { formatMoney } from "./inventoryStatus";
 // tune quantities, and generates DRAFT Purchase Requests grouped supplier × warehouse through the
 // existing PRF → approval → PO pipeline. The server re-validates every row at generate time, so
 // this surface never has to be perfectly fresh to be safe.
+
+// Item · Warehouse · six numeric columns · Reason · Supplier. Only the first, Reason and Supplier
+// carry text; `min-w-[1160px]` across twelve columns left every one of them ~97px.
+const TABLE_MIN_WIDTH = tableMinWidth(["wide", "wide", "narrow", "narrow", "narrow", "narrow", "narrow", "narrow", "narrow", "narrow", "normal", "normal"]);
 
 const REASON_LABELS: Record<ReorderReason, string> = {
   negative_stock: "Negative stock",
@@ -139,6 +144,7 @@ export function ReorderWorkbench() {
   const router = useRouter();
   const { can } = useAuth();
   const { pushToast } = useDashboard();
+  const searchParams = useSearchParams();
   const canGenerate = can("purchase_requests.create");
   // A row can only become a PRF line if it's actionable (not merely "covered" by the pipeline) AND
   // its primary supplier is set and still active — an inactive supplier would be rejected by the
@@ -161,7 +167,12 @@ export function ReorderWorkbench() {
   const [supplierFilter, setSupplierFilter] = React.useState("");
   const [categoryFilter, setCategoryFilter] = React.useState("");
   const [reasonFilter, setReasonFilter] = React.useState("");
-  const [criticalOnly, setCriticalOnly] = React.useState(false);
+  // Seeded from ?critical=1, which is where the "Critical stock" badge lands. That badge counts
+  // exactly the rows this checkbox leaves on screen (getReorderSummary's criticalCount is
+  // `actionable.filter(s => s.critical)`), so arriving with the box already ticked is what makes the
+  // number and the list the same set. It is a normal filter afterwards — untick and the URL is not
+  // rewritten, because the user is now browsing, not following a badge.
+  const [criticalOnly, setCriticalOnly] = React.useState(() => searchParams.get("critical") === "1");
   const [showCovered, setShowCovered] = React.useState(false);
 
   const [confirmOpen, setConfirmOpen] = React.useState(false);
@@ -451,7 +462,7 @@ export function ReorderWorkbench() {
           </div>
         ) : (
           <div className="min-h-0 flex-1 overflow-auto">
-            <table className="w-full min-w-[1160px] text-left text-sm">
+            <table className="w-full text-left text-sm" style={{ minWidth: TABLE_MIN_WIDTH }}>
               <thead>
                 <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
                   <th className="w-10 px-3 py-3">

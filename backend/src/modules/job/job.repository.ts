@@ -3,6 +3,7 @@ import { Prisma, type Job } from "@prisma/client";
 import { prisma, withTransaction } from "../../lib/prisma.js";
 import { escapeRegex } from "../../utils/search.js";
 import { startOfDayIn } from "../../utils/filter-date.js";
+import { OVERDUE_ELIGIBLE_STATUSES } from "./job-overdue.js";
 
 // Data-access layer for Jobs (field-work job header + kit lines). The ONLY place Prisma is touched
 // for job records. Soft-deleted jobs (deletedAt set) are excluded from normal reads. Header + kit
@@ -93,15 +94,31 @@ function lineCreateData(l: JobKitLineRow): Prisma.JobKitLineUncheckedCreateWitho
 // --- filters / reads -------------------------------------------------------------------------
 export interface JobListFilters {
   search?: string;
+  /** a real status, or the DERIVED pseudo-status "overdue" (see buildWhere) */
   status?: string;
   customerId?: string;
   assignedEngineerId?: string;
   projectId?: string;
+  /**
+   * Start of "today" in the COMPANY timezone. Supplied by the caller for the same reason as on the
+   * engineer side (buildEngineerWhere): the repository holds no business decisions and reads no
+   * settings. REQUIRED whenever `status === "overdue"`.
+   */
+  overdueBefore?: Date;
 }
 
 function buildWhere(filters: JobListFilters): Prisma.JobWhereInput {
   const where: Prisma.JobWhereInput = { deletedAt: null };
-  if (filters.status) where.status = filters.status;
+  if (filters.status === "overdue") {
+    // Same derived pseudo-status the engineer list and the dashboard overdue card use — an ACTIVE job
+    // whose completion date has passed. Sharing one definition is the point: this is where the
+    // "Jobs overdue" attention badge sends you, and a badge whose count disagrees with the list it
+    // opens is worse than no badge. Loud on a missing boundary for the same reason as the engineer
+    // side: a quiet default reports "nothing overdue", which is invisible and wrong.
+    if (!filters.overdueBefore) throw new Error("buildWhere: overdueBefore is required for the overdue filter.");
+    where.status = { in: [...ACTIVE_JOB_STATUSES] };
+    where.completionDate = { lt: filters.overdueBefore };
+  } else if (filters.status) where.status = filters.status;
   if (filters.customerId) where.customerId = filters.customerId;
   if (filters.assignedEngineerId) where.assignedEngineerId = filters.assignedEngineerId;
   if (filters.projectId) where.projectId = filters.projectId;
@@ -912,7 +929,9 @@ export async function countActiveJobsByEngineer(): Promise<Map<string, number>> 
 
 // --- Dashboard read-models — not a generic reporting API ---
 
-const ACTIVE_JOB_STATUSES = ["assigned", "accepted", "in_progress"] as const;
+// Re-exported from job-overdue so the `?status=overdue` filter below and the per-row `overdue` flag
+// on the list can never narrow to different statuses. One list, one definition.
+const ACTIVE_JOB_STATUSES = OVERDUE_ELIGIBLE_STATUSES;
 
 /** Count of jobs currently in flight. */
 export async function countActive(): Promise<number> {
@@ -933,6 +952,24 @@ export async function createdSince(since: Date): Promise<Array<{ at: Date }>> {
  *  They must share `startOfDayIn` — a card reading "3 overdue" above a queue listing 4 is worse than
  *  either being an hour out. Not per-warehouse: a job belongs to no warehouse (only its kit lines do),
  *  so this company-wide count would have none to read. */
+// Attention counts — office-side job states where a human still owes an action. `rejected` is the
+// highest-value one: an engineer declined it, so the job is DEAD until a planner reassigns or cancels
+// it, and nothing else in the app counts it. Jobs are deliberately NOT warehouse-scoped (a job's kit
+// lines can span warehouses), so these are company-wide for every actor — same rule as the
+// activeJobs dashboard card.
+//
+// NO "draft" count here. `status` defaults to "draft" in the schema, but nothing ever WRITES it —
+// createJob posts "assigned" (a job is raised with an engineer on it) and no transition returns to
+// draft. A count of it is structurally 0, and the badge it fed offered a filtered list that was
+// always empty. See the same note in attention.registry's "look like work but are not" block.
+export async function countAttention(): Promise<{ rejected: number; awaitingAcceptance: number }> {
+  const [rejected, awaitingAcceptance] = await Promise.all([
+    prisma.job.count({ where: { status: "rejected", deletedAt: null } }),
+    prisma.job.count({ where: { status: "assigned", deletedAt: null } }),
+  ]);
+  return { rejected, awaitingAcceptance };
+}
+
 export async function dueBreakdown(now: Date, timeZone: string): Promise<{ overdue: number; dueThisWeek: number }> {
   const startToday = startOfDayIn(timeZone, now);
   const in7Days = new Date(startToday.getTime() + 7 * 24 * 60 * 60 * 1000);

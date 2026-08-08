@@ -100,6 +100,17 @@ export interface Job {
   rack: string | null;
   shelf: string | null;
   completionDate: string | null;
+  /**
+   * Past its due date and still active — SERVER-DERIVED, never recomputed here.
+   *
+   * "Today" is the start of today in the COMPANY's timezone (a Settings value), which the browser
+   * does not know. Deriving this from `new Date()` would mark a different set of rows than the "Jobs
+   * overdue" badge counted, for anyone not sitting in that timezone. Populated on list reads; false
+   * on the detail payloads.
+   */
+  overdue: boolean;
+  /** Whole days past due when `overdue`, else null. Server-derived for the same reason. */
+  daysLate: number | null;
   priority: string;
   assignedEngineerId: string | null;
   assignedEngineerName: string | null;
@@ -170,6 +181,16 @@ export interface PortalJob {
   completionDate: string | null;
   /** When the work was actually finished. Null until it is. */
   completedAt: string | null;
+  /**
+   * Past its due date and still live — SERVER-DERIVED against the COMPANY timezone, like the office
+   * and engineer lists, so a customer abroad never sees a different set marked late than the people
+   * working the jobs do.
+   *
+   * No day count on purpose: the customer has the date and can do the arithmetic, and a "36d late"
+   * chip on their own job turns a status into an accusation. A red date says the same thing without
+   * performing it.
+   */
+  overdue: boolean;
   stage: PortalJobStage;
   /** The engineer attending. Null while the job is between engineers. */
   engineerName: string | null;

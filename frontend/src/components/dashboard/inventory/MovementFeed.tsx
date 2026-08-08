@@ -147,27 +147,33 @@ function FilterBar({
   );
 }
 
+import { tableMinWidth } from "@/components/ui/tableLayout";
+
 const HEADERS = ["Date", "Type", "Item", "Owner", "Location", "Qty", "Balance", "Reference", "Actor"];
+
+// Item, Location and Reference are the values that run long; the flat `min-w-[980px]` across nine
+// columns left them ~109px each.
+const TABLE_MIN_WIDTH = tableMinWidth(["normal", "normal", "wide", "narrow", "wide", "narrow", "narrow", "normal", "normal"]);
 
 function Row({ m }: { m: Movement }) {
   return (
     <tr className="border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]">
-      <td className="whitespace-nowrap px-4 py-3 text-[var(--muted)]">{new Date(m.date).toLocaleString()}</td>
-      <td className="px-4 py-3">
+      <td className="whitespace-nowrap cell-y px-4 text-[var(--muted)]">{new Date(m.date).toLocaleString()}</td>
+      <td className="cell-y px-4">
         <span className="rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-2 py-0.5 text-[11px] font-semibold text-[var(--muted)]">{m.label}</span>
       </td>
-      <td className="px-4 py-3">
+      <td className="cell-y px-4">
         <div className="font-semibold text-[var(--ink)]">{m.itemName}</div>
         {(m.itemCode || m.sku) && <div className="font-mono text-[10px] text-[var(--faint)]">{m.itemCode || m.sku}</div>}
       </td>
-      <td className="px-4 py-3"><OwnerTag ownership={m.ownership} /></td>
-      <td className="px-4 py-3 text-[var(--muted)]">{m.locationLabel || "—"}</td>
-      <td className={`px-4 py-3 text-right font-semibold ${m.quantityDelta < 0 ? "text-[var(--neg)]" : "text-[var(--pos)]"}`}>
+      <td className="cell-y px-4"><OwnerTag ownership={m.ownership} /></td>
+      <td className="cell-y px-4 text-[var(--muted)]">{m.locationLabel || "—"}</td>
+      <td className={`cell-y px-4 text-right font-semibold ${m.quantityDelta < 0 ? "text-[var(--neg)]" : "text-[var(--pos)]"}`}>
         {m.quantityDelta > 0 ? `+${m.quantityDelta}` : m.quantityDelta}
       </td>
-      <td className="px-4 py-3 text-right text-[var(--muted)]">{m.balanceAfter ?? "—"}</td>
-      <td className="px-4 py-3 font-mono text-[11px] text-[var(--muted)]">{m.reference ?? "—"}</td>
-      <td className="px-4 py-3 text-[var(--muted)]">{m.actor ?? "—"}</td>
+      <td className="cell-y px-4 text-right text-[var(--muted)]">{m.balanceAfter ?? "—"}</td>
+      <td className="cell-y px-4 font-mono text-[11px] text-[var(--muted)]">{m.reference ?? "—"}</td>
+      <td className="cell-y px-4 text-[var(--muted)]">{m.actor ?? "—"}</td>
     </tr>
   );
 }
@@ -301,11 +307,11 @@ export function MovementFeed({
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
         <div className="min-h-0 flex-1 overflow-auto">
-          <table className="w-full min-w-[980px] text-left text-sm">
+          <table className="w-full text-left text-sm" style={{ minWidth: TABLE_MIN_WIDTH }}>
             <thead className="sticky top-0 z-10 bg-[var(--surface)]">
               <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
                 {HEADERS.map((h) => (
-                  <th key={h} className={`px-4 py-3 ${h === "Qty" || h === "Balance" ? "text-right" : ""}`}>{h}</th>
+                  <th key={h} className={`cell-y px-4 ${h === "Qty" || h === "Balance" ? "text-right" : ""}`}>{h}</th>
                 ))}
               </tr>
             </thead>

@@ -21,6 +21,7 @@ import { useGoodsSocket } from "@/hooks/useGoodsSocket";
 import { TableSkeletonRows } from "./hubUi";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
+import { tableMinWidth } from "@/components/ui/tableLayout";
 import { inputCls, labelCls, primaryBtn, secondaryBtn } from "@/components/ui/styles";
 import type { EngineerTransfer, PagedTransfers } from "@/services/engineerTransfer.service";
 
@@ -28,6 +29,11 @@ import type { EngineerTransfer, PagedTransfers } from "@/services/engineerTransf
 
 const TH = "px-4 py-3 text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]";
 const TD = "px-4 py-3";
+
+// Item · Ownership · Qty · Code & Age · From · To · Reason · Status.
+// Engineer names and the reason are the long values; `min-w-[820px]` across eight columns left them
+// ~102px each.
+const TABLE_MIN_WIDTH = tableMinWidth(["wide", "normal", "narrow", "normal", "wide", "wide", "normal", "narrow"]);
 
 const STATUS_CLS: Record<string, string> = {
   pending: "border-amber-500/30 bg-amber-500/10 text-amber-600",
@@ -388,7 +394,7 @@ export function AdminTransferBoard() {
       {/* Table */}
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
         <div className="min-h-0 flex-1 overflow-auto">
-          <table className="w-full min-w-[820px] text-left text-sm">
+          <table className="w-full text-left text-sm" style={{ minWidth: TABLE_MIN_WIDTH }}>
             <thead className="sticky top-0 z-10 bg-[var(--surface)]">
               <tr className="border-b border-[var(--border)]">
                 <th className={TH}>Code / Age</th>
@@ -426,16 +432,17 @@ export function AdminTransferBoard() {
             )}
           </table>
         </div>
+        {/* Already inside the card; `embedded` moves the border-top and padding onto Pagination
+            itself so every list in the app draws this footer the same way. */}
         {transfers && transfers.total > 0 && (
-          <div className="shrink-0 border-t border-[var(--border)] p-3">
-            <Pagination
-              page={transfers.page}
-              totalPages={transfers.totalPages}
-              total={transfers.total}
-              label="transfers"
-              onPage={(p) => patchParams({ page: p > 1 ? String(p) : null })}
-            />
-          </div>
+          <Pagination
+            embedded
+            page={transfers.page}
+            totalPages={transfers.totalPages}
+            total={transfers.total}
+            label="transfers"
+            onPage={(p) => patchParams({ page: p > 1 ? String(p) : null })}
+          />
         )}
       </div>
     </>

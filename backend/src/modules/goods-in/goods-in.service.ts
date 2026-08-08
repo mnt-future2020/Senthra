@@ -9,6 +9,7 @@ import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
+import { emitAttentionChanged } from "../../lib/realtime.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { withTransaction } from "../../lib/prisma.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
@@ -141,8 +142,9 @@ function warehouseAddress(w: GoodsReceiptWithRelations["warehouse"]): string | n
   return parts.length ? parts.join(", ") : null;
 }
 
-// `liveReceived` (poItemId → current PO line receivedQuantity) is passed ONLY for draft
-// reads, to replace each line's stale `previouslyReceived` snapshot with the live value.
+// `liveReceived` (poItemId → current PO line receivedQuantity) replaces each line's stale
+// `previouslyReceived` snapshot with the live value. Passed for every receipt that has NOT posted its
+// own units against the PO — i.e. all but `completed`. See getGoodsReceipt.
 function toPublic(grn: GoodsReceiptWithRelations, liveReceived?: Map<string, number>): PublicGoodsReceipt {
   const supplier = grn.purchaseOrder?.supplier;
   let totalReceived = 0;
@@ -353,18 +355,25 @@ export async function getGoodsReceipt(idOrCode: string, actor?: AuditActor): Pro
   const grn = OBJECT_ID_RE.test(idOrCode) ? await grnRepo.findById(idOrCode) : await grnRepo.findByCode(idOrCode);
   if (!grn) throw notFound("Goods receipt not found.");
   assertWarehouseAccess(actor, grn.warehouseId);
-  // Each line's `previouslyReceived` is a snapshot frozen when the draft was created; it goes
-  // stale the moment another GRN against the same PO completes afterwards. For a DRAFT (the only
-  // editable state) recompute it live from the PO's current line receipts — which still EXCLUDE
-  // this draft — so the edit form shows the true remaining and its inline check matches the
-  // authoritative completion guard. Completed/cancelled GRNs keep their frozen historical snapshot
-  // (the PO line now includes their own received units, so a live value would be wrong there).
-  const liveReceived = grn.status === "draft" ? await livePreviouslyReceived(grn.purchaseOrderId) : undefined;
+  // Each line's `previouslyReceived` is a snapshot frozen when the draft was created; it goes stale
+  // the moment another GRN against the same PO completes afterwards. Recompute it live from the PO's
+  // current line receipts whenever this receipt is NOT the reason those receipts exist:
+  //
+  //   draft     — nothing posted, so the live figure excludes it. The edit form needs this to show
+  //               the true remaining and to match the authoritative completion guard.
+  //   cancelled — nothing posted and nothing ever will, so the live figure excludes it too.
+  //   completed — the PO line now INCLUDES this receipt's own units, so a live value would count
+  //               them as "previously received" against itself. Its frozen snapshot is the history.
+  //
+  // The condition was `=== "draft"`, which sent a cancelled receipt back to its creation-time
+  // snapshot: cancelling one visibly changed Prev. (1 → 0 in the case that surfaced this) with no
+  // stock having moved either way, reading as though the cancel had reversed a receipt somewhere.
+  const liveReceived = grn.status === "completed" ? undefined : await livePreviouslyReceived(grn.purchaseOrderId);
   return toPublic(grn, liveReceived);
 }
 
-// poItemId → the PO line's current receivedQuantity (sum of all COMPLETED receipts; drafts don't
-// count until completed). Used only to refresh a draft's stale `previouslyReceived` on read.
+// poItemId → the PO line's current receivedQuantity (sum of all COMPLETED receipts; drafts and
+// cancelled receipts never count). Used to refresh a stale `previouslyReceived` on read.
 async function livePreviouslyReceived(purchaseOrderId: string): Promise<Map<string, number>> {
   const po = await poRepo.findById(purchaseOrderId);
   return new Map((po?.items ?? []).map((l) => [l.id, l.receivedQuantity]));
@@ -409,6 +418,10 @@ export async function createGoodsReceipt(input: CreateGoodsReceiptInput, actor?:
     rows,
   );
   audit.record({ actor, action: "goods_in.created", targetType: "goods_receipt", targetId: created.id, targetLabel: created.code });
+  // GRN has no realtime surface of its own; this is purely the attention signal (drafts waiting to be
+  // completed, plus the receivable-PO queue this receipt was raised against). Editing a draft is
+  // deliberately NOT signalled — it moves no count.
+  emitAttentionChanged("goods_in");
   return toPublic(created);
 }
 
@@ -496,6 +509,10 @@ export async function completeGoodsReceipt(id: string, actor?: AuditActor): Prom
   });
 
   audit.record({ actor, action: "goods_in.completed", targetType: "goods_receipt", targetId: id, targetLabel: grn.code });
+  // Completing moves several queues at once — GRN drafts, the PO's receive/close state (advanced
+  // inside the tx above, which has no emit of its own) and inventory reorder levels. One signal is
+  // enough: the client refetches the whole attention payload, not just this area.
+  emitAttentionChanged("goods_in");
   return getGoodsReceipt(id);
 }
 
@@ -505,6 +522,7 @@ export async function cancelGoodsReceipt(id: string, reason: string | undefined,
   assertTransition(grn.status, "cancelled");
   const updated = await grnRepo.update(id, { status: "cancelled", cancelledBy: actor?.email ?? null, cancelledAt: new Date(), cancelReason: trimToNull(reason) });
   audit.record({ actor, action: "goods_in.cancelled", targetType: "goods_receipt", targetId: id, targetLabel: updated.code });
+  emitAttentionChanged("goods_in");
   return toPublic(updated);
 }
 
@@ -514,6 +532,7 @@ export async function deleteGoodsReceipt(id: string, actor?: AuditActor): Promis
   if (grn.status !== "draft") throw conflict("Only draft goods receipts can be deleted.");
   await grnRepo.softDelete(id);
   audit.record({ actor, action: "goods_in.deleted", targetType: "goods_receipt", targetId: id, targetLabel: grn.code });
+  emitAttentionChanged("goods_in");
 }
 
 // ── Attachments ──────────────────────────────────────────────────────────────────────────────

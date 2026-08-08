@@ -18,6 +18,7 @@ import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark } 
 import { BarcodePanel } from "@/components/dashboard/irm/BarcodePanel";
 import { PO_STATUS_LABELS } from "@/components/dashboard/purchase-orders/poStatus";
 import { AttachmentGrid, DocPicker, attachmentToDoc, type DocItem, type PickedDoc } from "./DeliveryDocuments";
+import { acceptedWording } from "./acceptedWording";
 import type { GoodsReceipt, GrnAttachment } from "@/types/goods-in";
 import type { PurchaseOrder } from "@/types/purchase-order";
 import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
@@ -165,6 +166,15 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
         }))
       : [],
   );
+
+  // This form only ever produces or edits a DRAFT — completing is a separate action from the detail
+  // page — so the summary aside always speaks in the "not posted yet" tense. Taken from the shared
+  // table rather than written here, so the aside and the detail page cannot describe the same figure
+  // in two different tenses.
+  const draftWording = acceptedWording("draft");
+  // Derived, exactly as the per-line Damaged cell derives it. Only shown when non-zero: otherwise it
+  // is a permanent "0" in a panel whose job is to be scanned at a glance.
+  const totalDamaged = lines.reduce((a, l) => a + damagedOf(l), 0);
 
   const [receivablePos, setReceivablePos] = React.useState<PurchaseOrder[]>([]);
   // True once the receivable-PO fetch settles — lets us tell "still loading" (don't nag) from
@@ -723,11 +733,20 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
         </div>
 
         <aside className="lg:sticky lg:top-6 lg:self-start">
+          {/* This form only ever edits a DRAFT, so "Total accepted" was the same past-tense claim the
+              detail page used to make: nothing has been accepted into anything until the receipt is
+              completed. The wording comes from the shared table so the aside and the detail page can
+              never describe the same figure differently.
+              Damaged is shown only when there is some — it is derived (received − accepted), so
+              without it a reader seeing 3 received and 2 to accept has no idea where the third went. */}
           <FormAsideCard title="Receipt summary">
             <div className="space-y-2.5 text-sm">
-              <div className="flex justify-between"><span className="text-[var(--muted)]">Lines receiving</span><span className="font-semibold text-[var(--ink)]">{lines.filter((l) => num(l.receive) > 0).length}</span></div>
+              <div className="flex justify-between"><span className="text-[var(--muted)]">Lines on this delivery</span><span className="font-semibold text-[var(--ink)]">{lines.filter((l) => num(l.receive) > 0).length}</span></div>
               <div className="flex justify-between"><span className="text-[var(--muted)]">Total received</span><span className="font-semibold text-[var(--ink)]">{lines.reduce((a, l) => a + num(l.receive), 0)}</span></div>
-              <div className="flex justify-between"><span className="text-[var(--muted)]">Total accepted</span><span className="font-extrabold text-[var(--ink)]">{lines.reduce((a, l) => a + acceptedOf(l), 0)}</span></div>
+              {totalDamaged > 0 && (
+                <div className="flex justify-between"><span className="text-[var(--muted)]">Total damaged</span><span className="font-semibold text-[var(--neg)]">{totalDamaged}</span></div>
+              )}
+              <div className="flex justify-between" title={draftWording.hint}><span className="text-[var(--muted)]">{draftWording.total}</span><span className="font-extrabold text-[var(--ink)]">{lines.reduce((a, l) => a + acceptedOf(l), 0)}</span></div>
               <p className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/40 px-3 py-2.5 text-[11px] text-[var(--muted)]">Inventory is updated only when the receipt is completed. The GRN number is assigned when the draft is saved.</p>
             </div>
           </FormAsideCard>

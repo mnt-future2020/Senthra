@@ -16,7 +16,7 @@ import * as transferRepo from "#modules/engineer-transfer/engineer-transfer.repo
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
 import { notify } from "#modules/notification/notification.service.js";
-import { emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
+import { emitAttentionChanged, emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
 import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
 import * as kitRequestRepo from "./job-kit-request.repository.js";
 import type { CreateKitRequestData, CreateKitRequestLineData, KitRequestWithLines } from "./job-kit-request.repository.js";
@@ -174,6 +174,7 @@ function emitUpdate(engineerId: string, jobId: string, data: { id: string; code:
   const payload = { ...data, jobId };
   emitToUser(engineerId, "kit_request:updated", payload);
   emitToRoom(OFFICE_JOBS_ROOM, "kit_request:updated", payload);
+  emitAttentionChanged("kit_requests");
 }
 
 function isReviewer(actor: AuditActor): boolean {

@@ -30,6 +30,13 @@ import {
 import * as customerService from "@/services/customer.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
+import { useAttention } from "@/hooks/useAttention";
+import { useEntityAttention } from "@/hooks/useEntityAttention";
+import { CountPill } from "@/components/dashboard/shell/TabCount";
+import type { AttentionTone } from "@/services/attention.service";
+
+/** critical &lt; attention &lt; info — lower wins, matching the server's own rollup. */
+const TONE_RANK: Record<AttentionTone, number> = { critical: 0, attention: 1, info: 2 };
 import { Select } from "@/components/ui/Select";
 import { FormPageHeader, FormSection } from "@/components/ui/FormScaffold";
 import { Avatar } from "@/components/ui/Avatar";
@@ -44,6 +51,7 @@ import {
   DEFAULT_SUBMISSION_FILTERS,
   effectiveSubmissionFilters,
   filterSubmissions,
+  isActionable,
   hasActiveSubmissionFilter,
   submissionStatusOptions,
   type SubmissionFilters,
@@ -75,13 +83,20 @@ const CUSTOMERS_LIST = "/dashboard/customers";
 // The detail page is organised into tabs (URL-driven ?tab=) like the Users & Roles
 // panel: the company header stays pinned and each section becomes a tab.
 type TabId = "overview" | "projects" | "catalogue" | "submissions" | "sites" | "users";
-const TABS: { id: TabId; label: string; icon: React.ElementType }[] = [
+// `attention` names the catalog key whose work is done on that tab. Both customer queues are worked
+// here and nowhere else — there is no cross-customer review screen — so this is the end of the chain
+// that starts at the sidebar badge and passes through the Customers list's per-row count. Without it
+// the row says "2" and the page it opens gives no clue which two tabs to look at.
+const TABS: { id: TabId; label: string; icon: React.ElementType; attention?: string[] }[] = [
   { id: "overview", label: "Overview", icon: Building2 },
   { id: "projects", label: "Projects", icon: FolderKanban },
   { id: "catalogue", label: "Inventory", icon: Boxes },
-  { id: "submissions", label: "Stock Submissions", icon: ClipboardList },
+  // BOTH submission queues, because both are worked on this one tab: reviewing a pending request and
+  // routing an approved one to warehouses. Counting only `pending` made the badge disagree with the
+  // tab it sits on — it read 2 while the tab opened on 4 rows, two of which were also outstanding.
+  { id: "submissions", label: "Stock Submissions", icon: ClipboardList, attention: ["cust.stock_requests", "cust.awaiting_assignment"] },
   { id: "sites", label: "Sites", icon: MapPin },
-  { id: "users", label: "Portal login", icon: KeyRound },
+  { id: "users", label: "Portal login", icon: KeyRound, attention: ["cust.portal_invites"] },
 ];
 
 // Each tab beyond Overview is gated by its sub-entity's view permission, so an admin
@@ -218,6 +233,28 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
   const selectTab = (t: TabId) =>
     router.replace(`/dashboard/customers/${customer.customerCode}?tab=${t}`, { scroll: false });
 
+  // This company's own pending work, split per queue. Keys the actor may not act on are already
+  // absent server-side, so a tab only ever counts work its viewer could actually do.
+  const { rows: customerAttention } = useEntityAttention("customer");
+  const { attention } = useAttention();
+  const mine = customerAttention[customer.id];
+  // Sums the tab's queues and takes the most severe tone among the ones that actually have work. A
+  // tab holding two queues has to report BOTH: Stock Submissions counted only `pending`, so it read 2
+  // while the tab opened on four rows — two of which were approved requests still waiting to be
+  // routed to warehouses, with an "Assign warehouses" button sitting right there.
+  const tabAttention = (keys?: string[]) => {
+    let count = 0;
+    let tone: AttentionTone = "info";
+    for (const k of keys ?? []) {
+      const n = mine?.keys[k] ?? 0;
+      if (n <= 0) continue;
+      count += n;
+      const t = attention.items.find((i) => i.key === k)?.tone;
+      if (t && TONE_RANK[t] < TONE_RANK[tone]) tone = t;
+    }
+    return { count, tone };
+  };
+
   return (
     <div className="flex h-full flex-col gap-6">
       <div className="shrink-0">
@@ -303,20 +340,30 @@ export function CustomerDetail({ initial }: { initial: Customer }) {
 
       {/* Tabs — URL-driven (?tab=), like the Users & Roles panel. */}
       <div className="flex shrink-0 gap-1 overflow-x-auto rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-1">
-        {visibleTabs.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => selectTab(t.id)}
-            className={`flex shrink-0 items-center gap-2 rounded-lg px-4 py-2 text-xs font-bold transition-all ${
-              activeTab === t.id
-                ? "bg-[var(--accent)] text-white shadow-xs"
-                : "text-[var(--muted)] hover:text-[var(--ink)]"
-            }`}
-          >
-            <t.icon className="h-4 w-4" />
-            {t.label}
-          </button>
-        ))}
+        {visibleTabs.map((t) => {
+          const hit = tabAttention(t.attention);
+          return (
+            <button
+              key={t.id}
+              onClick={() => selectTab(t.id)}
+              className={`flex shrink-0 items-center gap-2 rounded-lg px-4 py-2 text-xs font-bold transition-all ${
+                activeTab === t.id
+                  ? "bg-[var(--accent)] text-white shadow-xs"
+                  : "text-[var(--muted)] hover:text-[var(--ink)]"
+              }`}
+            >
+              <t.icon className="h-4 w-4" />
+              {t.label}
+              {/* On the selected tab the tone colours would sit on the accent fill and read as a
+                  separate control; an inherited-colour number is enough once you are looking at it. */}
+              {activeTab === t.id ? (
+                hit.count > 0 ? <span className="tabular-nums opacity-80">{hit.count}</span> : null
+              ) : (
+                <CountPill count={hit.count} tone={hit.tone} label={`awaiting action on ${t.label}`} />
+              )}
+            </button>
+          );
+        })}
       </div>
 
       {/* Tabs that lay themselves out full-height (flex h-full → their own inner scroller) get a
@@ -861,7 +908,7 @@ function StockEntriesTab({
   }, [entries, page, stockSearch]);
 
   return (
-    <div className="flex h-full flex-col gap-4">
+    <div className="stack flex h-full flex-col">
       {canViewDamaged && (
         <div className="flex shrink-0 flex-wrap items-center gap-2">
           {([
@@ -980,14 +1027,14 @@ function StockEntriesTab({
                       <table className="w-full text-left text-sm" style={{ minWidth: 750 }}>
                         <thead className="sticky top-0 z-10 bg-[var(--surface)] shadow-[0_1px_0_0_var(--border)]">
                           <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)] bg-[var(--surface)]">
-                            <th className="px-4 py-3">Item</th>
-                            <th className="px-4 py-3">Warehouse</th>
-                            <th className="px-4 py-3">SKU</th>
-                            <th className="px-4 py-3">Qty</th>
-                            <th className="px-4 py-3">Barcode</th>
-                            <th className="px-4 py-3">Status</th>
-                            <th className="px-4 py-3">Received</th>
-                            <th className="px-4 py-3" />
+                            <th className="cell-y px-4">Item</th>
+                            <th className="cell-y px-4">Warehouse</th>
+                            <th className="cell-y px-4">SKU</th>
+                            <th className="cell-y px-4">Qty</th>
+                            <th className="cell-y px-4">Barcode</th>
+                            <th className="cell-y px-4">Status</th>
+                            <th className="cell-y px-4">Received</th>
+                            <th className="cell-y px-4" />
                           </tr>
                         </thead>
                         <tbody>
@@ -997,15 +1044,15 @@ function StockEntriesTab({
                               className="cursor-pointer border-b border-[var(--border)] align-top transition-colors last:border-0 hover:bg-[var(--surface-2)]"
                               onClick={() => router.push(`/dashboard/stock-entries/${e.id}?from=customer`)}
                             >
-                              <td className="px-4 py-3 font-semibold text-[var(--ink)]">{e.itemName}</td>
-                              <td className="px-4 py-3">
+                              <td className="cell-y px-4 font-semibold text-[var(--ink)]">{e.itemName}</td>
+                              <td className="cell-y px-4">
                                 <div className="text-[var(--ink)]">{e.warehouseName}</div>
                                 <div className="font-mono text-[11px] text-[var(--faint)]">{e.warehouseCode}</div>
                               </td>
-                              <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.sku ?? "—"}</td>
-                              <td className="px-4 py-3 font-bold text-[var(--ink)]">{e.quantity}</td>
-                              <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.barcode ?? "—"}</td>
-                              <td className="px-4 py-3">
+                              <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">{e.sku ?? "—"}</td>
+                              <td className="cell-y px-4 font-bold text-[var(--ink)]">{e.quantity}</td>
+                              <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">{e.barcode ?? "—"}</td>
+                              <td className="cell-y px-4">
                                 <span
                                   className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${
                                     e.status === "active"
@@ -1016,8 +1063,8 @@ function StockEntriesTab({
                                   {e.status}
                                 </span>
                               </td>
-                              <td className="px-4 py-3 text-xs text-[var(--muted)]">{fmtDate(e.receivedAt ?? e.createdAt)}</td>
-                              <td className="px-4 py-3">
+                              <td className="cell-y px-4 text-xs text-[var(--muted)]">{fmtDate(e.receivedAt ?? e.createdAt)}</td>
+                              <td className="cell-y px-4">
                                 <div className="flex items-center gap-1.5">
                                   <button
                                     type="button"
@@ -1163,7 +1210,7 @@ function StockSubmissionsTab({
     // inside the shell's viewport, so on a laptop the visible window onto the list was a few rows
     // tall — with the search box and the paginator both scrolled out of reach of the rows they
     // control. Submissions accumulate for the life of the account, so this is the tab that needs it.
-    <div className="flex h-full flex-col gap-4">
+    <div className="stack flex h-full flex-col">
       {/* ONE toolbar row: filters left, the create action right. They used to be two rows, which
           left a band of dead space beside the filters. `ml-auto` on the button parks it at the
           right edge whether or not the filters are there — so the empty-list case (button only)
@@ -1258,6 +1305,12 @@ function StockSubmissionsTab({
           </div>
           {/* The ONLY scroller in the tab. */}
           <div className="min-h-0 flex-1 divide-y divide-[var(--border)] overflow-auto">
+            {/* No row tint. An earlier pass amber-washed the actionable rows, and it was wrong twice:
+                the row already announces itself (one carrying "Approve as-is" or "Assign warehouses"
+                is self-evidently outstanding), and in the default Open view — actionable rows plus
+                receiving-in-progress ones — the wash routinely covered most of the list, at which
+                point the UNMARKED row becomes the signal. "Which ones need me" is answered by the
+                "Needs you (N)" filter, which is the tab's own number made clickable. */}
             {pageRows.map((req) => (
               <div key={req.id} className="px-3 py-2.5">
                 <div className="flex flex-wrap items-start justify-between gap-2">
@@ -1900,6 +1953,7 @@ function RowActions({
   );
 }
 
+// Every status keeps its own hue — the colour says WHICH state, not how urgent it is.
 const REQ_STATUS_COLORS: Record<string, string> = {
   pending: "bg-amber-500/15 text-amber-600",
   approved: "bg-[var(--pos)]/12 text-[var(--pos)]",
@@ -1908,9 +1962,25 @@ const REQ_STATUS_COLORS: Record<string, string> = {
   partially_received: "bg-indigo-500/12 text-indigo-600",
   completed: "bg-[var(--accent-10)] text-[var(--accent)]",
 };
+
+/**
+ * Weight, not colour, marks a status the tab still owes something on.
+ *
+ * The row already announces itself through its buttons, and the earlier attempt at an amber row wash
+ * covered most of the default view — so the signal lives on the STATUS instead, which is the
+ * GitHub/Linear/Jira convention: the chip carries the meaning, the row stays quiet. A ring plus a
+ * ring-offset reads as "raised" at 10px without adding a sixth colour to a row that already has
+ * three buttons in it.
+ */
 function RequestStatusBadge({ status }: { status: string }) {
+  const actionable = isActionable({ name: "", editedName: null, status });
   return (
-    <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${REQ_STATUS_COLORS[status] ?? REQ_STATUS_COLORS.pending}`}>
+    <span
+      title={actionable ? "Waiting on you" : undefined}
+      className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${REQ_STATUS_COLORS[status] ?? REQ_STATUS_COLORS.pending} ${
+        actionable ? "ring-1 ring-current/40 ring-offset-1 ring-offset-[var(--surface)]" : ""
+      }`}
+    >
       {status.replace(/_/g, " ")}
     </span>
   );

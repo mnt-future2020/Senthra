@@ -18,25 +18,37 @@ import { ghostBtn } from "@/components/ui/styles";
 import { ReportDamageModal, type ReportDamageTarget } from "@/components/dashboard/goods-management/ReportDamageModal";
 import { INVENTORY_STATUS_LABELS, InventoryStatusBadge, formatDate, formatMoney } from "./inventoryStatus";
 import type { InventoryStatus } from "@/types/inventory";
+import { CELL_ONE_LINE, colClass, colClassAt, tableMinWidth, type ColPriority } from "@/components/ui/tableLayout";
 import { CopyableCode } from "@/components/ui/CopyableCode";
 
 const PAGE_SIZE = 20;
 
+// Item · SKU · Warehouse · Category · On hand · Planned · Available · Value · Last movement · Status.
+// The flat `min-w-[1040px]` this replaces gave each of ten columns ~104px, so item and warehouse
+// names wrapped and rows ran two to three lines — the same squeeze the Stock positions table had.
+// This is the IRM lens of the very hub that started this, so leaving it would have made one tab of
+// the page dense and the next one cramped.
+const TABLE_MIN_WIDTH = tableMinWidth(["wide", "normal", "wide", "normal", "narrow", "narrow", "narrow", "narrow", "normal", "narrow"]);
+
+// One array drives BOTH rows below, which is the rule colClass exists to enforce: a placeholder cell
+// that stays visible while its header is hidden shifts every cell after it.
+const SKELETON_COLS: ColPriority[] = ["always", "xl", "always", "always", "always", "always", "always", "xl", "lg", "always"];
+
 function TableSkeleton() {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[1040px] text-sm">
+      <table className="w-full text-sm" style={{ minWidth: TABLE_MIN_WIDTH }}>
         <thead>
           <tr className="border-b border-[var(--border)] text-left text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-            <th className="px-4 py-3">Item</th><th className="px-4 py-3">SKU</th><th className="px-4 py-3">Warehouse</th>
-            <th className="px-4 py-3">Category</th><th className="px-4 py-3">On hand</th><th className="px-4 py-3">Planned</th>
-            <th className="px-4 py-3">Available</th><th className="px-4 py-3">Value</th><th className="px-4 py-3">Last movement</th><th className="px-4 py-3">Status</th>
+            <th className="cell-y px-4">Item</th><th className={`cell-y px-4 ${colClass("xl")}`}>SKU</th><th className="cell-y px-4">Warehouse</th>
+            <th className="cell-y px-4">Category</th><th className="cell-y px-4">On hand</th><th className="cell-y px-4">Planned</th>
+            <th className="cell-y px-4">Available</th><th className={`cell-y px-4 ${colClass("xl")}`}>Value</th><th className={`cell-y px-4 ${colClass("lg")}`}>Last movement</th><th className="cell-y px-4">Status</th>
           </tr>
         </thead>
         <tbody>
           {Array.from({ length: 8 }).map((_, i) => (
             <tr key={i} className="border-b border-[var(--border)] last:border-0">
-              {Array.from({ length: 10 }).map((__, j) => (<td key={j} className="px-4 py-3"><Skeleton className="h-3 w-16" /></td>))}
+              {Array.from({ length: 10 }).map((__, j) => (<td key={j} className={`cell-y px-4 ${colClassAt(SKELETON_COLS, j)}`}><Skeleton className="h-3 w-16" /></td>))}
             </tr>
           ))}
         </tbody>
@@ -204,42 +216,42 @@ export function InventoryView({ warehouseId, embedded }: { warehouseId?: string;
                 containing block, escapes this scroll container at the table's full 1040px and drags
                 the whole page into a horizontal scroll. See vanRequestUi.tsx. */}
             <div className="relative min-h-0 flex-1 overflow-auto">
-              <table className="w-full min-w-[1040px] text-left text-sm">
+              <table className="w-full text-left text-sm" style={{ minWidth: TABLE_MIN_WIDTH }}>
                 {/* Sticky so the column headings stay readable once the body scrolls — the same
                     treatment StockPositionTable gives its header. */}
                 <thead className="sticky top-0 z-10 bg-[var(--surface)]">
                   <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                    <th className="px-4 py-3">Item</th><th className="px-4 py-3">SKU</th><th className="px-4 py-3">Warehouse</th>
-                    <th className="px-4 py-3">Category</th><th className="px-4 py-3 text-right">On hand</th><th className="px-4 py-3 text-right" title="Unissued quantity on active jobs' kit lines here">Planned</th>
-                    <th className="px-4 py-3 text-right">Available</th><th className="px-4 py-3 text-right">Value</th><th className="px-4 py-3">Last movement</th><th className="px-4 py-3">Status</th>
-                    {canReportDamage && <th className="px-4 py-3"><span className="sr-only">Actions</span></th>}
+                    <th className="cell-y px-4">Item</th><th className={`cell-y px-4 ${colClass("xl")}`}>SKU</th><th className="cell-y px-4">Warehouse</th>
+                    <th className="cell-y px-4">Category</th><th className="cell-y px-4 text-right">On hand</th><th className="cell-y px-4 text-right" title="Unissued quantity on active jobs' kit lines here">Planned</th>
+                    <th className="cell-y px-4 text-right">Available</th><th className={`cell-y px-4 text-right ${colClass("xl")}`}>Value</th><th className={`cell-y px-4 ${colClass("lg")}`}>Last movement</th><th className="cell-y px-4">Status</th>
+                    {canReportDamage && <th className="cell-y px-4"><span className="sr-only">Actions</span></th>}
                   </tr>
                 </thead>
                 <tbody>
                   {rows.map((r) => (
                     <tr key={r.id} onClick={() => router.push(`/dashboard/inventory/${r.id}`)} className="cursor-pointer border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]">
-                      <td className="px-4 py-3">
-                        <div className="font-semibold text-[var(--ink)]">{r.itemName}</div>
+                      <td className="cell-y px-4">
+                        <div className={`font-semibold text-[var(--ink)] ${CELL_ONE_LINE}`} title={r.itemName}>{r.itemName}</div>
                         {/* The CODE is the copy target here, not the name: this row navigates to the
                             item on click, so a copy button on the name would swallow the navigation
                             everyone already expects. CopyableCode stops propagation, so copying the
                             code doesn't open the item either. */}
                         <CopyableCode code={r.itemCode} className="text-[11px] text-[var(--faint)]" />
                       </td>
-                      <td className="px-4 py-3 text-[var(--muted)]">{r.sku ?? "—"}</td>
-                      <td className="px-4 py-3 text-[var(--muted)]">{r.warehouseName}</td>
-                      <td className="px-4 py-3 text-[var(--muted)]">{r.categoryName ?? "—"}</td>
-                      <td className="px-4 py-3 text-right font-semibold text-[var(--ink)]">{r.onHand}{r.baseUnit ? <span className="ml-1 text-[11px] font-normal text-[var(--faint)]">{r.baseUnit}</span> : null}</td>
+                      <td className={`cell-y px-4 text-[var(--muted)] ${colClass("xl")}`}>{r.sku ?? "—"}</td>
+                      <td className={`cell-y px-4 text-[var(--muted)] ${CELL_ONE_LINE}`} title={r.warehouseName}>{r.warehouseName}</td>
+                      <td className={`cell-y px-4 text-[var(--muted)] ${CELL_ONE_LINE}`} title={r.categoryName ?? undefined}>{r.categoryName ?? "—"}</td>
+                      <td className="cell-y px-4 text-right font-semibold text-[var(--ink)]">{r.onHand}{r.baseUnit ? <span className="ml-1 text-[11px] font-normal text-[var(--faint)]">{r.baseUnit}</span> : null}</td>
                       {/* The DB `reserved` field is permanently 0 (schema: "FUTURE"), so a column bound to it
                         always read 0 while real commitments sat on the Demand board — two screens
                         disagreeing about one item. This shows the commitment that actually exists. */}
-                      <td className="px-4 py-3 text-right text-[var(--muted)]">{r.plannedDemand}</td>
-                      <td className="px-4 py-3 text-right font-semibold text-[var(--ink)]">{r.available}</td>
-                      <td className="px-4 py-3 text-right text-[var(--muted)]">{formatMoney(r.value, r.currency)}</td>
-                      <td className="px-4 py-3 text-[var(--muted)]">{formatDate(r.lastMovementAt)}</td>
-                      <td className="px-4 py-3"><InventoryStatusBadge status={r.status} /></td>
+                      <td className="cell-y px-4 text-right text-[var(--muted)]">{r.plannedDemand}</td>
+                      <td className="cell-y px-4 text-right font-semibold text-[var(--ink)]">{r.available}</td>
+                      <td className={`cell-y px-4 text-right text-[var(--muted)] ${colClass("xl")}`}>{formatMoney(r.value, r.currency)}</td>
+                      <td className={`cell-y px-4 text-[var(--muted)] ${colClass("lg")}`}>{formatDate(r.lastMovementAt)}</td>
+                      <td className="cell-y px-4"><InventoryStatusBadge status={r.status} /></td>
                       {canReportDamage && (
-                        <td className="px-4 py-3">
+                        <td className="cell-y px-4">
                           <div className="flex justify-end">
                             <button
                               type="button"
@@ -279,13 +291,10 @@ export function InventoryView({ warehouseId, embedded }: { warehouseId?: string;
             )}
           </>
         )}
+        {data && data.total > 0 && (
+            <Pagination embedded page={data.page} totalPages={data.totalPages} total={data.total} label="records" onPage={setPage} />
+        )}
       </div>
-
-      {data && data.total > 0 && (
-        <div className="shrink-0">
-          <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="records" onPage={setPage} />
-        </div>
-      )}
 
       <ReportDamageModal
         target={damageTarget}

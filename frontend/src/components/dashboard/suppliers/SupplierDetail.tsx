@@ -83,7 +83,7 @@ export function SupplierDetail({ initial }: { initial: Supplier }) {
   };
 
   return (
-    <div className="flex h-full flex-col gap-5">
+    <div className="stack flex h-full flex-col">
       <DetailHeader
         storageKey="supplier-detail"
         title={s.name}

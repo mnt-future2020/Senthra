@@ -1996,6 +1996,10 @@ model CustomerStockRequest {
   updatedAt         DateTime  @updatedAt
 
   @@index([customerId, status])
+  // Standalone status index for the attention count, which asks "how many pending across the whole
+  // company?" with no customerId — a [customerId, status] compound cannot serve that (status is not
+  // a left prefix), so without this the count is a full collection scan on every attention load.
+  @@index([status])
 }
 
 // A warehouse allocation for a customer stock request. One request can be split across
@@ -2036,6 +2040,10 @@ model CustomerStockWarehouseAssignment {
   @@unique([customerStockRequestId, warehouseId])
   @@index([customerStockRequestId])
   @@index([warehouseId, status])
+  // The [warehouseId, status] compound above serves a warehouse-SCOPED actor. An unrestricted actor
+  // (admin, or any role without warehouse scoping) counts on status alone, which that compound can't
+  // serve — hence the standalone index. Same reason as CustomerStockRequest.
+  @@index([status])
 }
 
 // A physical stock entry created when customer stock is received at a warehouse.
@@ -2088,6 +2096,8 @@ model CustomerStockEntry {
   @@index([customerId])
   @@index([warehouseId, status])
   @@index([assignmentId])
+  // Unscoped actors count drafts on status alone — see CustomerStockWarehouseAssignment.
+  @@index([status])
 }
 
 // ── JOBS — field-work job pack (header + kit lines) ─────────────────────────────────────

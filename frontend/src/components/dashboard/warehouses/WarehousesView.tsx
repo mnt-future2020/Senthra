@@ -13,10 +13,40 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Select } from "@/components/ui/Select";
+import { CELL_ONE_LINE, colClass, tableMinWidth } from "@/components/ui/tableLayout";
+import { EntityCountPill } from "@/components/dashboard/shell/TabCount";
+import { useEntityAttention } from "@/hooks/useEntityAttention";
 import type { Warehouse, WarehouseStatus } from "@/types/warehouse";
 import type { UserStatus } from "@/types/user";
 
 const PAGE_SIZE = 20;
+
+// Code · Warehouse · Manager · City · Contact · Status · Needs attention · actions.
+// The flat `min-w-[860px]` this replaces gave each ~107px — the tightest table in the app — while
+// "London Fulfillment Centre" and a full contact name both run past 170px.
+const TABLE_MIN_WIDTH = tableMinWidth(["normal", "wide", "normal", "normal", "normal", "narrow", "narrow", "narrow"]);
+
+// ── Why these figures don't add up to the sidebar badge ────────────────────────────────────────
+//
+// They differ in TWO directions, and both are correct:
+//
+//   • The badge also counts "Stock out too long", which has no per-warehouse form — that read starts
+//     from every open job and nets its whole movement history, so there is nothing to group on and
+//     running it once per warehouse would be N of the most expensive read in the module.
+//   • A job kitted from two warehouses, or a restock split across two, counts at EACH here. That is
+//     the truth about the floor: both warehouses have their own lines to pick. To the module it is
+//     one piece of work; to the warehouses it is two.
+//
+// Neither is fixable without breaking something real. Attributing spanning work to a single warehouse
+// would hide it from the other one's manager — a genuine bug, not a tidier number. Rebuilding the
+// badge from these rows would drop "Stock out too long", the only critical-toned signal on the row.
+//
+// So the two numbers stay, and the screen says so. This was already written down in the backend
+// catalog; the failure was that it was written for whoever reads the code, not for whoever reads the
+// page — and the person comparing "16" in the sidebar with these figures is the second one.
+const ATTENTION_TITLE =
+  "Kit to issue, returns, field stock requests and customer stock waiting at this warehouse. " +
+  "Work spanning two warehouses counts at each, so these can total more than the sidebar badge.";
 type Sort = "newest" | "oldest" | "name" | "code";
 
 
@@ -153,32 +183,30 @@ function WarehouseRowActions({
 function WarehousesTableSkeleton({ actions }: { actions: boolean }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[860px] text-sm">
+      <table className="w-full text-sm" style={{ minWidth: TABLE_MIN_WIDTH }}>
         <thead>
           <tr className="border-b border-[var(--border)] text-left text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-            <th className="px-4 py-3">Code</th>
-            <th className="px-4 py-3">Warehouse</th>
-            <th className="px-4 py-3">Manager</th>
-            <th className="px-4 py-3">City</th>
-            <th className="px-4 py-3">Contact</th>
-            <th className="px-4 py-3">Status</th>
-            <th className="px-4 py-3">Items</th>
-            <th className="px-4 py-3">Qty</th>
-            {actions && <th className="px-4 py-3" />}
+            <th className="cell-y px-4">Code</th>
+            <th className="cell-y px-4">Warehouse</th>
+            <th className="cell-y px-4">Manager</th>
+            <th className={`cell-y px-4 ${colClass("lg")}`}>City</th>
+            <th className={`cell-y px-4 ${colClass("xl")}`}>Contact</th>
+            <th className="cell-y px-4">Status</th>
+            <th className="cell-y px-4">Needs attention here</th>
+            {actions && <th className="cell-y px-4" />}
           </tr>
         </thead>
         <tbody>
           {Array.from({ length: 6 }).map((_, i) => (
             <tr key={i} className="border-b border-[var(--border)] last:border-0">
-              <td className="px-4 py-3"><Skeleton className="h-3 w-16" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-36" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-24" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-20" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-24" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-5 w-16 rounded-full" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-6" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-6" /></td>
-              {actions && <td className="px-4 py-3"><Skeleton className="ml-auto h-6 w-6 rounded-lg" /></td>}
+              <td className="cell-y px-4"><Skeleton className="h-3 w-16" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-3 w-36" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-3 w-24" /></td>
+              <td className={`cell-y px-4 ${colClass("lg")}`}><Skeleton className="h-3 w-20" /></td>
+              <td className={`cell-y px-4 ${colClass("xl")}`}><Skeleton className="h-3 w-24" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-5 w-16 rounded-full" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-4 w-6 rounded-full" /></td>
+              {actions && <td className="cell-y px-4"><Skeleton className="ml-auto h-6 w-6 rounded-lg" /></td>}
             </tr>
           ))}
         </tbody>
@@ -271,6 +299,13 @@ export function WarehousesView() {
   }, [search, statusFilter, sort, page, refreshKey]);
 
   const warehouses = data?.warehouses ?? [];
+  // Each warehouse's own share of the pending work. Server-filtered to the queues this actor may act
+  // on, so a user who can only review van requests sees a column counting exactly those.
+  const { rows: attention } = useEntityAttention("warehouse");
+  // What the column adds up to across the warehouses ON THIS PAGE — the figure someone is implicitly
+  // summing by eye when they compare it with the sidebar. Scoped to the rendered rows so it always
+  // describes the column they can actually see, never a hidden page's.
+  const attentionTotal = warehouses.reduce((n, w) => n + (attention[w.id]?.count ?? 0), 0);
   const showSkeleton = loading && warehouses.length === 0;
   const isFiltered = statusFilter !== "all" || Boolean(search);
 
@@ -302,7 +337,12 @@ export function WarehousesView() {
   };
 
   return (
-    <div className="flex h-full flex-col gap-5">
+    <div className="stack flex h-full flex-col">
+      {/* This page used to open with the aggregate chip bar (`Job kit to issue · 12`, `Field stock
+          requests · 5`, …). Every one of those chips linked to THIS page, because the work behind them
+          is done inside a warehouse and no cross-warehouse screen exists — so clicking one reloaded
+          the page the user was already standing on. The counts now live on the rows below, where the
+          number names the warehouse you have to open and clicking it takes you there. */}
       <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center">
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
@@ -368,18 +408,24 @@ export function WarehousesView() {
           </div>
         ) : (
           <div className="min-h-0 flex-1 overflow-auto">
-            <table className="w-full min-w-[860px] text-left text-sm">
+            <table className="w-full text-left text-sm" style={{ minWidth: TABLE_MIN_WIDTH }}>
               <thead>
                 <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                  <th className="px-4 py-3">Code</th>
-                  <th className="px-4 py-3">Warehouse</th>
-                  <th className="px-4 py-3" title="Assigned under Users & Roles">Manager</th>
-                  <th className="px-4 py-3">City</th>
-                  <th className="px-4 py-3">Contact</th>
-                  <th className="px-4 py-3">Status</th>
-                  <th className="px-4 py-3" title="Available once inventory is live">Items</th>
-                  <th className="px-4 py-3" title="Available once inventory is live">Qty</th>
-                  {showActions && <th className="px-4 py-3" />}
+                  <th className="cell-y px-4">Code</th>
+                  <th className="cell-y px-4">Warehouse</th>
+                  <th className="cell-y px-4" title="Assigned under Users & Roles">Manager</th>
+                  <th className={`cell-y px-4 ${colClass("lg")}`}>City</th>
+                  <th className={`cell-y px-4 ${colClass("xl")}`}>Contact</th>
+                  <th className="cell-y px-4">Status</th>
+                  {/* Replaces the Items / Qty pair, which rendered a literal "—" in every row under a
+                      "Available once inventory is live" tooltip. Two columns of nothing, in the space
+                      the one number a warehouse manager opens this list to find had nowhere to go.
+                      "here" earns its place in that heading: these are PER-WAREHOUSE figures and do
+                      not add up to the sidebar badge — see ATTENTION_NOTE. */}
+                  <th className="cell-y px-4" title={ATTENTION_TITLE}>
+                    Needs attention here
+                  </th>
+                  {showActions && <th className="cell-y px-4" />}
                 </tr>
               </thead>
               <tbody>
@@ -389,8 +435,8 @@ export function WarehousesView() {
                     onClick={() => router.push(`/dashboard/warehouses/${w.code}`)}
                     className="cursor-pointer border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]"
                   >
-                    <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{w.code}</td>
-                    <td className="px-4 py-3">
+                    <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">{w.code}</td>
+                    <td className="cell-y px-4">
                       <div className="flex items-center gap-2 font-semibold text-[var(--ink)]">
                         {w.name}
                         {w.isDefault && (
@@ -402,7 +448,7 @@ export function WarehousesView() {
                       <div className="text-[11px] text-[var(--faint)]">{w.type?.name ?? "—"}</div>
                     </td>
                     {/* Derived from the Users & Roles assignments — first name, then a +N overflow. */}
-                    <td className="px-4 py-3 text-[var(--muted)]">
+                    <td className="cell-y px-4 text-[var(--muted)]">
                       {w.managers.length ? (
                         <>
                           {w.managers[0].name}
@@ -416,15 +462,22 @@ export function WarehousesView() {
                         "—"
                       )}
                     </td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{w.city ?? "—"}</td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{w.contactPerson ?? "—"}</td>
-                    <td className="px-4 py-3">
+                    <td className={`cell-y px-4 text-[var(--muted)] ${colClass("lg")}`}>{w.city ?? "—"}</td>
+                    <td className={`cell-y px-4 text-[var(--muted)] ${CELL_ONE_LINE} ${colClass("xl")}`} title={w.contactPerson ?? undefined}>{w.contactPerson ?? "—"}</td>
+                    <td className="cell-y px-4">
                       <StatusBadge status={w.status as UserStatus} />
                     </td>
-                    <td className="px-4 py-3 text-[var(--faint)]">—</td>
-                    <td className="px-4 py-3 text-[var(--faint)]">—</td>
+                    {/* A dash when there is nothing to do, so an idle warehouse reads as settled
+                        rather than as a count that failed to load. */}
+                    <td className="cell-y px-4">
+                      {attention[w.id] ? (
+                        <EntityCountPill row={attention[w.id]} at={w.name} />
+                      ) : (
+                        <span className="text-[var(--faint)]">—</span>
+                      )}
+                    </td>
                     {showActions && (
-                      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                      <td className="cell-y px-4" onClick={(e) => e.stopPropagation()}>
                         <WarehouseRowActions
                           warehouse={w}
                           canEdit={canEdit}
@@ -441,19 +494,27 @@ export function WarehousesView() {
             </table>
           </div>
         )}
+        {data && data.total > 0 && (
+            <Pagination embedded
+              page={data.page}
+              totalPages={data.totalPages}
+              total={data.total}
+              label="warehouses"
+              onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)}
+              // Stated on the page, not just in a tooltip: the person comparing "16" in the sidebar
+              // with these figures is looking at the numbers, not hovering the header. Only shown
+              // when there is something to explain — with an empty column it would be noise.
+              note={
+                attentionTotal > 0 ? (
+                  <span className="font-normal" title={ATTENTION_TITLE}>
+                    · {attentionTotal} awaiting action here — work spanning two warehouses counts at each, so this
+                    can exceed the sidebar badge
+                  </span>
+                ) : null
+              }
+            />
+        )}
       </div>
-
-      {data && data.total > 0 && (
-        <div className="shrink-0">
-          <Pagination
-            page={data.page}
-            totalPages={data.totalPages}
-            total={data.total}
-            label="warehouses"
-            onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)}
-          />
-        </div>
-      )}
 
       <ConfirmDialog
         open={confirm.open}

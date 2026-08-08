@@ -39,6 +39,10 @@ export function CustomersPanel() {
         <TabPills tabs={visibleTabs} active={activeTab} onSelect={selectTab} ariaLabel="Customers sections" />
       </PageActions>
 
+      {/* The aggregate chip bar used to sit here ("Customer stock requests · 6", "Portal invites not
+          accepted · 3"). Both are worked on a CUSTOMER's own detail page and no cross-customer review
+          screen exists, so both chips linked back to this very page and narrowed nothing. The counts
+          now sit on the customer rows, where the number names the company you have to open. */}
       <div className="flex min-h-0 flex-1 flex-col">
         {activeTab === "customers" ? <CustomersView /> : <CustomerCategoriesView />}
       </div>

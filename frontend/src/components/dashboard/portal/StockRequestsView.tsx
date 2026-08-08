@@ -297,14 +297,14 @@ export function StockRequestsView() {
 
   if (loading && paged === null) {
     return (
-      <div className="flex h-full flex-col gap-4">
+      <div className="stack flex h-full flex-col">
         <TableCardSkeleton headers={HEADERS} cells={SKELETON_CELLS} fill />
       </div>
     );
   }
 
   return (
-    <div className="flex h-full flex-col gap-4">
+    <div className="stack flex h-full flex-col">
       {msg && <div className="shrink-0"><Notice msg={msg} /></div>}
       {visibleExportMsg && <div className="shrink-0"><Notice msg={visibleExportMsg} /></div>}
 
@@ -380,7 +380,20 @@ export function StockRequestsView() {
         </div>
       ) : (
         <>
-          <TableCard headers={HEADERS} fill>
+          <TableCard
+            headers={HEADERS}
+            fill
+            footer={
+              <Pagination
+                embedded
+                page={paged?.page ?? 1}
+                totalPages={paged?.totalPages ?? 1}
+                total={paged?.total ?? 0}
+                label="submissions"
+                onPage={(p) => patchParams({ page: p > 1 ? String(p) : null })}
+              />
+            }
+          >
             {requests.map((r) => (
               <tr
                 key={r.id}
@@ -404,7 +417,7 @@ export function StockRequestsView() {
                     optional blocks of it into the rows is what made them range from ~44px to ~94px.
                     All of it is in the row's detail panel, in full and unabbreviated; the table's job
                     is to be scannable, and one rhythm is what makes it so. */}
-                <td className="px-4 py-3">
+                <td className="cell-y px-4">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-semibold text-[var(--ink)]">{r.editedName ?? r.name}</span>
                     {/* Inline, not a line below: the customer submitted this name and needs to
@@ -420,9 +433,9 @@ export function StockRequestsView() {
                     )}
                   </div>
                 </td>
-                <td className="px-4 py-3 font-bold text-[var(--ink)]">{r.quantity ?? "—"}</td>
-                <td className="px-4 py-3 text-[var(--muted)]">{fmtDate(r.createdAt)}</td>
-                <td className="px-4 py-3">
+                <td className="cell-y px-4 font-bold text-[var(--ink)]">{r.quantity ?? "—"}</td>
+                <td className="cell-y px-4 text-[var(--muted)]">{fmtDate(r.createdAt)}</td>
+                <td className="cell-y px-4">
                   <div className="flex flex-wrap items-center gap-1.5">
                     <RequestStatusChip value={r.status} />
                     <ShortfallBadge assignments={r.warehouseAssignments} />
@@ -439,15 +452,6 @@ export function StockRequestsView() {
               </tr>
             ))}
           </TableCard>
-          <div className="shrink-0">
-            <Pagination
-              page={paged?.page ?? 1}
-              totalPages={paged?.totalPages ?? 1}
-              total={paged?.total ?? 0}
-              label="submissions"
-              onPage={(p) => patchParams({ page: p > 1 ? String(p) : null })}
-            />
-          </div>
         </>
       )}
 

@@ -6,6 +6,7 @@ import { RefreshCw } from "lucide-react";
 import { relativeTime } from "@/components/dashboard/audit/auditDisplay";
 import { formatMoney } from "@/components/dashboard/purchase-orders/poStatus";
 import { NoAccessHome } from "@/components/dashboard/shell/NoAccessHome";
+import { subscribe } from "@/lib/socket";
 import { getDashboardSummary, type DashboardSummary, type SpendPeriod } from "@/services/dashboard.service";
 import { StatCard } from "./StatCard";
 import { SpendTrendChart } from "./SpendTrendChart";
@@ -18,6 +19,12 @@ import { QuickActions } from "./QuickActions";
 // "Updated X ago" caption re-renders. An ops dashboard left open must not go stale.
 const REFRESH_MS = 60_000;
 const CAPTION_TICK_MS = 30_000;
+
+// The global "some pending-work count moved" signal — the same one the sidebar badges listen to, so
+// the two surfaces can never disagree about whether something happened. Debounced because one
+// workflow transition (approve → PO created) fires more than one emit.
+const ATTENTION_EVENTS = ["attention:changed"] as const;
+const SOCKET_DEBOUNCE_MS = 400;
 
 // The Overview screen. Fetches the aggregated summary and composes the widgets in spec order.
 // Sections the actor can't see are absent from the payload and simply not rendered; a permitted
@@ -87,6 +94,24 @@ export function OverviewView() {
       clearInterval(t);
       window.removeEventListener("focus", refetch);
       document.removeEventListener("visibilitychange", refetch);
+    };
+  }, [load, spendPeriod]);
+
+  // Live: the same signal that moves the sidebar badges also moves this screen's cards and worklist,
+  // so a PRF approved on another desk lands here in under a second instead of waiting out the
+  // interval above. That interval stays as the backstop for time-derived numbers (overdue rolling
+  // over at midnight), which no event can announce. Debounced — one transition fires several emits.
+  React.useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const unsubscribe = subscribe(ATTENTION_EVENTS, () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        if (document.visibilityState === "visible") void load(spendPeriod);
+      }, SOCKET_DEBOUNCE_MS);
+    });
+    return () => {
+      clearTimeout(timer);
+      unsubscribe();
     };
   }, [load, spendPeriod]);
 

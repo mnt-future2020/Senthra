@@ -134,7 +134,7 @@ export function PortalJobDetail({ id }: { id: string }) {
             <thead>
               <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
                 {KIT_HEADERS.map((h, i) => (
-                  <th key={h} className={`px-4 py-3 ${i >= 3 ? "text-right" : ""}`}>
+                  <th key={h} className={`cell-y px-4 ${i >= 3 ? "text-right" : ""}`}>
                     {h}
                   </th>
                 ))}
@@ -155,10 +155,10 @@ export function PortalJobDetail({ id }: { id: string }) {
                   const isMisc = l.lineType === "misc";
                   return (
                     <tr key={l.id} className="border-b border-[var(--border)] last:border-0">
-                      <td className="px-4 py-3 text-[var(--muted)]">
+                      <td className="cell-y px-4 text-[var(--muted)]">
                         {JOB_LINE_TYPE_LABELS[l.lineType as JobLineType] ?? l.lineType}
                       </td>
-                      <td className="px-4 py-3">
+                      <td className="cell-y px-4">
                         <div className="font-semibold text-[var(--ink)]">{l.itemName}</div>
                         {l.seCode && <div className="text-[11px] text-[var(--faint)]">{l.seCode}</div>}
                         {l.description && <div className="text-[11px] text-[var(--muted)]">{l.description}</div>}
@@ -166,12 +166,12 @@ export function PortalJobDetail({ id }: { id: string }) {
                       {/* Just the warehouse name. The office cell also breaks the row down by origin
                           and prints where each part must be RETURNED — instructions to an engineer
                           with kit in a van, which a customer has no part in. */}
-                      <td className="px-4 py-3 text-[var(--muted)]">{l.warehouseName ?? "—"}</td>
-                      <td className="px-4 py-3 text-right font-semibold text-[var(--ink)]">{l.qty}</td>
-                      <td className="px-4 py-3 text-right text-[var(--ink)]">{l.issued}</td>
-                      <td className="px-4 py-3 text-right text-[var(--ink)]">{isMisc ? "—" : l.used}</td>
-                      <td className="px-4 py-3 text-right text-[var(--ink)]">{isMisc ? "—" : l.returned}</td>
-                      <td className="px-4 py-3 text-right font-bold text-[var(--ink)]">{isMisc ? "—" : l.remaining}</td>
+                      <td className="cell-y px-4 text-[var(--muted)]">{l.warehouseName ?? "—"}</td>
+                      <td className="cell-y px-4 text-right font-semibold text-[var(--ink)]">{l.qty}</td>
+                      <td className="cell-y px-4 text-right text-[var(--ink)]">{l.issued}</td>
+                      <td className="cell-y px-4 text-right text-[var(--ink)]">{isMisc ? "—" : l.used}</td>
+                      <td className="cell-y px-4 text-right text-[var(--ink)]">{isMisc ? "—" : l.returned}</td>
+                      <td className="cell-y px-4 text-right font-bold text-[var(--ink)]">{isMisc ? "—" : l.remaining}</td>
                     </tr>
                   );
                 })

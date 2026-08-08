@@ -13,6 +13,8 @@ import { AdjustStockForm } from "./AdjustStockForm";
 import { CustomerTransferForm } from "./CustomerTransferForm";
 import { RestoreDamagedDialog } from "./RestoreDamagedDialog";
 import { IrmPanel, IRM_TABS, type IrmTab } from "@/components/dashboard/irm/IrmPanel";
+import { TabCount } from "@/components/dashboard/shell/TabCount";
+import { AttentionBar } from "@/components/dashboard/shell/AttentionBar";
 import { ArrowRight, RotateCcw } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/hooks/useAuth";
@@ -22,14 +24,16 @@ import type { StockPosition } from "@/types/stock-position";
 type Lens = "all" | "company" | "customer" | "engineer" | "damaged" | "movements" | "reorder";
 type IrmSubTab = "stock" | "catalogue";
 
-const TABS: { id: Lens; label: string }[] = [
+// `attention` = a key from the backend attention catalog. Present only where the tab IS a work queue
+// (Reorder). The other lenses are reference views — a count on them would be a metric, not a backlog.
+const TABS: { id: Lens; label: string; attention?: string }[] = [
   { id: "all", label: "All Inventory" },
   { id: "company", label: "IRM" },
   { id: "customer", label: "Customer" },
   { id: "engineer", label: "Engineer" },
   { id: "damaged", label: "Damaged" },
   { id: "movements", label: "Movements" },
-  { id: "reorder", label: "Reorder" },
+  { id: "reorder", label: "Reorder", attention: "inv.reorder" },
 ];
 
 // A form that takes over the content area, with its own header + close + scroll.
@@ -129,15 +133,19 @@ export function InventoryHub() {
     (lens === "damaged" && Boolean(restoreRow));
 
   return (
-    <div className="flex h-full flex-col gap-4">
+    <div className="stack flex h-full flex-col">
       {/* Collapsible here specifically: this page is laid out full-height with an internally-
           scrolling table, so the header is pinned and costs its height on every screen. On a 1024px
           laptop that matters — five stacked bands (this, the summary, the lens tabs, the sub-tabs and
           the filter row) sit above the data. */}
       <SummaryCards key={`cards-${refreshKey}`} active={lens} onSelect={switchLens} />
 
-      {/* Lens tabs */}
-      <div className="flex shrink-0 flex-wrap gap-1 border-b border-[var(--border)]">
+      {/* Lens tabs, with the sidebar-badge breakdown riding the same row.
+          Both chips open the Reorder tab — "Items to reorder" is that tab, and "Critical stock" is
+          that tab pre-filtered to its urgent slice — so this is where they belong, and on a row that
+          already exists they cost no vertical space. They previously sat in a block of their own
+          above, paying the layout's 20px flex gap on top of their own height. */}
+      <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-[var(--border)]">
         {TABS.map((t) => (
           <button
             key={t.id}
@@ -149,8 +157,10 @@ export function InventoryHub() {
             }`}
           >
             {t.label}
+            {t.attention ? <TabCount attentionKey={t.attention} /> : null}
           </button>
         ))}
+        <AttentionBar nav="/dashboard/inventory" className="ml-auto flex flex-wrap items-center gap-1.5 pb-1.5" />
       </div>
 
       {/* IRM lens action bar — toggle on the left; Adjust (In stock) or catalogue sub-tabs (Catalogue) on the right */}

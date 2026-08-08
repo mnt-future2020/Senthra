@@ -10,12 +10,20 @@ import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
+import { CELL_ONE_LINE, colClass, colClassAt, tableMinWidth, type ColPriority } from "@/components/ui/tableLayout";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { AttentionBar } from "@/components/dashboard/shell/AttentionBar";
 import { GRN_STATUS_LABELS, GrnStatusBadge, formatDate } from "./grnStatus";
+import { lineSummary } from "./acceptedWording";
 import type { GoodsReceipt, GrnStatus } from "@/types/goods-in";
 
 const PAGE_SIZE = 20;
+
+// Code · Purchase Order · Supplier · Warehouse · Status · Received · Items · actions.
+// Supplier and warehouse names are the long values here, and `min-w-[900px]` across eight columns
+// left them ~112px each. Received and Items step aside on a narrow screen.
+const TABLE_MIN_WIDTH = tableMinWidth(["normal", "normal", "wide", "wide", "narrow", "normal", "normal", "narrow"]);
 
 function MenuItem({ icon: Icon, danger, onClick, children }: { icon: React.ElementType; danger?: boolean; onClick: () => void; children: React.ReactNode }) {
   return (
@@ -75,21 +83,25 @@ function RowActions({ grn, canEdit, canDelete, onEdit, onDelete }: { grn: GoodsR
   );
 }
 
+// One array drives BOTH rows below, which is the rule colClass exists to enforce: a placeholder cell
+// that stays visible while its header is hidden shifts every cell after it.
+const SKELETON_COLS: ColPriority[] = ["always", "always", "always", "always", "always", "lg", "xl"];
+
 function TableSkeleton({ actions }: { actions: boolean }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[900px] text-sm">
+      <table className="w-full text-sm" style={{ minWidth: TABLE_MIN_WIDTH }}>
         <thead>
           <tr className="border-b border-[var(--border)] text-left text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-            <th className="px-4 py-3">Code</th><th className="px-4 py-3">Purchase Order</th><th className="px-4 py-3">Supplier</th>
-            <th className="px-4 py-3">Warehouse</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Received</th>
-            <th className="px-4 py-3">Items</th>{actions && <th className="px-4 py-3" />}
+            <th className="cell-y px-4">Code</th><th className="cell-y px-4">Purchase Order</th><th className="cell-y px-4">Supplier</th>
+            <th className="cell-y px-4">Warehouse</th><th className="cell-y px-4">Status</th><th className={`cell-y px-4 ${colClass("lg")}`}>Received</th>
+            <th className={`cell-y px-4 ${colClass("xl")}`}>Items</th>{actions && <th className="cell-y px-4" />}
           </tr>
         </thead>
         <tbody>
           {Array.from({ length: 6 }).map((_, i) => (
             <tr key={i} className="border-b border-[var(--border)] last:border-0">
-              {Array.from({ length: actions ? 8 : 7 }).map((__, j) => (<td key={j} className="px-4 py-3"><Skeleton className="h-3 w-20" /></td>))}
+              {Array.from({ length: actions ? 8 : 7 }).map((__, j) => (<td key={j} className={`cell-y px-4 ${colClassAt(SKELETON_COLS, j)}`}><Skeleton className="h-3 w-20" /></td>))}
             </tr>
           ))}
         </tbody>
@@ -211,12 +223,22 @@ export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { wa
 
   return (
     <div className={`flex h-full flex-col ${embedded ? "gap-4" : "gap-5"}`}>
-      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center">
+      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:flex-wrap sm:items-center">
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input value={searchInput} onChange={(e) => setSearchInput(e.target.value)} placeholder="Search GRN, PO or delivery note…" className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]" />
         </div>
         <Select size="sm" value={statusFilter} onChange={(v) => patch({ status: v === "all" ? null : v })} options={[{ value: "all", label: "All statuses" }, ...(Object.keys(GRN_STATUS_LABELS) as GrnStatus[]).map((s) => ({ value: s, label: GRN_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
+        {/* The two receiving queues, selected by KEY rather than by nav row — they badge different
+            rows (drafts roll up to Warehouses, since GRN has no nav row of its own;
+            deliveries-to-receive badges Purchase Orders, because that is the list it opens) and the
+            other warehouse queues belong to other screens entirely. Draft receipts are stock that has
+            physically arrived but hasn't posted; deliveries-to-receive is what should become a GRN
+            next. Both deep-link to a filtered list, so both stay clickable.
+            In the toolbar row rather than a block above it: two chips beside one Select leave the row
+            far from full, so they cost no vertical space at all here. Hidden when embedded in a
+            warehouse detail, which supplies its own context. */}
+        {!embedded && <AttentionBar keys={["wh.grn_drafts", "wh.goods_in_waiting"]} className="flex flex-wrap items-center gap-1.5" />}
         {/* Embedded in a warehouse, this is the Received (history) view — receiving lives in the
             sibling "Expected deliveries" worklist, so no create action here. The Global GRN page
             (not embedded) keeps its Receive delivery button. */}
@@ -244,26 +266,28 @@ export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { wa
           </div>
         ) : (
           <div className={`min-h-0 flex-1 overflow-auto transition-opacity ${loading ? "pointer-events-none opacity-60" : ""}`}>
-            <table className="w-full min-w-[900px] text-left text-sm">
+            <table className="w-full text-left text-sm" style={{ minWidth: TABLE_MIN_WIDTH }}>
               <thead className="sticky top-0 z-10 bg-[var(--surface)]">
                 <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                  <th className="px-4 py-3">Code</th><th className="px-4 py-3">Purchase Order</th><th className="px-4 py-3">Supplier</th>
-                  <th className="px-4 py-3">Warehouse</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Received</th>
-                  <th className="px-4 py-3">Items</th>{showActions && <th className="px-4 py-3" />}
+                  <th className="cell-y px-4">Code</th><th className="cell-y px-4">Purchase Order</th><th className="cell-y px-4">Supplier</th>
+                  <th className="cell-y px-4">Warehouse</th><th className="cell-y px-4">Status</th><th className={`cell-y px-4 ${colClass("lg")}`}>Received</th>
+                  <th className={`cell-y px-4 ${colClass("xl")}`}>Items</th>{showActions && <th className="cell-y px-4" />}
                 </tr>
               </thead>
               <tbody>
                 {rows.map((grn) => (
                   <tr key={grn.id} onClick={() => router.push(`/dashboard/goods-in/${grn.code}`)} className="cursor-pointer border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]">
-                    <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{grn.code}</td>
-                    <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{grn.poCode ?? "—"}</td>
-                    <td className="px-4 py-3 font-semibold text-[var(--ink)]">{grn.supplierName ?? "—"}</td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{grn.warehouse?.name ?? "—"}</td>
-                    <td className="px-4 py-3"><GrnStatusBadge status={grn.status} /></td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{formatDate(grn.receivedDate)}</td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{grn.items.length} line{grn.items.length === 1 ? "" : "s"} · {grn.totalAccepted} accepted</td>
+                    <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">{grn.code}</td>
+                    <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">{grn.poCode ?? "—"}</td>
+                    <td className={`cell-y px-4 font-semibold text-[var(--ink)] ${CELL_ONE_LINE}`} title={grn.supplierName ?? undefined}>{grn.supplierName ?? "—"}</td>
+                    <td className={`cell-y px-4 text-[var(--muted)] ${CELL_ONE_LINE}`} title={grn.warehouse?.name ?? undefined}>{grn.warehouse?.name ?? "—"}</td>
+                    <td className="cell-y px-4"><GrnStatusBadge status={grn.status} /></td>
+                    <td className={`cell-y px-4 text-[var(--muted)] ${colClass("lg")}`}>{formatDate(grn.receivedDate)}</td>
+                    {/* "N accepted" is only true once the receipt is completed — on a draft nothing
+                        has posted, and on a cancelled one nothing ever will. See acceptedWording.ts. */}
+                    <td className={`cell-y px-4 text-[var(--muted)] ${colClass("xl")}`}>{lineSummary(grn.items.length, grn.totalAccepted, grn.status)}</td>
                     {showActions && (
-                      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                      <td className="cell-y px-4" onClick={(e) => e.stopPropagation()}>
                         <RowActions grn={grn} canEdit={canEdit} canDelete={canDelete} onEdit={() => router.push(`/dashboard/goods-in/${grn.code}/edit`)} onDelete={() => setConfirm({ open: true, grn })} />
                       </td>
                     )}
@@ -273,13 +297,10 @@ export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { wa
             </table>
           </div>
         )}
+        {data && data.total > 0 && (
+            <Pagination embedded page={data.page} totalPages={data.totalPages} total={data.total} label="goods receipts" onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)} />
+        )}
       </div>
-
-      {data && data.total > 0 && (
-        <div className="shrink-0">
-          <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="goods receipts" onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)} />
-        </div>
-      )}
 
       <ConfirmDialog open={confirm.open} title="Remove draft receipt?" message={<>This deletes draft <strong className="text-[var(--ink)]">{confirm.grn?.code}</strong>. Only drafts can be deleted.</>} confirmLabel="Remove" danger busy={deleting} onConfirm={onDelete} onClose={() => setConfirm({ open: false, grn: null })} />
     </div>

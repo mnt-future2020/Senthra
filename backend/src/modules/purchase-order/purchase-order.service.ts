@@ -13,9 +13,10 @@ import * as warehouseService from "#modules/warehouse/warehouse.service.js";
 import * as irmService from "#modules/irm/irm.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
-import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
+import { getCloudinaryCreds, getCompanyTimezone } from "#modules/settings/settings.service.js";
+import { startOfDayIn } from "../../utils/filter-date.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
-import { emitToRoom, PURCHASE_ORDER_WATCHERS_ROOM } from "../../lib/realtime.js";
+import { emitAttentionChanged, emitToRoom, PURCHASE_ORDER_WATCHERS_ROOM } from "../../lib/realtime.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
 import { paginate } from "../../utils/pagination.js";
@@ -368,6 +369,13 @@ export interface ListPurchaseOrdersParams {
   sort?: string;
 }
 
+// May this actor act on a pm_review PO that isn't assigned to them? Used by the send guard (an
+// override, e.g. the PM is away) and by the "awaiting_send" list/badge scoping, so both answer the
+// question the same way.
+function canOverridePm(actor?: AuditActor): boolean {
+  return Boolean(actor?.permissions?.includes("*") || actor?.permissions?.includes("purchase_orders.assign_pm"));
+}
+
 export async function listPurchaseOrders(params: ListPurchaseOrdersParams = {}, actor?: AuditActor): Promise<PagedPurchaseOrders> {
   const filters = {
     search: params.search,
@@ -380,6 +388,14 @@ export async function listPurchaseOrders(params: ListPurchaseOrdersParams = {}, 
     jobId: params.job,
     // Unrestricted actor → undefined → no filter (unchanged). Scoped actor → their warehouse ids.
     warehouseIds: warehouseScopeFilter(actor),
+    // "Overdue" is derived, not stored — the service owns settings, so the company-timezone day
+    // boundary is resolved here and handed down (same contract as the jobs list).
+    overdueBefore: params.status === "overdue" ? startOfDayIn(await getCompanyTimezone(), new Date()) : undefined,
+    // "awaiting_send" is likewise derived, and its pm_review half is PERSONAL: only the assigned PM
+    // may send (see sendPurchaseOrder), so a caller without the override sees only their own. The
+    // same rule the attention badge counts by, resolved here so the badge and this list agree.
+    pmScopeUserId:
+      params.status === "awaiting_send" && !canOverridePm(actor) ? (actor?.id ?? undefined) : undefined,
   };
   const total = await poRepo.count(filters);
   const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
@@ -649,6 +665,9 @@ function emitPoUpdated(po: { id: string; code: string; status: string }): void {
     code: po.code,
     status: po.status,
   });
+  // Every PO transition moves at least one attention queue (approve → send → acknowledge → receive →
+  // close), so the global badges refresh on the same signal the PO surfaces already use.
+  emitAttentionChanged("purchase_orders");
 }
 
 export async function submitPurchaseOrder(id: string, actor?: AuditActor): Promise<PublicPurchaseOrder> {
@@ -864,8 +883,7 @@ export async function sendPurchaseOrder(id: string, actor?: AuditActor): Promise
   // trail because sentBy won't match pmEmail.
   if (po.status === "pm_review") {
     const isAssignedPm = Boolean(actor?.id && po.pmUserId && actor.id === po.pmUserId);
-    const canOverride = Boolean(actor?.permissions?.includes("*") || actor?.permissions?.includes("purchase_orders.assign_pm"));
-    if (!isAssignedPm && !canOverride) {
+    if (!isAssignedPm && !canOverridePm(actor)) {
       throw forbidden(`Only the assigned project manager (${po.pmName ?? po.pmEmail ?? "unassigned"}) can send this purchase order.`);
     }
   }
