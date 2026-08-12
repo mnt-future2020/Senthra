@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeftRight, Loader2, Pencil, UserCog, XCircle } from "lucide-react";
+import { ArrowLeftRight, ExternalLink, FileText, Globe, Image as ImageIcon, Link as LinkIcon, Loader2, Lock, Pencil, UserCog, XCircle } from "lucide-react";
 
 import * as jobService from "@/services/job.service";
 import { listEngineerOptions } from "@/services/warehouse.service";
@@ -27,6 +27,7 @@ import {
 } from "./jobStatus";
 import { Notice } from "@/components/ui/Notice";
 import { outstandingKitWarning } from "./outstandingKit";
+import { parseJobAttachment } from "./jobAttachment";
 import type { Job, JobLineType, JobPriority, JobType } from "@/types/job";
 
 export function JobDetail({ idOrCode }: { idOrCode: string }) {
@@ -280,13 +281,51 @@ function JobView({ initial }: { initial: Job }) {
         </Card>
 
         {job.attachments.length > 0 && (
-          <Card title="Attachments">
-            <ul className="space-y-1.5 text-sm">
-              {job.attachments.map((a, i) => (
-                <li key={i}>
-                  <a href={a} target="_blank" rel="noopener noreferrer" className="break-all font-semibold text-[var(--accent)] hover:underline">{a}</a>
-                </li>
-              ))}
+          <Card title={`Attachments (${job.attachments.length})`}>
+            <ul className="space-y-2 text-sm">
+              {job.attachments.map((a, i) => {
+                const meta = parseJobAttachment(a);
+                if (!meta) return null;
+                const { rawUrl, name, isImg, isPdf, isDoc, isInternal } = meta;
+
+                return (
+                  <li key={i} className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/30 p-2.5">
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--surface-2)] text-[var(--accent)]">
+                      {isImg ? (
+                        <ImageIcon className="h-4 w-4" />
+                      ) : isPdf || isDoc ? (
+                        <FileText className="h-4 w-4" />
+                      ) : (
+                        <LinkIcon className="h-4 w-4" />
+                      )}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <p className="truncate text-xs font-bold text-[var(--ink)]" title={name}>
+                          {name}
+                        </p>
+                        <span
+                          className={`inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-extrabold ${
+                            isInternal
+                              ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                              : "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                          }`}
+                        >
+                          {isInternal ? <><Lock className="h-3 w-3" /> Internal</> : <><Globe className="h-3 w-3" /> Customer</>}
+                        </span>
+                      </div>
+                      <a
+                        href={rawUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--accent)] hover:underline"
+                      >
+                        Open attachment <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           </Card>
         )}

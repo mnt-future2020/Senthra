@@ -401,6 +401,22 @@ describe("getJobForCustomer — the detail page", () => {
     expect(job.attachments).toEqual(["https://ok.com/pack.pdf"]);
   });
 
+  it("withholds internal-only attachments containing #internal from customer portal DTO", async () => {
+    findById.mockResolvedValue(
+      detailRow({ attachments: ["https://ok.com/public-pack.pdf", "https://ok.com/internal-rams.pdf#internal"] }),
+    );
+    const job = await getJobForCustomer(CUST, "j1");
+    expect(job.attachments).toEqual(["https://ok.com/public-pack.pdf"]);
+  });
+
+  it("does NOT falsely withhold a URL whose fragment merely contains 'internal' as a substring", async () => {
+    findById.mockResolvedValue(
+      detailRow({ attachments: ["https://ok.com/docs#internaldocumentation", "https://ok.com/plan.pdf"] }),
+    );
+    const job = await getJobForCustomer(CUST, "j1");
+    expect(job.attachments).toEqual(["https://ok.com/docs#internaldocumentation", "https://ok.com/plan.pdf"]);
+  });
+
   // Zeroes, not nulls: the table renders an em dash for null, which in that column means "not
   // applicable" (a misc line), not "the warehouse hasn't issued anything yet".
   it("shows zero, not blank, for a line the warehouse has not touched", async () => {

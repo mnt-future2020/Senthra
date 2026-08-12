@@ -128,6 +128,14 @@ const action = (id: string, name: string, body?: unknown): Promise<Job> =>
 export const assignJob = (id: string, engineerId: string) => action(id, "assign", { engineerId });
 export const cancelJob = (id: string, reason?: string) => action(id, "cancel", { reason: reason ?? "" });
 
+export function uploadJobAttachment(dataUrl: string, fileName?: string): Promise<string> {
+  return api<{ url: string }>("/jobs/attachment", {
+    method: "POST",
+    body: { data: dataUrl, ...(fileName ? { fileName } : {}) },
+    timeout: LONG_WRITE_TIMEOUT,
+  }).then((r) => r.url);
+}
+
 // --- customer portal --------------------------------------------------------
 // A separate endpoint, a separate type, and NOT part of `listCache` above: that cache is keyed by
 // the office list's filters and cleared by office mutations, neither of which applies to a customer

@@ -27,6 +27,14 @@ function prismaStatus(err: unknown): { status: number; message: string } | null 
   }
 }
 
+// body-parser rejects an oversize body with `type: "entity.too.large"` and status 413, whose own
+// message is the raw "request entity too large" — which reaches the user as a toast on an upload
+// form and explains nothing about what to do next. Every route that can hit this is an attachment
+// or logo upload, so name the actual problem.
+function bodyTooLarge(err: unknown): boolean {
+  return (err as { type?: unknown })?.type === "entity.too.large";
+}
+
 function statusOf(err: unknown): number {
   if (err instanceof HttpError) return err.status;
   const status = (err as { status?: unknown })?.status;
@@ -42,10 +50,12 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
   const message =
     status >= 500
       ? "Internal Server Error"
-      : mapped
-        ? mapped.message
-        : err instanceof Error
-          ? err.message
-          : "Error";
+      : bodyTooLarge(err)
+        ? "That file is too large to upload."
+        : mapped
+          ? mapped.message
+          : err instanceof Error
+            ? err.message
+            : "Error";
   res.status(status).json({ error: message });
 };
