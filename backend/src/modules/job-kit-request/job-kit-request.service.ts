@@ -21,6 +21,7 @@ import { badRequest, conflict, forbidden, notFound } from "../../utils/http-erro
 import * as kitRequestRepo from "./job-kit-request.repository.js";
 import type { CreateKitRequestData, CreateKitRequestLineData, KitRequestWithLines } from "./job-kit-request.repository.js";
 import type { ApproveKitRequestInput, CreateKitRequestInput, DeclineKitRequestInput } from "./job-kit-request.validation.js";
+import { randomUUID } from "node:crypto";
 
 // ---- DTOs ------------------------------------------------------------------------------------
 
@@ -974,7 +975,9 @@ export async function searchItems(q: string, jobId?: string): Promise<KitItemOpt
 export async function uploadAttachment(image: string): Promise<{ url: string }> {
   const creds = await getCloudinaryCreds();
   if (!creds) throw badRequest("Cloudinary is not configured. Contact an administrator.");
-  const publicId = `kitreq-${Date.now()}`;
+  // Unique per upload: uploadToCloudinary overwrites on a repeated publicId, so a timestamp meant two
+  // engineers attaching kit-request evidence in the same millisecond kept only the second photo.
+  const publicId = `kitreq-${randomUUID()}`;
   const url = await uploadToCloudinary(image, publicId, creds, "senthra/kit-requests");
   return { url };
 }

@@ -17,6 +17,7 @@ import { assertWarehouseAccess, getAccessibleWarehouseIds, warehouseScopeFilter 
 import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
 import * as vsrRepo from "./van-stock-request.repository.js";
 import type { CreateRequestData, CreateRequestLineData, FulfilEntry, RequestWithLines } from "./van-stock-request.repository.js";
+import { randomUUID } from "node:crypto";
 import type {
   ApproveVanStockRequestInput,
   CloseShortInput,
@@ -1261,6 +1262,8 @@ export async function uploadImage(image: string, kind: "attachment" | "damage"):
   const creds = await getCloudinaryCreds();
   if (!creds) throw badRequest("Cloudinary is not configured. Contact an administrator.");
   const folder = kind === "damage" ? "senthra/damage-photos" : "senthra/van-stock-requests";
-  const url = await uploadToCloudinary(image, `vsr-${kind}-${Date.now()}`, creds, folder);
+  // Unique per upload: `uploadToCloudinary` overwrites on a repeated publicId, so a timestamp meant
+  // two engineers photographing the same kind of evidence in the same millisecond kept one photo.
+  const url = await uploadToCloudinary(image, `vsr-${kind}-${randomUUID()}`, creds, folder);
   return { url };
 }

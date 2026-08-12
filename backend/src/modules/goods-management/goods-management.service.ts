@@ -19,6 +19,7 @@ import type { CloseReconcileInput, PostMovementInput, ReportDamageInput, Restore
 import { withTransaction } from "../../lib/prisma.js";
 import { notify } from "#modules/notification/notification.service.js";
 import { emitAttentionChanged, emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
+import { randomUUID } from "node:crypto";
 
 // Issue / return / reconcile each move a goods attention queue (to-issue, awaiting-return, overdue
 // holdings), so the office event and the attention signal fire together — see emitJobsRoom.
@@ -440,9 +441,11 @@ export async function uploadDamagePhoto(image: string): Promise<{ url: string }>
       "Cloudinary isn't configured. Add your Cloudinary credentials in Settings → Integrations (or set CLOUDINARY_* in the backend env).",
     );
   }
-  // Use a timestamp-based unique publicId so each damage photo is stored as a distinct asset
-  // (no overwrite — unlike branding, damage photos must be preserved for audit purposes).
-  const publicId = `damage_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  // A distinct asset per photo — damage evidence backs supplier and insurance claims, so an upload
+  // that quietly replaced an earlier one would destroy the proof. `uploadToCloudinary` overwrites on a
+  // repeated publicId, and the previous timestamp-plus-Math.random() id could repeat: same
+  // millisecond, same 6 characters. randomUUID cannot.
+  const publicId = `damage-${randomUUID()}`;
   const url = await uploadToCloudinary(image, publicId, creds, "senthra/damage-photos");
   return { url };
 }
