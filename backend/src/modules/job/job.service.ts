@@ -19,7 +19,8 @@ import { conflict, forbidden, notFound, badRequest } from "../../utils/http-erro
 import { startOfDayIn } from "../../utils/filter-date.js";
 import { jobOverdue } from "./job-overdue.js";
 import { safeHttpUrls } from "../../utils/http-url.js";
-import { getCompanyTimezone } from "#modules/settings/settings.service.js";
+import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
+import { getCloudinaryCreds, getCompanyTimezone } from "#modules/settings/settings.service.js";
 import { paginate } from "../../utils/pagination.js";
 import type { CreateJobInput, JobKitLineInput, UpdateJobInput, CompleteJobInput } from "./job.validation.js";
 import * as goodsManagementService from "#modules/goods-management/goods-management.service.js";
@@ -1620,8 +1621,8 @@ export async function getJobForCustomer(customerId: string, jobId: string): Prom
     // Filtered, not just passed through. Validation only guards WRITES, so rows stored before the
     // http(s) rule existed still hold whatever was typed — and this surface renders them as links in
     // a customer's browser. Dropping the ones we can't vouch for is the only version of this that
-    // covers data already in the database.
-    attachments: safeHttpUrls(job.attachments),
+    // covers data already in the database. Internal-only attachments (#internal hash) are withheld.
+    attachments: safeHttpUrls(job.attachments).filter((url) => !url.toLowerCase().endsWith("#internal")),
     assignedAt: iso(job.assignedAt),
     acceptedAt: iso(job.acceptedAt),
     startedAt: iso(job.startedAt),
@@ -1653,3 +1654,43 @@ export async function getJobForCustomer(customerId: string, jobId: string): Prom
 export function countActiveJobsForCustomer(customerId: string): Promise<number> {
   return jobRepo.countByCustomerPortal(customerId, { statuses: ACTIVE_STATUSES });
 }
+
+/**
+ * Upload a job attachment file (data URI) to Cloudinary and return its secure URL.
+ *
+ * The file lands in Cloudinary BEFORE the job is saved, which is the right way round — an upload
+ * that only committed on save would lose the file on any validation error, the failure users
+ * actually notice. Abandon the form and the asset stays there unreferenced.
+ *
+ * ## Why the identity is thrown away here, unlike PRF/PO/GRN
+ *
+ * Those three store `publicId` + `resourceType` on an attachment ROW, so removing one can address
+ * and delete its file. A job's attachments are a bare `String[]` on the Job (plus an `#internal`
+ * URL fragment marking staff-only ones), edited by replacing the whole array — there is no discrete
+ * "this attachment was removed" event to hang a cleanup on, and no row to hold identity in. Adding
+ * one means changing the field's shape, its validation, the forms and the portal payload: a module
+ * redesign, not a cleanup fix, and deliberately out of scope.
+ *
+ * So this remains DEFERRED lifecycle debt, in two parts: job attachments are never deleted, and —
+ * shared with every module — a file uploaded into an abandoned form is never reclaimed. Closing
+ * either needs the PENDING → ATTACHED lifecycle and a scheduled sweep, neither of which exists.
+ */
+export async function uploadAttachment(dataUri: string, fileName?: string): Promise<{ url: string }> {
+  if (!dataUri.startsWith("data:")) throw badRequest("Upload a valid file.");
+  const creds = await getCloudinaryCreds();
+  if (!creds) throw badRequest("Cloudinary isn't configured. Add your credentials in Settings → Integrations first.");
+
+  let baseName = "job-attach";
+  if (fileName && fileName.trim()) {
+    const nameWithoutExt = fileName.replace(/\.[^/.]+$/, "").trim();
+    const sanitized = nameWithoutExt.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+    if (sanitized) baseName = sanitized.slice(0, 60);
+  }
+  const shortHash = crypto.randomUUID().slice(0, 8);
+  const publicId = `${baseName}-${shortHash}`;
+
+  // Only the URL is kept — `Job.attachments` is a `String[]` with nowhere to put the rest. See above.
+  const asset = await uploadFileToCloudinary(dataUri, publicId, creds, "senthra/jobs");
+  return { url: asset.url };
+}
+

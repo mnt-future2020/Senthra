@@ -674,10 +674,22 @@ model PurchaseRequestAttachment {
   fileType          String // pdf | docx | png | jpg
   fileSizeBytes     Int
   url               String
+  // Cloudinary asset identity. NULLABLE on purpose: rows written before identity was persisted
+  // have neither, and a null means "we cannot safely name this asset", which makes the deletion
+  // path skip it. Never infer these from `url` at runtime — see attachment.repository.ts.
+  //
+  // The identity is the PAIR. `publicId` alone is not unique: the same id can exist once as an
+  // `image` and once as a `raw` asset, and Cloudinary's destroy API needs both to address one.
+  publicId          String?
+  resourceType      String? // "image" | "raw"
   uploadedBy        String?
   createdAt         DateTime @default(now())
 
   @@index([purchaseRequestId])
+  // Reference counting before a Cloudinary delete. One asset can be referenced by more than one
+  // row (PRF → PO conversion copies the identity), so the delete path counts across all three
+  // attachment tables and destroys nothing while a reference survives.
+  @@index([resourceType, publicId])
 }
 
 // ── Purchase Orders — PROCUREMENT WORKFLOW ONLY ──────────────────────────────────────
@@ -837,10 +849,16 @@ model PurchaseOrderAttachment {
   fileType        String // pdf | docx | png | jpg
   fileSizeBytes   Int
   url             String
+  // Same pair as PurchaseRequestAttachment, and on a converted PRF's attachments it holds the
+  // SAME values — the conversion copies the identity rather than re-uploading the file. That is
+  // why removing a PO attachment must not assume it owns the asset.
+  publicId        String?
+  resourceType    String? // "image" | "raw"
   uploadedBy      String?
   createdAt       DateTime @default(now())
 
   @@index([purchaseOrderId])
+  @@index([resourceType, publicId])
 }
 
 // ── GOODS IN (GRN — Goods Receipt Note) ───────────────────────────────────────────────
@@ -982,10 +1000,16 @@ model GoodsReceiptAttachment {
   fileType       String // pdf | docx | png | jpg
   fileSizeBytes  Int
   url            String
+  // GRN attachments are always uploaded fresh (nothing copies them), so in practice these are
+  // unique to the row. The delete path still counts across every attachment table rather than
+  // relying on that — the next module to copy an attachment would otherwise inherit a silent bug.
+  publicId       String?
+  resourceType   String? // "image" | "raw"
   uploadedBy     String?
   createdAt      DateTime @default(now())
 
   @@index([goodsReceiptId])
+  @@index([resourceType, publicId])
 }
 
 // ── INVENTORY PRIMITIVES ───────────────────────────────────────────────────────────────

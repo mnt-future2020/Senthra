@@ -28,6 +28,7 @@ vi.mock("#modules/warehouse/warehouse.service.js", () => ({ requireActiveWarehou
 vi.mock("#modules/irm/irm.service.js", () => ({ requireActiveIrmItem: vi.fn(), requireActiveIrmItems: vi.fn() }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn() }));
+vi.mock("#modules/attachment/attachment.service.js", () => ({ releaseAsset: vi.fn() }));
 vi.mock("../../lib/cloudinary.js", () => ({ uploadFileToCloudinary: vi.fn() }));
 // Realtime is fire-and-forget; mock it so we can assert every transition fans a refetch signal out
 // to the procurement watchers (a stale detail page is what let a user re-send an already-sent PO).
@@ -61,6 +62,7 @@ import * as irmService from "#modules/irm/irm.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
+import * as attachmentService from "#modules/attachment/attachment.service.js";
 import { emitToRoom, PURCHASE_ORDER_WATCHERS_ROOM } from "../../lib/realtime.js";
 import {
   ISSUED_PO_ATTACHMENT_LABEL,
@@ -569,9 +571,16 @@ describe("attachments — terminal-state guard", () => {
   it("adds an attachment on a SENT (non-terminal) PO", async () => {
     mockFindById.mockResolvedValue(poRow({ status: "sent" }));
     mockCreds.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
-    mockUpload.mockResolvedValue("https://cdn/q.pdf");
+    mockUpload.mockResolvedValue({ url: "https://cdn/q.pdf", publicId: "senthra/purchase-orders/uuid.pdf", resourceType: "raw" });
     await addAttachment(PO_ID, att, { type: "admin", email: "x@x.com" });
     expect(mockAddAtt).toHaveBeenCalledTimes(1);
+    // The identity, not just the URL. A row that stores only a URL names a file nothing can ever
+    // delete — the state every attachment table in this app was in before.
+    expect(mockAddAtt.mock.calls[0][0]).toMatchObject({
+      url: "https://cdn/q.pdf",
+      publicId: "senthra/purchase-orders/uuid.pdf",
+      resourceType: "raw",
+    });
     expect(auditActions()).toContain("purchase_order.attachment_added");
   });
 
@@ -955,7 +964,7 @@ describe("issued-PDF archive (document of record)", () => {
     mockFindById.mockResolvedValue(poRow({ status: "approved" }));
     mockCreds.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
     mockPdf.mockResolvedValue({ filename: "PO-0001.pdf", buffer: Buffer.from("pdf"), mimeType: "application/pdf" });
-    mockUpload.mockResolvedValue("https://cdn/po-0001.pdf");
+    mockUpload.mockResolvedValue({ url: "https://cdn/po-0001.pdf", publicId: "senthra/purchase-orders/po1.pdf", resourceType: "raw" });
     await sendPurchaseOrder(PO_ID, { type: "user", id: "u1", email: "pm@x.co", permissions: [] });
     await flushAsync();
     expect(mockAddAtt).toHaveBeenCalledTimes(1);
@@ -963,6 +972,10 @@ describe("issued-PDF archive (document of record)", () => {
       label: ISSUED_PO_ATTACHMENT_LABEL,
       fileType: "pdf",
       uploadedBy: "system",
+      // Recorded even though this row can never be removed. The guard in removeAttachment is what
+      // protects the document of record — not a missing identity.
+      publicId: "senthra/purchase-orders/po1.pdf",
+      resourceType: "raw",
     });
   });
 
@@ -1001,5 +1014,57 @@ describe("issued-PDF archive (document of record)", () => {
         data: "data:application/pdf;base64,AAAA",
       } as Parameters<typeof addAttachment>[1]),
     ).rejects.toThrow(/reserved label/i);
+  });
+});
+
+// The PO is the side of the shared-asset problem that can actually bite. A PO converted from a PRF
+// holds COPIES of that PRF's attachment identities — same Cloudinary file, two rows — and the PRF,
+// now `converted` and read-only, still displays them. So removing the PO's row must not assume it
+// owns the file; it hands the identity to releaseAsset, whose reference count decides.
+describe("PO attachments — Cloudinary cleanup", () => {
+  const mockFindAtt = poRepo.findAttachment as ReturnType<typeof vi.fn>;
+  const mockRemoveAtt = poRepo.removeAttachment as ReturnType<typeof vi.fn>;
+  const release = attachmentService.releaseAsset as ReturnType<typeof vi.fn>;
+  const SHARED = { publicId: "senthra/purchase-orders/quote-abc.pdf", resourceType: "raw" };
+
+  beforeEach(() => {
+    mockFindById.mockResolvedValue(poRow({ status: "sent" }));
+    mockFindAtt.mockResolvedValue({ id: "att1", purchaseOrderId: PO_ID, label: "Quote", uploadedBy: "u@x.co", ...SHARED });
+  });
+
+  it("hands the removed row's identity to the cleanup, both halves", async () => {
+    await removeAttachment(PO_ID, "att1");
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(release.mock.calls[0][0]).toMatchObject(SHARED);
+  });
+
+  it("releases only AFTER the DB row is deleted", async () => {
+    const order: string[] = [];
+    mockRemoveAtt.mockImplementation(() => { order.push("db"); return Promise.resolve({}); });
+    release.mockImplementation(() => { order.push("cleanup"); return Promise.resolve(); });
+    await removeAttachment(PO_ID, "att1");
+    expect(order).toEqual(["db", "cleanup"]);
+  });
+
+  // The document of record is immutable — the guard fires before anything is deleted, so no cleanup
+  // is even considered. This is the one attachment whose file must outlive every removal attempt.
+  it("never touches Cloudinary for the archived issued-PO document", async () => {
+    mockFindAtt.mockResolvedValue({ id: "att1", purchaseOrderId: PO_ID, label: ISSUED_PO_ATTACHMENT_LABEL, uploadedBy: "system", ...SHARED });
+    await expect(removeAttachment(PO_ID, "att1")).rejects.toThrow(/can't be removed/i);
+    expect(mockRemoveAtt).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it("never releases when the terminal-state guard rejects the removal", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "closed" }));
+    await expect(removeAttachment(PO_ID, "att1")).rejects.toThrow(/closed or cancelled/i);
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it("passes a legacy row's null identity straight through — the skip is releaseAsset's call", async () => {
+    mockFindAtt.mockResolvedValue({ id: "att1", purchaseOrderId: PO_ID, label: null, uploadedBy: null, publicId: null, resourceType: null });
+    await removeAttachment(PO_ID, "att1");
+    expect(mockRemoveAtt).toHaveBeenCalled(); // the business operation still succeeds
+    expect(release.mock.calls[0][0]).toMatchObject({ publicId: null, resourceType: null });
   });
 });

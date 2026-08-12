@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, ExternalLink, FileText, Image as ImageIcon, Link as LinkIcon } from "lucide-react";
 
 import * as jobService from "@/services/job.service";
 import { DetailHeader } from "@/components/ui/DetailHeader";
@@ -15,6 +15,7 @@ import {
   formatDateTime,
 } from "@/components/dashboard/jobs/jobStatus";
 import { JobStageChip } from "./portalUi";
+import { parseJobAttachment } from "@/components/dashboard/jobs/jobAttachment";
 import type { JobLineType, JobPriority, JobType, PortalJobDetail as PortalJobDetailData } from "@/types/job";
 
 // Customer portal — one job.
@@ -230,13 +231,42 @@ export function PortalJobDetail({ id }: { id: string }) {
         </Card>
 
         {job.attachments.length > 0 && (
-          <Card title="Attachments">
-            <ul className="space-y-1.5 text-sm">
-              {job.attachments.map((a, i) => (
-                <li key={i}>
-                  <a href={a} target="_blank" rel="noopener noreferrer" className="break-all font-semibold text-[var(--accent)] hover:underline">{a}</a>
-                </li>
-              ))}
+          <Card title={`Attachments (${job.attachments.length})`}>
+            <ul className="space-y-2 text-sm">
+              {job.attachments.map((a, i) => {
+                // The internal ones are already filtered out upstream; parsing here still strips the
+                // marker so a stray one could never reach a customer's screen as a visible URL.
+                const meta = parseJobAttachment(a);
+                if (!meta || meta.isInternal) return null;
+                const { rawUrl: clean, name, isImg, isPdf, isDoc } = meta;
+
+                return (
+                  <li key={i} className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/30 p-2.5">
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--surface-2)] text-[var(--accent)]">
+                      {isImg ? (
+                        <ImageIcon className="h-4 w-4" />
+                      ) : isPdf || isDoc ? (
+                        <FileText className="h-4 w-4" />
+                      ) : (
+                        <LinkIcon className="h-4 w-4" />
+                      )}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-xs font-bold text-[var(--ink)]" title={name}>
+                        {name}
+                      </p>
+                      <a
+                        href={clean}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--accent)] hover:underline"
+                      >
+                        Open attachment <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           </Card>
         )}
