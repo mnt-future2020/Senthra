@@ -93,3 +93,46 @@ describe("job attachments remain deferred", () => {
     expect(job.src).not.toContain("releaseAsset");
   });
 });
+
+// `uploadToCloudinary` passes `overwrite: true`, which BRANDING and a user's signature depend on —
+// replacing one must land on the same asset. The cost is that any publicId two concurrent uploads can
+// agree on makes the second silently destroy the first, with nothing logged and nothing to notice.
+//
+// A timestamp is exactly such an id: `attach-${Date.now()}`, `sig-${id}-${Date.now()}` and
+// `vsr-${kind}-${Date.now()}` collided on a shared millisecond, and damage photos — which back
+// supplier and insurance claims — used a timestamp plus six Math.random characters, which can repeat.
+describe("upload ids cannot collide", () => {
+  it("no publicId is derived from a clock or Math.random", () => {
+    const offenders = files
+      .filter((f) => !f.rel.endsWith(".test.ts"))
+      .flatMap((f) =>
+        f.src
+          .split("\n")
+          .map((line, i) => ({ rel: f.rel, line: i + 1, text: line }))
+          // Comments discuss these ids — including the comments explaining why a clock is wrong — so
+          // only real code is scanned.
+          .filter(({ text }) => !/^\s*(\/\/|\*)/.test(text))
+          .filter(({ text }) => /publicId|uploadToCloudinary|uploadFileToCloudinary/.test(text))
+          .filter(({ text }) => /Date\.now\(\)|Math\.random\(\)/.test(text)),
+      );
+    expect(offenders.map((o) => `${o.rel}:${o.line}`)).toEqual([]);
+  });
+
+  // Every non-deterministic upload site names its asset with randomUUID. The deterministic ones
+  // (branding `type`, `signature-${userId}`) are absent on purpose — they REPLACE, and a fresh id
+  // each time would leak the old asset instead of overwriting it.
+  it("the sites that must not collide all use randomUUID", () => {
+    const rel = [
+      "modules/engineer-transfer/engineer-transfer.service.ts",
+      "modules/van-stock-request/van-stock-request.service.ts",
+      "modules/goods-management/goods-management.service.ts",
+      "modules/job/job.service.ts",
+      "modules/job-kit-request/job-kit-request.service.ts",
+    ];
+    for (const r of rel) {
+      const f = files.find((x) => x.rel === r);
+      expect(f, `${r} not found — was it moved?`).toBeDefined();
+      expect(f!.src, r).toMatch(/randomUUID/);
+    }
+  });
+});
