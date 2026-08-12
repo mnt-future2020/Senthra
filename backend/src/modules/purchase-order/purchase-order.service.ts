@@ -15,6 +15,7 @@ import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import * as attachmentService from "#modules/attachment/attachment.service.js";
 import { getCloudinaryCreds, getCompanyTimezone } from "#modules/settings/settings.service.js";
+import { PO_ATTACHMENT_MAX_COUNT, PO_ATTACHMENT_MAX_TOTAL_BYTES } from "./purchase-order.validation.js";
 import { startOfDayIn } from "../../utils/filter-date.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
 import { emitAttentionChanged, emitToRoom, PURCHASE_ORDER_WATCHERS_ROOM } from "../../lib/realtime.js";
@@ -1043,6 +1044,20 @@ export async function deletePurchaseOrder(id: string, actor?: AuditActor): Promi
 // ── Attachments ──────────────────────────────────────────────────────────────────────────────
 // A PO is immutable once it reaches a terminal state — attachments can't be changed on a
 // closed or cancelled order (consistent with the draft-only edit lock on the header/lines).
+/**
+ * The archived issued-PO document — the record of exactly what the supplier received.
+ *
+ * ONE predicate, because two places depend on it and they must agree: the count cap excludes this row
+ * so a full cap can never starve the archive, and removeAttachment refuses to delete it. If those two
+ * drifted, the cap would reserve a slot for something the guard no longer protected.
+ *
+ * Both halves are required. The label alone is reserved but user-supplied labels are checked against
+ * it on the way in, and `uploadedBy === "system"` is what only the archive writer can set.
+ */
+function isIssuedPoArchive(a: { label: string | null; uploadedBy: string | null }): boolean {
+  return a.label === ISSUED_PO_ATTACHMENT_LABEL && a.uploadedBy === "system";
+}
+
 function assertAttachmentsEditable(status: string): void {
   if (status === "closed" || status === "cancelled") {
     throw conflict("Attachments can't be changed on a closed or cancelled purchase order.");
@@ -1056,6 +1071,17 @@ export async function addAttachment(poId: string, input: PoAttachmentInput, acto
   // document of record.
   if (input.label?.trim() === ISSUED_PO_ATTACHMENT_LABEL) {
     throw badRequest(`"${ISSUED_PO_ATTACHMENT_LABEL}" is a reserved label.`);
+  }
+  // Counts USER documents only — the system's issued-PO archive keeps its own slot, or a buyer who
+  // filled the cap would silently leave the order with no document of record. Checked before the
+  // upload, so a rejected attachment never reaches Cloudinary as an orphan.
+  const userAttachments = po.attachments.filter((a) => !isIssuedPoArchive(a));
+  if (userAttachments.length >= PO_ATTACHMENT_MAX_COUNT) {
+    throw badRequest(`A purchase order can have at most ${PO_ATTACHMENT_MAX_COUNT} documents.`);
+  }
+  const totalBytes = userAttachments.reduce((sum, a) => sum + a.fileSizeBytes, 0);
+  if (totalBytes + input.fileSizeBytes > PO_ATTACHMENT_MAX_TOTAL_BYTES) {
+    throw badRequest("Total documents on a purchase order can't exceed 80 MB.");
   }
   const creds = await getCloudinaryCreds();
   if (!creds) throw badRequest("File uploads aren't configured. Add Cloudinary credentials in Settings first.");
@@ -1081,7 +1107,7 @@ export async function removeAttachment(poId: string, attachmentId: string, actor
   const att = await poRepo.findAttachment(attachmentId);
   if (!att || att.purchaseOrderId !== poId) throw notFound("Attachment not found.");
   // The archived issued document is immutable — it IS the record of what the supplier received.
-  if (att.label === ISSUED_PO_ATTACHMENT_LABEL && att.uploadedBy === "system") {
+  if (isIssuedPoArchive(att)) {
     throw conflict("The archived issued PO document can't be removed.");
   }
   await poRepo.removeAttachment(attachmentId);

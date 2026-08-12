@@ -36,6 +36,7 @@ import type {
   UpdatePurchaseRequestInput,
 } from "./purchase-request.validation.js";
 import { incotermLabel } from "#modules/purchase-order/purchase-order.validation.js";
+import { PRF_ATTACHMENT_MAX_COUNT, PRF_ATTACHMENT_MAX_TOTAL_BYTES } from "./purchase-request.validation.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 
@@ -987,6 +988,14 @@ function assertEditable(status: string): void {
 export async function addAttachment(prfId: string, input: PrfAttachmentInput, actor?: AuditActor): Promise<PublicPurchaseRequest> {
   const prf = await loadOrThrow(prfId, actor);
   assertEditable(prf.status);
+  // Checked BEFORE the upload, so a rejected attachment never reaches Cloudinary as an orphan.
+  if (prf.attachments.length >= PRF_ATTACHMENT_MAX_COUNT) {
+    throw badRequest(`A purchase request can have at most ${PRF_ATTACHMENT_MAX_COUNT} documents.`);
+  }
+  const totalBytes = prf.attachments.reduce((sum, a) => sum + a.fileSizeBytes, 0);
+  if (totalBytes + input.fileSizeBytes > PRF_ATTACHMENT_MAX_TOTAL_BYTES) {
+    throw badRequest("Total documents on a purchase request can't exceed 40 MB.");
+  }
   const creds = await getCloudinaryCreds();
   if (!creds) throw badRequest("File uploads aren't configured. Add Cloudinary credentials in Settings first.");
   const asset = await uploadFileToCloudinary(input.data, randomUUID(), creds);
