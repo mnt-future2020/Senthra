@@ -205,6 +205,15 @@ export function RestockComposerPage() {
   const remove = (id: string) => setCart((c) => c.filter((x) => x.irmItemId !== id));
 
   const onFile = async (file: File) => {
+    // `accept="image/*"` is a hint the file dialog lets the user override, and a file the browser
+    // cannot type at all reads back as `application/octet-stream` — which the server now refuses. Check
+    // it here so the answer arrives before the upload rather than after it, the same gate
+    // TransferComposer already applies to its own picker.
+    if (!file.type.startsWith("image/")) {
+      setMsg({ type: "error", text: "Attach an image — PNG, JPG, GIF or WEBP." });
+      if (fileRef.current) fileRef.current.value = "";
+      return;
+    }
     setUploading(true);
     setMsg(null);
     try {

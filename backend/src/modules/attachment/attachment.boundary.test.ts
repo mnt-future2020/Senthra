@@ -64,14 +64,18 @@ describe("Cloudinary deletion has exactly one entrance", () => {
 // The protection is structural: no cleanup path exists for any of them. This test states that as an
 // intended property, so wiring one up has to be a decision rather than a copy-paste.
 describe("deterministic and evidence assets have no deletion path", () => {
+  // `user` and `customer` are deliberately ABSENT. They upload two kinds of image: a deterministic one
+  // that overwrites in place (`signature-${userId}`), and a randomUUID one — the avatar and the company
+  // logo — where a replacement uploads a NEW asset and the old file simply stops being referenced. Those
+  // two DO release, because changing your picture is an ordinary success path and leaked a file every
+  // time. The sites listed here have no random-id upload at all, so a cleanup path would have nothing
+  // to clean and would only put a delete next to an asset that must survive.
   const IMAGE_UPLOAD_SITES = [
     "modules/settings/settings.service.ts", // logo / favicon — publicId is the literal type
-    "modules/user/user.service.ts", // signature-${userId}
     "modules/goods-management/goods-management.service.ts", // damage photos — audit evidence
     "modules/engineer-transfer/engineer-transfer.service.ts", // acknowledgement signature
     "modules/job-kit-request/job-kit-request.service.ts",
     "modules/van-stock-request/van-stock-request.service.ts",
-    "modules/customer/customer.service.ts",
   ];
 
   it.each(IMAGE_UPLOAD_SITES)("%s uploads but never releases", (rel) => {
@@ -134,5 +138,28 @@ describe("upload ids cannot collide", () => {
       expect(f, `${r} not found — was it moved?`).toBeDefined();
       expect(f!.src, r).toMatch(/randomUUID/);
     }
+  });
+});
+
+// The two random-id image uploads. A replacement does not overwrite them, so the file it replaces has
+// to be released explicitly — and it goes through releaseAsset like everything else, never a direct
+// destroy, so the single-entrance guarantee above still holds.
+describe("avatar and company logo release the file they replace", () => {
+  it.each([
+    "modules/user/user.service.ts",
+    "modules/customer/customer.service.ts",
+  ])("%s releases through releaseAsset, not a direct destroy", (rel) => {
+    const f = files.find((x) => x.rel === rel);
+    expect(f, `${rel} not found — was it moved?`).toBeDefined();
+    expect(f!.src).toContain("releaseAsset");
+    expect(f!.src).not.toContain("destroyFromCloudinary");
+  });
+
+  // Identity has to be STORED for the release to have anything to address.
+  it("stores the identity it will later need", () => {
+    const user = files.find((x) => x.rel === "modules/user/user.service.ts")!;
+    const customer = files.find((x) => x.rel === "modules/customer/customer.service.ts")!;
+    expect(user.src).toMatch(/profileImagePublicId/);
+    expect(customer.src).toMatch(/logoPublicId/);
   });
 });

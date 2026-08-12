@@ -20,6 +20,7 @@ import * as jobRepo from "#modules/job/job.repository.js";
 import * as jobService from "#modules/job/job.service.js";
 import { withTransactionRetry } from "../../lib/prisma.js";
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
+import type { CloudinaryImageAsset } from "../../lib/cloudinary.js";
 import { geocodePostcode, geocodePostcodesBulk, canonicalPostcode } from "../../lib/geocode.js";
 import { siteSchema } from "./customer.validation.js";
 import { getCloudinaryCreds, getRegionalSettings, getStockCodePrefix } from "#modules/settings/settings.service.js";
@@ -33,6 +34,7 @@ import { hashPassword } from "../../utils/password.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { emitAttentionChanged } from "../../lib/realtime.js";
+import * as attachmentService from "#modules/attachment/attachment.service.js";
 
 // The customer module has no realtime surface, but four attention queues live here (stock requests
 // awaiting review, open warehouse assignments, stock-entry drafts, portal invites never signed in).
@@ -52,7 +54,7 @@ import { sendTemplatedEmail } from "#modules/email/email.service.js";
 
 // Upload a company logo to Cloudinary (random public id, "senthra/customers"
 // folder) and return its secure URL. Mirrors the staff avatar upload.
-async function uploadLogo(image: string): Promise<string> {
+async function uploadLogo(image: string): Promise<CloudinaryImageAsset> {
   const creds = await getCloudinaryCreds();
   if (!creds) {
     throw badRequest(
@@ -507,14 +509,16 @@ export interface CreateCustomerInput extends CustomerFieldsInput {
 
 // The optional company/contact/address columns (everything except name/email/auth),
 // trimmed to null. Shared by create + revive so the two stay in lockstep.
-function customerColumns(input: CustomerFieldsInput, logoUrl: string | null) {
+function customerColumns(input: CustomerFieldsInput, logo: CloudinaryImageAsset | null) {
   return {
     legalName: trimToNull(input.legalName),
     registrationNumber: trimToNull(input.registrationNumber),
     industry: trimToNull(input.industry),
     website: trimToNull(input.website),
     notes: trimToNull(input.notes),
-    logoUrl,
+    logoUrl: logo?.url ?? null,
+    logoPublicId: logo?.publicId ?? null,
+    logoResourceType: logo?.resourceType ?? null,
     contactPerson: trimToNull(input.contactPerson),
     contactJobTitle: trimToNull(input.contactJobTitle),
     phone: trimToNull(input.phone),
@@ -634,13 +638,13 @@ export async function createCustomer(
     throw conflict(`A customer named "${name}" already exists.`);
   }
 
-  const logoUrl = input.logo ? await uploadLogo(input.logo) : null;
+  const logo = input.logo ? await uploadLogo(input.logo) : null;
   const actorLabel = actor?.email ?? null;
   const fields = {
     name,
     nameLower,
     email,
-    ...customerColumns(input, logoUrl),
+    ...customerColumns(input, logo),
     createdBy: actorLabel,
     updatedBy: actorLabel,
   };
@@ -757,8 +761,25 @@ export async function updateCustomer(
   if (typeof input.status === "string") data.status = normalizeStatus(input.status);
 
   // Logo: a new upload replaces the current one; removeLogo clears it.
-  if (input.logo) data.logoUrl = await uploadLogo(input.logo);
-  else if (input.removeLogo) data.logoUrl = null;
+  //
+  // A logo's public id is a fresh randomUUID, so a replacement does NOT overwrite the old asset — it
+  // just stops being referenced. Changing a customer's logo is an ordinary success path, so the file it
+  // replaces has to be released explicitly or it stays in the CDN forever.
+  let staleLogo: attachmentService.AssetRef | null = null;
+  const previousLogo: attachmentService.AssetRef = { publicId: customer.logoPublicId, resourceType: customer.logoResourceType };
+  if (input.logo) {
+    const logo = await uploadLogo(input.logo);
+    data.logoUrl = logo.url;
+    data.logoPublicId = logo.publicId;
+    data.logoResourceType = logo.resourceType;
+    // Only when the id actually moved; a legacy row has no stored id and is skipped.
+    if (previousLogo.publicId && previousLogo.publicId !== logo.publicId) staleLogo = previousLogo;
+  } else if (input.removeLogo) {
+    data.logoUrl = null;
+    data.logoPublicId = null;
+    data.logoResourceType = null;
+    if (previousLogo.publicId) staleLogo = previousLogo;
+  }
 
   if (Object.keys(data).length === 0) throw badRequest("Nothing to update.");
 
@@ -766,6 +787,8 @@ export async function updateCustomer(
   data.updatedBy = actor?.email ?? null;
 
   const updated = await customerRepo.update(id, data);
+  // After the row is written. Never throws — a storage failure cannot fail the customer update.
+  if (staleLogo) await attachmentService.releaseAsset(staleLogo, `customer ${updated.name}`);
   recordCustomerAudit({
     actor,
     action: "customer.updated",

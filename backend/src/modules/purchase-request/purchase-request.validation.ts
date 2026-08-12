@@ -173,6 +173,32 @@ export type PrfCancelInput = z.infer<typeof prfCancelSchema>;
 
 // --- attachment upload (data URI from the form) -----------------------------
 const TEN_MB = 10 * 1024 * 1024;
+
+/**
+ * How many documents one purchase request may carry.
+ *
+ * NOT copied from the GRN's 5. A PRF is raised against ONE supplier and its attachments are that
+ * supplier's quotation package — the quote, a revision, a datasheet, a spec sheet, sometimes the email
+ * it arrived in. Ten leaves room for a thorough package while keeping the collection bounded: the
+ * detail read loads every attachment on the record, so an unbounded array degrades the one screen a
+ * buyer opens most.
+ *
+ * It also sets the floor for the PO's cap — conversion COPIES these rows onto the order, so the PO
+ * must be able to absorb a full PRF and still accept its own documents. See PO_ATTACHMENT_MAX_COUNT.
+ */
+export const PRF_ATTACHMENT_MAX_COUNT = 10;
+
+/**
+ * And how many BYTES those ten may add up to.
+ *
+ * The count alone leaves a gap the GRN does not have: ten files at the 10 MB per-file ceiling is 100 MB
+ * on one request. A quotation package is PDFs — a quote is typically well under 2 MB — so 40 MB is
+ * roughly double a realistic worst case while keeping a single record's storage bounded.
+ *
+ * Summed from the sizes already stored, which are MEASURED from the payload rather than declared, so
+ * this is a ceiling that actually holds.
+ */
+export const PRF_ATTACHMENT_MAX_TOTAL_BYTES = 40 * 1024 * 1024;
 // The declared `fileType` and `fileSizeBytes` above are the CALLER'S CLAIMS about a payload the
 // server used to never open — so "pdf, 40 KB" would carry anything, at any size. Both are now
 // settled against `data` itself:

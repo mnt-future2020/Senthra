@@ -75,7 +75,11 @@ const mockAudit = audit.record as ReturnType<typeof vi.fn>;
 beforeEach(() => {
   vi.clearAllMocks();
   mockCreds.mockResolvedValue(CREDS);
-  mockUpload.mockResolvedValue("https://cdn/senthra/signatures/signature-x.png");
+  mockUpload.mockResolvedValue({
+    url: "https://cdn/senthra/signatures/signature-x.png",
+    publicId: "senthra/signatures/signature-x",
+    resourceType: "image",
+  });
   mockUpdate.mockImplementation((_id: string, data: Record<string, unknown>) =>
     Promise.resolve(userRow(data)),
   );

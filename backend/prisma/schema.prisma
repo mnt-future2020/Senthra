@@ -1752,6 +1752,13 @@ model User {
   role            Role?   @relation(fields: [roleId], references: [id])
   status          String  @default("active") // active | inactive | suspended
   profileImageUrl String?
+  // Cloudinary identity for the avatar above, so replacing it can delete the file it replaces.
+  // A new avatar gets a fresh randomUUID public id, so the old asset is NOT overwritten — without
+  // these it stayed in the CDN forever, on the ordinary success path of changing your picture.
+  // (The signature below needs no equivalent: its public id is `signature-${userId}`, so a replacement
+  // overwrites the same asset in place.)
+  profileImagePublicId     String?
+  profileImageResourceType String?
   notes           String?
 
   // Personal signature — printed on documents the user issues (e.g. the Purchase Order PDF).
@@ -1852,6 +1859,10 @@ model Customer {
   industry           String? // sector, e.g. "Telecoms"
   website            String?
   logoUrl            String? // Cloudinary URL (company logo)
+  // Cloudinary identity for the logo above — same reason as User.profileImagePublicId: a replacement
+  // uploads a fresh randomUUID asset rather than overwriting, so without these the old file leaked.
+  logoPublicId       String?
+  logoResourceType   String?
   notes              String? // internal notes (never shown to the customer)
   status             String  @default("active") // active | inactive
 

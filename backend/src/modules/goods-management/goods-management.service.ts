@@ -446,7 +446,7 @@ export async function uploadDamagePhoto(image: string): Promise<{ url: string }>
   // repeated publicId, and the previous timestamp-plus-Math.random() id could repeat: same
   // millisecond, same 6 characters. randomUUID cannot.
   const publicId = `damage-${randomUUID()}`;
-  const url = await uploadToCloudinary(image, publicId, creds, "senthra/damage-photos");
+  const { url } = await uploadToCloudinary(image, publicId, creds, "senthra/damage-photos");
   return { url };
 }
 

@@ -1264,6 +1264,6 @@ export async function uploadImage(image: string, kind: "attachment" | "damage"):
   const folder = kind === "damage" ? "senthra/damage-photos" : "senthra/van-stock-requests";
   // Unique per upload: `uploadToCloudinary` overwrites on a repeated publicId, so a timestamp meant
   // two engineers photographing the same kind of evidence in the same millisecond kept one photo.
-  const url = await uploadToCloudinary(image, `vsr-${kind}-${randomUUID()}`, creds, folder);
+  const { url } = await uploadToCloudinary(image, `vsr-${kind}-${randomUUID()}`, creds, folder);
   return { url };
 }

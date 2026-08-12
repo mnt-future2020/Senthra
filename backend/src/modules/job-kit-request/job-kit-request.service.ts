@@ -978,7 +978,7 @@ export async function uploadAttachment(image: string): Promise<{ url: string }> 
   // Unique per upload: uploadToCloudinary overwrites on a repeated publicId, so a timestamp meant two
   // engineers attaching kit-request evidence in the same millisecond kept only the second photo.
   const publicId = `kitreq-${randomUUID()}`;
-  const url = await uploadToCloudinary(image, publicId, creds, "senthra/kit-requests");
+  const { url } = await uploadToCloudinary(image, publicId, creds, "senthra/kit-requests");
   return { url };
 }
 

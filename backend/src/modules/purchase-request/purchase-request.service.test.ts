@@ -931,6 +931,57 @@ describe("PRF attachments — Cloudinary cleanup", () => {
     });
   });
 
+  // Ten documents, not the GRN's five: a PRF is one supplier's quotation package. Bounded because the
+  // detail read loads every attachment on the record.
+  describe("count cap", () => {
+    const att = { fileName: "q.pdf", fileType: "pdf", fileSizeBytes: 9, data: "data:application/pdf;base64,AA" } as Parameters<typeof addAttachment>[1];
+    const attRow = (i: number) => ({
+      id: `a${i}`, label: null, fileName: `q${i}.pdf`, fileType: "pdf", fileSizeBytes: 100,
+      url: `https://cdn/q${i}.pdf`, publicId: `p${i}`, resourceType: "raw", uploadedBy: null,
+      createdAt: new Date("2026-07-01T00:00:00Z"),
+    });
+    const withN = (n: number) => prfRow({ status: "draft", attachments: Array.from({ length: n }, (_, i) => attRow(i)) });
+
+    it("accepts the tenth document", async () => {
+      mockFindById.mockResolvedValue(withN(9));
+      mockCreds.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
+      mockUpload.mockResolvedValue({ url: "https://cdn/q.pdf", publicId: "p", resourceType: "raw" });
+      await addAttachment(PRF_ID, att);
+      expect(mockAddAtt).toHaveBeenCalledTimes(1);
+    });
+
+    // The count alone left a gap: ten files at the 10 MB per-file ceiling is 100 MB on one record.
+    it("refuses a document that would push the record past 40 MB", async () => {
+      const big = (i: number) => ({ ...attRow(i), fileSizeBytes: 8 * 1024 * 1024 });
+      mockFindById.mockResolvedValue(prfRow({ status: "draft", attachments: Array.from({ length: 5 }, (_, i) => big(i)) }));
+      const oneMore = { ...att, fileSizeBytes: 2 * 1024 * 1024 } as Parameters<typeof addAttachment>[1];
+      await expect(addAttachment(PRF_ID, oneMore)).rejects.toThrow(/can't exceed 40 MB/i);
+      expect(mockUpload).not.toHaveBeenCalled();
+    });
+
+    it("accepts one that stays inside 40 MB", async () => {
+      const big = (i: number) => ({ ...attRow(i), fileSizeBytes: 8 * 1024 * 1024 });
+      mockFindById.mockResolvedValue(prfRow({ status: "draft", attachments: Array.from({ length: 4 }, (_, i) => big(i)) }));
+      mockCreds.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
+      mockUpload.mockResolvedValue({ url: "https://cdn/q.pdf", publicId: "p", resourceType: "raw" });
+      await addAttachment(PRF_ID, { ...att, fileSizeBytes: 2 * 1024 * 1024 } as Parameters<typeof addAttachment>[1]);
+      expect(mockAddAtt).toHaveBeenCalledTimes(1);
+    });
+
+    it("refuses the eleventh", async () => {
+      mockFindById.mockResolvedValue(withN(10));
+      await expect(addAttachment(PRF_ID, att)).rejects.toThrow(/at most 10 documents/i);
+    });
+
+    // Refused BEFORE the upload, so a rejected attachment never lands in Cloudinary as an orphan.
+    it("never reaches Cloudinary when the cap is full", async () => {
+      mockFindById.mockResolvedValue(withN(10));
+      await expect(addAttachment(PRF_ID, att)).rejects.toThrow();
+      expect(mockUpload).not.toHaveBeenCalled();
+      expect(mockAddAtt).not.toHaveBeenCalled();
+    });
+  });
+
   // A soft delete keeps every attachment row, so the references survive and the files must too.
   it("soft-deleting the PRF destroys nothing", async () => {
     await deletePurchaseRequest(PRF_ID);

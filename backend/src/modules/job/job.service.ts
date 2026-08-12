@@ -1686,8 +1686,12 @@ export async function uploadAttachment(dataUri: string, fileName?: string): Prom
     const sanitized = nameWithoutExt.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
     if (sanitized) baseName = sanitized.slice(0, 60);
   }
-  const shortHash = crypto.randomUUID().slice(0, 8);
-  const publicId = `${baseName}-${shortHash}`;
+  // The FULL uuid, not a slice of it. `uploadFileToCloudinary` leaves `overwrite` unset, which
+  // Cloudinary defaults to true — so a publicId two uploads can agree on means the second silently
+  // destroys the first. Truncating to 8 hex characters left 32 bits, which two files sharing a name
+  // would collide on about once in four billion: unlikely rather than impossible, and there is nothing
+  // to gain by clipping it. The readable part is the name in front.
+  const publicId = `${baseName}-${crypto.randomUUID()}`;
 
   // Only the URL is kept — `Job.attachments` is a `String[]` with nowhere to put the rest. See above.
   const asset = await uploadFileToCloudinary(dataUri, publicId, creds, "senthra/jobs");

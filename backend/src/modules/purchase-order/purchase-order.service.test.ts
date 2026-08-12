@@ -62,6 +62,8 @@ import * as irmService from "#modules/irm/irm.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
+import { PO_ATTACHMENT_MAX_COUNT, PO_ATTACHMENT_MAX_TOTAL_BYTES } from "./purchase-order.validation.js";
+import { PRF_ATTACHMENT_MAX_COUNT, PRF_ATTACHMENT_MAX_TOTAL_BYTES } from "#modules/purchase-request/purchase-request.validation.js";
 import * as attachmentService from "#modules/attachment/attachment.service.js";
 import { emitToRoom, PURCHASE_ORDER_WATCHERS_ROOM } from "../../lib/realtime.js";
 import {
@@ -1066,5 +1068,75 @@ describe("PO attachments — Cloudinary cleanup", () => {
     await removeAttachment(PO_ID, "att1");
     expect(mockRemoveAtt).toHaveBeenCalled(); // the business operation still succeeds
     expect(release.mock.calls[0][0]).toMatchObject({ publicId: null, resourceType: null });
+  });
+});
+
+// Twenty, not the PRF's ten: conversion COPIES a full PRF's attachments onto the order, so an equal cap
+// would be exhausted the moment the PO existed — no room for the supplier's confirmation or the invoice.
+describe("PO attachments — count cap", () => {
+  const mockCreds2 = getCloudinaryCreds as ReturnType<typeof vi.fn>;
+  const mockUpload2 = uploadFileToCloudinary as ReturnType<typeof vi.fn>;
+  const mockAddAtt2 = poRepo.addAttachment as ReturnType<typeof vi.fn>;
+  const att = { fileName: "inv.pdf", fileType: "pdf", fileSizeBytes: 9, data: "data:application/pdf;base64,AA" } as Parameters<typeof addAttachment>[1];
+
+  const userAtt = (i: number) => ({ id: `u${i}`, label: null, fileName: `f${i}.pdf`, fileType: "pdf", fileSizeBytes: 10, url: `https://cdn/f${i}.pdf`, publicId: `p${i}`, resourceType: "raw", uploadedBy: "buyer@x.co", createdAt: new Date("2026-07-01T00:00:00Z") });
+  const archive = { id: "sys", label: ISSUED_PO_ATTACHMENT_LABEL, fileName: "PO-0001.pdf", fileType: "pdf", fileSizeBytes: 10, url: "https://cdn/po.pdf", publicId: "psys", resourceType: "raw", uploadedBy: "system", createdAt: new Date("2026-07-01T00:00:00Z") };
+  const withAtts = (atts: unknown[]) => poRow({ status: "sent", attachments: atts });
+
+  beforeEach(() => {
+    mockCreds2.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
+    mockUpload2.mockResolvedValue({ url: "https://cdn/inv.pdf", publicId: "pinv", resourceType: "raw" });
+  });
+
+  it("accepts the twentieth user document", async () => {
+    mockFindById.mockResolvedValue(withAtts(Array.from({ length: 19 }, (_, i) => userAtt(i))));
+    await addAttachment(PO_ID, att, { type: "admin", email: "x@x.com" });
+    expect(mockAddAtt2).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses the twenty-first", async () => {
+    mockFindById.mockResolvedValue(withAtts(Array.from({ length: 20 }, (_, i) => userAtt(i))));
+    await expect(addAttachment(PO_ID, att)).rejects.toThrow(/at most 20 documents/i);
+  });
+
+  // THE point of excluding the archive. A buyer who fills the cap must not be able to consume the slot
+  // the system needs for the document of record — its write is fire-and-forget and fails SILENTLY.
+  it("does not count the issued-PO archive against the cap", async () => {
+    mockFindById.mockResolvedValue(withAtts([archive, ...Array.from({ length: 19 }, (_, i) => userAtt(i))]));
+    await addAttachment(PO_ID, att, { type: "admin", email: "x@x.com" });
+    expect(mockAddAtt2).toHaveBeenCalledTimes(1); // 20 rows on the record, 19 of them user documents
+  });
+
+  // Refused before the upload, so a rejected attachment never lands in Cloudinary as an orphan.
+  it("never reaches Cloudinary when the cap is full", async () => {
+    mockFindById.mockResolvedValue(withAtts(Array.from({ length: 20 }, (_, i) => userAtt(i))));
+    await expect(addAttachment(PO_ID, att)).rejects.toThrow();
+    expect(mockUpload2).not.toHaveBeenCalled();
+    expect(mockAddAtt2).not.toHaveBeenCalled();
+  });
+
+  it("refuses a document that would push the order past 80 MB", async () => {
+    const big = (i: number) => ({ ...userAtt(i), fileSizeBytes: 15 * 1024 * 1024 });
+    mockFindById.mockResolvedValue(withAtts(Array.from({ length: 5 }, (_, i) => big(i))));
+    const oneMore = { ...att, fileSizeBytes: 6 * 1024 * 1024 } as Parameters<typeof addAttachment>[1];
+    await expect(addAttachment(PO_ID, oneMore)).rejects.toThrow(/can't exceed 80 MB/i);
+    expect(mockUpload2).not.toHaveBeenCalled();
+  });
+
+  // The archive is excluded from the BYTE total for the same reason as the count.
+  it("does not count the archive's bytes against the total", async () => {
+    const bigArchive = { ...archive, fileSizeBytes: 70 * 1024 * 1024 };
+    mockFindById.mockResolvedValue(withAtts([bigArchive, userAtt(0)]));
+    await addAttachment(PO_ID, { ...att, fileSizeBytes: 5 * 1024 * 1024 } as Parameters<typeof addAttachment>[1], { type: "admin", email: "x@x.com" });
+    expect(mockAddAtt2).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the byte ceiling above the PRF's, so a converted order has room", () => {
+    expect(PO_ATTACHMENT_MAX_TOTAL_BYTES).toBeGreaterThan(PRF_ATTACHMENT_MAX_TOTAL_BYTES);
+  });
+
+  // A PRF is capped at ten, so a full conversion can never exhaust the order's twenty on its own.
+  it("leaves headroom above a full PRF's worth of copied documents", () => {
+    expect(PO_ATTACHMENT_MAX_COUNT).toBeGreaterThan(PRF_ATTACHMENT_MAX_COUNT);
   });
 });

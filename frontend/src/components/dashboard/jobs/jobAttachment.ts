@@ -78,19 +78,28 @@ export interface JobAttachment {
 const CLOUDINARY_HOST = "res.cloudinary.com";
 
 /**
- * Strip the `-<8 hex>` suffix the upload path appends, and nothing else.
+ * Strip the uniqueness suffix the upload path appends, and nothing else.
  *
- * The hash must contain at least one a–f character. Without that guard the pattern also matched an
- * 8-DIGIT DATE, so a user's own `site-report-20240115.pdf` displayed as `site-report.pdf` — the app
- * silently deleting part of a real file name, on the one screen people use to tell two survey
- * reports apart. Requiring a letter costs a genuinely all-numeric hash its trim (~2% of uploads keep
- * a visible suffix) and that is the right side to err on: showing too much of a name is a blemish,
- * showing the wrong name is a mistake.
+ * TWO shapes, because the id changed and the older one is still in the database:
+ *
+ *   `-<uuid>`   current. A full UUID is unmistakable — five hex groups in a fixed 8-4-4-4-12 layout —
+ *               so it needs no further guard.
+ *   `-<8 hex>`  earlier uploads, which truncated the UUID. This one is ambiguous, and the pattern also
+ *               matched an 8-DIGIT DATE: a user's own `site-report-20240115.pdf` displayed as
+ *               `site-report.pdf`, the app silently deleting part of a real file name on the screen
+ *               people use to tell two survey reports apart. Requiring at least one a–f character
+ *               costs a genuinely all-numeric hash its trim and is the right side to err on — showing
+ *               too much of a name is a blemish, showing the wrong name is a mistake.
  */
+const UUID_SUFFIX = /^(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(\.[a-z0-9]+)$/i;
+const SHORT_SUFFIX = /^(.+)-([a-f0-9]{8})(\.[a-z0-9]+)$/i;
+
 function stripUploadHash(fileName: string): string {
-  const m = /^(.+)-([a-f0-9]{8})(\.[a-z0-9]+)$/i.exec(fileName);
-  if (!m || !/[a-f]/i.test(m[2])) return fileName;
-  return `${m[1]}${m[3]}`;
+  const uuid = UUID_SUFFIX.exec(fileName);
+  if (uuid) return `${uuid[1]}${uuid[2]}`;
+  const short = SHORT_SUFFIX.exec(fileName);
+  if (!short || !/[a-f]/i.test(short[2])) return fileName;
+  return `${short[1]}${short[3]}`;
 }
 
 /** Parse one stored attachment string. Returns null for a blank entry (the form keeps empty rows). */
