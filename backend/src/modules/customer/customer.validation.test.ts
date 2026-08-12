@@ -182,3 +182,59 @@ describe("adminStockRequestSchema", () => {
     expect(adminStockRequestSchema.safeParse({ quantity: 3 }).success).toBe(false);
   });
 });
+
+// The company logo. This field accepted any `data:image/…` prefix at any size, so its only real
+// ceiling was the body parser's — a caller could push a ~3.7 MB blob of any image type to a PAID CDN
+// through a form the UI limits to 2 MB of raster.
+//
+// Held to the AVATAR rule, not the branding rule: same picker helper, same <Avatar> render, stored on
+// a record rather than in Settings. Branding is looser on purpose (a favicon needs ICO).
+describe("customer logo", () => {
+  const base = { name: "LOBBI", email: "ops@lobbi.example", status: "active" };
+  const dataUri = (mediaType: string, chars = 40) => `data:${mediaType};base64,${"A".repeat(chars)}`;
+  const parse = (logo: string) => createCustomerSchema.safeParse({ ...base, logo });
+
+  it.each(["image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp"])("accepts %s", (mediaType) => {
+    expect(parse(dataUri(mediaType)).success).toBe(true);
+  });
+
+  it("is optional — a customer needs no logo", () => {
+    expect(createCustomerSchema.safeParse(base).success).toBe(true);
+  });
+
+  // SVG can carry script, and these land on a public Cloudinary URL that opens in its own tab, where
+  // the <img> tag that normally renders them — and neutralises them — is not involved. Excluded for
+  // the same reason user.validation excludes it from avatars.
+  it("rejects SVG", () => {
+    expect(parse(dataUri("image/svg+xml")).success).toBe(false);
+  });
+
+  it.each(["image/x-icon", "image/vnd.microsoft.icon", "image/avif", "image/tiff"])(
+    "rejects %s — the picker offers none of it",
+    (mediaType) => {
+      expect(parse(dataUri(mediaType)).success).toBe(false);
+    },
+  );
+
+  it.each([
+    ["a non-image data URI", "data:application/pdf;base64,QQ=="],
+    ["an executable pretending to be a data URI", "data:application/x-msdownload;base64,QQ=="],
+    ["a percent-encoded data URI", "data:image/png,notbase64"],
+    ["a plain URL", "https://cdn.example.com/logo.png"],
+    ["free text", "logo.png"],
+    ["an empty string", ""],
+  ])("rejects %s", (_label, logo) => {
+    expect(parse(logo).success).toBe(false);
+  });
+
+  // The cap the field never had. ~3 MB of characters is ~2.2 MB of binary — above the 2 MB the picker
+  // allows, and far below the 3.7 MB the body parser would otherwise have been the only guard against.
+  it("rejects a payload past the size ceiling", () => {
+    expect(parse(dataUri("image/png", 3 * 1024 * 1024 + 1)).success).toBe(false);
+  });
+
+  it("accepts a payload just inside it", () => {
+    const chars = 3 * 1024 * 1024 - "data:image/png;base64,".length;
+    expect(parse(dataUri("image/png", chars)).success).toBe(true);
+  });
+});

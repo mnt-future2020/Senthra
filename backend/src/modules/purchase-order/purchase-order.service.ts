@@ -13,6 +13,7 @@ import * as warehouseService from "#modules/warehouse/warehouse.service.js";
 import * as irmService from "#modules/irm/irm.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
+import * as attachmentService from "#modules/attachment/attachment.service.js";
 import { getCloudinaryCreds, getCompanyTimezone } from "#modules/settings/settings.service.js";
 import { startOfDayIn } from "../../utils/filter-date.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
@@ -849,14 +850,18 @@ async function archiveIssuedPdf(po: PurchaseOrderWithRelations, actor?: AuditAct
   }
   const pdf = await documentService.generatePurchaseOrderPdf(po, actor?.email ?? po.sentBy);
   const dataUri = `data:application/pdf;base64,${pdf.buffer.toString("base64")}`;
-  const url = await uploadFileToCloudinary(dataUri, randomUUID(), creds);
+  const asset = await uploadFileToCloudinary(dataUri, randomUUID(), creds);
   await poRepo.addAttachment({
     purchaseOrderId: po.id,
     label: ISSUED_PO_ATTACHMENT_LABEL,
     fileName: pdf.filename,
     fileType: "pdf",
     fileSizeBytes: pdf.buffer.length,
-    url,
+    url: asset.url,
+    // Recorded like any other attachment even though this row can never be removed — the guard in
+    // removeAttachment is what protects it, not the absence of an identity.
+    publicId: asset.publicId,
+    resourceType: asset.resourceType,
     uploadedBy: "system",
   });
   audit.record({
@@ -1054,14 +1059,16 @@ export async function addAttachment(poId: string, input: PoAttachmentInput, acto
   }
   const creds = await getCloudinaryCreds();
   if (!creds) throw badRequest("File uploads aren't configured. Add Cloudinary credentials in Settings first.");
-  const url = await uploadFileToCloudinary(input.data, randomUUID(), creds);
+  const asset = await uploadFileToCloudinary(input.data, randomUUID(), creds);
   await poRepo.addAttachment({
     purchaseOrderId: poId,
     label: trimToNull(input.label),
     fileName: input.fileName.trim(),
     fileType: input.fileType,
     fileSizeBytes: input.fileSizeBytes,
-    url,
+    url: asset.url,
+    publicId: asset.publicId,
+    resourceType: asset.resourceType,
     uploadedBy: actor?.email ?? null,
   });
   audit.record({ actor, action: "purchase_order.attachment_added", targetType: "purchase_order", targetId: poId, targetLabel: po.code });
@@ -1079,6 +1086,10 @@ export async function removeAttachment(poId: string, attachmentId: string, actor
   }
   await poRepo.removeAttachment(attachmentId);
   audit.record({ actor, action: "purchase_order.attachment_removed", targetType: "purchase_order", targetId: poId, targetLabel: po.code });
+  // The PO side is where the shared-asset case actually bites: a PO converted from a PRF holds
+  // COPIES of that PRF's attachment identities, and the PRF (now `converted`) still displays them.
+  // releaseAsset counts the surviving references, so removing the copy here leaves the file alone.
+  await attachmentService.releaseAsset(att, `purchase_order ${po.code}`);
   return getPurchaseOrder(poId, actor);
 }
 

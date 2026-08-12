@@ -14,6 +14,7 @@ import * as irmService from "#modules/irm/irm.service.js";
 import * as inventoryService from "#modules/inventory/inventory.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
+import * as attachmentService from "#modules/attachment/attachment.service.js";
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
 import { withTransaction } from "../../lib/prisma.js";
@@ -679,12 +680,22 @@ export async function convertPurchaseRequest(id: string, actor?: AuditActor): Pr
           },
           poCode,
           lines,
+          // The PO's attachment rows point at the SAME Cloudinary files — nothing is re-uploaded.
+          // So the identity is copied verbatim, never re-derived from the URL: two rows naming one
+          // asset is what lets either be removed without destroying a file the other still shows.
+          //
+          // This list is hand-written against a generated Prisma input type, so a new column is
+          // OPTIONAL and omitting it here compiles cleanly and silently. The guard against that is
+          // "carries every attachment field the PRF row holds onto the PO row", in
+          // purchase-request.service.test.ts.
           live.attachments.map((a) => ({
             label: a.label,
             fileName: a.fileName,
             fileType: a.fileType,
             fileSizeBytes: a.fileSizeBytes,
             url: a.url,
+            publicId: a.publicId,
+            resourceType: a.resourceType,
             uploadedBy: a.uploadedBy,
           })),
         );
@@ -978,14 +989,18 @@ export async function addAttachment(prfId: string, input: PrfAttachmentInput, ac
   assertEditable(prf.status);
   const creds = await getCloudinaryCreds();
   if (!creds) throw badRequest("File uploads aren't configured. Add Cloudinary credentials in Settings first.");
-  const url = await uploadFileToCloudinary(input.data, randomUUID(), creds);
+  const asset = await uploadFileToCloudinary(input.data, randomUUID(), creds);
   await prfRepo.addAttachment({
     purchaseRequestId: prfId,
     label: trimToNull(input.label),
     fileName: input.fileName.trim(),
     fileType: input.fileType,
     fileSizeBytes: input.fileSizeBytes,
-    url,
+    url: asset.url,
+    // Stored so this file can be deleted later. Without the pair the row names a file we can
+    // never address again — see attachment.service.ts.
+    publicId: asset.publicId,
+    resourceType: asset.resourceType,
     uploadedBy: actor?.email ?? null,
   });
   audit.record({ actor, action: "purchase_request.attachment_added", targetType: "purchase_request", targetId: prfId, targetLabel: prf.code });
@@ -999,5 +1014,47 @@ export async function removeAttachment(prfId: string, attachmentId: string, acto
   if (!att || att.purchaseRequestId !== prfId) throw notFound("Attachment not found.");
   await prfRepo.removeAttachment(attachmentId);
   audit.record({ actor, action: "purchase_request.attachment_removed", targetType: "purchase_request", targetId: prfId, targetLabel: prf.code });
+
+  // ── Cleanup, and the one race releaseAsset's reference count cannot see ──────────────────────
+  //
+  // INVARIANT: the asset may be destroyed only if the PRF is freshly confirmed still `draft` AFTER
+  // the row above was deleted. Anything else — submitted, approved, converted, cancelled, gone —
+  // leaves an orphaned file. An orphan costs storage; the alternative loses a document a PO may be
+  // displaying.
+  //
+  // Why a status read guards a Cloudinary delete: converting a PRF copies its attachments' identity
+  // onto the new PO's rows rather than re-uploading the files, so one asset ends up named by two
+  // rows. releaseAsset counts those references, but its count runs at a single instant, and the
+  // conversion runs in a TRANSACTION whose reads are snapshot-based:
+  //
+  //   removal reads draft ─┐
+  //   submit + approve     │  conversion tx snapshot: sees approved AND sees this attachment
+  //   THIS delete commits  │  (invisible to that snapshot)
+  //   countRefs → 0        │
+  //   destroy              │
+  //                        └─ conversion COMMITS a PO row naming the file we just destroyed
+  //
+  // The two never collide on a document, so MongoDB raises no write conflict between them.
+  //
+  // The re-read closes it. For the conversion to have seen this attachment its snapshot must have
+  // read `approved`, which means the approval was already COMMITTED — and therefore visible to this
+  // read, which happens later still. So a live conversion that could copy this file always shows up
+  // here as a non-draft status. The only way this could report `draft` again is a Reopen
+  // (approved → draft), and a Reopen writes the PurchaseRequest document — the same document
+  // `setConvertedTx` writes inside the conversion transaction — so it aborts that transaction with a
+  // write conflict and rolls its PO attachment rows back with it.
+  //
+  // That last step is why `setConvertedTx` must stay INSIDE the conversion transaction alongside
+  // `createPoTx`. "the conversion writes the PRF in the same transaction as the PO attachments"
+  // in purchase-request.service.test.ts pins it.
+  const fresh = await prfRepo.findById(prfId);
+  if (fresh?.status !== "draft") {
+    console.error(
+      `[attachment] purchase_request ${prf.code} left draft during removal (now ${fresh?.status ?? "missing"}) — Cloudinary asset ${att.resourceType}/${att.publicId} left in place`,
+    );
+    return getPurchaseRequest(prfId, actor);
+  }
+  // Never throws; the attachment is already gone from the PRF whatever Cloudinary does.
+  await attachmentService.releaseAsset(att, `purchase_request ${prf.code}`);
   return getPurchaseRequest(prfId, actor);
 }

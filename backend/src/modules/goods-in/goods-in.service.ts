@@ -7,6 +7,7 @@ import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import * as inventoryService from "#modules/inventory/inventory.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
+import * as attachmentService from "#modules/attachment/attachment.service.js";
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
 import { emitAttentionChanged } from "../../lib/realtime.js";
@@ -553,14 +554,16 @@ export async function addAttachment(grnId: string, input: GRNAttachmentInput, ac
   }
   const creds = await getCloudinaryCreds();
   if (!creds) throw badRequest("File uploads aren't configured. Add Cloudinary credentials in Settings first.");
-  const url = await uploadFileToCloudinary(input.data, randomUUID(), creds, "senthra/goods-in");
+  const asset = await uploadFileToCloudinary(input.data, randomUUID(), creds, "senthra/goods-in");
   await grnRepo.addAttachment({
     goodsReceiptId: grnId,
     label: trimToNull(input.label),
     fileName: input.fileName.trim(),
     fileType: input.fileType,
     fileSizeBytes: input.fileSizeBytes,
-    url,
+    url: asset.url,
+    publicId: asset.publicId,
+    resourceType: asset.resourceType,
     uploadedBy: actor?.email ?? null,
   });
   audit.record({ actor, action: "goods_in.attachment_added", targetType: "goods_receipt", targetId: grnId, targetLabel: grn.code });
@@ -575,5 +578,6 @@ export async function removeAttachment(grnId: string, attachmentId: string, acto
   if (!att || att.goodsReceiptId !== grnId) throw notFound("Attachment not found.");
   await grnRepo.removeAttachment(attachmentId);
   audit.record({ actor, action: "goods_in.attachment_removed", targetType: "goods_receipt", targetId: grnId, targetLabel: grn.code });
+  await attachmentService.releaseAsset(att, `goods_receipt ${grn.code}`);
   return getGoodsReceipt(grnId);
 }

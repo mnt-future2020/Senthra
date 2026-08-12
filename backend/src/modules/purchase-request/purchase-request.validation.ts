@@ -7,6 +7,7 @@ import { z } from "zod";
 // (qty ≥ 1, quoted unit price ≥ 0). Money is integer GBP pence.
 
 import { INCOTERM_CODES } from "#modules/purchase-order/purchase-order.validation.js";
+import { attachmentTypeMatches, dataUriBytes } from "../../utils/data-uri.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 
@@ -172,11 +173,43 @@ export type PrfCancelInput = z.infer<typeof prfCancelSchema>;
 
 // --- attachment upload (data URI from the form) -----------------------------
 const TEN_MB = 10 * 1024 * 1024;
+// The declared `fileType` and `fileSizeBytes` above are the CALLER'S CLAIMS about a payload the
+// server used to never open — so "pdf, 40 KB" would carry anything, at any size. Both are now
+// settled against `data` itself:
+//
+//   size  measured from the payload, so the per-file ceiling above is real. It also makes the
+//         PRF total a cap that holds, since that total is summed from stored sizes.
+//   type  read from the file's leading bytes (%PDF-, PK, PNG, JPEG), not from the URI's media type
+//         — that media type is text the caller wrote, so checking it only relocates the claim.
+//
+// Refined on the OBJECT rather than the `data` field because both checks compare two fields. Each
+// reports against the field the user can act on.
 export const prfAttachmentSchema = z.object({
   label: z.string().trim().max(80).optional(),
   fileName: z.string().trim().min(1, "File name is required.").max(200),
   fileType: z.enum(PRF_ATTACHMENT_TYPES, { error: "Unsupported file type. Use PDF, DOCX, PNG or JPG." }),
   fileSizeBytes: z.coerce.number().int().min(1).max(TEN_MB, "File must be 10 MB or smaller."),
   data: z.string().startsWith("data:", "Upload a valid file."),
-});
+})
+  .superRefine((v, ctx) => {
+    const actual = dataUriBytes(v.data);
+    if (actual === 0) {
+      ctx.addIssue({ code: "custom", path: ["data"], message: "Upload a valid file." });
+      return;
+    }
+    if (actual > TEN_MB) {
+      ctx.addIssue({ code: "custom", path: ["data"], message: "File must be 10 MB or smaller." });
+    } else if (actual !== v.fileSizeBytes) {
+      // A mismatch means the two halves of one upload disagree — a broken client, or a declaration
+      // aimed at slipping past the ceiling. Neither is worth storing under a size nobody can trust.
+      ctx.addIssue({ code: "custom", path: ["fileSizeBytes"], message: "File size doesn't match the uploaded file." });
+    }
+    if (!attachmentTypeMatches(v.data, v.fileType)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["fileType"],
+        message: "That file isn't a valid PDF, DOCX, PNG or JPG.",
+      });
+    }
+  });
 export type PrfAttachmentInput = z.infer<typeof prfAttachmentSchema>;
