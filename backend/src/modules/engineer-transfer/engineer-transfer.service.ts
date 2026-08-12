@@ -643,7 +643,7 @@ export async function acknowledge(id: string, signatureDataUri: string, actor: A
   // agree on is one silently overwriting the other. Two engineers acknowledging at once is exactly
   // the case, and the loser's signature is evidence nobody would notice was gone.
   const publicId = `sig-${t.id}-${randomUUID()}`;
-  const signatureUrl = await uploadToCloudinary(signatureDataUri, publicId, creds, "senthra/engineer-transfers");
+  const { url: signatureUrl } = await uploadToCloudinary(signatureDataUri, publicId, creds, "senthra/engineer-transfers");
 
   const acknowledged = await transferRepo.acknowledgeTx(id, signatureUrl);
 
@@ -668,6 +668,6 @@ export async function uploadAttachment(image: string): Promise<{ url: string }> 
   // Same reason as the acknowledgement signature above — and worse here, since `attach-` carries no
   // transfer id either, so the collision window was the whole app rather than one transfer.
   const publicId = `attach-${randomUUID()}`;
-  const url = await uploadToCloudinary(image, publicId, creds, "senthra/engineer-transfers");
+  const { url } = await uploadToCloudinary(image, publicId, creds, "senthra/engineer-transfers");
   return { url };
 }

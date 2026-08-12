@@ -120,3 +120,36 @@ describe("ATTACHMENT_MEDIA_TYPE", () => {
     );
   });
 });
+
+// The publicId gained a full UUID (32 bits of truncated hash was a collision waiting to happen), and
+// the display name has to keep hiding it — otherwise every attachment reads as
+// `site-survey-a3f91b2c-4d5e-...pdf`. Both shapes are live: the database still holds the short form.
+describe("upload suffix is hidden in both id shapes", () => {
+  const at = (name: string) => `https://res.cloudinary.com/demo/raw/upload/v1/senthra/jobs/${name}`;
+
+  it("hides a full UUID suffix", () => {
+    expect(parseJobAttachment(at("site-survey-a3f91b2c-4d5e-6f70-8901-234567890abc.pdf"))!.name).toBe("site-survey.pdf");
+  });
+
+  it("still hides the earlier 8-hex suffix", () => {
+    expect(parseJobAttachment(at("site-survey-a3f91b2c.pdf"))!.name).toBe("site-survey.pdf");
+  });
+
+  it("hides a UUID whose groups happen to be all digits", () => {
+    // No letter guard is needed for the UUID shape — the 8-4-4-4-12 layout is unmistakable.
+    expect(parseJobAttachment(at("plan-12345678-1234-1234-1234-123456789012.pdf"))!.name).toBe("plan.pdf");
+  });
+
+  // The reason the short form keeps its letter guard.
+  it("leaves an 8-digit date in the user's own file name alone", () => {
+    expect(parseJobAttachment(at("site-report-20240115.pdf"))!.name).toBe("site-report-20240115.pdf");
+  });
+
+  it("leaves a name with no suffix alone", () => {
+    expect(parseJobAttachment(at("delivery-note.pdf"))!.name).toBe("delivery-note.pdf");
+  });
+
+  it("keeps a hyphenated name intact either side of the suffix", () => {
+    expect(parseJobAttachment(at("rams-rev-c-final-a3f91b2c-4d5e-6f70-8901-234567890abc.docx"))!.name).toBe("rams-rev-c-final.docx");
+  });
+});

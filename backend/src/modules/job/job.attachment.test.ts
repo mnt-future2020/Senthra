@@ -65,7 +65,7 @@ describe("job uploadAttachment", () => {
     const result = await uploadAttachment(PDF_DATA);
     expect(result).toEqual({ url: "https://res.cloudinary.com/test/raw/upload/senthra/jobs/job-attach-123.pdf" });
     expect(uploadFileToCloudinary).toHaveBeenCalledTimes(1);
-    expect(uploadFileToCloudinary).toHaveBeenCalledWith(PDF_DATA, expect.stringMatching(/^job-attach-[a-f0-9]{8}$/), CREDS, "senthra/jobs");
+    expect(uploadFileToCloudinary).toHaveBeenCalledWith(PDF_DATA, expect.stringMatching(/^job-attach-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/), CREDS, "senthra/jobs");
   });
 
   it("sanitizes and preserves original filename in public_id", async () => {
@@ -78,7 +78,7 @@ describe("job uploadAttachment", () => {
 
     const result = await uploadAttachment(PDF_DATA, "Site Survey Rev C.pdf");
     expect(result).toEqual({ url: "https://res.cloudinary.com/test/raw/upload/senthra/jobs/site-survey-rev-c-a1b2c3d4.pdf" });
-    expect(uploadFileToCloudinary).toHaveBeenCalledWith(PDF_DATA, expect.stringMatching(/^site-survey-rev-c-[a-f0-9]{8}$/), CREDS, "senthra/jobs");
+    expect(uploadFileToCloudinary).toHaveBeenCalledWith(PDF_DATA, expect.stringMatching(/^site-survey-rev-c-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/), CREDS, "senthra/jobs");
   });
 
   describe("uploadAttachmentSchema", () => {

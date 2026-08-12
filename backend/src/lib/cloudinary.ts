@@ -16,7 +16,7 @@ export async function uploadToCloudinary(
   publicId: string,
   creds: CloudinaryCreds,
   folder = "senthra/branding",
-): Promise<string> {
+): Promise<CloudinaryImageAsset> {
   cloudinary.config({
     cloud_name: creds.cloudName,
     api_key: creds.apiKey,
@@ -30,8 +30,20 @@ export async function uploadToCloudinary(
     invalidate: true,
     resource_type: "image",
   });
-  return result.secure_url;
+  return { url: result.secure_url, publicId: result.public_id, resourceType: result.resource_type };
 }
+
+/**
+ * What `uploadToCloudinary` stored. Same shape as CloudinaryAsset, declared separately only because
+ * this helper is always `image` — callers that keep the identity are storing a constant `resourceType`,
+ * and that is deliberate: it records what was true at WRITE time rather than leaving a later delete to
+ * assume it.
+ *
+ * Most callers use `.url` and discard the rest, which is correct for them: a DETERMINISTIC public id
+ * (branding's `logo`/`favicon`, `signature-${userId}`) is overwritten in place, so there is never an
+ * older asset to clean up. The callers that pass a random id are the ones that must keep it.
+ */
+export interface CloudinaryImageAsset { url: string; publicId: string; resourceType: string; }
 
 // Pick the Cloudinary resource_type from a data-URI's MIME. Images (PNG/JPG/…) go up as `image`;
 // EVERYTHING else — PDF, DOCX and any future document type — goes up as `raw`.

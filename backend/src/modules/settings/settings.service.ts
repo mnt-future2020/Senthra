@@ -500,7 +500,9 @@ export async function uploadBrandingImage(
       "Cloudinary isn't configured. Add your Cloudinary credentials in Settings → Integrations (or set CLOUDINARY_* in the backend env).",
     );
   }
-  const url = await uploadToCloudinary(image, type, creds);
+  // Deterministic public id (`logo` / `favicon`) with overwrite — a replacement lands on the same
+  // asset, so there is never an older file to clean up and no identity worth storing.
+  const { url } = await uploadToCloudinary(image, type, creds);
   const data: Prisma.SettingsUpdateInput =
     type === "logo" ? { logoUrl: url } : { faviconUrl: url };
   const updated = await settingsRepo.update(s.id, data);
