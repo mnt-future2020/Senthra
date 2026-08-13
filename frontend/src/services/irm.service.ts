@@ -1,4 +1,5 @@
 import { api } from "@/lib/api";
+import { downloadCsv, withoutPaging } from "@/lib/csvExport";
 import { registerClientCache } from "@/lib/clientCache";
 import type { IrmItem, IrmStatus } from "@/types/irm";
 
@@ -79,6 +80,14 @@ const listCacheKey = (p: IrmListParams): string =>
 
 export const getCachedIrmItems = (params: IrmListParams = {}): PagedIrmItems | undefined =>
   listCache.get(listCacheKey(params));
+
+/**
+ * The SAME filtered catalogue as a CSV. Paging is dropped — an export is "everything matching what
+ * I'm looking at", not the page on screen. `capped` is true when the server stopped short.
+ */
+export function exportIrmItemsCsv(params: IrmListParams = {}): Promise<{ capped: boolean }> {
+  return downloadCsv(`/irm-items/export.csv${qs(withoutPaging(params))}`, "irm-catalogue");
+}
 
 export function listIrmItems(params: IrmListParams = {}): Promise<PagedIrmItems> {
   return api<PagedIrmItems>(`/irm-items${qs(params)}`).then((r) => {

@@ -161,3 +161,123 @@ export async function destroyFromCloudinary(
     throw new Error(`Cloudinary destroy returned "${result.result}"`);
   }
 }
+
+// ── Direct browser upload ──────────────────────────────────────────────────────────────────────
+//
+// The browser sends the file straight to Cloudinary, so the bytes never enter this process. What the
+// backend keeps is the two decisions that matter: WHO may upload, and WHAT the upload is allowed to
+// be. Both live in the signature — every parameter below is signed, so a client that edits any of
+// them invalidates it and Cloudinary refuses the upload.
+//
+// The api_secret signs and never leaves the server.
+
+/** Upload parameters the browser must post to Cloudinary verbatim, plus the signature over them. */
+export interface SignedUploadParams {
+  cloudName: string;
+  apiKey: string;
+  timestamp: number;
+  signature: string;
+  folder: string;
+  publicId: string;
+  resourceType: "image" | "raw";
+  /**
+   * The preset the signature was computed over, when there is one. The browser MUST post it back
+   * unchanged — it is a signed field, so omitting or editing it fails the signature check rather than
+   * quietly uploading without the account-side format allowlist.
+   */
+  uploadPreset?: string;
+  /** Echoed back so the caller can hand it to finalize; not part of the signature. */
+  uploadUrl: string;
+}
+
+/**
+ * Sign one upload. Every value here is chosen by the CALLER (the upload service), never by the client.
+ *
+ * `overwrite: false` is load-bearing. With a direct upload the browser holds a valid signature for a
+ * short window, and without this it could replay that signature to replace the asset it already
+ * uploaded — after finalize had validated the original. The second upload fails instead.
+ */
+export function signUploadParams(
+  args: { folder: string; publicId: string; resourceType: "image" | "raw"; uploadPreset?: string },
+  creds: CloudinaryCreds,
+): SignedUploadParams {
+  const timestamp = Math.floor(Date.now() / 1000);
+  // Only these keys are signed, and Cloudinary rebuilds the same string from what the browser posts —
+  // so an edited folder or public_id produces a different string and a failed signature check.
+  const toSign: Record<string, string | number | boolean> = {
+    folder: args.folder,
+    public_id: args.publicId,
+    overwrite: false,
+    timestamp,
+    ...(args.uploadPreset ? { upload_preset: args.uploadPreset } : {}),
+  };
+  const signature = cloudinary.utils.api_sign_request(toSign, creds.apiSecret);
+  return {
+    cloudName: creds.cloudName,
+    apiKey: creds.apiKey,
+    timestamp,
+    signature,
+    folder: args.folder,
+    publicId: args.publicId,
+    resourceType: args.resourceType,
+    ...(args.uploadPreset ? { uploadPreset: args.uploadPreset } : {}),
+    uploadUrl: `https://api.cloudinary.com/v1_1/${creds.cloudName}/${args.resourceType}/upload`,
+  };
+}
+
+/**
+ * Is this upload response really from Cloudinary, unedited?
+ *
+ * Cloudinary signs its own upload response, and the payload is `public_id=<id>&version=<v>` — those
+ * TWO FIELDS ONLY. So this proves the named asset exists in our cloud at that version. It proves
+ * NOTHING about the `bytes`, `format` or `resource_type` the browser also reported, because those are
+ * not covered, and it does not prove the asset is ours to attach — any real asset in the cloud would
+ * verify. Ownership is decided by the PendingUpload row; size and content are decided separately.
+ */
+export function verifyUploadResponse(publicId: string, version: number | string, signature: string, creds: CloudinaryCreds): boolean {
+  const expected = cloudinary.utils.api_sign_request({ public_id: publicId, version }, creds.apiSecret);
+  // Length-independent comparison is unnecessary here — both sides are hex digests of public values,
+  // and a mismatch is a rejected upload, not a leaked secret.
+  return expected === signature;
+}
+
+/**
+ * A delivery URL this server can fetch, whatever the asset's delivery type.
+ *
+ * `sign_url` makes it work for `authenticated` assets as well as public ones, which is what lets
+ * finalize inspect a document's first bytes WITHOUT the document having to be publicly reachable.
+ * Authenticated delivery for customer documents is a separate piece of work; signing here means this
+ * code does not have to change when that lands.
+ */
+export function signedDeliveryUrl(publicId: string, resourceType: string, creds: CloudinaryCreds, type = "upload"): string {
+  cloudinary.config({ cloud_name: creds.cloudName, api_key: creds.apiKey, api_secret: creds.apiSecret, secure: true });
+  return cloudinary.url(publicId, { resource_type: resourceType, type, sign_url: true, secure: true });
+}
+
+/**
+ * The first bytes of a stored asset, for magic-byte validation.
+ *
+ * A RANGE request, so a 10 MB document costs about a kilobyte to check. This is a CDN fetch, NOT an
+ * Admin API call — the Admin API is rate-limited (500/hour on the free plan, from 2000 on paid) and
+ * putting a call to it in every upload would cap the whole system at that number. The Upload API and
+ * delivery are not rate-limited.
+ *
+ * Needed because Cloudinary does not look inside a `raw` asset: it stores the bytes opaquely, so its
+ * `allowed_formats` restriction and the `format` it reports both come from the extension in the
+ * public_id. For a PDF or DOCX that is a label, not a fact, and this is the only thing that checks it.
+ */
+export async function fetchFirstBytes(url: string, byteCount: number, timeoutMs = 10_000): Promise<Buffer> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { headers: { Range: `bytes=0-${byteCount - 1}` }, signal: controller.signal });
+    // 206 is the range hit; 200 means the CDN ignored the header and sent the whole file, which is
+    // still usable — we only read the head of it.
+    if (res.status !== 206 && res.status !== 200) {
+      throw new Error(`Could not read the uploaded file (HTTP ${res.status}).`);
+    }
+    return Buffer.from(await res.arrayBuffer()).subarray(0, byteCount);
+  } finally {
+    clearTimeout(timer);
+  }
+}

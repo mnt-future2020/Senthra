@@ -1,4 +1,5 @@
 import { api, apiBlob } from "@/lib/api";
+import { downloadCsv, withoutPaging } from "@/lib/csvExport";
 import { registerClientCache } from "@/lib/clientCache";
 import { downloadBlob } from "@/lib/download";
 import type { PoPriority, PurchaseOrder } from "@/types/purchase-order";
@@ -145,6 +146,23 @@ export function listPurchaseOrders(params: PoListParams = {}): Promise<PagedPurc
     listCache.set(listCacheKey(params), r);
     return r;
   });
+}
+
+/**
+ * The SAME filtered list as a CSV. Paging is dropped — the export is "everything matching what I'm
+ * looking at", not the page on screen — and the server applies the identical filters, warehouse
+ * scope included. `capped` is true when it stopped short of the full set.
+ */
+/**
+ * The same orders, ONE ROW PER LINE — the spend report. Header fields repeat on every row so the
+ * file pivots (spend by item, unit-price trend, supplier comparison) without being filled down.
+ */
+export function exportPurchaseOrderLinesCsv(params: PoListParams = {}): Promise<{ capped: boolean }> {
+  return downloadCsv(`/purchase-orders/export-lines.csv${qs(withoutPaging(params))}`, "purchase-order-lines");
+}
+
+export function exportPurchaseOrdersCsv(params: PoListParams = {}): Promise<{ capped: boolean }> {
+  return downloadCsv(`/purchase-orders/export.csv${qs(withoutPaging(params))}`, "purchase-orders");
 }
 
 export function getPurchaseOrder(idOrCode: string): Promise<PurchaseOrder> {

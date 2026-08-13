@@ -2,7 +2,7 @@ import { Router } from "express";
 
 import * as jobController from "./job.controller.js";
 import { requireAnyPermission, requireAuth, requireCustomer, requirePermission } from "../../middleware/auth.middleware.js";
-import { writeLimiter } from "../../middleware/rateLimit.middleware.js";
+import { writeLimiter, exportLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import { assignJobSchema, cancelJobSchema, createJobSchema, updateJobSchema, uploadAttachmentSchema } from "./job.validation.js";
 
@@ -11,6 +11,8 @@ const router = Router();
 router.use(requireAuth);
 
 router.get("/", requirePermission("jobs.view"), jobController.listJobs);
+// BEFORE "/:idOrCode" — otherwise "export.csv" is parsed as a job code and 404s on lookup.
+router.get("/export.csv", requirePermission("jobs.export"), exportLimiter, jobController.exportJobsCsv);
 router.get("/:idOrCode", requirePermission("jobs.view"), jobController.getJob);
 
 router.post("/", requirePermission("jobs.create"), writeLimiter, validateBody(createJobSchema), jobController.createJob);
@@ -38,6 +40,8 @@ const portalRouter = Router();
 portalRouter.use(requireAuth, requireCustomer);
 
 portalRouter.get("/", jobController.getOwnJobs);
+// BEFORE "/:id" — otherwise "export.csv" is parsed as a job id and 404s on lookup.
+portalRouter.get("/export.csv", exportLimiter, jobController.exportOwnJobsCsv);
 portalRouter.get("/:id", jobController.getOwnJob);
 
 export { portalRouter };

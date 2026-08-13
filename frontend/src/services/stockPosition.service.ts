@@ -1,8 +1,8 @@
 // Typed wrappers around the backend /inventory aggregation endpoints.
 // Components call these, never api()/axios directly.
 
-import { api, apiFile } from "@/lib/api";
-import { downloadBlob, filenameFromDisposition } from "@/lib/download";
+import { api } from "@/lib/api";
+import { downloadCsv, withoutPaging } from "@/lib/csvExport";
 import type { InventorySummary, MovementPage, PagedPositions, StockPosition } from "@/types/stock-position";
 
 // ── Customer Stock Transfer ───────────────────────────────────────────────────
@@ -64,23 +64,13 @@ export function listPositions(params: PositionParams = {}): Promise<PagedPositio
 export async function exportPositionsCsv(
   params: PositionParams = {},
 ): Promise<{ capped: boolean }> {
-  const { page: _page, pageSize: _pageSize, ...filters } = params;
-  void _page;
-  void _pageSize;
-  const s = qs(filters as Record<string, unknown>);
-  const { blob, headers } = await apiFile(
-    `/inventory/positions/export.csv${s ? `?${s}` : ""}`,
-  );
-  const date = new Date().toISOString().slice(0, 10);
-  const filename = filenameFromDisposition(
-    headers["content-disposition"] ?? null,
-    `stock-positions-${date}.csv`,
-  );
-  downloadBlob(blob, filename);
-  // The positions export streams ALL matching rows — the backend only reports a row count
-  // (X-Inventory-Export-Count), never a cap. So this export is never truncated. (The movements/
-  // inventory exports DO cap and send an X-*-Export-Capped header — see exportMovementsCsv.)
-  return { capped: false };
+  // Reads the real header rather than assuming. This used to hard-code `capped: false` on the
+  // grounds that the positions endpoint "streams ALL matching rows and never caps" — which was true
+  // until it was given the same EXPORT_MAX ceiling every other export has. An assumption about
+  // another layer's behaviour, baked into a return value, survives the day that behaviour changes
+  // and turns into the exact failure the flag exists to prevent: a truncated file reported complete.
+  const s = qs(withoutPaging(params) as Record<string, unknown>);
+  return downloadCsv(`/inventory/positions/export.csv${s ? `?${s}` : ""}`, "stock-positions");
 }
 
 export function getSummary(): Promise<InventorySummary> {
@@ -113,11 +103,7 @@ export function listMovements(
 // server-side (inventory.history + inventory.export).
 export async function exportMovementsCsv(params: MovementFilters = {}): Promise<{ capped: boolean }> {
   const s = qs(params as Record<string, unknown>);
-  const { blob, headers } = await apiFile(`/inventory/movements/export.csv${s ? `?${s}` : ""}`);
-  const date = new Date().toISOString().slice(0, 10);
-  const filename = filenameFromDisposition(headers["content-disposition"] ?? null, `stock-movements-${date}.csv`);
-  downloadBlob(blob, filename);
-  return { capped: String(headers["x-movement-export-capped"] ?? "") === "true" };
+  return downloadCsv(`/inventory/movements/export.csv${s ? `?${s}` : ""}`, "stock-movements");
 }
 
 // ── Item-level detail endpoints (Task 17) ────────────────────────────────────────────────────────

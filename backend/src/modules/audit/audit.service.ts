@@ -3,7 +3,7 @@ import type { Prisma } from "@prisma/client";
 import * as auditLogRepo from "./audit.repository.js";
 import type { AuditListFilters } from "./audit.repository.js";
 import { getAccessibleWarehouseIds } from "../../lib/warehouse-access.js";
-import { csvEscape } from "../../utils/csv.js";
+import { csvEscape, EXPORT_MAX } from "../../utils/csv.js";
 import { parseFilterDate } from "../../utils/filter-date.js";
 import { getRegionalSettings } from "#modules/settings/settings.service.js";
 import { formatDateTime } from "#modules/document/document.formatter.js";
@@ -58,7 +58,9 @@ export function record(entry: AuditEntry): void {
 
 // Cap on a single CSV export — bounds memory and response size. Entries beyond
 // this are not exported (the response signals truncation via `capped`).
-export const AUDIT_EXPORT_MAX = 50_000;
+// Re-exported rather than redefined: the ceiling is one number for every export (utils/csv), and
+// this name is what the audit tests and callers already reference.
+export const AUDIT_EXPORT_MAX = EXPORT_MAX;
 
 const ACTOR_TYPES = ["admin", "user", "customer", "system"] as const;
 

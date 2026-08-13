@@ -6,7 +6,7 @@ import {
   requireAuth,
   requirePermission,
 } from "../../middleware/auth.middleware.js";
-import { writeLimiter } from "../../middleware/rateLimit.middleware.js";
+import { writeLimiter, exportLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import { createWarehouseSchema, updateWarehouseSchema } from "./warehouse.validation.js";
 
@@ -57,6 +57,8 @@ router.get(
 );
 
 router.get("/", requirePermission("warehouse.view"), warehouseController.listWarehouses);
+// BEFORE any "/:id" route — otherwise "export.csv" is parsed as an id and 404s on lookup.
+router.get("/export.csv", requirePermission("warehouse.export"), exportLimiter, warehouseController.exportWarehousesCsv);
 router.get("/:id", requirePermission("warehouse.view"), warehouseController.getWarehouse);
 
 router.post(

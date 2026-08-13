@@ -397,9 +397,11 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
   const canEditDocs = mode === "create" || o?.status === "draft";
 
   const onPickDoc = async (doc: PickedDoc) => {
+    // Both branches post base64 through this server, so both pay for the read — but only here, and
+    // only once. See PickedDoc.readDataUrl.
     if (mode === "edit" && o) {
       try {
-        const updated = await grnService.addAttachment(o.id, { fileName: doc.fileName, fileType: doc.fileType, fileSizeBytes: doc.fileSizeBytes, data: doc.dataUrl });
+        const updated = await grnService.addAttachment(o.id, { fileName: doc.fileName, fileType: doc.fileType, fileSizeBytes: doc.fileSizeBytes, data: await doc.readDataUrl() });
         setAttachments(updated.attachments);
         pushToast("Document added.", "success");
       } catch (e) {
@@ -407,7 +409,14 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
       }
       return;
     }
-    setStaged((prev) => [...prev, { key: crypto.randomUUID(), ...doc }]);
+    const dataUrl = await doc.readDataUrl();
+    setStaged((prev) => [...prev, {
+      key: crypto.randomUUID(),
+      fileName: doc.fileName,
+      fileType: doc.fileType,
+      fileSizeBytes: doc.fileSizeBytes,
+      dataUrl,
+    }]);
     touch();
   };
 

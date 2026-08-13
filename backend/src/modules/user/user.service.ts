@@ -21,7 +21,9 @@ import { hashPassword } from "../../utils/password.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { sendTemplatedEmail } from "#modules/email/email.service.js";
-import { getCloudinaryCreds, getEmployeeIdPrefix } from "#modules/settings/settings.service.js";
+import { getCloudinaryCreds, getEmployeeIdPrefix, getRegionalSettings } from "#modules/settings/settings.service.js";
+import { formatDate } from "#modules/document/document.formatter.js";
+import { EXPORT_MAX, EXPORT_PAGING, toCsv } from "../../utils/csv.js";
 import * as attachmentService from "#modules/attachment/attachment.service.js";
 
 const STATUSES = ["active", "inactive", "suspended"] as const;
@@ -330,6 +332,8 @@ export interface ListUsersParams {
   page?: number;
   pageSize?: number;
   sort?: string; // newest (default) | oldest | name
+  /** Internal only — see EXPORT_PAGING. Controllers never read this from the query string. */
+  maxPageSize?: number;
 }
 
 export interface PagedUsers {
@@ -348,11 +352,51 @@ export async function listUsers(params: ListUsersParams = {}): Promise<PagedUser
   };
   const total = await userRepo.count(filters);
   // Clamp the requested page so an out-of-range page returns the last page.
-  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total, params.maxPageSize);
   const users = await userRepo.findMany(filters, skip, pageSize, params.sort);
   // The list intentionally omits per-user warehouse assignments (avoids an N+1); publicUser
   // defaults them to []. The single-user reads (get/create/update) populate them.
   return { users: users.map((u) => publicUser(u)), total, page, pageSize, totalPages };
+}
+
+/**
+ * The SAME filtered staff list as a CSV, minus paging.
+ *
+ * Deliberately narrow. This is the export most likely to be forwarded to HR or an auditor, so it
+ * carries who someone IS and what they can do — never the personal data the record also holds:
+ * date of birth, gender, home address and `notes` are all absent, and so is anything about their
+ * credentials. A staff list is not a personnel file.
+ */
+export async function exportUsersCsv(
+  params: ListUsersParams = {},
+  actor?: AuditActor,
+): Promise<{ csv: string; capped: boolean }> {
+  // EXPORT_PAGING, not a bare pageSize: `paginate` clamps anything a client could ask for to 100,
+  // so without its maxPageSize every export silently stopped at 100 rows AND reported itself
+  // complete (capped was measured on the same clamped length). See utils/csv.
+  const { users } = await listUsers({ ...params, ...EXPORT_PAGING });
+  const rows = users.slice(0, EXPORT_MAX);
+
+  const regional = await getRegionalSettings();
+  const csv = toCsv(
+    ["Employee ID", "First Name", "Last Name", "Email", "Phone", "Role", "Job Title", "Department", "Status", `Joined (${regional.timezone})`, `Added (${regional.timezone})`],
+    rows.map((u) => [
+      u.employeeId,
+      u.firstName,
+      u.lastName,
+      u.email,
+      u.phone,
+      u.role?.name,
+      u.jobTitle,
+      u.department,
+      u.status,
+      formatDate(u.dateOfJoining, regional.dateFormat, regional.timezone),
+      formatDate(u.createdAt, regional.dateFormat, regional.timezone),
+    ]),
+  );
+
+  audit.record({ actor, action: "user.exported", targetType: "user", targetLabel: `${rows.length} rows` });
+  return { csv, capped: users.length > EXPORT_MAX };
 }
 
 // A 24-char hex string is a Mongo ObjectId; anything else is treated as the human

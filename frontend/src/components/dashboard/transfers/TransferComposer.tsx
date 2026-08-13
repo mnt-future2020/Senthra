@@ -7,7 +7,6 @@ import { ArrowRightLeft, Check, Loader2, Plus, Search, Trash2, Upload, X } from 
 import * as transferSvc from "@/services/engineerTransfer.service";
 import * as stockSvc from "@/services/stockPosition.service";
 import { useDashboard } from "@/hooks/useDashboard";
-import { readFileAsDataUrl } from "@/lib/image";
 import { FormPageHeader, FormSection, FormAsideCard, RequiredMark } from "@/components/ui/FormScaffold";
 import { Notice } from "@/components/ui/Notice";
 import { Select } from "@/components/ui/Select";
@@ -15,6 +14,7 @@ import { inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import type { EngineerHoldingOption, TransferOwnership } from "@/services/engineerTransfer.service";
 import type { EngineerOverviewRow } from "@/services/stockPosition.service";
 import type { Msg } from "@/components/ui/types";
+import { uploadDirectForUrl } from "@/lib/upload";
 
 // A single picked item in the transfer cart. Every line in one transfer shares ONE source engineer
 // (`fromEngineerId`) and goes to ONE recipient — the backend `EngineerStockTransfer` has a single
@@ -452,7 +452,8 @@ export function TransferComposer({ mode, returnUrl }: { mode: "admin" | "enginee
     if (!file.type.startsWith("image/")) { pushToast("Use an image file.", "alert"); return; }
     setUploading(true);
     try {
-      const url = await transferSvc.uploadAttachment(await readFileAsDataUrl(file));
+      // Straight to Cloudinary — the file no longer passes through our API.
+      const url = await uploadDirectForUrl({ purpose: "transfer_attachment", file });
       setAttachments((prev) => [...prev, url]);
     } catch (err) {
       pushToast(err instanceof Error ? err.message : "Upload failed.", "alert");

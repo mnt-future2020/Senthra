@@ -1,4 +1,5 @@
 import { api, LONG_WRITE_TIMEOUT } from "@/lib/api";
+import { downloadCsv, withoutPaging } from "@/lib/csvExport";
 import { registerClientCache } from "@/lib/clientCache";
 import { portalQs, type PortalListParams } from "@/services/customer.service";
 import type { Job, JobSummary, PortalJob, PortalJobDetail } from "@/types/job";
@@ -92,6 +93,14 @@ const listCacheKey = (p: JobListParams): string =>
 
 export const getCachedJobs = (params: JobListParams = {}): PagedJobs | undefined => listCache.get(listCacheKey(params));
 
+/**
+ * The SAME filtered list as a CSV. Paging is dropped — an export is "everything matching what I'm
+ * looking at", not the page on screen. `capped` is true when the server stopped short.
+ */
+export function exportJobsCsv(params: JobListParams = {}): Promise<{ capped: boolean }> {
+  return downloadCsv(`/jobs/export.csv${qs(withoutPaging(params))}`, "jobs");
+}
+
 export function listJobs(params: JobListParams = {}): Promise<PagedJobs> {
   return api<PagedJobs>(`/jobs${qs(params)}`).then((r) => {
     listCache.set(listCacheKey(params), r);
@@ -152,6 +161,15 @@ export type PagedPortalJobs = {
  *  customer id to pass, and passing one would not widen it. */
 export function getOwnJobs(params: PortalListParams = {}): Promise<PagedPortalJobs> {
   return api<PagedPortalJobs>(`/customer/jobs${portalQs(params)}`);
+}
+
+/**
+ * The customer's own jobs as a CSV, honouring the list's filters. Paging is dropped — an export is
+ * "everything matching what I'm looking at", not the page on screen. Scoped server-side from the
+ * session cookie, like every other portal read.
+ */
+export function exportOwnJobsCsv(params: PortalListParams = {}): Promise<{ capped: boolean }> {
+  return downloadCsv(`/customer/jobs/export.csv${portalQs(withoutPaging(params))}`, "my-jobs");
 }
 
 /** One of the customer's own jobs. 404s for anything outside their company — see getJobForCustomer. */

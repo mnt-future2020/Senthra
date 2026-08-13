@@ -371,8 +371,13 @@ export async function spendPenceForSupplier(supplierId: string): Promise<number>
 }
 
 // --- attachments ----------------------------------------------------------------------------
-export function addAttachment(data: Prisma.PurchaseOrderAttachmentUncheckedCreateInput): Promise<PurchaseOrderAttachment> {
-  return prisma.purchaseOrderAttachment.create({ data });
+export function addAttachment(
+  data: Prisma.PurchaseOrderAttachmentUncheckedCreateInput,
+  tx?: Prisma.TransactionClient,
+): Promise<PurchaseOrderAttachment> {
+  // `tx` is passed by the direct-upload finalize, which commits this row and its pending-upload
+  // ledger removal together.
+  return (tx ?? prisma).purchaseOrderAttachment.create({ data });
 }
 export function findAttachment(id: string): Promise<PurchaseOrderAttachment | null> {
   return prisma.purchaseOrderAttachment.findUnique({ where: { id } });

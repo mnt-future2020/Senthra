@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { ClipboardCheck, Search } from "lucide-react";
 
 import * as jobService from "@/services/job.service";
+import { ExportButton } from "@/components/ui/ExportButton";
 import { Notice } from "@/components/ui/Notice";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
@@ -175,6 +176,14 @@ export function PortalJobs() {
               Clear
             </button>
           )}
+          {/* Carries the CURRENT filters, like My Stock and Stock Submissions next door — this page
+              was the one portal list without a download, which made the portal inconsistent about
+              whether a customer can take their own data away. */}
+          <ExportButton
+            onExport={() => jobService.exportOwnJobsCsv({ q: search || undefined, status: status || undefined, sort: sort !== "newest" ? sort : undefined })}
+            disabled={jobs.length === 0}
+            title="Export your jobs to CSV"
+          />
         </div>
       </div>
 

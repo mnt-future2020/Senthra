@@ -11,6 +11,9 @@ import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import { paginate } from "../../utils/pagination.js";
+import { EXPORT_MAX, EXPORT_PAGING, toCsv } from "../../utils/csv.js";
+import { getRegionalSettings } from "#modules/settings/settings.service.js";
+import { formatDate } from "#modules/document/document.formatter.js";
 import type { CreateSupplierInput, UpdateSupplierInput } from "./supplier.validation.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
@@ -145,6 +148,8 @@ export interface ListSuppliersParams {
   page?: number;
   pageSize?: number;
   sort?: string;
+  /** Internal only — see EXPORT_PAGING. Controllers never read this from the query string. */
+  maxPageSize?: number;
 }
 
 export async function listSuppliers(params: ListSuppliersParams = {}): Promise<PagedSuppliers> {
@@ -154,9 +159,67 @@ export async function listSuppliers(params: ListSuppliersParams = {}): Promise<P
       : undefined;
   const filters = { search: params.search, status, typeId: params.type };
   const total = await supplierRepo.count(filters);
-  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total, params.maxPageSize);
   const rows = await supplierRepo.findMany(filters, skip, pageSize, params.sort);
   return { suppliers: rows.map(toPublic), total, page, pageSize, totalPages };
+}
+
+/**
+ * The SAME filtered list as a CSV, minus paging. Delegates to listSuppliers with one oversized page
+ * rather than re-deriving the filters — the status whitelist above is a real behaviour (an unknown
+ * ?status is ignored, not matched), and a second copy of it would drift.
+ */
+export async function exportSuppliersCsv(
+  params: ListSuppliersParams = {},
+  actor?: AuditActor,
+): Promise<{ csv: string; capped: boolean }> {
+  // EXPORT_PAGING, not a bare pageSize: `paginate` clamps anything a client could ask for to 100,
+  // so without its maxPageSize every export silently stopped at 100 rows AND reported itself
+  // complete (capped was measured on the same clamped length). See utils/csv.
+  const { suppliers } = await listSuppliers({ ...params, ...EXPORT_PAGING });
+  const rows = suppliers.slice(0, EXPORT_MAX);
+
+  const regional = await getRegionalSettings();
+  const csv = toCsv(
+    [
+      "Code", "Name", "Legal Name", "Type", "Status",
+      "Contact", "Job Title", "Email", "Phone",
+      "Company Reg No", "VAT Number", "Website",
+      "Address 1", "Address 2", "City", "County", "Postcode", "Country",
+      "Payment Terms", "Currency", "Lead Time (days)", `Added (${regional.timezone})`,
+    ],
+    rows.map((sup) => [
+      sup.code,
+      sup.name,
+      sup.legalName,
+      sup.type?.name,
+      sup.status,
+      sup.contactPerson,
+      sup.contactJobTitle,
+      sup.contactEmail,
+      sup.contactPhone,
+      sup.companyRegistrationNumber,
+      sup.vatNumber,
+      sup.website,
+      sup.addressLine1,
+      sup.addressLine2,
+      sup.city,
+      sup.county,
+      sup.postcode,
+      sup.country,
+      // The bespoke text when the terms are "custom", otherwise the picked option — the same rule
+      // the detail page renders by, so the column means one thing for every row.
+      sup.customPaymentTerms ?? sup.paymentTerms,
+      sup.currency,
+      sup.leadTimeDays,
+      formatDate(sup.createdAt, regional.dateFormat, regional.timezone),
+    ]),
+  );
+
+  // `notes` is deliberately absent: it is internal free text staff write about a supplier, and a
+  // spreadsheet is exactly the artifact that gets forwarded outside the company.
+  audit.record({ actor, action: "supplier.exported", targetType: "supplier", targetLabel: `${rows.length} rows` });
+  return { csv, capped: suppliers.length > EXPORT_MAX };
 }
 
 // Resolve by database id (24-hex) or supplier code (so pages can route by the code).

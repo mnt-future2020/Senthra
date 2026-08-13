@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+import type { Prisma } from "@prisma/client";
+
 import * as grnRepo from "./goods-in.repository.js";
 import type { GoodsReceiptWithRelations, GRNLineRow } from "./goods-in.repository.js";
 import * as poService from "#modules/purchase-order/purchase-order.service.js";
@@ -8,7 +10,9 @@ import * as inventoryService from "#modules/inventory/inventory.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import * as attachmentService from "#modules/attachment/attachment.service.js";
-import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
+import { getCloudinaryCreds, getRegionalSettings } from "#modules/settings/settings.service.js";
+import { formatDate } from "#modules/document/document.formatter.js";
+import { EXPORT_MAX, EXPORT_PAGING, toCsv } from "../../utils/csv.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
 import { emitAttentionChanged } from "../../lib/realtime.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
@@ -338,6 +342,8 @@ export interface ListGoodsReceiptsParams {
   page?: number;
   pageSize?: number;
   sort?: string;
+  /** Internal only — see EXPORT_PAGING. Controllers never read this from the query string. */
+  maxPageSize?: number;
 }
 
 export async function listGoodsReceipts(params: ListGoodsReceiptsParams = {}, actor?: AuditActor): Promise<PagedGoodsReceipts> {
@@ -345,11 +351,120 @@ export async function listGoodsReceipts(params: ListGoodsReceiptsParams = {}, ac
   // supplier filter must narrow the caller's permitted set, never widen it.
   const filters = { search: params.search, status: params.status, warehouseId: params.warehouse, warehouseIds: warehouseScopeFilter(actor), purchaseOrderId: params.purchaseOrder, supplierId: params.supplier };
   const total = await grnRepo.count(filters);
-  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total, params.maxPageSize);
   const rows = await grnRepo.findMany(filters, skip, pageSize, params.sort);
   // List rows use the stored snapshot (no live override) — the per-line remaining only matters on
   // the single-GRN edit/detail read, and a live lookup per row here would be an N+1.
   return { goodsReceipts: rows.map((g) => toPublic(g)), total, page, pageSize, totalPages };
+}
+
+/**
+ * The SAME filtered register as a CSV, minus paging. Delegates to listGoodsReceipts with one
+ * oversized page rather than re-deriving the filters — the actor's warehouse SCOPE lives in there,
+ * and the comment above it says exactly why: a filter must narrow the permitted set, never widen it.
+ */
+export async function exportGoodsReceiptsCsv(
+  params: ListGoodsReceiptsParams = {},
+  actor?: AuditActor,
+): Promise<{ csv: string; capped: boolean }> {
+  // EXPORT_PAGING, not a bare pageSize: `paginate` clamps anything a client could ask for to 100,
+  // so without its maxPageSize every export silently stopped at 100 rows AND reported itself
+  // complete (capped was measured on the same clamped length). See utils/csv.
+  const { goodsReceipts } = await listGoodsReceipts({ ...params, ...EXPORT_PAGING }, actor);
+  const rows = goodsReceipts.slice(0, EXPORT_MAX);
+
+  const regional = await getRegionalSettings();
+  const csv = toCsv(
+    [
+      "GRN Number", "Status", `Received (${regional.timezone})`,
+      "Purchase Order", "Supplier", "Warehouse",
+      "Delivery Note", "Carrier", "Vehicle Reg", "Reference",
+      "Quality", "Lines", "Received Qty", "Accepted Qty", "Damaged Qty",
+    ],
+    rows.map((g) => [
+      g.code,
+      g.status,
+      formatDate(g.receivedDate, regional.dateFormat, regional.timezone),
+      g.purchaseOrder?.code ?? g.poCode,
+      g.supplier?.name ?? g.supplierName,
+      g.warehouse?.name,
+      g.deliveryNoteNumber,
+      g.carrier,
+      g.vehicleRegistration,
+      g.referenceNumber,
+      g.qualityStatus,
+      g.items.length,
+      // The three quantities the reconciliation actually turns on: what arrived, what was taken
+      // into stock, and what was rejected. Received ≠ accepted + damaged is exactly the row a
+      // warehouse audit is looking for, so all three travel together.
+      g.totalReceived,
+      g.totalAccepted,
+      g.totalDamaged,
+    ]),
+  );
+
+  // `internalNotes` and `qualityNotes` are absent: staff free text about a delivery (and sometimes
+  // about the supplier who sent it), of the kind a forwarded spreadsheet should never carry.
+  audit.record({ actor, action: "goods_in.exported", targetType: "goods_receipt", targetLabel: `${rows.length} rows` });
+  return { csv, capped: goodsReceipts.length > EXPORT_MAX };
+}
+
+/**
+ * The same filtered receipts, ONE ROW PER LINE — the supplier-quality report.
+ *
+ * The header export says a delivery had 3 damaged units somewhere in it. This says WHICH item, on
+ * which order, from which supplier — which is the only form the question is actually asked in:
+ * "which supplier keeps sending us damaged CAT6". A header row cannot answer it, because the item
+ * never appears in one.
+ *
+ * Every header field repeats on each line so the file pivots without being filled down by hand.
+ */
+export async function exportGoodsReceiptLinesCsv(
+  params: ListGoodsReceiptsParams = {},
+  actor?: AuditActor,
+): Promise<{ csv: string; capped: boolean }> {
+  const { goodsReceipts } = await listGoodsReceipts({ ...params, ...EXPORT_PAGING }, actor);
+  const receipts = goodsReceipts.slice(0, EXPORT_MAX);
+
+  const regional = await getRegionalSettings();
+  const all = receipts.flatMap((g) =>
+    g.items.map((i) => [
+      g.code,
+      g.status,
+      formatDate(g.receivedDate, regional.dateFormat, regional.timezone),
+      g.purchaseOrder?.code ?? g.poCode,
+      g.supplier?.name ?? g.supplierName,
+      g.warehouse?.name,
+      g.deliveryNoteNumber,
+      i.itemName,
+      i.sku,
+      i.baseUnit,
+      // The four quantities the reconciliation turns on. `ordered` and `previouslyReceived` are what
+      // make a SHORTFALL computable from this file alone — without them a reader can see what
+      // arrived but not what was owed.
+      i.orderedQuantity,
+      i.previouslyReceived,
+      i.receivedQuantity,
+      i.acceptedQuantity,
+      i.damagedQuantity,
+    ]),
+  );
+  // Capped on LINES, not receipts: one delivery can carry hundreds.
+  const rows = all.slice(0, EXPORT_MAX);
+
+  const csv = toCsv(
+    [
+      "GRN Number", "Status", `Received (${regional.timezone})`,
+      "Purchase Order", "Supplier", "Warehouse", "Delivery Note",
+      "Item", "SKU", "Unit",
+      "Ordered Qty", "Previously Received", "Received Qty", "Accepted Qty", "Damaged Qty",
+    ],
+    rows,
+  );
+
+  // Line `notes` stay out, as on every other export: staff free text about a delivery.
+  audit.record({ actor, action: "goods_in.exported", targetType: "goods_receipt", targetLabel: `${rows.length} lines` });
+  return { csv, capped: goodsReceipts.length > EXPORT_MAX || all.length > EXPORT_MAX };
 }
 
 export async function getGoodsReceipt(idOrCode: string, actor?: AuditActor): Promise<PublicGoodsReceipt> {
@@ -537,37 +652,102 @@ export async function deleteGoodsReceipt(id: string, actor?: AuditActor): Promis
 }
 
 // ── Attachments ──────────────────────────────────────────────────────────────────────────────
-export async function addAttachment(grnId: string, input: GRNAttachmentInput, actor?: AuditActor): Promise<PublicGoodsReceipt> {
+/**
+ * May this receipt take one more document of this size?
+ *
+ * Needed twice once the browser uploads straight to Cloudinary: before the file is sent, and again at
+ * attachment time — the receipt can gain documents, or leave draft, while a file is in flight.
+ */
+export async function assertCanAttach(grnId: string, fileSizeBytes: number, actor?: AuditActor): Promise<void> {
   const grn = await loadOrThrow(grnId);
   assertWarehouseAccess(actor, grn.warehouseId);
-  // Attachments are editable on a DRAFT receipt only — a completed or cancelled GRN is
-  // immutable (mirrors the edit/delete guards).
+  // Attachments are editable on a DRAFT receipt only — a completed or cancelled GRN is immutable.
   if (grn.status !== "draft") throw conflict("Only draft goods receipts can have attachments changed.");
-  // Enterprise caps — fail fast BEFORE uploading to Cloudinary (per-file size + type are already
-  // validated by grnAttachmentSchema; count + running total are checked here against the loaded set).
   if (grn.attachments.length >= GRN_ATTACHMENT_MAX_COUNT) {
     throw badRequest(`A goods receipt can have at most ${GRN_ATTACHMENT_MAX_COUNT} documents.`);
   }
   const totalBytes = grn.attachments.reduce((sum, a) => sum + a.fileSizeBytes, 0);
-  if (totalBytes + input.fileSizeBytes > GRN_ATTACHMENT_MAX_TOTAL_BYTES) {
+  if (totalBytes + fileSizeBytes > GRN_ATTACHMENT_MAX_TOTAL_BYTES) {
     throw badRequest("Total documents on a goods receipt can't exceed 20 MB.");
   }
+}
+
+/** One already-stored asset, recorded against this receipt. */
+export interface AttachAssetInput {
+  label?: string | null;
+  fileName: string;
+  fileType: string;
+  fileSizeBytes: number;
+  url: string;
+  publicId: string;
+  resourceType: string;
+}
+
+/**
+ * Record an asset that is ALREADY in storage — the single place a GRN attachment row is written.
+ *
+ * Both entry points end here: the older path that uploads through this server, and the direct-upload
+ * finalize. `tx` is passed by the latter, which commits this row and its pending-upload ledger removal
+ * together.
+ */
+export async function attachUploadedAsset(
+  grnId: string,
+  input: AttachAssetInput,
+  actor?: AuditActor,
+  tx?: Prisma.TransactionClient,
+): Promise<PublicGoodsReceipt> {
+  const grn = await loadOrThrow(grnId);
+  await assertCanAttach(grnId, input.fileSizeBytes, actor);
+  await grnRepo.addAttachment(
+    {
+      goodsReceiptId: grnId,
+      label: trimToNull(input.label),
+      fileName: input.fileName.trim(),
+      fileType: input.fileType,
+      fileSizeBytes: input.fileSizeBytes,
+      url: input.url,
+      publicId: input.publicId,
+      resourceType: input.resourceType,
+      uploadedBy: actor?.email ?? null,
+    },
+    tx,
+  );
+  // Non-transactional path only — see recordAttachmentAudit.
+  if (!tx) recordAttachmentAudit(grn, actor);
+  return getGoodsReceipt(grnId);
+}
+
+/**
+ * The attachment-added audit event, in one place.
+ *
+ * `audit.record` is fire-and-forget and writes on the default client, so it does NOT roll back with a
+ * caller's `tx`: fired inside the direct-upload transaction, an abort after the write would leave an
+ * entry for an attachment that was never committed. The transactional caller fires this after its
+ * commit instead, and the event stays defined once.
+ */
+export function recordAttachmentAudit(grn: { id: string; code: string }, actor?: AuditActor): void {
+  audit.record({ actor, action: "goods_in.attachment_added", targetType: "goods_receipt", targetId: grn.id, targetLabel: grn.code });
+}
+
+export async function addAttachment(grnId: string, input: GRNAttachmentInput, actor?: AuditActor): Promise<PublicGoodsReceipt> {
+  // Before the upload, so a rejected attachment never reaches Cloudinary as an orphan.
+  await assertCanAttach(grnId, input.fileSizeBytes, actor);
   const creds = await getCloudinaryCreds();
   if (!creds) throw badRequest("File uploads aren't configured. Add Cloudinary credentials in Settings first.");
   const asset = await uploadFileToCloudinary(input.data, randomUUID(), creds, "senthra/goods-in");
-  await grnRepo.addAttachment({
-    goodsReceiptId: grnId,
-    label: trimToNull(input.label),
-    fileName: input.fileName.trim(),
-    fileType: input.fileType,
-    fileSizeBytes: input.fileSizeBytes,
-    url: asset.url,
-    publicId: asset.publicId,
-    resourceType: asset.resourceType,
-    uploadedBy: actor?.email ?? null,
-  });
-  audit.record({ actor, action: "goods_in.attachment_added", targetType: "goods_receipt", targetId: grnId, targetLabel: grn.code });
-  return getGoodsReceipt(grnId);
+  return attachUploadedAsset(
+    grnId,
+    {
+      label: input.label,
+      fileName: input.fileName,
+      fileType: input.fileType,
+      fileSizeBytes: input.fileSizeBytes,
+      url: asset.url,
+      publicId: asset.publicId,
+      resourceType: asset.resourceType,
+    },
+    actor,
+  );
 }
 
 export async function removeAttachment(grnId: string, attachmentId: string, actor?: AuditActor): Promise<PublicGoodsReceipt> {

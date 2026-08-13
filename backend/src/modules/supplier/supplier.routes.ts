@@ -5,7 +5,7 @@ import {
   requireAuth,
   requirePermission,
 } from "../../middleware/auth.middleware.js";
-import { writeLimiter } from "../../middleware/rateLimit.middleware.js";
+import { writeLimiter, exportLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import { createSupplierSchema, updateSupplierSchema } from "./supplier.validation.js";
 
@@ -14,6 +14,8 @@ const router = Router();
 router.use(requireAuth);
 
 router.get("/", requirePermission("suppliers.view"), supplierController.listSuppliers);
+// BEFORE any "/:id" route — otherwise "export.csv" is parsed as an id and 404s on lookup.
+router.get("/export.csv", requirePermission("suppliers.export"), exportLimiter, supplierController.exportSuppliersCsv);
 router.get("/:id", requirePermission("suppliers.view"), supplierController.getSupplier);
 
 router.post(

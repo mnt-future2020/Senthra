@@ -23,16 +23,39 @@ function walk(dir: string, out: string[] = []): string[] {
   return out;
 }
 
+/** Source with comment lines removed — these guards search for code, and comments discuss the code. */
+function codeLinesOf(src: string): string {
+  return src
+    .split("\n")
+    .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+    .join("\n");
+}
+
 const files = walk(SRC).map((path) => ({ path, rel: path.slice(SRC.length + 1).replace(/\\/g, "/"), src: readFileSync(path, "utf8") }));
 
 // The only places allowed to name the destroy transport: the transport itself, the one service that
 // wraps it in the reference check, and their tests.
+//
+// The direct-upload module is the ONE other holder, and on a different guarantee. releaseAsset
+// protects assets that domain rows may reference, and asks countRefs whether any still does. The
+// upload module destroys assets that NOTHING has referenced yet — an abandoned pending upload, or one
+// that just failed validation — and its proof is the PendingUpload ledger: a row exists only between
+// "we authorised this upload" and "someone claimed it".
+//
+// Routing those through releaseAsset would be worse, not better. countRefs counts the three attachment
+// tables only, so for a job or van-stock upload it returns zero whether the asset is referenced or
+// not; the right answer would come out by coincidence, resting on an argument that does not hold.
+// `upload.reaper.test.ts` asserts the reaper never consults it.
 const DESTROY_ALLOWLIST = [
   "lib/cloudinary.ts",
   "lib/__tests__/cloudinary.destroy.test.ts",
   "modules/attachment/attachment.service.ts",
   "modules/attachment/attachment.service.test.ts",
   "modules/attachment/attachment.boundary.test.ts",
+  "modules/upload/upload.service.ts",
+  "modules/upload/upload.service.test.ts",
+  "modules/upload/upload.reaper.ts",
+  "modules/upload/upload.reaper.test.ts",
 ];
 
 describe("Cloudinary deletion has exactly one entrance", () => {
@@ -161,5 +184,24 @@ describe("avatar and company logo release the file they replace", () => {
     const customer = files.find((x) => x.rel === "modules/customer/customer.service.ts")!;
     expect(user.src).toMatch(/profileImagePublicId/);
     expect(customer.src).toMatch(/logoPublicId/);
+  });
+});
+
+// The upload module holds the second destroy path, so the ledger has to be what justifies it. If the
+// reaper ever started asking countRefs instead, it would be leaning on a count that cannot see a
+// `String[]` attachment — and would destroy files that are on screen.
+describe("the direct-upload destroy path rests on the ledger, not the reference count", () => {
+  it("the reaper reads its own ledger and never the attachment tables", () => {
+    const reaper = files.find((f) => f.rel === "modules/upload/upload.reaper.ts")!;
+    // Code only — the file's own comment explains at length why countRefs is the wrong guarantee here,
+    // and a scan that read prose would flag the explanation as the offence.
+    const code = codeLinesOf(reaper.src);
+    expect(code).toContain("findReapable");
+    expect(code).not.toContain("countRefs");
+  });
+
+  it("every reap claims the row first", () => {
+    const reaper = files.find((f) => f.rel === "modules/upload/upload.reaper.ts")!;
+    expect(reaper.src).toMatch(/claim\(/);
   });
 });

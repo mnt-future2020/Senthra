@@ -9,6 +9,7 @@ import * as prfService from "@/services/purchase-request.service";
 import { listSuppliers } from "@/services/supplier.service";
 import { listWarehouses } from "@/services/warehouse.service";
 import { useAuth } from "@/hooks/useAuth";
+import { ExportButton } from "@/components/ui/ExportButton";
 import { useDashboard } from "@/hooks/useDashboard";
 import { usePurchaseRequestSocket } from "@/hooks/usePurchaseRequestSocket";
 import { useReferenceData } from "@/hooks/useReferenceData";
@@ -219,17 +220,23 @@ export function PurchaseRequestsView() {
     return () => clearTimeout(t);
   }, [searchInput, search, patchParams]);
 
+  // The filters WITHOUT paging — one definition, used by the list (which adds the page) and by the
+  // CSV export (which must not). Two copies is how a download quietly stops matching the screen it
+  // was taken from, and nothing about the resulting file looks wrong.
+  const exportParams = React.useMemo(
+    () => ({
+      search: search || undefined,
+      status: statusFilter === "all" ? undefined : statusFilter,
+      supplier: supplierFilter || undefined,
+      warehouse: warehouseFilter || undefined,
+    }),
+    [search, statusFilter, supplierFilter, warehouseFilter],
+  );
+
   React.useEffect(() => {
     let active = true;
     (async () => {
-      const params = {
-        search: search || undefined,
-        status: statusFilter === "all" ? undefined : statusFilter,
-        supplier: supplierFilter || undefined,
-        warehouse: warehouseFilter || undefined,
-        page,
-        pageSize: PAGE_SIZE,
-      };
+      const params = { ...exportParams, page, pageSize: PAGE_SIZE };
       const cached = prfService.getCachedPurchaseRequests(params);
       if (active && cached) setData(cached);
       setLoading(true);
@@ -247,7 +254,7 @@ export function PurchaseRequestsView() {
     return () => {
       active = false;
     };
-  }, [search, statusFilter, supplierFilter, warehouseFilter, page, refreshKey]);
+  }, [exportParams, page, refreshKey]);
 
   // Live-refresh the list whenever anyone moves a request through the flow, so a board left open
   // shows current statuses (and the finance review queue drains as decisions are made) without a
@@ -299,6 +306,25 @@ export function PurchaseRequestsView() {
         <Select size="sm" value={statusFilter} onChange={(v) => patchParams({ status: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All statuses" }, ...PRF_DERIVED_STATUS_OPTIONS, ...(Object.keys(PRF_STATUS_LABELS) as PrfStatus[]).map((s) => ({ value: s, label: PRF_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
         <Select size="sm" value={supplierFilter || "all"} onChange={(v) => patchParams({ supplier: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All suppliers" }, ...suppliers.map((s) => ({ value: s.id, label: s.name }))]} ariaLabel="Filter by supplier" />
         <Select size="sm" value={warehouseFilter || "all"} onChange={(v) => patchParams({ warehouse: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All warehouses" }, ...warehouses.map((w) => ({ value: w.id, label: w.name }))]} ariaLabel="Filter by warehouse" />
+        {/* Before "New request" and outside its ml-auto, so the primary action stays hard right. */}
+        {can("purchase_requests.export") && (
+          <>
+            <ExportButton
+              label="Export"
+              onExport={() => prfService.exportPurchaseRequestsCsv(exportParams)}
+              disabled={requests.length === 0}
+              title="Export the filtered purchase requests — one row per request"
+            />
+            {/* One row per LINE, carrying the PO code — this file joins the PO line export to
+                compare what was requested against what was ordered. */}
+            <ExportButton
+              label="Export lines"
+              onExport={() => prfService.exportPurchaseRequestLinesCsv(exportParams)}
+              disabled={requests.length === 0}
+              title="Export every request LINE — item, quantity, unit price"
+            />
+          </>
+        )}
         {can("purchase_requests.create") && (
           <button onClick={() => router.push("/dashboard/purchase-requests/new")} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 lg:ml-auto">
             <Plus className="h-4 w-4" /> New request

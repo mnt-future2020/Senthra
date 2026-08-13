@@ -2,7 +2,7 @@ import { Router } from "express";
 
 import * as prfController from "./purchase-request.controller.js";
 import { requireAuth, requirePermission } from "../../middleware/auth.middleware.js";
-import { writeLimiter } from "../../middleware/rateLimit.middleware.js";
+import { writeLimiter, exportLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import {
   createPurchaseRequestSchema,
@@ -19,6 +19,9 @@ const router = Router();
 router.use(requireAuth);
 
 router.get("/", requirePermission("purchase_requests.view"), prfController.listPurchaseRequests);
+// BEFORE any "/:id" route — otherwise "export.csv" is parsed as an id and 404s on lookup.
+router.get("/export.csv", requirePermission("purchase_requests.export"), exportLimiter, prfController.exportPurchaseRequestsCsv);
+router.get("/export-lines.csv", requirePermission("purchase_requests.export"), exportLimiter, prfController.exportPurchaseRequestLinesCsv);
 router.get("/:id", requirePermission("purchase_requests.view"), prfController.getPurchaseRequest);
 
 router.post(

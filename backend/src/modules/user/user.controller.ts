@@ -1,6 +1,9 @@
+import type { Request } from "express";
+
 import * as userService from "./user.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
+import { sendCsv } from "../../utils/csv-response.js";
 import { param, queryInt, queryStr } from "../../utils/request.js";
 import type {
   CreateUserInput,
@@ -12,17 +15,28 @@ import type {
 
 // GET /users  (protected) — paginated. Query: ?search=&status=&roleId=&page=&pageSize=
 // Returns { users, total, page, pageSize, totalPages }.
-export const listUsers = asyncHandler(async (req, res) => {
+// The list's filters, parsed once. Shared with the CSV export so the download is exactly the rows
+// on screen — a second copy is a second place for a filter to be forgotten, and the resulting file
+// gives no sign that it is wider or narrower than the list it came from.
+function listParamsFrom(req: Request): userService.ListUsersParams {
   const { search, status, roleId, sort, page, pageSize } = req.query;
-  const result = await userService.listUsers({
+  return {
     search: queryStr(search),
     status: queryStr(status),
     roleId: queryStr(roleId),
     sort: queryStr(sort),
     page: queryInt(page),
     pageSize: queryInt(pageSize),
-  });
-  res.json(result);
+  };
+}
+
+export const listUsers = asyncHandler(async (req, res) => {
+  res.json(await userService.listUsers(listParamsFrom(req)));
+});
+
+// GET /users/export.csv — the same filtered staff list as a download (paging ignored).
+export const exportUsersCsv = asyncHandler(async (req, res) => {
+  sendCsv(res, "staff", await userService.exportUsersCsv(listParamsFrom(req), actorFrom(req)));
 });
 
 // GET /users/:id  (protected)

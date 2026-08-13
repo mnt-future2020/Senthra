@@ -13,7 +13,6 @@ import type {
   WarehouseAvailability,
 } from "@/services/vanStockRequest.service";
 import { useDashboard } from "@/hooks/useDashboard";
-import { readFileAsDataUrl } from "@/lib/image";
 import { VanStockCartTable, VanStockItemSearch, type VanStockCartItem } from "@/components/dashboard/van-requests/vanRequestUi";
 import { FieldError, FormPageHeader, FormSection, FormAsideCard, RequiredMark } from "@/components/ui/FormScaffold";
 import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
@@ -22,6 +21,7 @@ import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import type { Msg } from "@/components/ui/types";
+import { uploadDirectForUrl } from "@/lib/upload";
 
 // Full-page composers for the engineer's NON-job field-stock flow, on the shared FormScaffold
 // (sticky header + sectioned main column + sticky summary aside) so they read exactly like the
@@ -217,8 +217,7 @@ export function RestockComposerPage() {
     setUploading(true);
     setMsg(null);
     try {
-      const dataUri = await readFileAsDataUrl(file);
-      const url = await vanStockSvc.uploadVanStockAttachment(dataUri);
+      const url = await uploadDirectForUrl({ purpose: "vsr_attachment", file });
       setAttachments((a) => [...a, url]);
     } catch (err) {
       setMsg({ type: "error", text: err instanceof Error ? err.message : "Could not upload the attachment." });

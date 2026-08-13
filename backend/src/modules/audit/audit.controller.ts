@@ -2,6 +2,7 @@ import * as auditService from "./audit.service.js";
 import { parseAuditQuery } from "./audit.validation.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
+import { sendCsv } from "../../utils/csv-response.js";
 
 // GET /audit  (protected: audit.view) — paginated, filterable list. Scoped to the caller's
 // accessible warehouses: a warehouse-scoped role sees only their warehouses' audit (actorFrom
@@ -22,11 +23,5 @@ export const listFacets = asyncHandler(async (req, res) => {
 // streamed as a file download. Honors the same filters AND the same warehouse scope as
 // the list (page/pageSize are ignored — the export spans all matching rows up to the cap).
 export const exportAuditCsv = asyncHandler(async (req, res) => {
-  const { csv, capped } = await auditService.exportAuditCsv(parseAuditQuery(req), actorFrom(req));
-  const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-  res.setHeader("Content-Type", "text/csv; charset=utf-8");
-  res.setHeader("Content-Disposition", `attachment; filename="audit-log-${date}.csv"`);
-  if (capped) res.setHeader("X-Audit-Export-Capped", "true");
-  // Prepend a UTF-8 BOM so Excel opens accented text correctly.
-  res.send("﻿" + csv);
+  sendCsv(res, "audit-log", await auditService.exportAuditCsv(parseAuditQuery(req), actorFrom(req)));
 });

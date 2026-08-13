@@ -109,6 +109,11 @@ const FINANCE_PROCUREMENT_PERMISSIONS = [
   // Read the audit trail — the PRF/PO detail's "Audit trail" tab (who submitted/approved/sent,
   // delivery-date revisions). Read-only; the tab is hidden without it.
   "audit.view",
+  // Spend reporting. Finance OWNS the PRF → PO flow, so downloading what it can already read on
+  // screen is the same authority in a form that can be reconciled in a spreadsheet — which is the
+  // client's actual ask. Deliberately NOT the master-data exports: a supplier list is not spend.
+  "purchase_requests.export",
+  "purchase_orders.export",
 ];
 
 // PM-side procurement permissions. Per the client flow the Project Manager enters the process
@@ -128,6 +133,10 @@ const PM_PROCUREMENT_PERMISSIONS = [
   "irm.view",
   // Read the audit trail — the PRF/PO detail's "Audit trail" tab.
   "audit.view",
+  // The PM reviews and routes POs, so they can download the same list. No PRF export: the PM does
+  // not raise requests (see above), and an export of a queue you take no part in is not a report,
+  // it is a copy of someone else's book.
+  "purchase_orders.export",
 ];
 
 // Warehouse-scoped role keys — members may ONLY access their explicitly-assigned warehouses

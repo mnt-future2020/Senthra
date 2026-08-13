@@ -17,6 +17,7 @@ import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkele
 import { PrfStatusBadge, formatDate, formatMoney } from "./prfStatus";
 import type { AuditEntry } from "@/types/audit";
 import type { PurchaseRequest } from "@/types/purchase-request";
+import { uploadDirect } from "@/lib/upload";
 
 const EXT_TYPE: Record<string, string> = { pdf: "pdf", docx: "docx", png: "png", jpg: "jpg", jpeg: "jpg" };
 
@@ -509,11 +510,12 @@ function Attachments({ prf, setPrf, canEdit }: { prf: PurchaseRequest; setPrf: (
       return;
     }
     setUploading(true);
-    const reader = new FileReader();
-    reader.onload = async () => {
+    // Straight to Cloudinary, then finalize attaches it through the request's own service — same
+    // permissions, same caps, same audit event, same DTO back.
+    void (async () => {
       try {
-        const updated = await prfService.addAttachment(prf.id, { fileName: file.name, fileType, fileSizeBytes: file.size, data: reader.result as string });
-        setPrf(updated);
+        const result = await uploadDirect({ purpose: "prf_attachment", file, targetId: prf.id });
+        if ("attachment" in result) setPrf(result.attachment as typeof prf);
         pushToast("Attachment added.", "success");
       } catch (e) {
         pushToast(e instanceof Error ? e.message : "Upload failed.", "alert");
@@ -521,9 +523,7 @@ function Attachments({ prf, setPrf, canEdit }: { prf: PurchaseRequest; setPrf: (
         setUploading(false);
         if (inputRef.current) inputRef.current.value = "";
       }
-    };
-    reader.onerror = () => { setUploading(false); pushToast("Could not read the file.", "alert"); };
-    reader.readAsDataURL(file);
+    })();
   };
 
   const onDelete = async () => {

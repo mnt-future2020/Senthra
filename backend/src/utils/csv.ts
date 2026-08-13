@@ -33,3 +33,37 @@ export function toCsv(
   }
   return lines.join("\r\n");
 }
+
+/**
+ * The most rows any single export will render into memory.
+ *
+ * One number, not one per module. It was defined three times over (audit, inventory, customer) with
+ * the same value and the same reasoning written out three times — which is fine right up until one
+ * of them is tuned and the others silently disagree about what "capped" means.
+ *
+ * A cap, not a stream, because an export is built as one string: the ceiling is what stops a filter
+ * that matches everything from asking the process to hold an unbounded document. Callers report the
+ * truncation (see sendCsv's X-Export-Capped) rather than hiding it — a short file the user believes
+ * is complete is worse than no file.
+ */
+export const EXPORT_MAX = 50_000;
+
+/**
+ * The paging an export hands to the list function it delegates to.
+ *
+ * Every CSV export that reuses a list function needs the same three values, and getting two of them
+ * right was not enough. `pageSize: EXPORT_MAX + 1` asks for one row more than the cap so a full page
+ * is distinguishable from a truncated one without a second count — but `paginate` bounds pageSize to
+ * 100 for anything a client can ask for, so without `maxPageSize` the request was clamped, every
+ * export stopped at 100 rows, and `capped` (measured on the same clamped length) said the file was
+ * complete. Spreading this object is what keeps the pair in step.
+ *
+ * Lifting the cap is safe here precisely because it is NOT reachable from the wire: controllers build
+ * their list params field by field from `req.query`, so `maxPageSize` only ever has the value an
+ * export gives it, and EXPORT_MAX remains the real ceiling on rows rendered into memory.
+ */
+export const EXPORT_PAGING = {
+  page: 1,
+  pageSize: EXPORT_MAX + 1,
+  maxPageSize: EXPORT_MAX + 1,
+} as const;

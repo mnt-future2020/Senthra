@@ -8,6 +8,7 @@ import * as svc from "@/services/stockPosition.service";
 import type { EngineerInventoryDetail, EngineerOverviewRow } from "@/services/stockPosition.service";
 import { CELL_ONE_LINE, tableMinWidth } from "@/components/ui/tableLayout";
 import { useAuth } from "@/hooks/useAuth";
+import { ExportButton } from "@/components/ui/ExportButton";
 import { OwnerTag, TableSkeletonRows } from "./hubUi";
 import { AdminTransferBoard } from "./AdminTransferBoard";
 
@@ -320,6 +321,21 @@ export function EngineersOverview() {
           >
             <ArrowRightLeft className="h-3.5 w-3.5" /> Transfers
           </button>
+        </div>
+      )}
+
+      {/* Field-stock reconciliation. The screen above is a ROLL-UP (one row per engineer); the file
+          is the per-item detail behind it, which is what a stock count is actually done against.
+          It reuses the positions export filtered to `location=engineer` rather than adding an
+          endpoint — same rows, same permission, and no second definition of "engineer-held stock"
+          to drift from the one the Inventory Hub already uses. */}
+      {view === "list" && can("inventory.export") && (
+        <div className="flex shrink-0 justify-end">
+          <ExportButton
+            label="Export field stock"
+            title="Export every item currently held by an engineer to CSV"
+            onExport={() => svc.exportPositionsCsv({ location: "engineer" })}
+          />
         </div>
       )}
 

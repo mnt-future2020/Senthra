@@ -1,5 +1,5 @@
-import { api, LONG_WRITE_TIMEOUT, apiFile } from "@/lib/api";
-import { downloadBlob, filenameFromDisposition } from "@/lib/download";
+import { api, LONG_WRITE_TIMEOUT } from "@/lib/api";
+import { downloadCsv, withoutPaging } from "@/lib/csvExport";
 import { registerClientCache } from "@/lib/clientCache";
 import type {
   BulkSiteResult,
@@ -134,6 +134,14 @@ const listCacheKey = (p: CustomerListParams): string =>
 
 export const getCachedCustomers = (params: CustomerListParams = {}): PagedCustomers | undefined =>
   listCache.get(listCacheKey(params));
+
+/**
+ * The SAME filtered list as a CSV. Paging is dropped — an export is "everything matching what I'm
+ * looking at", not the page on screen. `capped` is true when the server stopped short.
+ */
+export function exportCustomersCsv(params: CustomerListParams = {}): Promise<{ capped: boolean }> {
+  return downloadCsv(`/customers/export.csv${qs(withoutPaging(params))}`, "customers");
+}
 
 export function listCustomers(params: CustomerListParams = {}): Promise<PagedCustomers> {
   return api<PagedCustomers>(`/customers${qs(params)}`).then((r) => {
@@ -534,6 +542,20 @@ export function createDirectStockEntry(
   }).then((r) => r.entry);
 }
 
+/**
+ * One customer's stock as a CSV — the Inventory tab's download. Same columns the customer's own
+ * portal export produces, on purpose: the two files land side by side in a reconciliation call.
+ */
+export function exportCustomerStockCsv(
+  customerId: string,
+  params: PortalListParams = {},
+): Promise<{ capped: boolean }> {
+  return downloadCsv(
+    `/customers/${customerId}/stock-entries/export.csv${portalQs(withoutPaging(params))}`,
+    "customer-stock",
+  );
+}
+
 export function listCustomerStockEntries(
   customerId: string,
   status?: string,
@@ -641,20 +663,7 @@ async function portalCsv(
   params: PortalListParams,
   fallbackName: string,
 ): Promise<{ capped: boolean }> {
-  const { page: _page, pageSize: _pageSize, ...filters } = params;
-  void _page;
-  void _pageSize;
-  const { blob, headers } = await apiFile(`${path}${portalQs(filters)}`);
-  const date = new Date().toISOString().slice(0, 10);
-  const filename = filenameFromDisposition(
-    headers["content-disposition"] ?? null,
-    `${fallbackName}-${date}.csv`,
-  );
-  downloadBlob(blob, filename);
-  // Reads as false unless `X-Export-Capped` is in the API's CORS exposedHeaders — the browser hides
-  // an unexposed header on a cross-origin response, which would silently pass a truncated export off
-  // as complete.
-  return { capped: String(headers["x-export-capped"] ?? "") === "true" };
+  return downloadCsv(`${path}${portalQs(withoutPaging(params))}`, fallbackName);
 }
 
 /**

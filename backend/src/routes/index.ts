@@ -18,6 +18,7 @@ import irmRoutes from "#modules/irm/irm.routes.js";
 import irmCategoryRoutes from "#modules/irm-category/irm-category.routes.js";
 import irmTypeRoutes from "#modules/irm-type/irm-type.routes.js";
 import jobRoutes, { portalRouter as customerJobRoutes } from "#modules/job/job.routes.js";
+import uploadRoutes from "#modules/upload/upload.routes.js";
 import jobKitRequestRoutes from "#modules/job-kit-request/job-kit-request.routes.js";
 import jobTitleRoutes from "#modules/jobTitle/jobTitle.routes.js";
 import notificationRoutes from "#modules/notification/notification.routes.js";
@@ -62,6 +63,10 @@ router.use("/goods-in", goodsInRoutes);
 router.use("/goods-management", goodsManagementRoutes);
 router.use("/inventory", inventoryRoutes);
 router.use("/jobs", jobRoutes);
+
+// Direct browser upload — signature + finalize. Serves every upload contract, so the per-purpose
+// permission lives in the upload catalog rather than on the route.
+router.use("/uploads", uploadRoutes);
 router.use("/departments", departmentRoutes);
 router.use("/geo", geoRoutes);
 router.use("/job-titles", jobTitleRoutes);

@@ -14,7 +14,9 @@ import * as irmService from "#modules/irm/irm.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import * as attachmentService from "#modules/attachment/attachment.service.js";
-import { getCloudinaryCreds, getCompanyTimezone } from "#modules/settings/settings.service.js";
+import { getCloudinaryCreds, getCompanyTimezone, getRegionalSettings } from "#modules/settings/settings.service.js";
+import { formatDate } from "#modules/document/document.formatter.js";
+import { EXPORT_MAX, EXPORT_PAGING, toCsv } from "../../utils/csv.js";
 import { PO_ATTACHMENT_MAX_COUNT, PO_ATTACHMENT_MAX_TOTAL_BYTES } from "./purchase-order.validation.js";
 import { startOfDayIn } from "../../utils/filter-date.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
@@ -369,6 +371,8 @@ export interface ListPurchaseOrdersParams {
   page?: number;
   pageSize?: number;
   sort?: string;
+  /** Internal only — see EXPORT_PAGING. Controllers never read this from the query string. */
+  maxPageSize?: number;
 }
 
 // May this actor act on a pm_review PO that isn't assigned to them? Used by the send guard (an
@@ -400,9 +404,135 @@ export async function listPurchaseOrders(params: ListPurchaseOrdersParams = {}, 
       params.status === "awaiting_send" && !canOverridePm(actor) ? (actor?.id ?? undefined) : undefined,
   };
   const total = await poRepo.count(filters);
-  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total, params.maxPageSize);
   const rows = await poRepo.findMany(filters, skip, pageSize, params.sort);
   return { purchaseOrders: rows.map(toPublic), total, page, pageSize, totalPages };
+}
+
+/**
+ * The SAME filtered list as a CSV, minus paging — "everything matching what I'm looking at".
+ *
+ * Built by calling the list's own filter assembly rather than a second query: the export is the
+ * report the client reconciles spend against, and an export whose filters drift from the screen it
+ * was taken from is worse than none. That includes the warehouse scope and the personal
+ * "awaiting_send" narrowing, both of which live in listPurchaseOrders — so this delegates to it
+ * with one oversized page rather than re-deriving them.
+ */
+export async function exportPurchaseOrdersCsv(
+  params: ListPurchaseOrdersParams = {},
+  actor?: AuditActor,
+): Promise<{ csv: string; capped: boolean }> {
+  // EXPORT_PAGING, not a bare pageSize: `paginate` clamps anything a client could ask for to 100,
+  // so without its maxPageSize every export silently stopped at 100 rows AND reported itself
+  // complete (capped was measured on the same clamped length). See utils/csv.
+  const { purchaseOrders } = await listPurchaseOrders({ ...params, ...EXPORT_PAGING }, actor);
+  const rows = purchaseOrders.slice(0, EXPORT_MAX);
+
+  // Company timezone + configured date format, like every generated artifact; the column names the
+  // zone so a reader is never left guessing which one the dates are in.
+  const regional = await getRegionalSettings();
+  const csv = toCsv(
+    [
+      "PO Number", "Status", "Priority", "Supplier", "Warehouse",
+      "Purchase Request", "Job", "Project Ref", "Supplier Reference",
+      `Order Date (${regional.timezone})`, `Expected Delivery (${regional.timezone})`, `Confirmed Delivery (${regional.timezone})`,
+      "Assigned PM", "Currency", "Subtotal", "VAT", "Grand Total",
+    ],
+    rows.map((po) => [
+      po.code,
+      po.status,
+      po.priority,
+      po.supplier?.name ?? po.supplierName,
+      po.warehouse?.name,
+      po.purchaseRequest?.code,
+      po.job?.jobNumber,
+      po.projectRef,
+      po.referenceNumber,
+      formatDate(po.orderDate, regional.dateFormat, regional.timezone),
+      formatDate(po.expectedDeliveryDate, regional.dateFormat, regional.timezone),
+      formatDate(po.confirmedDeliveryDate, regional.dateFormat, regional.timezone),
+      po.pmName,
+      po.currency,
+      // Money as a plain decimal, never the pence integer: this file is opened in a spreadsheet and
+      // summed, and 222 in a column headed "Subtotal" is a £2.20 order reported as £222.
+      po.subtotal.toFixed(2),
+      po.vatTotal.toFixed(2),
+      po.grandTotal.toFixed(2),
+    ]),
+  );
+
+  // Audit the deliberate extraction, as the inventory and audit exports do — a download of the
+  // company's spend is an event worth being able to point at later, unlike a page view.
+  audit.record({ actor, action: "purchase_order.exported", targetType: "purchase_order", targetLabel: `${rows.length} rows` });
+  return { csv, capped: purchaseOrders.length > EXPORT_MAX };
+}
+
+/**
+ * The same filtered orders, ONE ROW PER LINE — the spend report.
+ *
+ * The header export answers "what did PO-0044 cost". This answers the questions a company actually
+ * opens Excel for: what did we spend on THIS ITEM this year, across every order; how has its unit
+ * price moved; which supplier charges what. None of those can be pivoted out of a header row,
+ * because the item never appears in one.
+ *
+ * Every header field is repeated on each line ON PURPOSE. A pivot table needs the supplier and the
+ * date on the same row as the item — a "tidy" file with the header written once is a file you have
+ * to fill down by hand before it is usable.
+ *
+ * No extra memory risk over the header export: the list projection already loads `items` (see
+ * withRelations), so this flattens rows that were fetched either way.
+ */
+export async function exportPurchaseOrderLinesCsv(
+  params: ListPurchaseOrdersParams = {},
+  actor?: AuditActor,
+): Promise<{ csv: string; capped: boolean }> {
+  const { purchaseOrders } = await listPurchaseOrders({ ...params, ...EXPORT_PAGING }, actor);
+  const orders = purchaseOrders.slice(0, EXPORT_MAX);
+
+  const regional = await getRegionalSettings();
+  const all = orders.flatMap((po) =>
+    po.items.map((i) => [
+      po.code,
+      po.status,
+      po.supplier?.name ?? po.supplierName,
+      po.warehouse?.name,
+      formatDate(po.orderDate, regional.dateFormat, regional.timezone),
+      formatDate(po.expectedDeliveryDate, regional.dateFormat, regional.timezone),
+      po.purchaseRequest?.code,
+      po.job?.jobNumber,
+      // The item's catalogue CODE as well as its name: the name is a snapshot taken at order time,
+      // so grouping by name alone splits an item that was renamed into two products.
+      i.irmItem?.code,
+      i.itemName,
+      i.sku,
+      i.baseUnit,
+      i.quantity,
+      i.unitPrice.toFixed(2),
+      i.vatRate,
+      i.lineTotal.toFixed(2),
+      // What actually turned up against this line — the difference is the outstanding quantity, and
+      // is why a spend file has to carry it rather than leaving it to a second lookup.
+      i.receivedQuantity,
+      po.currency,
+    ]),
+  );
+  // Capped on LINES, not orders: one order can carry hundreds, so an order-count ceiling would let
+  // the real row count run far past it.
+  const rows = all.slice(0, EXPORT_MAX);
+
+  const csv = toCsv(
+    [
+      "PO Number", "Status", "Supplier", "Warehouse",
+      `Order Date (${regional.timezone})`, `Expected Delivery (${regional.timezone})`,
+      "Purchase Request", "Job",
+      "Item Code", "Item", "SKU", "Unit",
+      "Quantity", "Unit Price", "VAT %", "Line Total", "Received Qty", "Currency",
+    ],
+    rows,
+  );
+
+  audit.record({ actor, action: "purchase_order.exported", targetType: "purchase_order", targetLabel: `${rows.length} lines` });
+  return { csv, capped: purchaseOrders.length > EXPORT_MAX || all.length > EXPORT_MAX };
 }
 
 export async function getPurchaseOrder(idOrCode: string, actor?: AuditActor): Promise<PublicPurchaseOrder> {
@@ -1064,41 +1194,109 @@ function assertAttachmentsEditable(status: string): void {
   }
 }
 
-export async function addAttachment(poId: string, input: PoAttachmentInput, actor?: AuditActor): Promise<PublicPurchaseOrder> {
+/**
+ * May this order take one more document of this size?
+ *
+ * Needed twice once the browser uploads straight to Cloudinary: before the file is sent, and again at
+ * attachment time — the order can gain documents, or close, while a file is in flight.
+ *
+ * `label` is checked here too because the reserved archive label must be refused before an upload, not
+ * after it.
+ */
+export async function assertCanAttach(poId: string, fileSizeBytes: number, label?: string | null, actor?: AuditActor): Promise<void> {
   const po = await loadOrThrow(poId, actor);
   assertAttachmentsEditable(po.status);
-  // The archive label is system-owned — a user attachment must never masquerade as the
-  // document of record.
-  if (input.label?.trim() === ISSUED_PO_ATTACHMENT_LABEL) {
+  if (label?.trim() === ISSUED_PO_ATTACHMENT_LABEL) {
     throw badRequest(`"${ISSUED_PO_ATTACHMENT_LABEL}" is a reserved label.`);
   }
-  // Counts USER documents only — the system's issued-PO archive keeps its own slot, or a buyer who
-  // filled the cap would silently leave the order with no document of record. Checked before the
-  // upload, so a rejected attachment never reaches Cloudinary as an orphan.
+  // USER documents only — the system's issued-PO archive keeps its own slot, or a buyer who filled the
+  // cap would silently leave the order with no document of record.
   const userAttachments = po.attachments.filter((a) => !isIssuedPoArchive(a));
   if (userAttachments.length >= PO_ATTACHMENT_MAX_COUNT) {
     throw badRequest(`A purchase order can have at most ${PO_ATTACHMENT_MAX_COUNT} documents.`);
   }
   const totalBytes = userAttachments.reduce((sum, a) => sum + a.fileSizeBytes, 0);
-  if (totalBytes + input.fileSizeBytes > PO_ATTACHMENT_MAX_TOTAL_BYTES) {
+  if (totalBytes + fileSizeBytes > PO_ATTACHMENT_MAX_TOTAL_BYTES) {
     throw badRequest("Total documents on a purchase order can't exceed 80 MB.");
   }
+}
+
+/** One already-stored asset, recorded against this order. */
+export interface AttachAssetInput {
+  label?: string | null;
+  fileName: string;
+  fileType: string;
+  fileSizeBytes: number;
+  url: string;
+  publicId: string;
+  resourceType: string;
+}
+
+/**
+ * Record an asset that is ALREADY in storage — the single place a PO attachment row is written.
+ *
+ * Both entry points end here: the older path that uploads through this server, and the direct-upload
+ * finalize. `tx` is passed by the latter, which commits this row and the removal of its pending-upload
+ * ledger entry together.
+ */
+export async function attachUploadedAsset(
+  poId: string,
+  input: AttachAssetInput,
+  actor?: AuditActor,
+  tx?: Prisma.TransactionClient,
+): Promise<PublicPurchaseOrder> {
+  const po = await loadOrThrow(poId, actor);
+  await assertCanAttach(poId, input.fileSizeBytes, input.label, actor);
+  await poRepo.addAttachment(
+    {
+      purchaseOrderId: poId,
+      label: trimToNull(input.label),
+      fileName: input.fileName.trim(),
+      fileType: input.fileType,
+      fileSizeBytes: input.fileSizeBytes,
+      url: input.url,
+      publicId: input.publicId,
+      resourceType: input.resourceType,
+      uploadedBy: actor?.email ?? null,
+    },
+    tx,
+  );
+  // Non-transactional path only — see recordAttachmentAudit.
+  if (!tx) recordAttachmentAudit(po, actor);
+  return getPurchaseOrder(poId, actor);
+}
+
+/**
+ * The attachment-added audit event, in one place.
+ *
+ * `audit.record` is fire-and-forget and writes on the default client, so it does NOT roll back with a
+ * caller's `tx`: fired inside the direct-upload transaction, an abort after the write would leave an
+ * entry for an attachment that was never committed. The transactional caller fires this after its
+ * commit instead, and the event stays defined once.
+ */
+export function recordAttachmentAudit(po: { id: string; code: string }, actor?: AuditActor): void {
+  audit.record({ actor, action: "purchase_order.attachment_added", targetType: "purchase_order", targetId: po.id, targetLabel: po.code });
+}
+
+export async function addAttachment(poId: string, input: PoAttachmentInput, actor?: AuditActor): Promise<PublicPurchaseOrder> {
+  // Before the upload, so a rejected attachment never reaches Cloudinary as an orphan.
+  await assertCanAttach(poId, input.fileSizeBytes, input.label, actor);
   const creds = await getCloudinaryCreds();
   if (!creds) throw badRequest("File uploads aren't configured. Add Cloudinary credentials in Settings first.");
   const asset = await uploadFileToCloudinary(input.data, randomUUID(), creds);
-  await poRepo.addAttachment({
-    purchaseOrderId: poId,
-    label: trimToNull(input.label),
-    fileName: input.fileName.trim(),
-    fileType: input.fileType,
-    fileSizeBytes: input.fileSizeBytes,
-    url: asset.url,
-    publicId: asset.publicId,
-    resourceType: asset.resourceType,
-    uploadedBy: actor?.email ?? null,
-  });
-  audit.record({ actor, action: "purchase_order.attachment_added", targetType: "purchase_order", targetId: poId, targetLabel: po.code });
-  return getPurchaseOrder(poId, actor);
+  return attachUploadedAsset(
+    poId,
+    {
+      label: input.label,
+      fileName: input.fileName,
+      fileType: input.fileType,
+      fileSizeBytes: input.fileSizeBytes,
+      url: asset.url,
+      publicId: asset.publicId,
+      resourceType: asset.resourceType,
+    },
+    actor,
+  );
 }
 
 export async function removeAttachment(poId: string, attachmentId: string, actor?: AuditActor): Promise<PublicPurchaseOrder> {
