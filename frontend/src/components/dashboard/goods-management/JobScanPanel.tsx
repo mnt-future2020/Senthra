@@ -35,6 +35,7 @@ import type {
 } from "@/types/goodsManagement";
 import { inputCls, primaryBtn, secondaryBtn } from "@/components/ui/styles";
 import { QtyStepper } from "@/components/ui/QtyStepper";
+import { uploadDirectForUrl } from "@/lib/upload";
 
 // ── Local types ───────────────────────────────────────────────────────────────
 
@@ -260,7 +261,7 @@ export function JobScanPanel({
       damagePhotoUploading: true,
     });
     try {
-      const hostedUrl = await gmService.uploadDamagePhoto(dataUrl);
+      const hostedUrl = await uploadDirectForUrl({ purpose: "damage_photo", file });
       updateLine(key, { damagePhotoUrl: hostedUrl, damagePhotoUploading: false });
     } catch (err) {
       // Clear the preview so the user knows the upload failed and must re-pick.

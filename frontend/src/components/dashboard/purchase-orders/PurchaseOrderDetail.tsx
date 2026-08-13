@@ -23,6 +23,7 @@ import { Pagination } from "@/components/ui/Pagination";
 import type { AuditEntry } from "@/types/audit";
 import type { GoodsReceipt } from "@/types/goods-in";
 import type { PurchaseOrder } from "@/types/purchase-order";
+import { uploadDirect } from "@/lib/upload";
 
 const EXT_TYPE: Record<string, string> = { pdf: "pdf", docx: "docx", png: "png", jpg: "jpg", jpeg: "jpg" };
 
@@ -862,11 +863,12 @@ function Attachments({ po, setPo, canEdit }: { po: PurchaseOrder; setPo: (p: Pur
       return;
     }
     setUploading(true);
-    const reader = new FileReader();
-    reader.onload = async () => {
+    // Straight to Cloudinary, then finalize attaches it through the order's own service — same
+    // permissions, same caps, same audit event, same DTO back.
+    void (async () => {
       try {
-        const updated = await poService.addAttachment(po.id, { fileName: file.name, fileType, fileSizeBytes: file.size, data: reader.result as string });
-        setPo(updated);
+        const result = await uploadDirect({ purpose: "po_attachment", file, targetId: po.id });
+        if ("attachment" in result) setPo(result.attachment as typeof po);
         pushToast("Attachment added.", "success");
       } catch (e) {
         pushToast(e instanceof Error ? e.message : "Upload failed.", "alert");
@@ -874,9 +876,7 @@ function Attachments({ po, setPo, canEdit }: { po: PurchaseOrder; setPo: (p: Pur
         setUploading(false);
         if (inputRef.current) inputRef.current.value = "";
       }
-    };
-    reader.onerror = () => { setUploading(false); pushToast("Could not read the file.", "alert"); };
-    reader.readAsDataURL(file);
+    })();
   };
 
   const onDelete = async () => {

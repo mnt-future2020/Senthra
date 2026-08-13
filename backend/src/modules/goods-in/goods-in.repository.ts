@@ -313,8 +313,13 @@ export function findIrmTrackFlags(
 }
 
 // --- attachments -----------------------------------------------------------------------------
-export function addAttachment(data: Prisma.GoodsReceiptAttachmentUncheckedCreateInput): Promise<GoodsReceiptAttachment> {
-  return prisma.goodsReceiptAttachment.create({ data });
+export function addAttachment(
+  data: Prisma.GoodsReceiptAttachmentUncheckedCreateInput,
+  tx?: Prisma.TransactionClient,
+): Promise<GoodsReceiptAttachment> {
+  // `tx` is passed by the direct-upload finalize, which commits this row and its pending-upload
+  // ledger removal together.
+  return (tx ?? prisma).goodsReceiptAttachment.create({ data });
 }
 export function findAttachment(id: string): Promise<GoodsReceiptAttachment | null> {
   return prisma.goodsReceiptAttachment.findUnique({ where: { id } });

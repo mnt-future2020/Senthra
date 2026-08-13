@@ -7,6 +7,7 @@ import { ClipboardList, MoreHorizontal, Pencil, Plus, Search, Trash2 } from "luc
 
 import * as poService from "@/services/purchase-order.service";
 import { useAuth } from "@/hooks/useAuth";
+import { ExportButton } from "@/components/ui/ExportButton";
 import { useDashboard } from "@/hooks/useDashboard";
 import { usePurchaseOrderSocket } from "@/hooks/usePurchaseOrderSocket";
 import { Pagination } from "@/components/ui/Pagination";
@@ -210,12 +211,21 @@ export function PurchaseOrdersView() {
     return () => clearTimeout(t);
   }, [searchInput, search, patchParams]);
 
+  // The filters WITHOUT paging — one definition, used by the list (which adds the page) and by the
+  // CSV export (which must not). Two copies is how a download quietly stops matching the screen it
+  // was taken from, and nothing about the resulting file looks wrong.
+  const exportParams = React.useMemo(
+    () =>
+      awaitingMine
+        ? { search: search || undefined, status: "pm_review", pm: "me" }
+        : { search: search || undefined, status: statusFilter === "all" ? undefined : statusFilter },
+    [awaitingMine, search, statusFilter],
+  );
+
   React.useEffect(() => {
     let active = true;
     (async () => {
-      const params = awaitingMine
-        ? { search: search || undefined, status: "pm_review", pm: "me", page, pageSize: PAGE_SIZE }
-        : { search: search || undefined, status: statusFilter === "all" ? undefined : statusFilter, page, pageSize: PAGE_SIZE };
+      const params = { ...exportParams, page, pageSize: PAGE_SIZE };
       const cached = poService.getCachedPurchaseOrders(params);
       if (active && cached) setData(cached);
       setLoading(true);
@@ -233,7 +243,7 @@ export function PurchaseOrdersView() {
     return () => {
       active = false;
     };
-  }, [search, statusFilter, awaitingMine, page, refreshKey]);
+  }, [exportParams, page, refreshKey]);
 
   // Live-refresh the list whenever anyone moves a PO through the flow, so a board left open shows
   // the current statuses (and the "awaiting mine" queue empties as the PM sends each order) without
@@ -296,6 +306,26 @@ export function PurchaseOrdersView() {
           >
             Awaiting my action
           </button>
+        )}
+        {/* Before "New order" and outside its ml-auto, so the primary action stays hard right. */}
+        {can("purchase_orders.export") && (
+          <>
+            <ExportButton
+              label="Export"
+              onExport={() => poService.exportPurchaseOrdersCsv(exportParams)}
+              disabled={orders.length === 0}
+              title="Export the filtered purchase orders — one row per order"
+            />
+            {/* The spend report: one row per LINE. Separate from the summary rather than replacing
+                it, because the two answer different questions — "what did this order cost" is a
+                header, "what did we spend on this item" is only pivotable from the lines. */}
+            <ExportButton
+              label="Export lines"
+              onExport={() => poService.exportPurchaseOrderLinesCsv(exportParams)}
+              disabled={orders.length === 0}
+              title="Export every order LINE — item, quantity, unit price (for spend analysis)"
+            />
+          </>
         )}
         {can("purchase_orders.create") && (
           <button onClick={() => router.push("/dashboard/purchase-orders/new")} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 sm:ml-auto">

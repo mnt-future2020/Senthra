@@ -5,6 +5,7 @@ import helmet, { type HelmetOptions } from "helmet";
 
 import { env } from "./config/env.js";
 import { errorHandler, notFound } from "./middleware/error.middleware.js";
+import { EXPORT_CAPPED_HEADER } from "./utils/csv-response.js";
 import routes from "./routes/index.js";
 
 // helmet 8 ships separate CJS and ESM type entrypoints. Under the NodeNext
@@ -38,13 +39,13 @@ app.use(helmetMiddleware({ crossOriginResourcePolicy: { policy: "cross-origin" }
 // truncated" flag reads as false because the header carrying it never reaches the client — so the
 // user is handed a partial file believing it is complete. Add to this list the moment a controller
 // starts answering with a header the frontend needs to read.
+// TWO entries, and it stays two however many exports are added. Every module used to name its own
+// capped header, so this list had to grow in lockstep with the export count — and the failure for a
+// forgotten entry is exactly the silent one described above. utils/csv-response now sends ONE
+// header for all of them, which is what makes this list finished rather than merely current.
 const EXPOSED_HEADERS = [
   "Content-Disposition", // download filename, every CSV/PDF export
-  "X-Export-Capped", // customer portal: own stock + own submissions CSV
-  "X-Audit-Export-Capped",
-  "X-Inventory-Export-Capped",
-  "X-Movement-Export-Capped",
-  "X-Inventory-Export-Count",
+  EXPORT_CAPPED_HEADER, // "this file is not the whole answer" — every CSV export
 ];
 
 app.use(

@@ -1,4 +1,5 @@
 import { api, LONG_WRITE_TIMEOUT } from "@/lib/api";
+import { downloadCsv, withoutPaging } from "@/lib/csvExport";
 import { registerClientCache } from "@/lib/clientCache";
 import type { GoodsReceipt } from "@/types/goods-in";
 
@@ -82,6 +83,23 @@ const listCacheKey = (p: GrnListParams): string =>
   `${p.page ?? 1}|${p.pageSize ?? ""}|${p.search ?? ""}|${p.status ?? ""}|${p.warehouse ?? ""}|${p.purchaseOrder ?? ""}|${p.supplier ?? ""}|${p.sort ?? ""}`;
 
 export const getCachedGoodsReceipts = (params: GrnListParams = {}): PagedGoodsReceipts | undefined => listCache.get(listCacheKey(params));
+
+/**
+ * The SAME filtered register as a CSV. Paging is dropped — an export is "everything matching what
+ * I'm looking at", not the page on screen — and the server keeps the caller's warehouse scope.
+ * `capped` is true when it stopped short of the full set.
+ */
+/**
+ * The same receipts, ONE ROW PER LINE — the supplier-quality report. Which item was short or
+ * damaged, on which order, from which supplier: none of that is answerable from a header row.
+ */
+export function exportGoodsReceiptLinesCsv(params: GrnListParams = {}): Promise<{ capped: boolean }> {
+  return downloadCsv(`/goods-in/export-lines.csv${qs(withoutPaging(params))}`, "goods-in-lines");
+}
+
+export function exportGoodsReceiptsCsv(params: GrnListParams = {}): Promise<{ capped: boolean }> {
+  return downloadCsv(`/goods-in/export.csv${qs(withoutPaging(params))}`, "goods-in");
+}
 
 export function listGoodsReceipts(params: GrnListParams = {}): Promise<PagedGoodsReceipts> {
   return api<PagedGoodsReceipts>(`/goods-in${qs(params)}`).then((r) => {

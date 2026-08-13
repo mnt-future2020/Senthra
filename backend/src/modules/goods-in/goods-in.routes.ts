@@ -2,7 +2,7 @@ import { Router } from "express";
 
 import * as grnController from "./goods-in.controller.js";
 import { requireAuth, requirePermission } from "../../middleware/auth.middleware.js";
-import { writeLimiter } from "../../middleware/rateLimit.middleware.js";
+import { writeLimiter, exportLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import { createGoodsReceiptSchema, grnAttachmentSchema, grnCancelSchema, updateGoodsReceiptSchema } from "./goods-in.validation.js";
 
@@ -11,6 +11,9 @@ const router = Router();
 router.use(requireAuth);
 
 router.get("/", requirePermission("goods_in.view"), grnController.listGoodsReceipts);
+// BEFORE any "/:id" route — otherwise "export.csv" is parsed as an id and 404s on lookup.
+router.get("/export.csv", requirePermission("goods_in.export"), exportLimiter, grnController.exportGoodsReceiptsCsv);
+router.get("/export-lines.csv", requirePermission("goods_in.export"), exportLimiter, grnController.exportGoodsReceiptLinesCsv);
 router.get("/:id", requirePermission("goods_in.view"), grnController.getGoodsReceipt);
 
 router.post("/", requirePermission("goods_in.create"), writeLimiter, validateBody(createGoodsReceiptSchema), grnController.createGoodsReceipt);

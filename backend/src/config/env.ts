@@ -31,6 +31,18 @@ const envSchema = z.object({
   CLOUDINARY_API_KEY: z.string().optional(),
   CLOUDINARY_API_SECRET: z.string().optional(),
 
+  // Signed upload presets, one per Cloudinary resource type. They carry the account-side
+  // `allowed_formats` allowlist, which is the ONLY part of a direct upload Cloudinary can refuse at its
+  // own edge — a disallowed extension fails with 400 before a byte of ours is spent. Everything else
+  // (size, real content, who may attach where) is still decided by finalize, which is authoritative.
+  //
+  // Defaulted rather than optional on purpose. A missing variable would silently drop the edge check
+  // and nothing would look wrong; a preset that does not exist in the account fails every upload
+  // loudly, which is the right direction for a validation gate to break in. Set either to "" to sign
+  // without a preset, which is the pre-preset behaviour.
+  CLOUDINARY_UPLOAD_PRESET_IMAGE: z.string().default("senthra_image"),
+  CLOUDINARY_UPLOAD_PRESET_RAW: z.string().default("senthra_raw"),
+
   // Firebase Cloud Messaging service-account (push notifications to the engineer
   // app). Optional — push is disabled until all three are set. The private key is
   // stored with literal \n escapes; the FCM lib un-escapes them at init.

@@ -1,4 +1,5 @@
 import { api } from "@/lib/api";
+import { downloadCsv, withoutPaging } from "@/lib/csvExport";
 import { registerClientCache } from "@/lib/clientCache";
 import type { Warehouse, WarehouseManager, WarehouseStatus } from "@/types/warehouse";
 
@@ -65,6 +66,15 @@ const listCacheKey = (p: WarehouseListParams): string =>
 
 export const getCachedWarehouses = (params: WarehouseListParams = {}): PagedWarehouses | undefined =>
   listCache.get(listCacheKey(params));
+
+/**
+ * The SAME filtered list as a CSV. Paging is dropped — an export is "everything matching what I'm
+ * looking at", not the page on screen — and the server keeps the caller's warehouse scope, so a
+ * scoped manager downloads their own sites and never the company's. `capped` flags a short file.
+ */
+export function exportWarehousesCsv(params: WarehouseListParams = {}): Promise<{ capped: boolean }> {
+  return downloadCsv(`/warehouses/export.csv${qs(withoutPaging(params))}`, "warehouses");
+}
 
 export function listWarehouses(params: WarehouseListParams = {}): Promise<PagedWarehouses> {
   return api<PagedWarehouses>(`/warehouses${qs(params)}`).then((r) => {

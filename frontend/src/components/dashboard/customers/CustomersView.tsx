@@ -7,6 +7,7 @@ import { MoreHorizontal, Pencil, Plus, Search, Send, Trash2, Users2 } from "luci
 
 import * as customerService from "@/services/customer.service";
 import { useAuth } from "@/hooks/useAuth";
+import { ExportButton } from "@/components/ui/ExportButton";
 import { useDashboard } from "@/hooks/useDashboard";
 import { Pagination } from "@/components/ui/Pagination";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -268,18 +269,24 @@ export function CustomersView() {
   }, [searchInput, search, patch]);
 
   // Re-fetch on any query change. Cache-first (instant) then revalidate.
+  // The filters WITHOUT paging — one definition, used by the list (which adds the page) and by the
+  // CSV export (which must not). Two copies is how a download quietly stops matching the screen it
+  // was taken from, and nothing about the resulting file looks wrong.
+  const exportParams = React.useMemo(
+    () => ({
+      search: search || undefined,
+      status: statusFilter === "all" ? undefined : statusFilter,
+      // "newest" is the server default → omit it so the cache key matches the initial seed
+      // (getCachedCustomers({ pageSize })), which has no sort.
+      sort: sort === "newest" ? undefined : sort,
+    }),
+    [search, statusFilter, sort],
+  );
+
   React.useEffect(() => {
     let active = true;
     (async () => {
-      const params = {
-        search: search || undefined,
-        status: statusFilter === "all" ? undefined : statusFilter,
-        // "newest" is the server default → omit it so the cache key matches the
-        // initial seed (getCachedCustomers({ pageSize })), which has no sort.
-        sort: sort === "newest" ? undefined : sort,
-        page,
-        pageSize: PAGE_SIZE,
-      };
+      const params = { ...exportParams, page, pageSize: PAGE_SIZE };
       const cached = customerService.getCachedCustomers(params);
       if (active && cached) setData(cached);
       setLoading(true);
@@ -297,7 +304,7 @@ export function CustomersView() {
     return () => {
       active = false;
     };
-  }, [search, statusFilter, sort, page, refreshKey]);
+  }, [exportParams, page, refreshKey]);
 
   const goToNew = () => router.push("/dashboard/customers/new");
 
@@ -373,6 +380,14 @@ export function CustomersView() {
           ]}
           ariaLabel="Sort"
         />
+        {/* Before "New customer" and outside its ml-auto, so the primary action stays hard right. */}
+        {can("customers.export") && (
+          <ExportButton
+            onExport={() => customerService.exportCustomersCsv(exportParams)}
+            disabled={customers.length === 0}
+            title="Export the filtered customers to CSV"
+          />
+        )}
         {can("customers.create") && (
           <button
             onClick={goToNew}

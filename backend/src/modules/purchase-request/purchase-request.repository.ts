@@ -219,8 +219,13 @@ export function setConvertedTx(tx: Prisma.TransactionClient, id: string, updated
 }
 
 // --- attachments ----------------------------------------------------------------------------
-export function addAttachment(data: Prisma.PurchaseRequestAttachmentUncheckedCreateInput): Promise<PurchaseRequestAttachment> {
-  return prisma.purchaseRequestAttachment.create({ data });
+export function addAttachment(
+  data: Prisma.PurchaseRequestAttachmentUncheckedCreateInput,
+  tx?: Prisma.TransactionClient,
+): Promise<PurchaseRequestAttachment> {
+  // `tx` is passed by the direct-upload finalize, which commits this row and the removal of its
+  // pending-upload ledger entry together.
+  return (tx ?? prisma).purchaseRequestAttachment.create({ data });
 }
 export function findAttachment(id: string): Promise<PurchaseRequestAttachment | null> {
   return prisma.purchaseRequestAttachment.findUnique({ where: { id } });

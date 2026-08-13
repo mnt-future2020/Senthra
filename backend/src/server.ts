@@ -5,6 +5,7 @@ import { app } from "./app.js";
 import { seedDatabase } from "./db/seed.js";
 import { initRealtime } from "./lib/realtime.js";
 import { prisma } from "./lib/prisma.js";
+import { startUploadReaper } from "#modules/upload/upload.reaper.js";
 
 async function start(): Promise<void> {
   // Ensure the admin + settings exist before accepting requests.
@@ -19,7 +20,14 @@ async function start(): Promise<void> {
     console.log(`Server listening on http://localhost:${env.PORT}`);
   });
 
+  // Sweep uploads the browser started and never came back for. An in-process timer rather than a
+  // worker or a queue: one abandoned-upload sweep an hour is not a reason to run more infrastructure,
+  // and every row is claimed through a conditional update, so several instances sweeping at once is
+  // safe — one simply skips what another took.
+  const stopReaper = startUploadReaper();
+
   const shutdown = async (): Promise<void> => {
+    stopReaper();
     await prisma.$disconnect();
     server.close(() => process.exit(0));
   };

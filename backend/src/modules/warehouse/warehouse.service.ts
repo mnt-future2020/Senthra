@@ -16,6 +16,9 @@ import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import { paginate } from "../../utils/pagination.js";
+import { EXPORT_MAX, EXPORT_PAGING, toCsv } from "../../utils/csv.js";
+import { getRegionalSettings } from "#modules/settings/settings.service.js";
+import { formatDate } from "#modules/document/document.formatter.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { geocodePostcode } from "../../lib/geocode.js";
 import type { CreateWarehouseInput, UpdateWarehouseInput } from "./warehouse.validation.js";
@@ -198,6 +201,8 @@ export interface ListWarehousesParams {
   page?: number;
   pageSize?: number;
   sort?: string;
+  /** Internal only — see EXPORT_PAGING. Controllers never read this from the query string. */
+  maxPageSize?: number;
 }
 
 export async function listWarehouses(
@@ -211,7 +216,7 @@ export async function listWarehouses(
   // Warehouse-scoped users only ever see their assigned warehouses (undefined = unrestricted).
   const filters = { search: params.search, status, typeId: params.type, ids: warehouseScopeFilter(actor) };
   const total = await warehouseRepo.count(filters);
-  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total, params.maxPageSize);
   const rows = await warehouseRepo.findMany(filters, skip, pageSize, params.sort);
   const managers = await managersByWarehouse(rows.map((r) => r.id));
   return {
@@ -221,6 +226,56 @@ export async function listWarehouses(
     pageSize,
     totalPages,
   };
+}
+
+/**
+ * The SAME filtered list as a CSV, minus paging. Delegates to listWarehouses with one oversized page
+ * rather than re-deriving the filters — the warehouse SCOPE lives in there, so a scoped manager's
+ * download stays their own warehouses and can never quietly widen to the company's.
+ */
+export async function exportWarehousesCsv(
+  params: ListWarehousesParams = {},
+  actor?: AuditActor,
+): Promise<{ csv: string; capped: boolean }> {
+  // EXPORT_PAGING, not a bare pageSize: `paginate` clamps anything a client could ask for to 100,
+  // so without its maxPageSize every export silently stopped at 100 rows AND reported itself
+  // complete (capped was measured on the same clamped length). See utils/csv.
+  const { warehouses } = await listWarehouses({ ...params, ...EXPORT_PAGING }, actor);
+  const rows = warehouses.slice(0, EXPORT_MAX);
+
+  const regional = await getRegionalSettings();
+  const csv = toCsv(
+    [
+      "Code", "Name", "Type", "Status", "Default",
+      "Address 1", "Address 2", "City", "County", "Postcode", "Country",
+      "Contact", "Email", "Phone", "Managers", `Added (${regional.timezone})`,
+    ],
+    rows.map((w) => [
+      w.code,
+      w.name,
+      w.type?.name,
+      w.status,
+      w.isDefault ? "Yes" : "No",
+      w.addressLine1,
+      w.addressLine2,
+      w.city,
+      w.county,
+      w.postcode,
+      w.country,
+      w.contactPerson,
+      w.contactEmail,
+      w.contactPhone,
+      // Every assigned manager on one line — the column answers "who runs this site?", which is a
+      // list, and one row per manager would turn a warehouse master into a duplicated one.
+      w.managers.map((m) => m.name).filter(Boolean).join(" | "),
+      formatDate(w.createdAt, regional.dateFormat, regional.timezone),
+    ]),
+  );
+
+  // lat/long are omitted: derived from the postcode, never hand-entered, and nothing reads them
+  // outside the map. The postcode above is the real, editable location.
+  audit.record({ actor, action: "warehouse.exported", targetType: "warehouse", targetLabel: `${rows.length} rows` });
+  return { csv, capped: warehouses.length > EXPORT_MAX };
 }
 
 // Resolve by database id (24-hex) or warehouse code (so pages can route by the code). Enforces

@@ -21,6 +21,9 @@ const router = Router();
 router.use(requireAuth);
 
 router.get("/", requirePermission("purchase_orders.view"), poController.listPurchaseOrders);
+// BEFORE any "/:id" route — otherwise "export.csv" is parsed as an id and 404s on lookup.
+router.get("/export.csv", requirePermission("purchase_orders.export"), exportLimiter, poController.exportPurchaseOrdersCsv);
+router.get("/export-lines.csv", requirePermission("purchase_orders.export"), exportLimiter, poController.exportPurchaseOrderLinesCsv);
 // Static paths before "/:id" so they aren't captured as an id.
 router.get("/items/:irmItemId", requirePermission("purchase_orders.view"), poController.listPurchaseOrdersForItem);
 // Eligible PMs for the Route-to-PM picker (+ the suggested default from the linked job).

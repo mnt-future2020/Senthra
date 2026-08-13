@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { ExternalLink, FileText, Globe, Image as ImageIcon, Link as LinkIcon, Loader2, Lock, Plus, Trash2, Upload } from "lucide-react";
 
 import * as jobService from "@/services/job.service";
-import { readFileAsDataUrl } from "@/lib/image";
 import { listCustomers, listCustomerProjects, listCustomerSites, listCustomerStockEntries } from "@/services/customer.service";
 import { listEngineerOptions, listWarehouseOptions, type WarehouseOption } from "@/services/warehouse.service";
 import { listIrmItems } from "@/services/irm.service";
@@ -36,7 +35,8 @@ import type { CustomerProject, CustomerSite, CustomerStockEntry } from "@/types/
 import type { Job, JobLineType } from "@/types/job";
 import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 import { isHttpUrl } from "@/lib/validation";
-import { ATTACHMENT_MEDIA_TYPE, parseJobAttachment, withMediaType } from "./jobAttachment";
+import { ATTACHMENT_MEDIA_TYPE, parseJobAttachment } from "./jobAttachment";
+import { uploadDirectForUrl } from "@/lib/upload";
 
 const JOBS_LIST = "/dashboard/jobs";
 const dateInput = (iso: string | null | undefined) => (iso ? iso.slice(0, 10) : "");
@@ -525,8 +525,13 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
 
     setUploadingDoc(true);
     try {
-      const dataUrl = withMediaType(await readFileAsDataUrl(file), ATTACHMENT_MEDIA_TYPE[ext]);
-      const url = await jobService.uploadJobAttachment(dataUrl, file.name);
+      // Straight to Cloudinary. The browser's own `file.type` is what the server signs against, and
+      // `ATTACHMENT_MEDIA_TYPE[ext]` stands in when the browser reports none — a .docx on a machine
+      // with no Office install — so the purpose's accepted-type list still recognises it.
+      const url = await uploadDirectForUrl({
+        purpose: "job_attachment",
+        file: file.type ? file : new File([file], file.name, { type: ATTACHMENT_MEDIA_TYPE[ext] }),
+      });
       setAttachments((rows) => {
         const active = rows.filter((r) => r.trim().length > 0);
         return [...active, url];

@@ -1,24 +1,35 @@
+import type { Request } from "express";
+
 import * as warehouseService from "./warehouse.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
+import { sendCsv } from "../../utils/csv-response.js";
 import { param, queryInt, queryStr } from "../../utils/request.js";
 import type { CreateWarehouseInput, UpdateWarehouseInput } from "./warehouse.validation.js";
 
 // GET /warehouses?search=&status=&type=&sort=&page=&pageSize=
-export const listWarehouses = asyncHandler(async (req, res) => {
+// The list's filters, parsed once. Shared with the CSV export so the download is exactly the rows
+// on screen — a second copy is a second place for a filter to be forgotten, and the resulting file
+// gives no sign that it is wider or narrower than the list it came from.
+function listParamsFrom(req: Request): warehouseService.ListWarehousesParams {
   const { search, status, type, sort, page, pageSize } = req.query;
-  const result = await warehouseService.listWarehouses(
-    {
-      search: queryStr(search),
-      status: queryStr(status),
-      type: queryStr(type),
-      sort: queryStr(sort),
-      page: queryInt(page),
-      pageSize: queryInt(pageSize),
-    },
-    actorFrom(req),
-  );
-  res.json(result);
+  return {
+    search: queryStr(search),
+    status: queryStr(status),
+    type: queryStr(type),
+    sort: queryStr(sort),
+    page: queryInt(page),
+    pageSize: queryInt(pageSize),
+  };
+}
+
+export const listWarehouses = asyncHandler(async (req, res) => {
+  res.json(await warehouseService.listWarehouses(listParamsFrom(req), actorFrom(req)));
+});
+
+// GET /warehouses/export.csv — the same filtered list as a download (paging ignored).
+export const exportWarehousesCsv = asyncHandler(async (req, res) => {
+  sendCsv(res, "warehouses", await warehouseService.exportWarehousesCsv(listParamsFrom(req), actorFrom(req)));
 });
 
 // GET /warehouses/engineer-options — active FIELD ENGINEERS (canHoldStock roles) for the

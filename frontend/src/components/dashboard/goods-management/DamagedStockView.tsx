@@ -11,6 +11,9 @@ import { AlertTriangle, History, Search } from "lucide-react";
 import Image from "next/image";
 
 import * as gmService from "@/services/goodsManagement.service";
+import * as stockPositionService from "@/services/stockPosition.service";
+import { useAuth } from "@/hooks/useAuth";
+import { ExportButton } from "@/components/ui/ExportButton";
 import type { DamagedHistory, DamagedRow } from "@/types/goodsManagement";
 import { ImageLightbox } from "@/components/ui/ImageLightbox";
 import { Modal } from "@/components/ui/Modal";
@@ -67,6 +70,7 @@ export function DamagedStockView({
   customerId?: string;
   fill?: boolean;
 }) {
+  const { can } = useAuth();
   const [search, setSearch] = React.useState("");
   const [rows, setRows] = React.useState<DamagedRow[] | null>(null);
   const [error, setError] = React.useState<string | null>(null);
@@ -240,15 +244,37 @@ export function DamagedStockView({
     <div className={fill ? "flex h-full flex-col gap-4" : "space-y-4"}>
       {/* Shown once there's data to search — a clean pool gets its empty table, not a dead control. */}
       {rows && rows.length > 0 && (
-        <div className="relative w-full shrink-0 sm:max-w-xs">
-          <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
-          <input
-            value={search}
-            onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-            placeholder="Search item, reason…"
-            aria-label="Search damaged stock"
-            className={`${toolbarInputCls} pl-9`}
-          />
+        <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
+          <div className="relative w-full sm:max-w-xs">
+            <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
+            <input
+              value={search}
+              onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+              placeholder="Search item, reason…"
+              aria-label="Search damaged stock"
+              className={`${toolbarInputCls} pl-9`}
+            />
+          </div>
+          {/* Damaged stock IS exportable — it is a position like any other — but only from the
+              Inventory screen with the right filter set, which nobody standing on this page would
+              think to do. Reuses the positions export filtered to `location=damaged` rather than
+              adding an endpoint, exactly as the engineer lens does: same rows, same permission, no
+              second definition of "damaged stock" to drift from the one the Hub already uses.
+
+              The page's OWN scope goes with it. This component is embedded in CustomerDetail and
+              WarehouseDetail, and the table above is loaded with that id — an export that sent only
+              `location=damaged` handed the operator every OTHER customer's damaged stock from a
+              button sitting on one customer's page. The service's params are `warehouse`/`customer`,
+              not the prop names, which is exactly how the omission went unnoticed.
+
+              The search box filters the loaded rows in memory, so it is NOT sent. */}
+          {can("inventory.export") && (
+            <ExportButton
+              label="Export damaged"
+              title={warehouseId || customerId ? "Export this damaged-stock list to CSV" : "Export every damaged-stock holding to CSV"}
+              onExport={() => stockPositionService.exportPositionsCsv({ location: "damaged", warehouse: warehouseId, customer: customerId })}
+            />
+          )}
         </div>
       )}
 

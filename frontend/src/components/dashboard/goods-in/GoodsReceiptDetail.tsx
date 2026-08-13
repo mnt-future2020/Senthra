@@ -18,6 +18,7 @@ import { AttachmentGrid, DocPicker, attachmentToDoc, type PickedDoc } from "./De
 import { Pagination } from "@/components/ui/Pagination";
 import type { AuditEntry } from "@/types/audit";
 import type { GoodsReceipt } from "@/types/goods-in";
+import { uploadDirect } from "@/lib/upload";
 
 type Tab = "overview" | "attachments" | "audit";
 
@@ -261,7 +262,10 @@ function Attachments({ grn, setGrn, canEdit }: { grn: GoodsReceipt; setGrn: (g: 
 
   const onPick = async (doc: PickedDoc) => {
     try {
-      setGrn(await grnService.addAttachment(grn.id, { fileName: doc.fileName, fileType: doc.fileType, fileSizeBytes: doc.fileSizeBytes, data: doc.dataUrl }));
+      // This receipt exists, so the document goes straight to Cloudinary and finalize attaches it
+      // through the receipt's own service — same draft-only guard, caps, audit event and DTO.
+      const result = await uploadDirect({ purpose: "grn_attachment", file: doc.file, targetId: grn.id });
+      if ("attachment" in result) setGrn(result.attachment as typeof grn);
       pushToast("Document added.", "success");
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Upload failed.", "alert");

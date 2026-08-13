@@ -7,6 +7,7 @@ import { MoreHorizontal, PackageCheck, Pencil, Search, Trash2 } from "lucide-rea
 
 import * as grnService from "@/services/goods-in.service";
 import { useAuth } from "@/hooks/useAuth";
+import { ExportButton } from "@/components/ui/ExportButton";
 import { useDashboard } from "@/hooks/useDashboard";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
@@ -168,6 +169,18 @@ export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { wa
     ? `/dashboard/goods-in/new?warehouse=${warehouseId}${warehouseCode ? `&returnTo=${encodeURIComponent(`/dashboard/warehouses/${warehouseCode}?tab=incoming`)}` : ""}`
     : "/dashboard/goods-in/new";
 
+  // The filters WITHOUT paging — one definition, used by the list (which adds the page) and by the
+  // CSV export (which must not). Two copies is how a download quietly stops matching the screen it
+  // was taken from, and nothing about the resulting file looks wrong.
+  const exportParams = React.useMemo(
+    () => ({
+      search: debounced || undefined,
+      status: statusFilter === "all" ? undefined : (statusFilter as GrnStatus),
+      warehouse: warehouseId,
+    }),
+    [debounced, statusFilter, warehouseId],
+  );
+
   React.useEffect(() => {
     const t = setTimeout(() => {
       // Guard against firing on mount / back-forward nav: only patch when the box actually diverges
@@ -183,7 +196,7 @@ export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { wa
   React.useEffect(() => {
     let active = true;
     (async () => {
-      const params = { search: debounced || undefined, status: statusFilter === "all" ? undefined : (statusFilter as GrnStatus), warehouse: warehouseId, page, pageSize: PAGE_SIZE };
+      const params = { ...exportParams, page, pageSize: PAGE_SIZE };
       const cached = grnService.getCachedGoodsReceipts(params);
       if (active && cached) setData(cached);
       setLoading(true);
@@ -199,7 +212,7 @@ export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { wa
       }
     })();
     return () => { active = false; };
-  }, [debounced, statusFilter, page, refreshKey, warehouseId]);
+  }, [exportParams, page, refreshKey]);
 
   const rows = data?.goodsReceipts ?? [];
   const showSkeleton = loading && rows.length === 0;
@@ -242,6 +255,26 @@ export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { wa
         {/* Embedded in a warehouse, this is the Received (history) view — receiving lives in the
             sibling "Expected deliveries" worklist, so no create action here. The Global GRN page
             (not embedded) keeps its Receive delivery button. */}
+        {/* Hidden when embedded (the supplier tab renders its own header), and placed before the
+            primary action so "New receipt" stays hard right. */}
+        {!embedded && can("goods_in.export") && (
+          <>
+            <ExportButton
+              label="Export"
+              onExport={() => grnService.exportGoodsReceiptsCsv(exportParams)}
+              disabled={rows.length === 0}
+              title="Export the filtered goods receipts — one row per receipt"
+            />
+            {/* The supplier-quality report: one row per LINE, so "which supplier keeps sending
+                damaged CAT6" becomes a pivot rather than a manual trawl. */}
+            <ExportButton
+              label="Export lines"
+              onExport={() => grnService.exportGoodsReceiptLinesCsv(exportParams)}
+              disabled={rows.length === 0}
+              title="Export every receipt LINE — ordered, received, accepted and damaged per item"
+            />
+          </>
+        )}
         {!embedded && can("goods_in.create") && (
           <button onClick={() => router.push(newReceiptHref)} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 sm:ml-auto">
             <PackageCheck className="h-4 w-4" /> Receive delivery

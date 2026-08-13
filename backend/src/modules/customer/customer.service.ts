@@ -29,7 +29,7 @@ import { assertWarehouseAccess } from "../../lib/warehouse-access.js";
 import { generateTempPassword } from "../../utils/generate-password.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import { paginate } from "../../utils/pagination.js";
-import { toCsv } from "../../utils/csv.js";
+import { EXPORT_MAX, EXPORT_PAGING, toCsv } from "../../utils/csv.js";
 import { hashPassword } from "../../utils/password.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
@@ -441,6 +441,8 @@ export interface ListCustomersParams {
   page?: number;
   pageSize?: number;
   sort?: string;
+  /** Internal only — see EXPORT_PAGING. Controllers never read this from the query string. */
+  maxPageSize?: number;
 }
 
 export interface PagedCustomers {
@@ -460,9 +462,58 @@ export async function listCustomers(params: ListCustomersParams = {}): Promise<P
       : undefined;
   const filters = { search: params.search, status };
   const total = await customerRepo.count(filters);
-  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total, params.maxPageSize);
   const customers = await customerRepo.findMany(filters, skip, pageSize, params.sort);
   return { customers: customers.map(toSummary), total, page, pageSize, totalPages };
+}
+
+/**
+ * The SAME filtered list as a CSV, minus paging. Delegates to listCustomers with one oversized page
+ * rather than re-deriving the filters — the status whitelist above is real behaviour (an unknown
+ * ?status is ignored, not matched), and a second copy of it would drift.
+ */
+export async function exportCustomersCsv(
+  params: ListCustomersParams = {},
+  actor?: AuditActor,
+): Promise<{ csv: string; capped: boolean }> {
+  const { customers } = await listCustomers({ ...params, ...EXPORT_PAGING });
+  const rows = customers.slice(0, EXPORT_MAX);
+
+  const regional = await getRegionalSettings();
+  const csv = toCsv(
+    [
+      "Code", "Name", "Legal Name", "Status", "Industry", "Registration No", "Website",
+      "Contact", "Job Title", "Email", "Phone", "Alt Phone",
+      "Address 1", "Address 2", "City", "County", "Postcode", "Country",
+      `Added (${regional.timezone})`,
+    ],
+    rows.map((c) => [
+      c.customerCode,
+      c.name,
+      c.legalName,
+      c.status,
+      c.industry,
+      c.registrationNumber,
+      c.website,
+      c.contactPerson,
+      c.contactJobTitle,
+      c.email,
+      c.phone,
+      c.altPhone,
+      c.addressLine1,
+      c.addressLine2,
+      c.city,
+      c.county,
+      c.postcode,
+      c.country,
+      formatDate(c.createdAt, regional.dateFormat, regional.timezone),
+    ]),
+  );
+
+  // `notes` and `createdBy` are deliberately absent: internal free text staff write ABOUT the
+  // customer, and a staff email — and a spreadsheet is exactly the artifact that gets forwarded on.
+  audit.record({ actor, action: "customer.exported", targetType: "customer", targetLabel: `${rows.length} rows` });
+  return { csv, capped: customers.length > EXPORT_MAX };
 }
 
 // Resolve a customer by either its database id OR its customerCode (so pages can
@@ -2603,7 +2654,7 @@ export async function listCustomerStockEntriesPaged(customerId: string, params: 
 
 // Cap on an export. High enough that no real customer hits it, low enough that a runaway account
 // can't ask us to render an unbounded document into memory. Mirrors AUDIT_EXPORT_MAX.
-export const PORTAL_EXPORT_MAX = 50_000;
+export const PORTAL_EXPORT_MAX = EXPORT_MAX;
 
 // PORTAL: the customer's own stock, as a CSV of the FILTERED set.
 //
@@ -2642,6 +2693,25 @@ export async function exportOwnStockCsv(
     ]),
   );
   return { csv, capped: entries.length >= PORTAL_EXPORT_MAX };
+}
+
+/**
+ * ADMIN: one customer's stock as a CSV — the Inventory tab on the customer detail page.
+ *
+ * Deliberately the SAME builder the customer's own export uses, not a wider admin variant. The two
+ * files land side by side in a reconciliation call ("your portal says 648, my sheet says 729"), and
+ * the whole value of that comparison is that both sides are looking at identical columns. A wider
+ * admin version would make every difference a question about the report rather than the stock.
+ *
+ * `requireCustomer` first so a bad id 404s rather than quietly exporting an empty file — the same
+ * guard listCustomerStockEntries applies.
+ */
+export async function exportCustomerStockCsv(
+  customerId: string,
+  params: PortalListParams = {},
+): Promise<{ csv: string; capped: boolean }> {
+  await requireCustomer(customerId);
+  return exportOwnStockCsv(customerId, params);
 }
 
 // PORTAL: the customer's submissions, as a CSV of the FILTERED set. One row PER WAREHOUSE LEG for a

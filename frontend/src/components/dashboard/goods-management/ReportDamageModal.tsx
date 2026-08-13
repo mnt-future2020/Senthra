@@ -25,6 +25,7 @@ import { Notice } from "@/components/ui/Notice";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import type { Msg } from "@/components/ui/types";
+import { uploadDirectForUrl } from "@/lib/upload";
 
 export interface ReportDamageTarget {
   warehouseId: string;
@@ -98,7 +99,8 @@ export function ReportDamageModal({
     setPhotoUrl(null);
     setUploading(true);
     try {
-      setPhotoUrl(await gmService.uploadDamagePhoto(dataUrl));
+      // Straight to Cloudinary — the photo no longer travels through our API as base64.
+      setPhotoUrl(await uploadDirectForUrl({ purpose: "damage_photo", file }));
     } catch (err) {
       // Clear the preview too, so "there's a photo on screen" can never mean "a photo was saved".
       setPhotoPreview(null);

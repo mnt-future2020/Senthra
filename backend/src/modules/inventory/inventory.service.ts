@@ -20,12 +20,11 @@ import { emitAttentionChanged } from "../../lib/realtime.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import type { AddStockInput, AdjustStockInput, CreateTransferInput } from "./inventory.validation.js";
-import { csvEscape } from "../../utils/csv.js";
+import { csvEscape, EXPORT_MAX } from "../../utils/csv.js";
 import { getRegionalSettings } from "#modules/settings/settings.service.js";
 import { formatDateTime } from "#modules/document/document.formatter.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
-const EXPORT_MAX = 50_000;
 
 // ── Inventory primitives (Goods In writes inbound; future Goods Out writes outbound) ──────────
 export interface ApplyMovementInput {

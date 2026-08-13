@@ -1,13 +1,19 @@
+import type { Request } from "express";
+
 import * as grnService from "./goods-in.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
+import { sendCsv } from "../../utils/csv-response.js";
 import { param, queryInt, queryStr } from "../../utils/request.js";
 import type { CreateGoodsReceiptInput, GRNAttachmentInput, GRNCancelInput, UpdateGoodsReceiptInput } from "./goods-in.validation.js";
 
 // GET /goods-in?search=&status=&warehouse=&purchaseOrder=&sort=&page=&pageSize=
-export const listGoodsReceipts = asyncHandler(async (req, res) => {
+// The list's filters, parsed once. Shared with the CSV export so the download is exactly the rows
+// on screen — a second copy is a second place for a filter to be forgotten, and the resulting file
+// gives no sign that it is wider or narrower than the list it came from.
+function listParamsFrom(req: Request): grnService.ListGoodsReceiptsParams {
   const { search, status, warehouse, purchaseOrder, supplier, sort, page, pageSize } = req.query;
-  const result = await grnService.listGoodsReceipts({
+  return {
     search: queryStr(search),
     status: queryStr(status),
     warehouse: queryStr(warehouse),
@@ -16,8 +22,21 @@ export const listGoodsReceipts = asyncHandler(async (req, res) => {
     sort: queryStr(sort),
     page: queryInt(page),
     pageSize: queryInt(pageSize),
-  }, actorFrom(req));
-  res.json(result);
+  };
+}
+
+export const listGoodsReceipts = asyncHandler(async (req, res) => {
+  res.json(await grnService.listGoodsReceipts(listParamsFrom(req), actorFrom(req)));
+});
+
+// GET /goods-in/export.csv — the same filtered register as a download (paging ignored).
+export const exportGoodsReceiptsCsv = asyncHandler(async (req, res) => {
+  sendCsv(res, "goods-in", await grnService.exportGoodsReceiptsCsv(listParamsFrom(req), actorFrom(req)));
+});
+
+// GET /goods-in/export-lines.csv — the same receipts, ONE ROW PER LINE (the quality report).
+export const exportGoodsReceiptLinesCsv = asyncHandler(async (req, res) => {
+  sendCsv(res, "goods-in-lines", await grnService.exportGoodsReceiptLinesCsv(listParamsFrom(req), actorFrom(req)));
 });
 
 // GET /goods-in/:id  (id or code)

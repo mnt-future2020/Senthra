@@ -20,7 +20,9 @@ import { startOfDayIn } from "../../utils/filter-date.js";
 import { jobOverdue } from "./job-overdue.js";
 import { safeHttpUrls } from "../../utils/http-url.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
-import { getCloudinaryCreds, getCompanyTimezone } from "#modules/settings/settings.service.js";
+import { getCloudinaryCreds, getCompanyTimezone, getRegionalSettings } from "#modules/settings/settings.service.js";
+import { formatDate } from "#modules/document/document.formatter.js";
+import { EXPORT_MAX, EXPORT_PAGING, toCsv } from "../../utils/csv.js";
 import { paginate } from "../../utils/pagination.js";
 import type { CreateJobInput, JobKitLineInput, UpdateJobInput, CompleteJobInput } from "./job.validation.js";
 import * as goodsManagementService from "#modules/goods-management/goods-management.service.js";
@@ -475,6 +477,8 @@ export interface ListJobsParams {
   page?: number;
   pageSize?: number;
   sort?: string;
+  /** Internal only — see EXPORT_PAGING. Controllers never read this from the query string. */
+  maxPageSize?: number;
 }
 
 export async function listJobs(params: ListJobsParams = {}, _actor?: AuditActor): Promise<PagedJobs> {
@@ -495,7 +499,7 @@ export async function listJobs(params: ListJobsParams = {}, _actor?: AuditActor)
     overdueBefore: params.status === "overdue" ? dayStart : undefined,
   };
   const total = await jobRepo.count(filters);
-  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total, params.maxPageSize);
   const rows = await jobRepo.findMany(filters, skip, pageSize, params.sort);
   const ids = rows.map((r) => r.id);
   // Merge each job's goods-lifecycle status + pending kit-request count in batched queries (no N+1).
@@ -511,6 +515,66 @@ export async function listJobs(params: ListJobsParams = {}, _actor?: AuditActor)
     return pub;
   });
   return { jobs, total, page, pageSize, totalPages };
+}
+
+/**
+ * The SAME filtered list as a CSV, minus paging. Delegates to listJobs with one oversized page
+ * rather than re-deriving the filters — the derived "overdue" pseudo-status needs a company-timezone
+ * day boundary that only the service can resolve, and a second copy of that is a second thing to get
+ * wrong by an hour every BST morning.
+ */
+export async function exportJobsCsv(
+  params: ListJobsParams = {},
+  actor?: AuditActor,
+): Promise<{ csv: string; capped: boolean }> {
+  // EXPORT_PAGING, not a bare pageSize: `paginate` clamps anything a client could ask for to 100,
+  // so without its maxPageSize every export silently stopped at 100 rows AND reported itself
+  // complete (capped was measured on the same clamped length). See utils/csv.
+  const { jobs } = await listJobs({ ...params, ...EXPORT_PAGING }, actor);
+  const rows = jobs.slice(0, EXPORT_MAX);
+
+  const regional = await getRegionalSettings();
+  const date = (v: string | null) => formatDate(v, regional.dateFormat, regional.timezone);
+  const csv = toCsv(
+    [
+      "Job Number", "Name", "Type", "Status", "Priority", "Overdue",
+      "Customer", "Project", "Site", "City", "Postcode",
+      "Customer Reference", "Scheme Number", "Technology",
+      "Engineer", "Installer Type", "Supplier", "Goods Status",
+      `Completion Date (${regional.timezone})`, `Work Completed (${regional.timezone})`, `Created (${regional.timezone})`,
+    ],
+    rows.map((j) => [
+      j.jobNumber,
+      j.name,
+      j.jobType,
+      j.status,
+      j.priority,
+      // The derived flag the list marks late work with, carried into the file so a filtered "all
+      // jobs" export still says which are late — otherwise the reader has to redo the date maths
+      // in a spreadsheet, in whatever timezone their machine happens to be in.
+      j.overdue ? "Yes" : "No",
+      j.customerName,
+      j.projectName,
+      j.siteName,
+      j.city,
+      j.postcode,
+      j.customerRef,
+      j.schemeNo,
+      j.technology,
+      j.assignedEngineerName,
+      j.installerType,
+      j.supplierName,
+      j.goodsStatus,
+      date(j.completionDate),
+      date(j.completedAt),
+      date(j.createdAt),
+    ]),
+  );
+
+  // `notes`, `rejectReason` and `cancelReason` are absent: office-to-engineer and internal free
+  // text, of the kind a forwarded spreadsheet should never carry.
+  audit.record({ actor, action: "job.exported", targetType: "job", targetLabel: `${rows.length} rows` });
+  return { csv, capped: jobs.length > EXPORT_MAX };
 }
 
 // Fill in each kit line's goods tallies (issued/used/returned/remaining) + the job's goods-lifecycle
@@ -1564,6 +1628,8 @@ export interface ListCustomerJobsParams {
   sort?: string;
   page?: number;
   pageSize?: number;
+  /** Internal only — see EXPORT_PAGING. Controllers never read this from the query string. */
+  maxPageSize?: number;
 }
 
 /**
@@ -1577,13 +1643,69 @@ export interface ListCustomerJobsParams {
 export async function listJobsForCustomer(customerId: string, params: ListCustomerJobsParams = {}): Promise<PagedPortalJobs> {
   const filters = { search: params.search, statuses: params.status ? FILTERABLE_STATUSES[params.status] : undefined };
   const total = await jobRepo.countByCustomerPortal(customerId, filters);
-  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total, params.maxPageSize);
   const rows = await jobRepo.findManyByCustomerPortal(customerId, filters, skip, pageSize, params.sort);
   // Resolved once for the page, from the COMPANY timezone — the same boundary the office and engineer
   // lists use. A customer in another timezone must not see a different set of jobs marked late than
   // the people working them do.
   const dayStart = startOfDayIn(await getCompanyTimezone(), new Date());
   return { jobs: rows.map((r) => toPortalJob(r, dayStart)), total, page, pageSize, totalPages };
+}
+
+/**
+ * The customer's own jobs as a CSV — the portal Jobs list, minus paging.
+ *
+ * Built from the SAME listJobsForCustomer the page renders, so the file cannot contain a job the
+ * screen would not have shown: the customer scope, the hidden `draft` status and the stage filter
+ * all live in there. Nothing about the columns is decided here either — they come from PortalJob,
+ * which is the shape that already excludes cost, staff contacts, internal notes and the raw status.
+ *
+ * The stage, not the stored status, for exactly the reason portalStage exists: a file is the most
+ * forwardable artifact this app produces, and "rejected" on a customer's own job would be read as
+ * us refusing their work.
+ */
+export async function exportOwnJobsCsv(
+  customerId: string,
+  params: ListCustomerJobsParams = {},
+): Promise<{ csv: string; capped: boolean }> {
+  // EXPORT_PAGING, not a bare pageSize: `paginate` clamps anything a client could ask for to 100,
+  // so without its maxPageSize every export silently stopped at 100 rows AND reported itself
+  // complete (capped was measured on the same clamped length). See utils/csv.
+  const { jobs } = await listJobsForCustomer(customerId, { ...params, ...EXPORT_PAGING });
+  const rows = jobs.slice(0, EXPORT_MAX);
+
+  const regional = await getRegionalSettings();
+  const date = (v: string | null) => formatDate(v, regional.dateFormat, regional.timezone);
+  const csv = toCsv(
+    [
+      "Job Number", "Name", "Job Type", "Technology",
+      "Your Reference", "Scheme Number",
+      "Project", "Site", "Address", "City", "Postcode",
+      "Status", "Engineer",
+      `Due (${regional.timezone})`, `Completed (${regional.timezone})`, `Raised (${regional.timezone})`,
+    ],
+    rows.map((j) => [
+      j.jobNumber,
+      j.name,
+      j.jobType,
+      j.technology,
+      // "Your reference", not "Customer reference" — on the customer's own file, "customer" is us.
+      j.customerRef,
+      j.schemeNo,
+      j.projectName,
+      j.siteName,
+      j.addressLine1,
+      j.city,
+      j.postcode,
+      j.stage,
+      j.engineerName,
+      date(j.completionDate),
+      date(j.completedAt),
+      date(j.createdAt),
+    ]),
+  );
+
+  return { csv, capped: jobs.length > EXPORT_MAX };
 }
 
 /**

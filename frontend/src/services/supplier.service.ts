@@ -1,4 +1,5 @@
 import { api } from "@/lib/api";
+import { downloadCsv, withoutPaging } from "@/lib/csvExport";
 import { registerClientCache } from "@/lib/clientCache";
 import type { Supplier, SupplierStatus } from "@/types/supplier";
 
@@ -71,6 +72,14 @@ const listCacheKey = (p: SupplierListParams): string =>
 
 export const getCachedSuppliers = (params: SupplierListParams = {}): PagedSuppliers | undefined =>
   listCache.get(listCacheKey(params));
+
+/**
+ * The SAME filtered list as a CSV. Paging is dropped — an export is "everything matching what I'm
+ * looking at", not the page on screen. `capped` is true when the server stopped short.
+ */
+export function exportSuppliersCsv(params: SupplierListParams = {}): Promise<{ capped: boolean }> {
+  return downloadCsv(`/suppliers/export.csv${qs(withoutPaging(params))}`, "suppliers");
+}
 
 export function listSuppliers(params: SupplierListParams = {}): Promise<PagedSuppliers> {
   return api<PagedSuppliers>(`/suppliers${qs(params)}`).then((r) => {

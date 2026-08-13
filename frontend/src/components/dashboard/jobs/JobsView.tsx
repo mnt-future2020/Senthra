@@ -10,6 +10,7 @@ import { listCustomers, type PagedCustomers } from "@/services/customer.service"
 import { listEngineerOptions } from "@/services/warehouse.service";
 import type { WarehouseManager } from "@/types/warehouse";
 import { useAuth } from "@/hooks/useAuth";
+import { ExportButton } from "@/components/ui/ExportButton";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
 import { useJobSocket } from "@/hooks/useJobSocket";
@@ -182,6 +183,19 @@ export function JobsView() {
   React.useEffect(() => subscribe(["kit_request:updated"], () => setRefreshKey((k) => k + 1)), []);
 
   // Debounce the search box into ?q (reset page on change).
+  // The filters WITHOUT paging — one definition, used by the list (which adds the page) and by the
+  // CSV export (which must not). Two copies is how a download quietly stops matching the screen it
+  // was taken from, and nothing about the resulting file looks wrong.
+  const exportParams = React.useMemo(
+    () => ({
+      search: search || undefined,
+      status: statusFilter === "all" ? undefined : statusFilter,
+      customer: customer || undefined,
+      engineer: engineer || undefined,
+    }),
+    [search, statusFilter, customer, engineer],
+  );
+
   React.useEffect(() => {
     const t = setTimeout(() => {
       if (searchInput.trim() !== search) patchParams({ q: searchInput.trim() || null }, true);
@@ -197,7 +211,7 @@ export function JobsView() {
   React.useEffect(() => {
     let active = true;
     (async () => {
-      const params = { search: search || undefined, status: statusFilter === "all" ? undefined : statusFilter, customer: customer || undefined, engineer: engineer || undefined, page, pageSize: PAGE_SIZE };
+      const params = { ...exportParams, page, pageSize: PAGE_SIZE };
       const cached = jobService.getCachedJobs(params);
       if (active && cached) setData(cached);
       setLoading(true);
@@ -213,7 +227,7 @@ export function JobsView() {
       }
     })();
     return () => { active = false; };
-  }, [search, statusFilter, customer, engineer, page, refreshKey]);
+  }, [exportParams, page, refreshKey]);
 
   const { rows, showSkeleton, isFiltered } = React.useMemo(() => {
     const r = data?.jobs ?? [];
@@ -256,6 +270,14 @@ export function JobsView() {
             the New job button (which claims the rest with ml-auto) holds them at no vertical cost.
             They belong here on the concept too: every one of them narrows THIS list. */}
         <AttentionBar nav="/dashboard/jobs" className="flex flex-wrap items-center gap-1.5" />
+        {/* Before "New job" and outside its ml-auto, so the primary action stays hard right. */}
+        {can("jobs.export") && (
+          <ExportButton
+            onExport={() => jobService.exportJobsCsv(exportParams)}
+            disabled={rows.length === 0}
+            title="Export the filtered jobs to CSV"
+          />
+        )}
         {can("jobs.create") && (
           <button onClick={() => router.push("/dashboard/jobs/new")} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 lg:ml-auto">
             <Plus className="h-4 w-4" /> New job

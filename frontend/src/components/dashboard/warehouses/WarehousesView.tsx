@@ -7,6 +7,7 @@ import { MoreHorizontal, Pencil, Plus, Power, Search, Trash2, Warehouse as Wareh
 
 import * as warehouseService from "@/services/warehouse.service";
 import { useAuth } from "@/hooks/useAuth";
+import { ExportButton } from "@/components/ui/ExportButton";
 import { useDashboard } from "@/hooks/useDashboard";
 import { Pagination } from "@/components/ui/Pagination";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -262,6 +263,18 @@ export function WarehousesView() {
   }, [router]);
 
   // Debounce the search input into ?q
+  // The filters WITHOUT paging — one definition, used by the list (which adds the page) and by the
+  // CSV export (which must not). Two copies is how a download quietly stops matching the screen it
+  // was taken from, and nothing about the resulting file looks wrong.
+  const exportParams = React.useMemo(
+    () => ({
+      search: search || undefined,
+      status: statusFilter === "all" ? undefined : statusFilter,
+      sort: sort === "newest" ? undefined : sort,
+    }),
+    [search, statusFilter, sort],
+  );
+
   React.useEffect(() => {
     const t = setTimeout(() => {
       if (searchInput.trim() !== search) patch({ q: searchInput.trim() || null });
@@ -272,13 +285,7 @@ export function WarehousesView() {
   React.useEffect(() => {
     let active = true;
     (async () => {
-      const params = {
-        search: search || undefined,
-        status: statusFilter === "all" ? undefined : statusFilter,
-        sort: sort === "newest" ? undefined : sort,
-        page,
-        pageSize: PAGE_SIZE,
-      };
+      const params = { ...exportParams, page, pageSize: PAGE_SIZE };
       const cached = warehouseService.getCachedWarehouses(params);
       if (active && cached) setData(cached);
       setLoading(true);
@@ -296,7 +303,7 @@ export function WarehousesView() {
     return () => {
       active = false;
     };
-  }, [search, statusFilter, sort, page, refreshKey]);
+  }, [exportParams, page, refreshKey]);
 
   const warehouses = data?.warehouses ?? [];
   // Each warehouse's own share of the pending work. Server-filtered to the queues this actor may act
@@ -376,6 +383,14 @@ export function WarehousesView() {
           ]}
           ariaLabel="Sort"
         />
+        {/* Before "New warehouse" and outside its ml-auto, so the primary action stays hard right. */}
+        {can("warehouse.export") && (
+          <ExportButton
+            onExport={() => warehouseService.exportWarehousesCsv(exportParams)}
+            disabled={warehouses.length === 0}
+            title="Export the filtered warehouses to CSV"
+          />
+        )}
         {can("warehouse.create") && (
           <button
             onClick={() => router.push("/dashboard/warehouses/new")}

@@ -7,6 +7,7 @@ import { MoreHorizontal, Pencil, Plus, Power, Search, Trash2, Truck } from "luci
 
 import * as supplierService from "@/services/supplier.service";
 import { useAuth } from "@/hooks/useAuth";
+import { ExportButton } from "@/components/ui/ExportButton";
 import { useDashboard } from "@/hooks/useDashboard";
 import { Pagination } from "@/components/ui/Pagination";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -257,16 +258,22 @@ export function SuppliersView() {
     return () => clearTimeout(t);
   }, [searchInput, search, patch]);
 
+  // The filters WITHOUT paging — one definition, used by the list (which adds the page) and by the
+  // CSV export (which must not). Two copies is how a download quietly stops matching the screen it
+  // was taken from, and nothing about the resulting file looks wrong.
+  const exportParams = React.useMemo(
+    () => ({
+      search: search || undefined,
+      status: statusFilter === "all" ? undefined : statusFilter,
+      sort: sort === "newest" ? undefined : sort,
+    }),
+    [search, statusFilter, sort],
+  );
+
   React.useEffect(() => {
     let active = true;
     (async () => {
-      const params = {
-        search: search || undefined,
-        status: statusFilter === "all" ? undefined : statusFilter,
-        sort: sort === "newest" ? undefined : sort,
-        page,
-        pageSize: PAGE_SIZE,
-      };
+      const params = { ...exportParams, page, pageSize: PAGE_SIZE };
       const cached = supplierService.getCachedSuppliers(params);
       if (active && cached) setData(cached);
       setLoading(true);
@@ -284,7 +291,7 @@ export function SuppliersView() {
     return () => {
       active = false;
     };
-  }, [search, statusFilter, sort, page, refreshKey]);
+  }, [exportParams, page, refreshKey]);
 
   const suppliers = data?.suppliers ?? [];
   const showSkeleton = loading && suppliers.length === 0;
@@ -352,6 +359,14 @@ export function SuppliersView() {
           ]}
           ariaLabel="Sort"
         />
+        {/* Before "New supplier" and outside its ml-auto, so the primary action stays hard right. */}
+        {can("suppliers.export") && (
+          <ExportButton
+            onExport={() => supplierService.exportSuppliersCsv(exportParams)}
+            disabled={suppliers.length === 0}
+            title="Export the filtered suppliers to CSV"
+          />
+        )}
         {can("suppliers.create") && (
           <button
             onClick={() => router.push("/dashboard/suppliers/new")}

@@ -18,6 +18,7 @@ import { fmtDateTime } from "@/components/dashboard/portal/portalUi";
 import { ScannerInput } from "@/components/dashboard/goods-management/ScannerInput";
 import { VanStockAttachments, VanStockCompletionBadge, VanStockPostings, VanStockWalkInBadge, linesForWarehouse, warehouseStatus } from "./vanRequestUi";
 import type { Msg } from "@/components/ui/types";
+import { uploadDirectForUrl } from "@/lib/upload";
 
 // Review + fulfil panel for one van stock request. Three zones by state:
 //   info (always) · review (pending restock: warehouse + trims + approve/decline)
@@ -432,19 +433,29 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
   // clears BOTH, so a preview can never imply evidence the posting doesn't actually carry.
   const onDamagePhoto = async (lineId: string, file: File | null) => {
     if (!file) return;
+    // A local preview while the file uploads. `createObjectURL` rather than a base64 read: the
+    // bytes go straight to Cloudinary now, so there is no data URI to reuse for this.
+    //
+    // It must be REVOKED. An object URL pins the whole File in memory until the document is
+    // discarded — the old data-URL string was just a string and could be collected once dropped, so
+    // the switch to createObjectURL quietly turned "picked a photo" into "held a photo for the rest
+    // of the session", every retry adding another. Revoked in `finally`, after the hosted URL has
+    // replaced it on success and after it is cleared on failure, so nothing is ever revoked while
+    // still on screen.
+    const preview = URL.createObjectURL(file);
     try {
-      const dataUri = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result));
-        reader.onerror = () => reject(new Error("Could not read the photo."));
-        reader.readAsDataURL(file);
-      });
-      setEntry(lineId, { damagePhotoDataUrl: dataUri, uploading: true });
-      const url = await vanStockSvc.uploadVanStockDamagePhoto(dataUri);
-      setEntry(lineId, { damagePhotoUrl: url, uploading: false });
+      setEntry(lineId, { damagePhotoDataUrl: preview, uploading: true });
+      const url = await uploadDirectForUrl({ purpose: "vsr_damage_photo", file });
+      // The thumbnail renders from `damagePhotoDataUrl`, so the preview is POINTED AT the hosted URL
+      // rather than cleared — clearing it would drop the thumbnail and the Remove button back to an
+      // "Attach photo" prompt for a photo that had in fact uploaded. This is the "swap in the hosted
+      // URL" the handler's own comment describes, and it is what makes the blob safe to revoke.
+      setEntry(lineId, { damagePhotoUrl: url, damagePhotoDataUrl: url, uploading: false });
     } catch (err) {
       setEntry(lineId, { damagePhotoDataUrl: undefined, damagePhotoUrl: undefined, uploading: false });
       pushToast(err instanceof Error ? err.message : "Could not upload the photo.", "alert");
+    } finally {
+      URL.revokeObjectURL(preview);
     }
   };
 

@@ -2,7 +2,7 @@ import { Router } from "express";
 
 import * as userController from "./user.controller.js";
 import { requireAuth, requirePermission } from "../../middleware/auth.middleware.js";
-import { writeLimiter } from "../../middleware/rateLimit.middleware.js";
+import { writeLimiter, exportLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import {
   createUserSchema,
@@ -27,6 +27,8 @@ router.post("/me/signature", writeLimiter, validateBody(uploadSignatureSchema), 
 router.delete("/me/signature", writeLimiter, userController.removeMySignature);
 
 router.get("/", requirePermission("users.view"), userController.listUsers);
+// BEFORE any "/:id" route — otherwise "export.csv" is parsed as an id and 404s on lookup.
+router.get("/export.csv", requirePermission("users.export"), exportLimiter, userController.exportUsersCsv);
 router.post("/", requirePermission("users.create"), writeLimiter, validateBody(createUserSchema), userController.createUser);
 router.get("/:id", requirePermission("users.view"), userController.getUser);
 router.put("/:id", requirePermission("users.edit"), writeLimiter, validateBody(updateUserSchema), userController.updateUser);

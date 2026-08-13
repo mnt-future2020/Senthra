@@ -14,6 +14,7 @@ import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import { paginate } from "../../utils/pagination.js";
+import { EXPORT_MAX, EXPORT_PAGING, toCsv } from "../../utils/csv.js";
 import type { CreateIrmItemInput, SupplierRowInput, UpdateIrmItemInput } from "./irm.validation.js";
 import { buildSkuCandidate, normalizeSku, withSuffix } from "./sku.js";
 
@@ -293,6 +294,8 @@ export interface ListIrmItemsParams {
   page?: number;
   pageSize?: number;
   sort?: string;
+  /** Internal only — see EXPORT_PAGING. Controllers never read this from the query string. */
+  maxPageSize?: number;
 }
 
 export async function listIrmItems(params: ListIrmItemsParams = {}): Promise<PagedIrmItems> {
@@ -306,9 +309,69 @@ export async function listIrmItems(params: ListIrmItemsParams = {}): Promise<Pag
     supplierId: params.supplier,
   };
   const total = await irmRepo.count(filters);
-  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total, params.maxPageSize);
   const rows = await irmRepo.findMany(filters, skip, pageSize, params.sort);
   return { items: rows.map(toPublic), total, page, pageSize, totalPages };
+}
+
+/**
+ * The SAME filtered catalogue as a CSV, minus paging. Delegates to listIrmItems with one oversized
+ * page rather than re-deriving the filters — the status whitelist above is real behaviour (an
+ * unknown ?status is ignored, not matched), and a second copy of it would drift.
+ */
+export async function exportIrmItemsCsv(
+  params: ListIrmItemsParams = {},
+  actor?: AuditActor,
+): Promise<{ csv: string; capped: boolean }> {
+  // EXPORT_PAGING, not a bare pageSize: `paginate` clamps anything a client could ask for to 100,
+  // so without its maxPageSize every export silently stopped at 100 rows AND reported itself
+  // complete (capped was measured on the same clamped length). See utils/csv.
+  const { items } = await listIrmItems({ ...params, ...EXPORT_PAGING });
+  const rows = items.slice(0, EXPORT_MAX);
+
+  const csv = toCsv(
+    [
+      "Code", "Name", "Type", "Category", "Status",
+      "Brand", "Manufacturer", "MPN", "SKU", "Barcode",
+      "Primary Supplier", "Suppliers",
+      "Unit", "Pack Size",
+      "Critical Level", "Reorder Level", "Maximum Stock",
+      "Standard Cost", "Currency", "VAT %",
+      "Track Inventory", "On Hand",
+    ],
+    rows.map((i) => [
+      i.code,
+      i.name,
+      i.type?.name,
+      i.category?.name,
+      i.status,
+      i.brand,
+      i.manufacturer,
+      i.mpn,
+      i.sku,
+      i.barcode,
+      i.primarySupplier?.name,
+      // The alternatives, so a buyer can see the second source without opening the item.
+      i.suppliers.map((sup) => sup.supplier?.name).filter(Boolean).join(" | "),
+      i.baseUnit,
+      i.packSize,
+      // The three thresholds in the order they stack (critical ≤ reorder ≤ maximum), so the columns
+      // read the way the rule does rather than in schema order.
+      i.criticalLevel,
+      i.reorderLevel,
+      i.maximumStock,
+      // Pounds, never the pence integer — this file is opened in a spreadsheet and multiplied out.
+      i.standardCost == null ? "" : i.standardCost.toFixed(2),
+      i.currency,
+      i.vatRatePercent,
+      i.trackInventory ? "Yes" : "No",
+      i.onHand,
+    ]),
+  );
+
+  // `notes` is deliberately absent, as on the supplier and customer exports: internal free text.
+  audit.record({ actor, action: "irm.exported", targetType: "irm_item", targetLabel: `${rows.length} rows` });
+  return { csv, capped: items.length > EXPORT_MAX };
 }
 
 export async function getIrmItem(idOrCode: string): Promise<PublicIrmItem> {

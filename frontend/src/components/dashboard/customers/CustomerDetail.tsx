@@ -29,6 +29,7 @@ import {
 
 import * as customerService from "@/services/customer.service";
 import { useAuth } from "@/hooks/useAuth";
+import { ExportButton } from "@/components/ui/ExportButton";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useAttention } from "@/hooks/useAttention";
 import { useEntityAttention } from "@/hooks/useEntityAttention";
@@ -984,6 +985,14 @@ function StockEntriesTab({
                 <span className="ml-1 text-xs text-[var(--muted)]">
                   {entryCount} {entryCount === 1 ? "entry" : "entries"}
                 </span>
+                {/* The status filter goes to the server; the search box filters the loaded rows in
+                    memory (searchStockEntries above), so it is NOT sent — the export is "every entry
+                    matching the STATUS I picked", which is what the count beside it means too. */}
+                <ExportButton
+                  onExport={() => customerService.exportCustomerStockCsv(customer.id, { status: stockFilter || undefined })}
+                  disabled={entryCount === 0}
+                  title="Export this customer's stock to CSV"
+                />
                 {stockCaps.create && (
                   <button
                     type="button"

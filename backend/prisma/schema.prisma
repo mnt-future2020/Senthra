@@ -2409,3 +2409,53 @@ model DeviceToken {
 
   @@index([userId])
 }
+
+// ── DIRECT UPLOAD — pending asset ledger ───────────────────────────────────────────────────
+// The browser uploads straight to Cloudinary, so an asset can exist in the cloud before anything in
+// this database refers to it. One row is written when the upload is AUTHORISED (the signature is
+// issued) and removed when the upload is claimed by finalize — so the row is the record of "an asset
+// we asked for that nobody has taken delivery of yet".
+//
+// It does two jobs, and the second is the one that is easy to miss:
+//
+//   1. CLEANUP. A row still here 24 hours later means the browser never came back — closed tab, dead
+//      network, abandoned form — so the reaper can destroy the asset knowing nothing references it.
+//
+//   2. OWNERSHIP. Cloudinary's upload response is signed, which proves the asset is real and in our
+//      cloud — it does NOT prove it is OURS TO ATTACH. Without this row, a caller could finalize with
+//      another customer's publicId and hang their document off its own record. Finalize requires a row
+//      with that publicId AND this actor, and the publicId is a UUID this server minted. That is the
+//      control; the response signature is a secondary check.
+//
+// DELIBERATELY NOT a general asset table. It is empty in steady state, rows live for seconds, and it
+// never describes a LIVE asset — the domain tables own those, exactly as they do today.
+model PendingUpload {
+  id           String  @id @default(auto()) @map("_id") @db.ObjectId
+  // Server-minted, and the join key finalize looks up by — never a value the client chose.
+  publicId     String  @unique
+  resourceType String // image | raw — needed to address the asset for a destroy
+  // Which upload contract this was authorised under. Re-checked at finalize so a signature obtained
+  // for a 2 MB engineer photo cannot be spent attaching a 10 MB document to a purchase order.
+  purpose      String
+  // Who the signature was issued to. Finalize refuses a row belonging to someone else.
+  actorId      String
+  createdAt    DateTime @default(now())
+
+  // ── The lease ──────────────────────────────────────────────────────────────────────────────
+  // null, or in the past  → nobody is working on this row; finalize or the reaper may claim it.
+  // in the future         → a finalize holds it; the reaper must not touch the asset.
+  //
+  // A LEASE rather than a plain "claimed" flag because a flag is set once and never cleared: a
+  // finalize that crashed mid-flight would keep its row marked busy forever, and the reaper — which
+  // skips busy rows — would never reclaim the asset. Permanent orphan, invisible. An expiry returns
+  // the row to the pool on its own.
+  //
+  // Claimed by a conditional update (`claimExpiresAt` null or past → now + lease) whose affected-row
+  // count decides the winner, so finalize and the reaper cannot both proceed. Finalize re-runs that
+  // same claim INSIDE its write transaction, so the lease it attaches under is the lease it still
+  // holds — no window between checking and writing.
+  claimExpiresAt DateTime?
+
+  // The reaper's query: old enough, and not actively leased.
+  @@index([createdAt, claimExpiresAt])
+}

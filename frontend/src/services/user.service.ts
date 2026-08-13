@@ -1,4 +1,5 @@
 import { api, LONG_WRITE_TIMEOUT } from "@/lib/api";
+import { downloadCsv, withoutPaging } from "@/lib/csvExport";
 import { registerClientCache } from "@/lib/clientCache";
 import type { User, UserStatus } from "@/types/user";
 
@@ -91,6 +92,14 @@ const listCacheKey = (p: UserListParams): string =>
 
 export const getCachedUsers = (params: UserListParams = {}): PagedUsers | undefined =>
   usersListCache.get(listCacheKey(params));
+
+/**
+ * The SAME filtered staff list as a CSV. Paging is dropped — an export is "everything matching what
+ * I'm looking at", not the page on screen. `capped` is true when the server stopped short.
+ */
+export function exportUsersCsv(params: UserListParams = {}): Promise<{ capped: boolean }> {
+  return downloadCsv(`/users/export.csv${qs(withoutPaging(params))}`, "staff");
+}
 
 export function listUsers(params: UserListParams = {}): Promise<PagedUsers> {
   return api<PagedUsers>(`/users${qs(params)}`).then((r) => {

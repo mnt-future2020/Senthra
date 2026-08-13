@@ -7,6 +7,7 @@ import { MoreHorizontal, PackageSearch, Pencil, Plus, Power, Search, Trash2 } fr
 
 import * as irmService from "@/services/irm.service";
 import { useAuth } from "@/hooks/useAuth";
+import { ExportButton } from "@/components/ui/ExportButton";
 import { useDashboard } from "@/hooks/useDashboard";
 import { Pagination } from "@/components/ui/Pagination";
 import { Skeleton } from "@/components/ui/Skeleton";
@@ -233,6 +234,18 @@ export function IrmItemsView() {
   };
 
   // Debounce the search box into ?q.
+  // The filters WITHOUT paging — one definition, used by the list (which adds the page) and by the
+  // CSV export (which must not). Two copies is how a download quietly stops matching the screen it
+  // was taken from, and nothing about the resulting file looks wrong.
+  const exportParams = React.useMemo(
+    () => ({
+      search: search || undefined,
+      status: statusFilter === "all" ? undefined : statusFilter,
+      sort: sort === "newest" ? undefined : sort,
+    }),
+    [search, statusFilter, sort],
+  );
+
   React.useEffect(() => {
     const t = setTimeout(() => {
       if (searchInput.trim() !== search) patch({ q: searchInput.trim() || null });
@@ -244,13 +257,7 @@ export function IrmItemsView() {
   React.useEffect(() => {
     let active = true;
     (async () => {
-      const params = {
-        search: search || undefined,
-        status: statusFilter === "all" ? undefined : statusFilter,
-        sort: sort === "newest" ? undefined : sort,
-        page,
-        pageSize: PAGE_SIZE,
-      };
+      const params = { ...exportParams, page, pageSize: PAGE_SIZE };
       const cached = irmService.getCachedIrmItems(params);
       if (active && cached) setData(cached);
       setLoading(true);
@@ -268,7 +275,7 @@ export function IrmItemsView() {
     return () => {
       active = false;
     };
-  }, [search, statusFilter, sort, page, refreshKey]);
+  }, [exportParams, page, refreshKey]);
 
   const items = data?.items ?? [];
   const showSkeleton = loading && items.length === 0;
@@ -336,6 +343,14 @@ export function IrmItemsView() {
           ]}
           ariaLabel="Sort"
         />
+        {/* Before "New item" and outside its ml-auto, so the primary action stays hard right. */}
+        {can("irm.export") && (
+          <ExportButton
+            onExport={() => irmService.exportIrmItemsCsv(exportParams)}
+            disabled={items.length === 0}
+            title="Export the filtered catalogue to CSV"
+          />
+        )}
         {can("irm.create") && (
           <button
             onClick={() => router.push("/dashboard/irm/new")}
