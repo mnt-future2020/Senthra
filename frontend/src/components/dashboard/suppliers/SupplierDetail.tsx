@@ -11,8 +11,8 @@ import * as prfService from "@/services/purchase-request.service";
 import * as irmService from "@/services/irm.service";
 import * as grnService from "@/services/goods-in.service";
 import { useAuth } from "@/hooks/useAuth";
+import { ExportButton } from "@/components/ui/ExportButton";
 import { useDashboard } from "@/hooks/useDashboard";
-import { NoStaffAssigned, StaffChip } from "@/components/ui/StaffChip";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { DetailHeader } from "@/components/ui/DetailHeader";
 import { Pagination } from "@/components/ui/Pagination";
@@ -84,7 +84,7 @@ export function SupplierDetail({ initial }: { initial: Supplier }) {
   };
 
   return (
-    <div className="flex h-full flex-col gap-5">
+    <div className="stack flex h-full flex-col">
       <DetailHeader
         storageKey="supplier-detail"
         title={s.name}
@@ -152,10 +152,15 @@ export function SupplierDetail({ initial }: { initial: Supplier }) {
   );
 }
 
-function Card({ title, children }: { title: string; children: React.ReactNode }) {
+function Card({ title, action, children }: { title: string; action?: React.ReactNode; children: React.ReactNode }) {
   return (
     <section className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
-      <h2 className="mb-4 text-sm font-extrabold text-[var(--ink)]">{title}</h2>
+      {/* The heading row carries an optional action (the procurement exports). Rendered as a row
+          even without one so a card with no action keeps the exact spacing it had. */}
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <h2 className="text-sm font-extrabold text-[var(--ink)]">{title}</h2>
+        {action}
+      </div>
       {children}
     </section>
   );
@@ -266,18 +271,6 @@ function Overview({ s }: { s: Supplier }) {
         </div>
       </Card>
 
-      <Card title="Management">
-        <Field label="Internal owner">
-          {s.owner ? (
-            <div className="mt-2">
-              <StaffChip staff={s.owner} />
-            </div>
-          ) : (
-            <NoStaffAssigned label="No owner assigned" />
-          )}
-        </Field>
-      </Card>
-
       <Card title="Record">
         <div className="grid grid-cols-2 gap-3">
           <Field label="Type">{s.type?.name ?? "—"}</Field>
@@ -358,7 +351,21 @@ function Procurement({ supplier }: { supplier: Supplier }) {
       </div>
 
       <div className={`grid gap-4 ${canViewPrfs ? "lg:grid-cols-2" : ""}`}>
-        <Card title="Recent purchase orders">
+        {/* The card lists the five most recent; the export is every one for this supplier — which is
+            the point of it. Scoped by the same `supplier` filter the list above uses, through the
+            same endpoint, so the file cannot include an order the tab would not have shown. */}
+        <Card
+          title="Recent purchase orders"
+          action={
+            can("purchase_orders.export") && orders !== null && orders.length > 0 ? (
+              <ExportButton
+                label="Export"
+                title="Export every purchase order for this supplier to CSV"
+                onExport={() => poService.exportPurchaseOrdersCsv({ supplier: supplier.id })}
+              />
+            ) : null
+          }
+        >
           {orders === null ? (
             <div className="space-y-2">
               {Array.from({ length: 3 }).map((_, i) => (
@@ -391,7 +398,25 @@ function Procurement({ supplier }: { supplier: Supplier }) {
           )}
         </Card>
         {canViewPrfs && (
-          <Card title="Recent purchase requests">
+          <Card
+            title="Recent purchase requests"
+            action={
+              can("purchase_requests.export") && requests !== null && requests.length > 0 ? (
+                <div className="flex items-center gap-2">
+                  <ExportButton
+                    label="Export"
+                    title="Export every purchase request for this supplier — one row per request"
+                    onExport={() => prfService.exportPurchaseRequestsCsv({ supplier: supplier.id })}
+                  />
+                  <ExportButton
+                    label="Lines"
+                    title="Export every request LINE for this supplier — item, quantity, unit price"
+                    onExport={() => prfService.exportPurchaseRequestLinesCsv({ supplier: supplier.id })}
+                  />
+                </div>
+              ) : null
+            }
+          >
             {requests === null ? (
               <div className="space-y-2">
                 {Array.from({ length: 3 }).map((_, i) => (

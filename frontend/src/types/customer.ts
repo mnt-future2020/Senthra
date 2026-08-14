@@ -277,6 +277,9 @@ export interface CustomerOverview {
     stockUnits: number;
     /** Units short-closed and never arriving. Usually 0 — the UI only shows it when it isn't. */
     notReceivedUnits: number;
+    /** Jobs still happening — scheduled or in progress. Matches what the Jobs page lists under
+     *  those two stages, because the server derives both from the same status set. */
+    activeJobs: number;
   };
   /** Units per warehouse, biggest first. Empty when the customer has no stock with us. Carries the
    *  id so a row can link to My Stock filtered to that warehouse. */

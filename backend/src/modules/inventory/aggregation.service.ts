@@ -16,7 +16,8 @@ import {
   type StockPosition,
   type PositionFilters,
 } from "./stock-position.js";
-import { csvEscape } from "../../utils/csv.js";
+import { csvEscape, EXPORT_MAX } from "../../utils/csv.js";
+import { warehouseScopeFilter, type WarehouseScopedActor } from "../../lib/warehouse-access.js";
 import { getRegionalSettings } from "#modules/settings/settings.service.js";
 import { formatDateTime } from "#modules/document/document.formatter.js";
 
@@ -187,11 +188,41 @@ export async function getItemJobs(irmItemId: string) {
 export interface AllPositionsCsvResult {
   csv: string;
   count: number;
+  /** True when the filtered set was longer than EXPORT_MAX and the file stops short of it. */
+  capped: boolean;
 }
 
-export async function exportAllPositionsCsv(filters: PositionFilters): Promise<AllPositionsCsvResult> {
-  const all = await assembleAll(filters);
-  const rows = sortPositions(filterPositions(all, filters));
+/**
+ * `actor` is what keeps this export inside the caller's warehouses.
+ *
+ * It is not optional decoration. This branch grants `inventory.export` to the warehouse-manager role,
+ * whose comment in permissions.ts promises the download is "the same rows the screen already shows
+ * them — never the company's". Nothing here delivered that: `assembleAll` scopes only on the explicit
+ * `?warehouse=` filter, so a scoped manager calling this route with no filter received every
+ * warehouse, every engineer's van and every customer's holdings in one file.
+ *
+ * A restricted actor keeps only the positions physically in a warehouse they hold — `warehouse` and
+ * `damaged` both carry the warehouse id in `locationId`. Engineer vans, customer sites and transit
+ * are dropped rather than guessed at: they are not the manager's warehouses, and defaulting to
+ * "include" is what produced the leak in the first place. An unrestricted actor (admin, system, any
+ * non-scoped role) is untouched — `warehouseScopeFilter` returns undefined for them.
+ */
+export async function exportAllPositionsCsv(
+  filters: PositionFilters,
+  actor?: WarehouseScopedActor,
+): Promise<AllPositionsCsvResult> {
+  const scope = warehouseScopeFilter(actor);
+  const assembled = await assembleAll(filters);
+  const all =
+    scope === undefined
+      ? assembled
+      : assembled.filter((p) => (p.locationType === "warehouse" || p.locationType === "damaged") && scope.includes(p.locationId));
+  // Capped like every other export. This one alone rendered EVERY matching row into one string: the
+  // set grows with the business and an unfiltered request would eventually be asked to hold all of
+  // it in memory. It also reported a `count` header nothing on the client read, while the flag that
+  // actually matters — "this file is not the whole answer" — was the one it never sent.
+  const matched = sortPositions(filterPositions(all, filters));
+  const rows = matched.slice(0, EXPORT_MAX);
 
   // Company timezone + configured date format, like every generated artifact; the column names the
   // zone so a reader is never left guessing which one the timestamps are in.
@@ -223,7 +254,7 @@ export async function exportAllPositionsCsv(filters: PositionFilters): Promise<A
     );
   }
 
-  return { csv: lines.join("\r\n"), count: rows.length };
+  return { csv: lines.join("\r\n"), count: rows.length, capped: matched.length > EXPORT_MAX };
 }
 
 // ── Engineer lens — engineers + their holdings & jobs ──────────────────────────

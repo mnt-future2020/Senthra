@@ -93,6 +93,25 @@ export function canSeeOverview(principal: Principal | null): boolean {
   return OVERVIEW_PERMS.some((p) => principalCan(principal, p));
 }
 
+// Should this principal fetch the attention payload (sidebar badges / attention strip / tab counts)?
+//
+// Staff-vs-customer ONLY — deliberately NOT `canSeeOverview`, and deliberately not a permission list
+// of its own. The attention CATALOG lives on the backend (attention.registry.ts) and its items are
+// keyed on ACTION permissions that OVERVIEW_PERMS does not carry — the whole customer group
+// (stock_requests.*, customer_portal.*, customers.view) is absent from it. Gating on OVERVIEW_PERMS
+// meant a role built from e.g. the WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS bundle never fetched at all,
+// so its badges were permanently blank: exactly the silent-blindness failure the attention system
+// exists to prevent. Any hand-mirrored list here would drift again the next time a catalog entry is
+// added, so the permission question is answered in ONE place — the server, which filters the catalog
+// against the caller's own grants and returns an empty payload when that is none.
+//
+// The cost of asking for a staff user who can act on nothing is one request that short-circuits
+// before any count query runs.
+export function canSeeAttention(principal: Principal | null): boolean {
+  if (!principal || principal.type === "customer") return false;
+  return true;
+}
+
 // Where to send a principal after authentication. Everyone enters the unified
 // dashboard shell: the shell intercepts a first-login principal with the
 // set-password screen, then the landing routes to their first section. A staff user

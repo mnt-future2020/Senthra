@@ -2,7 +2,7 @@ import type { Prisma } from "@prisma/client";
 
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
 import { notify } from "#modules/notification/notification.service.js";
-import { emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
+import { emitAttentionChanged, emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import * as settingsService from "#modules/settings/settings.service.js";
@@ -13,6 +13,7 @@ import { badRequest, conflict, forbidden, notFound } from "../../utils/http-erro
 import * as transferRepo from "./engineer-transfer.repository.js";
 import type { CreateTransferInput, TransferLineInput } from "./engineer-transfer.validation.js";
 import type { CreateTransferData, CreateTransferLineData, TransferWithLines } from "./engineer-transfer.repository.js";
+import { randomUUID } from "node:crypto";
 
 // ---- DTO types -------------------------------------------------------------------------------
 
@@ -131,6 +132,7 @@ function emitBoth(fromEngineerId: string, toEngineerId: string, data: { id: stri
   emitToUser(toEngineerId, "engineer:transfer_updated", data);
   // Office staff (admins + anyone with jobs.view) live-update the admin transfer board.
   emitToRoom(OFFICE_JOBS_ROOM, "engineer:transfer_updated", data);
+  emitAttentionChanged("engineer_transfers");
 }
 
 // Resolve name from User (no single `name` field — compose firstName + lastName).
@@ -636,8 +638,12 @@ export async function acknowledge(id: string, signatureDataUri: string, actor: A
   // Upload signature to Cloudinary
   const creds = await settingsService.getCloudinaryCreds();
   if (!creds) throw badRequest("Cloudinary is not configured. Contact an administrator.");
-  const publicId = `sig-${t.id}-${Date.now()}`;
-  const signatureUrl = await uploadToCloudinary(signatureDataUri, publicId, creds, "senthra/engineer-transfers");
+  // Unique per upload, not per millisecond. uploadToCloudinary passes `overwrite: true` because
+  // branding and user signatures are replaced in place — so a publicId two concurrent uploads can
+  // agree on is one silently overwriting the other. Two engineers acknowledging at once is exactly
+  // the case, and the loser's signature is evidence nobody would notice was gone.
+  const publicId = `sig-${t.id}-${randomUUID()}`;
+  const { url: signatureUrl } = await uploadToCloudinary(signatureDataUri, publicId, creds, "senthra/engineer-transfers");
 
   const acknowledged = await transferRepo.acknowledgeTx(id, signatureUrl);
 
@@ -659,7 +665,9 @@ export async function acknowledge(id: string, signatureDataUri: string, actor: A
 export async function uploadAttachment(image: string): Promise<{ url: string }> {
   const creds = await settingsService.getCloudinaryCreds();
   if (!creds) throw badRequest("Cloudinary is not configured. Contact an administrator.");
-  const publicId = `attach-${Date.now()}`;
-  const url = await uploadToCloudinary(image, publicId, creds, "senthra/engineer-transfers");
+  // Same reason as the acknowledgement signature above — and worse here, since `attach-` carries no
+  // transfer id either, so the collision window was the whole app rather than one transfer.
+  const publicId = `attach-${randomUUID()}`;
+  const { url } = await uploadToCloudinary(image, publicId, creds, "senthra/engineer-transfers");
   return { url };
 }

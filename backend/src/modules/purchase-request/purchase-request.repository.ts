@@ -78,8 +78,28 @@ export interface PrfTotals {
   grandTotalPence: number;
 }
 
+/**
+ * "Rejected — needs rework": a PRF sent back to its author, not just any draft.
+ *
+ * Rejection moves the row to `draft` and stamps the reason, so the reason is what distinguishes a
+ * returned request from one nobody has submitted yet. Defined ONCE and shared by the badge count and
+ * the list the badge opens — the counterpart of RECEIVABLE_PO_STATUSES on purchase orders.
+ *
+ * Sharing it is the whole point. The count already used this predicate while the badge's href pointed
+ * at `?status=draft`, so "Rejected — needs rework · 3" opened every draft in the module, including
+ * ones the reader had just created. Two spellings of one question is how that gap opens; there is now
+ * only one.
+ */
+export const reworkPrfWhere = (): Prisma.PurchaseRequestWhereInput => ({
+  status: "draft",
+  // `not: null` is $ne, which excludes null AND missing — the right direction here: we want rows that
+  // HAVE a reason, so an absent field must not match.
+  rejectionReason: { not: null },
+});
+
 export interface PurchaseRequestListFilters {
   search?: string;
+  /** a real status, or the DERIVED pseudo-status "rework" (see buildWhere) */
   status?: string;
   statuses?: string[];
   supplierId?: string;
@@ -93,7 +113,11 @@ export interface PurchaseRequestListFilters {
 export function buildWhere(filters: PurchaseRequestListFilters): Prisma.PurchaseRequestWhereInput {
   const where: Prisma.PurchaseRequestWhereInput = { deletedAt: null };
   if (filters.statuses?.length) where.status = { in: filters.statuses };
-  else if (filters.status) where.status = filters.status;
+  else if (filters.status === "rework") {
+    // DERIVED pseudo-status, never stored — see reworkPrfWhere. AND'd so it composes with (and can't
+    // be clobbered by) the search OR further down, the same shape the PO list uses.
+    where.AND = [reworkPrfWhere()];
+  } else if (filters.status) where.status = filters.status;
   if (filters.supplierId) where.supplierId = filters.supplierId;
   if (filters.warehouseId) where.warehouseId = filters.warehouseId;
   if (filters.jobId) where.jobId = filters.jobId;
@@ -195,8 +219,13 @@ export function setConvertedTx(tx: Prisma.TransactionClient, id: string, updated
 }
 
 // --- attachments ----------------------------------------------------------------------------
-export function addAttachment(data: Prisma.PurchaseRequestAttachmentUncheckedCreateInput): Promise<PurchaseRequestAttachment> {
-  return prisma.purchaseRequestAttachment.create({ data });
+export function addAttachment(
+  data: Prisma.PurchaseRequestAttachmentUncheckedCreateInput,
+  tx?: Prisma.TransactionClient,
+): Promise<PurchaseRequestAttachment> {
+  // `tx` is passed by the direct-upload finalize, which commits this row and the removal of its
+  // pending-upload ledger entry together.
+  return (tx ?? prisma).purchaseRequestAttachment.create({ data });
 }
 export function findAttachment(id: string): Promise<PurchaseRequestAttachment | null> {
   return prisma.purchaseRequestAttachment.findUnique({ where: { id } });
@@ -305,6 +334,24 @@ export async function countSubmitted(warehouseIds?: string[]): Promise<number> {
   return prisma.purchaseRequest.count({
     where: { status: "submitted", deletedAt: null, ...(warehouseIds ? { warehouseId: { in: warehouseIds } } : {}) },
   });
+}
+
+// Attention counts — the PRF states where a HUMAN still owes an action. `rework` is the reject path:
+// there is no "rejected" status (reject sends submitted → draft), so a rejected request is a draft
+// carrying a rejectionReason. Converted/cancelled are terminal and deliberately absent.
+export async function countAttention(warehouseIds?: string[]): Promise<{
+  awaitingApproval: number;
+  awaitingConversion: number;
+  rework: number;
+}> {
+  const scoped = { deletedAt: null, ...(warehouseIds ? { warehouseId: { in: warehouseIds } } : {}) };
+  const [awaitingApproval, awaitingConversion, rework] = await Promise.all([
+    prisma.purchaseRequest.count({ where: { status: "submitted", ...scoped } }),
+    prisma.purchaseRequest.count({ where: { status: "approved", ...scoped } }),
+    // Same predicate the `?status=rework` list filters on, so the badge and that list are one set.
+    prisma.purchaseRequest.count({ where: { ...reworkPrfWhere(), ...scoped } }),
+  ]);
+  return { awaitingApproval, awaitingConversion, rework };
 }
 
 /** createdAt of PRFs created since `since`, for the 8-week sparkline. */

@@ -38,7 +38,22 @@ export interface PickedDoc {
   fileName: string;
   fileType: string;
   fileSizeBytes: number;
-  dataUrl: string;
+  /**
+   * The file itself, for the detail page — that receipt exists, so its document goes straight to
+   * Cloudinary and the backend only finalizes it.
+   */
+  file: File;
+  /**
+   * The same file as a base64 data URL, for the create/edit FORM, which still posts its documents
+   * through this server (there is nothing to attach to until the receipt is saved).
+   *
+   * A FUNCTION, not a string, and that is the whole point. Reading a file this way costs about 1.33×
+   * its size in memory — up to ~6.7 MB for one 5 MB PDF — and the picker used to pay that on every
+   * pick, including on the detail page, which then used `file` and threw the string away. Not
+   * spending it is most of what direct upload was for. Now only the caller that actually posts base64
+   * calls this, and the detail page never allocates it at all.
+   */
+  readDataUrl: () => Promise<string>;
 }
 
 // Hidden file input + button. Validates type/size and the count + running-total caps
@@ -68,8 +83,16 @@ export function DocPicker({
     if (totalBytes + file.size > GRN_DOC_MAX_TOTAL_BYTES) return pushToast("Total documents can't exceed 20 MB.", "alert");
     setBusy(true);
     try {
-      const dataUrl = await readFileAsDataUrl(file);
-      await onPick({ fileName: file.name, fileType, fileSizeBytes: file.size, dataUrl });
+      // `readDataUrl` is handed over unevaluated — a caller that uploads the File directly never
+      // triggers the read. A throw from it still lands in this catch, because every caller awaits it
+      // inside `onPick`.
+      await onPick({
+        fileName: file.name,
+        fileType,
+        fileSizeBytes: file.size,
+        file,
+        readDataUrl: () => readFileAsDataUrl(file),
+      });
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Could not read the file.", "alert");
     } finally {

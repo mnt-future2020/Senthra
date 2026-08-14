@@ -1,8 +1,9 @@
-import type { Request, Response } from "express";
+import type { Request } from "express";
 
 import * as customerService from "./customer.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
+import { sendCsv } from "../../utils/csv-response.js";
 import { param, queryInt, queryStr } from "../../utils/request.js";
 import { unauthorized } from "../../utils/http-error.js";
 import { principalGrants } from "../../types/principal.js";
@@ -29,16 +30,27 @@ import type {
 // ============================================================================
 
 // GET /customers  — paginated. Query: ?search=&status=&sort=&page=&pageSize=
-export const listCustomers = asyncHandler(async (req, res) => {
+// The list's filters, parsed once. Shared with the CSV export so the download is exactly the rows
+// on screen — a second copy is a second place for a filter to be forgotten, and the resulting file
+// gives no sign that it is wider or narrower than the list it came from.
+function customerListParamsFrom(req: Request): customerService.ListCustomersParams {
   const { search, status, sort, page, pageSize } = req.query;
-  const result = await customerService.listCustomers({
+  return {
     search: queryStr(search),
     status: queryStr(status),
     sort: queryStr(sort),
     page: queryInt(page),
     pageSize: queryInt(pageSize),
-  });
-  res.json(result);
+  };
+}
+
+export const listCustomers = asyncHandler(async (req, res) => {
+  res.json(await customerService.listCustomers(customerListParamsFrom(req)));
+});
+
+// GET /customers/export.csv — the same filtered list as a download (paging ignored).
+export const exportCustomersCsv = asyncHandler(async (req, res) => {
+  sendCsv(res, "customers", await customerService.exportCustomersCsv(customerListParamsFrom(req), actorFrom(req)));
 });
 
 // GET /customers/:id  — detail (by id or customerCode), with projects/sites/users.
@@ -320,6 +332,12 @@ export const createDirectStockEntry = asyncHandler(async (req, res) => {
 });
 
 // GET /customers/:id/stock-entries — list stock entries for a customer.
+// GET /customers/:id/stock-entries/export.csv — one customer's stock, same columns as their own
+// portal export (see exportCustomerStockCsv for why they must match).
+export const exportCustomerStockCsv = asyncHandler(async (req, res) => {
+  sendCsv(res, "customer-stock", await customerService.exportCustomerStockCsv(param(req, "id"), portalListParams(req)));
+});
+
 export const listCustomerStockEntries = asyncHandler(async (req, res) => {
   const { status } = req.query;
   const entries = await customerService.listCustomerStockEntries(
@@ -401,27 +419,17 @@ export const getOwnStockWarehouses = asyncHandler(async (req, res) => {
   res.json({ warehouses: await customerService.listOwnStockWarehouses(customerId(req)) });
 });
 
-// Send a CSV as a file download. Shared by both portal exports so the headers — and the UTF-8 BOM
-// Excel needs to read accented text correctly — can't be got right in one and forgotten in the other.
-function sendCsv(res: Response, filename: string, csv: string, capped: boolean): void {
-  const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-  res.setHeader("Content-Type", "text/csv; charset=utf-8");
-  res.setHeader("Content-Disposition", `attachment; filename="${filename}-${date}.csv"`);
-  if (capped) res.setHeader("X-Export-Capped", "true");
-  res.send("﻿" + csv);
-}
-
 // GET /customer/stock-entries/export.csv — the customer's stock, honouring the list's filters
 // (page/pageSize ignored: the export spans every matching row up to the cap).
 export const exportOwnStockCsv = asyncHandler(async (req, res) => {
   const { csv, capped } = await customerService.exportOwnStockCsv(customerId(req), portalListParams(req));
-  sendCsv(res, "my-stock", csv, capped);
+  sendCsv(res, "my-stock", { csv, capped });
 });
 
 // GET /customer/stock-requests/export.csv — the customer's submissions, same contract.
 export const exportOwnStockRequestsCsv = asyncHandler(async (req, res) => {
   const { csv, capped } = await customerService.exportOwnStockRequestsCsv(customerId(req), portalListParams(req));
-  sendCsv(res, "my-submissions", csv, capped);
+  sendCsv(res, "my-submissions", { csv, capped });
 });
 
 // GET /customers/:id/sites — ADMIN: paged sites for the detail tab.

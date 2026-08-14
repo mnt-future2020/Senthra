@@ -3,6 +3,7 @@ import { Prisma, type Job } from "@prisma/client";
 import { prisma, withTransaction } from "../../lib/prisma.js";
 import { escapeRegex } from "../../utils/search.js";
 import { startOfDayIn } from "../../utils/filter-date.js";
+import { OVERDUE_ELIGIBLE_STATUSES } from "./job-overdue.js";
 
 // Data-access layer for Jobs (field-work job header + kit lines). The ONLY place Prisma is touched
 // for job records. Soft-deleted jobs (deletedAt set) are excluded from normal reads. Header + kit
@@ -93,15 +94,31 @@ function lineCreateData(l: JobKitLineRow): Prisma.JobKitLineUncheckedCreateWitho
 // --- filters / reads -------------------------------------------------------------------------
 export interface JobListFilters {
   search?: string;
+  /** a real status, or the DERIVED pseudo-status "overdue" (see buildWhere) */
   status?: string;
   customerId?: string;
   assignedEngineerId?: string;
   projectId?: string;
+  /**
+   * Start of "today" in the COMPANY timezone. Supplied by the caller for the same reason as on the
+   * engineer side (buildEngineerWhere): the repository holds no business decisions and reads no
+   * settings. REQUIRED whenever `status === "overdue"`.
+   */
+  overdueBefore?: Date;
 }
 
 function buildWhere(filters: JobListFilters): Prisma.JobWhereInput {
   const where: Prisma.JobWhereInput = { deletedAt: null };
-  if (filters.status) where.status = filters.status;
+  if (filters.status === "overdue") {
+    // Same derived pseudo-status the engineer list and the dashboard overdue card use — an ACTIVE job
+    // whose completion date has passed. Sharing one definition is the point: this is where the
+    // "Jobs overdue" attention badge sends you, and a badge whose count disagrees with the list it
+    // opens is worse than no badge. Loud on a missing boundary for the same reason as the engineer
+    // side: a quiet default reports "nothing overdue", which is invisible and wrong.
+    if (!filters.overdueBefore) throw new Error("buildWhere: overdueBefore is required for the overdue filter.");
+    where.status = { in: [...ACTIVE_JOB_STATUSES] };
+    where.completionDate = { lt: filters.overdueBefore };
+  } else if (filters.status) where.status = filters.status;
   if (filters.customerId) where.customerId = filters.customerId;
   if (filters.assignedEngineerId) where.assignedEngineerId = filters.assignedEngineerId;
   if (filters.projectId) where.projectId = filters.projectId;
@@ -317,6 +334,68 @@ export function findGoodsActiveJobIds(): Promise<{ id: string }[]> {
   });
 }
 
+// The statuses that mean a job is DONE WITH — the only two that end the work. Everything else is in
+// flight, including `rejected`: that is our engineer declining, after which the office reassigns, so
+// the job itself is still on. The delete guards below share this one list because they must agree
+// with what the customer is shown — job.service's ACTIVE_STATUSES folds `rejected` into the
+// "scheduled" stage and counts it as active, and a guard looser than the number on the customer's own
+// dashboard is a guard that lets you delete work they can see.
+const CLOSED_JOB_STATUSES = ["completed", "cancelled"];
+
+// Jobs for a customer that are still in flight. Guards customer deletion: a removed customer is
+// filtered out of every read, so a live job would be left naming a company nobody can look up.
+export function countOpenByCustomer(customerId: string): Promise<number> {
+  return prisma.job.count({
+    where: { customerId, deletedAt: null, status: { notIn: CLOSED_JOB_STATUSES } },
+  });
+}
+
+// The goods states that mean stock is still OUT against a job — issued to an engineer and not yet
+// fully handed back. `not_issued` and `reconciled` are the two settled ends; everything between them
+// is stock the warehouse still has to take back. Mirrors what findGoodsActiveJobIds exists to find,
+// but keyed on the summary rather than on job status, because status is exactly what stops being a
+// reliable signal once a job closes.
+const UNSETTLED_GOODS_STATUSES = ["partially_issued", "issued", "awaiting_return"];
+
+// Kit lines that name this warehouse as their pickup point AND still need it. Blocks deleting a
+// warehouse engineers are still being sent to: the row goes, every read filters it out, and the job
+// pack can no longer resolve where to collect.
+//
+// Two ways a kit line still needs the warehouse, hence the OR:
+//
+// 1. The job is live (not in CLOSED_JOB_STATUSES) — an engineer is still being sent there. A
+//    `rejected` job counts as live: it is going back out to another engineer, who still has to be
+//    told where to collect.
+// 2. The job has CLOSED but its stock hasn't settled. Closing a job moves no units — `cancelJob` has
+//    no guard on outstanding stock and a completed job can sit in `awaiting_return` — so the engineer
+//    walks away still holding the kit, and the scan-back-in runs through goods management against
+//    this warehouse. Keying branch 2 on the stock summary rather than on status is what keeps the two
+//    halves of this file agreeing: findGoodsActiveJobIds and findActiveByEngineerWithKitLines both
+//    deliberately keep `cancelled` in their window for this exact reason, and a delete guard that
+//    treated it as finished would strand the very stock those reads exist to chase.
+//
+// Still not "every job that ever used it": the kit line snapshots `warehouseName`/`warehouseCode`, so
+// a SETTLED job's pack reads correctly without the warehouse row. Counting those too would mean any
+// warehouse ever used by any job could never be deleted, a guard nobody could satisfy.
+export async function countLiveKitLinesByWarehouse(warehouseId: string): Promise<number> {
+  // Resolved as its own read rather than a nested `job: { stockSummary: … }` filter: the unsettled
+  // set is bounded by work in flight and indexed on goodsStatus, and one extra indexed round trip
+  // beats a two-level relation filter ($lookup) on the Mongo connector.
+  const unsettled = await prisma.jobStockSummary.findMany({
+    where: { goodsStatus: { in: UNSETTLED_GOODS_STATUSES } },
+    select: { jobId: true },
+  });
+  return prisma.jobKitLine.count({
+    where: {
+      warehouseId,
+      OR: [
+        { job: { deletedAt: null, status: { notIn: CLOSED_JOB_STATUSES } } },
+        { jobId: { in: unsettled.map((s) => s.jobId) }, job: { deletedAt: null } },
+      ],
+    },
+  });
+}
+
 // Kit-line TYPES for a set of jobs, and nothing else. The overdue read needs to know which lines are
 // `misc` so it can leave them out of "is anything still out?" — misc is free-text, never stock-tracked,
 // so it can never be returned and would otherwise keep a job overdue forever. Deliberately lean: no
@@ -456,6 +535,197 @@ export function findActiveByEngineer(engineerId: string): Promise<JobWithRelatio
 export function findByIdForEngineer(jobId: string, engineerId: string): Promise<JobWithRelations | null> {
   if (!jobId) return Promise.resolve(null);
   return prisma.job.findFirst({ where: { id: jobId, assignedEngineerId: engineerId, deletedAt: null }, include: withRelations });
+}
+
+// --- customer portal -------------------------------------------------------------------------
+// The customer's own view of their jobs. A SELECT, not an include — every other read here projects
+// the whole record, and on this surface the record is what has to be held back. A select is the only
+// version of this that cannot leak a field by accident later: adding a column to Job does NOT add it
+// here, someone has to choose to.
+//
+// The portal detail deliberately shows the SAME cards as the office page (see PortalJobDetail),
+// so what is withheld is a short, decided list rather than a design difference:
+//
+//   supplierName / supplierId / installerType — which subcontractor we use is commercial
+//   assignedEngineerEmail, createdBy, updatedBy, acceptedBy, rejectedBy — staff contact details
+//   notes                                     — office-to-engineer free text ("Anything the
+//                                               engineer should know"), routinely about the customer
+//   rejectReason / rejectedAt                 — why OUR engineer declined the job
+//   latitude / longitude                      — derived, nothing renders them
+//
+// `plannerName` / `plannerPhone` ARE included: the schema notes they are snapshotted off the
+// CUSTOMER's own job pack, so that is their contact, not ours.
+
+// The LIST projection. Kept lean on purpose — a customer's job history is unbounded and the list
+// renders header fields only, so kit lines (and everything the detail cards need) would be pure
+// weight on every page of every list.
+const portalJobListSelect = {
+  id: true,
+  jobNumber: true,
+  name: true,
+  jobType: true,
+  technology: true,
+  // The customer's OWN references — the two fields they are most likely to search by.
+  customerRef: true,
+  schemeNo: true,
+  projectId: true,
+  projectName: true,
+  project: { select: projectSelect },
+  siteId: true,
+  siteName: true,
+  site: { select: siteSelect },
+  addressLine1: true,
+  addressLine2: true,
+  city: true,
+  county: true,
+  postcode: true,
+  country: true,
+  completionDate: true,
+  completedAt: true,
+  status: true,
+  assignedEngineerName: true,
+  createdAt: true,
+} satisfies Prisma.JobSelect;
+
+// One kit line as the customer's detail table renders it: the office's Source / Item / Warehouse /
+// Planned / Issued / Used / Returned / Remaining columns. `itemName` is stored on the line, so this
+// needs no irmItem join, and the pickup warehouse's full ADDRESS block (which the engineer's pack
+// carries) stays out — a customer has no kit to collect.
+//
+// `notes` is the office's Notes column, and it is NOT here: it is a free-text box staff fill in for
+// each other, the same class of field as the job-level `notes` that is already withheld. Holding one
+// back while publishing the other would only have made the exclusion look arbitrary.
+//
+// `irmItemId` / `customerStockEntryId` ARE selected but never leave the server: getJobKitTallies
+// needs them to group lines by source item, and passing them saves it re-fetching the whole job.
+const portalKitLineSelect = {
+  id: true,
+  lineType: true,
+  seCode: true,
+  itemName: true,
+  description: true,
+  warehouseName: true,
+  qty: true,
+  irmItemId: true,
+  customerStockEntryId: true,
+} satisfies Prisma.JobKitLineSelect;
+
+// The DETAIL projection — the list's fields plus everything the office's four cards show. Ordered
+// to mirror those cards so a missing field is easy to spot against the page it feeds.
+const portalJobDetailSelect = {
+  ...portalJobListSelect,
+  // Identification
+  priority: true,
+  // Customer & project
+  customerName: true,
+  customer: { select: customerSelect },
+  trsArea: true,
+  // Location — the position WITHIN the site. Engineer-facing, but it is the customer's own building.
+  floor: true,
+  suite: true,
+  rack: true,
+  shelf: true,
+  // Server-only, never mapped into the DTO: getJobKitTallies caps each line's "remaining" by what
+  // this engineer actually still holds, so it needs the id. See getJobForCustomer.
+  assignedEngineerId: true,
+  // Schedule — the workflow stamps the office card shows.
+  assignedAt: true,
+  acceptedAt: true,
+  startedAt: true,
+  cancelledAt: true,
+  cancelReason: true,
+  // Their own planner contact, off their own job pack.
+  plannerName: true,
+  plannerPhone: true,
+  // The original job-pack files — which the customer sent us in the first place.
+  attachments: true,
+  // createdAt is already on the list select; the Record card reads it.
+  kitLines: { orderBy: { createdAt: "asc" }, select: portalKitLineSelect },
+} satisfies Prisma.JobSelect;
+
+export type PortalJobRow = Prisma.JobGetPayload<{ select: typeof portalJobListSelect }>;
+export type PortalJobDetailRow = Prisma.JobGetPayload<{ select: typeof portalJobDetailSelect }>;
+
+// The job statuses a customer may see, and the ONLY ones any portal query returns.
+//
+// `draft` is excluded: a draft job is the office still writing it — no engineer, dates in flux —
+// and showing the customer a commitment we have not made yet is worse than showing nothing.
+// `rejected` IS included: it means our engineer declined and the office must reassign, which is an
+// internal staffing event, not a change to the customer's job. It is folded into "Scheduled" by
+// portalStage() in the service so the word never reaches them.
+export const PORTAL_JOB_STATUSES = ["assigned", "accepted", "rejected", "in_progress", "completed", "cancelled"] as const;
+
+export interface PortalJobFilters {
+  search?: string;
+  /** Underlying statuses to narrow to. Must be a subset of PORTAL_JOB_STATUSES — the service maps a
+   *  customer-facing stage to these; anything else is a wiring bug, not user input. */
+  statuses?: readonly string[];
+}
+
+function buildCustomerWhere(customerId: string, f: PortalJobFilters): Prisma.JobWhereInput {
+  // Both bounds are always applied: the customer's own id AND the visible-status allow-list. The
+  // status filter can only ever narrow within that list — it can never widen it back to `draft`.
+  const allowed = f.statuses?.length ? f.statuses.filter((s) => (PORTAL_JOB_STATUSES as readonly string[]).includes(s)) : null;
+  const where: Prisma.JobWhereInput = {
+    customerId,
+    deletedAt: null,
+    status: { in: allowed && allowed.length > 0 ? [...allowed] : [...PORTAL_JOB_STATUSES] },
+  };
+  if (f.search) {
+    const q = escapeRegex(f.search);
+    where.OR = [
+      { jobNumber: { contains: q, mode: "insensitive" } },
+      { name: { contains: q, mode: "insensitive" } },
+      { customerRef: { contains: q, mode: "insensitive" } },
+      { schemeNo: { contains: q, mode: "insensitive" } },
+      { siteName: { contains: q, mode: "insensitive" } },
+      { postcode: { contains: q, mode: "insensitive" } },
+    ];
+  }
+  return where;
+}
+
+// The portal's own sort set. It does NOT reuse orderBy() above, whose "completion" case is
+// completionDate DESC — the furthest-away job first, which is the office looking back over a
+// finished period. A customer sorting by date wants the next thing happening to them, so "due"
+// is ASC, with the job number as a stable tiebreak (several jobs commonly share a due date, and
+// without it their relative order can differ between two fetches of the same page).
+//
+// Dateless jobs sort FIRST here. completionDate is app-required on create/edit but DB-nullable (see
+// schema.prisma for why), so only rows predating that rule can be null — and those were backfilled.
+// Prisma's `nulls: "last"` is not available on MongoDB, so this is the behaviour, not a choice: any
+// row that somehow has no due date leads the list rather than hiding at the end of it, which is the
+// better failure anyway.
+function portalOrderBy(sort?: string): Prisma.JobOrderByWithRelationInput[] {
+  switch (sort) {
+    case "due":
+      return [{ completionDate: "asc" }, { jobNumber: "desc" }];
+    case "oldest":
+      return [{ createdAt: "asc" }];
+    default:
+      return [{ createdAt: "desc" }];
+  }
+}
+
+export function findManyByCustomerPortal(
+  customerId: string,
+  f: PortalJobFilters = {},
+  skip = 0,
+  take = 20,
+  sort?: string,
+): Promise<PortalJobRow[]> {
+  return prisma.job.findMany({ where: buildCustomerWhere(customerId, f), select: portalJobListSelect, orderBy: portalOrderBy(sort), skip, take });
+}
+export function countByCustomerPortal(customerId: string, f: PortalJobFilters = {}): Promise<number> {
+  return prisma.job.count({ where: buildCustomerWhere(customerId, f) });
+}
+// One job, through the SAME where-builder as the list — so an id belonging to another company, a
+// soft-deleted job or a draft is simply not found, exactly as if it did not exist. Building the
+// scope here rather than checking `job.customerId === customerId` after the fetch is deliberate:
+// a forgotten check reads as working code, a missing filter clause does not.
+export function findByIdForCustomer(jobId: string, customerId: string): Promise<PortalJobDetailRow | null> {
+  if (!jobId) return Promise.resolve(null);
+  return prisma.job.findFirst({ where: { id: jobId, ...buildCustomerWhere(customerId, {}) }, select: portalJobDetailSelect });
 }
 
 // --- header / status writes ------------------------------------------------------------------
@@ -659,7 +929,9 @@ export async function countActiveJobsByEngineer(): Promise<Map<string, number>> 
 
 // --- Dashboard read-models — not a generic reporting API ---
 
-const ACTIVE_JOB_STATUSES = ["assigned", "accepted", "in_progress"] as const;
+// Re-exported from job-overdue so the `?status=overdue` filter below and the per-row `overdue` flag
+// on the list can never narrow to different statuses. One list, one definition.
+const ACTIVE_JOB_STATUSES = OVERDUE_ELIGIBLE_STATUSES;
 
 /** Count of jobs currently in flight. */
 export async function countActive(): Promise<number> {
@@ -680,6 +952,24 @@ export async function createdSince(since: Date): Promise<Array<{ at: Date }>> {
  *  They must share `startOfDayIn` — a card reading "3 overdue" above a queue listing 4 is worse than
  *  either being an hour out. Not per-warehouse: a job belongs to no warehouse (only its kit lines do),
  *  so this company-wide count would have none to read. */
+// Attention counts — office-side job states where a human still owes an action. `rejected` is the
+// highest-value one: an engineer declined it, so the job is DEAD until a planner reassigns or cancels
+// it, and nothing else in the app counts it. Jobs are deliberately NOT warehouse-scoped (a job's kit
+// lines can span warehouses), so these are company-wide for every actor — same rule as the
+// activeJobs dashboard card.
+//
+// NO "draft" count here. `status` defaults to "draft" in the schema, but nothing ever WRITES it —
+// createJob posts "assigned" (a job is raised with an engineer on it) and no transition returns to
+// draft. A count of it is structurally 0, and the badge it fed offered a filtered list that was
+// always empty. See the same note in attention.registry's "look like work but are not" block.
+export async function countAttention(): Promise<{ rejected: number; awaitingAcceptance: number }> {
+  const [rejected, awaitingAcceptance] = await Promise.all([
+    prisma.job.count({ where: { status: "rejected", deletedAt: null } }),
+    prisma.job.count({ where: { status: "assigned", deletedAt: null } }),
+  ]);
+  return { rejected, awaitingAcceptance };
+}
+
 export async function dueBreakdown(now: Date, timeZone: string): Promise<{ overdue: number; dueThisWeek: number }> {
   const startToday = startOfDayIn(timeZone, now);
   const in7Days = new Date(startToday.getTime() + 7 * 24 * 60 * 60 * 1000);

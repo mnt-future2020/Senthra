@@ -1,4 +1,5 @@
 import { api, LONG_WRITE_TIMEOUT } from "@/lib/api";
+import { downloadCsv, withoutPaging } from "@/lib/csvExport";
 import { registerClientCache } from "@/lib/clientCache";
 import type { PurchaseRequest } from "@/types/purchase-request";
 
@@ -92,6 +93,23 @@ const listCacheKey = (p: PrfListParams): string =>
 
 export const getCachedPurchaseRequests = (params: PrfListParams = {}): PagedPurchaseRequests | undefined =>
   listCache.get(listCacheKey(params));
+
+/**
+ * The SAME filtered list as a CSV. Paging is dropped — an export is "everything matching what I'm
+ * looking at", not the page on screen — and the server applies the identical filters and warehouse
+ * scope. `capped` is true when it stopped short of the full set.
+ */
+/**
+ * The same requests, ONE ROW PER LINE. Carries the PO code, so this file joins the PO line export
+ * in a spreadsheet: what was requested versus what was actually ordered, and at what price.
+ */
+export function exportPurchaseRequestLinesCsv(params: PrfListParams = {}): Promise<{ capped: boolean }> {
+  return downloadCsv(`/purchase-requests/export-lines.csv${qs(withoutPaging(params))}`, "purchase-request-lines");
+}
+
+export function exportPurchaseRequestsCsv(params: PrfListParams = {}): Promise<{ capped: boolean }> {
+  return downloadCsv(`/purchase-requests/export.csv${qs(withoutPaging(params))}`, "purchase-requests");
+}
 
 export function listPurchaseRequests(params: PrfListParams = {}): Promise<PagedPurchaseRequests> {
   return api<PagedPurchaseRequests>(`/purchase-requests${qs(params)}`).then((r) => {

@@ -84,11 +84,30 @@ export function findByCode(code: string): Promise<WarehouseWithRelations | null>
   return prisma.warehouse.findFirst({ where: { code, deletedAt: null }, include: withRelations });
 }
 
+/**
+ * Just the URL segment for one warehouse. Warehouse routes are keyed by CODE, not id, so the
+ * attention service needs this to turn a single-warehouse scope into a deep link — and it runs on the
+ * badge path, where pulling the type, managers and address relations `findById` includes would be
+ * paid on every page load for nothing.
+ */
+export async function findCodeById(id: string): Promise<string | null> {
+  if (!id) return null;
+  const row = await prisma.warehouse.findFirst({ where: { id, deletedAt: null }, select: { code: true } });
+  return row?.code ?? null;
+}
+
 // Ids of warehouses with no type assigned yet (incl. soft-deleted — they still hold a
 // row). Used once by the seed backfill to give every warehouse a fallback type so
 // `typeId` can be the single source of truth.
 export function findIdsMissingType(): Promise<{ id: string }[]> {
-  return prisma.warehouse.findMany({ where: { typeId: null }, select: { id: true } });
+  // `typeId: null` alone matches only an EXPLICIT null, and a warehouse created before the type
+  // became mandatory has the field ABSENT — exactly the rows this backfill exists to find, and the
+  // ones it would have skipped. No user-facing count depends on it, but a migration helper that
+  // quietly does nothing is the worst kind: it reports success.
+  return prisma.warehouse.findMany({
+    where: { OR: [{ typeId: null }, { typeId: { isSet: false } }] },
+    select: { id: true },
+  });
 }
 
 // The ACTIVE, non-deleted warehouses among `ids` (id only). Used to validate user→warehouse

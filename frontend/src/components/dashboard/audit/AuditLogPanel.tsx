@@ -5,10 +5,10 @@ import { Download, ScrollText, Search } from "lucide-react";
 
 import * as auditService from "@/services/audit.service";
 import { useDashboard } from "@/hooks/useDashboard";
-import { ListPageHeader } from "@/components/ui/ListPageHeader";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { toolbarActionsCls, toolbarBtn } from "@/components/ui/styles";
 import type { AuditEntry, AuditFacets, PagedAuditLogs } from "@/types/audit";
 import { AuditEntryDrawer } from "./AuditEntryDrawer";
 import {
@@ -33,19 +33,19 @@ function TableSkeleton() {
       <table className="w-full text-sm">
         <thead>
           <tr className="border-b border-[var(--border)] text-left text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-            <th className="px-4 py-3">When</th>
-            <th className="px-4 py-3">Action</th>
-            <th className="px-4 py-3">Actor</th>
-            <th className="px-4 py-3">Target</th>
+            <th className="cell-y px-4">When</th>
+            <th className="cell-y px-4">Action</th>
+            <th className="cell-y px-4">Actor</th>
+            <th className="cell-y px-4">Target</th>
           </tr>
         </thead>
         <tbody>
           {Array.from({ length: 8 }).map((_, i) => (
             <tr key={i} className="border-b border-[var(--border)] last:border-0">
-              <td className="px-4 py-3"><Skeleton className="h-3 w-16" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-5 w-40 rounded-full" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-32" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-28" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-3 w-16" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-5 w-40 rounded-full" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-3 w-32" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-3 w-28" /></td>
             </tr>
           ))}
         </tbody>
@@ -151,24 +151,8 @@ export function AuditLogPanel() {
   };
 
   return (
-    <div className="flex h-full flex-col gap-5">
-      {/* Header + export */}
-      <ListPageHeader
-        title="Audit Log"
-        subtitle="Every change made in the system, newest first."
-        right={
-          <button
-            onClick={doExport}
-            disabled={exporting || total === 0}
-            className="flex shrink-0 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3.5 py-2.5 text-xs font-extrabold text-[var(--ink)] transition-all hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <Download className="h-4 w-4" />
-            {exporting ? "Exporting…" : "Export CSV"}
-          </button>
-        }
-      />
-
-      {/* Filter bar */}
+    <div className="stack flex h-full flex-col">
+      {/* Filter bar — carries the Export action at its right-hand end. */}
       <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:items-center lg:flex-wrap">
         <div className="relative w-full lg:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
@@ -236,14 +220,20 @@ export function AuditLogPanel() {
             className={selectCls}
           />
         </label>
-        {isFiltered && (
-          <button
-            onClick={clearFilters}
-            className="text-xs font-bold text-[var(--accent)] hover:opacity-80 lg:ml-auto"
-          >
-            Clear filters
+        {/* Clear + Export share the pushed-right group. Export is a PAGE action but it belongs on
+            this row, not in the top bar: up there it sat against the browser's own chrome, a screen's
+            width from the rows it exports. `lg:` because THIS bar becomes a row at lg, not sm. */}
+        <div className={`${toolbarActionsCls} lg:ml-auto`}>
+          {isFiltered && (
+            <button onClick={clearFilters} className="text-xs font-bold text-[var(--accent)] hover:opacity-80">
+              Clear filters
+            </button>
+          )}
+          <button onClick={doExport} disabled={exporting || total === 0} className={toolbarBtn}>
+            <Download className="h-3.5 w-3.5" />
+            {exporting ? "Exporting…" : "Export CSV"}
           </button>
-        )}
+        </div>
       </div>
 
       {/* Table */}
@@ -272,10 +262,10 @@ export function AuditLogPanel() {
             <table className="w-full text-left text-sm">
               <thead className="sticky top-0 z-10 bg-[var(--surface)]">
                 <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                  <th className="px-4 py-3">When</th>
-                  <th className="px-4 py-3">Action</th>
-                  <th className="px-4 py-3">Actor</th>
-                  <th className="px-4 py-3">Target</th>
+                  <th className="cell-y px-4">When</th>
+                  <th className="cell-y px-4">Action</th>
+                  <th className="cell-y px-4">Actor</th>
+                  <th className="cell-y px-4">Target</th>
                 </tr>
               </thead>
               <tbody>
@@ -285,23 +275,23 @@ export function AuditLogPanel() {
                     onClick={() => setSelected(e)}
                     className="cursor-pointer border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]"
                   >
-                    <td className="px-4 py-3 text-[var(--muted)]" title={absoluteTime(e.createdAt)}>
+                    <td className="cell-y px-4 text-[var(--muted)]" title={absoluteTime(e.createdAt)}>
                       {relativeTime(e.createdAt)}
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="cell-y px-4">
                       <span
                         className={`inline-block rounded-full px-2.5 py-1 text-[11px] font-bold ${TONE_CLASSES[actionTone(e.action)]}`}
                       >
                         {actionLabel(e.action)}
                       </span>
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="cell-y px-4">
                       <span className="text-[var(--ink)]">{e.actorEmail ?? "—"}</span>
                       <span className="ml-2 text-[10px] font-bold uppercase tracking-wide text-[var(--faint)]">
                         {e.actorType}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-[var(--muted)]">
+                    <td className="cell-y px-4 text-[var(--muted)]">
                       {e.targetType ? (
                         <>
                           <span className="font-semibold text-[var(--ink)]">{e.targetType}</span>
@@ -317,19 +307,16 @@ export function AuditLogPanel() {
             </table>
           </div>
         )}
+        {data && data.total > 0 && (
+            <Pagination embedded
+              page={data.page}
+              totalPages={data.totalPages}
+              total={data.total}
+              label="entries"
+              onPage={setPage}
+            />
+        )}
       </div>
-
-      {data && data.total > 0 && (
-        <div className="shrink-0">
-          <Pagination
-            page={data.page}
-            totalPages={data.totalPages}
-            total={data.total}
-            label="entries"
-            onPage={setPage}
-          />
-        </div>
-      )}
 
       <AuditEntryDrawer entry={selected} onClose={() => setSelected(null)} />
     </div>

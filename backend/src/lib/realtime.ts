@@ -48,6 +48,18 @@ export const PURCHASE_ORDER_WATCHERS_ROOM = "purchase_orders:watchers";
 // own scoped REST call, so the shared room leaks nothing.
 export const PURCHASE_REQUEST_WATCHERS_ROOM = "purchase_requests:watchers";
 
+// Shared room for the global ATTENTION signal (sidebar badges + the dashboard attention strip).
+// Unlike the rooms above it is NOT permission-gated, and deliberately so: the rooms above are keyed
+// on *.view, but pending work is gated by ACTION permissions (purchase_orders.approve, goods_in.create,
+// jobs.kit_request.review …). A receiver who only holds goods_in.create belongs to none of the rooms
+// above, so a gated attention room would silently never update their badge — the exact bug this
+// system exists to prevent. Gating it would mean inventing one room per action permission.
+// It is safe because the payload carries NO data at all — just an area name ("purchase_orders") as a
+// debugging aid. Every client then refetches GET /attention, which filters the catalog against that
+// user's OWN permissions and warehouse scope. A user who can act on nothing gets an empty payload, so
+// the broadcast tells them nothing they couldn't already see. Customers are excluded (staff surface).
+export const ATTENTION_ROOM = "attention:watchers";
+
 // Identity resolved from the handshake, stashed on the socket for handlers.
 interface SocketAuth {
   principalId: string; // token sub — also the room name
@@ -142,6 +154,9 @@ export function initRealtime(httpServer: HttpServer): IOServer {
 async function joinScopedRooms(socket: Socket, auth: SocketAuth): Promise<void> {
   try {
     if (auth.actor === "customer") return; // customers never see internal staff surfaces
+    // Every staff socket watches the attention signal — see ATTENTION_ROOM: it carries no data, and
+    // the per-user filtering happens in GET /attention.
+    void socket.join(ATTENTION_ROOM);
     if (auth.actor === "admin") {
       await Promise.all([
         Promise.resolve(socket.join(OFFICE_JOBS_ROOM)),
@@ -174,4 +189,13 @@ export function emitToUser(userId: string, event: string, payload: unknown): voi
 // realtime isn't initialised.
 export function emitToRoom(room: string, event: string, payload: unknown): void {
   io?.to(room).emit(event, payload);
+}
+
+// Tell every staff client "some pending-work count may have moved — refetch your own attention".
+// Called from the SAME wrappers that already emit each module's own event, so a workflow transition
+// refreshes both the module surface and the global badges in one step. `area` is a hint for logging
+// and debugging only; the client always refetches the whole (permission-filtered) attention payload,
+// so no privileged data ever rides the broadcast.
+export function emitAttentionChanged(area: string): void {
+  io?.to(ATTENTION_ROOM).emit("attention:changed", { area });
 }

@@ -5,6 +5,7 @@ import { movementFiltersFrom } from "./movement.service.js";
 import { decodeCursor } from "./movement.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
+import { sendCsv } from "../../utils/csv-response.js";
 import { param, queryInt, queryStr } from "../../utils/request.js";
 import type { AddStockInput, AdjustStockInput, CreateTransferInput } from "./inventory.validation.js";
 import type { Ownership, LocationType, StockPositionStatus } from "./stock-position.js";
@@ -37,15 +38,14 @@ export const getReorderSuggestions = asyncHandler(async (req, res) => {
 // GET /inventory/export.csv?... (same filters as the list)
 export const exportInventoryCsv = asyncHandler(async (req, res) => {
   const { search, warehouse, category, status } = req.query;
-  const { csv, capped } = await inventoryService.exportInventoryCsv(
-    { search: queryStr(search), warehouse: queryStr(warehouse), category: queryStr(category), status: queryStr(status) },
-    actorFrom(req),
+  sendCsv(
+    res,
+    "inventory",
+    await inventoryService.exportInventoryCsv(
+      { search: queryStr(search), warehouse: queryStr(warehouse), category: queryStr(category), status: queryStr(status) },
+      actorFrom(req),
+    ),
   );
-  const date = new Date().toISOString().slice(0, 10);
-  res.setHeader("Content-Type", "text/csv; charset=utf-8");
-  res.setHeader("Content-Disposition", `attachment; filename="inventory-${date}.csv"`);
-  if (capped) res.setHeader("X-Inventory-Export-Capped", "true");
-  res.send("﻿" + csv); // UTF-8 BOM so Excel renders accented text correctly
 });
 
 // GET /inventory/availability?irmItem=&warehouse=
@@ -134,12 +134,7 @@ export const listMovements = asyncHandler(async (req, res) => {
 // GET /inventory/movements/export.csv — the SAME filtered movement history as a CSV download.
 // Same filter params as listMovements (cursor/limit ignored — the export walks the whole filtered set).
 export const exportMovementsCsv = asyncHandler(async (req, res) => {
-  const { csv, capped } = await movementService.exportMovementsCsv(movementFiltersFrom(req.query), actorFrom(req));
-  const date = new Date().toISOString().slice(0, 10);
-  res.setHeader("Content-Type", "text/csv; charset=utf-8");
-  res.setHeader("Content-Disposition", `attachment; filename="stock-movements-${date}.csv"`);
-  if (capped) res.setHeader("X-Movement-Export-Capped", "true");
-  res.send("﻿" + csv); // UTF-8 BOM so Excel renders accented text correctly
+  sendCsv(res, "stock-movements", await movementService.exportMovementsCsv(movementFiltersFrom(req.query), actorFrom(req)));
 });
 
 // GET /inventory/items/:irmItemId/distribution
@@ -163,7 +158,7 @@ export const getItemJobs = asyncHandler(async (req, res) => {
 // GET /inventory/positions/export.csv
 export const exportAllPositionsCsv = asyncHandler(async (req, res) => {
   const q = req.query;
-  const { csv, count } = await aggregation.exportAllPositionsCsv({
+  const { csv, capped } = await aggregation.exportAllPositionsCsv({
     ownership: q.ownership as Ownership | undefined,
     locationType: q.location as LocationType | undefined,
     warehouseId: q.warehouse as string | undefined,
@@ -171,12 +166,8 @@ export const exportAllPositionsCsv = asyncHandler(async (req, res) => {
     search: q.search as string | undefined,
     status: q.status as StockPositionStatus | undefined,
     customerId: q.customer as string | undefined,
-  });
-  const date = new Date().toISOString().slice(0, 10);
-  res.setHeader("Content-Type", "text/csv; charset=utf-8");
-  res.setHeader("Content-Disposition", `attachment; filename="all-inventory-${date}.csv"`);
-  res.setHeader("X-Inventory-Export-Count", String(count));
-  res.send("﻿" + csv); // UTF-8 BOM so Excel renders accented text correctly
+  }, actorFrom(req));
+  sendCsv(res, "all-inventory", { csv, capped });
 });
 
 // GET /inventory/engineers (engineer lens overview)

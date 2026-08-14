@@ -16,8 +16,11 @@ import { issueResetEmail } from "#modules/auth/auth.service.js";
 import * as sessionService from "#modules/auth/session.service.js";
 import { getCustomerStock, type CustomerStock } from "./customer.stock.service.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
+import * as jobRepo from "#modules/job/job.repository.js";
+import * as jobService from "#modules/job/job.service.js";
 import { withTransactionRetry } from "../../lib/prisma.js";
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
+import type { CloudinaryImageAsset } from "../../lib/cloudinary.js";
 import { geocodePostcode, geocodePostcodesBulk, canonicalPostcode } from "../../lib/geocode.js";
 import { siteSchema } from "./customer.validation.js";
 import { getCloudinaryCreds, getRegionalSettings, getStockCodePrefix } from "#modules/settings/settings.service.js";
@@ -26,15 +29,32 @@ import { assertWarehouseAccess } from "../../lib/warehouse-access.js";
 import { generateTempPassword } from "../../utils/generate-password.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import { paginate } from "../../utils/pagination.js";
-import { toCsv } from "../../utils/csv.js";
+import { EXPORT_MAX, EXPORT_PAGING, toCsv } from "../../utils/csv.js";
 import { hashPassword } from "../../utils/password.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
+import { emitAttentionChanged } from "../../lib/realtime.js";
+import * as attachmentService from "#modules/attachment/attachment.service.js";
+
+// The customer module has no realtime surface, but four attention queues live here (stock requests
+// awaiting review, open warehouse assignments, stock-entry drafts, portal invites never signed in).
+// Those move across ~10 mutations written in two different audit shapes, with more to come — so the
+// signal is derived from the audit line every one of them already writes, instead of an emit call
+// each site has to remember. Fired unconditionally rather than filtered by action prefix: every
+// action here is a rare admin/portal mutation (creating a customer, importing sites), the receiving
+// clients debounce, and the counts are indexed `count()`s — so the cost of over-signalling is far
+// below the cost of a queue that silently stops updating when someone adds action #15.
+// Known lag: a portal invite is cleared by the customer's FIRST LOGIN, which happens in the auth
+// module and writes no customer audit — that one count settles on the next signal or safety refresh.
+function recordCustomerAudit(entry: Parameters<typeof audit.record>[0]): void {
+  audit.record(entry);
+  emitAttentionChanged("customers");
+}
 import { sendTemplatedEmail } from "#modules/email/email.service.js";
 
 // Upload a company logo to Cloudinary (random public id, "senthra/customers"
 // folder) and return its secure URL. Mirrors the staff avatar upload.
-async function uploadLogo(image: string): Promise<string> {
+async function uploadLogo(image: string): Promise<CloudinaryImageAsset> {
   const creds = await getCloudinaryCreds();
   if (!creds) {
     throw badRequest(
@@ -421,6 +441,8 @@ export interface ListCustomersParams {
   page?: number;
   pageSize?: number;
   sort?: string;
+  /** Internal only — see EXPORT_PAGING. Controllers never read this from the query string. */
+  maxPageSize?: number;
 }
 
 export interface PagedCustomers {
@@ -440,9 +462,58 @@ export async function listCustomers(params: ListCustomersParams = {}): Promise<P
       : undefined;
   const filters = { search: params.search, status };
   const total = await customerRepo.count(filters);
-  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total, params.maxPageSize);
   const customers = await customerRepo.findMany(filters, skip, pageSize, params.sort);
   return { customers: customers.map(toSummary), total, page, pageSize, totalPages };
+}
+
+/**
+ * The SAME filtered list as a CSV, minus paging. Delegates to listCustomers with one oversized page
+ * rather than re-deriving the filters — the status whitelist above is real behaviour (an unknown
+ * ?status is ignored, not matched), and a second copy of it would drift.
+ */
+export async function exportCustomersCsv(
+  params: ListCustomersParams = {},
+  actor?: AuditActor,
+): Promise<{ csv: string; capped: boolean }> {
+  const { customers } = await listCustomers({ ...params, ...EXPORT_PAGING });
+  const rows = customers.slice(0, EXPORT_MAX);
+
+  const regional = await getRegionalSettings();
+  const csv = toCsv(
+    [
+      "Code", "Name", "Legal Name", "Status", "Industry", "Registration No", "Website",
+      "Contact", "Job Title", "Email", "Phone", "Alt Phone",
+      "Address 1", "Address 2", "City", "County", "Postcode", "Country",
+      `Added (${regional.timezone})`,
+    ],
+    rows.map((c) => [
+      c.customerCode,
+      c.name,
+      c.legalName,
+      c.status,
+      c.industry,
+      c.registrationNumber,
+      c.website,
+      c.contactPerson,
+      c.contactJobTitle,
+      c.email,
+      c.phone,
+      c.altPhone,
+      c.addressLine1,
+      c.addressLine2,
+      c.city,
+      c.county,
+      c.postcode,
+      c.country,
+      formatDate(c.createdAt, regional.dateFormat, regional.timezone),
+    ]),
+  );
+
+  // `notes` and `createdBy` are deliberately absent: internal free text staff write ABOUT the
+  // customer, and a staff email — and a spreadsheet is exactly the artifact that gets forwarded on.
+  audit.record({ actor, action: "customer.exported", targetType: "customer", targetLabel: `${rows.length} rows` });
+  return { csv, capped: customers.length > EXPORT_MAX };
 }
 
 // Resolve a customer by either its database id OR its customerCode (so pages can
@@ -489,14 +560,16 @@ export interface CreateCustomerInput extends CustomerFieldsInput {
 
 // The optional company/contact/address columns (everything except name/email/auth),
 // trimmed to null. Shared by create + revive so the two stay in lockstep.
-function customerColumns(input: CustomerFieldsInput, logoUrl: string | null) {
+function customerColumns(input: CustomerFieldsInput, logo: CloudinaryImageAsset | null) {
   return {
     legalName: trimToNull(input.legalName),
     registrationNumber: trimToNull(input.registrationNumber),
     industry: trimToNull(input.industry),
     website: trimToNull(input.website),
     notes: trimToNull(input.notes),
-    logoUrl,
+    logoUrl: logo?.url ?? null,
+    logoPublicId: logo?.publicId ?? null,
+    logoResourceType: logo?.resourceType ?? null,
     contactPerson: trimToNull(input.contactPerson),
     contactJobTitle: trimToNull(input.contactJobTitle),
     phone: trimToNull(input.phone),
@@ -616,13 +689,13 @@ export async function createCustomer(
     throw conflict(`A customer named "${name}" already exists.`);
   }
 
-  const logoUrl = input.logo ? await uploadLogo(input.logo) : null;
+  const logo = input.logo ? await uploadLogo(input.logo) : null;
   const actorLabel = actor?.email ?? null;
   const fields = {
     name,
     nameLower,
     email,
-    ...customerColumns(input, logoUrl),
+    ...customerColumns(input, logo),
     createdBy: actorLabel,
     updatedBy: actorLabel,
   };
@@ -643,7 +716,7 @@ export async function createCustomer(
     throw e;
   }
 
-  audit.record({
+  recordCustomerAudit({
     actor,
     action: "customer.created",
     targetType: "customer",
@@ -739,8 +812,25 @@ export async function updateCustomer(
   if (typeof input.status === "string") data.status = normalizeStatus(input.status);
 
   // Logo: a new upload replaces the current one; removeLogo clears it.
-  if (input.logo) data.logoUrl = await uploadLogo(input.logo);
-  else if (input.removeLogo) data.logoUrl = null;
+  //
+  // A logo's public id is a fresh randomUUID, so a replacement does NOT overwrite the old asset — it
+  // just stops being referenced. Changing a customer's logo is an ordinary success path, so the file it
+  // replaces has to be released explicitly or it stays in the CDN forever.
+  let staleLogo: attachmentService.AssetRef | null = null;
+  const previousLogo: attachmentService.AssetRef = { publicId: customer.logoPublicId, resourceType: customer.logoResourceType };
+  if (input.logo) {
+    const logo = await uploadLogo(input.logo);
+    data.logoUrl = logo.url;
+    data.logoPublicId = logo.publicId;
+    data.logoResourceType = logo.resourceType;
+    // Only when the id actually moved; a legacy row has no stored id and is skipped.
+    if (previousLogo.publicId && previousLogo.publicId !== logo.publicId) staleLogo = previousLogo;
+  } else if (input.removeLogo) {
+    data.logoUrl = null;
+    data.logoPublicId = null;
+    data.logoResourceType = null;
+    if (previousLogo.publicId) staleLogo = previousLogo;
+  }
 
   if (Object.keys(data).length === 0) throw badRequest("Nothing to update.");
 
@@ -748,7 +838,9 @@ export async function updateCustomer(
   data.updatedBy = actor?.email ?? null;
 
   const updated = await customerRepo.update(id, data);
-  audit.record({
+  // After the row is written. Never throws — a storage failure cannot fail the customer update.
+  if (staleLogo) await attachmentService.releaseAsset(staleLogo, `customer ${updated.name}`);
+  recordCustomerAudit({
     actor,
     action: "customer.updated",
     targetType: "customer",
@@ -761,11 +853,68 @@ export async function updateCustomer(
 export async function deleteCustomer(id: string, actor?: AuditActor): Promise<void> {
   const customer = await customerRepo.findById(id);
   if (!customer) throw notFound("Customer not found.");
+
+  // A company that still has consignment stock in our warehouses, or work in flight, can't be removed.
+  // The delete is soft, so nothing is destroyed — but every read filters deleted customers out, which
+  // left their stock sitting in a warehouse with no owner anyone could name, and live jobs pointing at
+  // a company that no longer appears anywhere. Deactivate such a customer instead; delete once the
+  // stock is out and the work is closed.
+  //
+  // Their stock is asked about in THREE places, because it lives in three and each one empties into
+  // the next: on a warehouse shelf, out in an engineer's van, or in the damaged pool. Issuing to an
+  // engineer decrements the shelf quantity, so the entry count alone reads zero for a company whose
+  // whole consignment is in the field — and if the job it went out on has since been completed or
+  // cancelled, the open-jobs count reads zero too. Checking only the shelf let exactly the stock we
+  // are still holding be the stock that no check could see.
+  // Stock they've SENT is the fourth place, and the one none of the three above can see: an approved
+  // or assigned request that hasn't landed yet has produced no entry, no holding and no damaged unit,
+  // so a company with a delivery in transit passes every stock check there is. Counted through
+  // countOpenStockRequestsByCustomer so this guard and the "Open submissions" number on their own
+  // dashboard resolve `open` from one definition — a guard looser than the count the customer is
+  // looking at is a guard that lets you delete work they can see.
+  const [entries, engineerHeld, damaged, liveJobs, openRequests] = await Promise.all([
+    customerRepo.countStockEntriesWithStockByCustomer(id),
+    customerRepo.countEngineerHoldingsByCustomer(id),
+    customerRepo.countDamagedByCustomer(id),
+    jobRepo.countOpenByCustomer(id),
+    customerRepo.countOpenStockRequestsByCustomer(id),
+  ]);
+  if (entries > 0) {
+    throw conflict(
+      `${customer.name} still has stock in ${entries} ${entries === 1 ? "entry" : "entries"} in your warehouses. ` +
+        `Dispatch or remove the stock before deleting the customer.`,
+    );
+  }
+  if (engineerHeld > 0) {
+    throw conflict(
+      `${customer.name} still has stock out with an engineer. ` +
+        `Have it returned or written off before deleting the customer.`,
+    );
+  }
+  if (damaged > 0) {
+    throw conflict(
+      `${customer.name} still has stock in the damaged pool. ` +
+        `Clear it from Goods Management before deleting the customer.`,
+    );
+  }
+  if (liveJobs > 0) {
+    throw conflict(
+      `${customer.name} still has ${liveJobs} job${liveJobs === 1 ? "" : "s"} in progress. ` +
+        `Complete or cancel them before deleting the customer.`,
+    );
+  }
+  if (openRequests > 0) {
+    throw conflict(
+      `${customer.name} still has ${openRequests} open stock request${openRequests === 1 ? "" : "s"}. ` +
+        `Receive or close them before deleting the customer.`,
+    );
+  }
+
   // End every portal user's sessions so a removed company can't keep browsing.
   const users = await customerRepo.findUsersByCustomer(id);
   await customerRepo.softDelete(id);
   await Promise.all(users.map((u) => sessionService.endAll(u.id, "customer")));
-  audit.record({
+  recordCustomerAudit({
     actor,
     action: "customer.deleted",
     targetType: "customer",
@@ -788,7 +937,7 @@ export async function resendInvite(
 
   const temporaryPassword = await reissueLogin(user.id);
   await sessionService.endAll(user.id, "customer");
-  audit.record({
+  recordCustomerAudit({
     actor,
     action: "customer.invite_resent",
     targetType: "customer",
@@ -817,7 +966,7 @@ function auditNested(
   customer: Customer,
   label: string,
 ): void {
-  audit.record({
+  recordCustomerAudit({
     actor,
     action,
     targetType: "customer",
@@ -1054,7 +1203,7 @@ export async function bulkAddSites(
 
   const created = await customerRepo.createSitesBulk(customerId, staged);
 
-  audit.record({
+  recordCustomerAudit({
     actor,
     action: "customer.sites.bulk_imported",
     targetType: "customer",
@@ -1292,7 +1441,7 @@ export async function submitStockRequest(
     requestedBy.name,
     data,
   );
-  audit.record({
+  recordCustomerAudit({
     actor: { id: requestedBy.userId, type: "customer", email: requestedBy.email },
     action: "customer.stock_request.submitted",
     targetType: "customer",
@@ -1314,7 +1463,7 @@ export async function createStockRequestForCustomer(
   const customer = await requireCustomer(customerId);
   const data = await resolveStockRequestData(customerId, input);
   const created = await customerRepo.createStockRequest(customerId, null, requestedByName, data);
-  audit.record({
+  recordCustomerAudit({
     actor,
     action: "customer.stock_request.created_by_admin",
     targetType: "customer",
@@ -1705,7 +1854,7 @@ export async function closeAssignmentShort(
   // the audit line would understate what arrived. This label is the whole point of the feature; it
   // has to be the number that is actually true at the moment of closing.
   const outstanding = updated.quantity - updated.receivedQuantity;
-  audit.record({
+  recordCustomerAudit({
     actor,
     action: "customer.stock_request.closed_short",
     targetType: "customer_stock_assignment",
@@ -1767,7 +1916,7 @@ export async function receiveStockAssignment(
     return { updated, stockEntry };
   });
 
-  audit.record({
+  recordCustomerAudit({
     actor,
     action: "customer.stock_request.received",
     targetType: "customer_stock_assignment",
@@ -1937,6 +2086,9 @@ export interface CustomerOverview {
     /** Units declared on a submission that were short-closed and are never arriving. 0 for almost
      *  every customer, which is why the UI only surfaces it when it isn't. */
     notReceivedUnits: number;
+    /** Jobs still happening — scheduled or in progress. Owned by the job module (jobService
+     *  decides which statuses those are) so this number and the Jobs page can't disagree. */
+    activeJobs: number;
   };
   /** Units per warehouse, biggest holding first. Empty when the customer has no stock with us.
    *  Carries the id so the dashboard row can link straight to My Stock filtered to that warehouse. */
@@ -1992,6 +2144,7 @@ export async function getOwnOverview(customerId: string): Promise<CustomerOvervi
     activeProjects,
     totalProjects,
     totalSites,
+    activeJobs,
   ] = await Promise.all([
     customerRepo.findStockRequestsByCustomer(customerId, {}, { skip: 0, take: 5 }),
     // OPEN, not just `pending`. "Pending" alone read as 0 for a customer with stock sitting approved
@@ -2006,6 +2159,11 @@ export async function getOwnOverview(customerId: string): Promise<CustomerOvervi
     customerRepo.countProjectsByCustomer(customerId, { status: "active" }),
     customerRepo.countProjectsByCustomer(customerId),
     customerRepo.countSitesByCustomer(customerId),
+    // Through the job SERVICE, not its repository: which statuses count as "still happening" (and
+    // which are hidden from the customer entirely) is the job module's rule, and the Jobs page reads
+    // it from the same place. Counted here rather than derived from a list — a customer's job history
+    // grows without bound, so this must stay a COUNT, and it rides the existing Promise.all for free.
+    jobService.countActiveJobsForCustomer(customerId),
   ]);
 
   // Only the warehouses actually holding this customer's stock are fetched — the grouping already
@@ -2031,6 +2189,7 @@ export async function getOwnOverview(customerId: string): Promise<CustomerOvervi
       stockEntries,
       stockUnits,
       notReceivedUnits,
+      activeJobs,
     },
     stockByWarehouse,
     // PORTAL mapper — this is the customer's own dashboard. Using the admin `toStockRequest` here sent
@@ -2208,7 +2367,7 @@ export async function updateStockEntry(
     status: "active",
   });
 
-  audit.record({
+  recordCustomerAudit({
     actor,
     action: "customer.stock_entry.updated",
     targetType: "customer_stock_entry",
@@ -2246,7 +2405,7 @@ export async function generateStockEntryBarcode(
   assertWarehouseAccess(actor, entry.warehouseId);
 
   const recordGenerated = (barcodeValue: string) =>
-    audit.record({
+    recordCustomerAudit({
       actor,
       action: "customer.stock_entry.barcode_generated",
       targetType: "customer_stock_entry",
@@ -2288,6 +2447,20 @@ export async function generateStockEntryBarcode(
   throw new Error("Could not allocate a unique stock entry barcode.");
 }
 
+// Anything that would be left pointing at a missing row. This entry is HARD-deleted — the model has
+// no archive state, deliberately — and MongoDB enforces no foreign keys, so nothing but this list
+// stands between a delete and a dangling reference. Mirrors the checker registry IRM already uses.
+//
+// Same class of bug as deleting a job that still had stock out: the record goes, the stock and the
+// rows that describe it stay, and nothing joins them up again.
+type StockEntryDependency = { count: (entryId: string) => Promise<number>; reason: string };
+const STOCK_ENTRY_DELETE_CHECKERS: StockEntryDependency[] = [
+  { reason: "units are still out with an engineer", count: (id) => customerRepo.countEngineerHoldingsByStockEntry(id) },
+  { reason: "it is planned on a job's kit list", count: (id) => customerRepo.countKitLinesByStockEntry(id) },
+  { reason: "it has goods movements recorded against it", count: (id) => customerRepo.countMovementLinesByStockEntry(id) },
+  { reason: "units of it are in the damaged pool", count: (id) => customerRepo.countDamagedByStockEntry(id) },
+];
+
 export async function deleteStockEntry(
   entryId: string,
   actor?: AuditActor,
@@ -2296,9 +2469,23 @@ export async function deleteStockEntry(
   if (!entry) throw notFound("Stock entry not found.");
   assertWarehouseAccess(actor, entry.warehouseId);
 
+  // Stock still on the shelf goes first: deleting it would remove the units with no ledger entry
+  // anywhere, which is the one loss that leaves no trace at all.
+  if (entry.quantity > 0) {
+    throw conflict(
+      `"${entry.itemName}" still has ${entry.quantity} unit${entry.quantity === 1 ? "" : "s"} in stock. ` +
+        `Move or dispatch the stock before deleting the entry.`,
+    );
+  }
+  for (const dep of STOCK_ENTRY_DELETE_CHECKERS) {
+    if ((await dep.count(entryId)) > 0) {
+      throw conflict(`"${entry.itemName}" can't be deleted — ${dep.reason}.`);
+    }
+  }
+
   await customerRepo.deleteStockEntry(entryId);
 
-  audit.record({
+  recordCustomerAudit({
     actor,
     action: "customer.stock_entry.deleted",
     targetType: "customer_stock_entry",
@@ -2373,7 +2560,7 @@ export async function createDirectStockEntry(
     receivedAt: new Date(),
   });
 
-  audit.record({
+  recordCustomerAudit({
     actor,
     action: "customer.stock_entry.created",
     targetType: "customer_stock_entry",
@@ -2418,7 +2605,7 @@ export async function transferCustomerStock(
 
   if (!updatedSource || !updatedDest) throw conflict("Transfer failed — stock changed concurrently. Refresh and try again.");
 
-  audit.record({
+  recordCustomerAudit({
     actor,
     action: "customer_stock.transferred",
     targetType: "customer_stock_entry",
@@ -2467,7 +2654,7 @@ export async function listCustomerStockEntriesPaged(customerId: string, params: 
 
 // Cap on an export. High enough that no real customer hits it, low enough that a runaway account
 // can't ask us to render an unbounded document into memory. Mirrors AUDIT_EXPORT_MAX.
-export const PORTAL_EXPORT_MAX = 50_000;
+export const PORTAL_EXPORT_MAX = EXPORT_MAX;
 
 // PORTAL: the customer's own stock, as a CSV of the FILTERED set.
 //
@@ -2506,6 +2693,25 @@ export async function exportOwnStockCsv(
     ]),
   );
   return { csv, capped: entries.length >= PORTAL_EXPORT_MAX };
+}
+
+/**
+ * ADMIN: one customer's stock as a CSV — the Inventory tab on the customer detail page.
+ *
+ * Deliberately the SAME builder the customer's own export uses, not a wider admin variant. The two
+ * files land side by side in a reconciliation call ("your portal says 648, my sheet says 729"), and
+ * the whole value of that comparison is that both sides are looking at identical columns. A wider
+ * admin version would make every difference a question about the report rather than the stock.
+ *
+ * `requireCustomer` first so a bad id 404s rather than quietly exporting an empty file — the same
+ * guard listCustomerStockEntries applies.
+ */
+export async function exportCustomerStockCsv(
+  customerId: string,
+  params: PortalListParams = {},
+): Promise<{ csv: string; capped: boolean }> {
+  await requireCustomer(customerId);
+  return exportOwnStockCsv(customerId, params);
 }
 
 // PORTAL: the customer's submissions, as a CSV of the FILTERED set. One row PER WAREHOUSE LEG for a

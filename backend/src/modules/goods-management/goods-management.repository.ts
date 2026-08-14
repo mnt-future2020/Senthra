@@ -290,6 +290,97 @@ export function getSummariesByJobs(jobIds: string[]): Promise<JobStockSummary[]>
   if (jobIds.length === 0) return Promise.resolve([]);
   return prisma.jobStockSummary.findMany({ where: { jobId: { in: jobIds } } });
 }
+
+// Attention counts — warehouse-floor work derived from the goods lifecycle, counted at the SUMMARY
+// level (one row per job) rather than by paging the queue. Warehouse scope is applied through the
+// job's kit lines, because a job itself owns no warehouse (its lines can span several).
+//   • toIssue        = active job, kit approved, stock not fully picked  → goods_management.issue
+//   • awaitingReturn = engineer flagged returns, warehouse must receive  → goods_management.receive_return
+// `issued` is deliberately NOT counted: the stock is legitimately out with the engineer and only
+// becomes work once it is overdue (getOverdueSummary owns that) or the job completes.
+export async function countGoodsAttention(warehouseIds?: string[]): Promise<{ toIssue: number; awaitingReturn: number }> {
+  const jobScope = {
+    deletedAt: null,
+    status: { in: ["assigned", "accepted", "in_progress"] },
+    ...(warehouseIds ? { kitLines: { some: { warehouseId: { in: warehouseIds } } } } : {}),
+  };
+  const [toIssue, awaitingReturn] = await Promise.all([
+    prisma.jobStockSummary.count({
+      where: { goodsStatus: { in: ["not_issued", "partially_issued"] }, job: { is: jobScope } },
+    }),
+    // A job can sit in awaiting_return after completion, so this one only excludes cancelled/deleted.
+    prisma.jobStockSummary.count({
+      where: {
+        goodsStatus: "awaiting_return",
+        job: {
+          is: {
+            deletedAt: null,
+            status: { not: "cancelled" },
+            ...(warehouseIds ? { kitLines: { some: { warehouseId: { in: warehouseIds } } } } : {}),
+          },
+        },
+      },
+    }),
+  ]);
+  return { toIssue, awaitingReturn };
+}
+
+/**
+ * The same two goods queues split PER WAREHOUSE, for the Warehouses list's per-row count and the
+ * warehouse detail Goods tab.
+ *
+ * Not a groupBy: the warehouse lives on the job's KIT LINES, one relation hop away, and Mongo cannot
+ * group across a relation. Only the warehouse ids are selected, so this reads ids for the jobs that
+ * are already in the flat count — no rows are materialised.
+ *
+ * A job whose kit spans two warehouses is counted at BOTH. That matches the flat count's own scope
+ * rule (`kitLines: { some: { warehouseId: { in: scope } } }`, which puts the job in either warehouse's
+ * queue) and it is the truth about the work: each warehouse has its own lines to issue. So the rows
+ * can total more than the flat count, and the UI must never present them as a decomposition of it.
+ *
+ * `misc` kit lines carry no warehouse at all (free text, never stock-tracked) — they are skipped
+ * rather than bucketed anywhere.
+ */
+export async function countGoodsAttentionByWarehouse(warehouseIds?: string[]): Promise<{
+  toIssue: Record<string, number>;
+  awaitingReturn: Record<string, number>;
+}> {
+  const kitScope = warehouseIds ? { kitLines: { some: { warehouseId: { in: warehouseIds } } } } : {};
+  const select = { job: { select: { kitLines: { select: { warehouseId: true } } } } } as const;
+  const [toIssue, awaitingReturn] = await Promise.all([
+    prisma.jobStockSummary.findMany({
+      where: {
+        goodsStatus: { in: ["not_issued", "partially_issued"] },
+        job: { is: { deletedAt: null, status: { in: ["assigned", "accepted", "in_progress"] }, ...kitScope } },
+      },
+      select,
+    }),
+    prisma.jobStockSummary.findMany({
+      where: {
+        goodsStatus: "awaiting_return",
+        job: { is: { deletedAt: null, status: { not: "cancelled" }, ...kitScope } },
+      },
+      select,
+    }),
+  ]);
+
+  const allowed = warehouseIds ? new Set(warehouseIds) : null;
+  const tally = (rows: typeof toIssue): Record<string, number> => {
+    const out: Record<string, number> = {};
+    for (const r of rows) {
+      // A set per job: two kit lines at the same warehouse are one job in that warehouse's queue,
+      // which is what the flat `count` of jobStockSummary rows measures.
+      const ids = new Set<string>();
+      for (const l of r.job?.kitLines ?? []) if (l.warehouseId) ids.add(l.warehouseId);
+      for (const id of ids) {
+        if (allowed && !allowed.has(id)) continue;
+        out[id] = (out[id] ?? 0) + 1;
+      }
+    }
+    return out;
+  };
+  return { toIssue: tally(toIssue), awaitingReturn: tally(awaitingReturn) };
+}
 export function upsertSummaryTx(tx: Prisma.TransactionClient, jobId: string, data: Prisma.JobStockSummaryUncheckedUpdateInput & { goodsStatus?: string }): Promise<JobStockSummary> {
   return tx.jobStockSummary.upsert({
     where: { jobId },
@@ -559,6 +650,18 @@ export type DamagedBalanceWithWarehouse = Prisma.DamagedStockBalanceGetPayload<{
 export function findDamagedByWarehouse(warehouseId: string): Promise<DamagedBalanceWithWarehouse[]> {
   return prisma.damagedStockBalance.findMany({ where: { warehouseId, quantity: { gt: 0 } }, include: damagedBalanceInclude, orderBy: { updatedAt: "desc" } });
 }
+/**
+ * Damaged units held at a warehouse — the delete guard for it.
+ *
+ * Nothing else covers this: the inventory checker counts InventoryBalance, which a unit has already
+ * left by the time it lands in the damaged pool. So a warehouse whose only remaining contents are
+ * damaged looks empty to every other check, and deleting it strands the pool behind a warehouse id
+ * that no read resolves — findDamagedByWarehouse above being the only way back to it.
+ */
+export function countDamagedByWarehouse(warehouseId: string): Promise<number> {
+  return prisma.damagedStockBalance.count({ where: { warehouseId, quantity: { gt: 0 } } });
+}
+
 export function findDamagedByCustomer(customerId: string): Promise<DamagedBalanceWithWarehouse[]> {
   return prisma.damagedStockBalance.findMany({ where: { customerId, quantity: { gt: 0 } }, include: damagedBalanceInclude, orderBy: { updatedAt: "desc" } });
 }

@@ -1,13 +1,19 @@
+import type { Request } from "express";
+
 import * as irmService from "./irm.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
+import { sendCsv } from "../../utils/csv-response.js";
 import { param, queryInt, queryStr } from "../../utils/request.js";
 import type { CreateIrmItemInput, UpdateIrmItemInput } from "./irm.validation.js";
 
 // GET /irm-items?search=&status=&type=&category=&supplier=&sort=&page=&pageSize=
-export const listIrmItems = asyncHandler(async (req, res) => {
+// The list's filters, parsed once. Shared with the CSV export so the download is exactly the rows
+// on screen — a second copy is a second place for a filter to be forgotten, and the resulting file
+// gives no sign that it is wider or narrower than the list it came from.
+function listParamsFrom(req: Request): irmService.ListIrmItemsParams {
   const { search, status, type, category, supplier, sort, page, pageSize } = req.query;
-  const result = await irmService.listIrmItems({
+  return {
     search: queryStr(search),
     status: queryStr(status),
     type: queryStr(type),
@@ -16,13 +22,16 @@ export const listIrmItems = asyncHandler(async (req, res) => {
     sort: queryStr(sort),
     page: queryInt(page),
     pageSize: queryInt(pageSize),
-  });
-  res.json(result);
+  };
+}
+
+export const listIrmItems = asyncHandler(async (req, res) => {
+  res.json(await irmService.listIrmItems(listParamsFrom(req)));
 });
 
-// GET /irm-items/owner-options — active staff users for the owner picker.
-export const listOwnerOptions = asyncHandler(async (_req, res) => {
-  res.json({ owners: await irmService.listOwnerOptions() });
+// GET /irm-items/export.csv — the same filtered catalogue as a download (paging ignored).
+export const exportIrmItemsCsv = asyncHandler(async (req, res) => {
+  sendCsv(res, "irm-catalogue", await irmService.exportIrmItemsCsv(listParamsFrom(req), actorFrom(req)));
 });
 
 // GET /irm-items/:id  (id or code)

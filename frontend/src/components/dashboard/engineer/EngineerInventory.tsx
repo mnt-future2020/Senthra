@@ -9,7 +9,7 @@ import type { MiscHeldItem } from "@/services/engineer.service";
 import { Notice } from "@/components/ui/Notice";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
-import { EmptyState, fmtDate, PortalHeader, TableCard, TableCardSkeleton } from "@/components/dashboard/portal/portalUi";
+import { EmptyState, fmtDate, TableCard, TableCardSkeleton } from "@/components/dashboard/portal/portalUi";
 import { PortalSearch, SortHeader, usePortalTable } from "@/components/dashboard/portal/portalTable";
 import { MovementFeed, type MovementFetcher } from "@/components/dashboard/inventory/MovementFeed";
 import type { EngineerStockItem } from "@/types/engineer";
@@ -81,24 +81,24 @@ function IrmStockPanel({ stock }: { stock: EngineerStockItem[] }) {
       {t.noMatches ? (
         <NoMatches />
       ) : (
-        <TableCard headers={headers} minWidth={520} fill>
+        <TableCard
+          headers={headers}
+          minWidth={520}
+          fill
+          footer={t.total > 0 ? <Pagination embedded page={t.page} totalPages={t.totalPages} total={t.total} label="items" onPage={t.setPage} /> : null}
+        >
           {t.rows.map((s) => (
             <tr key={s.irmItemId} className="border-b border-[var(--border)] last:border-0">
-              <td className="px-4 py-3 font-semibold text-[var(--ink)]">{s.itemName}</td>
-              <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{s.itemCode}</td>
-              <td className="px-4 py-3 font-bold text-[var(--ink)]">
+              <td className="cell-y px-4 font-semibold text-[var(--ink)]">{s.itemName}</td>
+              <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">{s.itemCode}</td>
+              <td className="cell-y px-4 font-bold text-[var(--ink)]">
                 {s.quantityOnHand}
                 {s.baseUnit ? ` ${s.baseUnit}` : ""}
               </td>
-              <td className="px-4 py-3 text-[var(--muted)]">{fmtDate(s.lastMovedAt)}</td>
+              <td className="cell-y px-4 text-[var(--muted)]">{fmtDate(s.lastMovedAt)}</td>
             </tr>
           ))}
         </TableCard>
-      )}
-      {t.total > 0 && (
-        <div className="shrink-0">
-          <Pagination page={t.page} totalPages={t.totalPages} total={t.total} label="items" onPage={t.setPage} />
-        </div>
       )}
     </>
   );
@@ -152,20 +152,20 @@ function CustomerStockPanel({ holdings }: { holdings: CustomerHolding[] }) {
       {t.noMatches ? (
         <NoMatches />
       ) : (
-        <TableCard headers={headers} minWidth={400} fill>
+        <TableCard
+          headers={headers}
+          minWidth={400}
+          fill
+          footer={t.total > 0 ? <Pagination embedded page={t.page} totalPages={t.totalPages} total={t.total} label="items" onPage={t.setPage} /> : null}
+        >
           {t.rows.map((h) => (
             <tr key={h.id} className="border-b border-[var(--border)] last:border-0">
-              <td className="px-4 py-3 font-semibold text-[var(--ink)]">{h.itemName}</td>
-              <td className="px-4 py-3 text-[var(--muted)]">{h.customerName ?? "—"}</td>
-              <td className="px-4 py-3 font-bold text-[var(--ink)]">{h.quantityOnHand}</td>
+              <td className="cell-y px-4 font-semibold text-[var(--ink)]">{h.itemName}</td>
+              <td className="cell-y px-4 text-[var(--muted)]">{h.customerName ?? "—"}</td>
+              <td className="cell-y px-4 font-bold text-[var(--ink)]">{h.quantityOnHand}</td>
             </tr>
           ))}
         </TableCard>
-      )}
-      {t.total > 0 && (
-        <div className="shrink-0">
-          <Pagination page={t.page} totalPages={t.totalPages} total={t.total} label="items" onPage={t.setPage} />
-        </div>
       )}
     </>
   );
@@ -194,19 +194,19 @@ function MiscStockPanel({ misc }: { misc: MiscHeldItem[] }) {
       {t.noMatches ? (
         <NoMatches />
       ) : (
-        <TableCard headers={headers} minWidth={320} fill>
+        <TableCard
+          headers={headers}
+          minWidth={320}
+          fill
+          footer={t.total > 0 ? <Pagination embedded page={t.page} totalPages={t.totalPages} total={t.total} label="items" onPage={t.setPage} /> : null}
+        >
           {t.rows.map((m) => (
             <tr key={m.itemName} className="border-b border-[var(--border)] last:border-0">
-              <td className="px-4 py-3 font-semibold text-[var(--ink)]">{m.itemName}</td>
-              <td className="px-4 py-3 font-bold text-[var(--ink)]">{m.quantityOnHand}</td>
+              <td className="cell-y px-4 font-semibold text-[var(--ink)]">{m.itemName}</td>
+              <td className="cell-y px-4 font-bold text-[var(--ink)]">{m.quantityOnHand}</td>
             </tr>
           ))}
         </TableCard>
-      )}
-      {t.total > 0 && (
-        <div className="shrink-0">
-          <Pagination page={t.page} totalPages={t.totalPages} total={t.total} label="items" onPage={t.setPage} />
-        </div>
       )}
     </>
   );
@@ -297,9 +297,7 @@ export function EngineerInventory() {
   }, [section, reloadTick]);
 
   return (
-    <div className="flex h-full flex-col gap-5">
-      <PortalHeader title="Stock" subtitle="Company (IRM), customer consignment and misc items currently assigned to you." />
-
+    <div className="stack flex h-full flex-col">
       {/* Sub-tabs */}
       <div className="flex shrink-0 items-center gap-2">
         {SECTIONS.map(({ key, label, icon: Icon }) => (

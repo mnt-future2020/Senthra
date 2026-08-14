@@ -4,6 +4,7 @@ import * as React from "react";
 import { Check, KeyRound, Loader2, X } from "lucide-react";
 
 import * as authService from "@/services/auth.service";
+import { useDashboard } from "@/hooks/useDashboard";
 import { AccountCard } from "./AccountCard";
 import { Field } from "@/components/ui/Field";
 import { Notice } from "@/components/ui/Notice";
@@ -37,7 +38,11 @@ export function PasswordCard({ style }: { style?: React.CSSProperties }) {
   const [newPw, setNewPw] = React.useState("");
   const [confirmPw, setConfirmPw] = React.useState("");
   const [saving, setSaving] = React.useState(false);
+  // ERRORS ONLY. A failure has to stay on screen until it is fixed; the success is a moment and goes
+  // to a toast (see submit). Keeping both here meant "Password updated." sat under the form while
+  // the user typed a fresh password into it — a receipt for something that was no longer true.
   const [msg, setMsg] = React.useState<Msg>(null);
+  const { pushToast } = useDashboard();
 
   const score = scorePassword(newPw);
   const strength = STRENGTH[score];
@@ -58,7 +63,7 @@ export function PasswordCard({ style }: { style?: React.CSSProperties }) {
       setCurrentPw("");
       setNewPw("");
       setConfirmPw("");
-      setMsg({ type: "success", text: "Password updated." });
+      pushToast("Password updated.");
     } catch (err) {
       setMsg({
         type: "error",

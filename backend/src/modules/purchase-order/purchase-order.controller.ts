@@ -1,7 +1,10 @@
+import type { Request } from "express";
+
 import * as poService from "./purchase-order.service.js";
 import * as documentService from "#modules/document/document.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
+import { sendCsv } from "../../utils/csv-response.js";
 import { param, queryInt, queryStr } from "../../utils/request.js";
 import type {
   CreatePurchaseOrderInput,
@@ -18,25 +21,42 @@ import type {
 // GET /purchase-orders?search=&status=&statuses=&priority=&supplier=&warehouse=&sort=&page=&pageSize=
 // `statuses` is a comma-separated list (e.g. statuses=sent,partially_received) for callers that
 // need several statuses in one query (the warehouse "Expected deliveries" worklist).
-export const listPurchaseOrders = asyncHandler(async (req, res) => {
+// The list's filters, parsed once. Shared with the CSV export below so the download is exactly the
+// rows on screen — a second copy of this parsing is a second place for a filter to be forgotten,
+// and the symptom (an export quietly wider or narrower than the list) is not visible in the file.
+function listParamsFrom(req: Request, actor: ReturnType<typeof actorFrom>): poService.ListPurchaseOrdersParams {
   const { search, status, statuses, priority, supplier, warehouse, pm, job, sort, page, pageSize } = req.query;
-  const actor = actorFrom(req);
-  // pm=me resolves to the signed-in user — the PM's "Awaiting my action" worklist.
-  const pmParam = typeof pm === "string" ? (pm === "me" ? actor.id ?? undefined : pm) : undefined;
-  const result = await poService.listPurchaseOrders({
+  return {
     search: queryStr(search),
     status: queryStr(status),
     statuses: typeof statuses === "string" ? statuses.split(",").map((s) => s.trim()).filter(Boolean) : undefined,
     priority: queryStr(priority),
     supplier: queryStr(supplier),
     warehouse: queryStr(warehouse),
-    pm: pmParam,
+    // pm=me resolves to the signed-in user — the PM's "Awaiting my action" worklist.
+    pm: typeof pm === "string" ? (pm === "me" ? actor.id ?? undefined : pm) : undefined,
     job: queryStr(job),
     sort: queryStr(sort),
     page: queryInt(page),
     pageSize: queryInt(pageSize),
-  }, actor);
-  res.json(result);
+  };
+}
+
+export const listPurchaseOrders = asyncHandler(async (req, res) => {
+  const actor = actorFrom(req);
+  res.json(await poService.listPurchaseOrders(listParamsFrom(req, actor), actor));
+});
+
+// GET /purchase-orders/export.csv — the same filtered list as a download (paging ignored).
+export const exportPurchaseOrdersCsv = asyncHandler(async (req, res) => {
+  const actor = actorFrom(req);
+  sendCsv(res, "purchase-orders", await poService.exportPurchaseOrdersCsv(listParamsFrom(req, actor), actor));
+});
+
+// GET /purchase-orders/export-lines.csv — the same orders, ONE ROW PER LINE (the spend report).
+export const exportPurchaseOrderLinesCsv = asyncHandler(async (req, res) => {
+  const actor = actorFrom(req);
+  sendCsv(res, "purchase-order-lines", await poService.exportPurchaseOrderLinesCsv(listParamsFrom(req, actor), actor));
 });
 
 // GET /purchase-orders/pm-candidates?jobId= — eligible PMs for the Route-to-PM picker plus the

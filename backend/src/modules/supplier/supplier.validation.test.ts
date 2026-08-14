@@ -116,12 +116,6 @@ describe("updateSupplierSchema", () => {
     expect(updateSupplierSchema.safeParse({ city: "   " }).success).toBe(false);
   });
 
-  it("accepts clearing the owner via empty string", () => {
-    const r = updateSupplierSchema.safeParse({ ownerUserId: "" });
-    expect(r.success).toBe(true);
-    if (r.success) expect(r.data.ownerUserId).toBeNull();
-  });
-
   it("clears payment terms when sent an empty string (— None — on edit)", () => {
     const r = updateSupplierSchema.safeParse({ paymentTerms: "" });
     expect(r.success).toBe(true);

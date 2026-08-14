@@ -6,10 +6,18 @@ import { ArrowLeft, ArrowRightLeft, Briefcase, ChevronRight, PackageOpen, Truck 
 
 import * as svc from "@/services/stockPosition.service";
 import type { EngineerInventoryDetail, EngineerOverviewRow } from "@/services/stockPosition.service";
+import { CELL_ONE_LINE, tableMinWidth } from "@/components/ui/tableLayout";
 import { useAuth } from "@/hooks/useAuth";
+import { ExportButton } from "@/components/ui/ExportButton";
 import { OwnerTag, TableSkeletonRows } from "./hubUi";
 import { AdminTransferBoard } from "./AdminTransferBoard";
 
+
+// Item · Owner · Qty · Job · Customer · Status, and the per-engineer roll-up beside it. Both sat
+// under one flat `min-w-[640px]`, which is far too tight for the first — item and customer names are
+// the long values there.
+const HOLDINGS_MIN_WIDTH = tableMinWidth(["wide", "normal", "narrow", "normal", "wide", "narrow"]);
+const ENGINEERS_MIN_WIDTH = tableMinWidth(["wide", "narrow", "narrow", "narrow"]);
 const TH = "px-4 py-3 text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]";
 const TD = "px-4 py-3";
 
@@ -100,7 +108,7 @@ function EngineerDetail({ engineer, onBack }: { engineer: EngineerOverviewRow; o
           </div>
         ) : (
           <div className="overflow-x-auto rounded-xl border border-[var(--border)]">
-            <table className="w-full text-left text-sm">
+            <table className="w-full text-left text-sm" style={{ minWidth: HOLDINGS_MIN_WIDTH }}>
               <thead>
                 <tr className="border-b border-[var(--border)]">
                   <th className={TH}>Item</th>
@@ -111,7 +119,7 @@ function EngineerDetail({ engineer, onBack }: { engineer: EngineerOverviewRow; o
               <tbody>
                 {data.holdings.map((h, i) => (
                   <tr key={`${h.itemName}-${i}`} className="border-b border-[var(--border)] last:border-0">
-                    <td className={`${TD}`}>
+                    <td className={`${TD} ${CELL_ONE_LINE}`} title={h.customerName ? `${h.itemName} · ${h.customerName}` : h.itemName}>
                       <span className="font-semibold text-[var(--ink)]">{h.itemName}</span>
                       {h.customerName ? (
                         <span className="ml-1 text-[11px] text-[var(--faint)]">· {h.customerName}</span>
@@ -205,7 +213,7 @@ function EngineersList({
       </p>
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
         <div className="min-h-0 flex-1 overflow-auto">
-          <table className="w-full min-w-[640px] text-left text-sm">
+          <table className="w-full text-left text-sm" style={{ minWidth: ENGINEERS_MIN_WIDTH }}>
             <thead className="sticky top-0 z-10 bg-[var(--surface)]">
               <tr className="border-b border-[var(--border)]">
                 <th className={TH}>Engineer</th>
@@ -313,6 +321,21 @@ export function EngineersOverview() {
           >
             <ArrowRightLeft className="h-3.5 w-3.5" /> Transfers
           </button>
+        </div>
+      )}
+
+      {/* Field-stock reconciliation. The screen above is a ROLL-UP (one row per engineer); the file
+          is the per-item detail behind it, which is what a stock count is actually done against.
+          It reuses the positions export filtered to `location=engineer` rather than adding an
+          endpoint — same rows, same permission, and no second definition of "engineer-held stock"
+          to drift from the one the Inventory Hub already uses. */}
+      {view === "list" && can("inventory.export") && (
+        <div className="flex shrink-0 justify-end">
+          <ExportButton
+            label="Export field stock"
+            title="Export every item currently held by an engineer to CSV"
+            onExport={() => svc.exportPositionsCsv({ location: "engineer" })}
+          />
         </div>
       )}
 

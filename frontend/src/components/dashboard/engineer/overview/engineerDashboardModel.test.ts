@@ -47,8 +47,39 @@ describe("buildStatCards", () => {
 
   it("flags overdue in the in-progress hint", () => {
     const inProg = buildStatCards(base, allow).find((c) => c.key === "inProgress")!;
-    expect(inProg.hint).toBe("1 overdue");
+    expect(inProg.hint).toBe("1 overdue across active jobs");
     expect(inProg.hintTone).toBe("red");
+  });
+
+  // The hint counts ACTIVE jobs (assigned + accepted + in_progress); the value counts `in_progress`
+  // alone. So it is not a breakdown of the number above it, and can legitimately exceed it — "1 /
+  // In progress / 4 overdue" is a real state, usually because the late job is still Accepted. Left
+  // unqualified it reads as "4 of that 1 are late", which is impossible, so every branch that spans
+  // the wider set has to name it.
+  it("says which set the hint counts, so it can never read as a share of the value", () => {
+    const spanning = buildStatCards(
+      { ...base, jobs: { ...base.jobs, inProgress: 1, overdue: 4 } },
+      allow,
+    ).find((c) => c.key === "inProgress")!;
+    expect(spanning.value).toBe(1);
+    expect(spanning.hint).toContain("across active jobs");
+  });
+
+  it("qualifies the due-this-week branch the same way", () => {
+    const due = buildStatCards(
+      { ...base, jobs: { ...base.jobs, overdue: 0, accepted: 0, dueThisWeek: 3 } },
+      allow,
+    ).find((c) => c.key === "inProgress")!;
+    expect(due.hint).toBe("3 due this week across active jobs");
+  });
+
+  // The card opens its OWN headline. The wider overdue set is reachable from the attention row below,
+  // which filters to exactly it — so neither number sends anyone to a list that doesn't hold it.
+  it("keeps the card pointed at in-progress, leaving the overdue set to the attention row", () => {
+    const inProg = buildStatCards(base, allow).find((c) => c.key === "inProgress")!;
+    expect(inProg.href).toBe("/dashboard/engineer/jobs?status=in_progress");
+    const row = buildAttentionRows(base, allow).find((r) => r.key === "overdue")!;
+    expect(row.href).toBe("/dashboard/engineer/jobs?status=overdue");
   });
 });
 

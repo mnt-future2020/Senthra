@@ -23,6 +23,7 @@ vi.mock("#modules/purchase-order/purchase-order.repository.js", () => ({ findByI
 vi.mock("#modules/inventory/inventory.service.js", () => ({ applyInbound: vi.fn() }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn() }));
+vi.mock("#modules/attachment/attachment.service.js", () => ({ releaseAsset: vi.fn() }));
 vi.mock("../../lib/cloudinary.js", () => ({ uploadFileToCloudinary: vi.fn() }));
 vi.mock("../../lib/prisma.js", () => ({ withTransaction: (fn: (tx: unknown) => unknown) => fn({}) }));
 
@@ -33,6 +34,7 @@ import * as inventoryService from "#modules/inventory/inventory.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
+import * as attachmentService from "#modules/attachment/attachment.service.js";
 import { addAttachment, cancelGoodsReceipt, completeGoodsReceipt, createGoodsReceipt, deleteGoodsReceipt, getGoodsReceipt, removeAttachment, updateGoodsReceipt } from "./goods-in.service.js";
 
 const GRN_ID = "e".repeat(24);
@@ -152,6 +154,8 @@ describe("getGoodsReceipt — previouslyReceived freshness", () => {
     expect(mockPoRepoFindById).toHaveBeenCalledWith(PO_ID);
   });
 
+  // A completed GRN's own units are now IN the PO line's receivedQuantity, so a live read would
+  // count them as "previously received" against itself. Its snapshot is the history.
   it("keeps a COMPLETED GRN's frozen snapshot (no live lookup)", async () => {
     mockFindById.mockResolvedValue(
       grnRow({ status: "completed", items: [grnItem({ orderedQuantity: 100, previouslyReceived: 70, receivedQuantity: 30 })] }),
@@ -161,6 +165,24 @@ describe("getGoodsReceipt — previouslyReceived freshness", () => {
 
     expect(grn.items[0].previouslyReceived).toBe(70);
     expect(mockPoRepoFindById).not.toHaveBeenCalled();
+  });
+
+  // A cancelled receipt never posted, so — exactly like a draft — the PO's live figure excludes it
+  // and is the honest answer. Reverting it to the creation-time snapshot made Prev. visibly CHANGE at
+  // the moment of cancelling (1 → 0 in the case that surfaced this), which reads as though cancelling
+  // had reversed a receipt somewhere. Cancelling moves no stock and moves no PO quantity.
+  it("recomputes a CANCELLED GRN's previouslyReceived live, so cancelling never moves the number", async () => {
+    const items = [grnItem({ orderedQuantity: 100, previouslyReceived: 0, receivedQuantity: 30 })];
+    mockPoRepoFindById.mockResolvedValue({ id: PO_ID, items: [{ id: POI_ID, quantity: 100, receivedQuantity: 70 }] });
+
+    mockFindById.mockResolvedValue(grnRow({ status: "draft", items }));
+    const asDraft = await getGoodsReceipt(GRN_ID);
+
+    mockFindById.mockResolvedValue(grnRow({ status: "cancelled", items }));
+    const asCancelled = await getGoodsReceipt(GRN_ID);
+
+    expect(asCancelled.items[0].previouslyReceived).toBe(70);
+    expect(asCancelled.items[0].previouslyReceived).toBe(asDraft.items[0].previouslyReceived);
   });
 });
 
@@ -354,9 +376,15 @@ describe("attachments — draft-only guard", () => {
   it("adds an attachment on a DRAFT receipt", async () => {
     mockFindById.mockResolvedValue(grnRow({ status: "draft" }));
     mockCreds.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
-    mockUpload.mockResolvedValue("https://cdn/inv.pdf");
+    mockUpload.mockResolvedValue({ url: "https://cdn/inv.pdf", publicId: "senthra/goods-in/uuid.pdf", resourceType: "raw" });
     await addAttachment(GRN_ID, att, { type: "admin", email: "x@x.com" });
     expect(mockAddAtt).toHaveBeenCalledTimes(1);
+    // Identity, not just the URL — this is what makes the file deletable later.
+    expect(mockAddAtt.mock.calls[0][0]).toMatchObject({
+      url: "https://cdn/inv.pdf",
+      publicId: "senthra/goods-in/uuid.pdf",
+      resourceType: "raw",
+    });
     expect(auditActions()).toContain("goods_in.attachment_added");
   });
 
@@ -387,5 +415,48 @@ describe("attachments — draft-only guard", () => {
     await expect(removeAttachment(GRN_ID, "att1")).rejects.toThrow(/only draft/i);
     expect(mockFindAtt).not.toHaveBeenCalled();
     expect(mockRemoveAtt).not.toHaveBeenCalled();
+  });
+});
+
+// GRN attachments are always uploaded fresh, so in practice each row owns its file outright. The
+// cleanup still goes through the same reference-counted path rather than deleting directly — the
+// next module that copies an attachment would otherwise inherit a silent bug here.
+describe("GRN attachments — Cloudinary cleanup", () => {
+  const mockFindAtt = grnRepo.findAttachment as ReturnType<typeof vi.fn>;
+  const mockRemoveAtt = grnRepo.removeAttachment as ReturnType<typeof vi.fn>;
+  const release = attachmentService.releaseAsset as ReturnType<typeof vi.fn>;
+  const ATT = { id: "att1", goodsReceiptId: GRN_ID, publicId: "senthra/goods-in/inv.pdf", resourceType: "raw" };
+
+  beforeEach(() => {
+    mockFindById.mockResolvedValue(grnRow({ status: "draft" }));
+    mockFindAtt.mockResolvedValue(ATT);
+  });
+
+  it("hands the removed row's identity to the cleanup", async () => {
+    await removeAttachment(GRN_ID, "att1");
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(release.mock.calls[0][0]).toMatchObject({ publicId: ATT.publicId, resourceType: ATT.resourceType });
+    expect(release.mock.calls[0][1]).toContain("GRN-0001");
+  });
+
+  it("releases only AFTER the DB row is deleted", async () => {
+    const order: string[] = [];
+    mockRemoveAtt.mockImplementation(() => { order.push("db"); return Promise.resolve({}); });
+    release.mockImplementation(() => { order.push("cleanup"); return Promise.resolve(); });
+    await removeAttachment(GRN_ID, "att1");
+    expect(order).toEqual(["db", "cleanup"]);
+  });
+
+  it("never releases when the draft-only guard rejects the removal", async () => {
+    mockFindById.mockResolvedValue(grnRow({ status: "completed" }));
+    await expect(removeAttachment(GRN_ID, "att1")).rejects.toThrow(/only draft/i);
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  // Soft delete keeps the attachment rows, so the references — and the files — must survive.
+  it("soft-deleting the GRN destroys nothing", async () => {
+    mockFindById.mockResolvedValue(grnRow({ status: "draft", attachments: [ATT] }));
+    await deleteGoodsReceipt(GRN_ID);
+    expect(release).not.toHaveBeenCalled();
   });
 });

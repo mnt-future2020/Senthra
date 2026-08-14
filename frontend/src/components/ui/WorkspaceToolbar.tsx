@@ -8,8 +8,8 @@ import { inputCls } from "@/components/ui/styles";
 // Toolbar for an OPERATIONAL WORKSPACE TAB rendered inside an entity (e.g. a Warehouse tab). This is
 // the WORKSPACE archetype: the tab inherits its identity from the parent entity header, so it starts
 // DIRECTLY with search / filters / actions — no page title or description (that would just repeat the
-// entity name). Distinct from ListPageHeader (a standalone module page has a title) and DetailHeader
-// (one entity, collapsible).
+// entity name). Distinct from PageActions (page-level tabs/actions on a standalone module page, whose
+// title comes from the top bar) and DetailHeader (one entity, collapsible).
 //
 // It's a pinned (`shrink-0`) single control row that wraps on small screens:
 //   [ search ]  [ …filters ]                                   [ …actions ]

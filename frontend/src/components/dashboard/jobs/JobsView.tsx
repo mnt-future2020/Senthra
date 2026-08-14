@@ -10,19 +10,27 @@ import { listCustomers, type PagedCustomers } from "@/services/customer.service"
 import { listEngineerOptions } from "@/services/warehouse.service";
 import type { WarehouseManager } from "@/types/warehouse";
 import { useAuth } from "@/hooks/useAuth";
+import { ExportButton } from "@/components/ui/ExportButton";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
 import { useJobSocket } from "@/hooks/useJobSocket";
 import { subscribe } from "@/lib/socket";
-import { ListPageHeader } from "@/components/ui/ListPageHeader";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { AttentionBar } from "@/components/dashboard/shell/AttentionBar";
 import { JOB_STATUS_LABELS, JOB_LINE_TYPE_LABELS, JobStatusChip, GoodsStatusChip, formatDate } from "./jobStatus";
+import { CELL_ONE_LINE, colClass, colClassAt, tableMinWidth, type ColPriority } from "@/components/ui/tableLayout";
 import type { Job, JobStatus } from "@/types/job";
 
 const PAGE_SIZE = 20;
+
+// Job · Name · Customer · Engineer · Status · Goods · Due date · actions.
+// The flat `min-w-[1000px]` this replaces gave each of those ~125px, and "JOB-2026-0030" alone needs
+// about 142px — so the code column wrapped to three lines and every row stood two to three lines
+// tall. Engineer and Goods step aside on a narrow screen; the row still opens the job.
+const JOB_MIN_WIDTH = tableMinWidth(["normal", "wide", "wide", "normal", "narrow", "narrow", "normal", "narrow"]);
 
 function MenuItem({ icon: Icon, danger, onClick, children }: { icon: React.ElementType; danger?: boolean; onClick: () => void; children: React.ReactNode }) {
   return (
@@ -84,20 +92,24 @@ function RowActions({ job, canEdit, canDelete, onEdit, onDelete }: { job: Job; c
   );
 }
 
+// One array drives BOTH rows below, which is the rule colClass exists to enforce: a placeholder cell
+// that stays visible while its header is hidden shifts every cell after it.
+const SKELETON_COLS: ColPriority[] = ["always", "always", "always", "lg", "always", "xl", "always"];
+
 function TableSkeleton({ actions }: { actions: boolean }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[1000px] text-sm">
+      <table className="w-full text-sm" style={{ minWidth: JOB_MIN_WIDTH }}>
         <thead>
           <tr className="border-b border-[var(--border)] text-left text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-            <th className="px-4 py-3">Job</th><th className="px-4 py-3">Name</th><th className="px-4 py-3">Customer</th>
-            <th className="px-4 py-3">Engineer</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Goods</th><th className="px-4 py-3">Due date</th>{actions && <th className="px-4 py-3" />}
+            <th className="cell-y px-4">Job</th><th className="cell-y px-4">Name</th><th className="cell-y px-4">Customer</th>
+            <th className={`cell-y px-4 ${colClass("lg")}`}>Engineer</th><th className="cell-y px-4">Status</th><th className={`cell-y px-4 ${colClass("xl")}`}>Goods</th><th className="cell-y px-4">Due date</th>{actions && <th className="cell-y px-4" />}
           </tr>
         </thead>
         <tbody>
           {Array.from({ length: 6 }).map((_, i) => (
             <tr key={i} className="border-b border-[var(--border)] last:border-0">
-              {Array.from({ length: actions ? 8 : 7 }).map((__, j) => (<td key={j} className="px-4 py-3"><Skeleton className="h-3 w-20" /></td>))}
+              {Array.from({ length: actions ? 8 : 7 }).map((__, j) => (<td key={j} className={`cell-y px-4 ${colClassAt(SKELETON_COLS, j)}`}><Skeleton className="h-3 w-20" /></td>))}
             </tr>
           ))}
         </tbody>
@@ -114,7 +126,10 @@ export function JobsView() {
 
   // ── URL-derived filter state ────────────────────────────────────────────────
   const search = searchParams.get("q") ?? "";
-  const statusFilter = (searchParams.get("status") ?? "all") as "all" | JobStatus;
+  // "overdue" is a DERIVED pseudo-status the server resolves against the company-timezone day start
+  // (same predicate as the overdue dashboard card and the Jobs attention badge, so all three agree).
+  // It is not a JobStatus, so it never reaches a status chip — only this filter and the query string.
+  const statusFilter = (searchParams.get("status") ?? "all") as "all" | "overdue" | JobStatus;
   const customer = searchParams.get("customer") ?? "";
   const engineer = searchParams.get("engineer") ?? "";
   const page = Math.max(1, Number(searchParams.get("page")) || 1);
@@ -168,6 +183,19 @@ export function JobsView() {
   React.useEffect(() => subscribe(["kit_request:updated"], () => setRefreshKey((k) => k + 1)), []);
 
   // Debounce the search box into ?q (reset page on change).
+  // The filters WITHOUT paging — one definition, used by the list (which adds the page) and by the
+  // CSV export (which must not). Two copies is how a download quietly stops matching the screen it
+  // was taken from, and nothing about the resulting file looks wrong.
+  const exportParams = React.useMemo(
+    () => ({
+      search: search || undefined,
+      status: statusFilter === "all" ? undefined : statusFilter,
+      customer: customer || undefined,
+      engineer: engineer || undefined,
+    }),
+    [search, statusFilter, customer, engineer],
+  );
+
   React.useEffect(() => {
     const t = setTimeout(() => {
       if (searchInput.trim() !== search) patchParams({ q: searchInput.trim() || null }, true);
@@ -183,7 +211,7 @@ export function JobsView() {
   React.useEffect(() => {
     let active = true;
     (async () => {
-      const params = { search: search || undefined, status: statusFilter === "all" ? undefined : statusFilter, customer: customer || undefined, engineer: engineer || undefined, page, pageSize: PAGE_SIZE };
+      const params = { ...exportParams, page, pageSize: PAGE_SIZE };
       const cached = jobService.getCachedJobs(params);
       if (active && cached) setData(cached);
       setLoading(true);
@@ -199,7 +227,7 @@ export function JobsView() {
       }
     })();
     return () => { active = false; };
-  }, [search, statusFilter, customer, engineer, page, refreshKey]);
+  }, [exportParams, page, refreshKey]);
 
   const { rows, showSkeleton, isFiltered } = React.useMemo(() => {
     const r = data?.jobs ?? [];
@@ -227,17 +255,29 @@ export function JobsView() {
   };
 
   return (
-    <div className="flex h-full flex-col gap-5">
-      <ListPageHeader title="Jobs" subtitle="Create and assign installation, survey and maintenance jobs. Assigning a job notifies the engineer in real time; they accept it from their portal." />
-
+    <div className="stack flex h-full flex-col">
       <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:flex-wrap lg:items-center">
         <div className="relative w-full lg:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input value={searchInput} onChange={(e) => setSearchInput(e.target.value)} placeholder="Search job, name, customer or engineer…" className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]" />
         </div>
-        <Select size="sm" value={statusFilter} onChange={(v) => patchParams({ status: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All statuses" }, ...(Object.keys(JOB_STATUS_LABELS) as JobStatus[]).map((s) => ({ value: s, label: JOB_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
+        <Select size="sm" value={statusFilter} onChange={(v) => patchParams({ status: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All statuses" }, { value: "overdue", label: "Overdue" }, ...(Object.keys(JOB_STATUS_LABELS) as JobStatus[]).map((s) => ({ value: s, label: JOB_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
         <Select size="sm" value={customer} onChange={(v) => patchParams({ customer: v || null }, true)} options={[{ value: "", label: "All customers" }, ...customers.map((c) => ({ value: c.id, label: c.name }))]} ariaLabel="Filter by customer" />
         <Select size="sm" value={engineer} onChange={(v) => patchParams({ engineer: v || null }, true)} options={[{ value: "", label: "All engineers" }, ...engineers.map((u) => ({ value: u.id, label: u.name }))]} ariaLabel="Filter by engineer" />
+        {/* Breakdown of the sidebar's Jobs badge — rejected jobs to reassign, overdue work, jobs
+            awaiting acceptance, kit requests to review. It sat in a row of its own above this card, costing a
+            chip row plus the flex gap for two chips; the toolbar's free space between the filters and
+            the New job button (which claims the rest with ml-auto) holds them at no vertical cost.
+            They belong here on the concept too: every one of them narrows THIS list. */}
+        <AttentionBar nav="/dashboard/jobs" className="flex flex-wrap items-center gap-1.5" />
+        {/* Before "New job" and outside its ml-auto, so the primary action stays hard right. */}
+        {can("jobs.export") && (
+          <ExportButton
+            onExport={() => jobService.exportJobsCsv(exportParams)}
+            disabled={rows.length === 0}
+            title="Export the filtered jobs to CSV"
+          />
+        )}
         {can("jobs.create") && (
           <button onClick={() => router.push("/dashboard/jobs/new")} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 lg:ml-auto">
             <Plus className="h-4 w-4" /> New job
@@ -260,11 +300,11 @@ export function JobsView() {
           </div>
         ) : (
           <div className="min-h-0 flex-1 overflow-auto">
-            <table className="w-full min-w-[1000px] text-left text-sm">
+            <table className="w-full text-left text-sm" style={{ minWidth: JOB_MIN_WIDTH }}>
               <thead>
                 <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                  <th className="px-4 py-3">Job</th><th className="px-4 py-3">Name</th><th className="px-4 py-3">Customer</th>
-                  <th className="px-4 py-3">Engineer</th><th className="px-4 py-3">Status</th><th className="px-4 py-3">Goods</th><th className="px-4 py-3">Due date</th>{showActions && <th className="px-4 py-3" />}
+                  <th className="cell-y px-4">Job</th><th className="cell-y px-4">Name</th><th className="cell-y px-4">Customer</th>
+                  <th className={`cell-y px-4 ${colClass("lg")}`}>Engineer</th><th className="cell-y px-4">Status</th><th className={`cell-y px-4 ${colClass("xl")}`}>Goods</th><th className="cell-y px-4">Due date</th>{showActions && <th className="cell-y px-4" />}
                 </tr>
               </thead>
               <tbody>
@@ -275,7 +315,7 @@ export function JobsView() {
                   return (
                   <React.Fragment key={job.id}>
                   <tr onClick={() => router.push(`/dashboard/jobs/${job.jobNumber}`)} className="cursor-pointer border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]">
-                    <td className="px-4 py-3">
+                    <td className="cell-y px-4">
                       <div className="flex items-center gap-2">
                         {hasKit ? (
                           <button onClick={(e) => { e.stopPropagation(); toggleExpand(job.id); }} className="shrink-0 rounded p-0.5 text-[var(--muted)] hover:bg-[var(--surface-2)] hover:text-[var(--ink)]" aria-label={isOpen ? "Hide kit list" : "Show kit list"} aria-expanded={isOpen}>
@@ -285,7 +325,7 @@ export function JobsView() {
                         <span className="font-mono text-xs text-[var(--muted)]">{job.jobNumber}</span>
                       </div>
                     </td>
-                    <td className="px-4 py-3 font-semibold text-[var(--ink)]">
+                    <td className="cell-y px-4 font-semibold text-[var(--ink)]">
                       <div className="flex items-center gap-2">
                         <span className="min-w-0 truncate">{job.name}</span>
                         {(job.pendingKitRequestCount ?? 0) > 0 && (
@@ -298,13 +338,34 @@ export function JobsView() {
                         )}
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{job.customerName ?? "—"}</td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{job.assignedEngineerName ?? "—"}</td>
-                    <td className="px-4 py-3"><JobStatusChip status={job.status} /></td>
-                    <td className="px-4 py-3">{hasKit ? <GoodsStatusChip status={job.goodsStatus} /> : <span className="text-[var(--faint)]">—</span>}</td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{formatDate(job.completionDate)}</td>
+                    {/* One line each, with the full value in the title — see CELL_ONE_LINE. Before
+                        this the columns were squeezed enough that "ABC Company" and "Shahul FE" both
+                        wrapped, and every row stood two to three lines tall. */}
+                    <td className={`cell-y px-4 text-[var(--muted)] ${CELL_ONE_LINE}`} title={job.customerName ?? undefined}>{job.customerName ?? "—"}</td>
+                    <td className={`cell-y px-4 text-[var(--muted)] ${CELL_ONE_LINE} ${colClass("lg")}`} title={job.assignedEngineerName ?? undefined}>{job.assignedEngineerName ?? "—"}</td>
+                    <td className="cell-y px-4"><JobStatusChip status={job.status} /></td>
+                    <td className={`cell-y px-4 ${colClass("xl")}`}>{hasKit ? <GoodsStatusChip status={job.goodsStatus} /> : <span className="text-[var(--faint)]">—</span>}</td>
+                    {/* Every due date used to render in the same grey, so "Jobs overdue 4" named
+                        four rows the table pointed at in no way — the only route to them was
+                        clicking the chip. The flag and the day count are server-derived (see the
+                        `overdue` field), so what is red here is exactly what that chip counted. */}
+                    <td className={`cell-y px-4 ${job.overdue ? "font-semibold text-[var(--neg)]" : "text-[var(--muted)]"}`}>
+                      <span className="inline-flex flex-wrap items-center gap-1.5">
+                        {formatDate(job.completionDate)}
+                        {job.overdue && job.daysLate != null && (
+                          // How far past due, which the date alone doesn't give at a glance — the same
+                          // badge the warehouse Expected-deliveries list uses, worded identically.
+                          <span
+                            title={`Due ${formatDate(job.completionDate)} — still open`}
+                            className="whitespace-nowrap rounded-full bg-[var(--neg)]/12 px-1.5 py-0.5 text-[10px] font-bold text-[var(--neg)]"
+                          >
+                            {job.daysLate}d late
+                          </span>
+                        )}
+                      </span>
+                    </td>
                     {showActions && (
-                      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                      <td className="cell-y px-4" onClick={(e) => e.stopPropagation()}>
                         <RowActions job={job} canEdit={canEdit && jobEditable(job)} canDelete={canDelete} onEdit={() => router.push(`/dashboard/jobs/${job.jobNumber}/edit`)} onDelete={() => setConfirm({ open: true, job })} />
                       </td>
                     )}
@@ -342,15 +403,19 @@ export function JobsView() {
             </table>
           </div>
         )}
+        {data && data.total > 0 && (
+            <Pagination embedded page={data.page} totalPages={data.totalPages} total={data.total} label="jobs" onPage={(p) => patchParams({ page: p > 1 ? String(p) : null }, false)} />
+        )}
       </div>
 
-      {data && data.total > 0 && (
-        <div className="shrink-0">
-          <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="jobs" onPage={(p) => patchParams({ page: p > 1 ? String(p) : null }, false)} />
-        </div>
-      )}
-
-      <ConfirmDialog open={confirm.open} title="Remove job?" message={<>This deletes job <strong className="text-[var(--ink)]">{confirm.job?.jobNumber}</strong>. Only draft or cancelled jobs can be deleted.</>} confirmLabel="Remove" danger busy={deleting} onConfirm={onDelete} onClose={() => setConfirm({ open: false, job: null })} />
+      <ConfirmDialog open={confirm.open} title="Remove job?" // States BOTH rules the server enforces. Saying only "draft or cancelled" was a half-truth: a
+        // cancelled job holding stock is refused too, so someone reading this, seeing the job IS
+        // cancelled, and confirming got a rejection that looked like a bug rather than the rule.
+        // Deliberately NOT hidden or disabled instead — the row has no kit lines (see the LIST
+        // projection in job.repository.ts), so the page cannot know what is outstanding without a
+        // per-row tally, and goodsStatus is not a safe proxy: "awaiting return" also covers a job whose
+        // stock is all back but unreconciled, which the server WOULD let you delete.
+        message={<>This deletes job <strong className="text-[var(--ink)]">{confirm.job?.jobNumber}</strong>. A job can only be deleted once it&rsquo;s draft or cancelled and has no stock out with the engineer.</>} confirmLabel="Remove" danger busy={deleting} onConfirm={onDelete} onClose={() => setConfirm({ open: false, job: null })} />
     </div>
   );
 }

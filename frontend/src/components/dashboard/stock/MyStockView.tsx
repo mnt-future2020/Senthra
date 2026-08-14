@@ -9,7 +9,7 @@ import { Modal } from "@/components/ui/Modal";
 import { Notice } from "@/components/ui/Notice";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
-import { toolbarBtn, toolbarInputCls } from "@/components/ui/styles";
+import { toolbarActionsCls, toolbarBtn, toolbarInputCls } from "@/components/ui/styles";
 import type { PagedStockEntries } from "@/services/customer.service";
 import {
   clickableRowCls,
@@ -17,8 +17,6 @@ import {
   DetailRow,
   EmptyState,
   fmtDate,
-  HeaderCardSkeleton,
-  PortalHeader,
   TableCard,
   TableCardSkeleton,
 } from "@/components/dashboard/portal/portalUi";
@@ -37,6 +35,10 @@ const STATUS_OPTIONS = [
   { value: "active", label: "Active" },
   { value: "draft", label: "Draft" },
 ];
+
+// The filters an export was produced under, as one comparable string. `page` is absent on purpose:
+// the export deliberately ignores paging ("everything matching what I'm looking at").
+const exportFilterKey = (search: string, status: string, warehouseId: string) => `${search}|${status}|${warehouseId}`;
 
 function StatusPill({ status }: { status: string }) {
   return (
@@ -100,7 +102,12 @@ export function MyStockView() {
   // separate and renders INLINE: the list on screen is fine, and replacing it with an error would
   // throw away the filters the customer had just set to produce that export.
   const [msg, setMsg] = React.useState<Msg>(null);
-  const [exportMsg, setExportMsg] = React.useState<Msg>(null);
+  // Stored WITH the filters it was produced under. "Export truncated — narrow the filters and try
+  // again" is advice about those filters, so once they change it is not merely stale, it is wrong:
+  // it went on telling the customer to narrow the filters after they already had. Kept as data and
+  // resolved during render (below) rather than cleared by an effect — this project's lint enforces
+  // React-Compiler rules, which forbid setState inside an effect.
+  const [exportMsg, setExportMsg] = React.useState<{ msg: Msg; filters: string } | null>(null);
   // The row whose detail panel is open. Holds the ROW, not an id — the list is already loaded, so
   // there is nothing to fetch and no loading state to show inside the modal.
   const [selected, setSelected] = React.useState<PortalStockEntry | null>(null);
@@ -206,6 +213,9 @@ export function MyStockView() {
   // truncated — a short file the customer believes is complete is worse than no file.
   const onExport = async () => {
     setExporting(true);
+    // Stamped at CALL time, not on resolve — these are the filters the file was produced under,
+    // even if the customer changes them while it downloads.
+    const filters = exportFilterKey(search, status, warehouseId);
     try {
       const { capped } = await customerService.exportOwnStockCsv({
         q: search || undefined,
@@ -214,11 +224,11 @@ export function MyStockView() {
       });
       setExportMsg(
         capped
-          ? { type: "error", text: "Export truncated — too many rows. Narrow the filters and try again." }
+          ? { msg: { type: "error", text: "Export truncated — too many rows. Narrow the filters and try again." }, filters }
           : null,
       );
     } catch (err) {
-      setExportMsg({ type: "error", text: err instanceof Error ? err.message : "Could not export your stock." });
+      setExportMsg({ msg: { type: "error", text: err instanceof Error ? err.message : "Could not export your stock." }, filters });
     } finally {
       setExporting(false);
     }
@@ -226,6 +236,9 @@ export function MyStockView() {
 
   const entries = paged?.entries ?? [];
   const filtered = !!search || !!status || !!warehouseId;
+  // Shown only while the filters it was produced under still hold — see the state declaration.
+  const visibleExportMsg =
+    exportMsg && exportMsg.filters === exportFilterKey(search, status, warehouseId) ? exportMsg.msg : null;
 
   // Only the very first load blanks the page. Afterwards a search keeps the toolbar mounted and swaps
   // the table for a skeleton — pulling the search box out from under someone mid-type would lose focus
@@ -233,7 +246,6 @@ export function MyStockView() {
   if (loading && paged === null) {
     return (
       <div className="flex h-full flex-col gap-6">
-        <HeaderCardSkeleton />
         <TableCardSkeleton headers={HEADERS} cells={SKELETON_CELLS} fill />
       </div>
     );
@@ -243,12 +255,7 @@ export function MyStockView() {
 
   return (
     <div className="flex h-full flex-col gap-6">
-      <PortalHeader
-        title="My Stock"
-        subtitle="All your stock currently held across our warehouses."
-      />
-
-      {exportMsg && <Notice msg={exportMsg} />}
+      {visibleExportMsg && <Notice msg={visibleExportMsg} />}
 
       {/* Toolbar — search + status. Same geometry as the Sites and Submissions toolbars. */}
       <div className="flex shrink-0 flex-col gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-xs sm:flex-row sm:items-center">
@@ -300,6 +307,12 @@ export function MyStockView() {
               Clear
             </button>
           )}
+        </div>
+
+        {/* Page action, at the right-hand end of the row the list is filtered from — NOT in the top
+            bar. Up there it sat against the browser's own chrome, a screen's width from the rows it
+            exports. Separated from the filter group so it doesn't read as another filter. */}
+        <div className={`${toolbarActionsCls} sm:ml-auto`}>
           {/* Exports the FILTERED set, not the page — so the filters just set carry into the file and
               there is no second place to re-specify them. Disabled on an empty list: a CSV with only
               a header row reads as a broken download. */}
@@ -337,7 +350,21 @@ export function MyStockView() {
         )
       ) : (
         <>
-          <TableCard headers={HEADERS} minWidth={750} fill>
+          <TableCard
+            headers={HEADERS}
+            minWidth={750}
+            fill
+            footer={
+              <Pagination
+                embedded
+                page={paged?.page ?? 1}
+                totalPages={paged?.totalPages ?? 1}
+                total={paged?.total ?? 0}
+                label="entries"
+                onPage={setPage}
+              />
+            }
+          >
             {entries.map((e) => (
               // Opens the detail panel. Keyboard-reachable and announced as a button, so the drill-down
               // isn't mouse-only — a <tr> with an onClick and nothing else is invisible to a keyboard.
@@ -355,32 +382,23 @@ export function MyStockView() {
                 aria-label={`View details for ${e.itemName}`}
                 className={clickableRowCls}
               >
-                <td className="px-4 py-3 font-semibold text-[var(--ink)]">{e.itemName}</td>
-                <td className="px-4 py-3">
+                <td className="cell-y px-4 font-semibold text-[var(--ink)]">{e.itemName}</td>
+                <td className="cell-y px-4">
                   <div className="text-[var(--ink)]">{e.warehouseName}</div>
                   <div className="font-mono text-[11px] text-[var(--faint)]">{e.warehouseCode}</div>
                 </td>
-                <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.sku ?? "—"}</td>
+                <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">{e.sku ?? "—"}</td>
                 {/* The unit rides with the number here too — a bare count leaves "25" ambiguous. */}
-                <td className="px-4 py-3 font-bold text-[var(--ink)]">
+                <td className="cell-y px-4 font-bold text-[var(--ink)]">
                   {e.quantity}
                   {e.uom && <span className="ml-1 text-[11px] font-semibold text-[var(--muted)]">{e.uom}</span>}
                 </td>
-                <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.barcode ?? "—"}</td>
-                <td className="px-4 py-3"><StatusPill status={e.status} /></td>
-                <td className="px-4 py-3 text-xs text-[var(--muted)]">{fmtDate(e.receivedAt ?? e.createdAt)}</td>
+                <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">{e.barcode ?? "—"}</td>
+                <td className="cell-y px-4"><StatusPill status={e.status} /></td>
+                <td className="cell-y px-4 text-xs text-[var(--muted)]">{fmtDate(e.receivedAt ?? e.createdAt)}</td>
               </tr>
             ))}
           </TableCard>
-          <div className="shrink-0">
-            <Pagination
-              page={paged?.page ?? 1}
-              totalPages={paged?.totalPages ?? 1}
-              total={paged?.total ?? 0}
-              label="entries"
-              onPage={setPage}
-            />
-          </div>
         </>
       )}
 

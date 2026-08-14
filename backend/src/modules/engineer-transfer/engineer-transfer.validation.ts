@@ -47,24 +47,46 @@ export const declineSchema = z.object({
 });
 export type DeclineInput = z.infer<typeof declineSchema>;
 
+// ~2 MB budget (same as branding uploads)
+const MAX_DATA_URI_CHARS = 3 * 1024 * 1024;
+
 export const acknowledgeSchema = z.object({
-  // A base64 data URI signature image
+  // A base64 data URI signature image.
+  //
+  // PNG is what the app produces: the recipient DRAWS this on a canvas and it is captured with
+  // `canvas.toDataURL("image/png")` (EngineerTransfers.tsx) — there is no upload alternative. JPEG is
+  // accepted alongside it because that is the app's established signature contract (user.validation's
+  // `signatureImage`), so a future upload option needs no second rule.
+  //
+  // This used to accept any `data:image/…`, which included `svg+xml`. A signature is EVIDENCE that a
+  // named person took delivery, and an SVG is a document that can render differently in different
+  // viewers — the one property such a record must not have. It could also carry script, and these
+  // land on a public Cloudinary URL.
+  //
+  // The size ceiling is the app-wide data-URI budget, and it was previously absent altogether: the
+  // only limit was the global body parser's, so this single field could carry ~3.7 MB. A drawn
+  // signature is tens of kilobytes.
   signature: z
     .string()
     .min(1, "Signature is required.")
-    .regex(/^data:image\//i, "Signature must be a base64 image data URI."),
+    .max(MAX_DATA_URI_CHARS, "Signature is too large (max ~2 MB).")
+    .regex(/^data:image\/(png|jpe?g);base64,/i, "Signature must be a PNG or JPG image."),
 });
 export type AcknowledgeInput = z.infer<typeof acknowledgeSchema>;
-
-// ~2 MB budget (same as branding uploads)
-const MAX_DATA_URI_CHARS = 3 * 1024 * 1024;
 export const uploadAttachmentSchema = z.object({
   image: z
     .string()
     .max(MAX_DATA_URI_CHARS, "Attachment is too large (max ~2 MB).")
     .regex(
-      /^data:(image\/(png|jpe?g|gif|webp|svg\+xml)|application\/pdf|application\/octet-stream)/i,
-      "Attachment must be a base64 data URI.",
+      // `application/octet-stream` used to be accepted here. It is the media type a browser emits
+      // when it knows nothing about a file, so accepting it meant this endpoint accepted ANY payload
+      // — an executable, an archive — as long as the caller labelled it that way. Nothing produces it:
+      // the picker filters to `image/*`, and a file the browser cannot type is not one we can either.
+      // Anchored to `;base64,`. Without it `data:image/png,hello` passed validation and failed later
+      // inside Cloudinary — an error from the wrong layer, wearing a message about nothing the caller
+      // did. Every other image endpoint (settings, user, customer) anchors it.
+      /^data:(image\/(png|jpe?g|gif|webp|svg\+xml)|application\/pdf);base64,/i,
+      "Attachment must be a PDF or a PNG, JPG, GIF, WEBP or SVG image.",
     ),
 });
 export type UploadAttachmentInput = z.infer<typeof uploadAttachmentSchema>;

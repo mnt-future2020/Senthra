@@ -1,6 +1,7 @@
 import { api } from "@/lib/api";
+import { downloadCsv, withoutPaging } from "@/lib/csvExport";
 import { registerClientCache } from "@/lib/clientCache";
-import type { IrmItem, IrmOwner, IrmStatus } from "@/types/irm";
+import type { IrmItem, IrmStatus } from "@/types/irm";
 
 // Typed wrappers around the backend /irm-items endpoints.
 
@@ -46,12 +47,8 @@ export interface IrmItemPayload {
   suppliers?: IrmSupplierRowPayload[];
   baseUnit?: string;
   packSize?: number | string;
-  conversionRatio?: number | string;
-  minimumStock?: number | string;
   reorderLevel?: number | string;
-  reorderQuantity?: number | string;
   maximumStock?: number | string;
-  safetyStock?: number | string;
   criticalLevel?: number | string;
   standardCost?: number | string;
   currency?: string;
@@ -59,8 +56,6 @@ export interface IrmItemPayload {
   trackInventory?: boolean;
   trackSerialNumbers?: boolean;
   trackBatchNumbers?: boolean;
-  allowNegativeStock?: boolean;
-  ownerUserId?: string;
   notes?: string;
 }
 
@@ -85,6 +80,14 @@ const listCacheKey = (p: IrmListParams): string =>
 
 export const getCachedIrmItems = (params: IrmListParams = {}): PagedIrmItems | undefined =>
   listCache.get(listCacheKey(params));
+
+/**
+ * The SAME filtered catalogue as a CSV. Paging is dropped — an export is "everything matching what
+ * I'm looking at", not the page on screen. `capped` is true when the server stopped short.
+ */
+export function exportIrmItemsCsv(params: IrmListParams = {}): Promise<{ capped: boolean }> {
+  return downloadCsv(`/irm-items/export.csv${qs(withoutPaging(params))}`, "irm-catalogue");
+}
 
 export function listIrmItems(params: IrmListParams = {}): Promise<PagedIrmItems> {
   return api<PagedIrmItems>(`/irm-items${qs(params)}`).then((r) => {
@@ -125,7 +128,3 @@ export function generateBarcode(id: string): Promise<IrmItem> {
   });
 }
 
-// Active staff users for the owner dropdown.
-export function listOwnerOptions(): Promise<IrmOwner[]> {
-  return api<{ owners: IrmOwner[] }>("/irm-items/owner-options").then((r) => r.owners);
-}

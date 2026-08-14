@@ -4,7 +4,8 @@ import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Building2, Tag } from "lucide-react";
 
-import { ListPageHeader } from "@/components/ui/ListPageHeader";
+import { PageActions } from "@/components/ui/PageActions";
+import { TabPills } from "@/components/ui/TabPills";
 import { CustomersView } from "./CustomersView";
 import { CustomerCategoriesView } from "./CustomerCategoriesView";
 import { useAuth } from "@/hooks/useAuth";
@@ -34,31 +35,14 @@ export function CustomersPanel() {
 
   return (
     <div className="flex h-full flex-col gap-6">
-      <ListPageHeader
-        title="Customers"
-        subtitle="Customer companies, their read-only portal access, and the categories their stock is filed under."
-        right={
-          visibleTabs.length > 1 && (
-            <div className="flex gap-1 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-1">
-              {visibleTabs.map((t) => (
-                <button
-                  key={t.id}
-                  onClick={() => selectTab(t.id)}
-                  className={`flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-bold transition-all ${
-                    activeTab === t.id
-                      ? "bg-[var(--accent)] text-white shadow-xs"
-                      : "text-[var(--muted)] hover:text-[var(--ink)]"
-                  }`}
-                >
-                  <t.icon className="h-4 w-4" />
-                  {t.label}
-                </button>
-              ))}
-            </div>
-          )
-        }
-      />
+      <PageActions>
+        <TabPills tabs={visibleTabs} active={activeTab} onSelect={selectTab} ariaLabel="Customers sections" />
+      </PageActions>
 
+      {/* The aggregate chip bar used to sit here ("Customer stock requests · 6", "Portal invites not
+          accepted · 3"). Both are worked on a CUSTOMER's own detail page and no cross-customer review
+          screen exists, so both chips linked back to this very page and narrowed nothing. The counts
+          now sit on the customer rows, where the number names the company you have to open. */}
       <div className="flex min-h-0 flex-1 flex-col">
         {activeTab === "customers" ? <CustomersView /> : <CustomerCategoriesView />}
       </div>

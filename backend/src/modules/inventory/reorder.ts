@@ -4,7 +4,7 @@
 //
 //   projected = (onHand − reserved) + incoming(open POs) + openPrf(open PRFs) − plannedDemand
 //   trigger   = projected < 0  OR  (reorderLevel > 0 AND projected ≤ reorderLevel)
-//   target    = maximumStock ?? (reorderLevel + (reorderQuantity ?? 0))
+//   target    = maximumStock ?? reorderLevel        (see the note on `maximumStock` below)
 //   suggested = max(1, target − projected), rounded UP to a packSize multiple when set
 //
 // Both incoming (open POs) and openPrf (open PRFs) are pending SUPPLY, so both ADD to the projected
@@ -45,7 +45,16 @@ export interface ReorderMathInput {
   plannedDemand: number; // active jobs' planned-but-UNISSUED kit qty (qty − grossIssued; never issued stock)
   reorderLevel: number | null;
   criticalLevel: number | null; // a more-severe threshold below reorderLevel — drives "critical" urgency
-  reorderQuantity: number | null;
+  /**
+   * The level stock is topped back up TO. `reorderQuantity` used to provide a second way to express
+   * the same thing (`reorderLevel + reorderQuantity`), which meant two fields for one number and a
+   * silent winner when both were set — maximumStock always won, so the quantity people typed was
+   * quietly ignored. One field now.
+   *
+   * Null falls back to `reorderLevel`, which makes a DEGENERATE suggestion: it restores stock to
+   * exactly the line that triggers reordering, so the row fires again immediately. That is a
+   * misconfiguration, not a feature — the item form says so at the point of entry.
+   */
   maximumStock: number | null;
   packSize: number | null;
 }
@@ -77,7 +86,7 @@ export function computeReorderMath(i: ReorderMathInput): ReorderMath | null {
   const physicallyLow = available < 0 || (reorderLevel > 0 && available <= reorderLevel);
   if (!needsOrder && !physicallyLow) return null;
 
-  const target = i.maximumStock ?? reorderLevel + (i.reorderQuantity ?? 0);
+  const target = i.maximumStock ?? reorderLevel;
   // A physically-healthy shelf that triggers anyway is a planned-demand row — the workbench labels it
   // so the PM instantly sees the trigger is future job draw, not a shortage on the shelf today.
   const reason: ReorderReason =

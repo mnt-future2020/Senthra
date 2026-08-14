@@ -16,6 +16,7 @@ import {
   LayoutDashboard,
   FolderKanban,
   MapPin,
+  ClipboardCheck,
   ClipboardList,
   Warehouse,
   Truck,
@@ -30,6 +31,7 @@ import { useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import { BrandMark } from "@/components/branding/BrandMark";
 import { optimizeCloudinaryUrl } from "@/lib/utils";
 import { isAdminNavItemVisible } from "@/lib/nav";
+import { NavBadge } from "./NavBadge";
 
 type NavItem = {
   href: string;
@@ -99,8 +101,12 @@ export const NAV: NavItem[] = [
 // The customer portal nav — a separate, read-only surface (no staff permissions).
 // Everything is view-only except Stock Submissions (the one place a customer writes).
 // Settings reuses the shared account page (profile + password).
-const CUSTOMER_NAV: NavItem[] = [
+// Exported alongside NAV so pageTitle.test.ts can assert every destination has a top-bar title.
+export const CUSTOMER_NAV: NavItem[] = [
   { href: "/dashboard/portal", label: "Dashboard", icon: LayoutDashboard, perms: [] },
+  // Above Projects and Sites: a job is the thing actually HAPPENING to the customer, where the
+  // other two are the structure it hangs off. It is what they open the portal to check.
+  { href: "/dashboard/portal/jobs", label: "Jobs", icon: ClipboardCheck, perms: [] },
   { href: "/dashboard/portal/projects", label: "Projects", icon: FolderKanban, perms: [] },
   { href: "/dashboard/portal/sites", label: "Sites", icon: MapPin, perms: [] },
   { href: "/dashboard/stock", label: "My Stock", icon: Package, perms: [] },
@@ -117,7 +123,7 @@ const CUSTOMER_NAV: NavItem[] = [
 // The engineer portal nav — a separate, isolated surface for staff field engineers, exactly like the
 // customer portal above. Shown ONLY when the engineer portal is the user's only surface (see
 // `isEngineer` below) — it is NEVER mixed into the admin nav.
-const ENGINEER_NAV: NavItem[] = [
+export const ENGINEER_NAV: NavItem[] = [
   { href: "/dashboard/engineer", label: "Dashboard", icon: LayoutDashboard, perms: ["engineer.dashboard.view"] },
   { href: "/dashboard/engineer/jobs", label: "Jobs", icon: ClipboardList, perms: ["engineer.jobs.view"] },
   { href: "/dashboard/engineer/inventory", label: "Stock", icon: Boxes, perms: ["engineer.inventory.view"] },
@@ -230,7 +236,7 @@ export function Sidebar({
           }}
           onClick={onCloseMobile}
           title={collapsed ? item.label : undefined}
-          className={`w-full flex items-center border-l-4 border-transparent rounded-xl text-xs font-bold transition-all duration-300 cursor-pointer text-left
+          className={`relative w-full flex items-center border-l-4 border-transparent rounded-xl text-xs font-bold transition-all duration-300 cursor-pointer text-left
             ${collapsed ? "justify-center p-2.5 gap-0" : "px-3.5 py-2.5 gap-3"}
             ${
               active
@@ -250,6 +256,11 @@ export function Sidebar({
           >
             {item.label}
           </span>
+          {/* Pending-work count for this row. Keyed on the row's own href — which IS the attention
+              catalog's nav key — so the NAV table below needs no extra field and cannot drift out of
+              sync with it. Rows with nothing pending (and every engineer/customer row, which the
+              catalog doesn't cover yet) render nothing at all. */}
+          <NavBadge navHref={item.href} collapsed={collapsed} />
         </Link>
       );
     });

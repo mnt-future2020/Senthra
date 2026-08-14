@@ -331,10 +331,6 @@ model Supplier {
   leadTimeDays Int? // typical lead time in days (0–365)
   notes        String?
 
-  // Internal owner — an active staff user responsible for the relationship. Optional.
-  ownerUserId String? @db.ObjectId
-  owner       User?   @relation(fields: [ownerUserId], references: [id])
-
   // IRM items this supplier can supply (junction back-relation; no DB column).
   irmLinks IrmItemSupplier[]
   // Purchase requests + orders raised against this supplier (back-relations; no DB column).
@@ -351,7 +347,6 @@ model Supplier {
   updatedAt DateTime @updatedAt
 
   @@index([status])
-  @@index([ownerUserId])
   @@index([typeId])
 }
 
@@ -410,11 +405,14 @@ model IrmItem {
 
   status String @default("active") // active | inactive
 
-  // Identification. `sku` is GLOBALLY unique FOREVER (never reused, even after soft-delete).
-  // Enforced at the DB by a PARTIAL unique index on `skuLower` (created in the seed step via
-  // irmRepo.ensureSkuUniqueIndex) PLUS an app-level pre-check. Do NOT add `@unique` here:
-  // Prisma would create a non-sparse index that rejects a second null SKU (prisma#23870),
-  // and most items have no SKU. The partial index only covers string skuLower values.
+  // Identification. `sku` is MANDATORY (irm.validation.ts requires it on create and update, and the
+  // service generates one from the name + category when a caller sends none) and GLOBALLY unique
+  // FOREVER — never reused, even after soft-delete. Enforced at the DB by a PARTIAL unique index on
+  // `skuLower` (created in the seed step via irmRepo.ensureSkuUniqueIndex) PLUS an app-level
+  // pre-check. Do NOT add `@unique` here: Prisma would create a non-sparse index that rejects a
+  // second null (prisma#23870). Do NOT make it required either — on MongoDB that enforces nothing
+  // and only turns any row predating the rule into a read crash. The partial index covers string
+  // skuLower values, which is every row a create can produce.
   sku      String?
   skuLower String?
   // Free-text / manufacturer barcode (e.g. an EAN). UNIQUE across all rows, enforced by a PARTIAL
@@ -434,16 +432,42 @@ model IrmItem {
 
   // Unit of measure.
   baseUnit        String? // e.g. "Each", "Metre"
+  // Units per pack. LOAD-BEARING: the reorder engine rounds a suggested quantity UP to whole packs
+  // (see inventory/reorder.ts), so a 412-metre need on a 305m-box item is ordered as 2 boxes. Drop it
+  // and the rounding silently stops — purchase requests keep generating, just with quantities no
+  // supplier will accept.
   packSize        Int?
+  // RETIRED from the app: no reader, no writer, and no form field — it was captured and then never
+  // used by any calculation. Kept DECLARED so the values stay readable through Prisma (on MongoDB,
+  // dropping a field from the schema doesn't delete anything — `db push` only manages indexes — it
+  // just makes the data invisible to the client, which is worse than leaving it in view). Do not
+  // re-surface it in the UI without a consumer to justify it.
   conversionRatio Float?
 
   // Stock policies (planning thresholds — ADVISORY; never live stock).
-  minimumStock    Int?
+  //
+  // THREE live thresholds, and they stack: criticalLevel <= reorderLevel <= maximumStock.
+  //   reorderLevel  — WHEN to buy. The trigger; "minimum stock" in warehouse speech.
+  //   maximumStock  — HOW FAR to top up. The reorder target; null degrades to reorderLevel, which
+  //                   only restores the trigger line and re-fires immediately (see reorder.ts).
+  //   criticalLevel — HOW URGENT. Flags the row red; never changes the quantity ordered.
   reorderLevel    Int?
-  reorderQuantity Int?
   maximumStock    Int?
-  safetyStock     Int?
   criticalLevel   Int?
+  // RETIRED — no reader, no writer, no form field. `minimumStock` and `safetyStock` were captured and
+  // used by nothing, and `minimumStock` was the worse of the two: it is the familiar phrase, so people
+  // filled it in believing it set the trigger while `reorderLevel` silently did. `reorderQuantity` was
+  // a second way to express the target (reorderLevel + qty) that maximumStock always beat when both
+  // were set, so the number typed was discarded without a word.
+  //
+  // Kept DECLARED for the same reason as conversionRatio above — on MongoDB, removing a field from
+  // the schema deletes nothing, it only hides the stored values from Prisma. `reorderQuantity`
+  // especially: it is the evidence of what an item's old top-up target was, and
+  // scripts/backfill-reorder-target.ts carries it over to `maximumStock`. Do not re-surface any of
+  // them in the UI without a consumer to justify it.
+  minimumStock    Int?
+  reorderQuantity Int?
+  safetyStock     Int?
 
   // Cost (internal only — never exposed to customers). Pence to avoid float drift.
   standardCostPence Int?
@@ -451,15 +475,21 @@ model IrmItem {
   vatRatePercent    Float?  @default(20) // UK standard rate default
 
   // Tracking flags.
+  //
+  // No form field sets these — the item form's toggles were removed deliberately, so every item sits
+  // at the defaults. `trackInventory` is read widely; the serial/batch pair is a FUTURE seam, and the
+  // goods scan already refuses an item carrying either ("can't be moved here yet") so the feature
+  // cannot be half-enabled by data alone. Keep them.
   trackInventory     Boolean @default(true)
   trackSerialNumbers Boolean @default(false)
   trackBatchNumbers  Boolean @default(false)
+  // RETIRED — unlike its neighbours this one has NO consumer anywhere: nothing reads it, no rule
+  // branches on it, and every row is false. Column kept so existing rows aren't rewritten. Do not
+  // re-surface it without something that actually honours it.
   allowNegativeStock Boolean @default(false)
 
   // Operations.
-  ownerUserId String? @db.ObjectId
-  owner       User?   @relation(fields: [ownerUserId], references: [id])
-  notes       String?
+  notes String?
 
   // Purchase-request + purchase-order lines referencing this item (back-relations; no DB column).
   purchaseRequestLines PurchaseRequestItem[]
@@ -489,7 +519,6 @@ model IrmItem {
   @@index([status])
   @@index([typeId])
   @@index([irmCategoryId])
-  @@index([ownerUserId])
 }
 
 // Junction: which suppliers can provide an IRM item, with ranking + per-supplier detail.
@@ -645,10 +674,22 @@ model PurchaseRequestAttachment {
   fileType          String // pdf | docx | png | jpg
   fileSizeBytes     Int
   url               String
+  // Cloudinary asset identity. NULLABLE on purpose: rows written before identity was persisted
+  // have neither, and a null means "we cannot safely name this asset", which makes the deletion
+  // path skip it. Never infer these from `url` at runtime — see attachment.repository.ts.
+  //
+  // The identity is the PAIR. `publicId` alone is not unique: the same id can exist once as an
+  // `image` and once as a `raw` asset, and Cloudinary's destroy API needs both to address one.
+  publicId          String?
+  resourceType      String? // "image" | "raw"
   uploadedBy        String?
   createdAt         DateTime @default(now())
 
   @@index([purchaseRequestId])
+  // Reference counting before a Cloudinary delete. One asset can be referenced by more than one
+  // row (PRF → PO conversion copies the identity), so the delete path counts across all three
+  // attachment tables and destroys nothing while a reference survives.
+  @@index([resourceType, publicId])
 }
 
 // ── Purchase Orders — PROCUREMENT WORKFLOW ONLY ──────────────────────────────────────
@@ -808,10 +849,16 @@ model PurchaseOrderAttachment {
   fileType        String // pdf | docx | png | jpg
   fileSizeBytes   Int
   url             String
+  // Same pair as PurchaseRequestAttachment, and on a converted PRF's attachments it holds the
+  // SAME values — the conversion copies the identity rather than re-uploading the file. That is
+  // why removing a PO attachment must not assume it owns the asset.
+  publicId        String?
+  resourceType    String? // "image" | "raw"
   uploadedBy      String?
   createdAt       DateTime @default(now())
 
   @@index([purchaseOrderId])
+  @@index([resourceType, publicId])
 }
 
 // ── GOODS IN (GRN — Goods Receipt Note) ───────────────────────────────────────────────
@@ -953,10 +1000,16 @@ model GoodsReceiptAttachment {
   fileType       String // pdf | docx | png | jpg
   fileSizeBytes  Int
   url            String
+  // GRN attachments are always uploaded fresh (nothing copies them), so in practice these are
+  // unique to the row. The delete path still counts across every attachment table rather than
+  // relying on that — the next module to copy an attachment would otherwise inherit a silent bug.
+  publicId       String?
+  resourceType   String? // "image" | "raw"
   uploadedBy     String?
   createdAt      DateTime @default(now())
 
   @@index([goodsReceiptId])
+  @@index([resourceType, publicId])
 }
 
 // ── INVENTORY PRIMITIVES ───────────────────────────────────────────────────────────────
@@ -1699,6 +1752,13 @@ model User {
   role            Role?   @relation(fields: [roleId], references: [id])
   status          String  @default("active") // active | inactive | suspended
   profileImageUrl String?
+  // Cloudinary identity for the avatar above, so replacing it can delete the file it replaces.
+  // A new avatar gets a fresh randomUUID public id, so the old asset is NOT overwritten — without
+  // these it stayed in the CDN forever, on the ordinary success path of changing your picture.
+  // (The signature below needs no equivalent: its public id is `signature-${userId}`, so a replacement
+  // overwrites the same asset in place.)
+  profileImagePublicId     String?
+  profileImageResourceType String?
   notes           String?
 
   // Personal signature — printed on documents the user issues (e.g. the Purchase Order PDF).
@@ -1742,10 +1802,6 @@ model User {
   // Explicit warehouse assignments (for warehouse-scoped roles). Rows PERSIST across role changes —
   // only removed on permanent user delete or explicit admin un-assignment (back-relation).
   warehouseAssignments UserWarehouseAssignment[]
-  // Suppliers this user is the internal owner of (back-relation; no DB column).
-  ownedSuppliers    Supplier[]
-  // IRM items this user is the internal owner of (back-relation; no DB column).
-  ownedIrmItems     IrmItem[]
   // Engineer-held stock (back-relation; no DB column).
   engineerStockBalances     EngineerStockBalance[]     @relation("EngineerStockOwner")
   engineerStockTransactions EngineerStockTransaction[] @relation("EngineerStockTxnOwner")
@@ -1803,6 +1859,10 @@ model Customer {
   industry           String? // sector, e.g. "Telecoms"
   website            String?
   logoUrl            String? // Cloudinary URL (company logo)
+  // Cloudinary identity for the logo above — same reason as User.profileImagePublicId: a replacement
+  // uploads a fresh randomUUID asset rather than overwriting, so without these the old file leaked.
+  logoPublicId       String?
+  logoResourceType   String?
   notes              String? // internal notes (never shown to the customer)
   status             String  @default("active") // active | inactive
 
@@ -1971,6 +2031,10 @@ model CustomerStockRequest {
   updatedAt         DateTime  @updatedAt
 
   @@index([customerId, status])
+  // Standalone status index for the attention count, which asks "how many pending across the whole
+  // company?" with no customerId — a [customerId, status] compound cannot serve that (status is not
+  // a left prefix), so without this the count is a full collection scan on every attention load.
+  @@index([status])
 }
 
 // A warehouse allocation for a customer stock request. One request can be split across
@@ -2011,6 +2075,10 @@ model CustomerStockWarehouseAssignment {
   @@unique([customerStockRequestId, warehouseId])
   @@index([customerStockRequestId])
   @@index([warehouseId, status])
+  // The [warehouseId, status] compound above serves a warehouse-SCOPED actor. An unrestricted actor
+  // (admin, or any role without warehouse scoping) counts on status alone, which that compound can't
+  // serve — hence the standalone index. Same reason as CustomerStockRequest.
+  @@index([status])
 }
 
 // A physical stock entry created when customer stock is received at a warehouse.
@@ -2063,6 +2131,8 @@ model CustomerStockEntry {
   @@index([customerId])
   @@index([warehouseId, status])
   @@index([assignmentId])
+  // Unscoped actors count drafts on status alone — see CustomerStockWarehouseAssignment.
+  @@index([status])
 }
 
 // ── JOBS — field-work job pack (header + kit lines) ─────────────────────────────────────
@@ -2338,4 +2408,54 @@ model DeviceToken {
   lastSeenAt DateTime @default(now())
 
   @@index([userId])
+}
+
+// ── DIRECT UPLOAD — pending asset ledger ───────────────────────────────────────────────────
+// The browser uploads straight to Cloudinary, so an asset can exist in the cloud before anything in
+// this database refers to it. One row is written when the upload is AUTHORISED (the signature is
+// issued) and removed when the upload is claimed by finalize — so the row is the record of "an asset
+// we asked for that nobody has taken delivery of yet".
+//
+// It does two jobs, and the second is the one that is easy to miss:
+//
+//   1. CLEANUP. A row still here 24 hours later means the browser never came back — closed tab, dead
+//      network, abandoned form — so the reaper can destroy the asset knowing nothing references it.
+//
+//   2. OWNERSHIP. Cloudinary's upload response is signed, which proves the asset is real and in our
+//      cloud — it does NOT prove it is OURS TO ATTACH. Without this row, a caller could finalize with
+//      another customer's publicId and hang their document off its own record. Finalize requires a row
+//      with that publicId AND this actor, and the publicId is a UUID this server minted. That is the
+//      control; the response signature is a secondary check.
+//
+// DELIBERATELY NOT a general asset table. It is empty in steady state, rows live for seconds, and it
+// never describes a LIVE asset — the domain tables own those, exactly as they do today.
+model PendingUpload {
+  id           String  @id @default(auto()) @map("_id") @db.ObjectId
+  // Server-minted, and the join key finalize looks up by — never a value the client chose.
+  publicId     String  @unique
+  resourceType String // image | raw — needed to address the asset for a destroy
+  // Which upload contract this was authorised under. Re-checked at finalize so a signature obtained
+  // for a 2 MB engineer photo cannot be spent attaching a 10 MB document to a purchase order.
+  purpose      String
+  // Who the signature was issued to. Finalize refuses a row belonging to someone else.
+  actorId      String
+  createdAt    DateTime @default(now())
+
+  // ── The lease ──────────────────────────────────────────────────────────────────────────────
+  // null, or in the past  → nobody is working on this row; finalize or the reaper may claim it.
+  // in the future         → a finalize holds it; the reaper must not touch the asset.
+  //
+  // A LEASE rather than a plain "claimed" flag because a flag is set once and never cleared: a
+  // finalize that crashed mid-flight would keep its row marked busy forever, and the reaper — which
+  // skips busy rows — would never reclaim the asset. Permanent orphan, invisible. An expiry returns
+  // the row to the pool on its own.
+  //
+  // Claimed by a conditional update (`claimExpiresAt` null or past → now + lease) whose affected-row
+  // count decides the winner, so finalize and the reaper cannot both proceed. Finalize re-runs that
+  // same claim INSIDE its write transaction, so the lease it attaches under is the lease it still
+  // holds — no window between checking and writing.
+  claimExpiresAt DateTime?
+
+  // The reaper's query: old enough, and not actively leased.
+  @@index([createdAt, claimExpiresAt])
 }

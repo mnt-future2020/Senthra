@@ -8,6 +8,7 @@ import * as prfService from "@/services/purchase-request.service";
 import { listSuppliers } from "@/services/supplier.service";
 import { listWarehouses } from "@/services/warehouse.service";
 import { listIrmItems } from "@/services/irm.service";
+import { packHint } from "./packHint";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
@@ -467,6 +468,7 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
                 // local — the item list already carries each item's supplier links + codes.
                 const pickedItem = row.irmItemId ? itemOptions.map.get(row.irmItemId) : undefined;
                 const supplierLink = pickedItem && supplierId ? pickedItem.suppliers.find((s) => s.supplierId === supplierId) : undefined;
+                const hint = packHint(pickedItem?.packSize ?? null, row.quantity);
                 return (
                   <div key={row._key} className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/30 p-3">
                     <div className="space-y-3">
@@ -483,6 +485,13 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
                         <div className="min-w-0">
                           <label className={labelCls}>Quantity</label>
                           <NumberInput className={inputCls} min={1} value={row.quantity} onChange={(e) => updateLine(idx, { quantity: e.target.value })} placeholder="e.g. 100" />
+                          {/* ADVISORY, never a block. A reorder-generated request already arrives in
+                              whole packs (the reorder engine rounds up); a hand-typed one doesn't, and
+                              nothing on this form said the item even came in packs — so "380 metres"
+                              of a 305m-box cable reached the supplier before anyone noticed. It is
+                              deliberately not enforced: buying a part-pack is a real decision, it just
+                              shouldn't be an accidental one. */}
+                          {hint && <p className="mt-1.5 text-[11px] text-[var(--muted)]">{hint}</p>}
                         </div>
                         <div className="min-w-0">
                           <label className={labelCls}>Quoted price (£)</label>

@@ -1,5 +1,6 @@
 import { AuthGuard } from "@/components/auth/AuthGuard";
 import { FirstLoginGate } from "@/components/auth/FirstLoginGate";
+import { AttentionProvider } from "@/providers/AttentionProvider";
 import { DashboardProvider } from "@/providers/DashboardProvider";
 import { DashboardShell } from "@/components/dashboard/shell/DashboardShell";
 import { DashboardShellSkeleton } from "@/components/dashboard/shell/DashboardShellSkeleton";
@@ -20,7 +21,11 @@ export default function DashboardLayout({
     <DashboardProvider>
       <AuthGuard fallback={<DashboardShellSkeleton />}>
         <FirstLoginGate>
-          <DashboardShell>{children}</DashboardShell>
+          {/* Inside AuthGuard so it never fetches before there's a principal, and outside the shell
+              so the sidebar, the Overview strip and every module tab share ONE /attention call. */}
+          <AttentionProvider>
+            <DashboardShell>{children}</DashboardShell>
+          </AttentionProvider>
         </FirstLoginGate>
       </AuthGuard>
     </DashboardProvider>

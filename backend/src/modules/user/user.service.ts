@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import type { Prisma } from "@prisma/client";
 
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
+import type { CloudinaryImageAsset } from "../../lib/cloudinary.js";
 import * as roleRepo from "#modules/role/role.repository.js";
 import { assertEmailNamespaceFree } from "#modules/auth/email-namespace.js";
 import { ALL_PERMISSIONS } from "#modules/role/permissions.js";
@@ -20,7 +21,10 @@ import { hashPassword } from "../../utils/password.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { sendTemplatedEmail } from "#modules/email/email.service.js";
-import { getCloudinaryCreds, getEmployeeIdPrefix } from "#modules/settings/settings.service.js";
+import { getCloudinaryCreds, getEmployeeIdPrefix, getRegionalSettings } from "#modules/settings/settings.service.js";
+import { formatDate } from "#modules/document/document.formatter.js";
+import { EXPORT_MAX, EXPORT_PAGING, toCsv } from "../../utils/csv.js";
+import * as attachmentService from "#modules/attachment/attachment.service.js";
 
 const STATUSES = ["active", "inactive", "suspended"] as const;
 export type UserStatus = (typeof STATUSES)[number];
@@ -222,7 +226,7 @@ function auditWarehouseAssignmentChanges(
 
 // Upload a profile image to Cloudinary (random public id, "users" folder) and
 // return its secure URL. Reuses the same credential resolution as branding.
-async function uploadAvatar(image: string): Promise<string> {
+async function uploadAvatar(image: string): Promise<CloudinaryImageAsset> {
   const creds = await getCloudinaryCreds();
   if (!creds) {
     throw badRequest(
@@ -230,6 +234,43 @@ async function uploadAvatar(image: string): Promise<string> {
     );
   }
   return uploadToCloudinary(image, crypto.randomUUID(), creds, "senthra/users");
+}
+
+/**
+ * Apply an avatar change, and release the picture it replaces.
+ *
+ * An avatar's public id is a fresh randomUUID, so a new upload does NOT overwrite the old asset — it
+ * simply stops being referenced. Changing your picture is an ordinary success path, so before this the
+ * app leaked one file every time anyone did it, forever.
+ *
+ * Released AFTER the row is written, and only when the id actually changes; `releaseAsset` never throws,
+ * so a storage failure cannot fail the profile update. Its reference count reads the attachment tables
+ * and finds nothing, which is the correct answer here: an avatar is referenced by exactly one user row,
+ * and randomUUID means no other record can ever name the same asset.
+ */
+async function applyAvatarChange(
+  data: Prisma.UserUpdateInput,
+  current: { profileImagePublicId: string | null; profileImageResourceType: string | null },
+  input: { removeProfileImage?: boolean; profileImage?: string },
+): Promise<attachmentService.AssetRef | null> {
+  const previous: attachmentService.AssetRef = {
+    publicId: current.profileImagePublicId,
+    resourceType: current.profileImageResourceType,
+  };
+  if (input.removeProfileImage) {
+    data.profileImageUrl = null;
+    data.profileImagePublicId = null;
+    data.profileImageResourceType = null;
+    return previous.publicId ? previous : null;
+  }
+  if (!input.profileImage) return null;
+  const asset = await uploadAvatar(input.profileImage);
+  data.profileImageUrl = asset.url;
+  data.profileImagePublicId = asset.publicId;
+  data.profileImageResourceType = asset.resourceType;
+  // Only when the id actually moved. A legacy row has no stored id and is skipped — the same
+  // conservative direction the attachment path takes.
+  return previous.publicId && previous.publicId !== asset.publicId ? previous : null;
 }
 
 // --- User signature (self-service; printed on issued documents) ------------------------------
@@ -242,7 +283,9 @@ async function uploadSignatureImage(image: string, userId: string): Promise<stri
       "Cloudinary isn't configured. Add your credentials in Settings → Integrations to upload a signature.",
     );
   }
-  return uploadToCloudinary(image, `signature-${userId}`, creds, "senthra/signatures");
+  // `signature-${userId}` is deterministic: a new signature OVERWRITES the same asset, so nothing
+  // leaks and no identity needs keeping.
+  return (await uploadToCloudinary(image, `signature-${userId}`, creds, "senthra/signatures")).url;
 }
 
 // Derive the mime type + byte size from a base64 image data URI (data:image/png;base64,XXXX),
@@ -289,6 +332,8 @@ export interface ListUsersParams {
   page?: number;
   pageSize?: number;
   sort?: string; // newest (default) | oldest | name
+  /** Internal only — see EXPORT_PAGING. Controllers never read this from the query string. */
+  maxPageSize?: number;
 }
 
 export interface PagedUsers {
@@ -307,11 +352,51 @@ export async function listUsers(params: ListUsersParams = {}): Promise<PagedUser
   };
   const total = await userRepo.count(filters);
   // Clamp the requested page so an out-of-range page returns the last page.
-  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total, params.maxPageSize);
   const users = await userRepo.findMany(filters, skip, pageSize, params.sort);
   // The list intentionally omits per-user warehouse assignments (avoids an N+1); publicUser
   // defaults them to []. The single-user reads (get/create/update) populate them.
   return { users: users.map((u) => publicUser(u)), total, page, pageSize, totalPages };
+}
+
+/**
+ * The SAME filtered staff list as a CSV, minus paging.
+ *
+ * Deliberately narrow. This is the export most likely to be forwarded to HR or an auditor, so it
+ * carries who someone IS and what they can do — never the personal data the record also holds:
+ * date of birth, gender, home address and `notes` are all absent, and so is anything about their
+ * credentials. A staff list is not a personnel file.
+ */
+export async function exportUsersCsv(
+  params: ListUsersParams = {},
+  actor?: AuditActor,
+): Promise<{ csv: string; capped: boolean }> {
+  // EXPORT_PAGING, not a bare pageSize: `paginate` clamps anything a client could ask for to 100,
+  // so without its maxPageSize every export silently stopped at 100 rows AND reported itself
+  // complete (capped was measured on the same clamped length). See utils/csv.
+  const { users } = await listUsers({ ...params, ...EXPORT_PAGING });
+  const rows = users.slice(0, EXPORT_MAX);
+
+  const regional = await getRegionalSettings();
+  const csv = toCsv(
+    ["Employee ID", "First Name", "Last Name", "Email", "Phone", "Role", "Job Title", "Department", "Status", `Joined (${regional.timezone})`, `Added (${regional.timezone})`],
+    rows.map((u) => [
+      u.employeeId,
+      u.firstName,
+      u.lastName,
+      u.email,
+      u.phone,
+      u.role?.name,
+      u.jobTitle,
+      u.department,
+      u.status,
+      formatDate(u.dateOfJoining, regional.dateFormat, regional.timezone),
+      formatDate(u.createdAt, regional.dateFormat, regional.timezone),
+    ]),
+  );
+
+  audit.record({ actor, action: "user.exported", targetType: "user", targetLabel: `${rows.length} rows` });
+  return { csv, capped: users.length > EXPORT_MAX };
 }
 
 // A 24-char hex string is a Mongo ObjectId; anything else is treated as the human
@@ -405,7 +490,7 @@ export async function createUser(
   // (DB) are independent — run them concurrently rather than serially. The employeeId
   // itself is allocated by the repository at write time (race-safe against the unique
   // index), using this configured prefix.
-  const [passwordHash, profileImageUrl, employeeIdPrefix] = await Promise.all([
+  const [passwordHash, avatar, employeeIdPrefix] = await Promise.all([
     hashPassword(temporaryPassword),
     input.profileImage ? uploadAvatar(input.profileImage) : Promise.resolve(null),
     getEmployeeIdPrefix(),
@@ -418,7 +503,9 @@ export async function createUser(
     phone: trimToNull(input.phone),
     status: normalizeStatus(input.status),
     notes: trimToNull(input.notes),
-    profileImageUrl,
+    profileImageUrl: avatar?.url ?? null,
+    profileImagePublicId: avatar?.publicId ?? null,
+    profileImageResourceType: avatar?.resourceType ?? null,
     jobTitle: trimToNull(input.jobTitle),
     department: trimToNull(input.department),
     dateOfJoining: dateOrNull(input.dateOfJoining),
@@ -431,6 +518,15 @@ export async function createUser(
     passwordHash,
     mustResetPassword: true,
   };
+
+  // Reviving overwrites the record, avatar included — so the picture the revived row USED to point at
+  // stops being referenced exactly as it does on an ordinary edit, and has to be released the same way.
+  // Only when the new write actually supplies a different asset: reviving without a photo keeps the old
+  // one, and releasing it then would delete a live avatar.
+  const replacedAvatar: attachmentService.AssetRef | null =
+    existing?.profileImagePublicId && avatar && existing.profileImagePublicId !== avatar.publicId
+      ? { publicId: existing.profileImagePublicId, resourceType: existing.profileImageResourceType }
+      : null;
 
   let created: UserWithRole;
   if (existing) {
@@ -450,6 +546,9 @@ export async function createUser(
     if (roleId) data.role = { connect: { id: roleId } };
     created = await userRepo.createWithEmployeeId(data, employeeIdPrefix);
   }
+
+  // After the row is written. Never throws — a storage failure cannot fail the account creation.
+  if (replacedAvatar) await attachmentService.releaseAsset(replacedAvatar, `user ${created.email}`);
 
   audit.record({
     actor,
@@ -616,10 +715,10 @@ export async function updateUser(
     }
   }
 
-  if (input.removeProfileImage) data.profileImageUrl = null;
-  else if (input.profileImage) data.profileImageUrl = await uploadAvatar(input.profileImage);
+  const staleAvatar = await applyAvatarChange(data, user, input);
 
   const updated = await userRepo.update(id, data);
+  if (staleAvatar) await attachmentService.releaseAsset(staleAvatar, `user ${updated.email}`);
   audit.record({
     actor,
     action: "user.updated",
@@ -754,10 +853,10 @@ export async function updateMyProfile(
   if (typeof input.addressLine2 === "string") data.addressLine2 = trimToNull(input.addressLine2);
   if (typeof input.city === "string") data.city = trimToNull(input.city);
   if (typeof input.postcode === "string") data.postcode = trimToNull(input.postcode);
-  if (input.removeProfileImage) data.profileImageUrl = null;
-  else if (input.profileImage) data.profileImageUrl = await uploadAvatar(input.profileImage);
+  const staleAvatar = await applyAvatarChange(data, user, input);
 
   const updated = await userRepo.update(user.id, data);
+  if (staleAvatar) await attachmentService.releaseAsset(staleAvatar, `user ${updated.email}`);
   audit.record({
     actor,
     action: "user.profile_updated",

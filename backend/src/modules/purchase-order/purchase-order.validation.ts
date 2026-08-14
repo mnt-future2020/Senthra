@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { attachmentTypeMatches, dataUriBytes } from "../../utils/data-uri.js";
 
 // Purchase Order validation. PROCUREMENT WORKFLOW ONLY. Codes/status/totals are SYSTEM-owned
 // and never accepted from the client. Editable only in `draft` (enforced in the service).
@@ -237,11 +238,68 @@ export type PoDeliveryDateInput = z.infer<typeof poDeliveryDateSchema>;
 
 // --- attachment upload (data URI from the form) -----------------------------
 const TEN_MB = 10 * 1024 * 1024;
+
+/**
+ * How many USER documents one purchase order may carry.
+ *
+ * Higher than the PRF's ten, and deliberately so: conversion copies a full PRF's attachments onto the
+ * order, so a cap equal to the PRF's would be exhausted the moment the PO existed — the buyer could
+ * never attach the supplier's confirmation, the invoice, or a delivery note. Twenty absorbs a complete
+ * quotation package and still leaves a working budget for the order's own life.
+ *
+ * The archived issued-PO document is EXCLUDED from this count. It is written by the system at send
+ * time, fire-and-forget, and its failure is deliberately silent — so a cap that could consume its slot
+ * would quietly leave an order with no document of record.
+ */
+export const PO_ATTACHMENT_MAX_COUNT = 20;
+
+/**
+ * And the byte ceiling for those twenty, on the same reasoning as the count: higher than the PRF's
+ * because conversion copies a full request's documents onto the order, so a PO that inherited 40 MB
+ * must still have room for the supplier's confirmation and the invoice.
+ *
+ * The archived issued-PO document is excluded here as well — it is written by the system, its failure
+ * is silent, and a total that could consume its allowance would leave an order with no document of
+ * record for exactly the reason the count cap already guards against.
+ */
+export const PO_ATTACHMENT_MAX_TOTAL_BYTES = 80 * 1024 * 1024;
+// The declared `fileType` and `fileSizeBytes` above are the CALLER'S CLAIMS about a payload the
+// server used to never open — so "pdf, 40 KB" would carry anything, at any size. Both are now
+// settled against `data` itself:
+//
+//   size  measured from the payload, so the per-file ceiling above is real. It also makes the
+//         PO total a cap that holds, since that total is summed from stored sizes.
+//   type  read from the file's leading bytes (%PDF-, PK, PNG, JPEG), not from the URI's media type
+//         — that media type is text the caller wrote, so checking it only relocates the claim.
+//
+// Refined on the OBJECT rather than the `data` field because both checks compare two fields. Each
+// reports against the field the user can act on.
 export const poAttachmentSchema = z.object({
   label: z.string().trim().max(80).optional(),
   fileName: z.string().trim().min(1, "File name is required.").max(200),
   fileType: z.enum(PO_ATTACHMENT_TYPES, { error: "Unsupported file type. Use PDF, DOCX, PNG or JPG." }),
   fileSizeBytes: z.coerce.number().int().min(1).max(TEN_MB, "File must be 10 MB or smaller."),
   data: z.string().startsWith("data:", "Upload a valid file."),
-});
+})
+  .superRefine((v, ctx) => {
+    const actual = dataUriBytes(v.data);
+    if (actual === 0) {
+      ctx.addIssue({ code: "custom", path: ["data"], message: "Upload a valid file." });
+      return;
+    }
+    if (actual > TEN_MB) {
+      ctx.addIssue({ code: "custom", path: ["data"], message: "File must be 10 MB or smaller." });
+    } else if (actual !== v.fileSizeBytes) {
+      // A mismatch means the two halves of one upload disagree — a broken client, or a declaration
+      // aimed at slipping past the ceiling. Neither is worth storing under a size nobody can trust.
+      ctx.addIssue({ code: "custom", path: ["fileSizeBytes"], message: "File size doesn't match the uploaded file." });
+    }
+    if (!attachmentTypeMatches(v.data, v.fileType)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["fileType"],
+        message: "That file isn't a valid PDF, DOCX, PNG or JPG.",
+      });
+    }
+  });
 export type PoAttachmentInput = z.infer<typeof poAttachmentSchema>;

@@ -5,10 +5,11 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { ClipboardList, Download, Loader2, PackagePlus, Plus, Search } from "lucide-react";
 
 import * as customerService from "@/services/customer.service";
+import { useDashboard } from "@/hooks/useDashboard";
 import { Notice } from "@/components/ui/Notice";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
-import { primaryBtn, toolbarBtn, toolbarInputCls } from "@/components/ui/styles";
+import { toolbarActionsCls, toolbarBtn, toolbarInputCls, toolbarPrimaryBtn } from "@/components/ui/styles";
 import { StockRequestModal } from "@/components/dashboard/stock/StockRequestModal";
 import type { PagedStockRequests } from "@/services/customer.service";
 import type { PortalStockRequest, PortalWarehouseAssignment } from "@/types/customer";
@@ -21,16 +22,18 @@ import {
   DetailRow,
   EmptyState,
   fmtDate,
-  HeaderCardSkeleton,
-  PortalHeader,
   RequestStatusChip,
   TableCard,
   TableCardSkeleton,
 } from "./portalUi";
-import { summariseShortfall } from "./stockRequestShortfall";
+import { shortfallBadgeText, shortfallTooltip, summariseShortfall } from "./stockRequestShortfall";
 
 const HEADERS = ["Item", "Qty", "Submitted", "Status"];
 const SKELETON_CELLS = ["h-3 w-44", "h-3 w-8", "h-3 w-20", "h-5 w-20 rounded-full"];
+
+// The filters an export was produced under, as one comparable string. `page` is absent on purpose:
+// the export deliberately ignores paging ("everything matching what I'm looking at").
+const exportFilterKey = (search: string, status: string) => `${search}|${status}`;
 
 const STATUS_OPTIONS = [
   { value: "", label: "All statuses" },
@@ -51,26 +54,25 @@ const STATUS_OPTIONS = [
 // lines beneath it. Two extra lines on some rows and none on others took the table from ~44px to
 // ~94px per row depending on the data, and a list you scan needs one rhythm, not four.
 //
-// Amber, not red: a fact about the delivery, not an error the customer must act on. `title` puts the
-// exact split and the reason one hover away; the row's detail panel has both in full, unabbreviated.
+// Amber, not red: a fact about the delivery, not an error the customer must act on — the commonest
+// cause is that the customer shipped fewer than they declared. Red would dress a normal business
+// event as a fault.
 //
-// "not received", NOT "short". "Short" is warehouse trade language (short shipment, picking short)
-// and the reader is a customer; on its own "23 short" can even parse as an adjective. "Received" is
-// already the verb this whole screen runs on ("2 of 25 received", the RECEIVED column), so its
-// negation needs no learning — and unlike "missing" it states the fact without implying a cause,
-// which matters when the commonest cause is that the customer simply shipped fewer than they
-// declared. Nothing was lost; it just never arrived. Used verbatim in the panel too, so clicking a
-// row never renames what it just told you.
+// Deliberately still in the STATUS column rather than folded into Qty. Qty is a column every row
+// shares, so putting "received of submitted" there would have to say something about a submission
+// still in transit too — and "0 of 25" on stock that is simply still travelling reads as a failure
+// that hasn't happened. An exception belongs in a mark that only appears when there IS one.
+//
+// Wording (and why) lives in stockRequestShortfall so a test can hold it still.
 function ShortfallBadge({ assignments }: { assignments: PortalWarehouseAssignment[] }) {
   const short = summariseShortfall(assignments);
   if (!short) return null;
-  const detail = `${short.received} of ${short.total} received`;
   return (
     <span
-      title={short.reasons.length > 0 ? `${detail} — ${short.reasons.join(" · ")}` : detail}
+      title={shortfallTooltip(short)}
       className="inline-flex shrink-0 items-center rounded-full bg-[var(--warn)]/12 px-2 py-0.5 text-[10px] font-bold text-[var(--warn)]"
     >
-      {short.units} not received
+      {shortfallBadgeText(short)}
     </span>
   );
 }
@@ -168,13 +170,23 @@ export function StockRequestsView() {
 
   const [paged, setPaged] = React.useState<PagedStockRequests | null>(null);
   const [loading, setLoading] = React.useState(true);
+  // LOAD ERRORS ONLY. The submission confirmation used to live here too, and that dual purpose was
+  // the bug: an inline Notice has no timer and no dismiss, so "Request submitted for X" sat above
+  // the table for the rest of the visit — still there after the customer searched for something
+  // else, changed the filter, or paged on. A receipt is a moment, not a state; it is a toast now.
   const [msg, setMsg] = React.useState<Msg>(null);
   const [requestOpen, setRequestOpen] = React.useState(false);
   const [refreshKey, setRefreshKey] = React.useState(0);
-  // Separate from `msg`, which carries the load error (that one HIDES the table) and the
-  // submission confirmation. An export failure must do neither: the list is fine, and clobbering
-  // "Request submitted" would swallow the receipt for the one write this portal allows.
-  const [exportMsg, setExportMsg] = React.useState<Msg>(null);
+  const { pushToast } = useDashboard();
+  // Still separate from `msg`: a load error HIDES the table, an export failure must not — the list
+  // on screen is fine and replacing it with an error would be a lie about the data.
+  //
+  // Stored WITH the filters it was produced under. "Export truncated — narrow the filters and try
+  // again" is advice about those filters, so once they change it is not merely stale, it is wrong:
+  // it went on telling the customer to narrow the filters after they already had. Kept as data and
+  // resolved during render (below) rather than cleared by an effect — this project's lint enforces
+  // React-Compiler rules, which forbid setState inside an effect.
+  const [exportMsg, setExportMsg] = React.useState<{ msg: Msg; filters: string } | null>(null);
   const [exporting, setExporting] = React.useState(false);
   // The row whose detail panel is open. Holds the ROW itself — the list is loaded, so opening one
   // fetches nothing and the panel has no loading state of its own.
@@ -226,9 +238,10 @@ export function StockRequestsView() {
         });
         if (active) {
           setPaged(r);
-          // Clear a stale load error so the table shows again, but keep a success message
-          // (onSubmitted sets one, then triggers this refetch — don't wipe the confirmation).
-          setMsg((m) => (m?.type === "error" ? null : m));
+          // A successful load clears the previous failure, full stop. This used to have to spare a
+          // success message that also lived in `msg` — which is what let the confirmation survive
+          // every later refetch too. With the receipt moved to a toast there is nothing to spare.
+          setMsg(null);
         }
       } catch (err) {
         if (active) setMsg({ type: "error", text: err instanceof Error ? err.message : "Could not load your requests." });
@@ -241,10 +254,11 @@ export function StockRequestsView() {
 
   const onSubmitted = (request: PortalStockRequest) => {
     setRequestOpen(false);
-    setMsg({
-      type: "success",
-      text: `Request submitted for "${request.name}" — your account team will review it.`,
-    });
+    // A toast, like every other write confirmation in the app (CustomerForm, StockEntryDetail and
+    // ~20 more): it auto-dismisses after 4s and de-duplicates repeats, so submitting twice in a row
+    // doesn't stack. The row itself appears in the table below a moment later — that is the durable
+    // record, and it is why the receipt does not need to persist.
+    pushToast(`Request submitted for "${request.name}" — your account team will review it.`);
     // Jump back to page 1 (newest first) so the new submission is visible. If a filter/page was
     // active, resetting the URL already re-runs the fetch effect; only when we're ALREADY at the
     // default view (nothing to reset) do we need to nudge refreshKey — avoids a double fetch.
@@ -254,11 +268,16 @@ export function StockRequestsView() {
 
   const requests = paged?.requests ?? [];
   const filtered = !!status || !!search;
+  // Shown only while the filters it was produced under still hold — see the state declaration.
+  const visibleExportMsg = exportMsg && exportMsg.filters === exportFilterKey(search, status) ? exportMsg.msg : null;
 
   // Passes the CURRENT filters, not the page. A capped export is reported rather than silently
   // truncated — a short file the customer believes is complete is worse than no file.
   const onExport = async () => {
     setExporting(true);
+    // Stamped at CALL time, not on resolve — these are the filters the file was produced under,
+    // even if the customer changes them while it downloads.
+    const filters = exportFilterKey(search, status);
     try {
       const { capped } = await customerService.exportOwnStockRequestsCsv({
         q: search || undefined,
@@ -266,11 +285,11 @@ export function StockRequestsView() {
       });
       setExportMsg(
         capped
-          ? { type: "error", text: "Export truncated — too many rows. Narrow the filters and try again." }
+          ? { msg: { type: "error", text: "Export truncated — too many rows. Narrow the filters and try again." }, filters }
           : null,
       );
     } catch (err) {
-      setExportMsg({ type: "error", text: err instanceof Error ? err.message : "Could not export your submissions." });
+      setExportMsg({ msg: { type: "error", text: err instanceof Error ? err.message : "Could not export your submissions." }, filters });
     } finally {
       setExporting(false);
     }
@@ -278,27 +297,16 @@ export function StockRequestsView() {
 
   if (loading && paged === null) {
     return (
-      <div className="flex h-full flex-col gap-4">
-        <HeaderCardSkeleton action />
+      <div className="stack flex h-full flex-col">
         <TableCardSkeleton headers={HEADERS} cells={SKELETON_CELLS} fill />
       </div>
     );
   }
 
   return (
-    <div className="flex h-full flex-col gap-4">
-      <PortalHeader
-        title="Stock Submissions"
-        subtitle="Submit stock to your account team and track each submission's status."
-        action={
-          <button type="button" onClick={() => setRequestOpen(true)} className={primaryBtn}>
-            <Plus className="h-4 w-4" /> Submit stock
-          </button>
-        }
-      />
-
+    <div className="stack flex h-full flex-col">
       {msg && <div className="shrink-0"><Notice msg={msg} /></div>}
-      {exportMsg && <div className="shrink-0"><Notice msg={exportMsg} /></div>}
+      {visibleExportMsg && <div className="shrink-0"><Notice msg={visibleExportMsg} /></div>}
 
       {/* Toolbar — search + status. Submissions accumulate for the life of the account and this list
           is already more than one page, so search matters MORE here than on Sites (3 rows, stable)
@@ -332,6 +340,12 @@ export function StockRequestsView() {
               Clear
             </button>
           )}
+        </div>
+
+        {/* Page actions, at the right-hand end of the row the list is filtered from — NOT in the top
+            bar. Up there they sat against the browser's own chrome, a screen's width from the rows
+            they act on. Export is outline so Submit stays the obvious primary of the pair. */}
+        <div className={`${toolbarActionsCls} sm:ml-auto`}>
           {/* Exports the FILTERED set, one row per warehouse leg. Disabled on an empty list — a CSV
               containing only a header reads as a broken download. */}
           <button
@@ -343,6 +357,9 @@ export function StockRequestsView() {
           >
             {exporting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
             {exporting ? "Exporting…" : "Export CSV"}
+          </button>
+          <button type="button" onClick={() => setRequestOpen(true)} className={toolbarPrimaryBtn}>
+            <Plus className="h-3.5 w-3.5" /> Submit stock
           </button>
         </div>
       </div>
@@ -363,7 +380,20 @@ export function StockRequestsView() {
         </div>
       ) : (
         <>
-          <TableCard headers={HEADERS} fill>
+          <TableCard
+            headers={HEADERS}
+            fill
+            footer={
+              <Pagination
+                embedded
+                page={paged?.page ?? 1}
+                totalPages={paged?.totalPages ?? 1}
+                total={paged?.total ?? 0}
+                label="submissions"
+                onPage={(p) => patchParams({ page: p > 1 ? String(p) : null })}
+              />
+            }
+          >
             {requests.map((r) => (
               <tr
                 key={r.id}
@@ -387,7 +417,7 @@ export function StockRequestsView() {
                     optional blocks of it into the rows is what made them range from ~44px to ~94px.
                     All of it is in the row's detail panel, in full and unabbreviated; the table's job
                     is to be scannable, and one rhythm is what makes it so. */}
-                <td className="px-4 py-3">
+                <td className="cell-y px-4">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-semibold text-[var(--ink)]">{r.editedName ?? r.name}</span>
                     {/* Inline, not a line below: the customer submitted this name and needs to
@@ -403,9 +433,9 @@ export function StockRequestsView() {
                     )}
                   </div>
                 </td>
-                <td className="px-4 py-3 font-bold text-[var(--ink)]">{r.quantity ?? "—"}</td>
-                <td className="px-4 py-3 text-[var(--muted)]">{fmtDate(r.createdAt)}</td>
-                <td className="px-4 py-3">
+                <td className="cell-y px-4 font-bold text-[var(--ink)]">{r.quantity ?? "—"}</td>
+                <td className="cell-y px-4 text-[var(--muted)]">{fmtDate(r.createdAt)}</td>
+                <td className="cell-y px-4">
                   <div className="flex flex-wrap items-center gap-1.5">
                     <RequestStatusChip value={r.status} />
                     <ShortfallBadge assignments={r.warehouseAssignments} />
@@ -422,15 +452,6 @@ export function StockRequestsView() {
               </tr>
             ))}
           </TableCard>
-          <div className="shrink-0">
-            <Pagination
-              page={paged?.page ?? 1}
-              totalPages={paged?.totalPages ?? 1}
-              total={paged?.total ?? 0}
-              label="submissions"
-              onPage={(p) => patchParams({ page: p > 1 ? String(p) : null })}
-            />
-          </div>
         </>
       )}
 

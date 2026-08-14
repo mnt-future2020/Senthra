@@ -5,7 +5,6 @@ import type { IrmItemWithRelations, IrmItemListRow, SupplierLinkRow } from "./ir
 import * as irmTypeService from "#modules/irm-type/irm-type.service.js";
 import * as irmCategoryService from "#modules/irm-category/irm-category.service.js";
 import * as supplierService from "#modules/supplier/supplier.service.js";
-import * as userRepo from "#modules/user/user.repository.js";
 import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import * as grnRepo from "#modules/goods-in/goods-in.repository.js";
 import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
@@ -15,19 +14,19 @@ import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import { paginate } from "../../utils/pagination.js";
+import { EXPORT_MAX, EXPORT_PAGING, toCsv } from "../../utils/csv.js";
 import type { CreateIrmItemInput, SupplierRowInput, UpdateIrmItemInput } from "./irm.validation.js";
+import { buildSkuCandidate, normalizeSku, withSuffix } from "./sku.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
+// How many times a GENERATED SKU is re-derived after losing a race to the unique index. Two rivals
+// landing on the same candidate is already unlikely; a third would mean something other than
+// concurrency is wrong, and looping on it would just delay the error.
+const SKU_RACE_RETRIES = 2;
 const STATUSES = ["active", "inactive"] as const;
 
 type SupplierLink = IrmItemWithRelations["suppliers"][number];
 
-export interface PublicIrmOwner {
-  id: string;
-  name: string;
-  email: string;
-  jobTitle: string | null;
-}
 export interface PublicIrmRef {
   id: string;
   name: string;
@@ -66,13 +65,9 @@ export interface PublicIrmItem {
   // Unit.
   baseUnit: string | null;
   packSize: number | null;
-  conversionRatio: number | null;
   // Stock policies (advisory).
-  minimumStock: number | null;
   reorderLevel: number | null;
-  reorderQuantity: number | null;
   maximumStock: number | null;
-  safetyStock: number | null;
   criticalLevel: number | null;
   // Cost (internal only).
   standardCostPence: number | null;
@@ -83,10 +78,7 @@ export interface PublicIrmItem {
   trackInventory: boolean;
   trackSerialNumbers: boolean;
   trackBatchNumbers: boolean;
-  allowNegativeStock: boolean;
   // Operations.
-  ownerUserId: string | null;
-  owner: PublicIrmOwner | null;
   notes: string | null;
   // Stock rollups — ZERO until the inventory ledger module is built (master-data only).
   onHand: number;
@@ -111,11 +103,6 @@ const trimToNull = (v: string | null | undefined): string | null => {
   const t = v?.trim();
   return t ? t : null;
 };
-
-function toOwner(o: IrmItemWithRelations["owner"]): PublicIrmOwner | null {
-  if (!o) return null;
-  return { id: o.id, name: `${o.firstName} ${o.lastName}`.trim() || o.email, email: o.email, jobTitle: o.jobTitle ?? o.role?.name ?? null };
-}
 
 function toSupplierLink(l: SupplierLink): PublicIrmSupplierLink {
   return {
@@ -154,12 +141,8 @@ function toPublic(i: IrmItemWithRelations | IrmItemListRow): PublicIrmItem {
     primarySupplier: primary?.supplier ? { id: primary.supplier.id, code: primary.supplier.code, name: primary.supplier.name } : null,
     baseUnit: i.baseUnit,
     packSize: i.packSize,
-    conversionRatio: i.conversionRatio,
-    minimumStock: i.minimumStock,
     reorderLevel: i.reorderLevel,
-    reorderQuantity: i.reorderQuantity,
     maximumStock: i.maximumStock,
-    safetyStock: i.safetyStock,
     criticalLevel: i.criticalLevel,
     standardCostPence: i.standardCostPence,
     standardCost: i.standardCostPence != null ? i.standardCostPence / 100 : null,
@@ -168,9 +151,6 @@ function toPublic(i: IrmItemWithRelations | IrmItemListRow): PublicIrmItem {
     trackInventory: i.trackInventory ?? true,
     trackSerialNumbers: i.trackSerialNumbers ?? false,
     trackBatchNumbers: i.trackBatchNumbers ?? false,
-    allowNegativeStock: i.allowNegativeStock ?? false,
-    ownerUserId: i.ownerUserId,
-    owner: toOwner(i.owner),
     notes: i.notes,
     onHand: 0,
     available: 0,
@@ -180,15 +160,6 @@ function toPublic(i: IrmItemWithRelations | IrmItemListRow): PublicIrmItem {
     createdAt: i.createdAt.toISOString(),
     updatedAt: i.updatedAt.toISOString(),
   };
-}
-
-async function resolveOwner(ownerUserId: string | null | undefined): Promise<string | null> {
-  const id = ownerUserId?.trim();
-  if (!id) return null;
-  const user = await userRepo.findById(id);
-  if (!user) throw badRequest("Selected owner no longer exists.");
-  if (user.status !== "active") throw badRequest("Selected owner is not an active user.");
-  return user.id;
 }
 
 // Normalise supplier rows to junction rows. Suppliers are optional, so the list may be empty;
@@ -227,17 +198,58 @@ function suppliersDiffer(existing: SupplierLink[], incoming: SupplierLinkRow[]):
 const costToPence = (pounds: number | null | undefined): number | null =>
   pounds == null ? null : Math.round(pounds * 100);
 
-// Resolve the SKU + its lowercase mirror; enforce GLOBAL FOREVER uniqueness (scans all rows
-// incl. soft-deleted). `selfId` excludes the item being edited.
-async function resolveSku(sku: string | null | undefined, selfId?: string): Promise<{ sku: string | null; skuLower: string | null }> {
-  const trimmed = trimToNull(sku);
-  if (!trimmed) return { sku: null, skuLower: null };
-  const skuLower = trimmed.toLowerCase();
-  const clash = await irmRepo.findBySkuLower(skuLower);
-  if (clash && clash.id !== selfId) {
-    throw skuConflict(trimmed);
+// Is this SKU free to use? Checks the two ways it can be taken:
+//   1. another item already owns it as a SKU (global + forever, soft-deleted rows included), and
+//   2. another item owns it as its display CODE — see irmRepo.findIdByCode for why that matters.
+async function isSkuFree(sku: string, selfId?: string): Promise<boolean> {
+  const clash = await irmRepo.findBySkuLower(sku.toLowerCase());
+  if (clash && clash.id !== selfId) return false;
+  const codeOwner = await irmRepo.findIdByCode(sku);
+  return !codeOwner || codeOwner.id === selfId;
+}
+
+// Walk the generated candidate's suffixes (CAB-CAT6, CAB-CAT6-2, …) until one is free. Only ever
+// used for SKUs the SERVER invented: a SKU a person typed is rejected on collision rather than
+// silently renamed, because they need to know the one they chose was taken.
+async function uniqueSku(candidate: string, selfId?: string): Promise<string> {
+  for (let n = 1; n <= 50; n++) {
+    const attempt = withSuffix(candidate, n);
+    if (await isSkuFree(attempt, selfId)) return attempt;
   }
-  return { sku: trimmed, skuLower };
+  throw conflict(`Could not generate a free SKU from "${candidate}". Enter one manually.`);
+}
+
+// `generated` separates a SKU the SERVER invented from one a PERSON chose. It decides who owns a
+// losing race against the unique index: our value is ours to replace silently, theirs is not.
+interface ResolvedSku {
+  sku: string;
+  skuLower: string;
+  generated: boolean;
+}
+
+// Resolve the SKU + its lowercase mirror. Every IRM item has one: a blank SKU is GENERATED from the
+// item's name and category rather than stored as null. `selfId` excludes the item being edited.
+async function resolveSku(
+  raw: string | null | undefined,
+  ctx: { name: string; categoryName?: string | null; codePrefix: string; selfId?: string },
+): Promise<ResolvedSku> {
+  const typed = normalizeSku(raw);
+
+  // Nothing usable typed → generate. The form fills this in as you type, so in practice this is
+  // the API-client path; it exists so "every item has a SKU" holds without trusting the caller.
+  if (!typed) {
+    const generated = await uniqueSku(buildSkuCandidate(ctx.name, ctx.categoryName), ctx.selfId);
+    return { sku: generated, skuLower: generated.toLowerCase(), generated: true };
+  }
+
+  // Reserve the shape of a FUTURE item code (IRM-0042) as well as the codes already issued. The
+  // code counter only ever climbs, so blocking the shape now is what stops a scan collision the
+  // day it reaches that number — by then the SKU would be far too entrenched to change.
+  if (new RegExp(`^${ctx.codePrefix}-\\d+$`).test(typed)) {
+    throw badRequest(`"${typed}" is the shape of an item code, which would break barcode scanning. Choose a different SKU.`);
+  }
+  if (!(await isSkuFree(typed, ctx.selfId))) throw skuConflict(typed);
+  return { sku: typed, skuLower: typed.toLowerCase(), generated: false };
 }
 
 // Friendly 409 for a duplicate SKU — used both by the app-level pre-check (resolveSku) and
@@ -245,22 +257,22 @@ async function resolveSku(sku: string | null | undefined, selfId?: string): Prom
 const skuConflict = (sku: string | null | undefined) =>
   conflict(`SKU "${(sku ?? "").trim()}" is already in use. SKUs are never reused, even from removed items.`);
 
-function irmColumns(input: CreateIrmItemInput, skuLower: string | null, standardCostPence: number | null) {
+function irmColumns(
+  input: CreateIrmItemInput,
+  resolvedSku: { sku: string; skuLower: string },
+  standardCostPence: number | null,
+) {
   return {
     description: trimToNull(input.description),
     brand: trimToNull(input.brand),
     manufacturer: trimToNull(input.manufacturer),
     mpn: trimToNull(input.mpn),
-    sku: trimToNull(input.sku),
-    skuLower,
+    sku: resolvedSku.sku,
+    skuLower: resolvedSku.skuLower,
     baseUnit: input.baseUnit,
     packSize: input.packSize ?? null,
-    conversionRatio: input.conversionRatio ?? null,
-    minimumStock: input.minimumStock ?? null,
     reorderLevel: input.reorderLevel ?? null,
-    reorderQuantity: input.reorderQuantity ?? null,
     maximumStock: input.maximumStock ?? null,
-    safetyStock: input.safetyStock ?? null,
     criticalLevel: input.criticalLevel ?? null,
     standardCostPence,
     currency: input.currency ?? "GBP",
@@ -268,7 +280,6 @@ function irmColumns(input: CreateIrmItemInput, skuLower: string | null, standard
     trackInventory: input.trackInventory ?? true,
     trackSerialNumbers: input.trackSerialNumbers ?? false,
     trackBatchNumbers: input.trackBatchNumbers ?? false,
-    allowNegativeStock: input.allowNegativeStock ?? false,
     notes: trimToNull(input.notes),
     status: input.status ?? "active",
   };
@@ -283,6 +294,8 @@ export interface ListIrmItemsParams {
   page?: number;
   pageSize?: number;
   sort?: string;
+  /** Internal only — see EXPORT_PAGING. Controllers never read this from the query string. */
+  maxPageSize?: number;
 }
 
 export async function listIrmItems(params: ListIrmItemsParams = {}): Promise<PagedIrmItems> {
@@ -296,9 +309,69 @@ export async function listIrmItems(params: ListIrmItemsParams = {}): Promise<Pag
     supplierId: params.supplier,
   };
   const total = await irmRepo.count(filters);
-  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total, params.maxPageSize);
   const rows = await irmRepo.findMany(filters, skip, pageSize, params.sort);
   return { items: rows.map(toPublic), total, page, pageSize, totalPages };
+}
+
+/**
+ * The SAME filtered catalogue as a CSV, minus paging. Delegates to listIrmItems with one oversized
+ * page rather than re-deriving the filters — the status whitelist above is real behaviour (an
+ * unknown ?status is ignored, not matched), and a second copy of it would drift.
+ */
+export async function exportIrmItemsCsv(
+  params: ListIrmItemsParams = {},
+  actor?: AuditActor,
+): Promise<{ csv: string; capped: boolean }> {
+  // EXPORT_PAGING, not a bare pageSize: `paginate` clamps anything a client could ask for to 100,
+  // so without its maxPageSize every export silently stopped at 100 rows AND reported itself
+  // complete (capped was measured on the same clamped length). See utils/csv.
+  const { items } = await listIrmItems({ ...params, ...EXPORT_PAGING });
+  const rows = items.slice(0, EXPORT_MAX);
+
+  const csv = toCsv(
+    [
+      "Code", "Name", "Type", "Category", "Status",
+      "Brand", "Manufacturer", "MPN", "SKU", "Barcode",
+      "Primary Supplier", "Suppliers",
+      "Unit", "Pack Size",
+      "Critical Level", "Reorder Level", "Maximum Stock",
+      "Standard Cost", "Currency", "VAT %",
+      "Track Inventory", "On Hand",
+    ],
+    rows.map((i) => [
+      i.code,
+      i.name,
+      i.type?.name,
+      i.category?.name,
+      i.status,
+      i.brand,
+      i.manufacturer,
+      i.mpn,
+      i.sku,
+      i.barcode,
+      i.primarySupplier?.name,
+      // The alternatives, so a buyer can see the second source without opening the item.
+      i.suppliers.map((sup) => sup.supplier?.name).filter(Boolean).join(" | "),
+      i.baseUnit,
+      i.packSize,
+      // The three thresholds in the order they stack (critical ≤ reorder ≤ maximum), so the columns
+      // read the way the rule does rather than in schema order.
+      i.criticalLevel,
+      i.reorderLevel,
+      i.maximumStock,
+      // Pounds, never the pence integer — this file is opened in a spreadsheet and multiplied out.
+      i.standardCost == null ? "" : i.standardCost.toFixed(2),
+      i.currency,
+      i.vatRatePercent,
+      i.trackInventory ? "Yes" : "No",
+      i.onHand,
+    ]),
+  );
+
+  // `notes` is deliberately absent, as on the supplier and customer exports: internal free text.
+  audit.record({ actor, action: "irm.exported", targetType: "irm_item", targetLabel: `${rows.length} rows` });
+  return { csv, capped: items.length > EXPORT_MAX };
 }
 
 export async function getIrmItem(idOrCode: string): Promise<PublicIrmItem> {
@@ -341,31 +414,38 @@ export async function createIrmItem(input: CreateIrmItemInput, actor?: AuditActo
   if (!name) throw badRequest("Item name is required.");
 
   await irmTypeService.requireActiveIrmType(input.typeId);
-  await irmCategoryService.requireActiveIrmCategory(input.irmCategoryId);
-  const ownerUserId = await resolveOwner(input.ownerUserId);
-  const { skuLower } = await resolveSku(input.sku);
+  const category = await irmCategoryService.requireActiveIrmCategory(input.irmCategoryId);
+  const codePrefix = await getIrmCodePrefix();
+  const resolvedSku = await resolveSku(input.sku, { name, categoryName: category.name, codePrefix });
   const supplierRows = await buildSupplierRows(input.suppliers ?? []);
   const standardCostPence = costToPence(input.standardCost);
-  const codePrefix = await getIrmCodePrefix();
   const actorLabel = actor?.email ?? null;
 
-  let created: IrmItemWithRelations;
-  try {
-    created = await irmRepo.createWithCode(
-      {
-        name,
-        ...irmColumns(input, skuLower, standardCostPence),
-        irmType: { connect: { id: input.typeId } },
-        irmCategory: { connect: { id: input.irmCategoryId } },
-        ...(ownerUserId ? { owner: { connect: { id: ownerUserId } } } : {}),
-        createdBy: actorLabel,
-        updatedBy: actorLabel,
-      },
-      codePrefix,
-    );
-  } catch (e) {
-    if (irmRepo.isSkuConflict(e)) throw skuConflict(input.sku);
-    throw e;
+  // The pre-check in resolveSku can lose a race to a concurrent create, and the partial unique
+  // index then rejects the write. What happens next depends on WHO chose the SKU: one the server
+  // generated is re-derived onto the next free suffix (the caller never picked it, so a 409 over it
+  // would be nonsense), while one a person typed is reported back to them — silently renaming their
+  // chosen identifier would be worse than failing.
+  let resolved = resolvedSku;
+  let created: IrmItemWithRelations | null = null;
+  for (let attempt = 0; created === null; attempt++) {
+    try {
+      created = await irmRepo.createWithCode(
+        {
+          name,
+          ...irmColumns(input, resolved, standardCostPence),
+          irmType: { connect: { id: input.typeId } },
+          irmCategory: { connect: { id: input.irmCategoryId } },
+          createdBy: actorLabel,
+          updatedBy: actorLabel,
+        },
+        codePrefix,
+      );
+    } catch (e) {
+      if (!irmRepo.isSkuConflict(e)) throw e;
+      if (!resolved.generated || attempt >= SKU_RACE_RETRIES) throw skuConflict(resolved.sku);
+      resolved = await resolveSku(undefined, { name, categoryName: category.name, codePrefix });
+    }
   }
   await irmRepo.replaceSuppliers(created.id, supplierRows);
   const full = (await irmRepo.findById(created.id))!;
@@ -392,21 +472,39 @@ export async function updateIrmItem(id: string, input: UpdateIrmItemInput, actor
   if (input.mpn !== undefined) data.mpn = trimToNull(input.mpn);
   if (input.baseUnit !== undefined) data.baseUnit = input.baseUnit;
   if (input.packSize !== undefined) data.packSize = input.packSize;
-  if (input.conversionRatio !== undefined) data.conversionRatio = input.conversionRatio;
-  if (input.minimumStock !== undefined) data.minimumStock = input.minimumStock;
   if (input.reorderLevel !== undefined) data.reorderLevel = input.reorderLevel;
-  if (input.reorderQuantity !== undefined) data.reorderQuantity = input.reorderQuantity;
   if (input.maximumStock !== undefined) data.maximumStock = input.maximumStock;
-  if (input.safetyStock !== undefined) data.safetyStock = input.safetyStock;
   if (input.criticalLevel !== undefined) data.criticalLevel = input.criticalLevel;
 
-  // Cross-field: maximum ≥ minimum must hold on the MERGED record. A partial PATCH may send
-  // only one of the two, so validate the effective values (incoming if present, else stored)
-  // — not just what's in this request (the zod refine only sees the request).
-  const effectiveMin = input.minimumStock !== undefined ? input.minimumStock : existing.minimumStock;
-  const effectiveMax = input.maximumStock !== undefined ? input.maximumStock : existing.maximumStock;
-  if (typeof effectiveMin === "number" && typeof effectiveMax === "number" && effectiveMax < effectiveMin) {
-    throw badRequest("Maximum stock must be greater than or equal to minimum stock.");
+  // Cross-field coherence on the MERGED record. A partial PATCH may send only one of a pair, so the
+  // effective values (incoming if present, else stored) are what must stack — the zod refine only
+  // ever sees this request. Previously this compared maximum against `minimumStock`, a field the
+  // reorder engine never read, so the guard protected a number that changed nothing.
+  //
+  // Each rule only fires when this request TOUCHES one of its two fields. Rows saved before these
+  // rules existed can violate them (nothing enforced max ≥ reorder, and criticalLevel had no rule at
+  // all), and a guard that ran unconditionally would refuse to rename such an item — a 400 about
+  // stock policy on a request that never mentioned it, with no way to clear it from the form. Same
+  // reasoning as the supplier/type pickers: an old value you didn't touch never blocks the edit in
+  // front of you. Touch either half of a pair and you own it, and the merged check applies in full.
+  const eff = <K extends "reorderLevel" | "maximumStock" | "criticalLevel">(k: K) =>
+    input[k] !== undefined ? input[k] : existing[k];
+  const effReorder = eff("reorderLevel");
+  const effMax = eff("maximumStock");
+  const effCritical = eff("criticalLevel");
+  const touched = (...keys: ("reorderLevel" | "maximumStock" | "criticalLevel")[]) =>
+    keys.some((k) => input[k] !== undefined);
+  if (touched("reorderLevel", "maximumStock") && typeof effReorder === "number" && typeof effMax === "number" && effMax < effReorder) {
+    throw badRequest("Maximum stock must be greater than or equal to the reorder level — an order has to lift stock clear of the line that triggered it.");
+  }
+  if (touched("reorderLevel", "criticalLevel") && typeof effReorder === "number" && typeof effCritical === "number" && effCritical > effReorder) {
+    throw badRequest("Critical level must be at or below the reorder level — it is the more urgent line, not a second trigger.");
+  }
+  // Closes the chain. Both rules above hinge on the reorder level, so with it blank nothing compared
+  // these two and critical 200 against a maximum of 50 passed — an ordering the comment claimed but
+  // the code only half-enforced. Same touched() gate: an untouched legacy pair never blocks an edit.
+  if (touched("criticalLevel", "maximumStock") && typeof effCritical === "number" && typeof effMax === "number" && effCritical > effMax) {
+    throw badRequest("Critical level must be at or below the maximum stock — it is the lowest of the three lines.");
   }
 
   if (input.currency !== undefined) data.currency = input.currency;
@@ -414,18 +512,33 @@ export async function updateIrmItem(id: string, input: UpdateIrmItemInput, actor
   if (input.trackInventory !== undefined) data.trackInventory = input.trackInventory;
   if (input.trackSerialNumbers !== undefined) data.trackSerialNumbers = input.trackSerialNumbers;
   if (input.trackBatchNumbers !== undefined) data.trackBatchNumbers = input.trackBatchNumbers;
-  if (input.allowNegativeStock !== undefined) data.allowNegativeStock = input.allowNegativeStock;
   if (input.notes !== undefined) data.notes = trimToNull(input.notes);
 
   // Cost: pounds → pence.
   if (input.standardCost !== undefined) data.standardCostPence = costToPence(input.standardCost);
 
-  // SKU: global-forever uniqueness; only re-check when it actually changes.
+  // SKU: required, and never clearable — an item that has one can't go back to having none.
+  // Re-resolved ONLY when it actually changes, so the common edit (which resends the unchanged SKU)
+  // costs no lookups. Note the value is normalized first, so re-sending 'FBR-SM12- G652D' as
+  // 'FBR-SM12-G652D' is correctly seen as no change rather than a rename that burns the old one.
   if (input.sku !== undefined) {
-    const { sku, skuLower } = await resolveSku(input.sku, id);
-    data.sku = sku;
-    data.skuLower = skuLower;
+    const typed = normalizeSku(input.sku);
+    if (!typed) throw badRequest("SKU is required.");
+    if (typed !== existing.sku) {
+      const resolved = await resolveSku(typed, {
+        name: input.name?.trim() || existing.name,
+        categoryName: existing.irmCategory?.name,
+        codePrefix: await getIrmCodePrefix(),
+        selfId: id,
+      });
+      data.sku = resolved.sku;
+      data.skuLower = resolved.skuLower;
+    }
   }
+  // What the write will actually try to store, for the racing-conflict message below. `input.sku` is
+  // the raw request field: reporting that would quote 'fbr-sm12- g652d' back at someone who is
+  // looking at FBR-SM12-G652D on screen.
+  const attemptedSku = typeof data.sku === "string" ? data.sku : existing.sku;
 
   // Type / category: validate + change only when a different active one is chosen.
   if (input.typeId !== undefined && input.typeId !== existing.typeId) {
@@ -438,13 +551,6 @@ export async function updateIrmItem(id: string, input: UpdateIrmItemInput, actor
   }
 
   const events: string[] = [];
-
-  // Owner change-detection (mirror supplier/warehouse).
-  if (input.ownerUserId !== undefined && input.ownerUserId !== existing.ownerUserId) {
-    const resolved = input.ownerUserId === null ? null : await resolveOwner(input.ownerUserId);
-    data.ownerUserId = resolved;
-    events.push(resolved ? "irm.owner_assigned" : "irm.owner_removed");
-  }
 
   // Status transitions.
   if (input.status !== undefined && input.status !== existing.status) {
@@ -465,7 +571,7 @@ export async function updateIrmItem(id: string, input: UpdateIrmItemInput, actor
   }
 
   // Generic "updated" when any non-transition scalar changed.
-  const IGNORE = new Set(["updatedBy", "status", "ownerUserId", "skuLower"]);
+  const IGNORE = new Set(["updatedBy", "status", "skuLower"]);
   let scalarChanged = false;
   for (const [k, v] of Object.entries(data)) {
     if (IGNORE.has(k)) continue;
@@ -482,7 +588,9 @@ export async function updateIrmItem(id: string, input: UpdateIrmItemInput, actor
   try {
     result = await irmRepo.update(id, data);
   } catch (e) {
-    if (irmRepo.isSkuConflict(e)) throw skuConflict(input.sku);
+    // No retry here, unlike create: an update's SKU is always one a person typed (a blank is
+    // rejected above), so it is never ours to silently replace.
+    if (irmRepo.isSkuConflict(e)) throw skuConflict(attemptedSku);
     throw e;
   }
   if (suppliersChanged && supplierRows) {
@@ -527,16 +635,6 @@ export async function deleteIrmItem(id: string, actor?: AuditActor): Promise<voi
     targetId: id,
     targetLabel: `${i.name} (${i.code})`,
   });
-}
-
-export async function listOwnerOptions(): Promise<PublicIrmOwner[]> {
-  const users = await irmRepo.findOwnerOptions();
-  return users.map((u) => ({
-    id: u.id,
-    name: `${u.firstName} ${u.lastName}`.trim() || u.email,
-    email: u.email,
-    jobTitle: u.jobTitle ?? u.role?.name ?? null,
-  }));
 }
 
 // Plug-in seam for FUTURE procurement/inventory modules: assert an item id points to an

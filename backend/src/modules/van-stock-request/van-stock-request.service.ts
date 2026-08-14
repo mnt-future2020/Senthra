@@ -12,11 +12,12 @@ import * as userRepo from "#modules/user/user.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
 import { notify } from "#modules/notification/notification.service.js";
-import { emitToRoom, emitToUser, VAN_STOCK_REVIEWERS_ROOM } from "../../lib/realtime.js";
+import { emitAttentionChanged, emitToRoom, emitToUser, VAN_STOCK_REVIEWERS_ROOM } from "../../lib/realtime.js";
 import { assertWarehouseAccess, getAccessibleWarehouseIds, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
 import * as vsrRepo from "./van-stock-request.repository.js";
 import type { CreateRequestData, CreateRequestLineData, FulfilEntry, RequestWithLines } from "./van-stock-request.repository.js";
+import { randomUUID } from "node:crypto";
 import type {
   ApproveVanStockRequestInput,
   CloseShortInput,
@@ -323,6 +324,7 @@ export function toPublic(r: RequestWithLines, now: Date, scope: string[] | undef
 function emitUpdate(engineerId: string, data: { id: string; code: string; status: string; type: string }): void {
   emitToUser(engineerId, "van_stock_request:updated", data);
   emitToRoom(VAN_STOCK_REVIEWERS_ROOM, "van_stock_request:updated", data);
+  emitAttentionChanged("van_stock");
 }
 
 // "Is this actor a WAREHOUSE REVIEWER (vs the requesting engineer)?" — used only by getOne to gate
@@ -1260,6 +1262,8 @@ export async function uploadImage(image: string, kind: "attachment" | "damage"):
   const creds = await getCloudinaryCreds();
   if (!creds) throw badRequest("Cloudinary is not configured. Contact an administrator.");
   const folder = kind === "damage" ? "senthra/damage-photos" : "senthra/van-stock-requests";
-  const url = await uploadToCloudinary(image, `vsr-${kind}-${Date.now()}`, creds, folder);
+  // Unique per upload: `uploadToCloudinary` overwrites on a repeated publicId, so a timestamp meant
+  // two engineers photographing the same kind of evidence in the same millisecond kept one photo.
+  const { url } = await uploadToCloudinary(image, `vsr-${kind}-${randomUUID()}`, creds, folder);
   return { url };
 }

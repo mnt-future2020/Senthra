@@ -7,12 +7,13 @@ vi.mock("./irm.repository.js", () => ({
   softDelete: vi.fn(),
   replaceSuppliers: vi.fn(),
   findBySkuLower: vi.fn(),
+  findIdByCode: vi.fn(),
+  createWithCode: vi.fn(),
   isSkuConflict: vi.fn(),
 }));
 vi.mock("#modules/irm-type/irm-type.service.js", () => ({ requireActiveIrmType: vi.fn() }));
 vi.mock("#modules/irm-category/irm-category.service.js", () => ({ requireActiveIrmCategory: vi.fn() }));
 vi.mock("#modules/supplier/supplier.service.js", () => ({ requireActiveSupplier: vi.fn() }));
-vi.mock("#modules/user/user.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/settings/settings.service.js", () => ({ getIrmCodePrefix: vi.fn().mockResolvedValue("IRM") }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 // Deleting an IRM item first asks four other modules whether anything still references it. Those are
@@ -30,9 +31,8 @@ import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
 import * as irmTypeService from "#modules/irm-type/irm-type.service.js";
 import * as irmCategoryService from "#modules/irm-category/irm-category.service.js";
 import * as supplierService from "#modules/supplier/supplier.service.js";
-import * as userRepo from "#modules/user/user.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
-import { deleteIrmItem, requireActiveIrmItems, updateIrmItem } from "./irm.service.js";
+import { createIrmItem, deleteIrmItem, requireActiveIrmItems, updateIrmItem } from "./irm.service.js";
 
 const IRM_ID = "f".repeat(24);
 const TYPE_ID = "a".repeat(24);
@@ -41,9 +41,6 @@ const CAT_ID = "b".repeat(24);
 const NEW_CAT_ID = "2".repeat(24);
 const SUP_ID = "c".repeat(24);
 const NEW_SUP_ID = "4".repeat(24);
-const ACTIVE_OWNER = "d".repeat(24);
-const INACTIVE_OWNER = "e".repeat(24);
-const NEW_OWNER = "3".repeat(24);
 
 function iRow(over: Record<string, unknown> = {}) {
   return {
@@ -66,12 +63,8 @@ function iRow(over: Record<string, unknown> = {}) {
     suppliers: [],
     baseUnit: "Each",
     packSize: null,
-    conversionRatio: null,
-    minimumStock: null,
     reorderLevel: null,
-    reorderQuantity: null,
     maximumStock: null,
-    safetyStock: null,
     criticalLevel: null,
     standardCostPence: null,
     currency: "GBP",
@@ -79,9 +72,6 @@ function iRow(over: Record<string, unknown> = {}) {
     trackInventory: true,
     trackSerialNumbers: false,
     trackBatchNumbers: false,
-    allowNegativeStock: false,
-    ownerUserId: null,
-    owner: null,
     notes: null,
     deletedAt: null,
     createdBy: null,
@@ -97,11 +87,12 @@ const mockUpdate = irmRepo.update as ReturnType<typeof vi.fn>;
 const mockSoftDelete = irmRepo.softDelete as ReturnType<typeof vi.fn>;
 const mockReplaceSuppliers = irmRepo.replaceSuppliers as ReturnType<typeof vi.fn>;
 const mockFindBySku = irmRepo.findBySkuLower as ReturnType<typeof vi.fn>;
+const mockFindIdByCode = irmRepo.findIdByCode as ReturnType<typeof vi.fn>;
+const mockCreate = irmRepo.createWithCode as ReturnType<typeof vi.fn>;
 const mockReqType = irmTypeService.requireActiveIrmType as ReturnType<typeof vi.fn>;
 const mockReqCat = irmCategoryService.requireActiveIrmCategory as ReturnType<typeof vi.fn>;
 const mockReqSupplier = supplierService.requireActiveSupplier as ReturnType<typeof vi.fn>;
 const mockIsSkuConflict = irmRepo.isSkuConflict as ReturnType<typeof vi.fn>;
-const mockUserFindById = userRepo.findById as ReturnType<typeof vi.fn>;
 const mockFindByIds = irmRepo.findByIds as ReturnType<typeof vi.fn>;
 const mockAudit = audit.record as ReturnType<typeof vi.fn>;
 
@@ -125,50 +116,19 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockUpdate.mockImplementation((_id: string, data: Record<string, unknown>) => Promise.resolve(iRow(data)));
   mockFindBySku.mockResolvedValue(null);
+  // No item owns the SKU as its display code (the ambiguous-scan guard) unless a test says so.
+  mockFindIdByCode.mockResolvedValue(null);
+  // Re-assert like the counts below: mockReturnValue survives clearAllMocks, so a test that forces
+  // "this error IS a SKU conflict" would otherwise relabel every later failure as one.
+  mockIsSkuConflict.mockReturnValue(false);
+  // Create returns whatever columns it was handed, so a test can assert on the stored SKU.
+  mockCreate.mockImplementation((data: Record<string, unknown>) => Promise.resolve(iRow(data)));
+  mockReqCat.mockResolvedValue({ id: CAT_ID, name: "Cable", status: "active" });
   // Re-assert "nothing depends on this item". clearAllMocks wipes call history but NOT a
   // mockResolvedValue, so without this the guard test below would leak its non-zero count into
   // whatever ran next and delete would start refusing for no visible reason.
   vi.mocked(poRepo.countByIrmItem).mockResolvedValue(0);
   vi.mocked(inventoryRepo.countBalancesWithStockByIrmItem).mockResolvedValue(0);
-});
-
-describe("updateIrmItem — owner change handling", () => {
-  it("edits other fields when the existing owner is INACTIVE — owner untouched", async () => {
-    mockFindById.mockResolvedValue(
-      iRow({
-        ownerUserId: INACTIVE_OWNER,
-        owner: { id: INACTIVE_OWNER, firstName: "Ina", lastName: "Ctive", email: "ina@x.com", status: "inactive", jobTitle: null, role: null },
-      }),
-    );
-    await expect(updateIrmItem(IRM_ID, { name: "CAT6 Cable 305m", ownerUserId: INACTIVE_OWNER })).resolves.toMatchObject({
-      name: "CAT6 Cable 305m",
-    });
-    expect(mockUserFindById).not.toHaveBeenCalled();
-    expect("ownerUserId" in mockUpdate.mock.calls[0][1]).toBe(false);
-    expect(auditActions()).toContain("irm.updated");
-  });
-
-  it("assigns a different active owner → owner_assigned", async () => {
-    mockFindById.mockResolvedValue(iRow({ ownerUserId: INACTIVE_OWNER }));
-    mockUserFindById.mockResolvedValue({ id: NEW_OWNER, status: "active" });
-    await updateIrmItem(IRM_ID, { ownerUserId: NEW_OWNER });
-    expect(mockUpdate.mock.calls[0][1].ownerUserId).toBe(NEW_OWNER);
-    expect(auditActions()).toContain("irm.owner_assigned");
-  });
-
-  it("clears the owner → owner_removed", async () => {
-    mockFindById.mockResolvedValue(iRow({ ownerUserId: ACTIVE_OWNER }));
-    await updateIrmItem(IRM_ID, { ownerUserId: null });
-    expect(mockUpdate.mock.calls[0][1].ownerUserId).toBeNull();
-    expect(auditActions()).toContain("irm.owner_removed");
-  });
-
-  it("rejects assigning an inactive owner", async () => {
-    mockFindById.mockResolvedValue(iRow({ ownerUserId: null }));
-    mockUserFindById.mockResolvedValue({ id: INACTIVE_OWNER, status: "inactive" });
-    await expect(updateIrmItem(IRM_ID, { ownerUserId: INACTIVE_OWNER })).rejects.toThrow(/not an active user/i);
-    expect(mockUpdate).not.toHaveBeenCalled();
-  });
 });
 
 describe("updateIrmItem — type / category / cost", () => {
@@ -267,23 +227,70 @@ describe("updateIrmItem — suppliers reconcile", () => {
   });
 });
 
+// The three thresholds must stack: critical ≤ reorder ≤ maximum. A PATCH may send only one of a
+// pair, so the guard runs on the MERGED record — the zod refine only ever sees the request, and a
+// request that lowers max alone would otherwise sail past a stored reorder level it now sits under.
+// These used to compare max against `minimumStock`, a field the reorder engine never read.
+//
+// Each rule is scoped to requests that TOUCH one of its two fields, so a pre-existing violation can
+// never block an edit to something else — see the two legacy-row cases at the end.
 describe("updateIrmItem — stock policy cross-field (partial PATCH)", () => {
-  it("rejects maximumStock below the EXISTING minimumStock when only max is patched", async () => {
-    mockFindById.mockResolvedValue(iRow({ minimumStock: 100, maximumStock: 500 }));
-    await expect(updateIrmItem(IRM_ID, { maximumStock: 50 })).rejects.toThrow(/greater than or equal/i);
+  it("rejects a maximum below the EXISTING reorder level when only max is patched", async () => {
+    mockFindById.mockResolvedValue(iRow({ reorderLevel: 100, maximumStock: 500 }));
+    await expect(updateIrmItem(IRM_ID, { maximumStock: 50 })).rejects.toThrow(/greater than or equal to the reorder level/i);
     expect(mockUpdate).not.toHaveBeenCalled();
   });
 
-  it("accepts a max ≥ existing min on a partial PATCH", async () => {
-    mockFindById.mockResolvedValue(iRow({ minimumStock: 100, maximumStock: 500 }));
+  it("accepts a maximum at or above the existing reorder level", async () => {
+    mockFindById.mockResolvedValue(iRow({ reorderLevel: 100, maximumStock: 500 }));
     await expect(updateIrmItem(IRM_ID, { maximumStock: 150 })).resolves.toBeDefined();
     expect(mockUpdate).toHaveBeenCalled();
   });
 
-  it("accepts lowering min at/below the existing max", async () => {
-    mockFindById.mockResolvedValue(iRow({ minimumStock: 100, maximumStock: 500 }));
-    await expect(updateIrmItem(IRM_ID, { minimumStock: 20 })).resolves.toBeDefined();
+  it("accepts lowering the reorder level under the existing maximum", async () => {
+    mockFindById.mockResolvedValue(iRow({ reorderLevel: 100, maximumStock: 500 }));
+    await expect(updateIrmItem(IRM_ID, { reorderLevel: 20 })).resolves.toBeDefined();
     expect(mockUpdate).toHaveBeenCalled();
+  });
+
+  // Critical is the MORE urgent line, so it sits at or below the trigger. Above it, the row would be
+  // flagged critical before it was even due to be reordered.
+  it("rejects a critical level above the EXISTING reorder level", async () => {
+    mockFindById.mockResolvedValue(iRow({ reorderLevel: 100, maximumStock: 500 }));
+    await expect(updateIrmItem(IRM_ID, { criticalLevel: 150 })).rejects.toThrow(/at or below the reorder level/i);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  // Chain closure on the merged record: with no stored reorder level, the two rules above cannot
+  // fire, so this pair is the only thing keeping the numbers in order.
+  it("rejects a critical level above the maximum when the item has NO reorder level", async () => {
+    mockFindById.mockResolvedValue(iRow({ reorderLevel: null, maximumStock: 50 }));
+    await expect(updateIrmItem(IRM_ID, { criticalLevel: 200 })).rejects.toThrow(/at or below the maximum stock/i);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it("accepts a critical level at or below the reorder level", async () => {
+    mockFindById.mockResolvedValue(iRow({ reorderLevel: 100, maximumStock: 500 }));
+    await expect(updateIrmItem(IRM_ID, { criticalLevel: 100 })).resolves.toBeDefined();
+    expect(mockUpdate).toHaveBeenCalled();
+  });
+
+  // Rows predating these rules can already violate them — nothing enforced max ≥ reorder before, and
+  // criticalLevel had no rule at all. Renaming such an item must not fail with a 400 about stock
+  // policy the request never mentioned; the form has no way to show or clear that error.
+  it("lets an UNRELATED edit through on a legacy row that violates both rules", async () => {
+    mockFindById.mockResolvedValue(iRow({ reorderLevel: 100, maximumStock: 40, criticalLevel: 150 }));
+    await expect(updateIrmItem(IRM_ID, { name: "CAT6 Cable 305m" })).resolves.toMatchObject({
+      name: "CAT6 Cable 305m",
+    });
+    expect(mockUpdate).toHaveBeenCalled();
+  });
+
+  // …but touching either half of a pair means you own it, and the merged check applies in full.
+  it("still rejects when a legacy row's own bad pair is patched", async () => {
+    mockFindById.mockResolvedValue(iRow({ reorderLevel: 100, maximumStock: 40, criticalLevel: 150 }));
+    await expect(updateIrmItem(IRM_ID, { reorderLevel: 90 })).rejects.toThrow(/greater than or equal to the reorder level/i);
+    expect(mockUpdate).not.toHaveBeenCalled();
   });
 });
 
@@ -292,7 +299,11 @@ describe("updateIrmItem — racing SKU conflict (DB P2002)", () => {
     mockFindById.mockResolvedValue(iRow());
     mockUpdate.mockRejectedValueOnce(new Error("E11000 duplicate key"));
     mockIsSkuConflict.mockReturnValue(true);
-    await expect(updateIrmItem(IRM_ID, { sku: "CAT6-001" })).rejects.toThrow(/already in use/i);
+    // Quotes the value the write attempted, not the raw request field — someone who typed
+    // "cat6 001" is looking at CAT6-001 on screen and must be told about that one.
+    await expect(updateIrmItem(IRM_ID, { sku: "cat6 001" })).rejects.toThrow(
+      /SKU "CAT6-001" is already in use/i,
+    );
   });
 });
 
@@ -374,5 +385,151 @@ describe("requireActiveIrmItems — batched active-item validation", () => {
     mockFindByIds.mockResolvedValue([]);
     const byId = await requireActiveIrmItems([]);
     expect(byId.size).toBe(0);
+  });
+});
+
+// The item form fills the SKU in as you type, so a blank one usually only reaches here from an API
+// client — but "every IRM item has a SKU" has to hold without trusting the caller to cooperate.
+describe("createIrmItem — SKU generation", () => {
+  const baseInput = {
+    name: "Cat6 U/UTP Cable 305m Box",
+    typeId: TYPE_ID,
+    irmCategoryId: CAT_ID,
+    baseUnit: "Each",
+  } as never;
+
+  it("generates from the name + category when none is supplied", async () => {
+    await createIrmItem(baseInput);
+    expect(mockCreate.mock.calls[0][0].sku).toBe("CAB-CAT6-U-UTP-CABLE-305M");
+    expect(mockCreate.mock.calls[0][0].skuLower).toBe("cab-cat6-u-utp-cable-305m");
+  });
+
+  it("suffixes past a generated SKU that is already taken", async () => {
+    // First candidate owned by someone else, the -2 variant free.
+    mockFindBySku.mockImplementation((skuLower: string) =>
+      Promise.resolve(skuLower === "cab-cat6-u-utp-cable-305m" ? { id: "other".padEnd(24, "0") } : null),
+    );
+    await createIrmItem(baseInput);
+    expect(mockCreate.mock.calls[0][0].sku).toBe("CAB-CAT6-U-UTP-CABLE-305M-2");
+  });
+
+  it("normalizes a supplied SKU into the canonical shape", async () => {
+    await createIrmItem({ ...(baseInput as object), sku: "fbr-sm12- g652d" } as never);
+    expect(mockCreate.mock.calls[0][0].sku).toBe("FBR-SM12-G652D");
+  });
+
+  it("generates rather than storing null when the supplied SKU normalizes to nothing", async () => {
+    await createIrmItem({ ...(baseInput as object), sku: "###" } as never);
+    expect(mockCreate.mock.calls[0][0].sku).toBe("CAB-CAT6-U-UTP-CABLE-305M");
+  });
+
+  it("falls back to an IRM prefix when the category name yields no letters", async () => {
+    mockReqCat.mockResolvedValue({ id: CAT_ID, name: "---", status: "active" });
+    await createIrmItem(baseInput);
+    expect(mockCreate.mock.calls[0][0].sku).toBe("IRM-CAT6-U-UTP-CABLE-305M");
+  });
+});
+
+// A SKU that equals an item CODE makes the goods/van-stock scan ambiguous: findActiveByCodeOrBarcode
+// matches one row on `code` and another on `skuLower`, then findFirst picks whichever comes back
+// first. Both the already-issued codes and the shape of future ones are refused.
+describe("SKU vs item code collisions", () => {
+  it("rejects a SKU already owned by another item as its display code", async () => {
+    mockFindById.mockResolvedValue(iRow());
+    mockFindIdByCode.mockResolvedValue({ id: "other".padEnd(24, "0") });
+    await expect(updateIrmItem(IRM_ID, { sku: "IRS-0006" })).rejects.toThrow(/already in use/i);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it("rejects a SKU shaped like a FUTURE item code, before that code is ever issued", async () => {
+    mockFindById.mockResolvedValue(iRow());
+    await expect(updateIrmItem(IRM_ID, { sku: "IRM-0042" })).rejects.toThrow(/shape of an item code/i);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it("allows a code-like SKU under a different prefix — the rule is not a blanket ban on digits", async () => {
+    mockFindById.mockResolvedValue(iRow());
+    await updateIrmItem(IRM_ID, { sku: "CAB-0042" });
+    expect(mockUpdate.mock.calls[0][1].sku).toBe("CAB-0042");
+  });
+});
+
+describe("updateIrmItem — SKU is required and never clearable", () => {
+  it("refuses to clear the SKU", async () => {
+    mockFindById.mockResolvedValue(iRow({ sku: "CAB-CAT6", skuLower: "cab-cat6" }));
+    await expect(updateIrmItem(IRM_ID, { sku: "   " })).rejects.toThrow(/SKU is required/i);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it("skips the uniqueness lookups entirely when the SKU is unchanged", async () => {
+    mockFindById.mockResolvedValue(iRow({ sku: "CAB-CAT6", skuLower: "cab-cat6" }));
+    await updateIrmItem(IRM_ID, { sku: "CAB-CAT6", name: "Renamed" });
+    expect(mockFindBySku).not.toHaveBeenCalled();
+    expect(mockFindIdByCode).not.toHaveBeenCalled();
+    expect("sku" in mockUpdate.mock.calls[0][1]).toBe(false);
+  });
+
+  it("treats a re-sent SKU that only differs by formatting as unchanged, not a rename", async () => {
+    // Legacy rows carry values like 'FBR-SM12- G652D'. Normalizing on the way in means the edit form
+    // handing that string straight back doesn't burn the old SKU on an unrelated save.
+    mockFindById.mockResolvedValue(iRow({ sku: "FBR-SM12-G652D", skuLower: "fbr-sm12-g652d" }));
+    await updateIrmItem(IRM_ID, { sku: "FBR-SM12- G652D" });
+    expect(mockFindBySku).not.toHaveBeenCalled();
+    expect("sku" in mockUpdate.mock.calls[0][1]).toBe(false);
+  });
+});
+
+// The pre-check and the write are not atomic, so a concurrent create can take the SKU in between and
+// the partial unique index rejects the second one. Who chose the SKU decides what happens next.
+describe("racing SKU conflict (DB P2002) — create", () => {
+  const baseInput = {
+    name: "Cat6 U/UTP Cable 305m Box",
+    typeId: TYPE_ID,
+    irmCategoryId: CAT_ID,
+    baseUnit: "Each",
+  } as never;
+
+  it("re-derives a GENERATED SKU onto the next suffix instead of failing the caller", async () => {
+    mockIsSkuConflict.mockReturnValue(true);
+    mockCreate.mockRejectedValueOnce(new Error("E11000 duplicate key"));
+    // Model the race in the right ORDER: the base candidate is free when resolveSku first checks,
+    // and only taken once the first write has been attempted. Marking it taken up front would let
+    // the very first attempt pick -2 and the test would pass without the retry advancing anything.
+    mockFindBySku.mockImplementation((skuLower: string) =>
+      Promise.resolve(
+        mockCreate.mock.calls.length > 0 && skuLower === "cab-cat6-u-utp-cable-305m"
+          ? { id: "other".padEnd(24, "0") }
+          : null,
+      ),
+    );
+
+    await createIrmItem(baseInput);
+    expect(mockCreate).toHaveBeenCalledTimes(2);
+    expect(mockCreate.mock.calls[0][0].sku).toBe("CAB-CAT6-U-UTP-CABLE-305M");
+    expect(mockCreate.mock.calls[1][0].sku).toBe("CAB-CAT6-U-UTP-CABLE-305M-2");
+  });
+
+  it("does NOT rename a SKU the caller typed — it reports the clash instead", async () => {
+    mockIsSkuConflict.mockReturnValue(true);
+    mockCreate.mockRejectedValueOnce(new Error("E11000 duplicate key"));
+    await expect(createIrmItem({ ...(baseInput as object), sku: "CAT6-305-BOX" } as never)).rejects.toThrow(
+      /"CAT6-305-BOX" is already in use/i,
+    );
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives up rather than looping when every retry also races", async () => {
+    mockIsSkuConflict.mockReturnValue(true);
+    mockCreate.mockRejectedValue(new Error("E11000 duplicate key"));
+    await expect(createIrmItem(baseInput)).rejects.toThrow(/already in use/i);
+    // Initial attempt + SKU_RACE_RETRIES.
+    expect(mockCreate).toHaveBeenCalledTimes(3);
+  });
+
+  it("names the SKU it actually tried, never an empty string", async () => {
+    mockIsSkuConflict.mockReturnValue(true);
+    mockCreate.mockRejectedValue(new Error("E11000 duplicate key"));
+    // No sku supplied: the old message quoted input.sku and read `SKU "" is already in use`.
+    await expect(createIrmItem(baseInput)).rejects.toThrow(/SKU "CAB-CAT6-U-UTP-CABLE-305M/);
   });
 });

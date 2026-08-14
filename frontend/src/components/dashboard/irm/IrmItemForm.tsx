@@ -11,7 +11,7 @@ import { listSuppliers } from "@/services/supplier.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
-import type { IrmItem, IrmOwner } from "@/types/irm";
+import type { IrmItem } from "@/types/irm";
 import type { IrmType } from "@/types/irm-type";
 import type { IrmCategory } from "@/types/irm-category";
 import type { Supplier } from "@/types/supplier";
@@ -25,6 +25,7 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { FieldError, FormAsideCard, FormField, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import type { UserStatus } from "@/types/user";
 import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
+import { buildSkuCandidate, categoryPrefix, findSkuPrefixMismatch, normalizeSku } from "@/lib/irmSku";
 
 // The IRM catalogue now lives in the Inventory Hub (Inventory → IRM → Catalogue), so that's the
 // fallback "list" destination when there's no in-app history to go back to.
@@ -53,14 +54,13 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
   const [mpn, setMpn] = React.useState(o?.mpn ?? "");
   const [status, setStatus] = React.useState<"active" | "inactive">(o?.status ?? "active");
   const [sku, setSku] = React.useState(o?.sku ?? "");
+  // On CREATE the SKU follows the name + category until the user types their own. On EDIT it never
+  // auto-follows: the item already has a SKU, and changing it burns the old one forever.
+  const [skuTouched, setSkuTouched] = React.useState(mode === "edit");
   const [baseUnit, setBaseUnit] = React.useState(o?.baseUnit ?? "Each");
   const [packSize, setPackSize] = React.useState(numStr(o?.packSize));
-  const [conversionRatio, setConversionRatio] = React.useState(numStr(o?.conversionRatio));
-  const [minimumStock, setMinimumStock] = React.useState(numStr(o?.minimumStock));
   const [reorderLevel, setReorderLevel] = React.useState(numStr(o?.reorderLevel));
-  const [reorderQuantity, setReorderQuantity] = React.useState(numStr(o?.reorderQuantity));
   const [maximumStock, setMaximumStock] = React.useState(numStr(o?.maximumStock));
-  const [safetyStock, setSafetyStock] = React.useState(numStr(o?.safetyStock));
   const [criticalLevel, setCriticalLevel] = React.useState(numStr(o?.criticalLevel));
   const [standardCost, setStandardCost] = React.useState(numStr(o?.standardCost));
   const [currency, setCurrency] = React.useState(o?.currency ?? "GBP");
@@ -70,7 +70,6 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
   const trackInventory = o?.trackInventory ?? true;
   const trackSerialNumbers = o?.trackSerialNumbers ?? false;
   const trackBatchNumbers = o?.trackBatchNumbers ?? false;
-  const [ownerUserId, setOwnerUserId] = React.useState(o?.ownerUserId ?? "");
   const [notes, setNotes] = React.useState(o?.notes ?? "");
 
   // Suppliers are optional, so an item with none starts with NO rows — the user adds one only if
@@ -87,7 +86,6 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
 
   const [types, setTypes] = React.useState<IrmType[]>([]);
   const [categories, setCategories] = React.useState<IrmCategory[]>([]);
-  const [owners, setOwners] = React.useState<IrmOwner[]>([]);
   const [suppliers, setSuppliers] = React.useState<Supplier[]>([]);
   const [saving, setSaving] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
@@ -112,7 +110,6 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
           if (mode === "create") setIrmCategoryId((cur) => cur || firstActiveId(c));
         },
       },
-      { label: "owners", load: () => irmService.listOwnerOptions(), onData: (m) => setOwners(m) },
       { label: "suppliers", load: () => listSuppliers({ status: "active", pageSize: 100 }), onData: (r) => setSuppliers(r.suppliers) },
     ],
     [mode],
@@ -132,12 +129,6 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
     }
     return act;
   }, [categories, o]);
-  const ownerOptions = React.useMemo(() => {
-    if (o?.owner && !owners.some((m) => m.id === o.owner!.id)) {
-      return [{ id: o.owner.id, name: `${o.owner.name} (inactive)`, email: o.owner.email, jobTitle: o.owner.jobTitle }, ...owners];
-    }
-    return owners;
-  }, [owners, o]);
   // Supplier dropdown options: every ACTIVE supplier, plus any supplier already linked to
   // this item that is no longer active (shown as "Name (inactive)"), so editing other fields
   // never hides or silently drops a stale link. Mirrors the owner/type/category pattern; the
@@ -156,12 +147,47 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
     return opts;
   }, [suppliers, o]);
 
+  // The category's NAME drives the SKU prefix (Cable -> CAB), so it has to be resolved from the
+  // loaded master rather than the selected id alone.
+  const selectedCategoryName = React.useMemo(
+    () => categories.find((c) => c.id === irmCategoryId)?.name ?? o?.category?.name ?? null,
+    [categories, irmCategoryId, o],
+  );
+  // Suggest nothing until there is a name to build from — otherwise a freshly-opened create form
+  // would start with a bare category code in the box and count as unsaved work straight away.
+  const suggestedSku = name.trim() ? buildSkuCandidate(name, selectedCategoryName) : "";
+  // What the field shows, what gets validated, and what gets sent. Deriving it (rather than writing
+  // state from an effect) keeps the auto-fill out of React's render cycle entirely.
+  const effectiveSku = skuTouched ? sku : suggestedSku;
+
+  // On EDIT the SKU never re-follows the category — it is a permanent identifier, and rewriting it
+  // would strand printed labels (the goods/van-stock scan resolves on skuLower) and disagree with
+  // the SKU already snapshotted onto every past PO, GRN and kit line. But an item re-categorised
+  // after its SKU was set does end up carrying the wrong category's code, so say so and let the
+  // person decide. Only fires when the leading segment is ANOTHER CATEGORY's code: a hand-written
+  // SKU like CAT6-305-BOX or LC-UPC-SM matches no category and is left alone.
+  // The field auto-follows the name + category on create until the user types their own, so a
+  // "use the suggestion" control only has work to do once they HAVE typed something different.
+  // Shown then and only then — a button that restores the state you are already in is furniture.
+  // Edit deliberately has no such control: the SKU there is a live identifier, and one click that
+  // rewrites it would strand printed labels and burn the old value forever. The one case worth
+  // acting on (the item was re-categorised) is offered by skuPrefixMismatch below instead.
+  const canUseSuggestedSku =
+    mode === "create" && skuTouched && Boolean(suggestedSku) && normalizeSku(effectiveSku) !== suggestedSku;
+
+  const skuPrefixMismatch = React.useMemo(
+    () =>
+      mode === "edit" && suggestedSku
+        ? findSkuPrefixMismatch(effectiveSku, selectedCategoryName, categories, irmCategoryId)
+        : null,
+    [mode, suggestedSku, effectiveSku, selectedCategoryName, categories, irmCategoryId],
+  );
+
   // Dirty detection — snapshot of every field captured on the first render.
   const liveKey = JSON.stringify({
-    name, typeId, irmCategoryId, description, brand, manufacturer, mpn, status, sku,
-    baseUnit, packSize, conversionRatio, minimumStock, reorderLevel, reorderQuantity, maximumStock, safetyStock,
-    criticalLevel, standardCost, currency, vatRatePercent, trackInventory, trackSerialNumbers, trackBatchNumbers,
-    ownerUserId, notes, supplierRows,
+    name, typeId, irmCategoryId, description, brand, manufacturer, mpn, status, sku: effectiveSku,
+    baseUnit, packSize, reorderLevel, maximumStock, criticalLevel, standardCost, currency, vatRatePercent, trackInventory, trackSerialNumbers, trackBatchNumbers,
+    notes, supplierRows,
   });
   // Initial snapshot derived from the item prop (same shape/order as liveKey), so a
   // change to any field flips dirty. Computed from `o`, not a render-time ref read.
@@ -181,12 +207,8 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
         sku: o?.sku ?? "",
         baseUnit: o?.baseUnit ?? "Each",
         packSize: numStr(o?.packSize),
-        conversionRatio: numStr(o?.conversionRatio),
-        minimumStock: numStr(o?.minimumStock),
         reorderLevel: numStr(o?.reorderLevel),
-        reorderQuantity: numStr(o?.reorderQuantity),
         maximumStock: numStr(o?.maximumStock),
-        safetyStock: numStr(o?.safetyStock),
         criticalLevel: numStr(o?.criticalLevel),
         standardCost: numStr(o?.standardCost),
         currency: o?.currency ?? "GBP",
@@ -194,7 +216,6 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
         trackInventory: o?.trackInventory ?? true,
         trackSerialNumbers: o?.trackSerialNumbers ?? false,
         trackBatchNumbers: o?.trackBatchNumbers ?? false,
-        ownerUserId: o?.ownerUserId ?? "",
         notes: o?.notes ?? "",
         supplierRows: (o?.suppliers ?? []).map((s) => ({
           supplierId: s.supplierId,
@@ -253,6 +274,9 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
     if (!typeId) errs.typeId = "Select an IRM type.";
     if (!irmCategoryId) errs.irmCategoryId = "Select an IRM category.";
     if (!baseUnit) errs.baseUnit = "Select a base unit.";
+    // Mandatory on create AND edit. The auto-suggestion normally fills this, so an empty box means
+    // the user deliberately cleared it — which the server refuses too.
+    if (!normalizeSku(effectiveSku)) errs.sku = "SKU is required.";
 
     // Suppliers are optional — an item may have none. Only the shape of the rows that DO name a
     // supplier is checked: unique, and at most one primary.
@@ -269,9 +293,31 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
       const v = Number(vatRatePercent);
       if (Number.isNaN(v) || v < 0 || v > 100) errs.vatRatePercent = "VAT must be 0–100%.";
     }
-    const min = minimumStock.trim() ? Number(minimumStock) : null;
+    // Mirrors packSizeField in irm.validation.ts. NumberInput blocks e/E/+/- but NOT the decimal
+    // point, so "2.5" reaches here looking fine and is only refused by the server — a round trip for
+    // something the form already knows. Whole packs is the whole point: half a box can't be ordered.
+    if (packSize.trim()) {
+      const n = Number(packSize);
+      if (!Number.isInteger(n)) errs.packSize = "Pack size must be a whole number.";
+      else if (n < 1) errs.packSize = "Pack size must be at least 1.";
+      else if (n > 1_000_000) errs.packSize = "Pack size can't be more than 1,000,000.";
+    }
+    // Mirrors the server: critical ≤ reorder ≤ maximum. This used to compare the maximum against
+    // `minimumStock`, a field the reorder engine never read — the only cross-field rule on the form
+    // was guarding a number that changed nothing.
+    const reorder = reorderLevel.trim() ? Number(reorderLevel) : null;
     const max = maximumStock.trim() ? Number(maximumStock) : null;
-    if (min != null && max != null && max < min) errs.maximumStock = "Maximum must be ≥ minimum.";
+    const critical = criticalLevel.trim() ? Number(criticalLevel) : null;
+    if (reorder != null && max != null && max < reorder) {
+      errs.maximumStock = "Maximum must be ≥ the reorder level — an order has to lift stock clear of it.";
+    }
+    if (reorder != null && critical != null && critical > reorder) {
+      errs.criticalLevel = "Critical must be at or below the reorder level.";
+    } else if (critical != null && max != null && critical > max) {
+      // Closes the chain — both rules above need a reorder level, so with it blank nothing compared
+      // these two. `else if` so a row failing both only reports the more specific one.
+      errs.criticalLevel = "Critical must be at or below the maximum stock.";
+    }
     return errs;
   };
 
@@ -295,16 +341,12 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
     manufacturer: manufacturer.trim(),
     mpn: mpn.trim(),
     status,
-    sku: sku.trim(),
+    sku: normalizeSku(effectiveSku),
     suppliers: buildSuppliersPayload(),
     baseUnit,
     packSize: packSize.trim(),
-    conversionRatio: conversionRatio.trim(),
-    minimumStock: minimumStock.trim(),
     reorderLevel: reorderLevel.trim(),
-    reorderQuantity: reorderQuantity.trim(),
     maximumStock: maximumStock.trim(),
-    safetyStock: safetyStock.trim(),
     criticalLevel: criticalLevel.trim(),
     standardCost: standardCost.trim(),
     currency,
@@ -312,7 +354,6 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
     trackInventory,
     trackSerialNumbers,
     trackBatchNumbers,
-    ownerUserId,
     notes: notes.trim(),
   });
 
@@ -465,12 +506,60 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
             </div>
           </FormSection>
 
-          <FormSection title="Identification" description="The item's internal SKU (optional). Unique forever once used. The printable Code128 label is generated separately from the item code.">
+          {/* Don't explain the barcode here: the Code128 label is rendered FROM the item's `code`,
+              and BarcodePanel says so where the barcode actually lives. */}
+          <FormSection title="Identification" description="The item's internal SKU — suggested from the name and category, and unique forever once used.">
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
-                <label className={labelCls}>SKU</label>
-                <input className={inputCls} value={sku} onChange={(e) => setSku(e.target.value)} maxLength={80} placeholder="e.g. IRM-CAT6-305" />
-                <p className="mt-1.5 text-[11px] text-[var(--faint)]">Your internal code. Unique forever — it can&apos;t be reused once set.</p>
+                <div className="flex items-end justify-between gap-2">
+                  <label className={labelCls} htmlFor="irm-sku">
+                    SKU<RequiredMark />
+                  </label>
+                  {canUseSuggestedSku && (
+                    <button
+                      type="button"
+                      className="mb-1.5 text-[11px] font-bold text-[var(--accent)] hover:underline"
+                      // Hands the field back to the name + category rather than pasting a frozen
+                      // value, so changing either afterwards keeps updating it.
+                      onClick={() => { setSkuTouched(false); clearError("sku"); }}
+                      title={`Use ${suggestedSku}`}
+                    >
+                      Use suggested
+                    </button>
+                  )}
+                </div>
+                <input
+                  id="irm-sku"
+                  className={inputCls}
+                  value={effectiveSku}
+                  onChange={(e) => { setSkuTouched(true); setSku(e.target.value); clearError("sku"); }}
+                  // Fold to the stored shape once they look away, so the box matches what the server
+                  // will save rather than surprising them with a rewrite after submit.
+                  onBlur={() => skuTouched && setSku((cur) => normalizeSku(cur))}
+                  maxLength={80}
+                  placeholder="e.g. CAB-CAT6-305M"
+                  aria-invalid={Boolean(errors.sku)}
+                  aria-describedby={errors.sku ? "err-sku" : undefined}
+                />
+                <FieldError id="err-sku" message={errors.sku} />
+                {skuPrefixMismatch && (
+                  <p className="mt-1.5 text-[11px] text-amber-600">
+                    Starts {skuPrefixMismatch.head}- ({skuPrefixMismatch.owner}), not {categoryPrefix(selectedCategoryName)}-.{" "}
+                    <button
+                      type="button"
+                      className="font-bold underline"
+                      onClick={() => { setSku(suggestedSku); setSkuTouched(true); clearError("sku"); }}
+                    >
+                      Use {suggestedSku}
+                    </button>{" "}
+                    — only if no labels are printed yet.
+                  </p>
+                )}
+                <p className="mt-1.5 text-[11px] text-[var(--faint)]">
+                  {mode === "create" && !skuTouched
+                    ? "Following the item name and category. Type here to set your own."
+                    : "Unique forever — it can’t be reused once set, even by a removed item."}
+                </p>
               </div>
             </div>
           </FormSection>
@@ -533,8 +622,8 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
             </div>
           </FormSection>
 
-          <FormSection title="Unit" description="How you count and (optionally) convert packs of this item.">
-            <div className="grid gap-4 sm:grid-cols-3">
+          <FormSection title="Unit" description="How you count this item, and how many come in a pack.">
+            <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className={labelCls}>
                   Base unit<RequiredMark />
@@ -549,45 +638,61 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
                 <FieldError id="err-baseUnit" message={errors.baseUnit} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">The unit you store and count this item in.</p>
               </div>
+              {/* "Conversion" used to sit beside this. It was captured and then read by nothing — no
+                  calculation, no report, no document — so it asked for a number and quietly did
+                  nothing with it. Pack size is the one that acts: the reorder engine rounds a
+                  suggested quantity UP to whole packs. */}
               <div>
                 <label className={labelCls}>Pack size</label>
-                <NumberInput className={inputCls} min={1} value={packSize} onChange={(e) => setPackSize(e.target.value)} placeholder="e.g. 1" />
-              </div>
-              <div>
-                <label className={labelCls}>Conversion</label>
-                <NumberInput className={inputCls} min={0} step="any" value={conversionRatio} onChange={(e) => setConversionRatio(e.target.value)} placeholder="e.g. 305" />
-                <p className="mt-1.5 text-[11px] text-[var(--faint)]">Base units in one pack — e.g. a 305 m box = 305.</p>
+                <NumberInput
+                  className={inputCls}
+                  min={1}
+                  max={1_000_000}
+                  step={1}
+                  value={packSize}
+                  onChange={(e) => { setPackSize(e.target.value); clearError("packSize"); }}
+                  aria-invalid={Boolean(errors.packSize)}
+                  aria-describedby={errors.packSize ? "err-packSize" : undefined}
+                  placeholder="e.g. 305"
+                />
+                <FieldError id="err-packSize" message={errors.packSize} />
+                <p className="mt-1.5 text-[11px] text-[var(--faint)]">Base units in one pack — e.g. a 305 m box = 305. Reorder suggestions round up to whole packs.</p>
               </div>
             </div>
           </FormSection>
 
-          <FormSection title="Stock policies" description="Advisory reorder thresholds, used by alerts once the inventory module is live. All optional.">
+          {/* THREE thresholds, and they stack: critical ≤ reorder ≤ maximum. There were six — the
+              other three (Minimum stock, Reorder qty, Safety stock) were read by nothing. "Minimum
+              stock" was the harmful one: it is the phrase everyone knows, so people filled it in
+              believing it set the trigger while Reorder level silently did. Every field here now
+              says what it drives, because the reason the wrong box got used was that none of them
+              said anything at all. */}
+          <FormSection title="Stock policies" description="When to reorder, how far to top up, and when it becomes urgent. All optional — leave blank for items you don't replenish.">
             <div className="grid gap-4 sm:grid-cols-3">
               <div>
-                <label className={labelCls}>Minimum stock</label>
-                <NumberInput className={inputCls} min={0} value={minimumStock} onChange={(e) => { setMinimumStock(e.target.value); clearError("maximumStock"); }} placeholder="e.g. 50" />
-              </div>
-              <div>
                 <label className={labelCls}>Reorder level</label>
-                <NumberInput className={inputCls} min={0} value={reorderLevel} onChange={(e) => setReorderLevel(e.target.value)} placeholder="e.g. 100" />
-              </div>
-              <div>
-                <label className={labelCls}>Reorder qty</label>
-                <NumberInput className={inputCls} min={0} value={reorderQuantity} onChange={(e) => setReorderQuantity(e.target.value)} placeholder="e.g. 200" />
+                <NumberInput className={inputCls} min={0} value={reorderLevel} onChange={(e) => { setReorderLevel(e.target.value); clearError("maximumStock"); clearError("criticalLevel"); }} placeholder="e.g. 100" />
+                <p className="mt-1.5 text-[11px] text-[var(--faint)]">Order when stock drops to this — your minimum.</p>
               </div>
               <div>
                 <label className={labelCls}>Maximum stock</label>
-                <NumberInput className={inputCls} min={0} value={maximumStock} onChange={(e) => { setMaximumStock(e.target.value); clearError("maximumStock"); }} placeholder="e.g. 500" aria-invalid={Boolean(errors.maximumStock)} />
+                <NumberInput className={inputCls} min={0} value={maximumStock} onChange={(e) => { setMaximumStock(e.target.value); clearError("maximumStock"); }} placeholder="e.g. 500" aria-invalid={Boolean(errors.maximumStock)} aria-describedby={errors.maximumStock ? "err-maximumStock" : undefined} />
                 <FieldError id="err-maximumStock" message={errors.maximumStock} />
-                <p className="mt-1.5 text-[11px] text-[var(--faint)]">Must be greater than or equal to minimum stock.</p>
-              </div>
-              <div>
-                <label className={labelCls}>Safety stock</label>
-                <NumberInput className={inputCls} min={0} value={safetyStock} onChange={(e) => setSafetyStock(e.target.value)} placeholder="e.g. 25" />
+                {/* Short like its siblings. The blank-maximum warning is REAL but only matters once a
+                    reorder level exists — printed always it was three lines of noise against their
+                    one, and noise beside two useful hints is what gets all three stopped being read.
+                    Shown exactly when it applies instead. */}
+                {reorderLevel.trim() && !maximumStock.trim() ? (
+                  <p className="mt-1.5 text-[11px] text-amber-600">Blank — orders will only restore the reorder level, so it triggers again straight away.</p>
+                ) : (
+                  <p className="mt-1.5 text-[11px] text-[var(--faint)]">Top up to this when reordering.</p>
+                )}
               </div>
               <div>
                 <label className={labelCls}>Critical level</label>
-                <NumberInput className={inputCls} min={0} value={criticalLevel} onChange={(e) => setCriticalLevel(e.target.value)} placeholder="e.g. 10" />
+                <NumberInput className={inputCls} min={0} value={criticalLevel} onChange={(e) => { setCriticalLevel(e.target.value); clearError("criticalLevel"); }} placeholder="e.g. 10" aria-invalid={Boolean(errors.criticalLevel)} aria-describedby={errors.criticalLevel ? "err-criticalLevel" : undefined} />
+                <FieldError id="err-criticalLevel" message={errors.criticalLevel} />
+                <p className="mt-1.5 text-[11px] text-[var(--faint)]">Flags the row as urgent. Doesn&apos;t change how much is ordered.</p>
               </div>
             </div>
           </FormSection>
@@ -619,22 +724,11 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
             </div>
           </FormSection>
 
-          <FormSection title="Operations" description="Internal owner and notes.">
+          {/* Was "Operations" — named for the tracking toggles that used to sit here. Those were removed
+              deliberately, and the heading stayed on describing a section that holds only notes. */}
+          <FormSection title="Notes" description="Internal context for whoever handles or buys this item.">
             <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <label className={labelCls}>Internal owner</label>
-                <Select
-                  value={ownerUserId}
-                  onChange={(v) => setOwnerUserId(v)}
-                  options={ownerOptions.map((m) => ({ value: m.id, label: m.jobTitle ? `${m.name} — ${m.jobTitle}` : m.name }))}
-                  placeholder={refLoading && !ownerUserId ? "Loading owners…" : "— No owner assigned —"}
-                  disabled={refLoading && !ownerUserId}
-                  ariaLabel="Internal owner"
-                />
-                <p className="mt-1.5 text-[11px] text-[var(--faint)]">The staff member responsible for this item (optional).</p>
-              </div>
               <div className="sm:col-span-2">
-                <label className={labelCls}>Notes</label>
                 <textarea className={inputCls} rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} maxLength={2000} placeholder="Internal notes — handling, storage or procurement context." />
               </div>
             </div>

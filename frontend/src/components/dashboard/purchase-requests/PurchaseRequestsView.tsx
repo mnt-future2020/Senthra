@@ -9,20 +9,27 @@ import * as prfService from "@/services/purchase-request.service";
 import { listSuppliers } from "@/services/supplier.service";
 import { listWarehouses } from "@/services/warehouse.service";
 import { useAuth } from "@/hooks/useAuth";
+import { ExportButton } from "@/components/ui/ExportButton";
 import { useDashboard } from "@/hooks/useDashboard";
 import { usePurchaseRequestSocket } from "@/hooks/usePurchaseRequestSocket";
 import { useReferenceData } from "@/hooks/useReferenceData";
-import { ListPageHeader } from "@/components/ui/ListPageHeader";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
+import { CELL_ONE_LINE, colClass, colClassAt, tableMinWidth, type ColPriority } from "@/components/ui/tableLayout";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
-import { PRF_STATUS_LABELS, PrfStatusBadge, formatDate, formatMoney } from "./prfStatus";
+import { AttentionBar } from "@/components/dashboard/shell/AttentionBar";
+import { PRF_DERIVED_STATUS_OPTIONS, PRF_STATUS_LABELS, PrfStatusBadge, formatDate, formatMoney } from "./prfStatus";
 import type { PrfStatus, PurchaseRequest } from "@/types/purchase-request";
 import type { Supplier } from "@/types/supplier";
 import type { Warehouse } from "@/types/warehouse";
 
 const PAGE_SIZE = 20;
+
+// Code · Supplier · Warehouse · Status · Quote Ref · Valid Until · Grand Total · actions.
+// Same flat-minimum problem as Purchase Orders: supplier and warehouse names are the long values and
+// they were the ones being squeezed. Quote Ref and Valid Until step aside on a narrow screen.
+const TABLE_MIN_WIDTH = tableMinWidth(["normal", "wide", "wide", "narrow", "normal", "normal", "normal", "narrow"]);
 
 function MenuItem({ icon: Icon, danger, onClick, children }: { icon: React.ElementType; danger?: boolean; onClick: () => void; children: React.ReactNode }) {
   return (
@@ -113,27 +120,31 @@ function PrfRowActions({ prf, canEdit, canDelete, onEdit, onDelete }: { prf: Pur
   );
 }
 
+// One array drives BOTH rows below, which is the rule colClass exists to enforce: a placeholder cell
+// that stays visible while its header is hidden shifts every cell after it.
+const SKELETON_COLS: ColPriority[] = ["always", "always", "always", "always", "xl", "lg", "always"];
+
 function PrfTableSkeleton({ actions }: { actions: boolean }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[1000px] text-sm">
+      <table className="w-full text-sm" style={{ minWidth: TABLE_MIN_WIDTH }}>
         <thead>
           <tr className="border-b border-[var(--border)] text-left text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-            <th className="px-4 py-3">Code</th>
-            <th className="px-4 py-3">Supplier</th>
-            <th className="px-4 py-3">Warehouse</th>
-            <th className="px-4 py-3">Status</th>
-            <th className="px-4 py-3">Quote Ref</th>
-            <th className="px-4 py-3">Valid Until</th>
-            <th className="px-4 py-3">Grand Total</th>
-            {actions && <th className="px-4 py-3" />}
+            <th className="cell-y px-4">Code</th>
+            <th className="cell-y px-4">Supplier</th>
+            <th className="cell-y px-4">Warehouse</th>
+            <th className="cell-y px-4">Status</th>
+            <th className={`cell-y px-4 ${colClass("xl")}`}>Quote Ref</th>
+            <th className={`cell-y px-4 ${colClass("lg")}`}>Valid Until</th>
+            <th className="cell-y px-4">Grand Total</th>
+            {actions && <th className="cell-y px-4" />}
           </tr>
         </thead>
         <tbody>
           {Array.from({ length: 6 }).map((_, i) => (
             <tr key={i} className="border-b border-[var(--border)] last:border-0">
               {Array.from({ length: actions ? 8 : 7 }).map((__, j) => (
-                <td key={j} className="px-4 py-3"><Skeleton className="h-3 w-20" /></td>
+                <td key={j} className={`cell-y px-4 ${colClassAt(SKELETON_COLS, j)}`}><Skeleton className="h-3 w-20" /></td>
               ))}
             </tr>
           ))}
@@ -150,7 +161,9 @@ export function PurchaseRequestsView() {
   const { pushToast } = useDashboard();
 
   // Derive filter state from URL params
-  const statusFilter = (searchParams.get("status") as "all" | PrfStatus) ?? "all";
+  // "rework" is a DERIVED pseudo-status the server resolves from reworkPrfWhere — the same predicate
+  // the "Rejected — needs rework" badge counts, so the badge and this list are one set of rows.
+  const statusFilter = (searchParams.get("status") as "all" | "rework" | PrfStatus) ?? "all";
   const supplierFilter = searchParams.get("supplier") ?? "";
   const warehouseFilter = searchParams.get("warehouse") ?? "";
   const search = searchParams.get("q") ?? "";
@@ -207,17 +220,23 @@ export function PurchaseRequestsView() {
     return () => clearTimeout(t);
   }, [searchInput, search, patchParams]);
 
+  // The filters WITHOUT paging — one definition, used by the list (which adds the page) and by the
+  // CSV export (which must not). Two copies is how a download quietly stops matching the screen it
+  // was taken from, and nothing about the resulting file looks wrong.
+  const exportParams = React.useMemo(
+    () => ({
+      search: search || undefined,
+      status: statusFilter === "all" ? undefined : statusFilter,
+      supplier: supplierFilter || undefined,
+      warehouse: warehouseFilter || undefined,
+    }),
+    [search, statusFilter, supplierFilter, warehouseFilter],
+  );
+
   React.useEffect(() => {
     let active = true;
     (async () => {
-      const params = {
-        search: search || undefined,
-        status: statusFilter === "all" ? undefined : statusFilter,
-        supplier: supplierFilter || undefined,
-        warehouse: warehouseFilter || undefined,
-        page,
-        pageSize: PAGE_SIZE,
-      };
+      const params = { ...exportParams, page, pageSize: PAGE_SIZE };
       const cached = prfService.getCachedPurchaseRequests(params);
       if (active && cached) setData(cached);
       setLoading(true);
@@ -235,7 +254,7 @@ export function PurchaseRequestsView() {
     return () => {
       active = false;
     };
-  }, [search, statusFilter, supplierFilter, warehouseFilter, page, refreshKey]);
+  }, [exportParams, page, refreshKey]);
 
   // Live-refresh the list whenever anyone moves a request through the flow, so a board left open
   // shows current statuses (and the finance review queue drains as decisions are made) without a
@@ -264,10 +283,17 @@ export function PurchaseRequestsView() {
   };
 
   return (
-    <div className="flex h-full flex-col gap-5">
-      <ListPageHeader title="Purchase Requests" subtitle="Capture supplier quotations for finance approval. Approved requests generate the purchase order." />
-
-      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:flex-wrap lg:items-center">
+    <div className="stack flex h-full flex-col">
+      {/* Breakdown of the sidebar's Purchase Requests badge — what is waiting on approval, on a
+          Generate-PO, or on rework after a rejection. Inside the toolbar card rather than a block of
+          its own above it: these chips narrow this list exactly as the controls below do, and as a
+          separate block they paid the layout's 20px flex gap on top of their own height. */}
+      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs">
+        <AttentionBar
+          nav="/dashboard/purchase-requests"
+          className="flex flex-wrap items-center gap-1.5 border-b border-[var(--border)] pb-3"
+        />
+        <div className="flex flex-col gap-3 lg:flex-row lg:flex-wrap lg:items-center">
         <div className="relative w-full lg:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input
@@ -277,14 +303,34 @@ export function PurchaseRequestsView() {
             className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
           />
         </div>
-        <Select size="sm" value={statusFilter} onChange={(v) => patchParams({ status: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All statuses" }, ...(Object.keys(PRF_STATUS_LABELS) as PrfStatus[]).map((s) => ({ value: s, label: PRF_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
+        <Select size="sm" value={statusFilter} onChange={(v) => patchParams({ status: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All statuses" }, ...PRF_DERIVED_STATUS_OPTIONS, ...(Object.keys(PRF_STATUS_LABELS) as PrfStatus[]).map((s) => ({ value: s, label: PRF_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
         <Select size="sm" value={supplierFilter || "all"} onChange={(v) => patchParams({ supplier: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All suppliers" }, ...suppliers.map((s) => ({ value: s.id, label: s.name }))]} ariaLabel="Filter by supplier" />
         <Select size="sm" value={warehouseFilter || "all"} onChange={(v) => patchParams({ warehouse: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All warehouses" }, ...warehouses.map((w) => ({ value: w.id, label: w.name }))]} ariaLabel="Filter by warehouse" />
+        {/* Before "New request" and outside its ml-auto, so the primary action stays hard right. */}
+        {can("purchase_requests.export") && (
+          <>
+            <ExportButton
+              label="Export"
+              onExport={() => prfService.exportPurchaseRequestsCsv(exportParams)}
+              disabled={requests.length === 0}
+              title="Export the filtered purchase requests — one row per request"
+            />
+            {/* One row per LINE, carrying the PO code — this file joins the PO line export to
+                compare what was requested against what was ordered. */}
+            <ExportButton
+              label="Export lines"
+              onExport={() => prfService.exportPurchaseRequestLinesCsv(exportParams)}
+              disabled={requests.length === 0}
+              title="Export every request LINE — item, quantity, unit price"
+            />
+          </>
+        )}
         {can("purchase_requests.create") && (
           <button onClick={() => router.push("/dashboard/purchase-requests/new")} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 lg:ml-auto">
             <Plus className="h-4 w-4" /> New request
           </button>
         )}
+        </div>
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
@@ -304,31 +350,31 @@ export function PurchaseRequestsView() {
           </div>
         ) : (
           <div className="min-h-0 flex-1 overflow-auto">
-            <table className="w-full min-w-[1000px] text-left text-sm">
+            <table className="w-full text-left text-sm" style={{ minWidth: TABLE_MIN_WIDTH }}>
               <thead>
                 <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                  <th className="px-4 py-3">Code</th>
-                  <th className="px-4 py-3">Supplier</th>
-                  <th className="px-4 py-3">Warehouse</th>
-                  <th className="px-4 py-3">Status</th>
-                  <th className="px-4 py-3">Quote Ref</th>
-                  <th className="px-4 py-3">Valid Until</th>
-                  <th className="px-4 py-3">Grand Total</th>
-                  {showActions && <th className="px-4 py-3" />}
+                  <th className="cell-y px-4">Code</th>
+                  <th className="cell-y px-4">Supplier</th>
+                  <th className="cell-y px-4">Warehouse</th>
+                  <th className="cell-y px-4">Status</th>
+                  <th className={`cell-y px-4 ${colClass("xl")}`}>Quote Ref</th>
+                  <th className={`cell-y px-4 ${colClass("lg")}`}>Valid Until</th>
+                  <th className="cell-y px-4">Grand Total</th>
+                  {showActions && <th className="cell-y px-4" />}
                 </tr>
               </thead>
               <tbody>
                 {requests.map((prf) => (
                   <tr key={prf.id} onClick={() => router.push(`/dashboard/purchase-requests/${prf.code}`)} className="cursor-pointer border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]">
-                    <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{prf.code}</td>
-                    <td className="px-4 py-3 font-semibold text-[var(--ink)]">{prf.supplierName ?? prf.supplier?.name ?? "—"}</td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{prf.warehouse?.name ?? "—"}</td>
-                    <td className="px-4 py-3"><PrfStatusBadge status={prf.status} /></td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{prf.quoteReference ?? "—"}</td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{formatDate(prf.quoteValidUntil)}</td>
-                    <td className="px-4 py-3 font-semibold text-[var(--ink)]">{formatMoney(prf.grandTotal, prf.currency)}</td>
+                    <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">{prf.code}</td>
+                    <td className={`cell-y px-4 font-semibold text-[var(--ink)] ${CELL_ONE_LINE}`} title={prf.supplierName ?? prf.supplier?.name ?? undefined}>{prf.supplierName ?? prf.supplier?.name ?? "—"}</td>
+                    <td className={`cell-y px-4 text-[var(--muted)] ${CELL_ONE_LINE}`} title={prf.warehouse?.name ?? undefined}>{prf.warehouse?.name ?? "—"}</td>
+                    <td className="cell-y px-4"><PrfStatusBadge status={prf.status} /></td>
+                    <td className={`cell-y px-4 text-[var(--muted)] ${colClass("xl")}`}>{prf.quoteReference ?? "—"}</td>
+                    <td className={`cell-y px-4 text-[var(--muted)] ${colClass("lg")}`}>{formatDate(prf.quoteValidUntil)}</td>
+                    <td className="cell-y px-4 font-semibold text-[var(--ink)]">{formatMoney(prf.grandTotal, prf.currency)}</td>
                     {showActions && (
-                      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                      <td className="cell-y px-4" onClick={(e) => e.stopPropagation()}>
                         <PrfRowActions prf={prf} canEdit={canEdit} canDelete={canDelete} onEdit={() => router.push(`/dashboard/purchase-requests/${prf.code}/edit`)} onDelete={() => setConfirm({ open: true, prf })} />
                       </td>
                     )}
@@ -338,13 +384,10 @@ export function PurchaseRequestsView() {
             </table>
           </div>
         )}
+        {data && data.total > 0 && (
+            <Pagination embedded page={data.page} totalPages={data.totalPages} total={data.total} label="purchase requests" onPage={(p) => patchParams({ page: p > 1 ? String(p) : null }, false)} />
+        )}
       </div>
-
-      {data && data.total > 0 && (
-        <div className="shrink-0">
-          <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="purchase requests" onPage={(p) => patchParams({ page: p > 1 ? String(p) : null }, false)} />
-        </div>
-      )}
 
       <ConfirmDialog
         open={confirm.open}

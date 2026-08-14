@@ -7,8 +7,12 @@ import {
   effectiveSubmissionFilters,
   filterSubmissions,
   hasActiveSubmissionFilter,
-  submissionStatusOptions,
   type SubmissionLike,
+  ACTIONABLE_STATUSES,
+  NEEDS_YOU,
+  submissionStatusOptions,
+  isActionable,
+  OPEN_STATUSES,
 } from "./stockSubmissionFilter";
 
 const sub = (over: Partial<SubmissionLike> = {}): SubmissionLike => ({
@@ -146,6 +150,9 @@ describe("submissionStatusOptions", () => {
     ];
     expect(submissionStatusOptions(mixed).map((o) => o.value)).toEqual([
       OPEN,
+      // Open holds both of them; only `pending` is waiting on this screen, so the two select
+      // different rows and both are worth offering.
+      NEEDS_YOU,
       ALL,
       "pending",
       "partially_received",
@@ -195,5 +202,97 @@ describe("effectiveSubmissionFilters", () => {
 
   it("never touches the search term", () => {
     expect(effectiveSubmissionFilters({ search: "keep me", status: ALL }, opts).search).toBe("keep me");
+  });
+});
+
+// The tab badge read "2" while the tab opened on four rows, with nothing marking which two. Both
+// numbers were right — they answered different questions (the badge counted `pending`, the list
+// defaults to `Open`, four statuses) — but shown 2cm apart with no explanation they read as a
+// contradiction. And one of the four, `approved`, was outstanding work counted by NOTHING: it has an
+// "Assign warehouses" button, but the pending count stops before it and the warehouse count can only
+// see assignments that step creates.
+describe("isActionable — what the Submissions tab still owes", () => {
+  const row = (status: string): SubmissionLike => ({ name: "x", editedName: null, status });
+
+  it("claims a request awaiting review", () => {
+    expect(isActionable(row("pending"))).toBe(true);
+  });
+
+  // The queue that had no count at all.
+  it("claims an approved request still to be routed to warehouses", () => {
+    expect(isActionable(row("approved"))).toBe(true);
+  });
+
+  // Still in flight, but the outstanding step is RECEIVING — done at the warehouse, and already
+  // counted there. Claiming it here would double-count one piece of work across two badges.
+  it("does not claim rows whose remaining work belongs to the warehouse", () => {
+    expect(isActionable(row("assigned"))).toBe(false);
+    expect(isActionable(row("partially_received"))).toBe(false);
+  });
+
+  it("does not claim finished rows", () => {
+    expect(isActionable(row("completed"))).toBe(false);
+    expect(isActionable(row("rejected"))).toBe(false);
+  });
+
+  // The marks on screen and the badge above them are summed from this ONE predicate, so they cannot
+  // drift; a row that lights up is a row the number counted.
+  it("marks exactly as many rows as the badge counts", () => {
+    const rows = ["pending", "approved", "assigned", "partially_received", "completed"].map(row);
+    expect(rows.filter(isActionable).map((r) => r.status)).toEqual(["pending", "approved"]);
+  });
+
+  // Actionable rows must survive the view the tab opens on, or the badge would point at rows the
+  // default filter hides.
+  it("keeps every actionable status inside the default Open view", () => {
+    for (const status of ACTIONABLE_STATUSES) {
+      expect(OPEN_STATUSES, `"${status}" is counted but hidden by the default filter`).toContain(status);
+    }
+  });
+});
+
+// "Which ones need me" is answered by a FILTER, not by painting rows. The first attempt tinted the
+// actionable rows amber; in the default Open view — actionable rows plus receiving-in-progress ones —
+// that routinely covered most of the list, and a highlight covering three rows in four inverts its
+// own meaning: the unmarked row becomes the signal. This option is the tab's badge made clickable.
+describe("Needs you — the tab's count, made selectable", () => {
+  const row = (status: string, name = "x"): SubmissionLike => ({ name, editedName: null, status });
+
+  it("selects exactly the rows the badge counts", () => {
+    const rows = [row("pending"), row("partially_received"), row("approved"), row("completed")];
+    const picked = filterSubmissions(rows, { search: "", status: NEEDS_YOU });
+    expect(picked.map((r) => r.status)).toEqual(["pending", "approved"]);
+    expect(picked.length).toBe(rows.filter(isActionable).length);
+  });
+
+  it("offers the option with its count, right under Open", () => {
+    const rows = [row("pending"), row("approved"), row("partially_received"), row("completed")];
+    const opts = submissionStatusOptions(rows);
+    expect(opts[0].value).toBe(OPEN);
+    expect(opts[1]).toEqual({ value: NEEDS_YOU, label: "Needs you (2)" });
+  });
+
+  // An option that can only ever produce an empty list is not a choice.
+  it("is hidden when nothing needs you", () => {
+    const opts = submissionStatusOptions([row("completed"), row("partially_received")]);
+    expect(opts.some((o) => o.value === NEEDS_YOU)).toBe(false);
+  });
+
+  // Two entries selecting the same rows read as a bug — the same reasoning that drops a redundant
+  // single open status. Open wins because it is the default and where Clear returns to.
+  it("is hidden when it would select the same rows as Open", () => {
+    const opts = submissionStatusOptions([row("pending"), row("approved")]);
+    expect(opts.some((o) => o.value === NEEDS_YOU)).toBe(false);
+    expect(opts[0]).toEqual({ value: OPEN, label: "Open (2)" });
+  });
+
+  it("comes back as soon as Open holds something it doesn't", () => {
+    const opts = submissionStatusOptions([row("pending"), row("approved"), row("assigned")]);
+    expect(opts.some((o) => o.value === NEEDS_YOU)).toBe(true);
+  });
+
+  it("still applies the search term", () => {
+    const rows = [row("pending", "fibre"), row("approved", "cable")];
+    expect(filterSubmissions(rows, { search: "fib", status: NEEDS_YOU }).map((r) => r.name)).toEqual(["fibre"]);
   });
 });

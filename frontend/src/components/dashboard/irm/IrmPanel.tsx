@@ -4,7 +4,8 @@ import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Boxes, Layers, Tags } from "lucide-react";
 
-import { ListPageHeader } from "@/components/ui/ListPageHeader";
+import { PageActions } from "@/components/ui/PageActions";
+import { TabPills } from "@/components/ui/TabPills";
 import { IrmItemsView } from "./IrmItemsView";
 import { IrmTypesView } from "./IrmTypesView";
 import { IrmCategoriesView } from "./IrmCategoriesView";
@@ -64,36 +65,16 @@ export function IrmPanel({ embedded = false, tab }: { embedded?: boolean; tab?: 
     return <div className="flex h-full min-h-0 flex-col">{content}</div>;
   }
 
-  const tabSwitcher =
-    visibleTabs.length > 1 ? (
-      <div className="flex gap-1 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-1">
-        {visibleTabs.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => selectTab(t.id)}
-            className={`flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-bold transition-all ${
-              activeTab === t.id
-                ? "bg-[var(--accent)] text-white shadow-xs"
-                : "text-[var(--muted)] hover:text-[var(--ink)]"
-            }`}
-          >
-            <t.icon className="h-4 w-4" />
-            {t.label}
-          </button>
-        ))}
-      </div>
-    ) : null;
+  const tabSwitcher = (
+    <TabPills tabs={visibleTabs} active={activeTab} onSelect={selectTab} ariaLabel="IRM Catalogue sections" />
+  );
 
   return (
     <div className={`flex h-full flex-col ${embedded ? "gap-4" : "gap-6"}`}>
       {embedded ? (
-        tabSwitcher ? <div className="flex shrink-0">{tabSwitcher}</div> : null
+        <div className="flex shrink-0 empty:hidden">{tabSwitcher}</div>
       ) : (
-        <ListPageHeader
-          title="IRM Catalogue"
-          subtitle="Company-owned internal stock items, with the type and category lists used to classify them."
-          right={tabSwitcher}
-        />
+        <PageActions>{tabSwitcher}</PageActions>
       )}
 
       <div className="flex min-h-0 flex-1 flex-col">{content}</div>

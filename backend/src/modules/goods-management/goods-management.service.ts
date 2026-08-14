@@ -18,7 +18,15 @@ import { getOpenDemand } from "./demand.js";
 import type { CloseReconcileInput, PostMovementInput, ReportDamageInput, RestoreDamagedInput, ScanLookupInput } from "./goods-management.validation.js";
 import { withTransaction } from "../../lib/prisma.js";
 import { notify } from "#modules/notification/notification.service.js";
-import { emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
+import { emitAttentionChanged, emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
+import { randomUUID } from "node:crypto";
+
+// Issue / return / reconcile each move a goods attention queue (to-issue, awaiting-return, overdue
+// holdings), so the office event and the attention signal fire together — see emitJobsRoom.
+function emitGoodsRoom(event: string, payload: unknown): void {
+  emitToRoom(OFFICE_JOBS_ROOM, event, payload);
+  emitAttentionChanged("goods_management");
+}
 
 export interface ScanMatch {
   source: "irm" | "customer";
@@ -88,10 +96,23 @@ export interface KitLineTally {
   remaining: number; // still held by the engineer = issued − used − returned
 }
 
+/**
+ * The only parts of a job getJobKitTallies reads. Structural on purpose: a caller that ALREADY holds
+ * the job — the customer portal fetches a narrow projection of it to render the page, the delete
+ * guard has just loaded the whole thing — can hand it over instead of paying for a second, full
+ * `findById` (which loads every kit line with its irmItem join and each pickup warehouse's whole
+ * address block, for four fields).
+ */
+export interface KitTallyJob {
+  assignedEngineerId: string | null;
+  kitLines: { id: string; lineType: string; irmItemId: string | null; customerStockEntryId: string | null }[];
+}
+
 // Per-kit-line goods tallies for a single job, keyed by jobKitLineId. Used on the job-detail "job
 // pack" views so the engineer/office can see issued / returned / remaining per item.
-export async function getJobKitTallies(jobId: string): Promise<Record<string, KitLineTally>> {
-  const job = await jobRepo.findById(jobId);
+export async function getJobKitTallies(jobId: string, prefetched?: KitTallyJob): Promise<Record<string, KitLineTally>> {
+  // Omitting `prefetched` keeps the original behaviour exactly — every existing caller is unchanged.
+  const job = prefetched ?? (await jobRepo.findById(jobId));
   const movements = await goodsManagementRepo.findMovementsByJob(jobId);
   const acc: Record<string, { issued: number; returned: number; consumed: number }> = {};
   for (const m of movements) {
@@ -120,7 +141,7 @@ export async function getJobKitTallies(jobId: string): Promise<Record<string, Ki
   // per-line "remaining" sums to the engineer's true holding. Misc lines aren't engineer-tracked, so
   // they keep their raw remaining. Keyed by current kit lines (orphaned movements are ignored).
   const out: Record<string, KitLineTally> = {};
-  const groups = new Map<string, NonNullable<JobWithRelations["kitLines"]>>();
+  const groups = new Map<string, KitTallyJob["kitLines"]>();
   for (const kl of job?.kitLines ?? []) {
     const key = kl.irmItemId ? `irm:${kl.irmItemId}` : kl.customerStockEntryId ? `cse:${kl.customerStockEntryId}` : `misc:${kl.id}`;
     const g = groups.get(key);
@@ -420,10 +441,12 @@ export async function uploadDamagePhoto(image: string): Promise<{ url: string }>
       "Cloudinary isn't configured. Add your Cloudinary credentials in Settings → Integrations (or set CLOUDINARY_* in the backend env).",
     );
   }
-  // Use a timestamp-based unique publicId so each damage photo is stored as a distinct asset
-  // (no overwrite — unlike branding, damage photos must be preserved for audit purposes).
-  const publicId = `damage_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  const url = await uploadToCloudinary(image, publicId, creds, "senthra/damage-photos");
+  // A distinct asset per photo — damage evidence backs supplier and insurance claims, so an upload
+  // that quietly replaced an earlier one would destroy the proof. `uploadToCloudinary` overwrites on a
+  // repeated publicId, and the previous timestamp-plus-Math.random() id could repeat: same
+  // millisecond, same 6 characters. randomUUID cannot.
+  const publicId = `damage-${randomUUID()}`;
+  const { url } = await uploadToCloudinary(image, publicId, creds, "senthra/damage-photos");
   return { url };
 }
 
@@ -651,7 +674,7 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
   // "Issued" is warehouse jargon (the system-side scan-out) — the engineer just
   // needs to know their kit is ready and where to get it.
   notify(job.assignedEngineerId!, { title: "Kit ready to collect", body: `Your kit for ${job.jobNumber} is ready at the warehouse — come and collect it.`, data: { type: "job", jobId: job.id } });
-  emitToRoom(OFFICE_JOBS_ROOM, "goods:updated", issuePayload);
+  emitGoodsRoom("goods:updated", issuePayload);
 
   return toPublic(created);
 }
@@ -1579,7 +1602,7 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
   // Realtime: notify the engineer + all office staff.
   const returnPayload = { jobId: job.id, movementId: created.id, code: created.code, direction: "return" };
   emitToUser(job.assignedEngineerId!, "goods:returned", returnPayload);
-  emitToRoom(OFFICE_JOBS_ROOM, "goods:updated", returnPayload);
+  emitGoodsRoom("goods:updated", returnPayload);
 
   return toPublic(created);
 }
@@ -2440,7 +2463,7 @@ export async function closeReconcile(
   // Realtime: notify the engineer + all office staff.
   const reconcilePayload = { jobId: job.id, direction: "reconcile" };
   emitToUser(job.assignedEngineerId!, "goods:returned", reconcilePayload);
-  emitToRoom(OFFICE_JOBS_ROOM, "goods:updated", reconcilePayload);
+  emitGoodsRoom("goods:updated", reconcilePayload);
 
   const updatedSummary = await goodsManagementRepo.getSummary(job.id);
   return {

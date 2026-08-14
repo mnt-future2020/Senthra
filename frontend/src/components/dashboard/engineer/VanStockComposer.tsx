@@ -13,7 +13,6 @@ import type {
   WarehouseAvailability,
 } from "@/services/vanStockRequest.service";
 import { useDashboard } from "@/hooks/useDashboard";
-import { readFileAsDataUrl } from "@/lib/image";
 import { VanStockCartTable, VanStockItemSearch, type VanStockCartItem } from "@/components/dashboard/van-requests/vanRequestUi";
 import { FieldError, FormPageHeader, FormSection, FormAsideCard, RequiredMark } from "@/components/ui/FormScaffold";
 import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
@@ -22,6 +21,7 @@ import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import type { Msg } from "@/components/ui/types";
+import { uploadDirectForUrl } from "@/lib/upload";
 
 // Full-page composers for the engineer's NON-job field-stock flow, on the shared FormScaffold
 // (sticky header + sectioned main column + sticky summary aside) so they read exactly like the
@@ -205,11 +205,19 @@ export function RestockComposerPage() {
   const remove = (id: string) => setCart((c) => c.filter((x) => x.irmItemId !== id));
 
   const onFile = async (file: File) => {
+    // `accept="image/*"` is a hint the file dialog lets the user override, and a file the browser
+    // cannot type at all reads back as `application/octet-stream` — which the server now refuses. Check
+    // it here so the answer arrives before the upload rather than after it, the same gate
+    // TransferComposer already applies to its own picker.
+    if (!file.type.startsWith("image/")) {
+      setMsg({ type: "error", text: "Attach an image — PNG, JPG, GIF or WEBP." });
+      if (fileRef.current) fileRef.current.value = "";
+      return;
+    }
     setUploading(true);
     setMsg(null);
     try {
-      const dataUri = await readFileAsDataUrl(file);
-      const url = await vanStockSvc.uploadVanStockAttachment(dataUri);
+      const url = await uploadDirectForUrl({ purpose: "vsr_attachment", file });
       setAttachments((a) => [...a, url]);
     } catch (err) {
       setMsg({ type: "error", text: err instanceof Error ? err.message : "Could not upload the attachment." });

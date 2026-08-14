@@ -13,6 +13,13 @@ export const PRF_STATUS_LABELS: Record<PrfStatus, string> = {
   cancelled: "Cancelled",
 };
 
+// DERIVED pseudo-status — a filter value the list accepts that is not stored on a PRF. Resolved
+// server-side in purchase-request.repository's buildWhere from the same predicate the "Rejected —
+// needs rework" badge counts, so clicking that badge opens precisely the rows it counted. Labelled as
+// a QUEUE so it reads as distinct from the real statuses above: every one of these IS a draft, but
+// only the ones sent back for rework.
+export const PRF_DERIVED_STATUS_OPTIONS = [{ value: "rework", label: "Rework queue" }];
+
 const PRF_STATUS_CLASSES: Record<PrfStatus, string> = {
   draft: "bg-[var(--surface-2)] text-[var(--muted)]",
   submitted: "bg-amber-500/12 text-amber-600",

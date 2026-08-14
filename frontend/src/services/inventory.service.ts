@@ -1,5 +1,5 @@
-import { api, apiFile } from "@/lib/api";
-import { downloadBlob, filenameFromDisposition } from "@/lib/download";
+import { api } from "@/lib/api";
+import { downloadCsv, withoutPaging } from "@/lib/csvExport";
 import { registerClientCache } from "@/lib/clientCache";
 import type { Availability, InventoryBalance, InventoryDetail, InventoryTransaction, PurchaseHistoryRow, StockTransfer } from "@/types/inventory";
 
@@ -252,12 +252,5 @@ export function adjustStock(payload: AdjustStockPayload): Promise<StockAdjustmen
 // the silent refresh-on-401 still applies (mirrors the audit export). Returns whether the export was
 // capped by the server; that flag rides on a header the API must expose via CORS.
 export async function exportInventoryCsv(params: InventoryListParams = {}): Promise<{ capped: boolean }> {
-  const { page: _page, pageSize: _pageSize, ...filters } = params;
-  void _page;
-  void _pageSize;
-  const { blob, headers } = await apiFile(`/inventory/export.csv${listQs(filters)}`);
-  const date = new Date().toISOString().slice(0, 10);
-  const filename = filenameFromDisposition(headers["content-disposition"] ?? null, `inventory-${date}.csv`);
-  downloadBlob(blob, filename);
-  return { capped: String(headers["x-inventory-export-capped"] ?? "") === "true" };
+  return downloadCsv(`/inventory/export.csv${listQs(withoutPaging(params))}`, "inventory");
 }

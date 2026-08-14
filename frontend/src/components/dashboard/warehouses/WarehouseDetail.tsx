@@ -15,6 +15,11 @@ import { secondaryBtn, toolbarBtn, toolbarInputCls } from "@/components/ui/style
 import { searchStockEntries } from "@/lib/stockEntrySearch";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
+import { useAttention } from "@/hooks/useAttention";
+import { useEntityAttention } from "@/hooks/useEntityAttention";
+import { CountPill } from "@/components/dashboard/shell/TabCount";
+import { followQuery, keysForPane, keysForTab } from "./warehouseAttention";
+import type { AttentionTone } from "@/services/attention.service";
 import { NoStaffAssigned, StaffChip } from "@/components/ui/StaffChip";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { DetailHeader } from "@/components/ui/DetailHeader";
@@ -57,13 +62,13 @@ function TableSkeleton({ headers, minWidth }: { headers: string[]; minWidth: num
       <table className="w-full text-left text-sm" style={{ minWidth }}>
         <thead>
           <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-            {headers.map((h, i) => (<th key={i} className="px-4 py-3">{h}</th>))}
+            {headers.map((h, i) => (<th key={i} className="cell-y px-4">{h}</th>))}
           </tr>
         </thead>
         <tbody>
           {Array.from({ length: 6 }).map((_, i) => (
             <tr key={i} className="border-b border-[var(--border)] last:border-0">
-              {headers.map((_h, j) => (<td key={j} className="px-4 py-3"><Skeleton className="h-3 w-20" /></td>))}
+              {headers.map((_h, j) => (<td key={j} className="cell-y px-4"><Skeleton className="h-3 w-20" /></td>))}
             </tr>
           ))}
         </tbody>
@@ -87,6 +92,40 @@ type Tab = "overview" | "inventory" | "incoming" | "goods" | "van" | "demand" | 
 // for card-style tabs (overview / audit) that scroll the whole page naturally. Set it
 // declaratively per tab rather than string-matching keys in the render, so a new tab can't silently
 // clip by being missed off a hardcoded list.
+// `attention` lists the catalog keys whose work is done ON that tab. Their counts are what the
+// sidebar's Warehouses badge is made of, and — for six of them — the only place the number can be
+// acted on: those queues span warehouses, so no cross-warehouse screen exists and the catalog gives
+// them no href. Putting the count here is what makes "Job kit to issue · 12" reachable at all.
+//
+// Which keys belong to which tab (and to which PANE inside it) lives in warehouseAttention.ts, and the
+// counts below are derived from it — a tab total written separately from its panes' shares is exactly
+// how "Incoming stock 4" came to open a pane holding none of them.
+/** critical &lt; attention &lt; info — lower wins, matching the server's own rollup. */
+const TONE_RANK: Record<AttentionTone, number> = { critical: 0, attention: 1, info: 2 };
+
+/**
+ * One attention key's count at THIS warehouse, handed down to the panes inside a tab.
+ *
+ * A tab count alone stops one level too high: "Incoming stock 4" tells someone the work is on this
+ * tab, but that tab opens on the Company (GRN) pane while the 4 may all be customer intake sitting
+ * behind a pill they never pressed. The number has to keep resolving until it reaches the pane that
+ * actually lists the rows — so the pills carry it too.
+ */
+type KeyAttention = (key: string) => { count: number; tone: AttentionTone };
+
+/** Total across a set of keys, taking the most severe tone among the ones that actually have work. */
+function sumKeys(keys: string[], keyAttention: KeyAttention): { count: number; tone: AttentionTone } {
+  let count = 0;
+  let tone: AttentionTone = "info";
+  for (const k of keys) {
+    const hit = keyAttention(k);
+    if (hit.count <= 0) continue;
+    count += hit.count;
+    if (TONE_RANK[hit.tone] < TONE_RANK[tone]) tone = hit.tone;
+  }
+  return { count, tone };
+}
+
 const TABS: { key: Tab; label: string; perms?: string[]; fill?: boolean }[] = [
   { key: "overview", label: "Overview" },
   { key: "incoming", label: "Incoming stock", perms: ["goods_in.view", "stock_requests.view"], fill: true },
@@ -111,6 +150,18 @@ export function WarehouseDetail({ initial }: { initial: Warehouse }) {
   const [busy, setBusy] = React.useState(false);
   const canEdit = can("warehouse.edit");
 
+  // This warehouse's own share of each queue. Keys the actor may not act on are already absent
+  // server-side, so a tab only ever counts work its viewer could actually do.
+  const { rows: warehouseAttention } = useEntityAttention("warehouse");
+  const mine = warehouseAttention[w.id];
+  // Tone per KEY, from the shared catalog payload the sidebar already fetched — so a tab holding only
+  // calm work stays calm even when something critical sits on another tab of the same warehouse.
+  const { attention } = useAttention();
+  const keyAttention: KeyAttention = (key) => ({
+    count: mine?.keys[key] ?? 0,
+    tone: attention.items.find((i) => i.key === key)?.tone ?? "info",
+  });
+
   const visibleTabs = TABS.filter((t) => !t.perms || t.perms.some((p) => can(p)));
   const requestedTab = searchParams.get("tab");
   const activeTab = visibleTabs.find((t) => t.key === requestedTab) ?? visibleTabs[0];
@@ -131,7 +182,7 @@ export function WarehouseDetail({ initial }: { initial: Warehouse }) {
   };
 
   return (
-    <div className="flex h-full flex-col gap-5">
+    <div className="stack flex h-full flex-col">
       <DetailHeader
         storageKey="warehouse-detail"
         title={w.name}
@@ -189,6 +240,11 @@ export function WarehouseDetail({ initial }: { initial: Warehouse }) {
             }`}
           >
             {t.label}
+            {/* CountPill renders nothing at zero, so a quiet tab looks exactly as it did before. */}
+            {(() => {
+              const { count, tone } = sumKeys(keysForTab(t.key), keyAttention);
+              return <CountPill count={count} tone={tone} label={`awaiting action on ${t.label}`} className="ml-1.5" />;
+            })()}
           </button>
         ))}
       </div>
@@ -198,8 +254,8 @@ export function WarehouseDetail({ initial }: { initial: Warehouse }) {
           Card-style tabs scroll as a whole page. Driven by the tab's declarative `fill` flag. */}
       <div className={`min-h-0 flex-1 ${activeTab?.fill ? "overflow-hidden" : "overflow-auto"}`}>
         {tab === "overview" && <Overview w={w} />}
-        {tab === "inventory" && <StockTab warehouseCode={w.code} warehouseId={w.id} router={router} />}
-        {tab === "incoming" && <IncomingTab warehouseCode={w.code} warehouseId={w.id} router={router} pushToast={pushToast} />}
+        {tab === "inventory" && <StockTab warehouseCode={w.code} warehouseId={w.id} router={router} keyAttention={keyAttention} />}
+        {tab === "incoming" && <IncomingTab warehouseCode={w.code} warehouseId={w.id} router={router} pushToast={pushToast} keyAttention={keyAttention} />}
         {tab === "goods" && <GoodsManagementTab warehouseId={w.id} router={router} />}
         {tab === "van" && <VanRequestsWorkspace warehouse={{ id: w.id, name: w.name, code: w.code }} />}
         {tab === "demand" && <DemandTab warehouseId={w.id} />}
@@ -349,11 +405,13 @@ function IncomingTab({
   warehouseId,
   router,
   pushToast,
+  keyAttention,
 }: {
   warehouseCode: string;
   warehouseId: string;
   router: ReturnType<typeof useRouter>;
   pushToast: (msg: string, type?: "success" | "alert") => void;
+  keyAttention: KeyAttention;
 }) {
   const { can } = useAuth();
   const searchParams = useSearchParams();
@@ -365,17 +423,29 @@ function IncomingTab({
     requested === "customer" || requested === "grn" ? requested : canGrn ? "grn" : "customer";
   const active: "grn" | "customer" = canGrn && canCustomer ? pool : canGrn ? "grn" : "customer";
 
+  // Clicking a pane control that is SHOWING A COUNT lands on that queue's rows, not merely on the
+  // list they live in — GRN history holds every completed receipt too, so "Received 3" opening all of
+  // them is the same broken promise as a link that filters nothing. With nothing outstanding it
+  // navigates plainly, so an empty queue never applies a filter that hides the history.
+  const go = (query: string) =>
+    router.replace(`/dashboard/warehouses/${warehouseCode}?${query}`, { scroll: false });
   const setPool = (p: "grn" | "customer") =>
-    router.replace(`/dashboard/warehouses/${warehouseCode}?tab=incoming&pool=${p}`, { scroll: false });
+    go(followQuery(keysForPane("incoming", p), (k) => keyAttention(k).count) ?? `tab=incoming&pool=${p}`);
 
-  // Within the Company (GRN) pool: "Expected deliveries" (open POs to receive — the WM worklist)
-  // vs "Received" (GRN history). Persisted in ?inbound= so a refresh keeps the chosen view.
-  // Expected needs PO read access; without it, only Received shows.
+  // Within the Company (GRN) pool: "Expected" (open POs to receive — the WM worklist) vs "Receipts"
+  // (the GRN records themselves). Persisted in ?inbound= so a refresh keeps the chosen view.
+  // Expected needs PO read access; without it, only Receipts shows.
+  //
+  // The second view was LABELLED "Received", which was wrong as soon as it carried a count: a GRN is
+  // draft | completed | cancelled, and a DRAFT is stock that has physically turned up but has not been
+  // booked in — unfinished work, the opposite of "received". So the pane read "Received 1" while the
+  // one row in it was a job still to do. The ?inbound= VALUE stays `received` so existing links and
+  // the pane map keep working; only the word the user reads changed.
   const canExpected = can("purchase_orders.view");
   const inbound: "expected" | "received" =
     !canExpected ? "received" : searchParams.get("inbound") === "received" ? "received" : "expected";
   const setInbound = (v: "expected" | "received") =>
-    router.replace(`/dashboard/warehouses/${warehouseCode}?tab=incoming&pool=grn&inbound=${v}`, { scroll: false });
+    go(followQuery(keysForPane("incoming", "grn", v), (k) => keyAttention(k).count) ?? `tab=incoming&pool=grn&inbound=${v}`);
 
   const showOwnerToggle = canGrn && canCustomer;
   const showViewSwitcher = active === "grn" && canExpected;
@@ -387,30 +457,43 @@ function IncomingTab({
   const [filterSlot, setFilterSlot] = React.useState<HTMLDivElement | null>(null);
 
   return (
-    <div className="flex h-full flex-col gap-4">
+    <div className="stack flex h-full flex-col">
       {/* One toolbar row: owner toggle (Company/Customer) on the left — matching the Inventory tab —
           the Expected-deliveries filter in the middle, and, only while Company is active, the
           Expected/Received view switcher on the right. */}
       {(showOwnerToggle || showViewSwitcher) && (
         <div className="flex shrink-0 flex-wrap items-center gap-2">
+          {/* Each pill carries its OWN share of the tab's count, so "Incoming stock 4" resolves to the
+              pane holding those 4 instead of stopping at the tab. Which keys those are comes from the
+              same map the tab total is derived from, so the parts always add up to the whole. */}
           {showOwnerToggle &&
             ([
               { key: "grn", label: "Company (GRN)" },
               { key: "customer", label: "Customer" },
-            ] as const).map((p) => (
-              <button
-                key={p.key}
-                type="button"
-                onClick={() => setPool(p.key)}
-                className={`rounded-full px-3 py-1.5 text-[11px] font-bold transition-all ${
-                  active === p.key
-                    ? "bg-[var(--accent)] text-white"
-                    : "border border-[var(--border)] bg-[var(--surface-2)] text-[var(--muted)] hover:text-[var(--ink)]"
-                }`}
-              >
-                {p.label}
-              </button>
-            ))}
+            ] as const).map((p) => {
+              const hit = sumKeys(keysForPane("incoming", p.key), keyAttention);
+              return (
+                <button
+                  key={p.key}
+                  type="button"
+                  onClick={() => setPool(p.key)}
+                  className={`inline-flex items-center rounded-full px-3 py-1.5 text-[11px] font-bold transition-all ${
+                    active === p.key
+                      ? "bg-[var(--accent)] text-white"
+                      : "border border-[var(--border)] bg-[var(--surface-2)] text-[var(--muted)] hover:text-[var(--ink)]"
+                  }`}
+                >
+                  {p.label}
+                  {/* On the selected pill the tone colours would sit on the accent fill and read as a
+                      separate control; a plain inherited-colour number is enough there. */}
+                  {active === p.key ? (
+                    hit.count > 0 ? <span className="ml-1.5 tabular-nums opacity-80">{hit.count}</span> : null
+                  ) : (
+                    <CountPill count={hit.count} tone={hit.tone} label={`awaiting action in ${p.label}`} className="ml-1.5" />
+                  )}
+                </button>
+              );
+            })}
           {/* Portal target — see filterSlot — grouped with the view switcher so both sit together
               on the right. ml-auto goes on the group, not the slot: on the slot it would claim the
               row's free space and shove the switcher off the edge once the menu appeared. An empty
@@ -419,23 +502,37 @@ function IncomingTab({
             <div ref={setFilterSlot} className="flex items-center" />
             {showViewSwitcher && (
               <div className="inline-flex items-center rounded-full border border-[var(--border)] bg-[var(--surface-2)] p-0.5">
+                {/* Draft receipts are GRN records, so the count belongs on Receipts — the pane the
+                    tab does NOT open on. Without it the Company pill says 2 and the Expected list it
+                    lands on shows none of them. */}
                 {([
-                  { key: "expected", label: "Expected" },
-                  { key: "received", label: "Received" },
-                ] as const).map((v) => (
-                  <button
-                    key={v.key}
-                    type="button"
-                    onClick={() => setInbound(v.key)}
-                    className={`rounded-full px-3 py-1 text-[11px] font-bold transition-all ${
-                      inbound === v.key
-                        ? "bg-[var(--accent)] text-white"
-                        : "text-[var(--muted)] hover:text-[var(--ink)]"
-                    }`}
-                  >
-                    {v.label}
-                  </button>
-                ))}
+                  { key: "expected", label: "Expected", hint: "Open purchase orders still to be booked in" },
+                  { key: "received", label: "Receipts", hint: "Goods receipts raised here — including drafts still to be completed" },
+                ] as const).map((v) => {
+                  const hit = sumKeys(keysForPane("incoming", "grn", v.key), keyAttention);
+                  return (
+                    <button
+                      key={v.key}
+                      type="button"
+                      title={v.hint}
+                      onClick={() => setInbound(v.key)}
+                      className={`inline-flex items-center rounded-full px-3 py-1 text-[11px] font-bold transition-all ${
+                        inbound === v.key
+                          ? "bg-[var(--accent)] text-white"
+                          : "text-[var(--muted)] hover:text-[var(--ink)]"
+                      }`}
+                    >
+                      {v.label}
+                      {/* Says WHAT the number is, not just how many — a bare count beside a view name
+                          reads as "this many items in here", which for a receipts list is wrong. */}
+                      {inbound !== v.key ? (
+                        <CountPill count={hit.count} tone={hit.tone} label="drafts still to complete" className="ml-1.5" />
+                      ) : hit.count > 0 ? (
+                        <span className="ml-1.5 tabular-nums opacity-80">{hit.count}</span>
+                      ) : null}
+                    </button>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -664,13 +761,13 @@ function IncomingStock({
         <table className="w-full text-left text-sm" style={{ minWidth: 700 }}>
           <thead className="sticky top-0 z-10 bg-[var(--surface)]">
             <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-              <th className="px-4 py-3">Customer</th>
-              <th className="px-4 py-3">Item</th>
-              <th className="px-4 py-3">Qty</th>
-              <th className="px-4 py-3">Received</th>
-              <th className="px-4 py-3">Status</th>
-              <th className="px-4 py-3">Requested</th>
-              <th className="px-4 py-3" />
+              <th className="cell-y px-4">Customer</th>
+              <th className="cell-y px-4">Item</th>
+              <th className="cell-y px-4">Qty</th>
+              <th className="cell-y px-4">Received</th>
+              <th className="cell-y px-4">Status</th>
+              <th className="cell-y px-4">Requested</th>
+              <th className="cell-y px-4" />
             </tr>
           </thead>
           <tbody>
@@ -678,16 +775,16 @@ function IncomingStock({
               const remaining = it.quantity - it.receivedQuantity;
               return (
                 <tr key={it.assignmentId} className="border-b border-[var(--border)] align-top last:border-0">
-                  <td className="px-4 py-3">
+                  <td className="cell-y px-4">
                     <div className="font-semibold text-[var(--ink)]">{it.customerName}</div>
                     <div className="font-mono text-[11px] text-[var(--faint)]">{it.customerCode}</div>
                   </td>
-                  <td className="px-4 py-3 font-semibold text-[var(--ink)]">{it.itemName}</td>
-                  <td className="px-4 py-3 font-bold text-[var(--ink)]">{it.quantity}</td>
-                  <td className="px-4 py-3 text-[var(--muted)]">
+                  <td className="cell-y px-4 font-semibold text-[var(--ink)]">{it.itemName}</td>
+                  <td className="cell-y px-4 font-bold text-[var(--ink)]">{it.quantity}</td>
+                  <td className="cell-y px-4 text-[var(--muted)]">
                     {it.receivedQuantity}/{it.quantity}
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="cell-y px-4">
                     <span
                       className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${
                         it.status === "partially_received"
@@ -698,8 +795,8 @@ function IncomingStock({
                       {it.status.replace(/_/g, " ")}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-xs text-[var(--muted)]">{fmtDate(it.createdAt)}</td>
-                  <td className="px-4 py-3">
+                  <td className="cell-y px-4 text-xs text-[var(--muted)]">{fmtDate(it.createdAt)}</td>
+                  <td className="cell-y px-4">
                     {remaining > 0 && (
                       <div className="flex items-center justify-end gap-1.5">
                         <button
@@ -728,13 +825,10 @@ function IncomingStock({
           </tbody>
         </table>
         </div>
+        {rows.length > 0 && (
+          <Pagination embedded page={safePage} totalPages={totalPages} total={total} label="items" onPage={setPage} />
+        )}
       </div>
-      )}
-
-      {rows.length > 0 && (
-        <div className="shrink-0">
-          <Pagination page={safePage} totalPages={totalPages} total={total} label="items" onPage={setPage} />
-        </div>
       )}
 
       {receiveTarget && (
@@ -816,10 +910,12 @@ function StockTab({
   warehouseCode,
   warehouseId,
   router,
+  keyAttention,
 }: {
   warehouseCode: string;
   warehouseId: string;
   router: ReturnType<typeof useRouter>;
+  keyAttention: KeyAttention;
 }) {
   const { can } = useAuth();
   const searchParams = useSearchParams();
@@ -834,9 +930,18 @@ function StockTab({
         : "customer";
   const active: "irm" | "customer" | "damaged" = canIrm ? pool : "customer";
 
+  // Same rule as the Incoming tab's pills — see the note on `go` there. The customer pool holds both
+  // draft and active entries, so "Customer 2" without the filter opens the whole consignment list.
   const setPool = (p: "irm" | "customer" | "damaged") =>
-    router.replace(`/dashboard/warehouses/${warehouseCode}?tab=inventory&pool=${p}`, { scroll: false });
+    router.replace(
+      `/dashboard/warehouses/${warehouseCode}?${
+        followQuery(keysForPane("inventory", p), (k) => keyAttention(k).count) ?? `tab=inventory&pool=${p}`
+      }`,
+      { scroll: false },
+    );
 
+  // "Received stock to catalogue" is customer-pool work, and this tab opens on Company (IRM) — so
+  // without the count on the pill the Inventory tab's number points at a pane nobody opens.
   const POOL_PILLS = canIrm
     ? ([
         { key: "irm", label: "Company (IRM)" },
@@ -846,23 +951,31 @@ function StockTab({
     : ([] as const);
 
   return (
-    <div className="flex h-full flex-col gap-4">
+    <div className="stack flex h-full flex-col">
       {canIrm && (
         <div className="flex shrink-0 items-center gap-2">
-          {POOL_PILLS.map((p) => (
-            <button
-              key={p.key}
-              type="button"
-              onClick={() => setPool(p.key)}
-              className={`rounded-full px-3 py-1.5 text-[11px] font-bold transition-all ${
-                active === p.key
-                  ? "bg-[var(--accent)] text-white"
-                  : "border border-[var(--border)] bg-[var(--surface-2)] text-[var(--muted)] hover:text-[var(--ink)]"
-              }`}
-            >
-              {p.label}
-            </button>
-          ))}
+          {POOL_PILLS.map((p) => {
+            const hit = sumKeys(keysForPane("inventory", p.key), keyAttention);
+            return (
+              <button
+                key={p.key}
+                type="button"
+                onClick={() => setPool(p.key)}
+                className={`inline-flex items-center rounded-full px-3 py-1.5 text-[11px] font-bold transition-all ${
+                  active === p.key
+                    ? "bg-[var(--accent)] text-white"
+                    : "border border-[var(--border)] bg-[var(--surface-2)] text-[var(--muted)] hover:text-[var(--ink)]"
+                }`}
+              >
+                {p.label}
+                {active !== p.key ? (
+                  <CountPill count={hit.count} tone={hit.tone} label={`awaiting action in ${p.label}`} className="ml-1.5" />
+                ) : hit.count > 0 ? (
+                  <span className="ml-1.5 tabular-nums opacity-80">{hit.count}</span>
+                ) : null}
+              </button>
+            );
+          })}
         </div>
       )}
       {active === "irm" ? (
@@ -1019,14 +1132,14 @@ function WarehouseStockEntries({
             <table className="w-full text-left text-sm" style={{ minWidth: 750 }}>
               <thead className="sticky top-0 z-10 bg-[var(--surface)]">
                 <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                  <th className="px-4 py-3">Item</th>
-                  <th className="px-4 py-3">Customer</th>
-                  <th className="px-4 py-3">SKU</th>
-                  <th className="px-4 py-3">Qty</th>
-                  <th className="px-4 py-3">Barcode</th>
-                  <th className="px-4 py-3">Status</th>
-                  <th className="px-4 py-3">Received</th>
-                  <th className="px-4 py-3" />
+                  <th className="cell-y px-4">Item</th>
+                  <th className="cell-y px-4">Customer</th>
+                  <th className="cell-y px-4">SKU</th>
+                  <th className="cell-y px-4">Qty</th>
+                  <th className="cell-y px-4">Barcode</th>
+                  <th className="cell-y px-4">Status</th>
+                  <th className="cell-y px-4">Received</th>
+                  <th className="cell-y px-4" />
                 </tr>
               </thead>
               <tbody>
@@ -1036,15 +1149,15 @@ function WarehouseStockEntries({
                     className="cursor-pointer border-b border-[var(--border)] align-top transition-colors last:border-0 hover:bg-[var(--surface-2)]"
                     onClick={() => router.push(`/dashboard/stock-entries/${e.id}?from=warehouse`)}
                   >
-                    <td className="px-4 py-3 font-semibold text-[var(--ink)]">{e.itemName}</td>
-                    <td className="px-4 py-3">
+                    <td className="cell-y px-4 font-semibold text-[var(--ink)]">{e.itemName}</td>
+                    <td className="cell-y px-4">
                       <div className="text-[var(--ink)]">{e.customerName}</div>
                       <div className="font-mono text-[11px] text-[var(--faint)]">{e.customerCode}</div>
                     </td>
-                    <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.sku ?? "—"}</td>
-                    <td className="px-4 py-3 font-bold text-[var(--ink)]">{e.quantity}</td>
-                    <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{e.barcode ?? "—"}</td>
-                    <td className="px-4 py-3">
+                    <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">{e.sku ?? "—"}</td>
+                    <td className="cell-y px-4 font-bold text-[var(--ink)]">{e.quantity}</td>
+                    <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">{e.barcode ?? "—"}</td>
+                    <td className="cell-y px-4">
                       <span
                         className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${
                           e.status === "active"
@@ -1055,8 +1168,8 @@ function WarehouseStockEntries({
                         {e.status}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-xs text-[var(--muted)]">{fmtDate(e.receivedAt ?? e.createdAt)}</td>
-                    <td className="px-4 py-3">
+                    <td className="cell-y px-4 text-xs text-[var(--muted)]">{fmtDate(e.receivedAt ?? e.createdAt)}</td>
+                    <td className="cell-y px-4">
                       <div className="flex items-center gap-1.5">
                         <button
                           type="button"
@@ -1106,9 +1219,7 @@ function WarehouseStockEntries({
               </tbody>
             </table>
             </div>
-          </div>
-          <div className="shrink-0">
-            <Pagination
+            <Pagination embedded
               page={Math.min(page, totalPages)}
               totalPages={totalPages}
               total={visibleEntries.length}

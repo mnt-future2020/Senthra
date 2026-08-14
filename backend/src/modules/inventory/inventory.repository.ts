@@ -22,8 +22,6 @@ const irmItemSelect = {
   // negligible on the list payloads that share this select.
   reorderLevel: true,
   criticalLevel: true,
-  minimumStock: true,
-  reorderQuantity: true,
   maximumStock: true,
   packSize: true,
   standardCostPence: true,

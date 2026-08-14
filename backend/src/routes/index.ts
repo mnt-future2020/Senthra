@@ -1,5 +1,6 @@
 import { Router } from "express";
 
+import attentionRoutes from "#modules/attention/attention.routes.js";
 import auditRoutes from "#modules/audit/audit.routes.js";
 import authRoutes from "#modules/auth/auth.routes.js";
 import engineerTransferRoutes from "#modules/engineer-transfer/engineer-transfer.routes.js";
@@ -16,7 +17,8 @@ import inventoryRoutes from "#modules/inventory/inventory.routes.js";
 import irmRoutes from "#modules/irm/irm.routes.js";
 import irmCategoryRoutes from "#modules/irm-category/irm-category.routes.js";
 import irmTypeRoutes from "#modules/irm-type/irm-type.routes.js";
-import jobRoutes from "#modules/job/job.routes.js";
+import jobRoutes, { portalRouter as customerJobRoutes } from "#modules/job/job.routes.js";
+import uploadRoutes from "#modules/upload/upload.routes.js";
 import jobKitRequestRoutes from "#modules/job-kit-request/job-kit-request.routes.js";
 import jobTitleRoutes from "#modules/jobTitle/jobTitle.routes.js";
 import notificationRoutes from "#modules/notification/notification.routes.js";
@@ -42,6 +44,8 @@ router.get("/", (_req, res) => {
 router.use("/auth", authRoutes);
 router.use("/audit", auditRoutes);
 router.use("/dashboard", dashboardRoutes);
+// Global pending-work counts (sidebar badges + dashboard strip + module tab counts — one source).
+router.use("/attention", attentionRoutes);
 router.use("/settings", settingsRoutes);
 router.use("/users", userRoutes);
 router.use("/roles", roleRoutes);
@@ -59,12 +63,21 @@ router.use("/goods-in", goodsInRoutes);
 router.use("/goods-management", goodsManagementRoutes);
 router.use("/inventory", inventoryRoutes);
 router.use("/jobs", jobRoutes);
+
+// Direct browser upload — signature + finalize. Serves every upload contract, so the per-purpose
+// permission lives in the upload catalog rather than on the route.
+router.use("/uploads", uploadRoutes);
 router.use("/departments", departmentRoutes);
 router.use("/geo", geoRoutes);
 router.use("/job-titles", jobTitleRoutes);
 router.use("/email-templates", emailTemplateRoutes);
 // Customer master-data (admin/PM) + the read-only customer portal API.
 router.use("/customers", customerRoutes);
+// Jobs on the portal live in the JOB module (it owns the model and its repository), so they mount
+// as their own sub-path. Declared BEFORE /customer: both prefixes match this URL, and while the
+// portal router below happens to have no /jobs route to shadow it, relying on that would make a
+// future route added there silently take precedence over this one.
+router.use("/customer/jobs", customerJobRoutes);
 router.use("/customer", customerPortalRoutes);
 // Engineer self-service portal API (staff-only, permission-gated, scoped to the signed-in user).
 router.use("/engineer", engineerRoutes);

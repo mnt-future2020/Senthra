@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ArrowLeftRight, CheckCircle2, MapPin, PackagePlus, Truck, XCircle, PlayCircle, ClipboardCheck } from "lucide-react";
+import { ArrowLeftRight, CheckCircle2, ExternalLink, FileText, Image as ImageIcon, Link as LinkIcon, MapPin, PackagePlus, Truck, XCircle, PlayCircle, ClipboardCheck } from "lucide-react";
 
 import * as engineerService from "@/services/engineer.service";
 import { isStaleStateError } from "@/lib/api";
@@ -15,6 +15,7 @@ import { fmtDate, fmtDateTime, JobStatusChip, PortalHeader, TableCard } from "@/
 import { GoodsStatusChip } from "@/components/dashboard/jobs/jobStatus";
 import { crossWarehouseReturnNote, kitLineSourceSplit } from "@/components/dashboard/jobs/jobStatus";
 import { outstandingKit } from "@/components/dashboard/jobs/outstandingKit";
+import { parseJobAttachment } from "@/components/dashboard/jobs/jobAttachment";
 import { Notice } from "@/components/ui/Notice";
 import { FormError, FormPageSkeleton } from "@/components/ui/FormScaffold";
 import type { Job, JobKitLine, JobKitWarehouse } from "@/types/job";
@@ -447,7 +448,6 @@ export function EngineerJobDetail({ id }: { id: string }) {
             <Field label="Completion date" value={fmtDate(job.completionDate)} />
             <Field label="Assigned" value={fmtDate(job.assignedAt)} />
             <Field label="Accepted" value={fmtDate(job.acceptedAt)} />
-            <Field label="Accepted by" value={job.acceptedBy} />
             <Field label="Work started" value={fmtDateTime(job.startedAt)} />
             <Field label="Work completed" value={fmtDateTime(job.completedAt)} />
           </div>
@@ -459,6 +459,62 @@ export function EngineerJobDetail({ id }: { id: string }) {
             <Field label="Engineer email" value={job.assignedEngineerEmail} />
             <Field label="Planner" value={job.plannerName} />
             <Field label="Planner phone" value={job.plannerPhone} />
+          </div>
+        </Card>
+
+        {job.attachments && job.attachments.length > 0 && (
+          <Card title={`Attachments (${job.attachments.length})`}>
+            <ul className="space-y-2 text-sm">
+              {job.attachments.map((a, i) => {
+                const meta = parseJobAttachment(a);
+                if (!meta) return null;
+                const { rawUrl, name, isImg, isPdf, isDoc } = meta;
+
+                return (
+                  <li key={i} className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/30 p-2.5">
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--surface-2)] text-[var(--accent)]">
+                      {isImg ? (
+                        <ImageIcon className="h-4 w-4" />
+                      ) : isPdf || isDoc ? (
+                        <FileText className="h-4 w-4" />
+                      ) : (
+                        <LinkIcon className="h-4 w-4" />
+                      )}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-xs font-bold text-[var(--ink)]" title={name}>
+                        {name}
+                      </p>
+                      <a
+                        href={rawUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--accent)] hover:underline"
+                      >
+                        Open attachment <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </Card>
+        )}
+
+        <Card title="Record">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Created" value={fmtDate(job.createdAt)} />
+            <Field label="Accepted by" value={job.acceptedBy} />
+            {/* NOT a <Field>: that truncates to one line, and this is the field the office uses to
+                send the engineer their actual instructions — access codes, who to ask for on site,
+                what to do if nobody answers. Clipping it at the first line on the one screen read
+                standing outside a locked building loses exactly the part that matters. */}
+            {job.notes && (
+              <div className="sm:col-span-2 min-w-0">
+                <p className="text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">Notes</p>
+                <p className="mt-0.5 whitespace-pre-wrap break-words text-sm font-semibold text-[var(--ink)]">{job.notes}</p>
+              </div>
+            )}
           </div>
         </Card>
       </div>
@@ -489,18 +545,18 @@ export function EngineerJobDetail({ id }: { id: string }) {
               const isMisc = line.lineType === "misc";
               return (
               <tr key={line.id} className="border-b border-[var(--border)] last:border-0">
-                <td className="px-4 py-3 font-semibold text-[var(--ink)]">
+                <td className="cell-y px-4 font-semibold text-[var(--ink)]">
                   {line.itemName}
                   {line.description ? (
                     <span className="block text-xs font-normal text-[var(--muted)]">{line.description}</span>
                   ) : null}
                 </td>
-                <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{line.seCode ?? "—"}</td>
-                <td className="px-4 py-3 text-[var(--muted)]">{LINE_TYPE_LABEL[line.lineType] ?? line.lineType}</td>
+                <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">{line.seCode ?? "—"}</td>
+                <td className="cell-y px-4 text-[var(--muted)]">{LINE_TYPE_LABEL[line.lineType] ?? line.lineType}</td>
                 {/* Where this stock actually comes FROM. A van-sourced line still stores a warehouse
                     (leftovers are returned there), so showing that warehouse as the pickup location
                     would send the engineer to collect stock a colleague is already handing them. */}
-                <td className="px-4 py-3">
+                <td className="cell-y px-4">
                   {line.vanSources?.length ? (
                     // A row can carry BOTH origins (kit lines merge same item + warehouse), so the
                     // engineer sees each with its quantity — how many to collect vs how many a
@@ -579,10 +635,10 @@ export function EngineerJobDetail({ id }: { id: string }) {
                     forever, and "Remaining 5" on a job already marked Reconciled reads as five units
                     the engineer still owes. An em dash says the column doesn't apply — the same thing
                     the Goods Management queue shows for misc. */}
-                <td className="px-4 py-3 font-bold text-[var(--ink)]">{line.qty}</td>
-                <td className="px-4 py-3 text-[var(--ink)]">{line.issued}</td>
-                <td className="px-4 py-3 text-[var(--ink)]">{isMisc ? "—" : line.used}</td>
-                <td className="px-4 py-3 text-[var(--ink)]">
+                <td className="cell-y px-4 font-bold text-[var(--ink)]">{line.qty}</td>
+                <td className="cell-y px-4 text-[var(--ink)]">{line.issued}</td>
+                <td className="cell-y px-4 text-[var(--ink)]">{isMisc ? "—" : line.used}</td>
+                <td className="cell-y px-4 text-[var(--ink)]">
                   <div className="flex flex-col items-start gap-1">
                     <span>{isMisc ? "—" : line.returned}</span>
                     {!isMisc && line.returned > line.issued && (
@@ -593,8 +649,8 @@ export function EngineerJobDetail({ id }: { id: string }) {
                     )}
                   </div>
                 </td>
-                <td className="px-4 py-3 font-bold text-[var(--ink)]">{isMisc ? "—" : line.remaining}</td>
-                <td className="px-4 py-3 text-[var(--muted)]">{line.notes ?? "—"}</td>
+                <td className="cell-y px-4 font-bold text-[var(--ink)]">{isMisc ? "—" : line.remaining}</td>
+                <td className="cell-y px-4 text-[var(--muted)]">{line.notes ?? "—"}</td>
               </tr>
               );
             })}
@@ -608,12 +664,6 @@ export function EngineerJobDetail({ id }: { id: string }) {
       {showKitCard && (
         <EngineerKitRequests job={job} locked={kitLocked} open={kitOpen} onOpenChange={setKitOpen} />
       )}
-
-      {job.notes ? (
-        <Card title="Notes">
-          <p className="whitespace-pre-wrap text-sm text-[var(--ink)]">{job.notes}</p>
-        </Card>
-      ) : null}
 
       {whModal && <WarehousePickupModal wh={whModal} onClose={() => setWhModal(null)} />}
     </div>

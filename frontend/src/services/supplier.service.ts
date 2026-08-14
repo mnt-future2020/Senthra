@@ -1,6 +1,7 @@
 import { api } from "@/lib/api";
+import { downloadCsv, withoutPaging } from "@/lib/csvExport";
 import { registerClientCache } from "@/lib/clientCache";
-import type { Supplier, SupplierOwner, SupplierStatus } from "@/types/supplier";
+import type { Supplier, SupplierStatus } from "@/types/supplier";
 
 // Typed wrappers around the backend /suppliers endpoints. Components call these
 // instead of hitting api() with raw URLs.
@@ -22,8 +23,8 @@ export interface PagedSuppliers {
   totalPages: number;
 }
 
-// Create + update payload. Optional fields send "" to clear; `ownerUserId` sends "" to
-// clear the owner. `code` is never sent (server-owned).
+// Create + update payload. Optional fields send "" to clear. `code` is never sent
+// (server-owned).
 export interface SupplierPayload {
   name?: string;
   legalName?: string;
@@ -48,7 +49,6 @@ export interface SupplierPayload {
   currency?: string;
   leadTimeDays?: number | string;
   notes?: string;
-  ownerUserId?: string;
 }
 
 function qs(params: SupplierListParams): string {
@@ -72,6 +72,14 @@ const listCacheKey = (p: SupplierListParams): string =>
 
 export const getCachedSuppliers = (params: SupplierListParams = {}): PagedSuppliers | undefined =>
   listCache.get(listCacheKey(params));
+
+/**
+ * The SAME filtered list as a CSV. Paging is dropped — an export is "everything matching what I'm
+ * looking at", not the page on screen. `capped` is true when the server stopped short.
+ */
+export function exportSuppliersCsv(params: SupplierListParams = {}): Promise<{ capped: boolean }> {
+  return downloadCsv(`/suppliers/export.csv${qs(withoutPaging(params))}`, "suppliers");
+}
 
 export function listSuppliers(params: SupplierListParams = {}): Promise<PagedSuppliers> {
   return api<PagedSuppliers>(`/suppliers${qs(params)}`).then((r) => {
@@ -106,7 +114,3 @@ export function deleteSupplier(id: string): Promise<void> {
   });
 }
 
-// Active staff users for the owner dropdown.
-export function listOwnerOptions(): Promise<SupplierOwner[]> {
-  return api<{ owners: SupplierOwner[] }>("/suppliers/owner-options").then((r) => r.owners);
-}

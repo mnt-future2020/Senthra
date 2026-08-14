@@ -1369,6 +1369,212 @@ export function updateStockEntry(id: string, data: UpdateStockEntryData) {
   });
 }
 
+// --- delete-dependency counts (see STOCK_ENTRY_DELETE_CHECKERS in customer.service) ------------
+// A CustomerStockEntry is HARD-deleted (this model has no archive state, by design), and MongoDB has
+// no foreign keys, so anything still pointing at the row simply ends up referencing an id that no
+// longer exists. These counts are what stop that happening.
+
+/** Units of this consignment entry still out with an engineer. */
+export function countEngineerHoldingsByStockEntry(entryId: string): Promise<number> {
+  return prisma.engineerCustomerStockHolding.count({ where: { customerStockEntryId: entryId, quantityOnHand: { gt: 0 } } });
+}
+
+/** Job kit lines planned against this entry — deleting it would leave them naming a missing item. */
+export function countKitLinesByStockEntry(entryId: string): Promise<number> {
+  return prisma.jobKitLine.count({ where: { customerStockEntryId: entryId } });
+}
+
+/** Posted goods movements that touched this entry: its history, which a hard delete would orphan. */
+export function countMovementLinesByStockEntry(entryId: string): Promise<number> {
+  return prisma.jobStockMovementLine.count({ where: { customerStockEntryId: entryId } });
+}
+
+/** Units of this entry sitting in the damaged pool. */
+export function countDamagedByStockEntry(entryId: string): Promise<number> {
+  return prisma.damagedStockBalance.count({ where: { customerStockEntryId: entryId, quantity: { gt: 0 } } });
+}
+
+/**
+ * Consignment entries that still HOLD stock at a warehouse — blocks deleting a warehouse storing a
+ * customer's goods. Only `quantity > 0`: an emptied entry is a historic record, and counting those too
+ * would make any warehouse that ever held consignment undeletable for ever.
+ */
+export function countStockEntriesWithStockByWarehouse(warehouseId: string): Promise<number> {
+  return prisma.customerStockEntry.count({ where: { warehouseId, quantity: { gt: 0 } } });
+}
+
+/**
+ * Warehouse allocations still awaiting stock — blocks deleting the warehouse a customer's incoming
+ * delivery is addressed to. Shares OPEN_ASSIGNMENT_STATUSES with the receive and short-close paths,
+ * so "still expecting a delivery" means one thing here and there.
+ *
+ * The sibling of countStockEntriesWithStockByWarehouse, and the half it can't see: an assignment
+ * that hasn't been received yet has produced NO CustomerStockEntry, so a warehouse whose only tie to
+ * a customer is an inbound delivery reads as completely empty. Deleting it takes the row out of
+ * every warehouse read, and the assignment is left addressed to somewhere the manager can no longer
+ * open to receive against — the Incoming queue simply loses the delivery.
+ */
+// Attention counts — customer-domain states where a human still owes an action.
+//  • stockRequestsPending: a customer submitted a request; office must approve/reject. NOT
+//    warehouse-scoped — no warehouse has been assigned yet, so it is company-wide by nature.
+//  • assignmentsOpen / stockEntryDrafts: warehouse-floor work (receive the delivery, then catalogue
+//    the received entry), both scoped to the actor's warehouses.
+//  • portalInvitesPending: an invited portal user who has never signed in. There is no "invited"
+//    status — the signal is mustResetPassword && lastLoginAt === null.
+export async function countAttention(warehouseIds?: string[]): Promise<{
+  stockRequestsPending: number;
+  stockRequestsAwaitingAssignment: number;
+  assignmentsOpen: number;
+  stockEntryDrafts: number;
+  portalInvitesPending: number;
+}> {
+  const whScope = warehouseIds ? { warehouseId: { in: warehouseIds } } : {};
+  const [
+    stockRequestsPending,
+    stockRequestsAwaitingAssignment,
+    assignmentsOpen,
+    stockEntryDrafts,
+    portalInvitesPending,
+  ] = await Promise.all([
+    prisma.customerStockRequest.count({ where: { status: "pending" } }),
+    // Approved, but the warehouses it will be received at have not been chosen yet.
+    //
+    // This is a REAL queue with a button on screen ("Assign warehouses") and it was counted by
+    // nothing: `stockRequestsPending` stops at `pending`, and `assignmentsOpen` below can only see
+    // assignments that ALREADY exist — which is precisely what this step creates. Approving therefore
+    // moved a request out of every badge in the product while leaving the work undone, so a queue of
+    // approved-but-unassigned requests read as an empty desk.
+    prisma.customerStockRequest.count({ where: { status: "approved" } }),
+    prisma.customerStockWarehouseAssignment.count({ where: { status: { in: OPEN_ASSIGNMENT_STATUSES }, ...whScope } }),
+    prisma.customerStockEntry.count({ where: { status: "draft", ...whScope } }),
+    prisma.customerUser.count({
+      where: {
+        status: "active",
+        mustResetPassword: true,
+        // MONGO TRAP (same one as van-stock-request.repository): `lastLoginAt: null` matches only
+        // rows where the field is explicitly null. Nothing ever WRITES lastLoginAt on create, so on
+        // a never-signed-in user the field is ABSENT — and absent is not null. Alone, that clause
+        // matched nothing and this count sat at 0 forever: a silent false negative, which is worse
+        // than the crash above it, because an attention badge that never appears looks like "no
+        // work outstanding" rather than like a bug.
+        OR: [{ lastLoginAt: null }, { lastLoginAt: { isSet: false } }],
+        // The soft-delete lives on the CUSTOMER, not on its portal users — CustomerUser has no
+        // deletedAt at all (which is what Prisma was rejecting here). Scoped through the relation
+        // instead, so a deleted company stops generating "chase this invite" work.
+        customer: { deletedAt: null },
+      },
+    }),
+  ]);
+  return { stockRequestsPending, stockRequestsAwaitingAssignment, assignmentsOpen, stockEntryDrafts, portalInvitesPending };
+}
+
+/**
+ * The two WAREHOUSE-attributable halves of countAttention, split per warehouse.
+ *
+ * Both models carry a real `warehouseId` column (and a `[warehouseId, status]` index), so this is two
+ * grouped counts rather than a scan. Warehouses with nothing outstanding are absent from the maps —
+ * missing means zero.
+ */
+export async function countIntakeByWarehouse(warehouseIds?: string[]): Promise<{
+  assignmentsOpen: Record<string, number>;
+  stockEntryDrafts: Record<string, number>;
+}> {
+  const whScope = warehouseIds ? { warehouseId: { in: warehouseIds } } : {};
+  const [assignments, drafts] = await Promise.all([
+    prisma.customerStockWarehouseAssignment.groupBy({
+      by: ["warehouseId"],
+      where: { status: { in: OPEN_ASSIGNMENT_STATUSES }, ...whScope },
+      _count: { _all: true },
+    }),
+    prisma.customerStockEntry.groupBy({
+      by: ["warehouseId"],
+      where: { status: "draft", ...whScope },
+      _count: { _all: true },
+    }),
+  ]);
+  return {
+    assignmentsOpen: Object.fromEntries(assignments.map((r) => [r.warehouseId, r._count._all])),
+    stockEntryDrafts: Object.fromEntries(drafts.map((r) => [r.warehouseId, r._count._all])),
+  };
+}
+
+/**
+ * The two CUSTOMER-facing attention counts, split per customer — what the Customers list shows on each
+ * row. Neither queue has a cross-customer screen (both are worked on a customer's own detail page), so
+ * this per-row split IS the navigation for them; there is nothing for the flat count to link to.
+ *
+ * Predicates are kept identical to countAttention's, including the Mongo null-vs-absent trap on
+ * `lastLoginAt`: nothing writes that field on create, so `null` alone matches no never-signed-in user
+ * and the count would sit at zero forever. A row and a badge disagreeing is exactly the failure this
+ * whole rework exists to remove, so the two must stay written the same way.
+ */
+export async function countAttentionByCustomer(): Promise<{
+  stockRequestsPending: Record<string, number>;
+  stockRequestsAwaitingAssignment: Record<string, number>;
+  portalInvitesPending: Record<string, number>;
+}> {
+  const [requests, awaitingAssignment, invites] = await Promise.all([
+    prisma.customerStockRequest.groupBy({ by: ["customerId"], where: { status: "pending" }, _count: { _all: true } }),
+    prisma.customerStockRequest.groupBy({ by: ["customerId"], where: { status: "approved" }, _count: { _all: true } }),
+    prisma.customerUser.groupBy({
+      by: ["customerId"],
+      where: {
+        status: "active",
+        mustResetPassword: true,
+        OR: [{ lastLoginAt: null }, { lastLoginAt: { isSet: false } }],
+        customer: { deletedAt: null },
+      },
+      _count: { _all: true },
+    }),
+  ]);
+  return {
+    stockRequestsPending: Object.fromEntries(requests.map((r) => [r.customerId, r._count._all])),
+    stockRequestsAwaitingAssignment: Object.fromEntries(awaitingAssignment.map((r) => [r.customerId, r._count._all])),
+    portalInvitesPending: Object.fromEntries(invites.map((r) => [r.customerId, r._count._all])),
+  };
+}
+
+export function countOpenAssignmentsByWarehouse(warehouseId: string): Promise<number> {
+  return prisma.customerStockWarehouseAssignment.count({
+    where: { warehouseId, status: { in: OPEN_ASSIGNMENT_STATUSES } },
+  });
+}
+
+/**
+ * A customer's entries that still hold stock. Same reasoning: entries are never archived (this model
+ * has no archive state), so counting all of them would permanently block deleting any customer who
+ * ever received consignment — and an emptied entry with movement history can't be deleted either,
+ * leaving no way out at all.
+ */
+export function countStockEntriesWithStockByCustomer(customerId: string): Promise<number> {
+  return prisma.customerStockEntry.count({ where: { customerId, quantity: { gt: 0 } } });
+}
+
+/**
+ * A customer's consignment stock that is out in an ENGINEER's van, not on a shelf.
+ *
+ * The entry count above is deliberately shelf-only, and issuing to an engineer DECREMENTS that
+ * shelf quantity (upsertCustomerHoldingTx moves it onto the holding row). So stock in the field is
+ * invisible to it: a company whose whole consignment is out reads zero entries with stock. This is
+ * the other half of "is any of their stock still with us".
+ *
+ * Scoped by the holding's own `customerId` snapshot — the field the model carries and indexes for
+ * exactly this, and the same way customer-owned damage is scoped (findDamagedByCustomer). The
+ * snapshot is taken from the entry, whose `customerId` is required, so it is always set.
+ */
+export function countEngineerHoldingsByCustomer(customerId: string): Promise<number> {
+  return prisma.engineerCustomerStockHolding.count({ where: { customerId, quantityOnHand: { gt: 0 } } });
+}
+
+/**
+ * A customer's units sitting in the damaged pool. Counted separately from the entry because a
+ * damaged balance outlives the entry it came from and carries its own `customerId`: a company can
+ * hold nothing on any shelf and nothing in any van, and still have stock of theirs in our hands.
+ */
+export function countDamagedByCustomer(customerId: string): Promise<number> {
+  return prisma.damagedStockBalance.count({ where: { customerId, quantity: { gt: 0 } } });
+}
+
 export function deleteStockEntry(id: string) {
   return prisma.customerStockEntry.delete({ where: { id } });
 }

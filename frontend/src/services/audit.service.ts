@@ -1,5 +1,5 @@
-import { api, apiFile } from "@/lib/api";
-import { downloadBlob, filenameFromDisposition } from "@/lib/download";
+import { api } from "@/lib/api";
+import { downloadCsv, withoutPaging } from "@/lib/csvExport";
 import type { AuditFacets, PagedAuditLogs } from "@/types/audit";
 
 // Typed wrappers around the backend /audit endpoints. Components call these, never
@@ -50,17 +50,5 @@ export function listAuditFacets(): Promise<AuditFacets> {
 export async function exportAuditCsv(
   params: AuditListParams = {},
 ): Promise<{ capped: boolean }> {
-  // Drop pagination — the export spans all matching rows up to the server cap.
-  const { page: _page, pageSize: _pageSize, ...filters } = params;
-  void _page;
-  void _pageSize;
-  const { blob, headers } = await apiFile(`/audit/export.csv${qs(filters)}`);
-  const date = new Date().toISOString().slice(0, 10);
-  const filename = filenameFromDisposition(
-    headers["content-disposition"] ?? null,
-    `audit-log-${date}.csv`,
-  );
-  downloadBlob(blob, filename);
-  const capped = String(headers["x-audit-export-capped"] ?? "") === "true";
-  return { capped };
+  return downloadCsv(`/audit/export.csv${qs(withoutPaging(params))}`, "audit-log");
 }

@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeftRight, Loader2, Pencil, UserCog, XCircle } from "lucide-react";
+import { ArrowLeftRight, ExternalLink, FileText, Globe, Image as ImageIcon, Link as LinkIcon, Loader2, Lock, Pencil, UserCog, XCircle } from "lucide-react";
 
 import * as jobService from "@/services/job.service";
 import { listEngineerOptions } from "@/services/warehouse.service";
@@ -27,6 +27,7 @@ import {
 } from "./jobStatus";
 import { Notice } from "@/components/ui/Notice";
 import { outstandingKitWarning } from "./outstandingKit";
+import { parseJobAttachment } from "./jobAttachment";
 import type { Job, JobLineType, JobPriority, JobType } from "@/types/job";
 
 export function JobDetail({ idOrCode }: { idOrCode: string }) {
@@ -124,7 +125,7 @@ function JobView({ initial }: { initial: Job }) {
           <table className="w-full min-w-[720px] text-left text-sm">
             <thead>
               <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                <th className="px-4 py-3">Source</th><th className="px-4 py-3">Item</th><th className="px-4 py-3">Warehouse</th><th className="px-4 py-3 text-right">Planned</th><th className="px-4 py-3 text-right">Issued</th><th className="px-4 py-3 text-right">Used</th><th className="px-4 py-3 text-right">Returned</th><th className="px-4 py-3 text-right">Remaining</th><th className="px-4 py-3">Notes</th>
+                <th className="cell-y px-4">Source</th><th className="cell-y px-4">Item</th><th className="cell-y px-4">Warehouse</th><th className="cell-y px-4 text-right">Planned</th><th className="cell-y px-4 text-right">Issued</th><th className="cell-y px-4 text-right">Used</th><th className="cell-y px-4 text-right">Returned</th><th className="cell-y px-4 text-right">Remaining</th><th className="cell-y px-4">Notes</th>
               </tr>
             </thead>
             <tbody>
@@ -135,15 +136,15 @@ function JobView({ initial }: { initial: Job }) {
                   const isMisc = l.lineType === "misc";
                   return (
                   <tr key={l.id} className="border-b border-[var(--border)] last:border-0">
-                    <td className="px-4 py-3 text-[var(--muted)]">{JOB_LINE_TYPE_LABELS[l.lineType as JobLineType] ?? l.lineType}</td>
-                    <td className="px-4 py-3">
+                    <td className="cell-y px-4 text-[var(--muted)]">{JOB_LINE_TYPE_LABELS[l.lineType as JobLineType] ?? l.lineType}</td>
+                    <td className="cell-y px-4">
                       <div className="font-semibold text-[var(--ink)]">{l.itemName}</div>
                       {l.seCode && <div className="text-[11px] text-[var(--faint)]">{l.seCode}</div>}
                       {l.description && <div className="text-[11px] text-[var(--muted)]">{l.description}</div>}
                     </td>
                     {/* One row can hold BOTH origins (kit lines merge), so break it down per source
                         with quantities rather than naming a single place. */}
-                    <td className="px-4 py-3 text-[var(--muted)]">
+                    <td className="cell-y px-4 text-[var(--muted)]">
                       {(() => {
                         const s = kitLineSourceSplit(l, { jobCancelled: job.status === "cancelled" });
                         if (!l.vanSources?.length) return l.warehouseName ?? "—";
@@ -195,14 +196,14 @@ function JobView({ initial }: { initial: Job }) {
                         );
                       })()}
                     </td>
-                    <td className="px-4 py-3 text-right font-semibold text-[var(--ink)]">{l.qty}</td>
-                    <td className="px-4 py-3 text-right text-[var(--ink)]">{l.issued}</td>
+                    <td className="cell-y px-4 text-right font-semibold text-[var(--ink)]">{l.qty}</td>
+                    <td className="cell-y px-4 text-right text-[var(--ink)]">{l.issued}</td>
                     {/* Misc is free text with no barcode or stock balance: never scanned back, left
                         out of the engineer's Complete form, skipped by reconcile. These three would sit
                         at 0 / 0 / issued forever, so a reconciled job would still claim units owed.
                         Same em dash the Goods Management queue and the engineer job pack use. */}
-                    <td className="px-4 py-3 text-right text-[var(--ink)]">{isMisc ? "—" : l.used}</td>
-                    <td className="px-4 py-3 text-right text-[var(--ink)]">
+                    <td className="cell-y px-4 text-right text-[var(--ink)]">{isMisc ? "—" : l.used}</td>
+                    <td className="cell-y px-4 text-right text-[var(--ink)]">
                       <div className="flex flex-col items-end gap-1">
                         <span>{isMisc ? "—" : l.returned}</span>
                         {!isMisc && l.returned > l.issued && (
@@ -213,8 +214,8 @@ function JobView({ initial }: { initial: Job }) {
                         )}
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-right font-bold text-[var(--ink)]">{isMisc ? "—" : l.remaining}</td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{l.notes ?? "—"}</td>
+                    <td className="cell-y px-4 text-right font-bold text-[var(--ink)]">{isMisc ? "—" : l.remaining}</td>
+                    <td className="cell-y px-4 text-[var(--muted)]">{l.notes ?? "—"}</td>
                   </tr>
                   );
                 })
@@ -280,13 +281,51 @@ function JobView({ initial }: { initial: Job }) {
         </Card>
 
         {job.attachments.length > 0 && (
-          <Card title="Attachments">
-            <ul className="space-y-1.5 text-sm">
-              {job.attachments.map((a, i) => (
-                <li key={i}>
-                  <a href={a} target="_blank" rel="noopener noreferrer" className="break-all font-semibold text-[var(--accent)] hover:underline">{a}</a>
-                </li>
-              ))}
+          <Card title={`Attachments (${job.attachments.length})`}>
+            <ul className="space-y-2 text-sm">
+              {job.attachments.map((a, i) => {
+                const meta = parseJobAttachment(a);
+                if (!meta) return null;
+                const { rawUrl, name, isImg, isPdf, isDoc, isInternal } = meta;
+
+                return (
+                  <li key={i} className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/30 p-2.5">
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--surface-2)] text-[var(--accent)]">
+                      {isImg ? (
+                        <ImageIcon className="h-4 w-4" />
+                      ) : isPdf || isDoc ? (
+                        <FileText className="h-4 w-4" />
+                      ) : (
+                        <LinkIcon className="h-4 w-4" />
+                      )}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <p className="truncate text-xs font-bold text-[var(--ink)]" title={name}>
+                          {name}
+                        </p>
+                        <span
+                          className={`inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-extrabold ${
+                            isInternal
+                              ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
+                              : "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                          }`}
+                        >
+                          {isInternal ? <><Lock className="h-3 w-3" /> Internal</> : <><Globe className="h-3 w-3" /> Customer</>}
+                        </span>
+                      </div>
+                      <a
+                        href={rawUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--accent)] hover:underline"
+                      >
+                        Open attachment <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           </Card>
         )}

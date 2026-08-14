@@ -35,11 +35,13 @@ vi.mock("#modules/irm/irm.service.js", () => ({ requireActiveIrmItem: vi.fn(), r
 // heavy inventory-service import graph out of this unit-test module.
 vi.mock("#modules/inventory/inventory.service.js", () => ({ getReorderSuggestions: vi.fn() }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
+vi.mock("#modules/attachment/attachment.service.js", () => ({ releaseAsset: vi.fn() }));
 vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn() }));
 vi.mock("../../lib/cloudinary.js", () => ({ uploadFileToCloudinary: vi.fn() }));
 // Realtime is fire-and-forget; mock it so we can assert every transition fans a refetch signal out
 // to the watchers (a stale detail page is what lets a user act on an already-moved request).
 vi.mock("../../lib/realtime.js", () => ({
+  emitAttentionChanged: vi.fn(),
   emitToRoom: vi.fn(),
   emitToUser: vi.fn(),
   PURCHASE_REQUEST_WATCHERS_ROOM: "purchase_requests:watchers",
@@ -61,6 +63,9 @@ import * as audit from "#modules/audit/audit.service.js";
 import { emitToRoom, PURCHASE_ORDER_WATCHERS_ROOM, PURCHASE_REQUEST_WATCHERS_ROOM } from "../../lib/realtime.js";
 import * as prfEmail from "./purchase-request.email.js";
 import * as inventoryService from "#modules/inventory/inventory.service.js";
+import * as attachmentService from "#modules/attachment/attachment.service.js";
+import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
+import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
 import {
   approvePurchaseRequest,
   cancelPurchaseRequest,
@@ -75,6 +80,8 @@ import {
   reopenPurchaseRequest,
   submitPurchaseRequest,
   updatePurchaseRequest,
+  addAttachment,
+  removeAttachment,
 } from "./purchase-request.service.js";
 import { createPurchaseRequestSchema, updatePurchaseRequestSchema } from "./purchase-request.validation.js";
 
@@ -417,7 +424,18 @@ describe("convert — generate the PO from an approved PRF (one per PRF, transac
       { irmItemId: IRM_ID, itemName: "CAT6", sku: "C6", baseUnit: "Each", quantity: 10, unitPricePence: 500, vatRate: 20, lineTotalPence: 5000, notes: null, sortOrder: 0 },
     ],
     attachments: [
-      { label: "Quote", fileName: "q.pdf", fileType: "pdf", fileSizeBytes: 111, url: "https://cdn/q.pdf", uploadedBy: "requester@x.co" },
+      {
+        label: "Quote",
+        fileName: "q.pdf",
+        fileType: "pdf",
+        fileSizeBytes: 111,
+        url: "https://cdn/q.pdf",
+        // Conversion does NOT re-upload the file, so the PO's row must end up naming the very same
+        // Cloudinary asset. That shared identity is what the delete path counts.
+        publicId: "senthra/purchase-orders/quote-abc.pdf",
+        resourceType: "raw",
+        uploadedBy: "requester@x.co",
+      },
     ],
     ...over,
   });
@@ -450,10 +468,63 @@ describe("convert — generate the PO from an approved PRF (one per PRF, transac
     expect(String(header.internalNotes)).toContain("PRF PRF-0001 justification");
     // Lines copied VERBATIM from the reviewed PRF (snapshots + quoted prices).
     expect(lines[0]).toMatchObject({ irmItemId: IRM_ID, itemName: "CAT6", quantity: 10, unitPricePence: 500 });
-    // The quotation evidence travels with the PO.
-    expect(attachments[0]).toMatchObject({ fileName: "q.pdf", url: "https://cdn/q.pdf" });
+    // The quotation evidence travels with the PO — as a second REFERENCE to one file, not a copy
+    // of it. Both halves of the identity come across verbatim; nothing is re-derived from the URL.
+    expect(attachments[0]).toMatchObject({
+      fileName: "q.pdf",
+      url: "https://cdn/q.pdf",
+      publicId: "senthra/purchase-orders/quote-abc.pdf",
+      resourceType: "raw",
+    });
     expect(mockSetConvertedTx).toHaveBeenCalledWith({}, PRF_ID, "fin@x.co");
     expect(auditActions()).toEqual(expect.arrayContaining(["purchase_request.converted", "purchase_order.created"]));
+  });
+
+  // THE CONCURRENCY PROOF DEPENDS ON THIS. Removing a PRF attachment destroys its Cloudinary file
+  // only after re-reading the PRF and finding it still `draft`. That is safe because a Reopen
+  // (approved → draft) — the one transition that could make the re-read say `draft` while a
+  // conversion is mid-flight holding the attachment in its snapshot — writes the PurchaseRequest
+  // document, which is the SAME document setConvertedTx writes inside this transaction. MongoDB
+  // aborts a transaction whose write target changed under it, so the conversion loses and its PO
+  // attachment rows roll back with it.
+  //
+  // Move setConvertedTx out of this transaction and the PO rows would survive a Reopen that the
+  // removal then reads as `draft` — and the file would be destroyed with a PO still naming it.
+  // Do not weaken this test.
+  it("writes the PRF in the same transaction as the PO attachments", async () => {
+    await convertPurchaseRequest(PRF_ID, { type: "user", id: "u1", email: "fin@x.co", permissions: [] });
+    const poTxClient = mockCreatePoTx.mock.calls[0][0];
+    const prfTxClient = mockSetConvertedTx.mock.calls[0][0];
+    expect(prfTxClient).toBe(poTxClient); // same object identity, not merely equal
+  });
+
+  // GUARD. The conversion hand-writes its attachment mapping against a GENERATED Prisma input type,
+  // so a new column is optional there: forget to carry it and the code compiles, the tests pass, and
+  // the PO row silently loses it. `publicId`/`resourceType` are exactly the columns where that is
+  // unsafe — a PO attachment with no identity is a file nobody can delete, and one with the WRONG
+  // identity is worse. If a field is added to the attachment record, add it here deliberately.
+  const CARRIED_TO_PO = [
+    "label",
+    "fileName",
+    "fileType",
+    "fileSizeBytes",
+    "url",
+    "publicId",
+    "resourceType",
+    "uploadedBy",
+  ] as const;
+
+  it("carries every attachment field the PRF row holds onto the PO row", async () => {
+    await convertPurchaseRequest(PRF_ID, { type: "user", id: "u1", email: "fin@x.co", permissions: [] });
+    const [, , , , attachments] = mockCreatePoTx.mock.calls[0];
+    const source = liveApproved().attachments[0]!;
+
+    // Nothing dropped…
+    for (const field of CARRIED_TO_PO) {
+      expect(attachments[0], field).toHaveProperty(field, source[field as keyof typeof source]);
+    }
+    // …and nothing extra invented, so this list stays an honest description of the mapping.
+    expect(Object.keys(attachments[0] as object).sort()).toEqual([...CARRIED_TO_PO].sort());
   });
 
   // Conversion is the one action that changes BOTH surfaces, so it must notify BOTH rooms: an open
@@ -732,5 +803,188 @@ describe("generateReorderPrfs — Reorder-workbench generation", () => {
     await generateReorderPrfs({ rows: [row()], requiredByDate: "2026-09-30" } as Parameters<typeof generateReorderPrfs>[0]);
     const requiredBy = mockCreateWithCode.mock.calls[0][0].requiredByDate as Date;
     expect(requiredBy.toISOString().slice(0, 10)).toBe("2026-09-30");
+  });
+});
+
+// Cleanup runs AFTER the row is gone, never before. The order is the concurrency argument: counting
+// surviving references before the delete leaves a window where another request commits one, and the
+// only failure this design permits is a leaked file — never a deleted-but-referenced one.
+describe("PRF attachments — Cloudinary cleanup", () => {
+  const mockFindAtt = prfRepo.findAttachment as ReturnType<typeof vi.fn>;
+  const mockRemoveAtt = prfRepo.removeAttachment as ReturnType<typeof vi.fn>;
+  const mockAddAtt = prfRepo.addAttachment as ReturnType<typeof vi.fn>;
+  const mockUpload = uploadFileToCloudinary as ReturnType<typeof vi.fn>;
+  const mockCreds = getCloudinaryCreds as ReturnType<typeof vi.fn>;
+  const release = attachmentService.releaseAsset as ReturnType<typeof vi.fn>;
+  const ATT = { id: "att1", purchaseRequestId: PRF_ID, publicId: "senthra/purchase-orders/q.pdf", resourceType: "raw" };
+
+  beforeEach(() => {
+    mockFindById.mockResolvedValue(prfRow({ status: "draft" }));
+    mockFindAtt.mockResolvedValue(ATT);
+  });
+
+  it("stores the Cloudinary identity when an attachment is added", async () => {
+    mockCreds.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
+    mockUpload.mockResolvedValue({ url: "https://cdn/q.pdf", publicId: "senthra/purchase-orders/q.pdf", resourceType: "raw" });
+    await addAttachment(PRF_ID, { fileName: "q.pdf", fileType: "pdf", fileSizeBytes: 9, data: "data:application/pdf;base64,AA" } as Parameters<typeof addAttachment>[1]);
+    expect(mockAddAtt.mock.calls[0][0]).toMatchObject({
+      url: "https://cdn/q.pdf",
+      publicId: "senthra/purchase-orders/q.pdf",
+      resourceType: "raw",
+    });
+  });
+
+  it("hands the removed row's identity to the cleanup", async () => {
+    await removeAttachment(PRF_ID, "att1");
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(release.mock.calls[0][0]).toMatchObject({ publicId: ATT.publicId, resourceType: ATT.resourceType });
+    expect(release.mock.calls[0][1]).toContain("PRF-0001"); // context, so a failed cleanup is traceable
+  });
+
+  it("releases only AFTER the DB row is deleted", async () => {
+    const order: string[] = [];
+    mockRemoveAtt.mockImplementation(() => { order.push("db"); return Promise.resolve({}); });
+    release.mockImplementation(() => { order.push("cleanup"); return Promise.resolve(); });
+    await removeAttachment(PRF_ID, "att1");
+    expect(order).toEqual(["db", "cleanup"]);
+  });
+
+  it("never releases when the guard rejects the removal", async () => {
+    mockFindById.mockResolvedValue(prfRow({ status: "approved" })); // draft-only
+    await expect(removeAttachment(PRF_ID, "att1")).rejects.toThrow(/only be changed on a draft/i);
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  // ── The re-check ────────────────────────────────────────────────────────────────────────────
+  //
+  // Converting a PRF copies its attachments' identity onto the PO instead of re-uploading the
+  // files, and the conversion runs in a transaction whose reads are snapshot-based. So a conversion
+  // can be mid-flight, already holding this attachment in its snapshot, while releaseAsset's
+  // reference count sees nothing — the PO row does not exist yet. A fresh status read AFTER the
+  // delete is what catches it: for that conversion to have seen this row, the approval was already
+  // committed, so the status read here cannot still say `draft`.
+  //
+  // `findById` is called three times in this path — the initial load, this fresh read, and the
+  // final DTO read — so these tests sequence it with mockResolvedValueOnce.
+  describe("only destroys while the PRF is still, freshly, a draft", () => {
+    const seq = (...rows: unknown[]) => {
+      mockFindById.mockReset();
+      for (const r of rows) mockFindById.mockResolvedValueOnce(r);
+      mockFindById.mockResolvedValue(prfRow({ status: "draft" })); // any further reads
+    };
+
+    it("releases when the PRF is still a draft after the delete", async () => {
+      seq(prfRow({ status: "draft" }), prfRow({ status: "draft" }));
+      await removeAttachment(PRF_ID, "att1");
+      expect(mockRemoveAtt).toHaveBeenCalledWith("att1");
+      expect(release).toHaveBeenCalledTimes(1);
+    });
+
+    // Each of these means work moved on underneath us. `approved` and `converted` are the ones that
+    // can actually have a conversion behind them; `submitted` and `cancelled` cannot, but they are
+    // equally not-draft and the rule stays one rule rather than a list of exceptions.
+    it.each(["submitted", "approved", "converted", "cancelled"])(
+      "leaves the asset alone when the PRF is %s by then",
+      async (status) => {
+        seq(prfRow({ status: "draft" }), prfRow({ status }));
+        await removeAttachment(PRF_ID, "att1");
+        expect(mockRemoveAtt).toHaveBeenCalledWith("att1"); // the row still goes
+        expect(release).not.toHaveBeenCalled(); // the file does not
+      },
+    );
+
+    it("leaves the asset alone when the PRF can no longer be read", async () => {
+      seq(prfRow({ status: "draft" }), null);
+      // Still succeeds: the delete is committed and the caller gets their PRF back.
+      await expect(removeAttachment(PRF_ID, "att1")).resolves.toMatchObject({ code: "PRF-0001" });
+      expect(release).not.toHaveBeenCalled();
+    });
+
+    it("names the asset and the status in the skip log, for later reconciliation", async () => {
+      const err = vi.spyOn(console, "error").mockImplementation(() => {});
+      seq(prfRow({ status: "draft" }), prfRow({ status: "approved" }));
+      await removeAttachment(PRF_ID, "att1");
+      expect(err).toHaveBeenCalledWith(expect.stringContaining(ATT.publicId));
+      expect(err).toHaveBeenCalledWith(expect.stringContaining("approved"));
+      err.mockRestore();
+    });
+
+    // MANDATORY ORDERING. Reading the status BEFORE the delete reopens the window this closes: a
+    // conversion could commit in the gap between that read and the delete. And releasing before the
+    // read would make the guard decorative.
+    it("deletes, THEN re-reads the status, THEN releases — in that order", async () => {
+      const order: string[] = [];
+      mockFindById.mockReset();
+      mockFindById.mockImplementation(() => {
+        order.push("read");
+        return Promise.resolve(prfRow({ status: "draft" }));
+      });
+      mockRemoveAtt.mockImplementation(() => { order.push("db"); return Promise.resolve({}); });
+      release.mockImplementation(() => { order.push("cleanup"); return Promise.resolve(); });
+
+      await removeAttachment(PRF_ID, "att1");
+
+      // load, delete, fresh re-read, cleanup, final DTO read.
+      expect(order).toEqual(["read", "db", "read", "cleanup", "read"]);
+      expect(order.indexOf("db")).toBeLessThan(order.lastIndexOf("read"));
+      expect(order.indexOf("cleanup")).toBeGreaterThan(order.indexOf("db"));
+    });
+  });
+
+  // Ten documents, not the GRN's five: a PRF is one supplier's quotation package. Bounded because the
+  // detail read loads every attachment on the record.
+  describe("count cap", () => {
+    const att = { fileName: "q.pdf", fileType: "pdf", fileSizeBytes: 9, data: "data:application/pdf;base64,AA" } as Parameters<typeof addAttachment>[1];
+    const attRow = (i: number) => ({
+      id: `a${i}`, label: null, fileName: `q${i}.pdf`, fileType: "pdf", fileSizeBytes: 100,
+      url: `https://cdn/q${i}.pdf`, publicId: `p${i}`, resourceType: "raw", uploadedBy: null,
+      createdAt: new Date("2026-07-01T00:00:00Z"),
+    });
+    const withN = (n: number) => prfRow({ status: "draft", attachments: Array.from({ length: n }, (_, i) => attRow(i)) });
+
+    it("accepts the tenth document", async () => {
+      mockFindById.mockResolvedValue(withN(9));
+      mockCreds.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
+      mockUpload.mockResolvedValue({ url: "https://cdn/q.pdf", publicId: "p", resourceType: "raw" });
+      await addAttachment(PRF_ID, att);
+      expect(mockAddAtt).toHaveBeenCalledTimes(1);
+    });
+
+    // The count alone left a gap: ten files at the 10 MB per-file ceiling is 100 MB on one record.
+    it("refuses a document that would push the record past 40 MB", async () => {
+      const big = (i: number) => ({ ...attRow(i), fileSizeBytes: 8 * 1024 * 1024 });
+      mockFindById.mockResolvedValue(prfRow({ status: "draft", attachments: Array.from({ length: 5 }, (_, i) => big(i)) }));
+      const oneMore = { ...att, fileSizeBytes: 2 * 1024 * 1024 } as Parameters<typeof addAttachment>[1];
+      await expect(addAttachment(PRF_ID, oneMore)).rejects.toThrow(/can't exceed 40 MB/i);
+      expect(mockUpload).not.toHaveBeenCalled();
+    });
+
+    it("accepts one that stays inside 40 MB", async () => {
+      const big = (i: number) => ({ ...attRow(i), fileSizeBytes: 8 * 1024 * 1024 });
+      mockFindById.mockResolvedValue(prfRow({ status: "draft", attachments: Array.from({ length: 4 }, (_, i) => big(i)) }));
+      mockCreds.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
+      mockUpload.mockResolvedValue({ url: "https://cdn/q.pdf", publicId: "p", resourceType: "raw" });
+      await addAttachment(PRF_ID, { ...att, fileSizeBytes: 2 * 1024 * 1024 } as Parameters<typeof addAttachment>[1]);
+      expect(mockAddAtt).toHaveBeenCalledTimes(1);
+    });
+
+    it("refuses the eleventh", async () => {
+      mockFindById.mockResolvedValue(withN(10));
+      await expect(addAttachment(PRF_ID, att)).rejects.toThrow(/at most 10 documents/i);
+    });
+
+    // Refused BEFORE the upload, so a rejected attachment never lands in Cloudinary as an orphan.
+    it("never reaches Cloudinary when the cap is full", async () => {
+      mockFindById.mockResolvedValue(withN(10));
+      await expect(addAttachment(PRF_ID, att)).rejects.toThrow();
+      expect(mockUpload).not.toHaveBeenCalled();
+      expect(mockAddAtt).not.toHaveBeenCalled();
+    });
+  });
+
+  // A soft delete keeps every attachment row, so the references survive and the files must too.
+  it("soft-deleting the PRF destroys nothing", async () => {
+    await deletePurchaseRequest(PRF_ID);
+    expect(release).not.toHaveBeenCalled();
   });
 });

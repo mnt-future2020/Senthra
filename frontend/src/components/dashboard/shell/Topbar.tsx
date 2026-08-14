@@ -4,25 +4,28 @@ import { usePathname } from "next/navigation";
 import { Menu } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
+import { resolvePageTitle } from "@/lib/pageTitle";
 
-// Page titles for the real routes. Falls back to a generic label otherwise.
-const TITLES: Record<string, string> = {
-  settings: "Settings",
-  users: "Users & Roles",
-  customers: "Customers",
-  account: "My Account",
-  stock: "My Stock",
-};
-
-export function Topbar({ onToggleSidebar }: { onToggleSidebar: () => void }) {
+// This is the only place a dashboard page states what it is: the per-page title card each list
+// screen used to render underneath is gone, because saying it twice cost ~110px of a laptop screen
+// before any content appeared. Titles live in lib/pageTitle.ts with a test tying them to the nav.
+export function Topbar({
+  onToggleSidebar,
+  actionSlotRef,
+}: {
+  onToggleSidebar: () => void;
+  /** Callback ref for the page-actions slot — see PageActions. */
+  actionSlotRef: (el: HTMLDivElement | null) => void;
+}) {
   const { principal } = useAuth();
   const pathname = usePathname();
 
-  const segment = pathname.split("/")[2] ?? "";
-  const title = TITLES[segment] ?? "Dashboard";
+  const title = resolvePageTitle(pathname);
 
   return (
-    <header className="sticky top-0 z-30 bg-[var(--surface)] border-b border-[var(--border)] px-4 py-3 md:px-8 md:py-4 flex items-center justify-between gap-4 backdrop-blur-md bg-opacity-95">
+    // Wraps rather than overflows: a four-pill switcher next to a long page name has nowhere to go on
+    // a phone, so it drops to a second line inside the header instead of pushing the title off-screen.
+    <header className="sticky top-0 z-30 bg-[var(--surface)] border-b border-[var(--border)] px-4 py-3 md:px-8 md:py-4 flex flex-wrap items-center justify-between gap-3 backdrop-blur-md bg-opacity-95">
       <div className="flex items-center gap-3">
         <button
           onClick={onToggleSidebar}
@@ -45,6 +48,10 @@ export function Topbar({ onToggleSidebar }: { onToggleSidebar: () => void }) {
           </p>
         </div>
       </div>
+
+      {/* Portal target for the current page's tabs / actions. `empty:hidden` keeps it from claiming
+          a share of the header's gap on a page that has none. */}
+      <div ref={actionSlotRef} className="flex flex-wrap items-center justify-end gap-2 empty:hidden" />
     </header>
   );
 }

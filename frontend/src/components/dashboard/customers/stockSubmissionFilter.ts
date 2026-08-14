@@ -46,7 +46,9 @@ export function hasActiveSubmissionFilter(f: SubmissionFilters): boolean {
 export function filterSubmissions<T extends SubmissionLike>(rows: T[], f: SubmissionFilters): T[] {
   const term = f.search.trim().toLowerCase();
   return rows.filter((r) => {
-    if (f.status === OPEN) {
+    if (f.status === NEEDS_YOU) {
+      if (!isActionable(r)) return false;
+    } else if (f.status === OPEN) {
       if (!OPEN_STATUSES.includes(r.status)) return false;
     } else if (f.status !== ALL && r.status !== f.status) {
       return false;
@@ -74,6 +76,41 @@ const STATUS_LABELS: Record<string, string> = {
   rejected: "Rejected",
 };
 
+/**
+ * Statuses where THIS screen still owes an action, and the tab badge counts them.
+ *
+ *   pending  — needs review          (Approve as-is / Edit & approve / Reject)
+ *   approved — needs routing         (Assign warehouses)
+ *
+ * `assigned` and `partially_received` are deliberately absent: the outstanding work on those is
+ * RECEIVING, which happens at the warehouse and is already counted there (wh.customer_intake). They
+ * stay in the Open view because they are still in flight, but nobody on this tab owes anything.
+ *
+ * The badge and this list have to agree about what "needs me" means, or the number is just decoration
+ * next to rows that don't explain it — which is exactly how a tab reading "2" came to open on four
+ * rows with nothing marking the two.
+ */
+export const ACTIONABLE_STATUSES = ["pending", "approved"];
+
+/**
+ * Pseudo-status: exactly the rows the tab badge counted.
+ *
+ * This is how a count becomes reachable. The badge says 3; picking this shows those 3 and nothing
+ * else — the list itself answers "which three", so nothing on the row has to shout it.
+ *
+ * The first attempt tinted those rows amber instead, and that was wrong twice over: the row already
+ * carries its own signal (a row with "Approve as-is" or "Assign warehouses" is self-evidently
+ * outstanding), and the default Open view contains actionable rows plus receiving-in-progress ones,
+ * so the tint routinely covered MOST of the list. Highlighting works when it marks a minority; when
+ * it marks three rows in four, the unmarked row becomes the signal instead.
+ */
+export const NEEDS_YOU = "needs_you";
+
+/** Does this row still need something from whoever is looking at the Submissions tab? */
+export function isActionable(row: SubmissionLike): boolean {
+  return ACTIONABLE_STATUSES.includes(row.status);
+}
+
 export function submissionStatusOptions(rows: SubmissionLike[]): SubmissionOption[] {
   const counts = new Map<string, number>();
   for (const r of rows) counts.set(r.status, (counts.get(r.status) ?? 0) + 1);
@@ -95,10 +132,21 @@ export function submissionStatusOptions(rows: SubmissionLike[]): SubmissionOptio
   const presentOpen = OPEN_STATUSES.filter((s) => counts.has(s));
   const redundantOpenStatus = presentOpen.length === 1 ? presentOpen[0] : null;
 
+  const needsYouCount = rows.filter(isActionable).length;
+  // Same rule as Open's: two entries selecting the same rows read as a bug. When every open row is
+  // also actionable, "Needs you" and "Open" are the same list — keep Open, since it is the default
+  // and where Clear returns to, and bring this back the moment the two differ.
+  const needsYouRedundant = needsYouCount === openCount;
+
   return [
     // Open first — it's the default and the one people want most of the time. Always offered even at
     // zero, because it's the view the tab returns to on Clear.
     { value: OPEN, label: `Open (${openCount})` },
+    // Directly under it: this is the number on the tab, and picking it shows exactly those rows.
+    // Hidden at zero — an option that can only ever produce an empty list is not a choice.
+    ...(needsYouCount > 0 && !needsYouRedundant
+      ? [{ value: NEEDS_YOU, label: `Needs you (${needsYouCount})` }]
+      : []),
     { value: ALL, label: `All statuses (${rows.length})` },
     ...[...known, ...unknown]
       .filter((s) => s !== redundantOpenStatus)

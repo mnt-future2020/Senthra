@@ -19,12 +19,32 @@ Desktop.ini
 # Qodo AI workspace (local, regenerated)
 .qodo/
 
-# AI assistant instructions + project documentation — LOCAL ONLY, never on
-# GitHub (patterns without a slash apply to every subfolder).
-CLAUDE.md
-AGENTS.md
+# Claude Code — per-machine local config, never tracked anywhere in the tree.
 .claude/
-docs/
+
+# Agent instruction files and the whole docs/ folder: LOCAL ONLY, never pushed.
+# They stay on disk and keep working for the tooling that reads them — they are
+# untracked (git rm --cached), not deleted.
+#
+# docs/ is ignored WHOLESALE rather than by file type, so nothing new dropped in
+# there can leak: it holds internal design specs, client contract inputs (.docx,
+# .pdf), real job-pack spreadsheets and the architecture diagrams. Its client
+# inputs are commercial documents, and the diagrams describe internal flows —
+# none of it is anyone's deliverable.
+#
+# What the reader of this repo gets instead: PROJECT-DOCUMENTATION.md and the
+# per-app READMEs, which stay tracked.
+#
+# NOTE for anyone switching branches: these files exist as ignored-and-untracked
+# only on branches where the removal commit is present. Checking out a branch
+# from BEFORE that commit restores them as tracked files, and moving forward
+# again deletes them off disk. Keep a copy outside the repo.
+/CLAUDE.md
+/frontend/CLAUDE.md
+/frontend/AGENTS.md
+/mobile/CLAUDE.md
+/mobile/AGENTS.md
+/docs/
 
 # Logs
 *.log

@@ -200,7 +200,7 @@ function QueueSkeleton() {
         <thead>
           <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
             {QUEUE_HEADERS.map((h, i) => (
-              <th key={i} className={`px-4 py-3 ${i >= 4 && i <= 9 ? "text-right" : ""}`}>{h}</th>
+              <th key={i} className={`cell-y px-4 ${i >= 4 && i <= 9 ? "text-right" : ""}`}>{h}</th>
             ))}
           </tr>
         </thead>
@@ -208,7 +208,7 @@ function QueueSkeleton() {
           {Array.from({ length: 6 }).map((_, i) => (
             <tr key={i} className="border-b border-[var(--border)] last:border-0">
               {QUEUE_HEADERS.map((_h, j) => (
-                <td key={j} className="px-4 py-3"><Skeleton className="h-3 w-20" /></td>
+                <td key={j} className="cell-y px-4"><Skeleton className="h-3 w-20" /></td>
               ))}
             </tr>
           ))}
@@ -478,7 +478,7 @@ export function GoodsManagementTab({
 
     return (
       <>
-        <td className="px-4 py-3" rowSpan={rowSpan}>
+        <td className="cell-y px-4" rowSpan={rowSpan}>
           <div className="flex items-start gap-2">
             <div className="mt-0.5">{chevron}</div>
             <div className="min-w-0">
@@ -529,7 +529,7 @@ export function GoodsManagementTab({
             </div>
           </div>
         </td>
-        <td className="px-4 py-3 text-xs text-[var(--muted)]" rowSpan={rowSpan}>
+        <td className="cell-y px-4 text-xs text-[var(--muted)]" rowSpan={rowSpan}>
           {row.engineerName ?? "—"}
         </td>
       </>
@@ -570,7 +570,7 @@ export function GoodsManagementTab({
   );
 
   return (
-    <div className="flex h-full flex-col gap-4">
+    <div className="stack flex h-full flex-col">
       {/* Section switcher — Queue / Closed / Overdue (segmented control, matches the scan panel) */}
       <div className="inline-flex shrink-0 self-start rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-1">
         {SECTION_PILLS.map(({ key, label, icon: Icon }) => (
@@ -706,17 +706,17 @@ export function GoodsManagementTab({
                 <table className="w-full text-left text-sm" style={{ minWidth: 1020 }}>
                   <thead className="sticky top-0 z-10 bg-[var(--surface)]">
                     <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                      <th className="px-4 py-3">Job</th>
-                      <th className="px-4 py-3">Engineer</th>
-                      <th className="px-4 py-3">Item</th>
-                      <th className="px-4 py-3">Status</th>
-                      <th className="px-4 py-3 text-right">Planned</th>
-                      <th className="px-4 py-3 text-right">Issued</th>
-                      <th className="px-4 py-3 text-right">Used</th>
-                      <th className="px-4 py-3 text-right">Returned</th>
-                      <th className="px-4 py-3 text-right">To return</th>
-                      <th className="px-4 py-3 text-right">Available</th>
-                      <th className="px-4 py-3" />
+                      <th className="cell-y px-4">Job</th>
+                      <th className="cell-y px-4">Engineer</th>
+                      <th className="cell-y px-4">Item</th>
+                      <th className="cell-y px-4">Status</th>
+                      <th className="cell-y px-4 text-right">Planned</th>
+                      <th className="cell-y px-4 text-right">Issued</th>
+                      <th className="cell-y px-4 text-right">Used</th>
+                      <th className="cell-y px-4 text-right">Returned</th>
+                      <th className="cell-y px-4 text-right">To return</th>
+                      <th className="cell-y px-4 text-right">Available</th>
+                      <th className="cell-y px-4" />
                     </tr>
                   </thead>
                   <tbody>
@@ -814,7 +814,7 @@ export function GoodsManagementTab({
                         return (
                           <tr key={`${row.jobId}-${line.id}`} className={`align-middle transition-colors hover:bg-[var(--surface-2)] ${jobSep}`}>
                             {lineIdx === 0 && jobCell(row, hiddenCount, rowCount, data.overdueAfterDays)}
-                            <td className={`px-4 py-3 ${active ? "font-medium text-[var(--ink)]" : "text-[var(--faint)]"} ${dim}`}>
+                            <td className={`cell-y px-4 ${active ? "font-medium text-[var(--ink)]" : "text-[var(--faint)]"} ${dim}`}>
                               {/* Click the NAME to copy the code that scans this line, so issuing or
                                   returning is paste-and-go instead of looking the item up again. The
                                   code is resolved server-side to mirror scanLookup — see scanCodeFor.
@@ -856,7 +856,7 @@ export function GoodsManagementTab({
                               ) : null}
                             </td>
                             {/* Per-item status — this line's own issuance (Closed view → reconciled). */}
-                            <td className={`px-4 py-3 ${dim}`}>
+                            <td className={`cell-y px-4 ${dim}`}>
                               {statusChip(isClosed ? "reconciled" : lineStatus(line, row.goodsStatus, effReturned, toReturn, row.status === "cancelled"))}
                             </td>
                             {/* Counts stay full-strength even on greyed (other-warehouse) lines so the WM can
@@ -864,16 +864,16 @@ export function GoodsManagementTab({
                             {/* Number treatment (matches the Inventory table): the key figures — Issued
                                 and To return — carry weight/colour; Planned/Used/Available and any 0
                                 recede, so the meaningful numbers read at a glance instead of a wall of bold. */}
-                            <td className="px-4 py-3 text-right tabular-nums text-[var(--muted)]">{line.plannedQty}</td>
-                            <td className={`px-4 py-3 text-right font-semibold tabular-nums ${issuedColor}`}>{line.issuedQty}</td>
+                            <td className="cell-y px-4 text-right tabular-nums text-[var(--muted)]">{line.plannedQty}</td>
+                            <td className={`cell-y px-4 text-right font-semibold tabular-nums ${issuedColor}`}>{line.issuedQty}</td>
                             {/* Used + To return don't apply to misc (free-text, not stock-tracked) → show — */}
-                            <td className={`px-4 py-3 text-right tabular-nums ${isMisc || line.usedQty === 0 ? "text-[var(--faint)]" : "text-[var(--ink)]"}`}>{isMisc ? "—" : line.usedQty}</td>
+                            <td className={`cell-y px-4 text-right tabular-nums ${isMisc || line.usedQty === 0 ? "text-[var(--faint)]" : "text-[var(--ink)]"}`}>{isMisc ? "—" : line.usedQty}</td>
                             {/* Returned (normalized across the item's warehouses) — teal when any came back. */}
-                            <td className={`px-4 py-3 text-right tabular-nums ${!isMisc && effReturned > 0 ? "text-teal-600" : "text-[var(--faint)]"}`}>{isMisc ? "—" : effReturned}</td>
-                            <td className={`px-4 py-3 text-right tabular-nums ${!isMisc && inReturnPhase && toReturn > 0 ? "font-semibold text-indigo-600" : "text-[var(--faint)]"}`}>
+                            <td className={`cell-y px-4 text-right tabular-nums ${!isMisc && effReturned > 0 ? "text-teal-600" : "text-[var(--faint)]"}`}>{isMisc ? "—" : effReturned}</td>
+                            <td className={`cell-y px-4 text-right tabular-nums ${!isMisc && inReturnPhase && toReturn > 0 ? "font-semibold text-indigo-600" : "text-[var(--faint)]"}`}>
                               {isMisc || !inReturnPhase ? "—" : toReturn}
                             </td>
-                            <td className={`px-4 py-3 text-right tabular-nums ${line.available < line.plannedQty - line.issuedQty ? "font-semibold text-[var(--neg)]" : "text-[var(--muted)]"}`}>
+                            <td className={`cell-y px-4 text-right tabular-nums ${line.available < line.plannedQty - line.issuedQty ? "font-semibold text-[var(--neg)]" : "text-[var(--muted)]"}`}>
                               {line.available}
                             </td>
                             {lineIdx === 0 && manageCell(row, rowCount)}
@@ -884,10 +884,7 @@ export function GoodsManagementTab({
                   </tbody>
                 </table>
                 </div>
-              </div>
-
-              <div className="shrink-0">
-                <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="jobs" onPage={(p) => patch({ gmPage: p > 1 ? String(p) : null }, false)} />
+                <Pagination embedded page={data.page} totalPages={data.totalPages} total={data.total} label="jobs" onPage={(p) => patch({ gmPage: p > 1 ? String(p) : null }, false)} />
               </div>
             </>
           )}

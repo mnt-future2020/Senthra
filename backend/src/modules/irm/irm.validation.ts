@@ -31,12 +31,6 @@ const optionalInt = (max: number, label: string) =>
       .optional(),
   );
 
-// Internal owner — 3-state: omitted (no change), "" / null (clear), or a valid id.
-const ownerIdField = z.preprocess(
-  (v) => (typeof v === "string" && v.trim() === "" ? null : v),
-  z.string().regex(OBJECT_ID_RE, "Select a valid owner.").nullable().optional(),
-);
-
 const currencyField = z.preprocess(emptyToUndef, z.enum(CURRENCY_OPTIONS).optional());
 const baseUnitCreate = z.enum(UOM_OPTIONS, { error: "Select a base unit." });
 const baseUnitUpdate = z.preprocess(emptyToUndef, z.enum(UOM_OPTIONS).optional());
@@ -62,10 +56,6 @@ const vatField = z.preprocess(
 const packSizeField = z.preprocess(
   (v) => (v === "" || v === null ? null : v),
   z.coerce.number().int("Pack size must be a whole number.").min(1, "Pack size must be at least 1.").max(1_000_000).nullable().optional(),
-);
-const conversionField = z.preprocess(
-  (v) => (v === "" || v === null ? null : v),
-  z.coerce.number().positive("Conversion ratio must be greater than 0.").max(1_000_000).nullable().optional(),
 );
 
 // One supplier link row (becomes an IrmItemSupplier junction row).
@@ -97,15 +87,15 @@ const sharedIrmFields = {
   mpn: z.string().trim().max(120).optional(),
   typeId: optionalTypeIdField,
   irmCategoryId: optionalCategoryIdField,
-  sku: z.string().trim().max(80).optional(),
+  // SKU is MANDATORY on both create and update — every IRM item carries one. It stays `optional()`
+  // here in the 3-state sense (omitted = no change on update; blank on create = let the server
+  // generate one from the name + category), but an explicitly EMPTY value is rejected: once an item
+  // has a SKU it can never go back to having none. The service normalizes the shape.
+  sku: z.string().trim().min(1, "SKU is required.").max(80).optional(),
   baseUnit: baseUnitUpdate,
   packSize: packSizeField,
-  conversionRatio: conversionField,
-  minimumStock: optionalInt(1_000_000, "Minimum stock"),
   reorderLevel: optionalInt(1_000_000, "Reorder level"),
-  reorderQuantity: optionalInt(1_000_000, "Reorder quantity"),
   maximumStock: optionalInt(1_000_000, "Maximum stock"),
-  safetyStock: optionalInt(1_000_000, "Safety stock"),
   criticalLevel: optionalInt(1_000_000, "Critical level"),
   standardCost: standardCostField,
   currency: currencyField,
@@ -113,16 +103,37 @@ const sharedIrmFields = {
   trackInventory: z.boolean().optional(),
   trackSerialNumbers: z.boolean().optional(),
   trackBatchNumbers: z.boolean().optional(),
-  allowNegativeStock: z.boolean().optional(),
-  ownerUserId: ownerIdField,
   notes: z.string().trim().max(2000).optional(),
   status: statusEnum.optional(),
 };
 
-// Soft cross-field check: maximum ≥ minimum when both present.
-const maxGteMin = (d: { minimumStock?: number | null; maximumStock?: number | null }) =>
-  !(typeof d.minimumStock === "number" && typeof d.maximumStock === "number") || d.maximumStock >= d.minimumStock;
-const maxGteMinError = { message: "Maximum stock must be greater than or equal to minimum stock.", path: ["maximumStock"] as string[] };
+// Stock policy coherence. These used to compare maximumStock against `minimumStock` — a field the
+// reorder engine never read, so the one cross-field rule in the form was guarding a number that did
+// nothing. The three thresholds that DO drive reordering must stack: critical ≤ reorder ≤ maximum.
+const maxGteReorder = (d: { reorderLevel?: number | null; maximumStock?: number | null }) =>
+  !(typeof d.reorderLevel === "number" && typeof d.maximumStock === "number") || d.maximumStock >= d.reorderLevel;
+const maxGteReorderError = {
+  message: "Maximum stock must be greater than or equal to the reorder level — an order has to lift stock clear of the line that triggered it.",
+  path: ["maximumStock"] as string[],
+};
+
+const criticalLteReorder = (d: { reorderLevel?: number | null; criticalLevel?: number | null }) =>
+  !(typeof d.reorderLevel === "number" && typeof d.criticalLevel === "number") || d.criticalLevel <= d.reorderLevel;
+const criticalLteReorderError = {
+  message: "Critical level must be at or below the reorder level — it is the more urgent line, not a second trigger.",
+  path: ["criticalLevel"] as string[],
+};
+
+// Closes the chain. The two rules above both hinge on `reorderLevel`, so with it left blank nothing
+// compared critical against maximum — critical 200 with a maximum of 50 passed, and the comment above
+// claimed an ordering the code only half-enforced. Every adjacent pair is now checked, so any two of
+// the three that are present must still stack.
+const criticalLteMax = (d: { criticalLevel?: number | null; maximumStock?: number | null }) =>
+  !(typeof d.criticalLevel === "number" && typeof d.maximumStock === "number") || d.criticalLevel <= d.maximumStock;
+const criticalLteMaxError = {
+  message: "Critical level must be at or below the maximum stock — it is the lowest of the three lines.",
+  path: ["criticalLevel"] as string[],
+};
 
 export const createIrmItemSchema = z
   .object({
@@ -133,7 +144,9 @@ export const createIrmItemSchema = z
     baseUnit: baseUnitCreate,
     suppliers: suppliersField,
   })
-  .refine(maxGteMin, maxGteMinError);
+  .refine(maxGteReorder, maxGteReorderError)
+  .refine(criticalLteReorder, criticalLteReorderError)
+  .refine(criticalLteMax, criticalLteMaxError);
 export type CreateIrmItemInput = z.infer<typeof createIrmItemSchema>;
 
 export const updateIrmItemSchema = z
@@ -142,5 +155,7 @@ export const updateIrmItemSchema = z
     ...sharedIrmFields,
     suppliers: suppliersField,
   })
-  .refine(maxGteMin, maxGteMinError);
+  .refine(maxGteReorder, maxGteReorderError)
+  .refine(criticalLteReorder, criticalLteReorderError)
+  .refine(criticalLteMax, criticalLteMaxError);
 export type UpdateIrmItemInput = z.infer<typeof updateIrmItemSchema>;

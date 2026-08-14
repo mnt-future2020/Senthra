@@ -4,6 +4,7 @@ import * as React from "react";
 import { AlertTriangle, Loader2, RefreshCw, Upload, UserRound } from "lucide-react";
 
 import * as userService from "@/services/user.service";
+import { useDashboard } from "@/hooks/useDashboard";
 import { PostcodeField } from "@/components/ui/PostcodeField";
 import { MAX_IMAGE_BYTES, readFileAsDataUrl } from "@/lib/image";
 import { optimizeCloudinaryUrl } from "@/lib/utils";
@@ -27,7 +28,11 @@ export function ProfileEditCard() {
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [reloadKey, setReloadKey] = React.useState(0); // bumped by Retry to re-run the load effect
   const [saving, setSaving] = React.useState(false);
-  const [msg, setMsg] = React.useState<{ type: "success" | "error"; text: string } | null>(null);
+  // ERRORS ONLY. A failure has to stay on screen until it is fixed; the success is a moment and goes
+  // to a toast (see save). Keeping both here meant "Profile updated." sat under the form while the
+  // user carried on editing it — a receipt for changes that were no longer saved.
+  const [msg, setMsg] = React.useState<{ type: "error"; text: string } | null>(null);
+  const { pushToast } = useDashboard();
   const fileRef = React.useRef<HTMLInputElement>(null);
 
   const hydrate = (u: User) => {
@@ -93,7 +98,7 @@ export function ProfileEditCard() {
         ...(removeImage ? { removeProfileImage: true } : {}),
       });
       hydrate(u);
-      setMsg({ type: "success", text: "Profile updated." });
+      pushToast("Profile updated.");
     } catch (err) {
       setMsg({ type: "error", text: err instanceof Error ? err.message : "Save failed." });
     } finally {
@@ -181,9 +186,7 @@ export function ProfileEditCard() {
           />
         </div>
 
-        {msg && (
-          <p className={`text-xs font-semibold ${msg.type === "success" ? "text-[var(--pos)]" : "text-[var(--neg)]"}`}>{msg.text}</p>
-        )}
+        {msg && <p className="text-xs font-semibold text-[var(--neg)]">{msg.text}</p>}
         <div className="flex justify-end">
           <button
             type="submit"

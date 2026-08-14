@@ -46,7 +46,7 @@
 | **GM** | Goods Management movement (`GM-0001`) — job-scoped issue/return/consume scan session. |
 | **Senthra Code** | Manual fallback code when a Code-128 barcode isn't scannable (per-customer format, e.g. `CSE-00001`). |
 
-Supporting docs live in [docs/](docs/): [Senthra_Complete_Business_Flow.md](docs/Senthra_Complete_Business_Flow.md) (14 operational flows), [ARCHITECTURE.md](docs/ARCHITECTURE.md), [Client_Requirements.md](docs/Client_Requirements.md), Figma diagram exports in [docs/diagrams/](docs/diagrams/), and a spec-driven paper trail (16 design specs, 9 implementation plans) in [docs/superpowers/](docs/superpowers/).
+Supporting material — the business-flow write-up, architecture notes, client requirements, Figma diagram exports and the spec-driven paper trail (16 design specs, 9 implementation plans) — is kept in a `docs/` folder that is deliberately NOT in this repository. It mixes internal design notes with commercial client documents, so it is held outside version control; ask the team if you need it. This file is the tracked entry point.
 
 ---
 
@@ -80,7 +80,7 @@ Two independent apps in one git repo (not a workspace — each has its own `pack
 | Domain utilities | `@zxing/browser` (barcode scanning), `xlsx` (Excel site import/export), `zod` |
 | Dev/test | `typescript` 5, `eslint` + `eslint-config-next`, `vitest` 4 |
 
-⚠️ The frontend is a **customized Next.js 16 build with breaking changes vs. stock Next.js** — [frontend/AGENTS.md](frontend/AGENTS.md) instructs developers/agents to read `node_modules/next/dist/docs/` before writing Next.js code. Observed Next 16 patterns: async `cookies()`, `generateMetadata` + `React.cache`, `<Link onNavigate>`, `useSearchParams` requiring `<Suspense>`.
+⚠️ The frontend is a **customized Next.js 16 build with breaking changes vs. stock Next.js**. Read `node_modules/next/dist/docs/` before writing Next.js code — your training data and the public Next.js docs will both be wrong in places. Observed Next 16 patterns: async `cookies()`, `generateMetadata` + `React.cache`, `<Link onNavigate>`, `useSearchParams` requiring `<Suspense>`.
 
 ---
 
@@ -88,9 +88,8 @@ Two independent apps in one git repo (not a workspace — each has its own `pack
 
 ```
 e:\Senthra
-├── CLAUDE.md                  # AI/dev instructions for the repo
-├── docs/                      # Business flows, architecture, client requirements, diagrams, specs/plans
-├── reference/                 # Reference material
+├── PROJECT-DOCUMENTATION.md   # This file — the tracked entry point
+├── reference/                 # Reference material (local only)
 ├── backend/
 │   ├── api/index.js           # Vercel serverless entry (exports the compiled Express app)
 │   ├── prisma/schema.prisma   # Single Prisma schema (~2,260 lines, ~60 models)
@@ -255,7 +254,7 @@ Single schema at [backend/prisma/schema.prisma](backend/prisma/schema.prisma) (~
 | **Auth / platform** | `Admin`, `Settings`, `Role`, `User`, `UserWarehouseAssignment`, `CustomerUser`, `Session`, `Counter` | `Admin` is the single super-admin. `Settings` is a singleton (SMTP/Google/Cloudinary/branding/company profile/regional). `Role.permissions String[]`, plus `canHoldStock` and `isWarehouseScoped` flags. `Session` enforces logout + 2-device cap (`sid @unique`, `@@index([principalId, principalType])`). `User` soft-deletes (`deletedAt`), unique `email` and `employeeId`. |
 | **Master data** | `Category` (customer-domain), `IrmCategory`, `IrmType`, `SupplierType`, `WarehouseType`, `Department`, `JobTitle` | Taxonomies share the shape `key @unique` + `nameLower @unique` (case-insensitive uniqueness). `Department`/`JobTitle` names are denormalized onto `User` and renamed via transactional cascade. |
 | **Warehouses / suppliers** | `Warehouse`, `Supplier` | Rich masters: `code @unique`, UK address + geocoded lat/long (warehouse), owner User ref (supplier), soft delete, status indexes. A warehouse has no manager field — its managers are derived from `UserWarehouseAssignment`. |
-| **IRM catalogue** | `IrmItem`, `IrmItemSupplier` | Item master: code, sku (global-forever unique), barcode, UoM, stock policies (reorder/min/max), `standardCostPence`, track flags (`trackInventory`, `trackSerialNumbers`, `trackBatchNumbers`). Junction ranks suppliers (`@@unique([irmItemId, supplierId])`, ≤1 primary). |
+| **IRM catalogue** | `IrmItem`, `IrmItemSupplier` | Item master: code, sku (mandatory, global-forever unique, auto-generated from name + category when not supplied), barcode, UoM, stock policies (reorder/min/max), `standardCostPence`, track flags (`trackInventory`, `trackSerialNumbers`, `trackBatchNumbers`). Junction ranks suppliers (`@@unique([irmItemId, supplierId])`, ≤1 primary). |
 | **Procurement** | `PurchaseRequest(+Item,+Attachment)`, `PurchaseOrder(+Item,+Attachment)` | Lines snapshot item name/sku/unit and hold `quantity`, `unitPricePence`, `vatRate`; header roll-ups `subtotal/vat/grandTotalPence`. `PurchaseOrderItem.receivedQuantity` is the Goods-In seam. `@@unique([purchaseRequestId, irmItemId])` / `([purchaseOrderId, irmItemId])`. One PO per PRF enforced transactionally (deliberately not `@unique`). |
 | **Goods In** | `GoodsReceipt(+Item,+Serial,+Batch,+Attachment)` | GRN against a PO; per line `ordered/previouslyReceived/received/damaged/accepted`. Serial uniqueness backstop `@@unique([irmItemId, serialLower])`. |
 | **Warehouse inventory** | `InventoryBalance`, `InventoryTransaction`, `StockTransfer`, `StockAdjustment` | Balance: `@@unique([irmItemId, warehouseId])`, `quantityOnHand`/`quantityReserved`. Transaction: immutable append-only ledger (`quantityDelta`, `type`, `sourceType/sourceId/sourceCode`, `balanceAfter`). |
@@ -303,9 +302,9 @@ All routes are mounted in [routes/index.ts](backend/src/routes/index.ts). `GET /
 |---|---|
 | `/categories`, `/irm-categories`, `/irm-types`, `/supplier-types`, `/warehouse-types` | Uniform taxonomy CRUD: GET `/`, GET `/:idOrKey`, POST, PUT `/:id`, DELETE `/:id`. View/create also granted to the owning entity's create/edit permissions (form pickers + inline create). Delete blocked while in use (409 with count). |
 | `/departments`, `/job-titles` | GET/POST/PUT/DELETE reusing `users.*` permissions; rename cascades to `User.department`/`User.jobTitle` in a transaction. |
-| `/suppliers` | GET `/owner-options`; CRUD *(suppliers.view/create/edit/delete)* — `SUP-####` codes, PATCH change-detection audit events, payment-terms rules ("Custom" requires text), soft delete blocked by PRF/PO/GRN/catalogue usage. |
+| `/suppliers` | CRUD *(suppliers.view/create/edit/delete)* — `SUP-####` codes, PATCH change-detection audit events, payment-terms rules ("Custom" requires text), soft delete blocked by PRF/PO/GRN/catalogue usage. |
 | `/warehouses` | GET `/engineer-options` (role `canHoldStock`), `/options`; CRUD *(warehouse.\*)* — `WH-####`, postcode geocoding, single-default enforcement, warehouse-scoped visibility, soft delete guarded by dependencies. Also hosts the customer pending-stock router. |
-| `/irm-items` | GET `/owner-options`; CRUD *(irm.\*)*; POST `/:id/generate-barcode` *(irm.barcode.manage)* — Code-128 PNG of the item code. Global-forever SKU uniqueness; supplier links reconciled transactionally; soft delete guarded by PO/GRN/inventory/engineer-stock usage. |
+| `/irm-items` | CRUD *(irm.\*)*; POST `/:id/generate-barcode` *(irm.barcode.manage)* — Code-128 PNG of the item code. SKU mandatory on create + update (generated from name + category when blank), global-forever unique and refused if it collides with any item code; supplier links reconciled transactionally; soft delete guarded by PO/GRN/inventory/engineer-stock usage. |
 
 ### Customers & portal
 | Area | Routes |
@@ -339,7 +338,7 @@ Request-body shapes are defined per module in `*.validation.ts` (zod) — the sc
 The 30 modules fall into recognisable shapes:
 
 - **Taxonomy masters** (category, irm-category, irm-type, supplier-type, warehouse-type): identical CRUD slices with case-insensitive name uniqueness (`nameLower`), slugified keys, grouped-count in-use guards on delete, and `requireActiveX(id)` seams consumed by their parent modules.
-- **Rich entity masters** (supplier, warehouse, irm, customer): `Counter`-allocated display codes, PATCH change-detection emitting granular audit events (`x.activated`, `x.owner_assigned`, …), dependency-checked **soft delete**, picker option routes placed before `/:id`.
+- **Rich entity masters** (supplier, warehouse, irm, customer): `Counter`-allocated display codes, PATCH change-detection emitting granular audit events (`x.activated`, `x.deactivated`, …), dependency-checked **soft delete**, picker option routes placed before `/:id`.
 - **Employee masters** (department, jobTitle): denormalized names cascaded onto `User` transactionally on rename.
 - **Workflow documents** (purchase-request, purchase-order, goods-in, job, job-kit-request, van-stock-request, engineer-transfer): forward-only status machines (`ALLOWED_TRANSITIONS` + `assertTransition`), workflow stamp fields (`submittedBy/At`, `approvedBy/At`, …), fire-and-forget templated emails and realtime emits after commit.
 - **Stock primitives** (inventory, engineer-stock, goods-management repositories): balance upserts with a **zero-floor guard** (negative balance → conflict → transaction rollback) + append-only ledgers with `balanceAfter` snapshots. `inventoryService.applyInbound/applyOutbound` is the single write seam every other module uses to touch warehouse stock.
@@ -527,7 +526,7 @@ Socket.IO rooms (long-lived server only): PRF/PO watcher rooms, van-stock review
 
 - **Backend on Vercel**: [vercel.json](backend/vercel.json) rewrites every request to `/api`; [api/index.js](backend/api/index.js) exports the compiled Express app as the serverless handler. Build command `vercel-build` = `prisma generate && tsc`. Prisma `binaryTargets` include `rhel-openssl-3.0.x` for the Vercel runtime. `trust proxy = 1` makes client IPs / rate limiting correct behind the proxy. **Note:** Socket.IO realtime is wired only in `server.ts` (long-lived mode) — the serverless path has no realtime.
 - **Frontend**: standard Next.js build (`pnpm build` / `start`); requires `NEXT_PUBLIC_API_URL`. No hosting config committed.
-- **CI/CD**: no `.github/workflows/` or other CI pipeline files found in the repo. Development follows a PR-per-feature-branch flow (recent PRs #34–#47) with design specs and implementation plans committed under `docs/superpowers/`.
+- **CI/CD**: no `.github/workflows/` or other CI pipeline files found in the repo. Development follows a PR-per-feature-branch flow, each feature preceded by a written design spec and implementation plan (kept in the untracked `docs/` folder).
 - **Database migrations**: none (MongoDB) — schema/index changes are applied with `npx prisma db push`; partial unique indexes are (re)created idempotently by the startup seed.
 
 ---

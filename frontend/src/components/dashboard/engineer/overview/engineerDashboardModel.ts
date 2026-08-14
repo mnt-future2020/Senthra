@@ -57,13 +57,21 @@ export function buildStatCards(o: EngineerOverview, can: (p: string) => boolean)
       tone: "accent",
       value: o.jobs.inProgress,
       label: "In progress",
+      // Every branch here counts across ACTIVE jobs (assigned + accepted + in_progress), while the
+      // value above counts `in_progress` alone — so the hint is NOT a breakdown of the number it sits
+      // under, and each one has to say so. Unqualified, "1 / In progress / 4 overdue" reads as "4 of
+      // that 1 are late", which cannot be true; the job dragging it red is usually still Accepted.
+      //
+      // The number stays whole rather than being narrowed to in_progress: 4 is the figure worth
+      // acting on, it matches the "4 active jobs are past the completion date" row below, and that
+      // row is what opens them (?status=overdue). This card opens its own headline, in_progress.
       hint:
         o.jobs.overdue > 0
-          ? `${o.jobs.overdue} overdue`
+          ? `${o.jobs.overdue} overdue across active jobs`
           : o.jobs.accepted > 0
             ? `${o.jobs.accepted} accepted, not started`
             : o.jobs.dueThisWeek > 0
-              ? `${o.jobs.dueThisWeek} due this week`
+              ? `${o.jobs.dueThisWeek} due this week across active jobs`
               : "nothing due this week",
       hintTone: o.jobs.overdue > 0 ? "red" : undefined,
       href: "/dashboard/engineer/jobs?status=in_progress",

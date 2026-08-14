@@ -90,6 +90,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       { key: "users.create", action: "Create", description: "Add new staff users." },
       { key: "users.edit", action: "Edit", description: "Edit users — details, role, status, resend invite." },
       { key: "users.delete", action: "Delete", description: "Remove staff users." },
+      { key: "users.export", action: "Export", description: "Export the staff list to CSV." },
     ],
   },
   {
@@ -135,6 +136,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       { key: "customers.create", action: "Create", description: "Add new customer companies (also provisions their read-only portal login)." },
       { key: "customers.edit", action: "Edit", description: "Edit a customer company's own profile — name, contact, status." },
       { key: "customers.delete", action: "Delete", description: "Remove customer companies." },
+      { key: "customers.export", action: "Export", description: "Export the customer list to CSV." },
     ],
   },
   {
@@ -230,6 +232,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       { key: "warehouse.create", action: "Create", description: "Add new warehouses." },
       { key: "warehouse.edit", action: "Edit", description: "Edit warehouses; assign a manager; activate / deactivate." },
       { key: "warehouse.delete", action: "Delete", description: "Remove warehouses (only when no stock or open movements exist)." },
+      { key: "warehouse.export", action: "Export", description: "Export the warehouse list to CSV." },
     ],
   },
   {
@@ -254,6 +257,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       { key: "irm.create", action: "Create", description: "Add new IRM items." },
       { key: "irm.edit", action: "Edit", description: "Edit IRM items; assign suppliers/owner; activate / deactivate." },
       { key: "irm.delete", action: "Delete", description: "Remove IRM items (only when no dependencies exist)." },
+      { key: "irm.export", action: "Export", description: "Export the IRM catalogue to CSV." },
       { key: "irm.barcode.manage", action: "Barcode", description: "Generate, regenerate and print IRM item barcodes." },
     ],
   },
@@ -294,6 +298,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       { key: "purchase_requests.submit", action: "Submit", description: "Submit a draft for finance review." },
       { key: "purchase_requests.approve", action: "Approve", description: "Finance review — approve, reject or reopen a purchase request." },
       { key: "purchase_requests.convert", action: "Convert", description: "Generate the purchase order from a finance-approved request." },
+      { key: "purchase_requests.export", action: "Export", description: "Export purchase requests to CSV." },
       { key: "purchase_requests.cancel", action: "Cancel", description: "Cancel a purchase request before it is converted." },
     ],
   },
@@ -314,6 +319,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       { key: "purchase_orders.acknowledge", action: "Record acceptance", description: "Record the supplier's acceptance and confirmed delivery date on an issued order." },
       { key: "purchase_orders.cancel", action: "Cancel", description: "Cancel a purchase order before it is received." },
       { key: "purchase_orders.close", action: "Close", description: "Close a received purchase order." },
+      { key: "purchase_orders.export", action: "Export", description: "Export purchase orders — including supplier spend — to CSV." },
     ],
   },
   {
@@ -328,6 +334,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       { key: "goods_in.delete", action: "Delete", description: "Delete draft goods receipts." },
       { key: "goods_in.complete", action: "Complete", description: "Complete a receipt — posts stock and updates the purchase order." },
       { key: "goods_in.cancel", action: "Cancel", description: "Cancel a draft goods receipt." },
+      { key: "goods_in.export", action: "Export", description: "Export the goods-in register to CSV." },
     ],
   },
   {
@@ -377,6 +384,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       { key: "jobs.assign", action: "Assign", description: "Assign or reassign a job to an engineer." },
       { key: "jobs.cancel", action: "Cancel", description: "Cancel a job." },
       { key: "jobs.delete", action: "Delete", description: "Delete a draft job." },
+      { key: "jobs.export", action: "Export", description: "Export the jobs list to CSV." },
       { key: "jobs.kit_request.review", action: "Review kit requests", description: "Review a field engineer's additional-kit requests — approve (growing the kit + opening fulfilment) or decline." },
     ],
   },
@@ -441,6 +449,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       { key: "suppliers.create", action: "Create", description: "Add new suppliers." },
       { key: "suppliers.edit", action: "Edit", description: "Edit suppliers; assign an owner; activate / deactivate." },
       { key: "suppliers.delete", action: "Delete", description: "Remove suppliers (only when no dependencies exist)." },
+      { key: "suppliers.export", action: "Export", description: "Export the supplier list — including a supplier's purchase orders and requests — to CSV." },
     ],
   },
   {
@@ -662,6 +671,10 @@ export const WAREHOUSE_MANAGER_PERMISSIONS = [
   // Day-to-day receiving: a manager creates, corrects, completes (posts stock) and cancels a mistaken
   // DRAFT goods receipt for their assigned warehouse. `cancel` is state-machine-limited to drafts (a
   // completed GRN is terminal); `delete` is intentionally withheld — deletion isn't a warehouse op.
+  // Floor reporting: the two registers this role works from every day. Both are warehouse-scoped at
+  // the query, so the download is the same rows the screen already shows them — never the company's.
+  "inventory.export",
+  "goods_in.export",
   "goods_in.view",
   "goods_in.create",
   "goods_in.edit",
@@ -754,6 +767,11 @@ export const SYSTEM_ADMIN_PERMISSIONS = [
   "inventory.view", "inventory.move", "inventory.history", "inventory.export", "inventory.adjust", "inventory.stock_take",
   "jobs.view", "jobs.create", "jobs.edit", "jobs.assign", "jobs.cancel", "jobs.delete",
   "goods_management.view", "goods_management.issue", "goods_management.receive_return", "goods_management.reconcile",
+  // Every export this role can already read on screen. Kept as its own line rather than folded into
+  // the module lines above so the answer to "what can this role download?" is one place — extracting
+  // data is the question an auditor asks, and it should not have to be reassembled from ten lines.
+  "users.export", "customers.export", "suppliers.export", "warehouse.export", "irm.export",
+  "purchase_requests.export", "purchase_orders.export", "goods_in.export", "jobs.export",
 ];
 
 // The customer sub-entity groups. Each is a slice of a single customer record, so

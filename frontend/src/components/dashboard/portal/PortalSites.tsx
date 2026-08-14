@@ -14,8 +14,6 @@ import type { Msg } from "@/components/ui/types";
 
 import {
   EmptyState,
-  HeaderCardSkeleton,
-  PortalHeader,
   StatusChip,
   TableCard,
   TableCardSkeleton,
@@ -94,17 +92,14 @@ export function PortalSites() {
 
   if (loading && paged === null) {
     return (
-      <div className="space-y-6">
-        <HeaderCardSkeleton />
-        <TableCardSkeleton headers={HEADERS} cells={SKELETON_CELLS} minWidth={680} />
+      <div className="stack flex h-full flex-col">
+        <TableCardSkeleton headers={HEADERS} cells={SKELETON_CELLS} minWidth={680} fill />
       </div>
     );
   }
 
   return (
-    <div className="space-y-6">
-      <PortalHeader title="Sites" subtitle="Your sites and their on-site contacts." />
-
+    <div className="stack flex h-full flex-col">
       {msg && <Notice msg={msg} />}
 
       {/* Toolbar — search + sort */}
@@ -143,7 +138,7 @@ export function PortalSites() {
       </div>
 
       {msg?.type === "error" ? null : loading ? (
-        <TableCardSkeleton headers={HEADERS} cells={SKELETON_CELLS} minWidth={680} />
+        <TableCardSkeleton headers={HEADERS} cells={SKELETON_CELLS} minWidth={680} fill />
       ) : sites.length === 0 ? (
         <EmptyState
           icon={MapPin}
@@ -152,16 +147,30 @@ export function PortalSites() {
         />
       ) : (
         <>
-          <TableCard headers={HEADERS} minWidth={680}>
+          <TableCard
+            headers={HEADERS}
+            minWidth={680}
+            fill
+            footer={
+              <Pagination
+                embedded
+                page={paged?.page ?? 1}
+                totalPages={paged?.totalPages ?? 1}
+                total={paged?.total ?? 0}
+                label="sites"
+                onPage={(p) => patchParams({ page: p > 1 ? String(p) : null })}
+              />
+            }
+          >
             {sites.map((s) => (
               <tr key={s.id} className="border-b border-[var(--border)] align-top last:border-0">
-                <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{s.code ?? "—"}</td>
-                <td className="px-4 py-3 font-semibold text-[var(--ink)]">{s.name}</td>
+                <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">{s.code ?? "—"}</td>
+                <td className="cell-y px-4 font-semibold text-[var(--ink)]">{s.name}</td>
                 {/* `country` included — it was the one address part fetched and then dropped, which
                     made an overseas site indistinguishable from a UK one at a glance. */}
-                <td className="px-4 py-3 text-[var(--muted)]">{[s.addressLine1, s.addressLine2, s.city, s.county, s.country].filter(Boolean).join(", ") || "—"}</td>
-                <td className="px-4 py-3 text-[var(--muted)]">{s.postcode ?? "—"}</td>
-                <td className="px-4 py-3 text-[var(--muted)]">
+                <td className="cell-y px-4 text-[var(--muted)]">{[s.addressLine1, s.addressLine2, s.city, s.county, s.country].filter(Boolean).join(", ") || "—"}</td>
+                <td className="cell-y px-4 text-[var(--muted)]">{s.postcode ?? "—"}</td>
+                <td className="cell-y px-4 text-[var(--muted)]">
                   {s.contactPerson ? (
                     <div>
                       <div className="text-[var(--ink)]">{s.contactPerson}</div>
@@ -173,19 +182,12 @@ export function PortalSites() {
                     "—"
                   )}
                 </td>
-                <td className="px-4 py-3">
+                <td className="cell-y px-4">
                   <StatusChip value={s.status} />
                 </td>
               </tr>
             ))}
           </TableCard>
-          <Pagination
-            page={paged?.page ?? 1}
-            totalPages={paged?.totalPages ?? 1}
-            total={paged?.total ?? 0}
-            label="sites"
-            onPage={(p) => patchParams({ page: p > 1 ? String(p) : null })}
-          />
         </>
       )}
     </div>

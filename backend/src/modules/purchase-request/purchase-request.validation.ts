@@ -7,6 +7,7 @@ import { z } from "zod";
 // (qty ≥ 1, quoted unit price ≥ 0). Money is integer GBP pence.
 
 import { INCOTERM_CODES } from "#modules/purchase-order/purchase-order.validation.js";
+import { attachmentTypeMatches, dataUriBytes } from "../../utils/data-uri.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 
@@ -172,11 +173,69 @@ export type PrfCancelInput = z.infer<typeof prfCancelSchema>;
 
 // --- attachment upload (data URI from the form) -----------------------------
 const TEN_MB = 10 * 1024 * 1024;
+
+/**
+ * How many documents one purchase request may carry.
+ *
+ * NOT copied from the GRN's 5. A PRF is raised against ONE supplier and its attachments are that
+ * supplier's quotation package — the quote, a revision, a datasheet, a spec sheet, sometimes the email
+ * it arrived in. Ten leaves room for a thorough package while keeping the collection bounded: the
+ * detail read loads every attachment on the record, so an unbounded array degrades the one screen a
+ * buyer opens most.
+ *
+ * It also sets the floor for the PO's cap — conversion COPIES these rows onto the order, so the PO
+ * must be able to absorb a full PRF and still accept its own documents. See PO_ATTACHMENT_MAX_COUNT.
+ */
+export const PRF_ATTACHMENT_MAX_COUNT = 10;
+
+/**
+ * And how many BYTES those ten may add up to.
+ *
+ * The count alone leaves a gap the GRN does not have: ten files at the 10 MB per-file ceiling is 100 MB
+ * on one request. A quotation package is PDFs — a quote is typically well under 2 MB — so 40 MB is
+ * roughly double a realistic worst case while keeping a single record's storage bounded.
+ *
+ * Summed from the sizes already stored, which are MEASURED from the payload rather than declared, so
+ * this is a ceiling that actually holds.
+ */
+export const PRF_ATTACHMENT_MAX_TOTAL_BYTES = 40 * 1024 * 1024;
+// The declared `fileType` and `fileSizeBytes` above are the CALLER'S CLAIMS about a payload the
+// server used to never open — so "pdf, 40 KB" would carry anything, at any size. Both are now
+// settled against `data` itself:
+//
+//   size  measured from the payload, so the per-file ceiling above is real. It also makes the
+//         PRF total a cap that holds, since that total is summed from stored sizes.
+//   type  read from the file's leading bytes (%PDF-, PK, PNG, JPEG), not from the URI's media type
+//         — that media type is text the caller wrote, so checking it only relocates the claim.
+//
+// Refined on the OBJECT rather than the `data` field because both checks compare two fields. Each
+// reports against the field the user can act on.
 export const prfAttachmentSchema = z.object({
   label: z.string().trim().max(80).optional(),
   fileName: z.string().trim().min(1, "File name is required.").max(200),
   fileType: z.enum(PRF_ATTACHMENT_TYPES, { error: "Unsupported file type. Use PDF, DOCX, PNG or JPG." }),
   fileSizeBytes: z.coerce.number().int().min(1).max(TEN_MB, "File must be 10 MB or smaller."),
   data: z.string().startsWith("data:", "Upload a valid file."),
-});
+})
+  .superRefine((v, ctx) => {
+    const actual = dataUriBytes(v.data);
+    if (actual === 0) {
+      ctx.addIssue({ code: "custom", path: ["data"], message: "Upload a valid file." });
+      return;
+    }
+    if (actual > TEN_MB) {
+      ctx.addIssue({ code: "custom", path: ["data"], message: "File must be 10 MB or smaller." });
+    } else if (actual !== v.fileSizeBytes) {
+      // A mismatch means the two halves of one upload disagree — a broken client, or a declaration
+      // aimed at slipping past the ceiling. Neither is worth storing under a size nobody can trust.
+      ctx.addIssue({ code: "custom", path: ["fileSizeBytes"], message: "File size doesn't match the uploaded file." });
+    }
+    if (!attachmentTypeMatches(v.data, v.fileType)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["fileType"],
+        message: "That file isn't a valid PDF, DOCX, PNG or JPG.",
+      });
+    }
+  });
 export type PrfAttachmentInput = z.infer<typeof prfAttachmentSchema>;

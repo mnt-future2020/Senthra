@@ -5,6 +5,7 @@ import { Loader2, ShieldCheck, User } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
 import * as authService from "@/services/auth.service";
+import { useDashboard } from "@/hooks/useDashboard";
 import { SettingsCard } from "@/components/dashboard/settings/ui/SettingsCard";
 import { Notice } from "@/components/ui/Notice";
 import { PasswordInput } from "@/components/ui/PasswordInput";
@@ -17,7 +18,12 @@ export function AccountSection() {
   const [email, setEmail] = React.useState(admin?.email ?? "");
   const [currentPassword, setCurrentPassword] = React.useState("");
   const [saving, setSaving] = React.useState(false);
+  // ERRORS ONLY. A failure has to stay on screen until it is fixed; the success is a moment and
+  // goes to a toast. Keeping both here left the receipt under the form while the user typed new
+  // changes into it — a "saved" that had stopped being true, and this card has no dirty bar to
+  // contradict it.
   const [msg, setMsg] = React.useState<Msg>(null);
+  const { pushToast } = useDashboard();
 
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -35,7 +41,7 @@ export function AccountSection() {
       await authService.changeEmail(currentPassword, email);
       await refresh();
       setCurrentPassword("");
-      setMsg({ type: "success", text: "Email updated successfully." });
+      pushToast("Email updated successfully.");
     } catch (err) {
       setMsg({
         type: "error",

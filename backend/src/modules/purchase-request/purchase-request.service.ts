@@ -14,10 +14,18 @@ import * as irmService from "#modules/irm/irm.service.js";
 import * as inventoryService from "#modules/inventory/inventory.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
-import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
+import * as attachmentService from "#modules/attachment/attachment.service.js";
+import { getCloudinaryCreds, getRegionalSettings } from "#modules/settings/settings.service.js";
+import { formatDate } from "#modules/document/document.formatter.js";
+import { EXPORT_MAX, EXPORT_PAGING, toCsv } from "../../utils/csv.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
 import { withTransaction } from "../../lib/prisma.js";
-import { emitToRoom, PURCHASE_ORDER_WATCHERS_ROOM, PURCHASE_REQUEST_WATCHERS_ROOM } from "../../lib/realtime.js";
+import {
+  emitAttentionChanged,
+  emitToRoom,
+  PURCHASE_ORDER_WATCHERS_ROOM,
+  PURCHASE_REQUEST_WATCHERS_ROOM,
+} from "../../lib/realtime.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import { paginate } from "../../utils/pagination.js";
@@ -30,6 +38,7 @@ import type {
   UpdatePurchaseRequestInput,
 } from "./purchase-request.validation.js";
 import { incotermLabel } from "#modules/purchase-order/purchase-order.validation.js";
+import { PRF_ATTACHMENT_MAX_COUNT, PRF_ATTACHMENT_MAX_TOTAL_BYTES } from "./purchase-request.validation.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 
@@ -317,6 +326,8 @@ export interface ListPurchaseRequestsParams {
   page?: number;
   pageSize?: number;
   sort?: string;
+  /** Internal only — see EXPORT_PAGING. Controllers never read this from the query string. */
+  maxPageSize?: number;
 }
 
 export async function listPurchaseRequests(params: ListPurchaseRequestsParams = {}, actor?: AuditActor): Promise<PagedPurchaseRequests> {
@@ -330,9 +341,119 @@ export async function listPurchaseRequests(params: ListPurchaseRequestsParams = 
     warehouseIds: warehouseScopeFilter(actor),
   };
   const total = await prfRepo.count(filters);
-  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total, params.maxPageSize);
   const rows = await prfRepo.findMany(filters, skip, pageSize, params.sort);
   return { purchaseRequests: rows.map(toPublic), total, page, pageSize, totalPages };
+}
+
+/**
+ * The SAME filtered list as a CSV, minus paging — "everything matching what I'm looking at".
+ *
+ * Delegates to listPurchaseRequests with one oversized page rather than re-deriving the filters:
+ * the warehouse scope lives in there, and an export whose scope drifts from the list's is the one
+ * bug in a report nobody spots — the file looks perfectly normal either way.
+ */
+export async function exportPurchaseRequestsCsv(
+  params: ListPurchaseRequestsParams = {},
+  actor?: AuditActor,
+): Promise<{ csv: string; capped: boolean }> {
+  // EXPORT_PAGING, not a bare pageSize: `paginate` clamps anything a client could ask for to 100,
+  // so without its maxPageSize every export silently stopped at 100 rows AND reported itself
+  // complete (capped was measured on the same clamped length). See utils/csv.
+  const { purchaseRequests } = await listPurchaseRequests({ ...params, ...EXPORT_PAGING }, actor);
+  const rows = purchaseRequests.slice(0, EXPORT_MAX);
+
+  const regional = await getRegionalSettings();
+  const date = (v: string | null) => formatDate(v, regional.dateFormat, regional.timezone);
+  const csv = toCsv(
+    [
+      "PRF Number", "Status", "Supplier", "Warehouse", "Job", "Project Ref",
+      "Quote Reference", `Quote Date (${regional.timezone})`, `Required By (${regional.timezone})`,
+      "Lines", "Currency", "Subtotal", "VAT", "Grand Total",
+      "Purchase Order", "Submitted By", `Submitted (${regional.timezone})`, "Approved By", `Approved (${regional.timezone})`,
+    ],
+    rows.map((prf) => [
+      prf.code,
+      prf.status,
+      prf.supplier?.name ?? prf.supplierName,
+      prf.warehouse?.name,
+      prf.job?.jobNumber,
+      prf.projectRef,
+      prf.quoteReference,
+      date(prf.quoteDate),
+      date(prf.requiredByDate),
+      prf.items.length,
+      prf.currency,
+      // Decimals, never the pence integers — this file is summed in a spreadsheet, where 222 under
+      // a "Subtotal" heading reports a £2.20 request as £222.
+      prf.subtotal.toFixed(2),
+      prf.vatTotal.toFixed(2),
+      prf.grandTotal.toFixed(2),
+      // The PO this request became, so a spend reconciliation can follow the pair across two files.
+      prf.purchaseOrder?.code,
+      prf.submittedBy,
+      date(prf.submittedAt),
+      prf.approvedBy,
+      date(prf.approvedAt),
+    ]),
+  );
+
+  // Audit the deliberate extraction, like the inventory and PO exports — a download of the
+  // company's committed spend is an event worth being able to point at later.
+  audit.record({ actor, action: "purchase_request.exported", targetType: "purchase_request", targetLabel: `${rows.length} rows` });
+  return { csv, capped: purchaseRequests.length > EXPORT_MAX };
+}
+
+/**
+ * The same filtered requests, ONE ROW PER LINE — what was ASKED for, item by item.
+ *
+ * Its value is the pair with the PO line export: both carry the item and the PO code, so the two
+ * files join in a spreadsheet and answer "what did we request versus what did we actually order,
+ * and at what price". Neither header export can be joined that way — the item is not in them.
+ */
+export async function exportPurchaseRequestLinesCsv(
+  params: ListPurchaseRequestsParams = {},
+  actor?: AuditActor,
+): Promise<{ csv: string; capped: boolean }> {
+  const { purchaseRequests } = await listPurchaseRequests({ ...params, ...EXPORT_PAGING }, actor);
+  const prfs = purchaseRequests.slice(0, EXPORT_MAX);
+
+  const regional = await getRegionalSettings();
+  const date = (v: string | null) => formatDate(v, regional.dateFormat, regional.timezone);
+  const all = prfs.flatMap((prf) =>
+    prf.items.map((i) => [
+      prf.code,
+      prf.status,
+      prf.supplier?.name ?? prf.supplierName,
+      prf.warehouse?.name,
+      prf.job?.jobNumber,
+      date(prf.requiredByDate),
+      // The PO this request became — the join key to the PO line export.
+      prf.purchaseOrder?.code,
+      i.itemName,
+      i.sku,
+      i.baseUnit,
+      i.quantity,
+      i.unitPrice.toFixed(2),
+      i.vatRate,
+      i.lineTotal.toFixed(2),
+      prf.currency,
+    ]),
+  );
+  // Capped on LINES, not requests: one request can carry hundreds.
+  const rows = all.slice(0, EXPORT_MAX);
+
+  const csv = toCsv(
+    [
+      "PRF Number", "Status", "Supplier", "Warehouse", "Job",
+      `Required By (${regional.timezone})`, "Purchase Order",
+      "Item", "SKU", "Unit", "Quantity", "Unit Price", "VAT %", "Line Total", "Currency",
+    ],
+    rows,
+  );
+
+  audit.record({ actor, action: "purchase_request.exported", targetType: "purchase_request", targetLabel: `${rows.length} lines` });
+  return { csv, capped: purchaseRequests.length > EXPORT_MAX || all.length > EXPORT_MAX };
 }
 
 export async function getPurchaseRequest(idOrCode: string, actor?: AuditActor): Promise<PublicPurchaseRequest> {
@@ -466,6 +587,7 @@ function emitPrfUpdated(prf: { id: string; code: string; status: string }): void
     code: prf.code,
     status: prf.status,
   });
+  emitAttentionChanged("purchase_requests");
 }
 
 export async function submitPurchaseRequest(id: string, actor?: AuditActor): Promise<PublicPurchaseRequest> {
@@ -673,12 +795,22 @@ export async function convertPurchaseRequest(id: string, actor?: AuditActor): Pr
           },
           poCode,
           lines,
+          // The PO's attachment rows point at the SAME Cloudinary files — nothing is re-uploaded.
+          // So the identity is copied verbatim, never re-derived from the URL: two rows naming one
+          // asset is what lets either be removed without destroying a file the other still shows.
+          //
+          // This list is hand-written against a generated Prisma input type, so a new column is
+          // OPTIONAL and omitting it here compiles cleanly and silently. The guard against that is
+          // "carries every attachment field the PRF row holds onto the PO row", in
+          // purchase-request.service.test.ts.
           live.attachments.map((a) => ({
             label: a.label,
             fileName: a.fileName,
             fileType: a.fileType,
             fileSizeBytes: a.fileSizeBytes,
             url: a.url,
+            publicId: a.publicId,
+            resourceType: a.resourceType,
             uploadedBy: a.uploadedBy,
           })),
         );
@@ -967,23 +1099,116 @@ function assertEditable(status: string): void {
   }
 }
 
-export async function addAttachment(prfId: string, input: PrfAttachmentInput, actor?: AuditActor): Promise<PublicPurchaseRequest> {
+/**
+ * May this request take one more document of this size?
+ *
+ * Split out because the answer is needed at TWO moments once the browser uploads straight to
+ * Cloudinary: before the file is sent, so a full request fails the user in a second rather than after
+ * a 10 MB upload; and again at attachment time, which is the answer that counts — the request can gain
+ * documents, or leave draft, while a file is in flight.
+ */
+export async function assertCanAttach(prfId: string, fileSizeBytes: number, actor?: AuditActor): Promise<void> {
   const prf = await loadOrThrow(prfId, actor);
   assertEditable(prf.status);
+  if (prf.attachments.length >= PRF_ATTACHMENT_MAX_COUNT) {
+    throw badRequest(`A purchase request can have at most ${PRF_ATTACHMENT_MAX_COUNT} documents.`);
+  }
+  const totalBytes = prf.attachments.reduce((sum, a) => sum + a.fileSizeBytes, 0);
+  if (totalBytes + fileSizeBytes > PRF_ATTACHMENT_MAX_TOTAL_BYTES) {
+    throw badRequest("Total documents on a purchase request can't exceed 40 MB.");
+  }
+}
+
+/** One already-stored asset, recorded against this request. */
+export interface AttachAssetInput {
+  label?: string | null;
+  fileName: string;
+  fileType: string;
+  fileSizeBytes: number;
+  url: string;
+  publicId: string;
+  resourceType: string;
+}
+
+/**
+ * Record an asset that is ALREADY in storage.
+ *
+ * The single place a PRF attachment row is written. Both entry points end here — the older path that
+ * uploads through this server, and the direct-upload finalize that hands over an asset the browser
+ * sent to Cloudinary itself — so the guards, the audit event and the DTO are written once and cannot
+ * drift between them.
+ *
+ * `tx` is passed by finalize, which needs this write and the removal of its pending-upload row to
+ * commit together.
+ */
+export async function attachUploadedAsset(
+  prfId: string,
+  input: AttachAssetInput,
+  actor?: AuditActor,
+  tx?: Prisma.TransactionClient,
+): Promise<PublicPurchaseRequest> {
+  const prf = await loadOrThrow(prfId, actor);
+  await assertCanAttach(prfId, input.fileSizeBytes, actor);
+  await prfRepo.addAttachment(
+    {
+      purchaseRequestId: prfId,
+      label: trimToNull(input.label),
+      fileName: input.fileName.trim(),
+      fileType: input.fileType,
+      fileSizeBytes: input.fileSizeBytes,
+      url: input.url,
+      publicId: input.publicId,
+      resourceType: input.resourceType,
+      uploadedBy: actor?.email ?? null,
+    },
+    tx,
+  );
+  // Only on the NON-transactional path. `audit.record` is fire-and-forget and writes on the default
+  // client, so it does not roll back with `tx` — a transaction that aborts after this line (a write
+  // conflict, a failed pending-row delete) would leave an "attachment_added" entry describing an
+  // attachment that no longer exists. The transactional caller records it after the commit instead;
+  // the event itself is still defined once, in `recordAttachmentAudit` below.
+  if (!tx) recordAttachmentAudit(prf, actor);
+  return getPurchaseRequest(prfId, actor);
+}
+
+/**
+ * The attachment-added audit event, in one place.
+ *
+ * Exported so the direct-upload path can fire it once its transaction has COMMITTED, without
+ * restating the action key, target type or label — the drift this module's single-write-point design
+ * exists to prevent.
+ */
+export function recordAttachmentAudit(prf: { id: string; code: string }, actor?: AuditActor): void {
+  audit.record({ actor, action: "purchase_request.attachment_added", targetType: "purchase_request", targetId: prf.id, targetLabel: prf.code });
+}
+
+/**
+ * Upload a document THROUGH this server, then record it.
+ *
+ * The original path, kept for callers that still post a data URI. The upload is all it does that
+ * `attachUploadedAsset` does not — the guards, the row, the audit event and the DTO are that
+ * function's, so there is exactly one implementation of what an attachment IS.
+ */
+export async function addAttachment(prfId: string, input: PrfAttachmentInput, actor?: AuditActor): Promise<PublicPurchaseRequest> {
+  // Before the upload, so a rejected attachment never reaches Cloudinary as an orphan.
+  await assertCanAttach(prfId, input.fileSizeBytes, actor);
   const creds = await getCloudinaryCreds();
   if (!creds) throw badRequest("File uploads aren't configured. Add Cloudinary credentials in Settings first.");
-  const url = await uploadFileToCloudinary(input.data, randomUUID(), creds);
-  await prfRepo.addAttachment({
-    purchaseRequestId: prfId,
-    label: trimToNull(input.label),
-    fileName: input.fileName.trim(),
-    fileType: input.fileType,
-    fileSizeBytes: input.fileSizeBytes,
-    url,
-    uploadedBy: actor?.email ?? null,
-  });
-  audit.record({ actor, action: "purchase_request.attachment_added", targetType: "purchase_request", targetId: prfId, targetLabel: prf.code });
-  return getPurchaseRequest(prfId, actor);
+  const asset = await uploadFileToCloudinary(input.data, randomUUID(), creds);
+  return attachUploadedAsset(
+    prfId,
+    {
+      label: input.label,
+      fileName: input.fileName,
+      fileType: input.fileType,
+      fileSizeBytes: input.fileSizeBytes,
+      url: asset.url,
+      publicId: asset.publicId,
+      resourceType: asset.resourceType,
+    },
+    actor,
+  );
 }
 
 export async function removeAttachment(prfId: string, attachmentId: string, actor?: AuditActor): Promise<PublicPurchaseRequest> {
@@ -993,5 +1218,47 @@ export async function removeAttachment(prfId: string, attachmentId: string, acto
   if (!att || att.purchaseRequestId !== prfId) throw notFound("Attachment not found.");
   await prfRepo.removeAttachment(attachmentId);
   audit.record({ actor, action: "purchase_request.attachment_removed", targetType: "purchase_request", targetId: prfId, targetLabel: prf.code });
+
+  // ── Cleanup, and the one race releaseAsset's reference count cannot see ──────────────────────
+  //
+  // INVARIANT: the asset may be destroyed only if the PRF is freshly confirmed still `draft` AFTER
+  // the row above was deleted. Anything else — submitted, approved, converted, cancelled, gone —
+  // leaves an orphaned file. An orphan costs storage; the alternative loses a document a PO may be
+  // displaying.
+  //
+  // Why a status read guards a Cloudinary delete: converting a PRF copies its attachments' identity
+  // onto the new PO's rows rather than re-uploading the files, so one asset ends up named by two
+  // rows. releaseAsset counts those references, but its count runs at a single instant, and the
+  // conversion runs in a TRANSACTION whose reads are snapshot-based:
+  //
+  //   removal reads draft ─┐
+  //   submit + approve     │  conversion tx snapshot: sees approved AND sees this attachment
+  //   THIS delete commits  │  (invisible to that snapshot)
+  //   countRefs → 0        │
+  //   destroy              │
+  //                        └─ conversion COMMITS a PO row naming the file we just destroyed
+  //
+  // The two never collide on a document, so MongoDB raises no write conflict between them.
+  //
+  // The re-read closes it. For the conversion to have seen this attachment its snapshot must have
+  // read `approved`, which means the approval was already COMMITTED — and therefore visible to this
+  // read, which happens later still. So a live conversion that could copy this file always shows up
+  // here as a non-draft status. The only way this could report `draft` again is a Reopen
+  // (approved → draft), and a Reopen writes the PurchaseRequest document — the same document
+  // `setConvertedTx` writes inside the conversion transaction — so it aborts that transaction with a
+  // write conflict and rolls its PO attachment rows back with it.
+  //
+  // That last step is why `setConvertedTx` must stay INSIDE the conversion transaction alongside
+  // `createPoTx`. "the conversion writes the PRF in the same transaction as the PO attachments"
+  // in purchase-request.service.test.ts pins it.
+  const fresh = await prfRepo.findById(prfId);
+  if (fresh?.status !== "draft") {
+    console.error(
+      `[attachment] purchase_request ${prf.code} left draft during removal (now ${fresh?.status ?? "missing"}) — Cloudinary asset ${att.resourceType}/${att.publicId} left in place`,
+    );
+    return getPurchaseRequest(prfId, actor);
+  }
+  // Never throws; the attachment is already gone from the PRF whatever Cloudinary does.
+  await attachmentService.releaseAsset(att, `purchase_request ${prf.code}`);
   return getPurchaseRequest(prfId, actor);
 }

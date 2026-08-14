@@ -305,19 +305,19 @@ function WorklistSkeleton() {
           <table className="w-full text-left text-sm" style={{ minWidth: 760 }}>
             <thead>
               <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                <th className="px-4 py-3">Purchase order</th>
-                <th className="px-4 py-3">Supplier</th>
-                <th className="px-4 py-3">Delivery date</th>
-                <th className="px-4 py-3">Priority</th>
-                <th className="px-4 py-3">Remaining</th>
-                <th className="px-4 py-3" />
+                <th className="cell-y px-4">Purchase order</th>
+                <th className="cell-y px-4">Supplier</th>
+                <th className="cell-y px-4">Delivery date</th>
+                <th className="cell-y px-4">Priority</th>
+                <th className="cell-y px-4">Remaining</th>
+                <th className="cell-y px-4" />
               </tr>
             </thead>
             <tbody>
               {Array.from({ length: 6 }).map((_, i) => (
                 <tr key={i} className="border-b border-[var(--border)] last:border-0">
                   {Array.from({ length: 6 }).map((__, j) => (
-                    <td key={j} className="px-4 py-3"><Skeleton className="h-3 w-20" /></td>
+                    <td key={j} className="cell-y px-4"><Skeleton className="h-3 w-20" /></td>
                   ))}
                 </tr>
               ))}
@@ -495,12 +495,12 @@ export function ExpectedDeliveries({
           <table className="w-full text-left text-sm" style={{ minWidth: 760 }}>
             <thead>
               <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                <th className="px-4 py-3">Purchase order</th>
-                <th className="px-4 py-3">Supplier</th>
-                <th className="px-4 py-3">Delivery date</th>
-                <th className="px-4 py-3">Priority</th>
-                <th className="px-4 py-3">Remaining</th>
-                <th className="px-4 py-3" />
+                <th className="cell-y px-4">Purchase order</th>
+                <th className="cell-y px-4">Supplier</th>
+                <th className="cell-y px-4">Delivery date</th>
+                <th className="cell-y px-4">Priority</th>
+                <th className="cell-y px-4">Remaining</th>
+                <th className="cell-y px-4" />
               </tr>
             </thead>
             <tbody>
@@ -509,12 +509,12 @@ export function ExpectedDeliveries({
                 const badge = urgencyBadge(row);
                 return (
                   <tr key={po.id} className="border-b border-[var(--border)] align-top last:border-0">
-                    <td className="px-4 py-3">
+                    <td className="cell-y px-4">
                       <a href={`/dashboard/purchase-orders/${po.code}`} className="font-mono text-xs font-bold text-[var(--accent)] hover:underline">{po.code}</a>
                       <div className="mt-1"><PoStatusBadge status={po.status} /></div>
                     </td>
-                    <td className="px-4 py-3 font-semibold text-[var(--ink)]">{po.supplierName ?? po.supplier?.name ?? "—"}</td>
-                    <td className="px-4 py-3">
+                    <td className="cell-y px-4 font-semibold text-[var(--ink)]">{po.supplierName ?? po.supplier?.name ?? "—"}</td>
+                    <td className="cell-y px-4">
                       {row.dateIso ? (
                         <>
                           <span className={row.bucket === "overdue" ? "font-semibold text-[var(--neg)]" : "text-[var(--muted)]"}>{formatDate(row.dateIso)}</span>
@@ -532,12 +532,12 @@ export function ExpectedDeliveries({
                           survives filtering and sorting without a header to anchor it. */}
                       {badge && <span className="ml-1.5 rounded-full bg-[var(--neg)]/10 px-1.5 py-0.5 text-[10px] font-bold text-[var(--neg)]">{badge}</span>}
                     </td>
-                    <td className="px-4 py-3 text-xs text-[var(--muted)]">{PO_PRIORITY_LABELS[po.priority]}</td>
-                    <td className="px-4 py-3">
+                    <td className="cell-y px-4 text-xs text-[var(--muted)]">{PO_PRIORITY_LABELS[po.priority]}</td>
+                    <td className="cell-y px-4">
                       <span className="font-bold text-[var(--ink)]">{remaining}</span>
                       <span className="text-[var(--muted)]"> / {ordered} remaining</span>
                     </td>
-                    <td className="px-4 py-3">
+                    <td className="cell-y px-4">
                       {canReceive && (
                         <button
                           type="button"
@@ -566,10 +566,8 @@ export function ExpectedDeliveries({
             </tbody>
           </table>
         </div>
-      </div>
-
-      <div className="shrink-0">
         <Pagination
+          embedded
           page={Math.min(page, totalPages)}
           totalPages={totalPages}
           total={matchCount}

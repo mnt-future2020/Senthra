@@ -4,6 +4,7 @@ import * as React from "react";
 import { Loader2, Plug } from "lucide-react";
 
 import * as settingsService from "@/services/settings.service";
+import { useDashboard } from "@/hooks/useDashboard";
 import { useAuth } from "@/hooks/useAuth";
 import { SettingsCard } from "@/components/dashboard/settings/ui/SettingsCard";
 import { ReadOnlyNotice } from "@/components/dashboard/settings/ui/ReadOnlyNotice";
@@ -22,7 +23,12 @@ export function IntegrationsSection() {
   const [clientSecret, setClientSecret] = React.useState("");
   const [secretSet, setSecretSet] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
+  // ERRORS ONLY. A failure has to stay on screen until it is fixed; the success is a moment and
+  // goes to a toast. Keeping both here left the receipt under the form while the user typed new
+  // changes into it — a "saved" that had stopped being true, and this card has no dirty bar to
+  // contradict it.
   const [msg, setMsg] = React.useState<Msg>(null);
+  const { pushToast } = useDashboard();
 
   React.useEffect(() => {
     (async () => {
@@ -49,7 +55,7 @@ export function IntegrationsSection() {
       });
       setSecretSet(settings.googleClientSecretSet);
       setClientSecret("");
-      setMsg({ type: "success", text: "Google settings saved." });
+      pushToast("Google settings saved.");
     } catch (err) {
       setMsg({
         type: "error",

@@ -16,12 +16,27 @@ const MAX_PAGE_SIZE = 100;
 
 /**
  * Clamp a raw (page, pageSize) request against a known total.
- * - pageSize: trunc, then bounded to [1, MAX_PAGE_SIZE], defaulting to 20 when absent/NaN.
+ * - pageSize: trunc, then bounded to [1, maxPageSize], defaulting to 20 when absent/NaN.
  * - totalPages: at least 1 (an empty list is still "page 1 of 1").
  * - page: trunc, then bounded to [1, totalPages] (an out-of-range page clamps to the last).
+ *
+ * `maxPageSize` raises the cap for a SERVER-INITIATED read, and exists because of a bug this
+ * signature previously made invisible. A CSV export asks its list function for one oversized page
+ * (`pageSize: EXPORT_MAX + 1`) so it can render every matching row; the 100 above silently clamped
+ * that, so every export returned 100 rows and the `capped` flag — computed from the same clamped
+ * length — reported the file as complete. A short download nobody is told is short.
+ *
+ * It is deliberately an ARGUMENT rather than a raised constant: 100 is the right ceiling for
+ * anything a client can ask for, and only a caller that is not the client may lift it. See
+ * EXPORT_PAGING in utils/csv.ts, which is the only thing that does.
  */
-export function paginate(page: number | undefined, pageSize: number | undefined, total: number): PageBounds {
-  const size = Math.min(Math.max(Math.trunc(pageSize ?? DEFAULT_PAGE_SIZE), 1), MAX_PAGE_SIZE);
+export function paginate(
+  page: number | undefined,
+  pageSize: number | undefined,
+  total: number,
+  maxPageSize: number = MAX_PAGE_SIZE,
+): PageBounds {
+  const size = Math.min(Math.max(Math.trunc(pageSize ?? DEFAULT_PAGE_SIZE), 1), Math.max(maxPageSize, 1));
   const totalPages = Math.max(1, Math.ceil(total / size));
   const clampedPage = Math.min(Math.max(Math.trunc(page ?? 1), 1), totalPages);
   return { page: clampedPage, pageSize: size, totalPages, skip: (clampedPage - 1) * size };

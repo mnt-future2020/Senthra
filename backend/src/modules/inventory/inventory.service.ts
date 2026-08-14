@@ -16,15 +16,15 @@ import * as warehouseService from "#modules/warehouse/warehouse.service.js";
 import * as irmService from "#modules/irm/irm.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
+import { emitAttentionChanged } from "../../lib/realtime.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import type { AddStockInput, AdjustStockInput, CreateTransferInput } from "./inventory.validation.js";
-import { csvEscape } from "../../utils/csv.js";
+import { csvEscape, EXPORT_MAX } from "../../utils/csv.js";
 import { getRegionalSettings } from "#modules/settings/settings.service.js";
 import { formatDateTime } from "#modules/document/document.formatter.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
-const EXPORT_MAX = 50_000;
 
 // ── Inventory primitives (Goods In writes inbound; future Goods Out writes outbound) ──────────
 export interface ApplyMovementInput {
@@ -405,7 +405,6 @@ export async function getReorderSuggestions(actor?: AuditActor): Promise<Reorder
       plannedDemand: plannedByKey.get(key) ?? 0,
       reorderLevel: b.irmItem.reorderLevel,
       criticalLevel: b.irmItem.criticalLevel,
-      reorderQuantity: b.irmItem.reorderQuantity,
       maximumStock: b.irmItem.maximumStock,
       packSize: b.irmItem.packSize,
     });
@@ -638,6 +637,7 @@ export async function transferStock(input: CreateTransferInput, actor?: AuditAct
   );
   // Audit AFTER commit, fire-and-forget: a logging failure must never roll back a real stock move.
   audit.record({ actor, action: "inventory.transfer", targetType: "stock_transfer", targetId: transfer.id, targetLabel: transfer.code });
+  emitAttentionChanged("inventory");
   return toTransferDTO(transfer);
 }
 
@@ -678,6 +678,7 @@ export async function addStock(input: AddStockInput, actor?: AuditActor): Promis
     targetId: adjustment.id,
     targetLabel: `${adjustment.code} · +${input.quantity} ${item.name} @ ${wh.name}`,
   });
+  emitAttentionChanged("inventory");
 
   return {
     id: adjustment.id,
@@ -731,6 +732,7 @@ export async function adjustStock(input: AdjustStockInput, actor?: AuditActor): 
     targetId: adjustment.id,
     targetLabel: `${adjustment.code} · −${input.quantity} ${item.name} @ ${wh.name}`,
   });
+  emitAttentionChanged("inventory");
 
   return {
     id: adjustment.id,

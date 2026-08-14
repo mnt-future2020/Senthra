@@ -14,10 +14,15 @@ import type { AuditActor } from "#modules/audit/audit.service.js";
 import { sendTemplatedEmail } from "#modules/email/email.service.js";
 import { notify } from "#modules/notification/notification.service.js";
 import { roleGrants } from "#modules/role/permissions.js";
-import { emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
+import { emitAttentionChanged, emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
 import { conflict, forbidden, notFound, badRequest } from "../../utils/http-error.js";
 import { startOfDayIn } from "../../utils/filter-date.js";
-import { getCompanyTimezone } from "#modules/settings/settings.service.js";
+import { jobOverdue } from "./job-overdue.js";
+import { safeHttpUrls } from "../../utils/http-url.js";
+import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
+import { getCloudinaryCreds, getCompanyTimezone, getRegionalSettings } from "#modules/settings/settings.service.js";
+import { formatDate } from "#modules/document/document.formatter.js";
+import { EXPORT_MAX, EXPORT_PAGING, toCsv } from "../../utils/csv.js";
 import { paginate } from "../../utils/pagination.js";
 import type { CreateJobInput, JobKitLineInput, UpdateJobInput, CompleteJobInput } from "./job.validation.js";
 import * as goodsManagementService from "#modules/goods-management/goods-management.service.js";
@@ -29,6 +34,14 @@ import * as transferService from "#modules/engineer-transfer/engineer-transfer.s
 import * as kitRequestService from "#modules/job-kit-request/job-kit-request.service.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
+
+// Every office-visible job event also moves a job attention queue (awaiting
+// acceptance, rejected, overdue), so the two signals travel together through one wrapper rather than
+// each of the ~10 call sites remembering to fire both. Same shape as emitPoUpdated / emitPrfUpdated.
+function emitJobsRoom(event: string, payload: unknown): void {
+  emitToRoom(OFFICE_JOBS_ROOM, event, payload);
+  emitAttentionChanged("jobs");
+}
 
 // ── Status state machine (forward-only; backend-enforced). A job is born "assigned" (it always has
 // an engineer). Completed + Cancelled are terminal. Re-assign keeps it at "assigned". ───────────────
@@ -124,6 +137,16 @@ export interface PublicJob {
   rack: string | null;
   shelf: string | null;
   completionDate: string | null;
+  /**
+   * Past its completion date and still active — the same predicate `?status=overdue` filters on and
+   * the "Jobs overdue" badge counts. Sent so the LIST can mark the rows: a client that derived this
+   * from its own clock would draw the red marks against a different midnight than the badge counted
+   * against, for anyone not sitting in the company's timezone. Populated on the list reads only
+   * (false elsewhere, like goodsStatus).
+   */
+  overdue: boolean;
+  /** Whole days past due when `overdue`, else null. Server-derived for the same reason. */
+  daysLate: number | null;
   priority: string;
   assignedEngineerId: string | null;
   assignedEngineerName: string | null;
@@ -204,6 +227,11 @@ function toPublic(j: JobWithRelations | JobListRow): PublicJob {
     rack: j.rack,
     shelf: j.shelf,
     completionDate: iso(j.completionDate),
+    // Overwritten by the list reads, which resolve the company-timezone day boundary. Defaulting to
+    // "not overdue" is the safe direction: a detail view that never marks late is merely quiet, while
+    // one that marked late from the wrong clock would contradict the badge beside it.
+    overdue: false,
+    daysLate: null,
     priority: j.priority ?? "normal",
     assignedEngineerId: j.assignedEngineerId,
     assignedEngineerName: eng ? `${eng.firstName} ${eng.lastName}`.trim() : j.assignedEngineerName ?? null,
@@ -217,7 +245,11 @@ function toPublic(j: JobWithRelations | JobListRow): PublicJob {
     plannerName: j.plannerName,
     plannerPhone: j.plannerPhone,
     notes: j.notes,
-    attachments: j.attachments ?? [],
+    // Same scheme filter as the portal read, and for the same reason: these render as `href`s, and a
+    // row written before the validation rule existed can still hold a `javascript:`/`data:` link.
+    // Staff click their own job pages far more often than customers do, so exempting the office side
+    // would leave the bigger surface as the unguarded one.
+    attachments: safeHttpUrls(j.attachments),
     kitLines: kitLines.map((l) => ({
       id: l.id,
       lineType: l.lineType,
@@ -445,12 +477,29 @@ export interface ListJobsParams {
   page?: number;
   pageSize?: number;
   sort?: string;
+  /** Internal only — see EXPORT_PAGING. Controllers never read this from the query string. */
+  maxPageSize?: number;
 }
 
 export async function listJobs(params: ListJobsParams = {}, _actor?: AuditActor): Promise<PagedJobs> {
-  const filters = { search: params.search, status: params.status, customerId: params.customer, assignedEngineerId: params.engineer, projectId: params.project };
+  // "Overdue" is derived, not stored — resolve the company-timezone day boundary here (the service
+  // owns settings, the repository doesn't) exactly as listJobsForEngineer does.
+  //
+  // Resolved for EVERY list read, not just `?status=overdue`, because each row now carries its own
+  // `overdue` flag so the table can mark late work in place. Before that, the count in the badge was
+  // the only way to know any job was late: the Due date column rendered every date in the same grey,
+  // so "Jobs overdue 4" could only be resolved by clicking it. One settings read, already memoised.
+  const dayStart = startOfDayIn(await getCompanyTimezone(), new Date());
+  const filters = {
+    search: params.search,
+    status: params.status,
+    customerId: params.customer,
+    assignedEngineerId: params.engineer,
+    projectId: params.project,
+    overdueBefore: params.status === "overdue" ? dayStart : undefined,
+  };
   const total = await jobRepo.count(filters);
-  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total, params.maxPageSize);
   const rows = await jobRepo.findMany(filters, skip, pageSize, params.sort);
   const ids = rows.map((r) => r.id);
   // Merge each job's goods-lifecycle status + pending kit-request count in batched queries (no N+1).
@@ -462,9 +511,70 @@ export async function listJobs(params: ListJobsParams = {}, _actor?: AuditActor)
     const pub = toPublic(r);
     pub.goodsStatus = goodsStatusByJob.get(r.id) ?? "not_issued";
     pub.pendingKitRequestCount = pendingByJob.get(r.id) ?? 0;
+    Object.assign(pub, jobOverdue(r.completionDate, pub.status, dayStart));
     return pub;
   });
   return { jobs, total, page, pageSize, totalPages };
+}
+
+/**
+ * The SAME filtered list as a CSV, minus paging. Delegates to listJobs with one oversized page
+ * rather than re-deriving the filters — the derived "overdue" pseudo-status needs a company-timezone
+ * day boundary that only the service can resolve, and a second copy of that is a second thing to get
+ * wrong by an hour every BST morning.
+ */
+export async function exportJobsCsv(
+  params: ListJobsParams = {},
+  actor?: AuditActor,
+): Promise<{ csv: string; capped: boolean }> {
+  // EXPORT_PAGING, not a bare pageSize: `paginate` clamps anything a client could ask for to 100,
+  // so without its maxPageSize every export silently stopped at 100 rows AND reported itself
+  // complete (capped was measured on the same clamped length). See utils/csv.
+  const { jobs } = await listJobs({ ...params, ...EXPORT_PAGING }, actor);
+  const rows = jobs.slice(0, EXPORT_MAX);
+
+  const regional = await getRegionalSettings();
+  const date = (v: string | null) => formatDate(v, regional.dateFormat, regional.timezone);
+  const csv = toCsv(
+    [
+      "Job Number", "Name", "Type", "Status", "Priority", "Overdue",
+      "Customer", "Project", "Site", "City", "Postcode",
+      "Customer Reference", "Scheme Number", "Technology",
+      "Engineer", "Installer Type", "Supplier", "Goods Status",
+      `Completion Date (${regional.timezone})`, `Work Completed (${regional.timezone})`, `Created (${regional.timezone})`,
+    ],
+    rows.map((j) => [
+      j.jobNumber,
+      j.name,
+      j.jobType,
+      j.status,
+      j.priority,
+      // The derived flag the list marks late work with, carried into the file so a filtered "all
+      // jobs" export still says which are late — otherwise the reader has to redo the date maths
+      // in a spreadsheet, in whatever timezone their machine happens to be in.
+      j.overdue ? "Yes" : "No",
+      j.customerName,
+      j.projectName,
+      j.siteName,
+      j.city,
+      j.postcode,
+      j.customerRef,
+      j.schemeNo,
+      j.technology,
+      j.assignedEngineerName,
+      j.installerType,
+      j.supplierName,
+      j.goodsStatus,
+      date(j.completionDate),
+      date(j.completedAt),
+      date(j.createdAt),
+    ]),
+  );
+
+  // `notes`, `rejectReason` and `cancelReason` are absent: office-to-engineer and internal free
+  // text, of the kind a forwarded spreadsheet should never carry.
+  audit.record({ actor, action: "job.exported", targetType: "job", targetLabel: `${rows.length} rows` });
+  return { csv, capped: jobs.length > EXPORT_MAX };
 }
 
 // Fill in each kit line's goods tallies (issued/used/returned/remaining) + the job's goods-lifecycle
@@ -571,7 +681,7 @@ export async function createJob(input: CreateJobInput, actor?: AuditActor): Prom
     emitToUser(job.assignedEngineerId, "job:new", job); // engineer's portal list
     notify(job.assignedEngineerId, { title: "New job assigned", body: `${job.jobNumber} · ${job.name}`, data: { type: "job", jobId: job.id } });
   }
-  emitToRoom(OFFICE_JOBS_ROOM, "job:new", job); // every office Jobs-list watcher
+  emitJobsRoom("job:new", job); // every office Jobs-list watcher
   audit.record({ actor, action: "job.created", targetType: "job", targetId: created.id, targetLabel: created.jobNumber });
   notifyAssignedEngineer(job);
   return job;
@@ -843,7 +953,7 @@ export async function updateJob(id: string, input: UpdateJobInput, actor?: Audit
       emitToUser(job.assignedEngineerId, "job:new", job);
       notify(job.assignedEngineerId, { title: "New job assigned", body: `${job.jobNumber} · ${job.name}`, data: { type: "job", jobId: job.id } });
     }
-    emitToRoom(OFFICE_JOBS_ROOM, "job:new", job);
+    emitJobsRoom("job:new", job);
     audit.record({
       actor,
       action: "job.assigned",
@@ -857,7 +967,7 @@ export async function updateJob(id: string, input: UpdateJobInput, actor?: Audit
     // A plain header/kit edit (reschedule, address, kit-line change) must reach the assigned
     // engineer's open list/detail and every office watcher — dual-emit like the status transitions.
     if (job.assignedEngineerId) emitToUser(job.assignedEngineerId, "job:updated", job);
-    emitToRoom(OFFICE_JOBS_ROOM, "job:updated", job);
+    emitJobsRoom("job:updated", job);
   }
   return job;
 }
@@ -1014,7 +1124,7 @@ export async function assignJob(id: string, engineerId: string, actor?: AuditAct
     emitToUser(job.assignedEngineerId, "job:new", job);
     notify(job.assignedEngineerId, { title: "New job assigned", body: `${job.jobNumber} · ${job.name}`, data: { type: "job", jobId: job.id } });
   }
-  emitToRoom(OFFICE_JOBS_ROOM, "job:new", job);
+  emitJobsRoom("job:new", job);
   audit.record({
     actor,
     action: "job.assigned",
@@ -1083,7 +1193,7 @@ export async function cancelJob(id: string, reason: string | undefined, actor?: 
     // ("Server Change was cancelled").
     notify(pub.assignedEngineerId, { title: "Job cancelled", body: `${pub.jobNumber} · ${pub.name}`, data: { type: "job", jobId: pub.id } });
   }
-  emitToRoom(OFFICE_JOBS_ROOM, "job:updated", pub); // office Jobs-list watchers
+  emitJobsRoom("job:updated", pub); // office Jobs-list watchers
   return pub;
 }
 
@@ -1098,12 +1208,50 @@ export async function deleteJob(id: string, actor?: AuditActor): Promise<void> {
   if (!DELETABLE_STATUSES.has(existing.status)) {
     throw conflict(`A ${existing.status.replace("_", " ")} job can't be deleted — cancel it instead.`);
   }
+
+  // A job holding stock cannot be deleted, WHATEVER its status.
+  //
+  // The status list above protects a live job's history, but it was walked around in two clicks:
+  // cancelling has no stock guard and `cancelled` is deletable, so accepted → cancel → delete removed
+  // a job with units still out with the engineer. Every read filters `deletedAt: null`, so the job
+  // vanished from the goods queue and could never be scanned back or reconciled.
+  //
+  // Worse than stranding it: `jobCommittedByEngineer` also filters deleted jobs out, so those units
+  // silently stopped counting as job-committed and became FREE van stock — walking straight around the
+  // field-return guard that exists precisely to stop job stock going back that way ("else it'd be
+  // stranded", van-stock-request.service). The stock came home as anonymous van stock and the job it
+  // belonged to was gone.
+  //
+  // Measured with the SAME tally the reconcile screen uses, so it can't disagree with what the user is
+  // told to do about it: `remaining` is already capped at the engineer's real holding, which keeps a
+  // phantom shortfall (stock handed back under another job) from making a job undeletable. `misc` is
+  // excluded — free text, never stock-tracked, never returnable, so counting it would freeze such a
+  // job as undeletable for ever.
+  //
+  // The job is handed over rather than re-fetched — `existing` above is already the full record, and
+  // without it getJobKitTallies loads the whole thing again (every kit line's irmItem join and each
+  // pickup warehouse's address block) to read one scalar and four fields per line. Same reason
+  // getJobForCustomer prefetches.
+  const tallies = await goodsManagementService.getJobKitTallies(id, {
+    assignedEngineerId: existing.assignedEngineerId,
+    kitLines: existing.kitLines,
+  });
+  const outstanding = (existing.kitLines ?? [])
+    .filter((kl) => kl.lineType !== "misc")
+    .reduce((n, kl) => n + (tallies[kl.id]?.remaining ?? 0), 0);
+  if (outstanding > 0) {
+    throw conflict(
+      `This job still has ${outstanding} unit${outstanding === 1 ? "" : "s"} out with the engineer. ` +
+        `Return the stock, or write it off from Goods Management, before deleting.`,
+    );
+  }
+
   await jobRepo.softDelete(id);
   // Dual-emit (same contract as job:new): the assigned engineer isn't in OFFICE_JOBS_ROOM, so a
   // room-only emit would leave a now-deleted job sitting in their list (and 404 on click).
   const pub = toPublic(existing);
   if (existing.assignedEngineerId) emitToUser(existing.assignedEngineerId, "job:deleted", pub);
-  emitToRoom(OFFICE_JOBS_ROOM, "job:deleted", pub);
+  emitJobsRoom("job:deleted", pub);
   audit.record({ actor, action: "job.deleted", targetType: "job", targetId: id, targetLabel: existing.jobNumber });
 }
 
@@ -1120,16 +1268,24 @@ export interface ListEngineerJobsParams {
 export async function listJobsForEngineer(engineerId: string, params: ListEngineerJobsParams = {}): Promise<PagedJobs> {
   // "Today" for the derived overdue filter is a company-timezone question, so it's resolved here and
   // handed to the repository — the same boundary the dashboard card and the warehouse Due filter use.
+  // Resolved for every read, not just the overdue filter — the engineer's rows carry the same flag as
+  // the office list, so the two surfaces can never mark different jobs late.
+  const dayStart = startOfDayIn(await getCompanyTimezone(), new Date());
   const filters = {
     status: params.status,
     search: params.search,
-    overdueBefore: params.status === "overdue" ? startOfDayIn(await getCompanyTimezone(), new Date()) : undefined,
+    overdueBefore: params.status === "overdue" ? dayStart : undefined,
   };
   const total = await jobRepo.countByEngineer(engineerId, filters);
   const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
   // LIST projection (no kit lines) — the engineer's list renders only header fields.
   const rows = await jobRepo.findManyByEngineerList(engineerId, filters, skip, pageSize, params.sort);
-  return { jobs: rows.map(toPublic), total, page, pageSize, totalPages };
+  const jobs = rows.map((r) => {
+    const pub = toPublic(r);
+    Object.assign(pub, jobOverdue(r.completionDate, pub.status, dayStart));
+    return pub;
+  });
+  return { jobs, total, page, pageSize, totalPages };
 }
 
 // The engineer's ACTIVE jobs (assigned / accepted / in_progress) as slim public rows — one bounded,
@@ -1166,7 +1322,7 @@ export async function acceptJobForEngineer(engineerId: string, jobId: string, ac
   if (!updated) throw notFound("Job not found.");
 
   const job = toPublic(updated);
-  emitToRoom(OFFICE_JOBS_ROOM, "job:accepted", job); // every office Jobs-list watcher (incl. the creator)
+  emitJobsRoom("job:accepted", job); // every office Jobs-list watcher (incl. the creator)
   audit.record({ actor, action: "job.accepted", targetType: "job", targetId: updated.id, targetLabel: updated.jobNumber });
   return job;
 }
@@ -1197,7 +1353,7 @@ export async function rejectJobForEngineer(
 
   const job = toPublic(updated);
   // Notify every office Jobs-list watcher (incl. the creator), so they can reassign or cancel.
-  emitToRoom(OFFICE_JOBS_ROOM, "job:rejected", job);
+  emitJobsRoom("job:rejected", job);
   // Email the creator too — a rejection needs prompt reassignment and they may not be watching.
   notifyJobCreatorOfRejection(job, updated.createdByUserId ?? null);
   audit.record({
@@ -1237,7 +1393,7 @@ export async function startJobForEngineer(jobId: string, engineerId: string, act
   // `remaining` to cap declared usage, so a bare toPublic (all tallies 0) would leave it unusable.
   const pub = await withGoodsTallies(toPublic(updated));
   emitToUser(engineerId, "job:updated", pub);
-  emitToRoom(OFFICE_JOBS_ROOM, "job:updated", pub);
+  emitJobsRoom("job:updated", pub);
   audit.record({ actor, action: "job.started", targetType: "job", targetId: jobId, targetLabel: job.jobNumber });
   return pub;
 }
@@ -1266,7 +1422,404 @@ export async function completeJobForEngineer(jobId: string, engineerId: string, 
   // the used/remaining state, consistent with getJobForEngineer.
   const pub = await withGoodsTallies(toPublic(updated!));
   emitToUser(engineerId, "job:updated", pub);
-  emitToRoom(OFFICE_JOBS_ROOM, "job:updated", pub);
+  emitJobsRoom("job:updated", pub);
   audit.record({ actor, action: "job.completed", targetType: "job", targetId: jobId, targetLabel: job.jobNumber });
   return pub;
 }
+
+// ── Customer portal (scoped to the signed-in customer's own company) ──────────────────────────
+//
+// Two things separate this from every other read in the module, and both are deliberate:
+//
+//  1. It never returns `PublicJob`. That DTO carries `notes`, `attachments`, `cancelReason`,
+//     `rejectReason`, `plannerPhone`, `createdBy` and the engineer's email — internal to a fault.
+//     The portal gets its own narrow shape, fed by a narrow SELECT (job.repository), so a field
+//     added to Job or to PublicJob later cannot arrive here without someone deciding it should.
+//  2. It never returns the raw `status`. See PortalJobStage below.
+
+/**
+ * What a job looks like from the outside.
+ *
+ * The stored status machine has six states, three of which are about OUR staffing rather than the
+ * customer's work: `assigned` and `accepted` differ only by whether the engineer has tapped Accept,
+ * and `rejected` means they declined and the office must reassign. To the customer all three mean
+ * the same thing — the job is booked and hasn't started — so they collapse into one stage.
+ *
+ * Collapsing rather than relabelling matters. Sending `rejected` under a friendlier label would
+ * still leak the event through anything that reads the value (a saved link, a CSV, the next
+ * feature built on this payload) — and "Rejected" on a customer's own job reads as us refusing
+ * their work, which is the opposite of what happened.
+ */
+export type PortalJobStage = "scheduled" | "in_progress" | "completed" | "cancelled";
+
+const STAGE_OF: Record<string, PortalJobStage> = {
+  assigned: "scheduled",
+  accepted: "scheduled",
+  rejected: "scheduled",
+  in_progress: "in_progress",
+  completed: "completed",
+  cancelled: "cancelled",
+};
+
+/** Stored status → the stage the customer sees. Unknown statuses fall back to the least
+ *  committal stage rather than throwing: a job the customer can see is a job they should see
+ *  SOMETHING for, and a new internal state must never 500 their list. */
+export function portalStage(status: string): PortalJobStage {
+  return STAGE_OF[status] ?? "scheduled";
+}
+
+// Inverted from STAGE_OF rather than written out a second time — a hand-kept mirror is exactly the
+// kind of pair that drifts when a status is added, and the drift is silent (a status quietly absent
+// from every filter still shows in the unfiltered list, so nothing looks broken).
+const STATUSES_IN_STAGE = Object.entries(STAGE_OF).reduce<Record<string, string[]>>((acc, [status, stage]) => {
+  (acc[stage] ??= []).push(status);
+  return acc;
+}, {});
+
+/** The stages that mean "still happening" — what the portal dashboard counts. */
+const ACTIVE_STAGES: PortalJobStage[] = ["scheduled", "in_progress"];
+const ACTIVE_STATUSES = ACTIVE_STAGES.flatMap((s) => STATUSES_IN_STAGE[s] ?? []);
+
+// What the ?status filter accepts: the four stages, plus "active" as a pseudo-stage spanning two of
+// them. It exists so the dashboard's Active-jobs card can link to a list showing exactly the jobs it
+// counted — a figure the customer cannot trace is a figure they have to phone about. Resolved HERE,
+// from the same ACTIVE_STATUSES the count uses, so the card and the list cannot disagree. (Same
+// device as OPEN_REQUEST_STATUSES on the submissions list.)
+const FILTERABLE_STATUSES: Record<string, string[]> = { ...STATUSES_IN_STAGE, active: ACTIVE_STATUSES };
+
+export interface PortalJob {
+  id: string;
+  jobNumber: string;
+  name: string;
+  jobType: string;
+  technology: string | null;
+  customerRef: string | null;
+  schemeNo: string | null;
+  projectId: string;
+  projectName: string | null;
+  siteId: string | null;
+  siteName: string | null;
+  addressLine1: string | null;
+  addressLine2: string | null;
+  city: string | null;
+  county: string | null;
+  postcode: string | null;
+  country: string | null;
+  /** The date the job is due to be completed. */
+  completionDate: string | null;
+  /** When the work was actually finished. Null until it is. */
+  completedAt: string | null;
+  /**
+   * Past its due date and still live — the SAME predicate the office and engineer lists use, so the
+   * three surfaces can never disagree about whether a customer's job is late.
+   *
+   * Deliberately NO day count on this DTO, unlike the internal lists. The customer already knows the
+   * date and can do the arithmetic; a "36d late" chip on their own job turns a status into an
+   * accusation, and the portal's language is deliberately stages ("booked", "in progress") rather
+   * than our internal SLA vocabulary. What they are owed is that the date is not presented as though
+   * nothing were wrong — a red date says that, a running total performs it.
+   */
+  overdue: boolean;
+  stage: PortalJobStage;
+  /** The engineer attending, when there is one — see the note in toPortalJob. */
+  engineerName: string | null;
+  createdAt: string;
+}
+
+export interface PagedPortalJobs {
+  jobs: PortalJob[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+/** One kit line as the customer's detail table renders it — the office's own columns. */
+export interface PortalJobKitLine {
+  id: string;
+  lineType: string;
+  seCode: string | null;
+  itemName: string;
+  description: string | null;
+  warehouseName: string | null;
+  qty: number;
+  issued: number;
+  used: number;
+  returned: number;
+  remaining: number;
+}
+
+/**
+ * The detail payload — the list row plus everything the office's four cards show.
+ *
+ * A separate, wider type rather than widening PortalJob: the list is server-paged over an unbounded
+ * history, so every field added there is paid for on every row of every page. The office makes the
+ * same split (JobListRow vs JobWithRelations) for the same reason.
+ */
+export interface PortalJobDetail extends PortalJob {
+  customerName: string | null;
+  priority: string;
+  trsArea: string | null;
+  floor: string | null;
+  suite: string | null;
+  rack: string | null;
+  shelf: string | null;
+  /** Their own planner contact, snapshotted off their job pack — not one of ours. */
+  plannerName: string | null;
+  plannerPhone: string | null;
+  /** The original job-pack files, which the customer sent us. */
+  attachments: string[];
+  assignedAt: string | null;
+  acceptedAt: string | null;
+  startedAt: string | null;
+  cancelledAt: string | null;
+  /** Why the job was called off. Included where `rejectReason` is not: a cancellation is a decision
+   *  about the customer's work, a rejection is one of our engineers declining to take it. */
+  cancelReason: string | null;
+  kitLines: PortalJobKitLine[];
+}
+
+/**
+ * @param dayStart start of today in the COMPANY timezone, when the caller has resolved it.
+ *
+ * Optional because the single-job read has no reason to pay for a settings lookup — the detail page
+ * shows one date the reader is already looking at, not a list to scan. Omitted means "not overdue",
+ * which is the safe direction: a detail page that stays quiet is merely quiet, while one marking late
+ * from the wrong clock would contradict the list the customer arrived from.
+ */
+function toPortalJob(j: jobRepo.PortalJobRow, dayStart?: Date): PortalJob {
+  return {
+    id: j.id,
+    jobNumber: j.jobNumber,
+    name: j.name,
+    jobType: j.jobType,
+    technology: j.technology,
+    customerRef: j.customerRef,
+    schemeNo: j.schemeNo,
+    projectId: j.projectId,
+    // Live relation first, snapshot second — same precedence as toPublic, so a renamed project
+    // reads the same on both surfaces instead of the customer and the office quoting each other
+    // different names for it.
+    projectName: j.project?.name ?? j.projectName ?? null,
+    siteId: j.siteId,
+    siteName: j.site?.name ?? j.siteName ?? null,
+    addressLine1: j.addressLine1,
+    addressLine2: j.addressLine2,
+    city: j.city,
+    county: j.county,
+    postcode: j.postcode,
+    country: j.country,
+    completionDate: iso(j.completionDate),
+    completedAt: iso(j.completedAt),
+    // Same rule as the office and engineer lists, so all three agree about a customer's job. The day
+    // count jobOverdue also returns is deliberately dropped here — see the `overdue` field's note.
+    overdue: dayStart ? jobOverdue(j.completionDate, j.status, dayStart).overdue : false,
+    stage: portalStage(j.status),
+    // Blanked while the job is between engineers. `assignedEngineerName` is a snapshot that SURVIVES
+    // a rejection, so a rejected job still names the engineer who declined it — presenting them as
+    // the customer's engineer would be wrong twice over: they are not attending, and the customer
+    // would chase someone with no part in the job.
+    engineerName: j.status === "rejected" ? null : j.assignedEngineerName,
+    createdAt: j.createdAt.toISOString(),
+  };
+}
+
+export interface ListCustomerJobsParams {
+  /** A PortalJobStage, or the "active" pseudo-stage. Anything else is ignored (see below). */
+  status?: string;
+  search?: string;
+  sort?: string;
+  page?: number;
+  pageSize?: number;
+  /** Internal only — see EXPORT_PAGING. Controllers never read this from the query string. */
+  maxPageSize?: number;
+}
+
+/**
+ * The customer's own jobs, paged. Scoped by the customerId taken from the SESSION — never from the
+ * query string — so the only jobs reachable here are the signed-in company's.
+ *
+ * An unrecognised `status` widens to all stages rather than matching nothing. This value comes from
+ * a URL the customer can edit or share, and an empty table is the one response that misleads: "no
+ * jobs" is a statement about their account, not about a typo in a query string.
+ */
+export async function listJobsForCustomer(customerId: string, params: ListCustomerJobsParams = {}): Promise<PagedPortalJobs> {
+  const filters = { search: params.search, statuses: params.status ? FILTERABLE_STATUSES[params.status] : undefined };
+  const total = await jobRepo.countByCustomerPortal(customerId, filters);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total, params.maxPageSize);
+  const rows = await jobRepo.findManyByCustomerPortal(customerId, filters, skip, pageSize, params.sort);
+  // Resolved once for the page, from the COMPANY timezone — the same boundary the office and engineer
+  // lists use. A customer in another timezone must not see a different set of jobs marked late than
+  // the people working them do.
+  const dayStart = startOfDayIn(await getCompanyTimezone(), new Date());
+  return { jobs: rows.map((r) => toPortalJob(r, dayStart)), total, page, pageSize, totalPages };
+}
+
+/**
+ * The customer's own jobs as a CSV — the portal Jobs list, minus paging.
+ *
+ * Built from the SAME listJobsForCustomer the page renders, so the file cannot contain a job the
+ * screen would not have shown: the customer scope, the hidden `draft` status and the stage filter
+ * all live in there. Nothing about the columns is decided here either — they come from PortalJob,
+ * which is the shape that already excludes cost, staff contacts, internal notes and the raw status.
+ *
+ * The stage, not the stored status, for exactly the reason portalStage exists: a file is the most
+ * forwardable artifact this app produces, and "rejected" on a customer's own job would be read as
+ * us refusing their work.
+ */
+export async function exportOwnJobsCsv(
+  customerId: string,
+  params: ListCustomerJobsParams = {},
+): Promise<{ csv: string; capped: boolean }> {
+  // EXPORT_PAGING, not a bare pageSize: `paginate` clamps anything a client could ask for to 100,
+  // so without its maxPageSize every export silently stopped at 100 rows AND reported itself
+  // complete (capped was measured on the same clamped length). See utils/csv.
+  const { jobs } = await listJobsForCustomer(customerId, { ...params, ...EXPORT_PAGING });
+  const rows = jobs.slice(0, EXPORT_MAX);
+
+  const regional = await getRegionalSettings();
+  const date = (v: string | null) => formatDate(v, regional.dateFormat, regional.timezone);
+  const csv = toCsv(
+    [
+      "Job Number", "Name", "Job Type", "Technology",
+      "Your Reference", "Scheme Number",
+      "Project", "Site", "Address", "City", "Postcode",
+      "Status", "Engineer",
+      `Due (${regional.timezone})`, `Completed (${regional.timezone})`, `Raised (${regional.timezone})`,
+    ],
+    rows.map((j) => [
+      j.jobNumber,
+      j.name,
+      j.jobType,
+      j.technology,
+      // "Your reference", not "Customer reference" — on the customer's own file, "customer" is us.
+      j.customerRef,
+      j.schemeNo,
+      j.projectName,
+      j.siteName,
+      j.addressLine1,
+      j.city,
+      j.postcode,
+      j.stage,
+      j.engineerName,
+      date(j.completionDate),
+      date(j.completedAt),
+      date(j.createdAt),
+    ]),
+  );
+
+  return { csv, capped: jobs.length > EXPORT_MAX };
+}
+
+/**
+ * One of the customer's jobs, for the portal detail page.
+ *
+ * "Not found" covers every way a job can be out of reach — another company's, soft-deleted, still a
+ * draft — because they are one answer to the customer: there is no such job here. Distinguishing
+ * them would turn this into an oracle for guessing at job ids that exist but aren't theirs.
+ *
+ * The kit tallies come from goods-management in ONE batched call, exactly as the office detail does
+ * (withGoodsTallies) — the alternative, a tally lookup per line, is a round-trip per row.
+ */
+export async function getJobForCustomer(customerId: string, jobId: string): Promise<PortalJobDetail> {
+  const job = await jobRepo.findByIdForCustomer(jobId, customerId);
+  if (!job) throw notFound("Job not found.");
+
+  // The job is handed over rather than re-fetched: without it, getJobKitTallies loads the WHOLE job
+  // again — every kit line with its irmItem join and each pickup warehouse's full address block — to
+  // read four fields off it. On a remote Atlas that is a wasted round-trip on every page view.
+  const tallies = await goodsManagementService.getJobKitTallies(job.id, {
+    assignedEngineerId: job.assignedEngineerId,
+    kitLines: job.kitLines,
+  });
+  return {
+    ...toPortalJob(job),
+    customerName: job.customer?.name ?? job.customerName ?? null,
+    priority: job.priority ?? "normal",
+    trsArea: job.trsArea,
+    floor: job.floor,
+    suite: job.suite,
+    rack: job.rack,
+    shelf: job.shelf,
+    plannerName: job.plannerName,
+    plannerPhone: job.plannerPhone,
+    // Filtered, not just passed through. Validation only guards WRITES, so rows stored before the
+    // http(s) rule existed still hold whatever was typed — and this surface renders them as links in
+    // a customer's browser. Dropping the ones we can't vouch for is the only version of this that
+    // covers data already in the database. Internal-only attachments (#internal hash) are withheld.
+    attachments: safeHttpUrls(job.attachments).filter((url) => !url.toLowerCase().endsWith("#internal")),
+    assignedAt: iso(job.assignedAt),
+    acceptedAt: iso(job.acceptedAt),
+    startedAt: iso(job.startedAt),
+    cancelledAt: iso(job.cancelledAt),
+    cancelReason: job.cancelReason,
+    kitLines: job.kitLines.map((l) => {
+      // Zeroes, not nulls, for a line the warehouse has not touched — the same default the office
+      // page shows. A null would render as an em dash, which in that table means "not applicable"
+      // (misc lines), not "nothing issued yet".
+      const t = tallies[l.id];
+      return {
+        id: l.id,
+        lineType: l.lineType,
+        seCode: l.seCode,
+        itemName: l.itemName,
+        description: l.description,
+        warehouseName: l.warehouseName,
+        qty: l.qty,
+        issued: t?.issued ?? 0,
+        used: t?.used ?? 0,
+        returned: t?.returned ?? 0,
+        remaining: t?.remaining ?? 0,
+      };
+    }),
+  };
+}
+
+/** Count of the customer's jobs that are still happening — the portal dashboard's Jobs card. */
+export function countActiveJobsForCustomer(customerId: string): Promise<number> {
+  return jobRepo.countByCustomerPortal(customerId, { statuses: ACTIVE_STATUSES });
+}
+
+/**
+ * Upload a job attachment file (data URI) to Cloudinary and return its secure URL.
+ *
+ * The file lands in Cloudinary BEFORE the job is saved, which is the right way round — an upload
+ * that only committed on save would lose the file on any validation error, the failure users
+ * actually notice. Abandon the form and the asset stays there unreferenced.
+ *
+ * ## Why the identity is thrown away here, unlike PRF/PO/GRN
+ *
+ * Those three store `publicId` + `resourceType` on an attachment ROW, so removing one can address
+ * and delete its file. A job's attachments are a bare `String[]` on the Job (plus an `#internal`
+ * URL fragment marking staff-only ones), edited by replacing the whole array — there is no discrete
+ * "this attachment was removed" event to hang a cleanup on, and no row to hold identity in. Adding
+ * one means changing the field's shape, its validation, the forms and the portal payload: a module
+ * redesign, not a cleanup fix, and deliberately out of scope.
+ *
+ * So this remains DEFERRED lifecycle debt, in two parts: job attachments are never deleted, and —
+ * shared with every module — a file uploaded into an abandoned form is never reclaimed. Closing
+ * either needs the PENDING → ATTACHED lifecycle and a scheduled sweep, neither of which exists.
+ */
+export async function uploadAttachment(dataUri: string, fileName?: string): Promise<{ url: string }> {
+  if (!dataUri.startsWith("data:")) throw badRequest("Upload a valid file.");
+  const creds = await getCloudinaryCreds();
+  if (!creds) throw badRequest("Cloudinary isn't configured. Add your credentials in Settings → Integrations first.");
+
+  let baseName = "job-attach";
+  if (fileName && fileName.trim()) {
+    const nameWithoutExt = fileName.replace(/\.[^/.]+$/, "").trim();
+    const sanitized = nameWithoutExt.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+    if (sanitized) baseName = sanitized.slice(0, 60);
+  }
+  // The FULL uuid, not a slice of it. `uploadFileToCloudinary` leaves `overwrite` unset, which
+  // Cloudinary defaults to true — so a publicId two uploads can agree on means the second silently
+  // destroys the first. Truncating to 8 hex characters left 32 bits, which two files sharing a name
+  // would collide on about once in four billion: unlikely rather than impossible, and there is nothing
+  // to gain by clipping it. The readable part is the name in front.
+  const publicId = `${baseName}-${crypto.randomUUID()}`;
+
+  // Only the URL is kept — `Job.attachments` is a `String[]` with nowhere to put the rest. See above.
+  const asset = await uploadFileToCloudinary(dataUri, publicId, creds, "senthra/jobs");
+  return { url: asset.url };
+}
+

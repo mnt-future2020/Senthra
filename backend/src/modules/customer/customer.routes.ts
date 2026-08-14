@@ -7,7 +7,7 @@ import {
   requireCustomer,
   requirePermission,
 } from "../../middleware/auth.middleware.js";
-import { writeLimiter, bulkWriteLimiter } from "../../middleware/rateLimit.middleware.js";
+import { writeLimiter, bulkWriteLimiter, exportLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import {
   adminStockRequestSchema,
@@ -36,6 +36,8 @@ const adminRouter = Router();
 adminRouter.use(requireAuth);
 
 adminRouter.get("/", requirePermission("customers.view"), customerController.listCustomers);
+// BEFORE any "/:id" route — otherwise "export.csv" is parsed as an id and 404s on lookup.
+adminRouter.get("/export.csv", requirePermission("customers.export"), exportLimiter, customerController.exportCustomersCsv);
 adminRouter.post(
   "/",
   requirePermission("customers.create"),
@@ -215,6 +217,14 @@ adminRouter.get(
   requireAnyPermission("customer_stock.view", "stock_requests.view"),
   customerController.listCustomerStockEntries,
 );
+// Same gate as the list it downloads — this is that list in a file, not a wider reach. Declared
+// after it because the paths differ in their LAST segment, so neither can shadow the other.
+adminRouter.get(
+  "/:id/stock-entries/export.csv",
+  requireAnyPermission("customer_stock.view", "stock_requests.view"),
+  exportLimiter,
+  customerController.exportCustomerStockCsv,
+);
 
 // Directly add a stock entry for a customer (existing stock in warehouse).
 adminRouter.post(
@@ -243,10 +253,10 @@ portalRouter.get("/stock", customerController.getOwnStock);
 // them adjacent is what stops a filter being added to one and missed on the other. (All literal
 // paths — no `:param` here for `export.csv` to be shadowed by, so declaration order is cosmetic.)
 portalRouter.get("/stock-entries", customerController.getOwnStockEntries);
-portalRouter.get("/stock-entries/export.csv", customerController.exportOwnStockCsv);
+portalRouter.get("/stock-entries/export.csv", exportLimiter, customerController.exportOwnStockCsv);
 portalRouter.get("/stock-warehouses", customerController.getOwnStockWarehouses);
 portalRouter.get("/stock-requests", customerController.getOwnStockRequests);
-portalRouter.get("/stock-requests/export.csv", customerController.exportOwnStockRequestsCsv);
+portalRouter.get("/stock-requests/export.csv", exportLimiter, customerController.exportOwnStockRequestsCsv);
 portalRouter.post(
   "/stock-requests",
   writeLimiter,

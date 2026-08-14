@@ -163,6 +163,16 @@ export const uploadImageSchema = z.object({
   image: z
     .string()
     .max(MAX_DATA_URI_CHARS, "Attachment is too large (max ~2 MB).")
-    .regex(/^data:(image\/(png|jpe?g|gif|webp|svg\+xml)|application\/pdf|application\/octet-stream)/i, "Attachment must be a base64 data URI."),
+    // `application/octet-stream` used to be accepted here. It is the media type a browser emits when it
+    // knows nothing about a file, so accepting it meant this endpoint accepted ANY payload — an
+    // executable, an archive — as long as the caller labelled it that way. The picker filters to
+    // `image/*`, and a file the browser cannot type is not one we can either.
+    .regex(
+      // Anchored to `;base64,`. Without it `data:image/png,hello` passed validation and failed later
+      // inside Cloudinary — an error from the wrong layer, wearing a message about nothing the caller
+      // did. Every other image endpoint (settings, user, customer) anchors it.
+      /^data:(image\/(png|jpe?g|gif|webp|svg\+xml)|application\/pdf);base64,/i,
+      "Attachment must be a PDF or a PNG, JPG, GIF, WEBP or SVG image.",
+    ),
 });
 export type UploadImageInput = z.infer<typeof uploadImageSchema>;

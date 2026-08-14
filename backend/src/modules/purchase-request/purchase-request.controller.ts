@@ -1,6 +1,9 @@
+import type { Request } from "express";
+
 import * as prfService from "./purchase-request.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
+import { sendCsv } from "../../utils/csv-response.js";
 import { param, queryInt, queryStr } from "../../utils/request.js";
 import type {
   CreatePurchaseRequestInput,
@@ -13,9 +16,12 @@ import type {
 } from "./purchase-request.validation.js";
 
 // GET /purchase-requests?search=&status=&statuses=&supplier=&warehouse=&job=&sort=&page=&pageSize=
-export const listPurchaseRequests = asyncHandler(async (req, res) => {
+// The list's filters, parsed once. Shared with the CSV export below so the download is exactly the
+// rows on screen — a second copy is a second place for a filter to be forgotten, and the resulting
+// file gives no sign that it is wider or narrower than the list it came from.
+function listParamsFrom(req: Request): prfService.ListPurchaseRequestsParams {
   const { search, status, statuses, supplier, warehouse, job, sort, page, pageSize } = req.query;
-  const result = await prfService.listPurchaseRequests({
+  return {
     search: queryStr(search),
     status: queryStr(status),
     statuses: typeof statuses === "string" ? statuses.split(",").map((s) => s.trim()).filter(Boolean) : undefined,
@@ -25,8 +31,21 @@ export const listPurchaseRequests = asyncHandler(async (req, res) => {
     sort: queryStr(sort),
     page: queryInt(page),
     pageSize: queryInt(pageSize),
-  }, actorFrom(req));
-  res.json(result);
+  };
+}
+
+export const listPurchaseRequests = asyncHandler(async (req, res) => {
+  res.json(await prfService.listPurchaseRequests(listParamsFrom(req), actorFrom(req)));
+});
+
+// GET /purchase-requests/export.csv — the same filtered list as a download (paging ignored).
+export const exportPurchaseRequestsCsv = asyncHandler(async (req, res) => {
+  sendCsv(res, "purchase-requests", await prfService.exportPurchaseRequestsCsv(listParamsFrom(req), actorFrom(req)));
+});
+
+// GET /purchase-requests/export-lines.csv — the same requests, ONE ROW PER LINE.
+export const exportPurchaseRequestLinesCsv = asyncHandler(async (req, res) => {
+  sendCsv(res, "purchase-request-lines", await prfService.exportPurchaseRequestLinesCsv(listParamsFrom(req), actorFrom(req)));
 });
 
 // GET /purchase-requests/:id  (id or code)

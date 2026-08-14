@@ -11,6 +11,9 @@ import { AlertTriangle, History, Search } from "lucide-react";
 import Image from "next/image";
 
 import * as gmService from "@/services/goodsManagement.service";
+import * as stockPositionService from "@/services/stockPosition.service";
+import { useAuth } from "@/hooks/useAuth";
+import { ExportButton } from "@/components/ui/ExportButton";
 import type { DamagedHistory, DamagedRow } from "@/types/goodsManagement";
 import { ImageLightbox } from "@/components/ui/ImageLightbox";
 import { Modal } from "@/components/ui/Modal";
@@ -67,6 +70,7 @@ export function DamagedStockView({
   customerId?: string;
   fill?: boolean;
 }) {
+  const { can } = useAuth();
   const [search, setSearch] = React.useState("");
   const [rows, setRows] = React.useState<DamagedRow[] | null>(null);
   const [error, setError] = React.useState<string | null>(null);
@@ -134,17 +138,17 @@ export function DamagedStockView({
     <table className="w-full text-left text-sm" style={{ minWidth: 700 }}>
       <thead className={fill ? "sticky top-0 z-10 bg-[var(--surface)]" : undefined}>
         <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-              <th className="px-4 py-3">Photo</th>
-              <th className="px-4 py-3">Item</th>
-              <th className="px-4 py-3">Owner</th>
-              {warehouseId ? null : <th className="px-4 py-3">Warehouse</th>}
+              <th className="cell-y px-4">Photo</th>
+              <th className="cell-y px-4">Item</th>
+              <th className="cell-y px-4">Owner</th>
+              {warehouseId ? null : <th className="cell-y px-4">Warehouse</th>}
               {/* "Latest" is load-bearing: the row aggregates every report for this item, so the
                   reason shown belongs to the most recent one only. The History column is where the
                   earlier ones live. */}
-              <th className="px-4 py-3">Latest reason</th>
-              <th className="px-4 py-3 text-right">Qty</th>
-              <th className="px-4 py-3">Last updated</th>
-              <th className="px-4 py-3"><span className="sr-only">History</span></th>
+              <th className="cell-y px-4">Latest reason</th>
+              <th className="cell-y px-4 text-right">Qty</th>
+              <th className="cell-y px-4">Last updated</th>
+              <th className="cell-y px-4"><span className="sr-only">History</span></th>
             </tr>
           </thead>
           <tbody>
@@ -154,9 +158,9 @@ export function DamagedStockView({
               // Skeleton rows — same layout as real data, so the table doesn't jump when it loads.
               Array.from({ length: 6 }).map((_, i) => (
                 <tr key={i} className="border-b border-[var(--border)] last:border-0">
-                  <td className="px-4 py-3"><Skeleton className="h-10 w-10 rounded-lg" /></td>
+                  <td className="cell-y px-4"><Skeleton className="h-10 w-10 rounded-lg" /></td>
                   {Array.from({ length: cols - 1 }).map((__, j) => (
-                    <td key={j} className="px-4 py-3"><Skeleton className={`h-4 ${j === cols - 2 ? "w-16" : "w-24"}`} /></td>
+                    <td key={j} className="cell-y px-4"><Skeleton className={`h-4 ${j === cols - 2 ? "w-16" : "w-24"}`} /></td>
                   ))}
                 </tr>
               ))
@@ -187,7 +191,7 @@ export function DamagedStockView({
               pageRows.map((row) => (
                 <tr key={row.id} className="border-b border-[var(--border)] align-middle last:border-0">
                   {/* Photo thumbnail — opens the in-app preview modal */}
-                  <td className="px-4 py-3">
+                  <td className="cell-y px-4">
                     {row.photoUrl ? (
                       <button
                         type="button"
@@ -206,17 +210,17 @@ export function DamagedStockView({
                       <span className="text-xs text-[var(--faint)]">—</span>
                     )}
                   </td>
-                  <td className="px-4 py-3 font-semibold text-[var(--ink)]">{row.itemName}</td>
-                  <td className="px-4 py-3">
+                  <td className="cell-y px-4 font-semibold text-[var(--ink)]">{row.itemName}</td>
+                  <td className="cell-y px-4">
                     <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${row.ownerType === "company" ? "bg-[var(--accent)]/12 text-[var(--accent)]" : "bg-indigo-500/12 text-indigo-600"}`}>
                       {row.ownerType === "company" ? "Company (IRM)" : "Customer"}
                     </span>
                   </td>
-                  {warehouseId ? null : <td className="px-4 py-3 text-xs text-[var(--muted)]">{row.warehouseName ?? "—"}</td>}
-                  <td className="max-w-[180px] px-4 py-3 text-xs text-[var(--muted)]">{row.reason ?? <span className="text-[var(--faint)]">—</span>}</td>
-                  <td className="px-4 py-3 text-right font-bold text-[var(--neg)]">{row.quantity}</td>
-                  <td className="px-4 py-3 text-xs text-[var(--muted)]">{fmtDate(row.updatedAt)}</td>
-                  <td className="px-4 py-3">
+                  {warehouseId ? null : <td className="cell-y px-4 text-xs text-[var(--muted)]">{row.warehouseName ?? "—"}</td>}
+                  <td className="max-w-[180px] cell-y px-4 text-xs text-[var(--muted)]">{row.reason ?? <span className="text-[var(--faint)]">—</span>}</td>
+                  <td className="cell-y px-4 text-right font-bold text-[var(--neg)]">{row.quantity}</td>
+                  <td className="cell-y px-4 text-xs text-[var(--muted)]">{fmtDate(row.updatedAt)}</td>
+                  <td className="cell-y px-4">
                     <div className="flex justify-end">
                       <button
                         type="button"
@@ -240,15 +244,37 @@ export function DamagedStockView({
     <div className={fill ? "flex h-full flex-col gap-4" : "space-y-4"}>
       {/* Shown once there's data to search — a clean pool gets its empty table, not a dead control. */}
       {rows && rows.length > 0 && (
-        <div className="relative w-full shrink-0 sm:max-w-xs">
-          <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
-          <input
-            value={search}
-            onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-            placeholder="Search item, reason…"
-            aria-label="Search damaged stock"
-            className={`${toolbarInputCls} pl-9`}
-          />
+        <div className="flex shrink-0 flex-col gap-2 sm:flex-row sm:items-center">
+          <div className="relative w-full sm:max-w-xs">
+            <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
+            <input
+              value={search}
+              onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+              placeholder="Search item, reason…"
+              aria-label="Search damaged stock"
+              className={`${toolbarInputCls} pl-9`}
+            />
+          </div>
+          {/* Damaged stock IS exportable — it is a position like any other — but only from the
+              Inventory screen with the right filter set, which nobody standing on this page would
+              think to do. Reuses the positions export filtered to `location=damaged` rather than
+              adding an endpoint, exactly as the engineer lens does: same rows, same permission, no
+              second definition of "damaged stock" to drift from the one the Hub already uses.
+
+              The page's OWN scope goes with it. This component is embedded in CustomerDetail and
+              WarehouseDetail, and the table above is loaded with that id — an export that sent only
+              `location=damaged` handed the operator every OTHER customer's damaged stock from a
+              button sitting on one customer's page. The service's params are `warehouse`/`customer`,
+              not the prop names, which is exactly how the omission went unnoticed.
+
+              The search box filters the loaded rows in memory, so it is NOT sent. */}
+          {can("inventory.export") && (
+            <ExportButton
+              label="Export damaged"
+              title={warehouseId || customerId ? "Export this damaged-stock list to CSV" : "Export every damaged-stock holding to CSV"}
+              onExport={() => stockPositionService.exportPositionsCsv({ location: "damaged", warehouse: warehouseId, customer: customerId })}
+            />
+          )}
         </div>
       )}
 
@@ -258,17 +284,22 @@ export function DamagedStockView({
           scroll container at the table's full width and drags the whole PAGE into a horizontal
           scroll on a phone, while every visible element stays inside the viewport. See the note in
           van-requests/vanRequestUi.tsx. */}
+      {/* Pagination lives INSIDE the card in both layouts — as a card of its own it paid a second
+          border, a shadow and the parent's flex gap for a footer belonging to the table above it. */}
       {fill ? (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
           <div className="relative min-h-0 flex-1 overflow-auto">{table}</div>
+          {rows && total > 0 ? (
+            <Pagination embedded page={safePage} totalPages={totalPages} total={total} label="damaged items" onPage={setPage} />
+          ) : null}
         </div>
       ) : (
-        <div className="relative overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">{table}</div>
-      )}
-
-      {rows && total > 0 && (
-        <div className="shrink-0">
-          <Pagination page={safePage} totalPages={totalPages} total={total} label="damaged items" onPage={setPage} />
+        <div className="relative rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+          {/* Scroller inside, so the footer isn't dragged sideways with a wide table. */}
+          <div className="overflow-x-auto">{table}</div>
+          {rows && total > 0 ? (
+            <Pagination embedded page={safePage} totalPages={totalPages} total={total} label="damaged items" onPage={setPage} />
+          ) : null}
         </div>
       )}
 

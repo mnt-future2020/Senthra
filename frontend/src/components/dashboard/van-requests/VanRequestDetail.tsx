@@ -18,6 +18,7 @@ import { fmtDateTime } from "@/components/dashboard/portal/portalUi";
 import { ScannerInput } from "@/components/dashboard/goods-management/ScannerInput";
 import { VanStockAttachments, VanStockCompletionBadge, VanStockPostings, VanStockWalkInBadge, linesForWarehouse, warehouseStatus } from "./vanRequestUi";
 import type { Msg } from "@/components/ui/types";
+import { uploadDirectForUrl } from "@/lib/upload";
 
 // Review + fulfil panel for one van stock request. Three zones by state:
 //   info (always) · review (pending restock: warehouse + trims + approve/decline)
@@ -432,19 +433,29 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
   // clears BOTH, so a preview can never imply evidence the posting doesn't actually carry.
   const onDamagePhoto = async (lineId: string, file: File | null) => {
     if (!file) return;
+    // A local preview while the file uploads. `createObjectURL` rather than a base64 read: the
+    // bytes go straight to Cloudinary now, so there is no data URI to reuse for this.
+    //
+    // It must be REVOKED. An object URL pins the whole File in memory until the document is
+    // discarded — the old data-URL string was just a string and could be collected once dropped, so
+    // the switch to createObjectURL quietly turned "picked a photo" into "held a photo for the rest
+    // of the session", every retry adding another. Revoked in `finally`, after the hosted URL has
+    // replaced it on success and after it is cleared on failure, so nothing is ever revoked while
+    // still on screen.
+    const preview = URL.createObjectURL(file);
     try {
-      const dataUri = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result));
-        reader.onerror = () => reject(new Error("Could not read the photo."));
-        reader.readAsDataURL(file);
-      });
-      setEntry(lineId, { damagePhotoDataUrl: dataUri, uploading: true });
-      const url = await vanStockSvc.uploadVanStockDamagePhoto(dataUri);
-      setEntry(lineId, { damagePhotoUrl: url, uploading: false });
+      setEntry(lineId, { damagePhotoDataUrl: preview, uploading: true });
+      const url = await uploadDirectForUrl({ purpose: "vsr_damage_photo", file });
+      // The thumbnail renders from `damagePhotoDataUrl`, so the preview is POINTED AT the hosted URL
+      // rather than cleared — clearing it would drop the thumbnail and the Remove button back to an
+      // "Attach photo" prompt for a photo that had in fact uploaded. This is the "swap in the hosted
+      // URL" the handler's own comment describes, and it is what makes the blob safe to revoke.
+      setEntry(lineId, { damagePhotoUrl: url, damagePhotoDataUrl: url, uploading: false });
     } catch (err) {
       setEntry(lineId, { damagePhotoDataUrl: undefined, damagePhotoUrl: undefined, uploading: false });
       pushToast(err instanceof Error ? err.message : "Could not upload the photo.", "alert");
+    } finally {
+      URL.revokeObjectURL(preview);
     }
   };
 
@@ -629,15 +640,15 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
             <table className="w-full min-w-[680px] text-left text-sm">
               <thead>
                 <tr className="border-b border-[var(--border)] bg-[var(--surface-2)] text-[10px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                  <th className="px-4 py-3">Item</th>
-                  <th className="px-4 py-3">Requested</th>
-                  <th className="px-4 py-3">{isReviewZone ? "Approve qty" : "Approved"}</th>
+                  <th className="cell-y px-4">Item</th>
+                  <th className="cell-y px-4">Requested</th>
+                  <th className="cell-y px-4">{isReviewZone ? "Approve qty" : "Approved"}</th>
                   {isReviewZone ? (
-                    <th className="px-4 py-3">Source warehouse</th>
+                    <th className="cell-y px-4">Source warehouse</th>
                   ) : req.type === "restock" && (req.status === "approved" || req.status === "partially_fulfilled") ? (
-                    <th className="px-4 py-3">Source</th>
+                    <th className="cell-y px-4">Source</th>
                   ) : null}
-                  <th className="px-4 py-3">Fulfilled</th>
+                  <th className="cell-y px-4">Fulfilled</th>
                 </tr>
               </thead>
               <tbody>
@@ -650,13 +661,13 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
                         code is NOT printed underneath: it is on the hover tooltip and in the "Copied
                         IRM-0004" confirmation, so a permanent second line would repeat what the row
                         already offers and push every row taller for it. */}
-                    <td className="px-4 py-3">
+                    <td className="cell-y px-4">
                       <div className="font-semibold text-[var(--ink)]">
                         {l.code ? <CopyableCode code={l.code} label={l.itemName} className="text-left" onCopied={(c) => pushToast(`Copied ${c}`)} /> : l.itemName}
                       </div>
                     </td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{l.requestedQty}</td>
-                    <td className="px-4 py-3">
+                    <td className="cell-y px-4 text-[var(--muted)]">{l.requestedQty}</td>
+                    <td className="cell-y px-4">
                       {isReviewZone && lineIsMine(l) ? (
                         <input
                           type="number"
@@ -736,7 +747,7 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
                         )}
                       </td>
                     ) : req.type === "restock" && (req.status === "approved" || req.status === "partially_fulfilled") ? (
-                      <td className="px-4 py-3 text-[11px] text-[var(--muted)]">
+                      <td className="cell-y px-4 text-[11px] text-[var(--muted)]">
                         {l.approvedQty === 0 ? (
                           <span className="font-bold uppercase text-[var(--faint)]">Excluded</span>
                         ) : (
@@ -747,7 +758,7 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
                         {l.isMine && l.sourceWarehouseId === currentWarehouseId && l.approvedQty !== 0 && <span className="ml-1 rounded bg-[var(--accent)]/10 px-1 text-[9px] font-bold uppercase text-[var(--accent)]">Yours</span>}
                       </td>
                     ) : null}
-                    <td className="px-4 py-3 text-[var(--muted)]">
+                    <td className="cell-y px-4 text-[var(--muted)]">
                       {l.fulfilledQty}
                       {/* A closed-short line used to read "approved 6 · fulfilled 0" — identical to one
                           nobody had touched. The qty makes the arithmetic add up again, and the reason

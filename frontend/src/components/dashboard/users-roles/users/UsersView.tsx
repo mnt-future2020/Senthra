@@ -18,6 +18,7 @@ import {
 
 import { useDashboard } from "@/hooks/useDashboard";
 import { useAuth } from "@/hooks/useAuth";
+import { ExportButton } from "@/components/ui/ExportButton";
 import { formatDate } from "@/lib/formatDate";
 import * as roleService from "@/services/role.service";
 import * as userService from "@/services/user.service";
@@ -282,6 +283,20 @@ export function UsersView() {
   });
 
   // Roles power the filter dropdown + the create/edit form (full list — bounded).
+  // The filters WITHOUT paging — one definition, used by the list (which adds the page) and by the
+  // CSV export (which must not). Two copies is how a download quietly stops matching the screen it
+  // was taken from, and nothing about the resulting file looks wrong.
+  const exportParams = React.useMemo(
+    () => ({
+      search: search || undefined,
+      status: statusFilter === "all" ? undefined : statusFilter,
+      roleId: roleFilter === "all" ? undefined : roleFilter,
+      // "newest" is the server default → omit it so the cache key matches the seed.
+      sort: sort === "newest" ? undefined : sort,
+    }),
+    [search, statusFilter, roleFilter, sort],
+  );
+
   React.useEffect(() => {
     let active = true;
     (async () => {
@@ -311,15 +326,7 @@ export function UsersView() {
   React.useEffect(() => {
     let active = true;
     (async () => {
-      const params = {
-        page,
-        pageSize: PAGE_SIZE,
-        search: search || undefined,
-        status: statusFilter === "all" ? undefined : statusFilter,
-        roleId: roleFilter === "all" ? undefined : roleFilter,
-        // "newest" is the server default → omit it so the cache key matches the seed.
-        sort: sort === "newest" ? undefined : sort,
-      };
+      const params = { ...exportParams, page, pageSize: PAGE_SIZE };
       // Show cached data for this exact query immediately (no skeleton), then refetch.
       const cached = userService.getCachedUsers(params);
       if (active && cached) {
@@ -344,7 +351,7 @@ export function UsersView() {
     return () => {
       active = false;
     };
-  }, [page, search, statusFilter, roleFilter, sort, refreshKey]);
+  }, [exportParams, page, refreshKey]);
 
   const refresh = () => setRefreshKey((k) => k + 1);
 
@@ -390,7 +397,7 @@ export function UsersView() {
     Boolean(search) || statusFilter !== "all" || roleFilter !== "all";
 
   return (
-    <div className="flex h-full flex-col gap-5">
+    <div className="stack flex h-full flex-col">
       {/* Toolbar */}
       <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center">
         <div className="relative w-full sm:max-w-xs">
@@ -435,6 +442,14 @@ export function UsersView() {
             { value: "name", label: "Name (A–Z)" },
           ]}
         />
+        {/* Before "New user" and outside its ml-auto, so the primary action stays hard right. */}
+        {can("users.export") && (
+          <ExportButton
+            onExport={() => userService.exportUsersCsv(exportParams)}
+            disabled={users.length === 0}
+            title="Export the filtered staff list to CSV"
+          />
+        )}
         {canCreate && (
           <button
             onClick={() => router.push("/dashboard/users/new")}
@@ -536,19 +551,16 @@ export function UsersView() {
             </table>
           </div>
         )}
+        {!showSkeleton && !error && total > 0 && (
+            <Pagination embedded
+              page={page}
+              totalPages={totalPages}
+              total={total}
+              label="users"
+              onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)}
+            />
+        )}
       </div>
-
-      {!showSkeleton && !error && total > 0 && (
-        <div className="shrink-0">
-          <Pagination
-            page={page}
-            totalPages={totalPages}
-            total={total}
-            label="users"
-            onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)}
-          />
-        </div>
-      )}
 
       <ConfirmDialog
         open={confirm.open}

@@ -4,6 +4,7 @@ import * as React from "react";
 import { Loader2, PenLine, Trash2, Upload } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
+import { useDashboard } from "@/hooks/useDashboard";
 import * as userService from "@/services/user.service";
 import { MAX_IMAGE_BYTES, readFileAsDataUrl } from "@/lib/image";
 
@@ -14,7 +15,11 @@ export function SignatureCard({ style }: { style?: React.CSSProperties }) {
   const { user } = useAuth();
   const [url, setUrl] = React.useState<string | null>(user?.signatureUrl ?? null);
   const [busy, setBusy] = React.useState(false);
-  const [msg, setMsg] = React.useState<{ type: "success" | "error"; text: string } | null>(null);
+  // ERRORS ONLY. A failure has to stay on screen until it is fixed; the success is a moment and goes
+  // to a toast. Keeping both here meant "Document signature saved." stayed under the card
+  // indefinitely — including after the signature was replaced or removed again.
+  const [msg, setMsg] = React.useState<{ type: "error"; text: string } | null>(null);
+  const { pushToast } = useDashboard();
   const fileRef = React.useRef<HTMLInputElement>(null);
 
   if (!user) return null;
@@ -34,7 +39,7 @@ export function SignatureCard({ style }: { style?: React.CSSProperties }) {
       const data = await readFileAsDataUrl(file);
       const updated = await userService.uploadMySignature(data, file.name);
       setUrl(updated.signatureUrl);
-      setMsg({ type: "success", text: "Document signature saved." });
+      pushToast("Document signature saved.");
     } catch (e) {
       setMsg({ type: "error", text: e instanceof Error ? e.message : "Upload failed." });
     } finally {
@@ -49,7 +54,7 @@ export function SignatureCard({ style }: { style?: React.CSSProperties }) {
     try {
       const updated = await userService.removeMySignature();
       setUrl(updated.signatureUrl);
-      setMsg({ type: "success", text: "Document signature removed." });
+      pushToast("Document signature removed.");
     } catch (e) {
       setMsg({ type: "error", text: e instanceof Error ? e.message : "Remove failed." });
     } finally {
@@ -108,11 +113,7 @@ export function SignatureCard({ style }: { style?: React.CSSProperties }) {
       </div>
 
       <p className="mt-2 text-[11px] text-[var(--faint)]">PNG or JPG, max 2 MB. A transparent PNG looks best on documents.</p>
-      {msg && (
-        <p className={`mt-3 text-xs font-semibold ${msg.type === "success" ? "text-[var(--pos)]" : "text-[var(--neg)]"}`}>
-          {msg.text}
-        </p>
-      )}
+      {msg && <p className="mt-3 text-xs font-semibold text-[var(--neg)]">{msg.text}</p>}
 
       <input
         ref={fileRef}

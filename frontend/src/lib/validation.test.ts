@@ -5,6 +5,7 @@ import {
   earliestDobIso,
   formatUkPostcode,
   isCalendarDate,
+  isHttpUrl,
   latestDobIso,
   latestJoiningIso,
   todayIso,
@@ -12,6 +13,41 @@ import {
   validateDateOfJoining,
   yearsBetween,
 } from "./validation";
+
+// MUST agree case-for-case with the backend's utils/http-url.ts, which job.validation.ts enforces on
+// save. These cases are the same ones asserted in job.validation.test.ts: this side names the box
+// that's wrong before the request, the server is the check the request can't skip, and a
+// disagreement either blocks a link the server would have taken or waves through one it won't.
+describe("isHttpUrl", () => {
+  it("accepts http and https links", () => {
+    expect(isHttpUrl("http://docs.test/a.pdf")).toBe(true);
+    expect(isHttpUrl("https://docs.test/b.png")).toBe(true);
+  });
+
+  it("tolerates surrounding whitespace, like the form's trimmed value", () => {
+    expect(isHttpUrl("  https://docs.test/a.pdf  ")).toBe(true);
+  });
+
+  // The whole point of a scheme allow-list: both of these are perfectly well-formed URLs, so any
+  // shape-based check passes them, and both execute when the link is clicked.
+  it("REJECTS javascript: and data:, which execute when clicked", () => {
+    expect(isHttpUrl("javascript:alert(1)")).toBe(false);
+    expect(isHttpUrl("data:text/html,<script>alert(1)</script>")).toBe(false);
+  });
+
+  it("REJECTS other schemes that aren't a web link", () => {
+    expect(isHttpUrl("file:///c:/drawings/rev-c.pdf")).toBe(false);
+    expect(isHttpUrl("ftp://files.test/a.pdf")).toBe(false);
+  });
+
+  // A relative path lands here too, and that is right: an attachment must say where it lives.
+  it("REJECTS things that aren't links at all", () => {
+    expect(isHttpUrl("drawing-rev-c.pdf")).toBe(false);
+    expect(isHttpUrl("/uploads/drawing.pdf")).toBe(false);
+    expect(isHttpUrl("ask Dave for the drawing")).toBe(false);
+    expect(isHttpUrl("")).toBe(false);
+  });
+});
 
 // This MUST behave identically to the backend's utils/postcode.ts — the client formats for
 // instant feedback, the server formats for storage, and a disagreement between the two would

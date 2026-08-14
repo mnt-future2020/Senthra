@@ -56,7 +56,27 @@ const sharedCustomerFields = {
   country: z.string().trim().max(80).optional(),
   status: statusEnum.optional(),
   // Company logo as a data URI (uploaded to Cloudinary by the service).
-  logo: z.string().startsWith("data:image/", "Logo must be an image data URI.").optional(),
+  //
+  // Held to the same rule as a user's avatar, not to the branding rule — the two are the closest
+  // analogues in the app: both are picked from the same form helper (lib/image.ts, 2 MB client-side),
+  // both are stored on a record rather than in Settings, and both render through <Avatar>. Branding
+  // is deliberately looser because a favicon needs ICO and an admin sets it once.
+  //
+  // RASTER ONLY. SVG is excluded for the reason user.validation gives: it can carry script, and these
+  // land on a public Cloudinary URL that opens in its own tab, where an <img> tag's protection does
+  // not apply. GIF/WEBP are allowed because the avatar rule allows them and a logo is the same kind
+  // of picture.
+  //
+  // The size cap matters as much as the type. This field had neither, so the only ceiling was the
+  // body parser's 5mb — meaning a caller could push a ~3.7 MB blob to a PAID CDN through a field the
+  // UI limits to 2 MB, and every read of that customer would serve it. base64 inflates by ~33%, so
+  // ~3 MB of characters caps the binary near 2.2 MB: above what the picker allows, below anything
+  // worth calling an upload.
+  logo: z
+    .string()
+    .max(3 * 1024 * 1024, "Logo is too large (max ~2 MB).")
+    .regex(/^data:image\/(png|jpe?g|gif|webp);base64,/i, "Logo must be a PNG, JPG, GIF or WEBP image.")
+    .optional(),
 };
 
 export const createCustomerSchema = z.object({

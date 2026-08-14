@@ -6,35 +6,11 @@ import { escapeRegex } from "../../utils/search.js";
 // Data-access layer for the Supplier master. The ONLY place Prisma is touched for
 // suppliers. Soft-deleted suppliers (deletedAt set) are excluded from normal reads.
 
-// The owner fields surfaced on a supplier read (a thin slice of User — never the whole
-// record). jobTitle + role.name drive the "Name — Role" dropdown label.
-const ownerSelect = {
-  id: true,
-  firstName: true,
-  lastName: true,
-  email: true,
-  status: true,
-  jobTitle: true,
-  role: { select: { name: true } },
-} satisfies Prisma.UserSelect;
-
 export type SupplierWithRelations = Supplier & {
-  owner:
-    | {
-        id: string;
-        firstName: string;
-        lastName: string;
-        email: string;
-        status: string;
-        jobTitle: string | null;
-        role: { name: string } | null;
-      }
-    | null;
   supplierType: { id: string; name: string } | null;
 };
 
 const withRelations = {
-  owner: { select: ownerSelect },
   supplierType: { select: { id: true, name: true } },
 } satisfies Prisma.SupplierInclude;
 
@@ -103,41 +79,14 @@ export function findByCode(code: string): Promise<SupplierWithRelations | null> 
   return prisma.supplier.findFirst({ where: { code, deletedAt: null }, include: withRelations });
 }
 
-// Unchecked update input so the service can set the scalar `ownerUserId` / `typeId` FKs
-// directly (clear with null / assign an id) instead of going through relation
-// connect/disconnect — simpler and avoids disconnect-on-null edge cases.
+// Unchecked update input so the service can set the scalar `typeId` FK directly (clear with
+// null / assign an id) instead of relation connect/disconnect.
 export function update(id: string, data: Prisma.SupplierUncheckedUpdateInput): Promise<SupplierWithRelations> {
   return prisma.supplier.update({ where: { id }, data, include: withRelations });
 }
 
 export function softDelete(id: string): Promise<Supplier> {
   return prisma.supplier.update({ where: { id }, data: { deletedAt: new Date() } });
-}
-
-// Active, non-deleted staff users for the owner picker (minimal slice, name-sorted).
-// jobTitle + role.name feed the "Name — Role" dropdown label.
-export function findOwnerOptions(): Promise<
-  {
-    id: string;
-    firstName: string;
-    lastName: string;
-    email: string;
-    jobTitle: string | null;
-    role: { name: string } | null;
-  }[]
-> {
-  return prisma.user.findMany({
-    where: { status: "active", deletedAt: null },
-    select: {
-      id: true,
-      firstName: true,
-      lastName: true,
-      email: true,
-      jobTitle: true,
-      role: { select: { name: true } },
-    },
-    orderBy: [{ firstName: "asc" }, { lastName: "asc" }],
-  });
 }
 
 // --- code allocation (atomic Counter, prefix "SUP") -------------------------

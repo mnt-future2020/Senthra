@@ -265,6 +265,67 @@ export function countPending(warehouseScope?: string[]): Promise<number> {
   });
 }
 
+// Approved RETURN requests still to be scanned back in at the warehouse — the counterpart of
+// countCollectibleRestocks (which is the engineer's side of an approved restock). Without this the
+// returns half of the van flow has no warehouse-side signal at all.
+export function countReturnsToScan(warehouseScope?: string[]): Promise<number> {
+  return prisma.vanStockRequest.count({
+    where: {
+      AND: [
+        { type: "return", status: { in: ["approved", "partially_fulfilled"] }, deletedAt: null },
+        ...(warehouseScope ? [belongsToWarehouses(warehouseScope)] : []),
+      ],
+    },
+  });
+}
+
+/**
+ * The two van queues split PER WAREHOUSE, for the Warehouses list's per-row count.
+ *
+ * Deliberately NOT a groupBy: "belongs to warehouse X" is the three-armed OR above, not a column, so
+ * there is nothing for Mongo to group on. Requests are read with only the four fields the rule needs
+ * and attributed in memory — and a request attributed to two warehouses is COUNTED AT BOTH, exactly as
+ * belongsToWarehouses already makes a split restock appear in every involved warehouse's queue. Row
+ * counts can therefore add up to more than the flat count; that is the truth about the work (each
+ * warehouse really does have something to do), not double counting to be netted away.
+ *
+ * Bounded by the open-request set, which is small by construction — these statuses are worked daily.
+ */
+async function attributeToWarehouses(
+  where: Prisma.VanStockRequestWhereInput,
+  warehouseScope?: string[],
+): Promise<Record<string, number>> {
+  const rows = await prisma.vanStockRequest.findMany({
+    where: { AND: [where, ...(warehouseScope ? [belongsToWarehouses(warehouseScope)] : [])] },
+    select: { status: true, warehouseId: true, preferredWarehouseId: true, lines: { select: { sourceWarehouseId: true } } },
+  });
+  const out: Record<string, number> = {};
+  const allowed = warehouseScope ? new Set(warehouseScope) : null;
+  for (const r of rows) {
+    // A set, so a request whose final warehouse ALSO sources a line cannot count twice at that one.
+    const ids = new Set<string>();
+    if (r.warehouseId) ids.add(r.warehouseId);
+    if (r.status === "pending" && r.preferredWarehouseId) ids.add(r.preferredWarehouseId);
+    for (const l of r.lines) if (l.sourceWarehouseId) ids.add(l.sourceWarehouseId);
+    for (const id of ids) {
+      if (allowed && !allowed.has(id)) continue; // a scoped actor never sees a sibling warehouse's share
+      out[id] = (out[id] ?? 0) + 1;
+    }
+  }
+  return out;
+}
+
+export function countPendingByWarehouse(warehouseScope?: string[]): Promise<Record<string, number>> {
+  return attributeToWarehouses({ status: "pending", deletedAt: null }, warehouseScope);
+}
+
+export function countReturnsToScanByWarehouse(warehouseScope?: string[]): Promise<Record<string, number>> {
+  return attributeToWarehouses(
+    { type: "return", status: { in: ["approved", "partially_fulfilled"] }, deletedAt: null },
+    warehouseScope,
+  );
+}
+
 // Open (pending/approved/partially_fulfilled) line items for one engineer + type — powers the
 // non-blocking duplicate warning in the composer.
 export async function findOpenLineItems(engineerId: string, type: string): Promise<Array<{ irmItemId: string; code: string }>> {
@@ -273,6 +334,20 @@ export async function findOpenLineItems(engineerId: string, type: string): Promi
     select: { code: true, lines: { select: { irmItemId: true } } },
   });
   return rows.flatMap((r) => r.lines.map((l) => ({ irmItemId: l.irmItemId, code: r.code })));
+}
+
+/**
+ * Requests still in flight against a warehouse — the delete guard for it.
+ *
+ * Same shape as a live job's kit line naming its pickup point: an open restock says where the
+ * engineer collects, and an approved-but-unscanned one is stock the warehouse has already committed
+ * (it credits the van when the warehouse finally scans it out). Deleting the warehouse under either
+ * leaves the request pointing at an id every read filters away.
+ */
+export function countOpenByWarehouse(warehouseId: string): Promise<number> {
+  return prisma.vanStockRequest.count({
+    where: { warehouseId, deletedAt: null, status: { in: ["pending", "approved", "partially_fulfilled"] } },
+  });
 }
 
 // How many requests are still in flight for a group of engineers — pending, approved, or partly

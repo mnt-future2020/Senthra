@@ -7,16 +7,23 @@ import { MoreHorizontal, PackageSearch, Pencil, Plus, Power, Search, Trash2 } fr
 
 import * as irmService from "@/services/irm.service";
 import { useAuth } from "@/hooks/useAuth";
+import { ExportButton } from "@/components/ui/ExportButton";
 import { useDashboard } from "@/hooks/useDashboard";
 import { Pagination } from "@/components/ui/Pagination";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Select } from "@/components/ui/Select";
+import { CELL_ONE_LINE, colClass, tableMinWidth } from "@/components/ui/tableLayout";
 import type { IrmItem, IrmStatus } from "@/types/irm";
 import type { UserStatus } from "@/types/user";
 
 const PAGE_SIZE = 20;
+
+// Code · Item · Type · Category · Primary Supplier · Base Unit · Standard Cost · Status · actions.
+// Item names and supplier names are the long values; nine columns at `min-w-[1100px]` gave each
+// ~122px. Base Unit and Standard Cost step aside on a narrow screen.
+const TABLE_MIN_WIDTH = tableMinWidth(["normal", "wide", "normal", "normal", "wide", "narrow", "normal", "narrow", "narrow"]);
 type Sort = "newest" | "oldest" | "name" | "code";
 
 function formatCost(item: IrmItem): string {
@@ -148,32 +155,32 @@ function IrmRowActions({
 function IrmTableSkeleton({ actions }: { actions: boolean }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[1100px] text-sm">
+      <table className="w-full text-sm" style={{ minWidth: TABLE_MIN_WIDTH }}>
         <thead>
           <tr className="border-b border-[var(--border)] text-left text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-            <th className="px-4 py-3">Code</th>
-            <th className="px-4 py-3">Item</th>
-            <th className="px-4 py-3">Type</th>
-            <th className="px-4 py-3">Category</th>
-            <th className="px-4 py-3">Primary Supplier</th>
-            <th className="px-4 py-3">Base Unit</th>
-            <th className="px-4 py-3">Standard Cost</th>
-            <th className="px-4 py-3">Status</th>
-            {actions && <th className="px-4 py-3" />}
+            <th className="cell-y px-4">Code</th>
+            <th className="cell-y px-4">Item</th>
+            <th className="cell-y px-4">Type</th>
+            <th className="cell-y px-4">Category</th>
+            <th className="cell-y px-4">Primary Supplier</th>
+            <th className={`cell-y px-4 ${colClass("xl")}`}>Base Unit</th>
+            <th className={`cell-y px-4 ${colClass("lg")}`}>Standard Cost</th>
+            <th className="cell-y px-4">Status</th>
+            {actions && <th className="cell-y px-4" />}
           </tr>
         </thead>
         <tbody>
           {Array.from({ length: 6 }).map((_, i) => (
             <tr key={i} className="border-b border-[var(--border)] last:border-0">
-              <td className="px-4 py-3"><Skeleton className="h-3 w-16" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-40" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-20" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-20" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-24" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-12" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-3 w-14" /></td>
-              <td className="px-4 py-3"><Skeleton className="h-5 w-16 rounded-full" /></td>
-              {actions && <td className="px-4 py-3"><Skeleton className="ml-auto h-6 w-6 rounded-lg" /></td>}
+              <td className="cell-y px-4"><Skeleton className="h-3 w-16" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-3 w-40" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-3 w-20" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-3 w-20" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-3 w-24" /></td>
+              <td className={`cell-y px-4 ${colClass("xl")}`}><Skeleton className="h-3 w-12" /></td>
+              <td className={`cell-y px-4 ${colClass("lg")}`}><Skeleton className="h-3 w-14" /></td>
+              <td className="cell-y px-4"><Skeleton className="h-5 w-16 rounded-full" /></td>
+              {actions && <td className="cell-y px-4"><Skeleton className="ml-auto h-6 w-6 rounded-lg" /></td>}
             </tr>
           ))}
         </tbody>
@@ -227,6 +234,18 @@ export function IrmItemsView() {
   };
 
   // Debounce the search box into ?q.
+  // The filters WITHOUT paging — one definition, used by the list (which adds the page) and by the
+  // CSV export (which must not). Two copies is how a download quietly stops matching the screen it
+  // was taken from, and nothing about the resulting file looks wrong.
+  const exportParams = React.useMemo(
+    () => ({
+      search: search || undefined,
+      status: statusFilter === "all" ? undefined : statusFilter,
+      sort: sort === "newest" ? undefined : sort,
+    }),
+    [search, statusFilter, sort],
+  );
+
   React.useEffect(() => {
     const t = setTimeout(() => {
       if (searchInput.trim() !== search) patch({ q: searchInput.trim() || null });
@@ -238,13 +257,7 @@ export function IrmItemsView() {
   React.useEffect(() => {
     let active = true;
     (async () => {
-      const params = {
-        search: search || undefined,
-        status: statusFilter === "all" ? undefined : statusFilter,
-        sort: sort === "newest" ? undefined : sort,
-        page,
-        pageSize: PAGE_SIZE,
-      };
+      const params = { ...exportParams, page, pageSize: PAGE_SIZE };
       const cached = irmService.getCachedIrmItems(params);
       if (active && cached) setData(cached);
       setLoading(true);
@@ -262,7 +275,7 @@ export function IrmItemsView() {
     return () => {
       active = false;
     };
-  }, [search, statusFilter, sort, page, refreshKey]);
+  }, [exportParams, page, refreshKey]);
 
   const items = data?.items ?? [];
   const showSkeleton = loading && items.length === 0;
@@ -296,7 +309,7 @@ export function IrmItemsView() {
   };
 
   return (
-    <div className="flex h-full flex-col gap-5">
+    <div className="stack flex h-full flex-col">
       <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center">
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
@@ -330,6 +343,14 @@ export function IrmItemsView() {
           ]}
           ariaLabel="Sort"
         />
+        {/* Before "New item" and outside its ml-auto, so the primary action stays hard right. */}
+        {can("irm.export") && (
+          <ExportButton
+            onExport={() => irmService.exportIrmItemsCsv(exportParams)}
+            disabled={items.length === 0}
+            title="Export the filtered catalogue to CSV"
+          />
+        )}
         {can("irm.create") && (
           <button
             onClick={() => router.push("/dashboard/irm/new")}
@@ -362,18 +383,18 @@ export function IrmItemsView() {
           </div>
         ) : (
           <div className="min-h-0 flex-1 overflow-auto">
-            <table className="w-full min-w-[1100px] text-left text-sm">
+            <table className="w-full text-left text-sm" style={{ minWidth: TABLE_MIN_WIDTH }}>
               <thead>
                 <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                  <th className="px-4 py-3">Code</th>
-                  <th className="px-4 py-3">Item</th>
-                  <th className="px-4 py-3">Type</th>
-                  <th className="px-4 py-3">Category</th>
-                  <th className="px-4 py-3">Primary Supplier</th>
-                  <th className="px-4 py-3">Base Unit</th>
-                  <th className="px-4 py-3">Standard Cost</th>
-                  <th className="px-4 py-3">Status</th>
-                  {showActions && <th className="px-4 py-3" />}
+                  <th className="cell-y px-4">Code</th>
+                  <th className="cell-y px-4">Item</th>
+                  <th className="cell-y px-4">Type</th>
+                  <th className="cell-y px-4">Category</th>
+                  <th className="cell-y px-4">Primary Supplier</th>
+                  <th className={`cell-y px-4 ${colClass("xl")}`}>Base Unit</th>
+                  <th className={`cell-y px-4 ${colClass("lg")}`}>Standard Cost</th>
+                  <th className="cell-y px-4">Status</th>
+                  {showActions && <th className="cell-y px-4" />}
                 </tr>
               </thead>
               <tbody>
@@ -383,23 +404,23 @@ export function IrmItemsView() {
                     onClick={() => router.push(`/dashboard/irm/${i.code}`)}
                     className="cursor-pointer border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]"
                   >
-                    <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">{i.code}</td>
-                    <td className="px-4 py-3">
+                    <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">{i.code}</td>
+                    <td className="cell-y px-4">
                       <div className="font-semibold text-[var(--ink)]">{i.name}</div>
                       {(i.brand || i.mpn) && (
                         <div className="text-[11px] text-[var(--faint)]">{[i.brand, i.mpn].filter(Boolean).join(" · ")}</div>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{i.type?.name ?? "—"}</td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{i.category?.name ?? "—"}</td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{i.primarySupplier?.name ?? "—"}</td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{i.baseUnit ?? "—"}</td>
-                    <td className="px-4 py-3 text-[var(--muted)]">{formatCost(i)}</td>
-                    <td className="px-4 py-3">
+                    <td className="cell-y px-4 text-[var(--muted)]">{i.type?.name ?? "—"}</td>
+                    <td className="cell-y px-4 text-[var(--muted)]">{i.category?.name ?? "—"}</td>
+                    <td className={`cell-y px-4 text-[var(--muted)] ${CELL_ONE_LINE}`} title={i.primarySupplier?.name ?? undefined}>{i.primarySupplier?.name ?? "—"}</td>
+                    <td className={`cell-y px-4 text-[var(--muted)] ${colClass("xl")}`}>{i.baseUnit ?? "—"}</td>
+                    <td className={`cell-y px-4 text-[var(--muted)] ${colClass("lg")}`}>{formatCost(i)}</td>
+                    <td className="cell-y px-4">
                       <StatusBadge status={i.status as UserStatus} />
                     </td>
                     {showActions && (
-                      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                      <td className="cell-y px-4" onClick={(e) => e.stopPropagation()}>
                         <IrmRowActions
                           item={i}
                           canEdit={canEdit}
@@ -416,13 +437,10 @@ export function IrmItemsView() {
             </table>
           </div>
         )}
+        {data && data.total > 0 && (
+            <Pagination embedded page={data.page} totalPages={data.totalPages} total={data.total} label="items" onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)} />
+        )}
       </div>
-
-      {data && data.total > 0 && (
-        <div className="shrink-0">
-          <Pagination page={data.page} totalPages={data.totalPages} total={data.total} label="items" onPage={(n) => patch({ page: n > 1 ? String(n) : null }, false)} />
-        </div>
-      )}
 
       <ConfirmDialog
         open={confirm.open}

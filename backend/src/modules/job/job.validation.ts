@@ -1,6 +1,8 @@
 import { z } from "zod";
 
 import { postcodeField as ukPostcode } from "../../utils/postcode.js";
+import { isHttpUrl } from "../../utils/http-url.js";
+import { dataUriBytes, detectAttachmentType } from "../../utils/data-uri.js";
 
 // Job (field-work) validation. Job number / status / snapshots / timestamps are SYSTEM-owned and
 // never accepted from the client. lineType/priority/installerType/jobType are validated here (the
@@ -154,7 +156,13 @@ const sharedHeader = {
   plannerName: z.string().trim().max(160).optional(),
   plannerPhone: z.string().trim().max(60).optional(),
   notes: z.string().trim().max(4000).optional(),
-  attachments: z.array(z.string().trim().max(1000)).max(50).optional(),
+  // http(s) only. These are typed in as free text and rendered as links — on the customer portal
+  // now, not just the office page — and `javascript:` / `data:` are valid URLs that execute when
+  // clicked. A shape check would pass both, so the SCHEME is what this pins (utils/http-url).
+  attachments: z
+    .array(z.string().trim().max(1000).refine(isHttpUrl, "Attachments must be an http:// or https:// link."))
+    .max(50)
+    .optional(),
 };
 
 export const createJobSchema = z
@@ -239,3 +247,37 @@ export const completeJobSchema = z.object({
     .default([]),
 });
 export type CompleteJobInput = z.infer<typeof completeJobSchema>;
+
+// --- attachment upload (data URI from the form) -----------------------------
+//
+// The body is a base64 data URI, so BOTH checks below have to happen here rather than being left to
+// the client. A `data:` prefix on its own says nothing about what follows: without the media-type
+// gate any payload at all (an .exe, an .svg carrying script) reaches Cloudinary and comes back as a
+// link staff, engineers and CUSTOMERS all click, and without the size gate the only ceiling is the
+// body parser's. The client checks the same two rules for a fast error message; this is the one that
+// actually holds.
+//
+// Both are derived from the PAYLOAD, not from fields alongside it. prfAttachmentSchema (and the PO
+// and GRN ones) take `fileType` and `fileSizeBytes` as separate client-supplied values and never
+// check them against `data` — so a caller there can declare "pdf, 40 KB" and send anything of any
+// size. Deliberately not copied: a declared type is a label, and this is the endpoint deciding what
+// actually reaches storage.
+
+export const MAX_JOB_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+
+export const uploadAttachmentSchema = z.object({
+  data: z
+    .string({ error: "Upload a valid file." })
+    .trim()
+    .min(1, "File data is required.")
+    .startsWith("data:", "Upload a valid file.")
+    // The file's OWN LEADING BYTES, not the media type in front of them. That media type is text the
+    // caller wrote — reading it only moves the claim, it never settles it — and it is also the thing
+    // a browser gets wrong: no MIME registered for `.docx` and the URI arrives as
+    // `application/octet-stream` for a perfectly good document. Signatures answer both.
+    .refine((v) => detectAttachmentType(v) !== null, "Unsupported file type. Use PDF, DOCX, PNG or JPG.")
+    .refine((v) => dataUriBytes(v) <= MAX_JOB_ATTACHMENT_BYTES, "File must be 10 MB or smaller."),
+  fileName: z.string().trim().max(300).optional(),
+});
+export type UploadAttachmentInput = z.infer<typeof uploadAttachmentSchema>;
+

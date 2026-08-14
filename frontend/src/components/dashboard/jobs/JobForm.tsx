@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, Plus, Trash2 } from "lucide-react";
+import { ExternalLink, FileText, Globe, Image as ImageIcon, Link as LinkIcon, Loader2, Lock, Plus, Trash2, Upload } from "lucide-react";
 
 import * as jobService from "@/services/job.service";
 import { listCustomers, listCustomerProjects, listCustomerSites, listCustomerStockEntries } from "@/services/customer.service";
@@ -34,6 +34,9 @@ import {
 import type { CustomerProject, CustomerSite, CustomerStockEntry } from "@/types/customer";
 import type { Job, JobLineType } from "@/types/job";
 import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
+import { isHttpUrl } from "@/lib/validation";
+import { ATTACHMENT_MEDIA_TYPE, parseJobAttachment } from "./jobAttachment";
+import { uploadDirectForUrl } from "@/lib/upload";
 
 const JOBS_LIST = "/dashboard/jobs";
 const dateInput = (iso: string | null | undefined) => (iso ? iso.slice(0, 10) : "");
@@ -484,9 +487,66 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
   };
 
   // --- attachments helpers ---
-  const setAttachment = (i: number, v: string) => { setAttachments((rows) => rows.map((r, idx) => (idx === i ? v : r))); touch(); };
-  const addAttachment = () => { setAttachments((rows) => [...rows, ""]); touch(); };
-  const removeAttachment = (i: number) => { setAttachments((rows) => (rows.length === 1 ? rows : rows.filter((_, idx) => idx !== i))); touch(); };
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const [uploadingDoc, setUploadingDoc] = React.useState(false);
+
+  const setAttachment = (i: number, v: string) => {
+    setAttachments((rows) => rows.map((r, idx) => (idx === i ? v : r)));
+    touch();
+    clearError("attachments");
+  };
+  const addAttachment = () => {
+    setAttachments((rows) => [...rows, ""]);
+    touch();
+  };
+  const removeAttachment = (i: number) => {
+    setAttachments((rows) => (rows.length <= 1 ? [""] : rows.filter((_, idx) => idx !== i)));
+    touch();
+    clearError("attachments");
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+    if (!(ext in ATTACHMENT_MEDIA_TYPE)) {
+      pushToast("Unsupported file type. Use PDF, DOCX, PNG, JPG, or JPEG.", "alert");
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+
+    const maxBytes = 10 * 1024 * 1024; // 10 MB per file limit
+    if (file.size > maxBytes) {
+      pushToast(`"${file.name}" exceeds the 10 MB limit.`, "alert");
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+
+    setUploadingDoc(true);
+    try {
+      // Straight to Cloudinary. The browser's own `file.type` is what the server signs against, and
+      // `ATTACHMENT_MEDIA_TYPE[ext]` stands in when the browser reports none — a .docx on a machine
+      // with no Office install — so the purpose's accepted-type list still recognises it.
+      const url = await uploadDirectForUrl({
+        purpose: "job_attachment",
+        file: file.type ? file : new File([file], file.name, { type: ATTACHMENT_MEDIA_TYPE[ext] }),
+      });
+      setAttachments((rows) => {
+        const active = rows.filter((r) => r.trim().length > 0);
+        return [...active, url];
+      });
+      touch();
+      clearError("attachments");
+      pushToast(`"${file.name}" uploaded successfully.`, "success");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Document upload failed.";
+      pushToast(msg, "alert");
+    } finally {
+      setUploadingDoc(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
 
   // Demand from OTHER active jobs for a line's item+warehouse, and the stock TRULY free to plan
   // (on-hand − that demand). null free = availability not loaded yet (no cap can be applied).
@@ -551,6 +611,14 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
           seen.add(k);
         }
       }
+    }
+    // Mirrors createJobSchema's `attachments` rule (job.validation.ts → utils/http-url.ts): http(s)
+    // only, because these render as links and `javascript:` / `data:` are valid URLs that execute
+    // when clicked. The server rejects them either way — what only this side can do is say WHICH box
+    // is wrong. Without it a bad link on row 3 of 5 came back as a bare toast naming no field.
+    const badLink = attachments.map((a) => a.trim()).filter(Boolean).find((a) => !isHttpUrl(a));
+    if (badLink) {
+      e.attachments = `"${badLink}" isn't a link. Attachments must start with http:// or https://.`;
     }
     return e;
   };
@@ -987,20 +1055,153 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
           </Step>
 
           {/* Step 6 — Attachments, notes & review */}
-          <Step n={6} title="Attachments, notes & review" description="Reference links, notes, and a final check.">
+          <Step n={6} title="Attachments, notes & review" description="Upload documents, reference links, notes, and a final check.">
             <div className="space-y-4">
               <div>
-                <label className={labelCls}>Attachment links</label>
-                <div className="space-y-2">
-                  {attachments.map((a, i) => (
-                    <div key={i} className="flex items-stretch gap-2">
-                      <input className={`${inputCls} min-w-0 flex-1`} value={a} onChange={(e) => setAttachment(i, e.target.value)} maxLength={500} placeholder="https://…" />
-                      <button type="button" onClick={() => removeAttachment(i)} disabled={attachments.length === 1} className="flex w-11 shrink-0 items-center justify-center rounded-lg text-[var(--muted)] hover:bg-[var(--surface-2)] hover:text-[var(--neg)] disabled:opacity-40" aria-label="Remove attachment"><Trash2 className="h-4 w-4" /></button>
-                    </div>
-                  ))}
-                  <button type="button" onClick={addAttachment} className="flex items-center gap-1.5 rounded-lg border border-dashed border-[var(--border)] px-3 py-1.5 text-xs font-bold text-[var(--accent)] hover:bg-[var(--surface-2)]"><Plus className="h-3.5 w-3.5" /> Add link</button>
+                <div className="mb-2 flex items-center justify-between">
+                  <label className={`${labelCls} mb-0`}>Attachments & Links</label>
+                  <span className="text-[11px] font-semibold text-[var(--faint)]">
+                    {attachments.filter((a) => a.trim()).length} attached
+                  </span>
                 </div>
-                <p className="mt-1.5 text-[11px] text-[var(--faint)]">Paste a URL to a document, drawing, or photo. Optional.</p>
+
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".pdf,.docx,.png,.jpg,.jpeg"
+                  className="hidden"
+                  onChange={handleFileUpload}
+                />
+
+                <div className="space-y-2">
+                  {attachments.map((a, i) => {
+                    const meta = parseJobAttachment(a);
+                    // Only files WE uploaded render as a fixed row. A pasted link — whatever its
+                    // extension — stays an editable text field, because correcting a mistyped URL
+                    // must not mean deleting the row and re-entering it.
+                    // Written as an aliased condition (`meta !== null && …`) so TypeScript narrows
+                    // `meta` inside the branch below — `meta?.isUploaded` would not.
+                    const isUploadedDoc = meta !== null && meta.isUploaded;
+
+                    return (
+                      <div key={i} className="flex items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/30 p-2">
+                        {isUploadedDoc ? (
+                          <div className="flex min-w-0 flex-1 items-center gap-2.5 px-1">
+                            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--surface-2)] text-[var(--accent)]">
+                              {meta.isImg ? (
+                                <ImageIcon className="h-4 w-4" />
+                              ) : meta.isPdf || meta.isDoc ? (
+                                <FileText className="h-4 w-4" />
+                              ) : (
+                                <LinkIcon className="h-4 w-4" />
+                              )}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate text-xs font-bold text-[var(--ink)]" title={meta.name}>
+                                {meta.name}
+                              </p>
+                              <a
+                                href={meta.rawUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--accent)] hover:underline"
+                              >
+                                View attachment <ExternalLink className="h-3 w-3" />
+                              </a>
+                            </div>
+                          </div>
+                        ) : (
+                          <input
+                            className={`${inputCls} min-w-0 flex-1`}
+                            value={meta?.rawUrl ?? a}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              const isInt = meta?.isInternal;
+                              setAttachment(i, isInt && val.trim() ? `${val}#internal` : val);
+                            }}
+                            maxLength={500}
+                            placeholder="https://…"
+                          />
+                        )}
+
+                        {a.trim() && (
+                          <div className="inline-flex shrink-0 items-center rounded-lg border border-[var(--border)] bg-[var(--surface-2)] p-0.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (meta?.isInternal) {
+                                  const next = a.replace(/#internal$/i, "");
+                                  setAttachment(i, next);
+                                }
+                              }}
+                              className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-bold transition-all ${
+                                !meta?.isInternal
+                                  ? "bg-emerald-600 text-white shadow-xs"
+                                  : "text-[var(--muted)] hover:text-[var(--ink)]"
+                              }`}
+                              title="Customer visible — shown on Customer Portal"
+                            >
+                              <Globe className="h-3.5 w-3.5" /> Customer
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (!meta?.isInternal) {
+                                  const next = `${a}#internal`;
+                                  setAttachment(i, next);
+                                }
+                              }}
+                              className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-bold transition-all ${
+                                meta?.isInternal
+                                  ? "bg-amber-600 text-white shadow-xs"
+                                  : "text-[var(--muted)] hover:text-[var(--ink)]"
+                              }`}
+                              title="Internal document — Office & Engineers only"
+                            >
+                              <Lock className="h-3.5 w-3.5" /> Internal
+                            </button>
+                          </div>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() => removeAttachment(i)}
+                          disabled={attachments.length === 1 && !attachments[0]}
+                          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[var(--muted)] hover:bg-[var(--surface-2)] hover:text-[var(--neg)] disabled:opacity-40"
+                          aria-label="Remove attachment"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
+                    );
+                  })}
+
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={uploadingDoc || attachments.filter((a) => a.trim()).length >= 20}
+                      className="flex items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2 text-xs font-extrabold text-white transition-all hover:opacity-90 disabled:opacity-60"
+                    >
+                      {uploadingDoc ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+                      {uploadingDoc ? "Uploading…" : "Upload document"}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={addAttachment}
+                      disabled={uploadingDoc || attachments.filter((a) => a.trim()).length >= 20}
+                      className="flex items-center gap-1.5 rounded-xl border border-dashed border-[var(--border)] px-3.5 py-2 text-xs font-bold text-[var(--accent)] hover:bg-[var(--surface-2)] disabled:opacity-60"
+                    >
+                      <Plus className="h-3.5 w-3.5" /> Add link
+                    </button>
+                  </div>
+                </div>
+
+                <FieldError message={errors.attachments} />
+                <p className="mt-1.5 text-[11px] text-[var(--faint)]">
+                  Upload documents, drawings, site photos, or quotes (PDF, DOCX, PNG, JPG, max 10 MB) or paste external links.
+                </p>
               </div>
               <div>
                 <label className={labelCls}>Notes</label>

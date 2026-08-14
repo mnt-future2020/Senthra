@@ -4,6 +4,7 @@ import * as React from "react";
 import { Loader2, Send } from "lucide-react";
 
 import * as settingsService from "@/services/settings.service";
+import { useDashboard } from "@/hooks/useDashboard";
 import { useAuth } from "@/hooks/useAuth";
 import { SettingsCard } from "@/components/dashboard/settings/ui/SettingsCard";
 import { ReadOnlyNotice } from "@/components/dashboard/settings/ui/ReadOnlyNotice";
@@ -57,7 +58,12 @@ export function EmailSection() {
   const [testTo, setTestTo] = React.useState("");
   const [saving, setSaving] = React.useState(false);
   const [testing, setTesting] = React.useState(false);
+  // ERRORS ONLY. A failure has to stay on screen until it is fixed; the success is a moment and
+  // goes to a toast. Keeping both here left the receipt under the form while the user typed new
+  // changes into it — a "saved" that had stopped being true, and this card has no dirty bar to
+  // contradict it.
   const [msg, setMsg] = React.useState<Msg>(null);
+  const { pushToast } = useDashboard();
 
   React.useEffect(() => {
     (async () => {
@@ -109,7 +115,7 @@ export function EmailSection() {
       const settings = await settingsService.updateSettings(smtpPayload());
       setPasswordSet(settings.smtpPasswordSet);
       setPassword("");
-      setMsg({ type: "success", text: "Email settings saved." });
+      pushToast("Email settings saved.");
     } catch (err) {
       setMsg({
         type: "error",
@@ -132,7 +138,7 @@ export function EmailSection() {
         ...smtpPayload(),
         to: testTo.trim(),
       });
-      setMsg({ type: "success", text: res.message || "Test email sent." });
+      pushToast(res.message || "Test email sent.");
     } catch (err) {
       setMsg({
         type: "error",

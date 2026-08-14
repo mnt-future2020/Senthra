@@ -16,11 +16,12 @@ import * as transferRepo from "#modules/engineer-transfer/engineer-transfer.repo
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
 import { notify } from "#modules/notification/notification.service.js";
-import { emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
+import { emitAttentionChanged, emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
 import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
 import * as kitRequestRepo from "./job-kit-request.repository.js";
 import type { CreateKitRequestData, CreateKitRequestLineData, KitRequestWithLines } from "./job-kit-request.repository.js";
 import type { ApproveKitRequestInput, CreateKitRequestInput, DeclineKitRequestInput } from "./job-kit-request.validation.js";
+import { randomUUID } from "node:crypto";
 
 // ---- DTOs ------------------------------------------------------------------------------------
 
@@ -174,6 +175,7 @@ function emitUpdate(engineerId: string, jobId: string, data: { id: string; code:
   const payload = { ...data, jobId };
   emitToUser(engineerId, "kit_request:updated", payload);
   emitToRoom(OFFICE_JOBS_ROOM, "kit_request:updated", payload);
+  emitAttentionChanged("kit_requests");
 }
 
 function isReviewer(actor: AuditActor): boolean {
@@ -973,8 +975,10 @@ export async function searchItems(q: string, jobId?: string): Promise<KitItemOpt
 export async function uploadAttachment(image: string): Promise<{ url: string }> {
   const creds = await getCloudinaryCreds();
   if (!creds) throw badRequest("Cloudinary is not configured. Contact an administrator.");
-  const publicId = `kitreq-${Date.now()}`;
-  const url = await uploadToCloudinary(image, publicId, creds, "senthra/kit-requests");
+  // Unique per upload: uploadToCloudinary overwrites on a repeated publicId, so a timestamp meant two
+  // engineers attaching kit-request evidence in the same millisecond kept only the second photo.
+  const publicId = `kitreq-${randomUUID()}`;
+  const { url } = await uploadToCloudinary(image, publicId, creds, "senthra/kit-requests");
   return { url };
 }
 

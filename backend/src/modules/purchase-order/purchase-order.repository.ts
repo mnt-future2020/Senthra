@@ -2,6 +2,7 @@ import { Prisma, type PurchaseOrder, type PurchaseOrderAttachment } from "@prism
 
 import { isWriteConflict, prisma, withTransaction } from "../../lib/prisma.js";
 import { escapeRegex } from "../../utils/search.js";
+import { effectiveEta, isDeliveryOverdue } from "./po-overdue.js";
 
 // Data-access layer for Purchase Orders. The ONLY place Prisma is touched for POs. Soft-deleted
 // POs (deletedAt set) are excluded from normal reads. Header + lines + totals are written
@@ -79,6 +80,7 @@ export interface PoTotals {
 
 export interface PurchaseOrderListFilters {
   search?: string;
+  /** a real status, or a DERIVED pseudo-status — "overdue" | "awaiting_approval" | "awaiting_send" (see buildWhere) */
   status?: string;
   // Multiple statuses (e.g. the warehouse "Expected deliveries" worklist wants sent +
   // partially_received in one query). Takes precedence over `status` when non-empty.
@@ -89,6 +91,13 @@ export interface PurchaseOrderListFilters {
   // The assigned PM — feeds the "Awaiting my action" worklist (pm_review + pmUserId = me).
   pmUserId?: string;
   jobId?: string;
+  /** Start of "today" in the COMPANY timezone. REQUIRED whenever `status === "overdue"`. */
+  overdueBefore?: Date;
+  // Restricts the pm_review HALF of the "awaiting_send" pseudo-status to one PM, leaving the
+  // "approved" half (which has no PM yet) untouched. The service sets it for an actor who can't
+  // override PM assignment, so the list matches that actor's badge count exactly. Ignored for every
+  // other status — a plain pm_review filter is what `pmUserId` above is for.
+  pmScopeUserId?: string;
   // Warehouse-access scope (from warehouseScopeFilter): `undefined` = unrestricted (no filter);
   // an array constrains the list to POs delivering to those warehouses. NOTE: a scoped actor only
   // ever sees POs WITH a warehouseId in their set — POs whose warehouseId is still null (header not
@@ -98,9 +107,83 @@ export interface PurchaseOrderListFilters {
 }
 
 // Exported for unit testing — pure where-clause builder, no Prisma I/O.
+// The receivable window — a PO that has been issued to the supplier but isn't fully in yet. Shared by
+// the overdue filter below and expectedDeliveries, so the "Deliveries overdue" badge and the list it
+// opens are the same set of rows, not two similar ideas.
+export const RECEIVABLE_PO_STATUSES = ["sent", "supplier_accepted", "partially_received"] as const;
+
+// The two approval-queue predicates, defined ONCE and shared by countAttention (the badge) and
+// buildWhere (the list the badge opens) — the same contract RECEIVABLE_PO_STATUSES gives the overdue
+// badge. Previously the badge summed these while its href pointed at a single real status, so a
+// badge reading "7 to approve" opened a list of 4.
+//
+// A PRF-born PO is created straight into `draft` (the fast path) and is ALREADY awaiting sign-off, so
+// the approval queue is those plus the explicitly submitted `pending_approval` rows.
+export const awaitingApprovalPoWhere = (): Prisma.PurchaseOrderWhereInput[] => [
+  { status: "draft", purchaseRequestId: { not: null } },
+  { status: "pending_approval" },
+];
+
+// "Ready to go out": `approved` (no PM assigned yet) plus `pm_review` (assigned, awaiting the send).
+// `pmScopeUserId` narrows only the pm_review half — an approved PO has no pmUserId, so applying it
+// to both would wrongly empty the queue.
+export const awaitingSendPoWhere = (pmScopeUserId?: string): Prisma.PurchaseOrderWhereInput[] => [
+  { status: "approved" },
+  { status: "pm_review", ...(pmScopeUserId ? { pmUserId: pmScopeUserId } : {}) },
+];
+
 export function buildWhere(filters: PurchaseOrderListFilters): Prisma.PurchaseOrderWhereInput {
   const where: Prisma.PurchaseOrderWhereInput = { deletedAt: null };
-  if (filters.statuses?.length) where.status = { in: filters.statuses };
+  if (filters.status === "overdue") {
+    // DERIVED pseudo-status, never stored: a receivable PO whose effective ETA has passed. The
+    // effective ETA is the supplier-CONFIRMED date when set, otherwise the expected date — the same
+    // "confirmed ?? expected" rule expectedDeliveries applies in memory, written here as an AND'd OR
+    // so it composes with (and can't be clobbered by) the search OR further down.
+    // Loud on a missing boundary, like the jobs list: "today" is a company-timezone question the
+    // service answers, and a quiet default would silently report an empty overdue list.
+    if (!filters.overdueBefore) throw new Error("buildWhere: overdueBefore is required for the overdue filter.");
+    where.status = { in: [...RECEIVABLE_PO_STATUSES] };
+    where.AND = [
+      {
+        OR: [
+          { confirmedDeliveryDate: { lt: filters.overdueBefore } },
+          // MONGO TRAP — the same one that kept the portal-invite count at zero. `confirmedDeliveryDate: null`
+          // matches only rows where the field is EXPLICITLY null, and nothing writes it on create:
+          // recordSupplierAcceptance is the only path that ever sets it. So on every PO still awaiting
+          // acknowledgement the field is ABSENT, and absent is not null.
+          //
+          // The badge computes `confirmed ?? expected` in memory (expectedDeliveries), where undefined
+          // falls through happily. This clause did not, so a `sent` PO with a past expected date was
+          // COUNTED as overdue and then hidden from the list that count opens — "Deliveries overdue 8"
+          // opening six rows, every one of them Supplier Accepted, with the un-acknowledged ones (the
+          // ones most worth chasing) missing entirely.
+          {
+            OR: [{ confirmedDeliveryDate: null }, { confirmedDeliveryDate: { isSet: false } }],
+            expectedDeliveryDate: { lt: filters.overdueBefore },
+          },
+        ],
+      },
+    ];
+  } else if (filters.status === "receivable") {
+    // DERIVED pseudo-status: everything the warehouse can still book in — the exact set countAttention
+    // measures for "Deliveries to receive". It spans three real statuses, and the badge used to open
+    // `?status=sent` instead: a chip reading 14 opened a list of 7, with the other 7 sitting under
+    // supplier_accepted / partially_received. Same RECEIVABLE_PO_STATUSES the overdue branch uses, so
+    // there is one definition of "receivable" in this file, not three.
+    where.status = { in: [...RECEIVABLE_PO_STATUSES] };
+  } else if (filters.status === "awaiting_approval" || filters.status === "awaiting_send") {
+    // DERIVED pseudo-statuses, never stored — the approval and send queues, which each span more
+    // than one real status. AND'd like the overdue branch above so they compose with (and can't be
+    // clobbered by) the search OR further down.
+    where.AND = [
+      {
+        OR:
+          filters.status === "awaiting_approval"
+            ? awaitingApprovalPoWhere()
+            : awaitingSendPoWhere(filters.pmScopeUserId),
+      },
+    ];
+  } else if (filters.statuses?.length) where.status = { in: filters.statuses };
   else if (filters.status) where.status = filters.status;
   if (filters.priority) where.priority = filters.priority;
   if (filters.supplierId) where.supplierId = filters.supplierId;
@@ -288,8 +371,13 @@ export async function spendPenceForSupplier(supplierId: string): Promise<number>
 }
 
 // --- attachments ----------------------------------------------------------------------------
-export function addAttachment(data: Prisma.PurchaseOrderAttachmentUncheckedCreateInput): Promise<PurchaseOrderAttachment> {
-  return prisma.purchaseOrderAttachment.create({ data });
+export function addAttachment(
+  data: Prisma.PurchaseOrderAttachmentUncheckedCreateInput,
+  tx?: Prisma.TransactionClient,
+): Promise<PurchaseOrderAttachment> {
+  // `tx` is passed by the direct-upload finalize, which commits this row and its pending-upload
+  // ledger removal together.
+  return (tx ?? prisma).purchaseOrderAttachment.create({ data });
 }
 export function findAttachment(id: string): Promise<PurchaseOrderAttachment | null> {
   return prisma.purchaseOrderAttachment.findUnique({ where: { id } });
@@ -489,8 +577,12 @@ function whereWarehouse(warehouseIds?: string[]) {
 /** Open PO count + committed value (pence). The count is a workload metric (drafts included);
  *  the value is financial, so drafts — not yet approved commitments — are excluded from the sum. */
 /** Dashboard "Expected this week": open receivable POs due within 7 days vs already overdue. */
-export async function expectedDeliveries(now: Date, warehouseIds?: string[]): Promise<{ dueThisWeek: number; overdue: number }> {
-  const soon = new Date(now.getTime() + 7 * 86_400_000);
+// `dayStart` is the company-timezone start of today (utils/filter-date startOfDayIn) — the SAME clock
+// jobRepo.dueBreakdown and the goods-management due filters use. Passing raw `now` instead would make a
+// delivery "overdue" hours before a job due the same day is, so the badges would contradict each other
+// every morning.
+export async function expectedDeliveries(now: Date, dayStart: Date, warehouseIds?: string[]): Promise<{ dueThisWeek: number; overdue: number }> {
+  const soon = new Date(dayStart.getTime() + 7 * 86_400_000);
   // The supplier-confirmed date is authoritative for planning (updatable after the supplier commits);
   // fall back to the expected date when it isn't set yet. Because the effective date can be EITHER
   // column, we can't filter by date in the where clause — the open-receivable set is small, so we
@@ -506,12 +598,49 @@ export async function expectedDeliveries(now: Date, warehouseIds?: string[]): Pr
   let dueThisWeek = 0;
   let overdue = 0;
   for (const r of rows) {
-    const eta = r.confirmedDeliveryDate ?? r.expectedDeliveryDate;
+    // Shared with buildWhere's `overdue` branch through po-overdue.ts. The two halves cannot be one
+    // implementation — this is JavaScript, that is a Prisma `where` — so they are written down side
+    // by side and tested against the same table of cases. They last drifted on absent-vs-null.
+    const eta = effectiveEta(r.confirmedDeliveryDate, r.expectedDeliveryDate);
     if (!eta || eta > soon) continue;
-    if (eta < now) overdue++;
+    if (isDeliveryOverdue(r.confirmedDeliveryDate, r.expectedDeliveryDate, dayStart)) overdue++;
     else dueThisWeek++;
   }
   return { dueThisWeek, overdue };
+}
+
+// Attention counts — the PO states where a human still owes an action, in the order the workflow
+// hands them along. `awaitingSend` folds `approved` (nobody has routed or issued it yet) together with
+// the pm_review rows THIS actor must issue; `receivable` is the warehouse's goods-in backlog.
+// fully_received → awaiting close. Closed/cancelled are terminal and deliberately absent.
+export async function countAttention(
+  opts: { warehouseIds?: string[]; pmUserId?: string } = {},
+): Promise<{
+  awaitingApproval: number;
+  awaitingSend: number;
+  awaitingAcceptance: number;
+  awaitingClose: number;
+  receivable: number;
+}> {
+  const scoped = { deletedAt: null, ...whereWarehouse(opts.warehouseIds) };
+  // Each queue is ONE count over the shared predicate rather than a sum of per-status counts, so the
+  // badge cannot drift from the list `?status=awaiting_approval` / `?status=awaiting_send` opens.
+  const [awaitingApproval, awaitingSend, sent, awaitingClose, receivable] = await Promise.all([
+    prisma.purchaseOrder.count({ where: { OR: awaitingApprovalPoWhere(), ...scoped } }),
+    prisma.purchaseOrder.count({ where: { OR: awaitingSendPoWhere(opts.pmUserId), ...scoped } }),
+    prisma.purchaseOrder.count({ where: { status: "sent", ...scoped } }),
+    prisma.purchaseOrder.count({ where: { status: "fully_received", ...scoped } }),
+    prisma.purchaseOrder.count({
+      where: { status: { in: [...RECEIVABLE_PO_STATUSES] }, ...scoped },
+    }),
+  ]);
+  return {
+    awaitingApproval,
+    awaitingSend,
+    awaitingAcceptance: sent,
+    awaitingClose,
+    receivable,
+  };
 }
 
 export async function openSummary(warehouseIds?: string[]): Promise<{ count: number; valuePence: number }> {
