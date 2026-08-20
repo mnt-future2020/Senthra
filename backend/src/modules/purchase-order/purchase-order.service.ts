@@ -1,6 +1,12 @@
 import type { Prisma } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 
+import { daysBetween, toCalendarDay } from "../../utils/calendar-day.js";
+import { parseFilterDate } from "../../utils/filter-date.js";
+import { computeNotifyOnDate } from "./rentalHire.predicate.js";
+import { emitHireUpdated } from "./rentalHire.realtime.js";
+import { resolveDeliveryLocation, resolveReturnLocation, type ReturnContext } from "./rentalReturn.js";
+import { extensionChargePence, type RatePeriod } from "../../utils/rental-pricing.js";
 import * as poRepo from "./purchase-order.repository.js";
 import type { PoLineRow, PurchaseOrderWithRelations } from "./purchase-order.repository.js";
 import * as poEmail from "./purchase-order.email.js";
@@ -14,9 +20,13 @@ import * as irmService from "#modules/irm/irm.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import * as attachmentService from "#modules/attachment/attachment.service.js";
+// The hire's movement notes, for the physical window on an on-hire row. The REPOSITORY, deliberately:
+// rental-receipt.service imports this file, so reaching for its service would make the cycle.
+import * as receiptRepo from "#modules/rental-receipt/rental-receipt.repository.js";
 import { getCloudinaryCreds, getCompanyTimezone, getRegionalSettings } from "#modules/settings/settings.service.js";
 import { formatDate } from "#modules/document/document.formatter.js";
 import { EXPORT_MAX, EXPORT_PAGING, toCsv } from "../../utils/csv.js";
+import { publicLateHireDelivery } from "../../utils/hire-delivery.js";
 import { PO_ATTACHMENT_MAX_COUNT, PO_ATTACHMENT_MAX_TOTAL_BYTES } from "./purchase-order.validation.js";
 import { startOfDayIn } from "../../utils/filter-date.js";
 import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
@@ -32,6 +42,7 @@ import type {
   PoAttachmentInput,
   PoSupplierAcceptInput,
   UpdatePurchaseOrderInput,
+  ExtendHireInput,
 } from "./purchase-order.validation.js";
 import { incotermLabel } from "./purchase-order.validation.js";
 
@@ -58,6 +69,13 @@ const ALLOWED_TRANSITIONS: Record<string, string[]> = {
   cancelled: [],
 };
 const humanStatus = (s: string) => s.replace(/_/g, " ");
+
+/**
+ * The receipt statuses in order, oldest first — how `recomputeRentalReceiptStatus` tells a downgrade
+ * from an advance. Anything outside this list (draft, approvals, terminal states) is handled by the
+ * guards around it and never reaches the comparison.
+ */
+const RECEIPT_PROGRESS = ["sent", "supplier_accepted", "partially_received", "fully_received"];
 function assertTransition(from: string, to: string): void {
   if (!ALLOWED_TRANSITIONS[from]?.includes(to)) {
     throw conflict(`Can't move a ${humanStatus(from)} purchase order to ${humanStatus(to)}.`);
@@ -91,6 +109,75 @@ export interface PublicPoWarehouse {
   name: string;
   address: string | null;
 }
+/** A committed hire on the order — the row the deadline badge counts and the sweep emails about. */
+export interface PublicPoRentalLine {
+  id: string;
+  rentalItemId: string;
+  itemName: string;
+  baseUnit: string | null;
+  quantity: number;
+  hireStartDate: string;
+  hireEndDate: string;
+  hireDays: number;
+  notifyDaysBefore: number;
+  notifyOnDate: string;
+  deliveryAddress: string | null;
+  ratePeriod: string;
+  ratePence: number | null;
+  priceOverridden: boolean;
+  returnMode: string;
+  returnAddress: string | null;
+  /** BOTH legs, resolved once server-side — see rentalReturn.ts. */
+  deliveryLocation: { label: string; address: string | null };
+  returnLocation: { label: string; address: string | null };
+  unitPricePence: number;
+  unitPrice: number;
+  vatRate: number;
+  lineTotalPence: number;
+  lineTotal: number;
+  notes: string | null;
+  hireStatus: string;
+  /** How many units have actually turned up, summed from this line's hire deliveries. */
+  receivedQuantity: number;
+  /** Every ordered unit is here — what takes the line off the receiving queue. */
+  fullyReceived: boolean;
+  /** How many have gone BACK, and whether everything we hold has. The return form caps on these. */
+  returnedQuantity: number;
+  fullyReturned: boolean;
+  /** Units reported damaged while in our hands — clamped by every reader to what is still held. */
+  damagedQuantity: number;
+  /** Stamped when the warehouse confirmed the kit arrived; null while awaiting delivery. */
+  receivedAt: string | null;
+  receivedBy: string | null;
+  /** Cumulative extension charges, NOT included in this order's totals. */
+  extensionChargePence: number;
+  extensionCharge: number;
+  /**
+   * The BREAKDOWN of that total, oldest first — one entry per extension.
+   *
+   * The total alone says £725 and nothing else: not how many times, not when, not how much each. Both
+   * are kept because they answer different questions, and the sum is the one every deadline screen
+   * needs at a glance.
+   */
+  extensions: {
+    id: string;
+    previousEndDate: string;
+    newEndDate: string;
+    addedDays: number;
+    charge: number;
+    /** What the hire's own rate priced it at. Null on the `total` basis, which has no rate. */
+    calculatedCharge: number | null;
+    priceOverridden: boolean;
+    agreedBy: string | null;
+    agreedAt: string;
+  }[];
+  /** What the total holds that no entry explains — extensions agreed before they were recorded. */
+  unexplainedExtensionCharge: number;
+  returnedAt: string | null;
+  returnedBy: string | null;
+  rentalItem: { id: string; code: string; name: string; status: string } | null;
+}
+
 export interface PublicPoItem {
   id: string;
   irmItemId: string;
@@ -150,6 +237,11 @@ export interface PublicPurchaseOrder {
   description: string | null;
   orderDate: string;
   expectedDeliveryDate: string | null;
+  // Set when the delivery date — the supplier's confirmed date, else the expected one — falls AFTER
+  // one of this order's hires has already started —
+  // days billed with nothing on site, and the date the supplier reads on the PDF. Derived here so
+  // the request screen, the order screen and any export read one answer. A warning, never a block.
+  lateHireDelivery: { earliestHireStart: string; daysLate: number } | null;
   currency: string;
   subtotalPence: number;
   vatPence: number;
@@ -165,6 +257,7 @@ export interface PublicPurchaseOrder {
   internalNotes: string | null;
   supplierNotes: string | null;
   items: PublicPoItem[];
+  rentalItems: PublicPoRentalLine[];
   attachments: PublicPoAttachment[];
   createdBy: string | null;
   submittedBy: string | null;
@@ -196,10 +289,41 @@ const trimToNull = (v: string | null | undefined): string | null => {
 const pounds = (p: number | null | undefined): number => (p == null ? 0 : p / 100);
 const iso = (d: Date | null | undefined): string | null => (d ? d.toISOString() : null);
 
+/** The address parts of any warehouse-shaped row, joined. The on-hire list selects a narrower
+ *  warehouse than the detail include, and both need the same block. */
+function addressBlock(
+  w: { addressLine1: string | null; addressLine2: string | null; city: string | null; county: string | null; postcode: string | null; country: string | null } | null | undefined,
+): string | null {
+  if (!w) return null;
+  const parts = [w.addressLine1, w.addressLine2, w.city, w.county, w.postcode, w.country].map((x) => x?.trim()).filter(Boolean);
+  return parts.length ? parts.join(", ") : null;
+}
+
 function warehouseAddress(w: PurchaseOrderWithRelations["warehouse"]): string | null {
   if (!w) return null;
   const parts = [w.addressLine1, w.addressLine2, w.city, w.county, w.postcode, w.country].map((p) => p?.trim()).filter(Boolean);
   return parts.length ? parts.join(", ") : null;
+}
+
+/**
+ * The facts BOTH legs of a hire's round trip are resolved from — see rentalReturn.ts.
+ *
+ * Built once per line so the outbound and return chains are handed the same facts. `deliveryAddress`
+ * here is the LINE's own; the order's "deliver to a different address" override is a separate step in
+ * the chain, and a line with neither falls through to the warehouse.
+ */
+function poReturnCtx(
+  po: PurchaseOrderWithRelations,
+  r: PurchaseOrderWithRelations["rentalItems"][number],
+): ReturnContext {
+  return {
+    returnMode: r.returnMode,
+    returnAddress: r.returnAddress,
+    deliveryAddress: r.deliveryAddress,
+    orderDeliveryAddress: po.deliveryAddress,
+    warehouseName: po.warehouse?.name ?? null,
+    warehouseAddress: warehouseAddress(po.warehouse),
+  };
 }
 
 function toPublic(po: PurchaseOrderWithRelations): PublicPurchaseOrder {
@@ -250,6 +374,9 @@ function toPublic(po: PurchaseOrderWithRelations): PublicPurchaseOrder {
     description: po.description,
     orderDate: po.orderDate.toISOString(),
     expectedDeliveryDate: iso(po.expectedDeliveryDate),
+    // The supplier's CONFIRMED date wins once given: it is the date the kit actually turns up, and
+    // the warehouse worklist already plans against it in preference to the estimate.
+    lateHireDelivery: publicLateHireDelivery(po.confirmedDeliveryDate ?? po.expectedDeliveryDate, po.rentalItems),
     currency: po.currency ?? "GBP",
     subtotalPence: po.subtotalPence,
     vatPence: po.vatPence,
@@ -280,6 +407,70 @@ function toPublic(po: PurchaseOrderWithRelations): PublicPurchaseOrder {
       notes: i.notes,
       irmItem: i.irmItem ? { id: i.irmItem.id, code: i.irmItem.code, name: i.irmItem.name, status: i.irmItem.status } : null,
     })),
+    rentalItems: po.rentalItems.map((r) => ({
+      id: r.id,
+      rentalItemId: r.rentalItemId,
+      itemName: r.itemName,
+      baseUnit: r.baseUnit,
+      quantity: r.quantity,
+      hireStartDate: r.hireStartDate.toISOString(),
+      hireEndDate: r.hireEndDate.toISOString(),
+      hireDays: daysBetween(r.hireStartDate, r.hireEndDate),
+      notifyDaysBefore: r.notifyDaysBefore,
+      notifyOnDate: r.notifyOnDate.toISOString(),
+      deliveryAddress: r.deliveryAddress,
+      ratePeriod: r.ratePeriod,
+      ratePence: r.ratePence,
+      priceOverridden: r.priceOverridden,
+      returnMode: r.returnMode,
+      returnAddress: r.returnAddress,
+      // BOTH legs, resolved here rather than on the client: the order document prints the same answer
+      // from the same function, so a screen and a PDF can never name two different places. The
+      // outbound one matters most on THIS record — an order carrying a "deliver to a different
+      // address" override sends a line with no address of its own somewhere the row used to call
+      // "Delivery warehouse".
+      deliveryLocation: resolveDeliveryLocation(poReturnCtx(po, r)),
+      returnLocation: resolveReturnLocation(poReturnCtx(po, r)),
+      unitPricePence: r.unitPricePence,
+      unitPrice: pounds(r.unitPricePence),
+      vatRate: r.vatRate,
+      lineTotalPence: r.lineTotalPence,
+      lineTotal: pounds(r.lineTotalPence),
+      notes: r.notes,
+      hireStatus: r.hireStatus,
+      receivedQuantity: r.receivedQuantity ?? 0,
+      fullyReceived: r.fullyReceived ?? false,
+      returnedQuantity: r.returnedQuantity ?? 0,
+      fullyReturned: r.fullyReturned ?? false,
+      damagedQuantity: r.damagedQuantity ?? 0,
+      receivedAt: iso(r.receivedAt),
+      receivedBy: r.receivedBy,
+      extensionChargePence: r.extensionChargePence,
+      extensionCharge: pounds(r.extensionChargePence),
+      extensions: (r.extensions ?? []).map((e) => ({
+        id: e.id,
+        previousEndDate: e.previousEndDate.toISOString(),
+        newEndDate: e.newEndDate.toISOString(),
+        addedDays: e.addedDays,
+        charge: pounds(e.chargePence),
+        calculatedCharge: e.calculatedChargePence == null ? null : pounds(e.calculatedChargePence),
+        priceOverridden: e.priceOverridden,
+        agreedBy: e.createdBy,
+        agreedAt: e.createdAt.toISOString(),
+      })),
+      // What the running total holds that no breakdown row explains — extensions agreed before this
+      // was recorded per event. Stated rather than hidden: a breakdown that silently adds up to less
+      // than the total beside it is read as the total being wrong. See the HireExtension model for
+      // why the old ones are not reconstructed from the audit log.
+      unexplainedExtensionCharge: pounds(
+        Math.max(0, r.extensionChargePence - (r.extensions ?? []).reduce((sum, e) => sum + e.chargePence, 0)),
+      ),
+      returnedAt: r.returnedAt?.toISOString() ?? null,
+      returnedBy: r.returnedBy,
+      rentalItem: r.rentalItem
+        ? { id: r.rentalItem.id, code: r.rentalItem.code, name: r.rentalItem.name, status: r.rentalItem.status }
+        : null,
+    })),
     attachments: po.attachments.map((a) => ({
       id: a.id,
       label: a.label,
@@ -304,6 +495,11 @@ function toPublic(po: PurchaseOrderWithRelations): PublicPurchaseOrder {
     createdAt: po.createdAt.toISOString(),
     updatedAt: po.updatedAt.toISOString(),
   };
+}
+
+/** Pence → "£2,145.00", for an audit label a human reads. */
+function poundsLabel(pence: number): string {
+  return `£${(pence / 100).toFixed(2)}`;
 }
 
 // ── Financials (server-authoritative, integer pence) ─────────────────────────────────────────
@@ -490,16 +686,23 @@ export async function exportPurchaseOrderLinesCsv(
   const orders = purchaseOrders.slice(0, EXPORT_MAX);
 
   const regional = await getRegionalSettings();
-  const all = orders.flatMap((po) =>
-    po.items.map((i) => [
-      po.code,
-      po.status,
-      po.supplier?.name ?? po.supplierName,
-      po.warehouse?.name,
-      formatDate(po.orderDate, regional.dateFormat, regional.timezone),
-      formatDate(po.expectedDeliveryDate, regional.dateFormat, regional.timezone),
-      po.purchaseRequest?.code,
-      po.job?.jobNumber,
+  // Header cells shared by both kinds of line, so an IRM row and a hire row line up column-for-column.
+  const headerCells = (po: PublicPurchaseOrder) => [
+    po.code,
+    po.status,
+    po.supplier?.name ?? po.supplierName,
+    po.warehouse?.name,
+    formatDate(po.orderDate, regional.dateFormat, regional.timezone),
+    formatDate(po.expectedDeliveryDate, regional.dateFormat, regional.timezone),
+    po.purchaseRequest?.code,
+    po.job?.jobNumber,
+  ];
+  // BOTH kinds. A hire carries real spend, so an export of `items` alone under-reports the order's
+  // value — and a hire-only order exported as nothing at all.
+  const all = orders.flatMap((po) => [
+    ...po.items.map((i) => [
+      ...headerCells(po),
+      "Item",
       // The item's catalogue CODE as well as its name: the name is a snapshot taken at order time,
       // so grouping by name alone splits an item that was renamed into two products.
       i.irmItem?.code,
@@ -507,6 +710,9 @@ export async function exportPurchaseOrderLinesCsv(
       i.sku,
       i.baseUnit,
       i.quantity,
+      "",
+      "",
+      "",
       i.unitPrice.toFixed(2),
       i.vatRate,
       i.lineTotal.toFixed(2),
@@ -515,7 +721,26 @@ export async function exportPurchaseOrderLinesCsv(
       i.receivedQuantity,
       po.currency,
     ]),
-  );
+    ...po.rentalItems.map((r) => [
+      ...headerCells(po),
+      "Rental",
+      r.rentalItem?.code,
+      r.itemName,
+      "",
+      r.baseUnit,
+      r.quantity,
+      // UTC: a hire date is a calendar day stored as UTC midnight.
+      formatDate(r.hireStartDate, regional.dateFormat, "UTC"),
+      formatDate(r.hireEndDate, regional.dateFormat, "UTC"),
+      r.hireStatus,
+      r.unitPrice.toFixed(2),
+      r.vatRate,
+      r.lineTotal.toFixed(2),
+      // A hire is never "received" — it goes back instead, which `Hire Status` carries.
+      "",
+      po.currency,
+    ]),
+  ]);
   // Capped on LINES, not orders: one order can carry hundreds, so an order-count ceiling would let
   // the real row count run far past it.
   const rows = all.slice(0, EXPORT_MAX);
@@ -525,8 +750,9 @@ export async function exportPurchaseOrderLinesCsv(
       "PO Number", "Status", "Supplier", "Warehouse",
       `Order Date (${regional.timezone})`, `Expected Delivery (${regional.timezone})`,
       "Purchase Request", "Job",
-      "Item Code", "Item", "SKU", "Unit",
-      "Quantity", "Unit Price", "VAT %", "Line Total", "Received Qty", "Currency",
+      "Line Type", "Item Code", "Item", "SKU", "Unit", "Quantity",
+      "Hire From", "Hire Until", "Hire Status",
+      "Unit Price", "VAT %", "Line Total", "Received Qty", "Currency",
     ],
     rows,
   );
@@ -741,7 +967,16 @@ export async function updatePurchaseOrder(id: string, input: UpdatePurchaseOrder
   let result: PurchaseOrderWithRelations;
   if (input.items !== undefined) {
     const lineRows = await buildLineRows(input.items);
-    const totals = computeTotals(lineRows);
+    // A line of SOME kind must remain. The schema can no longer enforce this on `items` alone —
+    // a hire-only order legitimately has none — so the check lives where the rental lines are visible.
+    if (lineRows.length === 0 && existing.rentalItems.length === 0) {
+      throw badRequest("Add at least one item or rental line.");
+    }
+    // The rental lines are NOT replaced here — this endpoint only edits IRM lines — but they still
+    // carry money, so the header roll-up has to include them. Computing from `lineRows` alone made
+    // a draft edit silently drop the hire value back out of the totals that conversion had just
+    // put in, leaving a hire-only order reading £0 with its lines still on screen.
+    const totals = computeTotals([...lineRows, ...existing.rentalItems]);
     result = await poRepo.replaceItemsAndTotals(id, lineRows, totals, headerPatch);
   } else {
     result = await poRepo.update(id, headerPatch);
@@ -749,11 +984,12 @@ export async function updatePurchaseOrder(id: string, input: UpdatePurchaseOrder
   // Field-level change audit (Zoho/SAP-style): capture the before→after of the commercially-meaningful
   // fields — supplier, warehouse, and each line's qty/price/VAT — so a pre-issue edit is traceable.
   // `result` carries the fully-resolved post-update values; lines only diffed when the update sent them.
-  const changes = diffProcurementChanges(existing, {
+  const withKeys = <T extends { irmItemId: string }>(lines: T[]) => lines.map((l) => ({ ...l, lineKey: l.irmItemId }));
+  const changes = diffProcurementChanges({ ...existing, items: withKeys(existing.items) }, {
     supplierId: result.supplierId,
     supplierName: result.supplierName,
     warehouseId: result.warehouseId,
-    items: input.items !== undefined ? result.items : undefined,
+    items: input.items !== undefined ? withKeys(result.items) : undefined,
   });
   audit.record({
     actor,
@@ -805,7 +1041,11 @@ function emitPoUpdated(po: { id: string; code: string; status: string }): void {
 export async function submitPurchaseOrder(id: string, actor?: AuditActor): Promise<PublicPurchaseOrder> {
   const po = await loadOrThrow(id, actor);
   assertTransition(po.status, "pending_approval");
-  if (po.items.length === 0) throw badRequest("Add at least one item before submitting.");
+  // A line of EITHER kind — an order converted from a hire-only request has no IRM lines at all,
+  // and checking `items` alone would strand it in draft forever.
+  if (po.items.length === 0 && po.rentalItems.length === 0) {
+    throw badRequest("Add at least one item or rental line before submitting.");
+  }
   // Same reason as approve: this is the last point where the PO is still an editable draft.
   if (!po.expectedDeliveryDate) throw conflict("Set an expected delivery date before submitting this purchase order.");
   const updated = await poRepo.update(id, { status: "pending_approval", submittedBy: actor?.email ?? null, submittedAt: new Date() });
@@ -1026,6 +1266,10 @@ export async function sendPurchaseOrder(id: string, actor?: AuditActor): Promise
   // sentBy is the issuer — the signer printed on the PO document (deterministic for email + download).
   const updated = await poRepo.update(id, { status: "sent", sentAt: new Date(), sentBy: actor?.email ?? null });
   recordStatus(actor, id, updated.code, "purchase_order.sent");
+  // The catch-up for a hire received while the order was still a draft: the quantities were recorded
+  // then, but the status could not legally move until now. Fire-and-forget in the same sense as the
+  // rest of this block — the send itself has already committed.
+  await recomputeRentalReceiptStatus(id, actor);
   emitPoUpdated(updated);
   // Fire-and-forget: email the supplier the issued PO with its PDF. NEVER blocks or rolls back.
   void poEmail.notifySupplierPoSent(updated, actor).catch((e) =>
@@ -1062,13 +1306,27 @@ export async function recordSupplierAcceptance(
   }
   // Only the awaiting-acknowledgement state moves; every other recordable status stays put.
   const advances = po.status === "sent";
-  const confirmed = new Date(input.confirmedDeliveryDate); // required by the schema
+  // The confirmed date is REQUIRED while the delivery is still ahead, and optional once it is behind.
+  //
+  // Accepting an order that has not arrived is a commitment to a date, and that date is what the
+  // warehouse plans against — so it is asked for and refused if missing. Once the goods are in there
+  // is nothing left to plan: the real arrival is on the receipt, and insisting on a "confirmed
+  // delivery date" would push somebody to type the date it actually turned up, filing an arrival
+  // under a field that means "what the supplier promised". A late acknowledgement is about the
+  // reference and the notes.
+  const AWAITING_DELIVERY = po.status === "sent" || po.status === "supplier_accepted";
+  if (AWAITING_DELIVERY && !input.confirmedDeliveryDate) {
+    throw badRequest("Enter the delivery date the supplier confirmed.");
+  }
+  const confirmed = input.confirmedDeliveryDate ? new Date(input.confirmedDeliveryDate) : null;
   const updated = await poRepo.update(id, {
     ...(advances ? { status: "supplier_accepted" } : {}),
     supplierAcceptedAt: input.acceptedDate ? new Date(input.acceptedDate) : new Date(),
     supplierAcceptedBy: actor?.email ?? null,
     supplierAckReference: trimToNull(input.supplierAckReference),
-    confirmedDeliveryDate: confirmed,
+    // Left ALONE when none is given, rather than nulled: a late acknowledgement must not erase the
+    // date the supplier committed to earlier in the order's life.
+    ...(confirmed ? { confirmedDeliveryDate: confirmed } : {}),
     supplierAcceptNotes: trimToNull(input.notes),
   });
   audit.record({
@@ -1079,7 +1337,7 @@ export async function recordSupplierAcceptance(
     targetLabel: updated.code,
     metadata: {
       supplierAckReference: trimToNull(input.supplierAckReference) ?? undefined,
-      confirmedDeliveryDate: confirmed.toISOString(),
+      confirmedDeliveryDate: confirmed?.toISOString(),
       // Makes a LATE acknowledgement self-evident in the ledger: the status it was recorded
       // against, and whether that status moved as a result.
       statusAtAcceptance: po.status,
@@ -1155,6 +1413,16 @@ export async function cancelPurchaseOrder(id: string, reason: string | undefined
 export async function closePurchaseOrder(id: string, actor?: AuditActor): Promise<PublicPurchaseOrder> {
   const po = await loadOrThrow(id, actor);
   assertTransition(po.status, "closed");
+  // An order whose hired equipment is still in our hands is not finished — the supplier is still
+  // billing for it and it still has to go back. Closing would also be a one-way door: the return and
+  // damage paths refuse a closed order, so the handover could never be recorded and the deadline
+  // badges would keep counting a hire nobody could clear.
+  const stillOut = po.rentalItems.filter((r) => r.hireStatus !== "returned");
+  if (stillOut.length > 0) {
+    throw conflict(
+      `${stillOut[0]!.itemName} is still on hire. Record its return before closing this purchase order.`,
+    );
+  }
   const updated = await poRepo.update(id, { status: "closed", closedAt: new Date() });
   recordStatus(actor, id, updated.code, "purchase_order.closed");
   emitPoUpdated(updated);
@@ -1166,6 +1434,33 @@ export async function deletePurchaseOrder(id: string, actor?: AuditActor): Promi
   if (po.status !== "draft") throw conflict("Only draft purchase orders can be deleted.");
   await poRepo.softDelete(id);
   audit.record({ actor, action: "purchase_order.deleted", targetType: "purchase_order", targetId: id, targetLabel: po.code });
+
+  // Give the REQUEST back if this order came from one.
+  //
+  // Deleting a draft PO means "this order should not have been raised" — but the request behind it
+  // was legitimately approved, and `converted` is a terminal status (ALLOWED_TRANSITIONS.converted
+  // is empty). Without this the request was stranded: no PO, no Generate PO, no Reopen, and a
+  // "View PO-0051" button pointing at a record the loader refuses. The only way forward was to
+  // duplicate it as a revision, which burns a PRF number and detaches the work from its approval.
+  //
+  // Returning it to `approved` puts it back exactly where it was the moment before the conversion,
+  // so the ordinary Generate PO path is available again. Both the delete and this move are audited,
+  // so the round trip is legible afterwards — the history is added to, not rewritten.
+  //
+  // Only draft POs can be deleted, so this can never rewind a request whose order was already sent.
+  if (po.purchaseRequestId && (await prfRepo.revertConversion(po.purchaseRequestId, actor?.email ?? null))) {
+    audit.record({
+      actor,
+      action: "purchase_request.conversion_reverted",
+      targetType: "purchase_request",
+      targetId: po.purchaseRequestId,
+      targetLabel: po.purchaseRequest?.code,
+      metadata: { purchaseOrderCode: po.code, reason: "The purchase order generated from it was deleted." },
+    });
+    // The request is countable again under "Approved — generate PO".
+    emitAttentionChanged("purchase_requests");
+  }
+
   // Same refetch signal as a status change: a watcher's list re-pulls and the row simply disappears.
   // `deleted` is not a real PO status — it is only a hint; clients act on the refetch, not the value.
   emitPoUpdated({ id, code: po.code, status: "deleted" });
@@ -1332,6 +1627,10 @@ export async function requireReceivablePurchaseOrder(id: string): Promise<Purcha
 }
 // Pure helper Goods In calls AFTER writing line receivedQuantity to derive the new status. In
 // THIS module every line's receivedQuantity is 0, so it returns "sent" unchanged.
+//
+// Takes LINES, not a purchase order, and knows nothing about what kind of line they are — which is
+// what lets hire lines join the same arithmetic without Goods In ever hearing about them. Goods In
+// keeps passing its own items; `recomputeRentalReceiptStatus` below loads BOTH kinds itself.
 export function recomputeReceiptStatus(items: { quantity: number; receivedQuantity: number }[]): "sent" | "partially_received" | "fully_received" {
   const anyReceived = items.some((i) => i.receivedQuantity > 0);
   const allReceived = items.length > 0 && items.every((i) => i.receivedQuantity >= i.quantity);
@@ -1340,17 +1639,119 @@ export function recomputeReceiptStatus(items: { quantity: number; receivedQuanti
   return "sent";
 }
 
+/**
+ * Re-derive an order's received status after a HIRE delivery, and advance it if it moved.
+ *
+ * Called by the rental-receipt module, which owns hire deliveries. It lives here because the answer
+ * depends on BOTH kinds of line: a hire-only order used to be stuck in `sent` forever, because the
+ * only path to `fully_received` counted `items` and `items.length > 0` is false when every line is a
+ * hire. Now the same arithmetic sees both.
+ *
+ * The direction of the dependency matters. Hire lines are loaded HERE and handed to the shared pure
+ * helper; the rental module never reaches into Goods In, and Goods In never learns that hire lines
+ * exist — which is what modules/__tests__/rental.boundary.test.ts enforces at build time.
+ *
+ * Forward-only, exactly like the goods path: `sent → partially_received → fully_received`, and never
+ * back down. A reversed note can lower the quantities, but an order that was fully received is a
+ * fact somebody acted on — reopening it silently is the bug that path already guards against for
+ * `closed` and `cancelled`.
+ */
+export async function recomputeRentalReceiptStatus(
+  purchaseOrderId: string,
+  actor?: AuditActor,
+  // Set ONLY by a reversal. Every other caller adds quantity, so its recompute can only move the
+  // status forwards; a reversal is the one operation that takes quantity away, and without this the
+  // order is left claiming `fully_received` for kit it no longer has any record of receiving — which
+  // then drops it out of the receiving window, so the units it just gave back appear on no queue and
+  // the Receive button is gone.
+  opts: { allowDowngrade?: boolean } = {},
+): Promise<void> {
+  const po = await poRepo.findById(purchaseOrderId);
+  if (!po) return;
+  // Terminal states are immutable: a receipt must never reopen or mutate a closed or cancelled order.
+  if (po.status === "closed" || po.status === "cancelled") return;
+
+  const lines = [
+    ...po.items.map((l) => ({ quantity: l.quantity, receivedQuantity: l.receivedQuantity })),
+    ...po.rentalItems.map((l) => ({ quantity: l.quantity, receivedQuantity: l.receivedQuantity ?? 0 })),
+  ];
+  const computed = recomputeReceiptStatus(lines);
+
+  // NOTHING received any more. `recomputeReceiptStatus` calls that "sent", but an order the supplier
+  // acknowledged does not un-acknowledge itself — it goes back to where it stood before the first
+  // delivery landed, which is `supplier_accepted` when there is an acceptance on file.
+  const preReceipt = po.supplierAcceptedAt ? "supplier_accepted" : "sent";
+  const next = computed === "sent" ? preReceipt : computed;
+  if (next === po.status) return;
+
+  // A DOWNGRADE — only a reversal may ask for one, and only back into the receiving window. It
+  // deliberately skips the transition check below: `ALLOWED_TRANSITIONS` is forward-only by design,
+  // and this is the one legitimate way back.
+  const isDowngrade = RECEIPT_PROGRESS.indexOf(next) < RECEIPT_PROGRESS.indexOf(po.status);
+  if (isDowngrade) {
+    if (!opts.allowDowngrade) return;
+    await poRepo.update(po.id, { status: next });
+    // Its own action, not `purchase_order.sent`: the order was not re-sent, its receipts were undone.
+    audit.record({
+      actor,
+      action: "purchase_order.receipt_reverted",
+      targetType: "purchase_order",
+      targetId: po.id,
+      targetLabel: po.code,
+      metadata: { from: po.status, to: next },
+    });
+    emitPoUpdated({ id: po.id, code: po.code, status: next });
+    return;
+  }
+
+  // Forwards. `sent`/`supplier_accepted` mean "nothing received yet", which is not a transition — it
+  // is the absence of one.
+  if (next !== "partially_received" && next !== "fully_received") return;
+  // And only from a status the state machine can legally leave for it.
+  //
+  // A hire CAN be received against a draft order — paperwork lags reality, and a PRF-born order sits
+  // in draft while its committed kit turns up. What must not follow is the order jumping to
+  // `partially_received`: `ALLOWED_TRANSITIONS` has no path from there back to `sent`, so the order
+  // could never be issued, the supplier would never receive it, and the only move left would be to
+  // close it. This write bypasses `assertTransition` by design (it is derived, not commanded), which
+  // is exactly why it has to ask the same question the transition would.
+  //
+  // Nothing is lost by waiting: `sendPurchaseOrder` re-runs this once the order is issued, so the
+  // status catches up with the quantities already recorded.
+  if (!ALLOWED_TRANSITIONS[po.status]?.includes(next)) return;
+
+  await poRepo.update(po.id, { status: next });
+  recordStatus(actor, po.id, po.code, `purchase_order.${next}`);
+  emitPoUpdated({ id: po.id, code: po.code, status: next });
+}
+
 // ADDITIVE Goods In seam — called INSIDE the GRN completion transaction. Bumps each PO line's
 // receivedQuantity by the physically-received delta, recomputes the received status from ALL
 // lines, and advances the PO (sent → partially_received / fully_received) emitting the reserved
 // audit verb. Forward-only: receivedQuantity only grows, so recompute never downgrades. No
 // existing PO behaviour/field changes — this is the writer the seams above were built for.
+/**
+ * Returns the status change this receipt caused, or null — so the CALLER can record it after the
+ * transaction commits.
+ *
+ * The audit write used to happen here, inside the transaction. `audit.record` is fire-and-forget and
+ * commits on its own, so a later failure in the same transaction (a serial clash on the inventory
+ * write, a Mongo write conflict) rolled everything back and left the trail permanently asserting
+ * `purchase_order.fully_received` for an order that received nothing. An audit trail that can be
+ * wrong about the one thing it exists to record is worse than no entry at all.
+ */
+export interface ReceiptStatusChange {
+  code: string;
+  status: "partially_received" | "fully_received";
+}
+
 export async function applyGoodsReceipt(
   tx: Prisma.TransactionClient,
   purchaseOrderId: string,
   deltas: { purchaseOrderItemId: string; receivedDelta: number }[],
-  actor?: AuditActor,
-): Promise<void> {
+  // No `actor`: this no longer writes anything the actor is stamped on. The status entry moved out to
+  // `recordReceiptStatusChange`, which the caller runs once the transaction has committed.
+): Promise<ReceiptStatusChange | null> {
   // Terminal-state guard: `closed` and `cancelled` are immutable — a receipt must NEVER reopen or
   // mutate such a PO (the bug this closes: completing a stale draft GRN silently un-closed the PO,
   // left a stale closedAt, and still wrote inventory). Loaded + checked BEFORE any write, so
@@ -1383,13 +1784,25 @@ export async function applyGoodsReceipt(
   const next = recomputeReceiptStatus(lines);
   if (next !== header.status && (next === "partially_received" || next === "fully_received")) {
     await poRepo.setStatusTx(tx, purchaseOrderId, next);
-    recordStatus(actor, purchaseOrderId, header.code, `purchase_order.${next}`);
-    // NOTE: emitted from inside the GRN completion transaction, matching the audit record on the
-    // line above. If that transaction later rolls back, watchers have been told to refetch a change
-    // that never landed — harmless, because the payload is only a refetch SIGNAL: each client
-    // re-pulls the committed truth over REST and simply sees the unchanged order.
+    // NOTE: emitted from inside the transaction, deliberately, unlike the audit entry. If it later
+    // rolls back, watchers have been told to refetch a change that never landed — harmless, because
+    // the payload is only a refetch SIGNAL: each client re-pulls the committed truth over REST and
+    // simply sees the unchanged order. An audit entry has no such recovery, which is why it is
+    // handed back to the caller instead.
     emitPoUpdated({ id: purchaseOrderId, code: header.code, status: next });
+    return { code: header.code, status: next };
   }
+  return null;
+}
+
+/** Record the status change `applyGoodsReceipt` reported — call it AFTER the transaction commits. */
+export function recordReceiptStatusChange(
+  purchaseOrderId: string,
+  change: ReceiptStatusChange | null,
+  actor?: AuditActor,
+): void {
+  if (!change) return;
+  recordStatus(actor, purchaseOrderId, change.code, `purchase_order.${change.status}`);
 }
 
 // ── Supplier procurement summary (the supplier detail "Procurement" tab) ─────────────────────
@@ -1449,4 +1862,691 @@ export async function incomingByItemWarehouse(): Promise<Map<string, number>> {
     map.set(key, (map.get(key) ?? 0) + remaining);
   }
   return map;
+}
+
+// ── Rental hires ──────────────────────────────────────────────────────────────────────────────
+//
+// The two actions a live hire supports. Everything else about a rental line is fixed at
+// conversion: it was reviewed and committed to the supplier, so quantities and prices are not
+// editable here any more than an IRM line's are.
+
+/** The line, checked to belong to THIS order — an id alone would let one PO act on another's. */
+async function loadRentalLine(poId: string, lineId: string) {
+  const line = await poRepo.findRentalLine(lineId);
+  if (!line || line.purchaseOrderId !== poId) throw notFound("Rental line not found on this purchase order.");
+  return line;
+}
+
+/**
+ * Mark a hire returned.
+ *
+ * This is what takes it off the deadline badge. Without a terminal state every hire that ever
+ * ended would stay overdue forever and the red count would only grow — see the schema note on
+ * `hireStatus`.
+ */
+export async function markHireReturned(
+  poId: string,
+  lineId: string,
+  actor?: AuditActor,
+): Promise<PublicPurchaseOrder> {
+  const po = await loadOrThrow(poId, actor);
+  const line = await loadRentalLine(po.id, lineId);
+  if (line.hireStatus === "returned") throw conflict("That hire has already been returned.");
+  // Nothing can go back that never arrived. The honest answer to "we never took delivery" is to
+  // cancel the hire, which this module does not model yet — so it says so rather than stamping a
+  // return date onto kit that was never in our hands.
+  if (line.hireStatus === "awaiting_delivery") {
+    throw conflict("That hire hasn't been received yet — mark it received before returning it.");
+  }
+  // Units already back means a RETURN NOTE put them there, and from here the two writers must not
+  // mix. This path writes `returnedQuantity` with no note behind it; reversing any existing note
+  // recomputes that column purely from the notes that survive — so a 2-unit note reversed after this
+  // closed a 5-unit hire would silently erase all five and reopen the hire as if nothing went back.
+  //
+  // A line that has never had a note is safe: this write also closes the hire, and a closed hire
+  // takes no further notes, so nothing is ever left to reverse.
+  if ((line.returnedQuantity ?? 0) > 0) {
+    throw conflict(
+      "This hire already has collection records. Record the remaining units with Return hire, so the quantities and the records agree.",
+    );
+  }
+
+  await poRepo.updateRentalLine(lineId, {
+    hireStatus: "returned",
+    returnedAt: new Date(),
+    returnedBy: actor?.email ?? null,
+    // The QUANTITIES have to move with the status, or the two ways a hire ends disagree: this path
+    // would leave a closed hire reading "3 of 3 still out" on every surface that counts units, and the
+    // warehouse pane would keep listing equipment nobody has.
+    //
+    // This is the path for a hire that simply ended — the supplier collected from site, an engineer
+    // handed it back. The one that needs proof (a date, a collector, a condition, a photograph) is
+    // POST /rental-receipts/returns, which writes an HRN and reaches the same state with evidence.
+    returnedQuantity: line.receivedQuantity,
+    fullyReturned: true,
+  });
+  emitHireUpdated(po.id, po.code);
+  audit.record({
+    actor,
+    action: "purchase_order.rental_returned",
+    targetType: "purchase_order",
+    targetId: po.id,
+    targetLabel: po.code,
+    metadata: { item: line.itemName, hireEndDate: line.hireEndDate.toISOString() },
+  });
+  return getPurchaseOrder(po.id, actor);
+}
+
+/**
+ * Extend a hire by moving its end date.
+ *
+ * Not a new record and not a new status — the same line, later. The write recomputes `notifyOnDate`
+ * and clears the whole notification state, so the NEW deadline earns its own reminder rather than
+ * inheriting "already told them" from the old one.
+ */
+export async function extendHire(
+  poId: string,
+  lineId: string,
+  input: ExtendHireInput,
+  actor?: AuditActor,
+): Promise<PublicPurchaseOrder> {
+  const po = await loadOrThrow(poId, actor);
+  const line = await loadRentalLine(po.id, lineId);
+  if (line.hireStatus === "returned") throw conflict("That hire has been returned and can no longer be extended.");
+
+  // A calendar day like every other hire date, so a time-of-day cannot shift the reminder by a
+  // fraction of a day or slip past the "after the start date" check.
+  const hireEndDate = toCalendarDay(input.hireEndDate);
+  if (hireEndDate.getTime() <= line.hireStartDate.getTime()) {
+    throw badRequest("The hire end date must be after the start date.");
+  }
+  // An extension moves the end date FORWARD. Every consumer of this write assumes that and none of
+  // them survives the opposite: the register stores `addedDays` as a plain difference and renders it
+  // as `+{addedDays}d` (a shortening reads "+-27d"), extensionChargePence clamps the difference to
+  // zero so the move is silently free, and the reminder is re-armed for a deadline that may already
+  // have passed. The Extend dialog sets `min={hireEndDate}` on the date input, but that is a hint to
+  // the picker rather than a rule — a stale tab, devtools or any direct API call ignores it — so the
+  // rule has to live here. Correcting an end date backwards is a different operation from extending,
+  // and this codebase does not model it (see extensionChargePence: "shortening is not a credit note").
+  if (hireEndDate.getTime() <= line.hireEndDate.getTime()) {
+    throw badRequest("The new hire end date must be after the current end date.");
+  }
+  const notifyDaysBefore = input.notifyDaysBefore ?? line.notifyDaysBefore;
+
+  // What the extension costs, on the rate the hire was struck at. The whole hire is repriced and the
+  // old price subtracted — see extensionChargePence for why the added days are never priced alone.
+  const calculatedChargePence = extensionChargePence(
+    line.ratePeriod as RatePeriod,
+    line.ratePence,
+    line.hireStartDate,
+    line.hireEndDate,
+    hireEndDate,
+  );
+  // The AGREED figure wins when one is sent: a supplier may price the extra days differently, and on
+  // the `total` basis there is no rate to calculate from at all. Per unit, like every other price
+  // here, so the quantity multiplies it exactly as it does the hire itself.
+  const agreedChargePence = input.additionalChargePence ?? calculatedChargePence ?? 0;
+
+  // The LINE total for this one extension — what is added to the running total, and therefore what
+  // the breakdown row has to carry for the two to add up.
+  const lineChargePence = agreedChargePence * line.quantity;
+
+  // The line and the record of what moved it, in one transaction. Recording each extension as a fact
+  // of its own is the only way "how much extension did we agree in July" can be answered: the running
+  // total below is a SUM, and a sum carries no dates — three extensions of £275, £300 and £150 read
+  // as £725 and nothing more.
+  await poRepo.extendRentalLine(
+    lineId,
+    {
+      hireEndDate,
+      notifyDaysBefore,
+      notifyOnDate: computeNotifyOnDate(line.hireStartDate, hireEndDate, notifyDaysBefore),
+      // Accumulated BESIDE the committed money, never inside it — the order's totals stay the amount
+      // the supplier agreed to. See the field's note in schema.prisma.
+      extensionChargePence: line.extensionChargePence + lineChargePence,
+      deadlineNotifiedAt: null,
+      deadlineNotifyClaimToken: null,
+      deadlineNotifyClaimExpires: null,
+      deadlineNotifyAttempts: 0,
+    },
+    {
+      purchaseOrderRentalLineId: line.id,
+      purchaseOrderId: po.id,
+      poCode: po.code,
+      supplierName: po.supplierName,
+      itemName: line.itemName,
+      previousEndDate: line.hireEndDate,
+      newEndDate: hireEndDate,
+      addedDays: daysBetween(line.hireEndDate, hireEndDate),
+      chargePence: lineChargePence,
+      calculatedChargePence,
+      priceOverridden: input.additionalChargePence != null && input.additionalChargePence !== calculatedChargePence,
+      quantity: line.quantity,
+      ratePeriod: line.ratePeriod,
+      ratePence: line.ratePence,
+      createdBy: actor?.email ?? null,
+    },
+  );
+  emitHireUpdated(po.id, po.code);
+  audit.record({
+    actor,
+    action: "purchase_order.rental_extended",
+    targetType: "purchase_order",
+    targetId: po.id,
+    targetLabel: po.code,
+    metadata: {
+      item: line.itemName,
+      from: line.hireEndDate.toISOString(),
+      to: hireEndDate.toISOString(),
+      // BOTH figures, so a negotiated extension shows what the rate said and what was agreed —
+      // the same pairing the line's own price keeps.
+      calculatedAdditionalChargePence: calculatedChargePence,
+      agreedAdditionalChargePence: agreedChargePence,
+      priceOverridden: input.additionalChargePence != null && input.additionalChargePence !== calculatedChargePence,
+      ratePeriod: line.ratePeriod,
+      ratePence: line.ratePence,
+      quantity: line.quantity,
+      // `changes[]` is what the purchase order's own Audit Trail tab renders (auditDisplay's
+      // changeLabels). Without it this entry shows as a bare "Rental Extended" with the dates and
+      // the money visible only in the global audit log's raw-JSON drawer — which is not where anyone
+      // looking at this order would think to check.
+      changes: [
+        {
+          label:
+            `${line.itemName}: hire end ${line.hireEndDate.toISOString().slice(0, 10)} → ` +
+            `${hireEndDate.toISOString().slice(0, 10)}` +
+            (agreedChargePence > 0
+              ? ` · additional ${poundsLabel(agreedChargePence * line.quantity)}` +
+                (calculatedChargePence != null && calculatedChargePence !== agreedChargePence
+                  ? ` (rate calculates ${poundsLabel(calculatedChargePence * line.quantity)})`
+                  : "")
+              : " · no additional charge"),
+        },
+      ],
+    },
+  });
+  return getPurchaseOrder(po.id, actor);
+}
+
+export interface PublicOnHireLine {
+  id: string;
+  purchaseOrderId: string;
+  purchaseOrderCode: string;
+  supplierName: string | null;
+  rentalItemId: string;
+  rentalItemCode: string | null;
+  itemName: string;
+  quantity: number;
+  hireStartDate: string;
+  hireEndDate: string;
+  hireDays: number;
+  daysRemaining: number;
+  notifyOnDate: string;
+  /**
+   * Which deadline window this hire is in, decided HERE.
+   *
+   * The client used to re-derive it, which meant a second implementation of the rule and a "today"
+   * taken from the browser rather than the company timezone — so a row could be coloured for a
+   * state the badge disagreed with. One answer, computed where the badges are computed.
+   */
+  window: "ok" | "expiring" | "overdue";
+  deliveryAddress: string | null;
+  /** The basis an extension prices from — the Extend dialog previews the charge from these. */
+  ratePeriod: string;
+  ratePence: number | null;
+  priceOverridden: boolean;
+  /** Cumulative extension charges on this hire. NOT part of the order's totals. */
+  extensionCharge: number;
+  /** Ordered vs actually arrived — a part delivery is ordinary, and the row has to show it. */
+  receivedQuantity: number;
+  fullyReceived: boolean;
+  /** What has gone back, and whether everything we hold has — the row's Return action caps on these. */
+  returnedQuantity: number;
+  fullyReturned: boolean;
+  /** Reported damaged while with us. The warehouse's rental pane filters on it. */
+  damagedQuantity: number;
+  /**
+   * What this hire COSTS: the agreed price for one unit and for the whole line, in pounds.
+   *
+   * The same numbers the order committed — carried onto the row rather than left on the purchase
+   * order, because the unit a hire is reported in is the LINE (one item, one period, one price) and
+   * a report that has to open every order to price its rows is not a report.
+   *
+   * `extensionCharge` above sits beside them and is deliberately NOT added in: it is money agreed
+   * after the order was sent and is not part of its totals. A reader adding the two columns is doing
+   * it knowingly; a single pre-summed column would hide which half is which.
+   */
+  unitPrice: number;
+  lineTotal: number;
+  /**
+   * When the equipment actually MOVED, off its own movement notes — first delivery, last collection.
+   *
+   * Not `receivedAt` / `returnedAt`: those are stamped when somebody typed the record in, and the
+   * note carries the day the kit changed hands. A supplier invoices from the second one.
+   */
+  deliveredOn: string | null;
+  collectedOn: string | null;
+  /**
+   * Days actually held, on the same convention as `hireDays` — the collection day is not charged.
+   * Null until the loop is closed at both ends; there is no honest number before that.
+   *
+   * Against `hireDays` this is the one comparison a hire is reviewed on: billed 70, held 62.
+   */
+  daysOnHire: number | null;
+  /**
+   * What the supplier is charging us for damage to this hire, in pounds, across its live damage
+   * reports and returns.
+   *
+   * NULL, not 0, when no figure is on file — a hire with damaged units and no charge yet is waiting
+   * on a quote, and calling that zero is how it stops being chased. Beside `lineTotal` and
+   * `extensionCharge` rather than added into either: the three are committed money, money agreed
+   * later, and money we owe for breaking something, and a report that folds them together can answer
+   * none of the questions asked of them.
+   */
+  damageCharge: number | null;
+  /** Where it GOES — the line's own address, the order's override, or the warehouse. */
+  deliveryLocation: { label: string; address: string | null };
+  /** Where it is collected from — resolved by the same function the order document prints. */
+  returnLocation: { label: string; address: string | null };
+  hireStatus: string;
+}
+
+/**
+ * The hire's physical window, and the length of it, from its first and last movement.
+ *
+ * `daysOnHire` is measured the way `billableDays` measures a hire: the collection day is the day it
+ * goes back and is not a day held. Null unless BOTH ends are known — a hire still out has no length
+ * yet, and 0 would read as "held for no time" on a row that is currently out.
+ */
+function hireWindow(m: receiptRepo.HireMovementDates | undefined): {
+  deliveredOn: string | null;
+  collectedOn: string | null;
+  daysOnHire: number | null;
+  damageCharge: number | null;
+} {
+  const deliveredOn = m?.deliveredOn ?? null;
+  const collectedOn = m?.collectedOn ?? null;
+  return {
+    deliveredOn: deliveredOn?.toISOString() ?? null,
+    collectedOn: collectedOn?.toISOString() ?? null,
+    // Clamped at 0: a collection dated before the delivery is bad data entry, not a negative hire.
+    daysOnHire: deliveredOn && collectedOn ? Math.max(0, daysBetween(deliveredOn, collectedOn)) : null,
+    // Null when nothing has been quoted — see the field's own note. `pounds()` would turn that into
+    // 0, which is the one answer this number must never give.
+    damageCharge: m?.damageChargePence == null ? null : pounds(m.damageChargePence),
+  };
+}
+
+/** One context for both legs of an on-hire row — see poReturnCtx for the same job on a full order. */
+function onHireCtx(r: {
+  returnMode: string;
+  returnAddress: string | null;
+  deliveryAddress: string | null;
+  // The narrow shape the on-hire query actually selects — `addressBlock`'s own parameter, so this
+  // never drifts from what it can format.
+  purchaseOrder: {
+    deliveryAddress: string | null;
+    warehouse: (Parameters<typeof addressBlock>[0] & { name: string }) | null | undefined;
+  };
+}): ReturnContext {
+  return {
+    returnMode: r.returnMode,
+    returnAddress: r.returnAddress,
+    deliveryAddress: r.deliveryAddress,
+    orderDeliveryAddress: r.purchaseOrder.deliveryAddress,
+    warehouseName: r.purchaseOrder.warehouse?.name ?? null,
+    warehouseAddress: addressBlock(r.purchaseOrder.warehouse),
+  };
+}
+
+/**
+ * The live hires, for the rentals module's On hire tab.
+ *
+ * Its `status` filter resolves through the SAME predicates the attention badges count, so a badge
+ * reading 3 opens exactly those 3 rows. Two copies of "expiring" is how a count and its list drift
+ * apart — the failure the attention registry already documents for `?status=rework`.
+ */
+export async function listOnHire(
+  params: {
+    status?: string;
+    page?: number;
+    pageSize?: number;
+    warehouseId?: string;
+    rentalItemId?: string;
+    search?: string;
+    /**
+     * Raises the 200-row page cap for a SERVER-INITIATED read — only the CSV export sets it.
+     * Not reachable from the wire: the controller builds these params field by field out of
+     * `req.query` and never copies this one, so a client cannot ask for an unbounded page.
+     * See EXPORT_PAGING in utils/csv.ts, and `paginate`'s `maxPageSize` for the same argument.
+     */
+    maxPageSize?: number;
+  },
+  // Company-wide, deliberately: a hire is chased by the PM on the order, not by whoever holds the
+  // warehouse it was delivered to. The actor is taken so the signature matches every other list
+  // and a future scope rule has somewhere to land.
+  _actor?: AuditActor,
+): Promise<{ rows: PublicOnHireLine[]; total: number; page: number; pageSize: number }> {
+  // Checked against the repository's own list rather than a hand-written chain: a status the filter
+  // resolves but this line forgets is silently downgraded to "all", opening every live hire under a
+  // badge that counted a handful.
+  const status: poRepo.OnHireStatus = (poRepo.ON_HIRE_STATUSES as readonly string[]).includes(params.status ?? "")
+    ? (params.status as poRepo.OnHireStatus)
+    : "all";
+  const page = Math.max(1, params.page ?? 1);
+  // 200 is the ceiling for anything a CLIENT can ask for; only a server-initiated read may lift it,
+  // and only by passing maxPageSize. Without that escape hatch the CSV export asked for 50,000 rows,
+  // was silently clamped to 200, and then measured its own `capped` flag against that clamped length
+  // — reporting a 200-row file as the complete register. Same failure `paginate(maxPageSize)` exists
+  // to prevent; this list cannot use `paginate` itself because the repository returns `total`
+  // alongside the rows rather than counting first.
+  const pageSize = Math.min(params.maxPageSize ?? 200, Math.max(1, params.pageSize ?? 20));
+  const todayStart = startOfDayIn(await getCompanyTimezone(), new Date());
+
+  const { rows, total } = await poRepo.listOnHire({
+    status,
+    todayStart,
+    page,
+    pageSize,
+    warehouseId: params.warehouseId,
+    // Ignored unless it looks like an id — a stray query string must narrow to nothing recognisable
+    // rather than being handed to Prisma, which answers a malformed ObjectId with a 500.
+    rentalItemId: /^[a-f0-9]{24}$/i.test(params.rentalItemId ?? "") ? params.rentalItemId : undefined,
+    // A box holding only spaces is not a filter — it would narrow the list to nothing while the
+    // screen showed an empty-looking search.
+    search: params.search?.trim() ? params.search.trim() : undefined,
+  });
+  // The physical window of every row on this page, in ONE batched query — see movementDatesByHireLine
+  // for why the notes are the source and the hire line's own timestamps are not. Read through the
+  // rental-receipt REPOSITORY rather than its service: that module's service imports this one, and a
+  // service-to-service edge here would close the cycle.
+  const moved = await receiptRepo.movementDatesByHireLine(rows.map((r) => r.id));
+  return {
+    rows: rows.map((r) => ({
+      id: r.id,
+      purchaseOrderId: r.purchaseOrder.id,
+      purchaseOrderCode: r.purchaseOrder.code,
+      supplierName: r.purchaseOrder.supplierName,
+      rentalItemId: r.rentalItemId,
+      rentalItemCode: r.rentalItem?.code ?? null,
+      itemName: r.itemName,
+      quantity: r.quantity,
+      hireStartDate: r.hireStartDate.toISOString(),
+      hireEndDate: r.hireEndDate.toISOString(),
+      hireDays: daysBetween(r.hireStartDate, r.hireEndDate),
+      // Negative once the hire has run out — the on-hire row's "3 days left" / "2 days over".
+      daysRemaining: daysBetween(todayStart, r.hireEndDate),
+      fullyReceived: r.fullyReceived ?? false,
+      returnedQuantity: r.returnedQuantity ?? 0,
+      fullyReturned: r.fullyReturned ?? false,
+      damagedQuantity: r.damagedQuantity ?? 0,
+      notifyOnDate: r.notifyOnDate.toISOString(),
+      window:
+        r.hireEndDate.getTime() < todayStart.getTime()
+          ? "overdue"
+          : r.notifyOnDate.getTime() <= todayStart.getTime()
+            ? "expiring"
+            : "ok",
+      deliveryAddress: r.deliveryAddress,
+      ratePeriod: r.ratePeriod,
+      ratePence: r.ratePence,
+      priceOverridden: r.priceOverridden,
+      // What extending this hire has added so far. Shown on the row that offers the Extend button,
+      // so the running commitment is visible where it is created.
+      extensionCharge: pounds(r.extensionChargePence),
+      // Whoever books the hire back in needs BOTH ends of the trip — the same answers the supplier
+      // reads on the order. `deliveryAddress` above is only the line's own text: a hire on an order
+      // that overrides its delivery address showed an empty Delivery column while going somewhere
+      // definite, so the resolved leg travels alongside it.
+      receivedQuantity: r.receivedQuantity ?? 0,
+      deliveryLocation: resolveDeliveryLocation(onHireCtx(r)),
+      returnLocation: resolveReturnLocation(onHireCtx(r)),
+      hireStatus: r.hireStatus,
+      unitPrice: pounds(r.unitPricePence),
+      lineTotal: pounds(r.lineTotalPence),
+      ...hireWindow(moved.get(r.id)),
+    })),
+    total,
+    page,
+    pageSize,
+  };
+}
+
+// ── The extension register ────────────────────────────────────────────────────────────────────
+//
+// Every extension agreed in a period, one row each. `extensionChargePence` on the hire line is the
+// SUM of these and answers only "how much, in total, on this hire" — it carries no dates, so the
+// question a finance period actually asks ("what extension did we agree in July") had no answer at
+// all. The audit log holds each event, but an activity trail cannot be filtered, joined to a hire and
+// totalled; that is what a register is.
+
+export interface PublicHireExtension {
+  id: string;
+  purchaseOrderId: string;
+  purchaseOrderCode: string | null;
+  supplierName: string | null;
+  itemName: string;
+  previousEndDate: string;
+  newEndDate: string;
+  addedDays: number;
+  /** The LINE charge for this one extension, in pounds — per unit x quantity. */
+  charge: number;
+  /** What the hire's own rate priced it at, when there was a rate. Null on the `total` basis. */
+  calculatedCharge: number | null;
+  priceOverridden: boolean;
+  quantity: number;
+  ratePeriod: string | null;
+  ratePence: number | null;
+  agreedBy: string | null;
+  agreedAt: string;
+}
+
+export interface ListHireExtensionsParams {
+  search?: string;
+  purchaseOrder?: string;
+  /** Inclusive calendar days on when the extension was AGREED. */
+  from?: string;
+  to?: string;
+  page?: number;
+  pageSize?: number;
+  maxPageSize?: number;
+}
+
+function toPublicExtension(e: {
+  id: string;
+  purchaseOrderId: string;
+  poCode: string | null;
+  supplierName: string | null;
+  itemName: string;
+  previousEndDate: Date;
+  newEndDate: Date;
+  addedDays: number;
+  chargePence: number;
+  calculatedChargePence: number | null;
+  priceOverridden: boolean;
+  quantity: number;
+  ratePeriod: string | null;
+  ratePence: number | null;
+  createdBy: string | null;
+  createdAt: Date;
+}): PublicHireExtension {
+  return {
+    id: e.id,
+    purchaseOrderId: e.purchaseOrderId,
+    purchaseOrderCode: e.poCode,
+    supplierName: e.supplierName,
+    itemName: e.itemName,
+    previousEndDate: e.previousEndDate.toISOString(),
+    newEndDate: e.newEndDate.toISOString(),
+    addedDays: e.addedDays,
+    charge: pounds(e.chargePence),
+    calculatedCharge: e.calculatedChargePence == null ? null : pounds(e.calculatedChargePence),
+    priceOverridden: e.priceOverridden,
+    quantity: e.quantity,
+    ratePeriod: e.ratePeriod,
+    ratePence: e.ratePence,
+    agreedBy: e.createdBy,
+    agreedAt: e.createdAt.toISOString(),
+  };
+}
+
+/**
+ * Every extension, filtered as a period.
+ *
+ * Company-wide, exactly like the on-hire list beside it and for the same reason: a hire is chased —
+ * and extended — by the PM on the order, not by whoever holds the warehouse it was delivered to.
+ * The `actor` is taken so the signature matches every other list and a future scope rule has
+ * somewhere to land.
+ */
+export async function listHireExtensions(
+  params: ListHireExtensionsParams = {},
+  _actor?: AuditActor,
+): Promise<{ extensions: PublicHireExtension[]; total: number; page: number; pageSize: number; totalPages: number; totalCharge: number }> {
+  const filters = {
+    search: params.search,
+    purchaseOrderId: params.purchaseOrder,
+    // The SHARED widening rule (utils/filter-date), which every other date-range filter in the app
+    // uses — including the audit log, whose `createdAt` is a timestamp exactly like `agreedAt` here.
+    // The "end" edge widens to 23:59:59.999, which is what stops a To date from dropping every
+    // extension agreed after midnight on the last day of the period — i.e. all of them.
+    dateFrom: parseFilterDate(params.from, "start"),
+    dateTo: parseFilterDate(params.to, "end"),
+  };
+  const total = await poRepo.countExtensions(filters);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total, params.maxPageSize);
+  const rows = await poRepo.findManyExtensions(filters, skip, pageSize);
+  return {
+    extensions: rows.map(toPublicExtension),
+    total,
+    page,
+    pageSize,
+    totalPages,
+    // What this PAGE adds up to. Deliberately the page and not the whole filtered set: a period total
+    // is what the export is for, and a figure quietly summing rows the reader cannot see is the kind
+    // of number that gets copied into a report.
+    totalCharge: pounds(rows.reduce((sum, e) => sum + e.chargePence, 0)),
+  };
+}
+
+/** The same filtered extensions as a file — the period report the running total cannot produce. */
+export async function exportHireExtensionsCsv(
+  params: ListHireExtensionsParams = {},
+  actor?: AuditActor,
+): Promise<{ csv: string; capped: boolean }> {
+  // EXPORT_PAGING, not a bare pageSize: `paginate` clamps anything a client could ask for, so without
+  // it an export stops at one page AND reports itself complete.
+  const { extensions } = await listHireExtensions({ ...params, ...EXPORT_PAGING }, actor);
+  const rows = extensions.slice(0, EXPORT_MAX);
+  const regional = await getRegionalSettings();
+  // The hire dates are calendar days stored as UTC midnight; `agreedAt` is a real timestamp and is
+  // shown in the company timezone, which the column names so a reader is never left guessing.
+  const day = (isoDate: string) => formatDate(new Date(isoDate), regional.dateFormat, "UTC");
+
+  const csv = toCsv(
+    [
+      `Agreed (${regional.timezone})`, "Agreed By", "Purchase Order", "Supplier", "Item",
+      "Quantity", "Previous End", "New End", "Days Added",
+      "Rate", "Rate Basis", "Calculated Charge", "Agreed Charge", "Negotiated",
+    ],
+    rows.map((e) => [
+      formatDate(new Date(e.agreedAt), regional.dateFormat, regional.timezone),
+      e.agreedBy,
+      e.purchaseOrderCode,
+      e.supplierName,
+      e.itemName,
+      e.quantity,
+      day(e.previousEndDate),
+      day(e.newEndDate),
+      e.addedDays,
+      // Blank, not 0.00: a hire priced as a lump sum has no per-period rate, and a zero would average
+      // into a rate report as a free extension.
+      e.ratePence == null ? "" : (e.ratePence / 100).toFixed(2),
+      e.ratePence == null ? "" : e.ratePeriod,
+      // BOTH figures, so a negotiated extension shows what the rate said and what was actually
+      // agreed — the same pairing the hire's own price keeps. The gap between them is the discount.
+      e.calculatedCharge == null ? "" : e.calculatedCharge.toFixed(2),
+      e.charge.toFixed(2),
+      e.priceOverridden ? "yes" : "",
+    ]),
+  );
+
+  audit.record({ actor, action: "rental_hire.exported", targetType: "purchase_order", targetLabel: `${rows.length} extensions` });
+  return { csv, capped: extensions.length > EXPORT_MAX };
+}
+
+/**
+ * The live hires, as a file.
+ *
+ * Same predicate the badges count and the tab lists, so a download taken from a filtered view holds
+ * exactly the rows that view showed.
+ */
+export async function exportOnHireCsv(
+  params: { status?: string; search?: string },
+  actor?: AuditActor,
+): Promise<{ csv: string; capped: boolean }> {
+  const regional = await getRegionalSettings();
+  // EXPORT_PAGING, not a bare pageSize: listOnHire caps a page at 200 for anything a client asks for,
+  // so without the maxPageSize this spreads, the export stopped at 200 rows AND reported itself
+  // complete. The same object every other export in the repo hands to its list function.
+  const { rows, total } = await listOnHire({ ...params, ...EXPORT_PAGING }, actor);
+  // UTC on the hire dates: a calendar day stored as UTC midnight shifts a day in any zone behind it.
+  const day = (iso: string) => formatDate(new Date(iso), regional.dateFormat, "UTC");
+  const csv = toCsv(
+    [
+      "Purchase Order", "Supplier", "Item Code", "Item", "Quantity",
+      "Hire From", "Hire Until", "Hire Days", "Days Remaining",
+      `Reminder Due (${regional.timezone})`, "Delivery Address", "Collected From", "Hire Status",
+      // ── What the hire COST and what actually happened ──────────────────────────────────────
+      // The columns a period report is built from, and the reason the `returned` filter exists at
+      // all: with the file above alone, "what did we spend on hire in July" could not be asked.
+      // Appended rather than interleaved so an existing saved spreadsheet keeps its column order.
+      "Rate", "Rate Basis", "Unit Price", "Line Total", "Extension Charge",
+      "Delivered", "Collected", "Days On Hire",
+      "Received Qty", "Returned Qty", "Damaged Qty", "Damage Charge",
+    ],
+    rows.map((r) => [
+      r.purchaseOrderCode,
+      r.supplierName,
+      r.rentalItemCode,
+      r.itemName,
+      r.quantity,
+      day(r.hireStartDate),
+      day(r.hireEndDate),
+      r.hireDays,
+      // BLANK on a hire that is already back. Both of these are computed against TODAY, and on a
+      // finished hire that is a countdown to a deadline nobody is waiting for any more: a returned
+      // row arriving as "Days Remaining -1" reads as overdue, which is the one thing it is not. The
+      // live rows they exist for are unaffected.
+      r.hireStatus === "returned" ? "" : r.daysRemaining,
+      r.hireStatus === "returned" ? "" : day(r.notifyOnDate),
+      // The RESOLVED outbound leg, matching the screen: the line's own text was empty on every hire
+      // going to its delivery warehouse, which reads as "nowhere" in a spreadsheet.
+      r.deliveryLocation.address?.replace(/\r?\n/g, ", ") ?? "",
+      r.returnLocation.address?.replace(/\r?\n/g, ", ") ?? "",
+      r.hireStatus,
+      // Money as a plain decimal, never the pence integer — this file is summed in a spreadsheet.
+      // A rate of nothing is BLANK, not 0.00: a hire priced as a total has no per-period rate, and
+      // a zero there would average into a rate report as a free hire.
+      r.ratePence == null ? "" : (r.ratePence / 100).toFixed(2),
+      r.ratePence == null ? "" : r.ratePeriod,
+      r.unitPrice.toFixed(2),
+      r.lineTotal.toFixed(2),
+      // Beside the line total, never folded into it: an extension is money agreed after the order
+      // was sent, and it is not part of the order's committed value.
+      r.extensionCharge.toFixed(2),
+      // Blank while the hire is still out — an empty cell is a fact, 0 days is a claim.
+      r.deliveredOn ? day(r.deliveredOn) : "",
+      r.collectedOn ? day(r.collectedOn) : "",
+      r.daysOnHire ?? "",
+      // Billed against held: ordered vs arrived vs gone back, plus what came back broken.
+      r.receivedQuantity,
+      r.returnedQuantity,
+      r.damagedQuantity,
+      // Blank while nothing is quoted. A hire with damaged units and an empty cell here is the row
+      // somebody has to chase — 0.00 would close that question without anyone deciding to.
+      r.damageCharge == null ? "" : r.damageCharge.toFixed(2),
+    ]),
+  );
+  audit.record({ actor, action: "rental_hire.exported", targetType: "purchase_order", targetLabel: `${rows.length} hires` });
+  return { csv, capped: total > rows.length };
 }

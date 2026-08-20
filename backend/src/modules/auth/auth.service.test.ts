@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../config/env.js", () => ({ env: { nodeEnv: "test" } }));
 vi.mock("google-auth-library", () => ({ OAuth2Client: class {} }));
-vi.mock("./admin.repository.js", () => ({ findByEmail: vi.fn(), findById: vi.fn() }));
+vi.mock("./admin.repository.js", () => ({ findByEmail: vi.fn(), findById: vi.fn(), update: vi.fn() }));
 vi.mock("./session.service.js", () => ({
   startSession: vi.fn(),
   findActive: vi.fn(),
@@ -37,7 +37,7 @@ import * as customerRepo from "#modules/customer/customer.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import { verifyPassword } from "../../utils/password.js";
 import { verifyRefreshToken } from "../../utils/jwt.js";
-import { login, refreshSession, logout } from "./auth.service.js";
+import { changeCredentials, login, refreshSession, logout } from "./auth.service.js";
 
 const mockVerifyPassword = verifyPassword as ReturnType<typeof vi.fn>;
 const mockVerifyRefresh = verifyRefreshToken as ReturnType<typeof vi.fn>;
@@ -170,5 +170,50 @@ describe("logout", () => {
     await logout(principal, "sid-9");
     expect(sessionService.endSession).toHaveBeenCalledWith("sid-9");
     expect(audit.record).toHaveBeenCalled();
+  });
+});
+
+// The super admin's display NAME had no way in. `Admin.name` existed in the schema and nothing ever
+// wrote it, so every document a super admin raised printed a raw login where a person's name belongs
+// — and where a stale staff row happened to share the address, the wrong person's name.
+describe("changeCredentials — the super admin's own name", () => {
+  const ADMIN_ID = "a".repeat(24);
+  const admin = { id: ADMIN_ID, email: "boss@x.com", passwordHash: "hash", name: null };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (adminRepo.findById as ReturnType<typeof vi.fn>).mockResolvedValue(admin);
+    (verifyPassword as ReturnType<typeof vi.fn>).mockResolvedValue(true);
+    (adminRepo.update as ReturnType<typeof vi.fn>).mockImplementation((_id, data) =>
+      Promise.resolve({ ...admin, ...data }),
+    );
+  });
+
+  it("saves a name on its own, without touching the email or password", async () => {
+    await changeCredentials(ADMIN_ID, { currentPassword: "pw", name: "Ada Boss" }, "sid");
+    expect(adminRepo.update).toHaveBeenCalledWith(ADMIN_ID, { name: "Ada Boss" });
+  });
+
+  it("trims what was typed", async () => {
+    await changeCredentials(ADMIN_ID, { currentPassword: "pw", name: "  Ada Boss  " }, "sid");
+    expect(adminRepo.update).toHaveBeenCalledWith(ADMIN_ID, { name: "Ada Boss" });
+  });
+
+  // Clearing it is a real intent — back to no name, which prints the email. An empty string must not
+  // be stored as a name, or documents would print a blank where a person belongs.
+  it("stores a cleared name as null, not an empty string", async () => {
+    (adminRepo.findById as ReturnType<typeof vi.fn>).mockResolvedValue({ ...admin, name: "Ada Boss" });
+    await changeCredentials(ADMIN_ID, { currentPassword: "pw", name: "   " }, "sid");
+    expect(adminRepo.update).toHaveBeenCalledWith(ADMIN_ID, { name: null });
+  });
+
+  it("still refuses a request that changes nothing", async () => {
+    await expect(changeCredentials(ADMIN_ID, { currentPassword: "pw" }, "sid")).rejects.toThrow(/nothing to update/i);
+  });
+
+  // The name is not a credential — changing it must not sign the other devices out.
+  it("does not end other sessions for a name change", async () => {
+    await changeCredentials(ADMIN_ID, { currentPassword: "pw", name: "Ada Boss" }, "sid");
+    expect(sessionService.endOthers).not.toHaveBeenCalled();
   });
 });

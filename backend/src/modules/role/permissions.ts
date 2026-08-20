@@ -286,6 +286,44 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     ],
   },
   {
+    key: "rentals",
+    label: "Rentals",
+    description: "Equipment the company hires rather than owns — the catalogue, and the live hires on order.",
+    category: "Inventory",
+    permissions: [
+      { key: "rentals.view", action: "View", description: "View rental items, their details and the hires currently on order." },
+      { key: "rentals.create", action: "Create", description: "Add new rental items." },
+      { key: "rentals.edit", action: "Edit", description: "Edit rental items; activate / deactivate." },
+      { key: "rentals.delete", action: "Delete", description: "Remove rental items (only when no dependencies exist)." },
+      { key: "rentals.export", action: "Export", description: "Export the rental catalogue, the hire register and the hire movement history to CSV." },
+      // Separate from `edit`: these act on a LIVE hire committed to a supplier, not on catalogue
+      // master data.
+      //
+      // Split in two because the two jobs sit in different buildings and carry different weight. The
+      // FLOOR books equipment in, hands it back and photographs what is broken — work done with a
+      // scanner in one hand, dozens of times a week. The COMMERCIAL side extends a hire (which commits
+      // money) and reverses a record (which rewrites what already happened). A warehouse receiver needs
+      // the first and should not be handed the second just to do their job.
+      //
+      // Every floor route accepts EITHER key (requireAnyPermission), so a role that already held
+      // "Manage hires" keeps working untouched — no migration, no role that silently stops receiving.
+      { key: "rentals.hire.receive", action: "Receive & return", description: "Book hired equipment in at a warehouse, record it going back, and report damage found while it is with us." },
+      { key: "rentals.hire.manage", action: "Manage hires", description: "Extend a hire period, mark a hire returned without a handover record, record what a supplier is charging for damage, and reverse a hire record. Includes everything Receive & return allows." },
+    ],
+  },
+  {
+    key: "rental_categories",
+    label: "Rental Categories",
+    description: "The category master used to classify rental items (separate from IRM categories).",
+    category: "Inventory",
+    permissions: [
+      { key: "rental_categories.view", action: "View", description: "View rental categories." },
+      { key: "rental_categories.create", action: "Create", description: "Add new rental categories." },
+      { key: "rental_categories.edit", action: "Edit", description: "Edit rental categories." },
+      { key: "rental_categories.delete", action: "Delete", description: "Delete rental categories." },
+    ],
+  },
+  {
     key: "purchase_requests",
     label: "Purchase Requests (PRF)",
     description: "The pre-PO procurement document — capture the supplier quotation, route it through Finance review and convert it into a purchase order.",
@@ -682,6 +720,18 @@ export const WAREHOUSE_MANAGER_PERMISSIONS = [
   "goods_in.cancel",
   // Read-only: the receivable-PO list behind Goods In + the expected-deliveries panel (above).
   "purchase_orders.view",
+  // HIRED equipment at this warehouse. Not an extra: the warehouse page already carries a "Hire
+  // deliveries to receive" queue and its attention badge, plus the Rental (hired in) pool on the Stock
+  // tab — and without these two keys every one of them 403s or renders a pane with no actions, for the
+  // role whose whole job is the equipment standing in the yard.
+  //
+  // `rentals.hire.receive` and NOT `rentals.hire.manage`: booking kit in, handing it back and
+  // photographing what is broken is floor work. Extending a hire commits money to a supplier and
+  // reversing a record rewrites what already happened — those stay with procurement. That split is the
+  // reason the two keys exist; granting `manage` here would collapse it on the very role it was
+  // drawn for.
+  "rentals.view",
+  "rentals.hire.receive",
   // Warehouse-side customer consignment intake: receive a customer's stock into an assigned
   // warehouse, then fill in the entry + generate its barcode (see the constant's own doc for the
   // exact scope). Without these the Incoming stock → Customer and Inventory → Customer tabs 403

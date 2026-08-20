@@ -41,6 +41,9 @@ const TITLES: Record<string, string> = {
   "/dashboard/goods-in": "Goods In",
   // Reached from Inventory rather than the rail.
   "/dashboard/irm": "IRM Catalogue",
+  // Same: rentals live in the Inventory Hub, so there is no nav entry for the guard above to catch —
+  // without this the item pages inherit nothing and announce themselves as "Dashboard".
+  "/dashboard/rentals": "Rental Catalogue",
   // A customer's stock-entry record, opened from the customer or warehouse it sits in.
   "/dashboard/stock-entries": "Stock Entry",
 

@@ -694,8 +694,8 @@ function TransferList({ role }: { role: "incoming" | "outgoing" }) {
       ))}
 
       {/* Toolbar — search + status filter + sort */}
-      <div className="flex shrink-0 flex-col gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-xs lg:flex-row lg:flex-wrap lg:items-center">
-        <div className="relative w-full lg:max-w-xs">
+      <div className="flex shrink-0 flex-col gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-xs sm:flex-row sm:flex-wrap sm:items-center">
+        <div className="relative w-full sm:max-w-xs sm:flex-1">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--faint)]" />
           <input
             type="text"
@@ -731,8 +731,8 @@ function TransferList({ role }: { role: "incoming" | "outgoing" }) {
 
         {/* The page's action, at the right-hand end of the row rather than in the top bar — up there
             it sat against the browser's own chrome, a screen's width from the list it acts on.
-            `lg:` because THIS toolbar becomes a row at lg. */}
-        <div className={`${toolbarActionsCls} lg:ml-auto`}>
+            `sm:` because THIS toolbar becomes a row at sm. */}
+        <div className={`${toolbarActionsCls} sm:ml-auto`}>
           <button type="button" onClick={() => router.push("/dashboard/engineer/transfers/new")} className={toolbarPrimaryBtn}>
             <ArrowRightLeft className="h-3.5 w-3.5" /> Request stock
           </button>

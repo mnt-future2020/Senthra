@@ -18,7 +18,16 @@ vi.mock("./job.repository.js", () => ({
   findByNumber: vi.fn(),
   findActiveForGoodsManagement: vi.fn(),
   softDelete: vi.fn(),
+  findAttachments: vi.fn(),
+  addAttachment: vi.fn(),
+  setAttachmentInternal: vi.fn(),
+  removeAttachment: vi.fn(),
 }));
+vi.mock("#modules/upload/upload.service.js", () => ({
+  claimDeferredUpload: vi.fn(),
+  commitAttachment: vi.fn(),
+}));
+vi.mock("#modules/attachment/attachment.service.js", () => ({ releaseAsset: vi.fn() }));
 
 vi.mock("#modules/goods-management/goods-management.service.js", () => ({
   recordConsumeAndComplete: vi.fn(),
@@ -49,6 +58,8 @@ vi.mock("#modules/customer/customer.repository.js", () => ({
 vi.mock("#modules/supplier/supplier.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/irm/irm.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/warehouse/warehouse.repository.js", () => ({ findById: vi.fn() }));
+vi.mock("#modules/purchase-request/purchase-request.repository.js", () => ({ countByJob: vi.fn(async () => 0) }));
+vi.mock("#modules/purchase-order/purchase-order.repository.js", () => ({ countByJob: vi.fn(async () => 0) }));
 vi.mock("#modules/inventory/inventory.repository.js", () => ({ findBalancePair: vi.fn(), findBalancesByItemsAndWarehouses: vi.fn(async () => []) }));
 vi.mock("#modules/user/user.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/engineer-transfer/engineer-transfer.repository.js", () => ({ findVanSourcesByKitLines: vi.fn() }));
@@ -59,6 +70,8 @@ vi.mock("#modules/role/permissions.js", () => ({ roleGrants: vi.fn().mockReturnV
 
 import * as jobRepo from "./job.repository.js";
 import * as goodsManagementService from "#modules/goods-management/goods-management.service.js";
+import * as prfRepo from "#modules/purchase-request/purchase-request.repository.js";
+import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
 import * as irmRepo from "#modules/irm/irm.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
@@ -67,6 +80,7 @@ import * as userRepo from "#modules/user/user.repository.js";
 import * as emailService from "#modules/email/email.service.js";
 import * as transferService from "#modules/engineer-transfer/engineer-transfer.service.js";
 import * as kitRequestService from "#modules/job-kit-request/job-kit-request.service.js";
+import * as uploadService from "#modules/upload/upload.service.js";
 import { startJobForEngineer, completeJobForEngineer, updateJob, kitLinesChanged, getJob, cancelJob, assignJob, deleteJob } from "./job.service.js";
 
 const JOB_ID = "a".repeat(24);
@@ -666,6 +680,49 @@ describe("deleteJob — stock still out blocks deletion", () => {
     }
   });
 
+  // A job named on a purchase request or order is a link on that document, and every job read
+  // filters `deletedAt` — so deleting it left the request pointing at a record the loader refuses.
+  // Same class as the request that kept a "View PO-0051" button for a deleted order.
+  describe("a job named on a purchase request or order", () => {
+    const mockPrfCount = prfRepo.countByJob as ReturnType<typeof vi.fn>;
+    const mockPoCount = poRepo.countByJob as ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      mockPrfCount.mockResolvedValue(0);
+      mockPoCount.mockResolvedValue(0);
+    });
+
+    it("REFUSES the delete and names the document kind", async () => {
+      mockFindById.mockResolvedValue(jobWith("cancelled"));
+      mockTallies.mockResolvedValue({});
+      mockPrfCount.mockResolvedValue(1);
+      await expect(deleteJob(JOB_ID)).rejects.toThrow(/named on existing purchase requests/i);
+      expect(mockSoftDelete).not.toHaveBeenCalled();
+    });
+
+    it("checks purchase ORDERS too, not just requests", async () => {
+      mockFindById.mockResolvedValue(jobWith("draft"));
+      mockTallies.mockResolvedValue({});
+      mockPoCount.mockResolvedValue(2);
+      await expect(deleteJob(JOB_ID)).rejects.toThrow(/named on existing purchase orders/i);
+      expect(mockSoftDelete).not.toHaveBeenCalled();
+    });
+
+    it("points at cancel, which is what someone in this position actually wants", async () => {
+      mockFindById.mockResolvedValue(jobWith("assigned"));
+      mockTallies.mockResolvedValue({});
+      mockPrfCount.mockResolvedValue(1);
+      await expect(deleteJob(JOB_ID)).rejects.toThrow(/cancel it instead/i);
+    });
+
+    it("still deletes a job nothing references", async () => {
+      mockFindById.mockResolvedValue(jobWith("cancelled"));
+      mockTallies.mockResolvedValue({});
+      await deleteJob(JOB_ID);
+      expect(mockSoftDelete).toHaveBeenCalledWith(JOB_ID);
+    });
+  });
+
   it("sums what is out across several kit lines", async () => {
     mockFindById.mockResolvedValue(jobWith("cancelled", [{ ...KIT_LINE, id: "kl1" }, { ...KIT_LINE, id: "kl2" }]));
     mockTallies.mockResolvedValue({ kl1: tally(3), kl2: tally(7) });
@@ -708,5 +765,52 @@ describe("deleteJob — stock still out blocks deletion", () => {
     await expect(deleteJob(JOB_ID)).rejects.toThrow(/can't be deleted/i);
     expect(mockTallies).not.toHaveBeenCalled();
     expect(mockSoftDelete).not.toHaveBeenCalled();
+  });
+});
+
+// ── Retiring the legacy attachment array ────────────────────────────────────────────────────────
+//
+// A job's files live in JobAttachment ROWS now; `Job.attachments` is a legacy `String[]` that is
+// still read for pre-migration jobs. An edit that carries attachments migrates the URLs into rows
+// and retires the array — and the ORDER of those two writes is the whole safety property, because
+// they are separate writes with no transaction spanning them.
+//
+// Clearing the array in the header write and converting afterwards means a failure part-way through
+// the conversion leaves the URLs in neither place: the array is already empty, and only some of the
+// rows exist. Nothing else holds them. Doing it the other way round costs nothing — the DTO
+// concatenates legacy strings and rows, so the worst case is a URL listed twice until the next
+// successful save, against a URL lost for good.
+describe("updateJob — retiring the legacy attachment array", () => {
+  const legacy = { ...baseJob, status: "in_progress", attachments: ["https://cdn.x/a.pdf", "https://cdn.x/b.pdf"] };
+
+  beforeEach(() => {
+    mockFindById.mockResolvedValue(legacy);
+    mockUpdate.mockResolvedValue(legacy);
+    vi.mocked(jobRepo.findAttachments).mockResolvedValue([]);
+    vi.mocked(uploadService.claimDeferredUpload).mockResolvedValue(null as never);
+    vi.mocked(jobRepo.addAttachment).mockResolvedValue({} as never);
+  });
+
+  it("does not clear the array in the same write that precedes the conversion", async () => {
+    await updateJob(JOB_ID, { attachments: legacy.attachments } as never, { email: "a@x.com" } as never);
+    // The FIRST write is the header. It must not be the one that empties the array.
+    expect(mockUpdate.mock.calls[0]![1]).not.toMatchObject({ attachments: [] });
+  });
+
+  it("retires the array once every URL has a row", async () => {
+    await updateJob(JOB_ID, { attachments: legacy.attachments } as never, { email: "a@x.com" } as never);
+    expect(vi.mocked(jobRepo.addAttachment)).toHaveBeenCalledTimes(2);
+    expect(mockUpdate.mock.calls.some((c) => (c[1] as { attachments?: string[] }).attachments?.length === 0)).toBe(true);
+  });
+
+  it("leaves the array standing when the conversion fails part-way", async () => {
+    vi.mocked(jobRepo.addAttachment)
+      .mockResolvedValueOnce({} as never)
+      .mockRejectedValueOnce(new Error("write failed"));
+    await expect(
+      updateJob(JOB_ID, { attachments: legacy.attachments } as never, { email: "a@x.com" } as never),
+    ).rejects.toThrow(/write failed/i);
+    // Nothing emptied it, so the second URL is still recorded somewhere and a retry can finish.
+    expect(mockUpdate.mock.calls.every((c) => (c[1] as { attachments?: string[] }).attachments === undefined)).toBe(true);
   });
 });

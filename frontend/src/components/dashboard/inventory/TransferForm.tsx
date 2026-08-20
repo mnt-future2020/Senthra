@@ -10,7 +10,7 @@ import { listWarehouses } from "@/services/warehouse.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import { inputCls, ghostBtn, labelCls, primaryBtn } from "@/components/ui/styles";
-import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
+import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark, SummaryRow } from "@/components/ui/FormScaffold";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { Select } from "@/components/ui/Select";
 import type { Availability } from "@/types/inventory";
@@ -226,11 +226,11 @@ export function TransferForm() {
         <aside className="lg:sticky lg:top-6 lg:self-start">
           <FormAsideCard title="Movement summary">
             <div className="space-y-2.5 text-sm">
-              <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">Item</span><span className="text-right font-semibold text-[var(--ink)]">{selectedItem ? selectedItem.name : "—"}</span></div>
-              <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">From</span><span className="text-right font-semibold text-[var(--ink)]">{sourceWh ? `${sourceWh.name} (${sourceWh.code})` : "—"}</span></div>
-              <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">To</span><span className="text-right font-semibold text-[var(--ink)]">{destWh ? `${destWh.name} (${destWh.code})` : "—"}</span></div>
-              <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">Available at source</span><span className="font-semibold text-[var(--ink)]">{available ?? "—"}</span></div>
-              <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">Quantity to move</span><span className="font-extrabold text-[var(--ink)]">{Number.isInteger(qtyNum) && qtyNum > 0 ? qtyNum : "—"}</span></div>
+              <SummaryRow label="Item" valueClassName="font-semibold">{selectedItem ? selectedItem.name : "—"}</SummaryRow>
+              <SummaryRow label="From" valueClassName="font-semibold">{sourceWh ? `${sourceWh.name} (${sourceWh.code})` : "—"}</SummaryRow>
+              <SummaryRow label="To" valueClassName="font-semibold">{destWh ? `${destWh.name} (${destWh.code})` : "—"}</SummaryRow>
+              <SummaryRow label="Available at source" valueClassName="font-semibold">{available ?? "—"}</SummaryRow>
+              <SummaryRow label="Quantity to move" valueClassName="font-extrabold">{Number.isInteger(qtyNum) && qtyNum > 0 ? qtyNum : "—"}</SummaryRow>
               <p className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/40 px-3 py-2.5 text-[11px] text-[var(--muted)]">The transfer is applied immediately and atomically: stock leaves the source and arrives at the destination in a single step. The TRF number is assigned on completion.</p>
             </div>
           </FormAsideCard>

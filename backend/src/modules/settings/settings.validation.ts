@@ -82,6 +82,14 @@ export const updateSettingsSchema = z.object({
     .regex(/^[A-Za-z]{2,5}$/, "IRM code prefix must be 2–5 letters.")
     .or(z.literal(""))
     .optional(),
+  // Rental item-code prefix: 2–5 letters (case-insensitive; the service uppercases it).
+  // Empty string clears it back to the default.
+  rentalCodePrefix: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z]{2,5}$/, "Rental code prefix must be 2–5 letters.")
+    .or(z.literal(""))
+    .optional(),
 
   // --- Company profile (legal identity for official documents). All optional;
   // empty string clears the field back to null (default applied on read). ---

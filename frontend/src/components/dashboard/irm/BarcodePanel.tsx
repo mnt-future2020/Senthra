@@ -40,7 +40,13 @@ export function BarcodePanel({
   barcodeDataUri: string | null;
   canManage: boolean;
   busy: boolean;
-  onGenerate: () => void;
+  /**
+   * One-time generation, for the surfaces that STORE their barcode image. Omitted by a surface whose
+   * label is rendered from an immutable code and therefore always exists (rental items) — there is
+   * nothing to generate there, so the button and its copy would be offering a step that does not
+   * exist.
+   */
+  onGenerate?: () => void;
   /** Receives the RESOLVED count (typed value, or defaultCopies when the box is blank). */
   onPrint: (copies: number) => void;
   copies: string;
@@ -69,7 +75,9 @@ export function BarcodePanel({
           {hasBarcode ? (
             <>Code128 barcode encoding <span className="font-mono font-bold text-[var(--ink)]">{code}</span>.</>
           ) : (
-            "No barcode generated yet. Generate one to print a label for the physical stock."
+            onGenerate
+              ? "No barcode generated yet. Generate one to print a label for the physical stock."
+              : "No barcode to show."
           )}
         </p>
         {hasBarcode ? (
@@ -104,7 +112,7 @@ export function BarcodePanel({
             </div>
             {error && <p className="text-[11px] font-semibold text-[var(--neg)]">{error}</p>}
           </div>
-        ) : canManage ? (
+        ) : canManage && onGenerate ? (
           // No barcode yet → one-time generation (encodes the record's permanent code).
           <button
             type="button"

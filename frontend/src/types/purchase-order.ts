@@ -62,6 +62,8 @@ export interface PoAttachment {
   createdAt: string;
 }
 
+import type { PoRentalLine } from "./rental";
+
 export interface PurchaseOrder {
   id: string;
   code: string;
@@ -95,6 +97,9 @@ export interface PurchaseOrder {
   description: string | null;
   orderDate: string;
   expectedDeliveryDate: string | null;
+  // Set by the server when the expected delivery date falls AFTER one of this order's hires has
+  // already started — the date the supplier reads on the PDF. Advisory, never a blocked save.
+  lateHireDelivery: { earliestHireStart: string; daysLate: number } | null;
   currency: string;
   subtotalPence: number;
   vatPence: number;
@@ -113,6 +118,8 @@ export interface PurchaseOrder {
   internalNotes: string | null;
   supplierNotes: string | null;
   items: PoItem[];
+  /** Committed hires on this order — the rows the deadline badges count. */
+  rentalItems: PoRentalLine[];
   attachments: PoAttachment[];
   createdBy: string | null;
   submittedBy: string | null;

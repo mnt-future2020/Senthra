@@ -9,6 +9,7 @@ import { param, queryInt, queryStr } from "../../utils/request.js";
 import type {
   CreatePurchaseOrderInput,
   CreatePurchaseOrdersSplitInput,
+  ExtendHireInput,
   PoAssignPmInput,
   PoAttachmentInput,
   PoCancelInput,
@@ -165,4 +166,84 @@ export const addAttachment = asyncHandler(async (req, res) => {
 export const removeAttachment = asyncHandler(async (req, res) => {
   const purchaseOrder = await poService.removeAttachment(param(req, "id"), param(req, "attachmentId"), actorFrom(req));
   res.json({ purchaseOrder });
+});
+
+// PATCH /purchase-orders/:id/rental-lines/:lineId/return
+export const markHireReturned = asyncHandler(async (req, res) => {
+  const purchaseOrder = await poService.markHireReturned(
+    param(req, "id"),
+    param(req, "lineId"),
+    actorFrom(req),
+  );
+  res.json({ purchaseOrder });
+});
+
+// PATCH /purchase-orders/:id/rental-lines/:lineId/extend
+export const extendHire = asyncHandler(async (req, res) => {
+  const purchaseOrder = await poService.extendHire(
+    param(req, "id"),
+    param(req, "lineId"),
+    req.body as ExtendHireInput,
+    actorFrom(req),
+  );
+  res.json({ purchaseOrder });
+});
+
+// GET /purchase-orders/rental-lines/on-hire
+export const listOnHire = asyncHandler(async (req, res) => {
+  res.json(
+    await poService.listOnHire(
+      {
+        status: queryStr(req.query.status),
+        page: queryInt(req.query.page),
+        pageSize: queryInt(req.query.pageSize),
+        // Set only by a warehouse's own receiving pane. The list is company-wide otherwise, because a
+        // hire is chased by the PM on the order rather than by whoever holds the warehouse.
+        warehouseId: queryStr(req.query.warehouseId),
+        // Set by a rental item's own page — the live hires of that one item.
+        rentalItemId: queryStr(req.query.rentalItemId),
+        search: queryStr(req.query.search),
+      },
+      actorFrom(req),
+    ),
+  );
+});
+
+// GET /purchase-orders/rental-lines/on-hire/export
+// GET /purchase-orders/rental-lines/extensions?search=&purchaseOrder=&from=&to=&page=&pageSize=
+//
+// The period filters, parsed once and shared with the export — a second copy is a second place for a
+// filter to be forgotten, and the file gives no sign that it is wider than the list it came from.
+function extensionParamsFrom(req: Request): poService.ListHireExtensionsParams {
+  const { search, purchaseOrder, from, to, page, pageSize } = req.query;
+  return {
+    search: queryStr(search),
+    purchaseOrder: queryStr(purchaseOrder),
+    from: queryStr(from),
+    to: queryStr(to),
+    page: queryInt(page),
+    pageSize: queryInt(pageSize),
+  };
+}
+
+export const listHireExtensions = asyncHandler(async (req, res) => {
+  res.json(await poService.listHireExtensions(extensionParamsFrom(req), actorFrom(req)));
+});
+
+// GET /purchase-orders/rental-lines/extensions/export.csv — the same period as a download.
+export const exportHireExtensionsCsv = asyncHandler(async (req, res) => {
+  sendCsv(res, "hire-extensions", await poService.exportHireExtensionsCsv(extensionParamsFrom(req), actorFrom(req)));
+});
+
+export const exportOnHireCsv = asyncHandler(async (req, res) => {
+  sendCsv(
+    res,
+    "rentals-on-hire",
+    // The SAME filters the screen carries. A download that quietly holds more rows than the list it
+    // was taken from gives no sign of it.
+    await poService.exportOnHireCsv(
+      { status: queryStr(req.query.status), search: queryStr(req.query.search) },
+      actorFrom(req),
+    ),
+  );
 });

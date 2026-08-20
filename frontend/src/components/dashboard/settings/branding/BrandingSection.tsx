@@ -17,8 +17,7 @@ import { inputCls, labelCls } from "@/components/ui/styles";
 import { SaveBar } from "@/components/dashboard/settings/ui/SaveBar";
 import type { Msg } from "@/components/ui/types";
 import { useReportDirty } from "@/providers/NavigationGuardProvider";
-
-const MAX_IMAGE_BYTES = 2 * 1024 * 1024; // 2 MB — logos/favicons are tiny
+import { MAX_IMAGE_BYTES, readFileAsDataUrl, shrinkImage } from "@/lib/image";
 
 // The brand accent applied when none is chosen. Kept in sync with the backend's
 // DEFAULT_BRAND_COLOR (backend/src/utils/email-html.ts) so the UI and sent emails
@@ -47,15 +46,6 @@ function brandingFromSettings(s: Settings): Branding {
     loginHeadline: s.loginHeadline,
     loginSubtext: s.loginSubtext,
   };
-}
-
-function readFileAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(new Error("Could not read the file."));
-    reader.readAsDataURL(file);
-  });
 }
 
 // Reusable preview + upload/remove control for logo & favicon.
@@ -147,6 +137,7 @@ export function BrandingSection() {
   const [employeeIdPrefix, setEmployeeIdPrefix] = React.useState("");
   const [stockCodePrefix, setStockCodePrefix] = React.useState("");
   const [irmCodePrefix, setIrmCodePrefix] = React.useState("");
+  const [rentalCodePrefix, setRentalCodePrefix] = React.useState("");
 
   // Snapshot of the last-persisted text fields. Logo & favicon save immediately
   // on upload/remove, so they aren't part of this form's unsaved state — only
@@ -160,6 +151,7 @@ export function BrandingSection() {
     employeeIdPrefix: "",
     stockCodePrefix: "",
     irmCodePrefix: "",
+    rentalCodePrefix: "",
   });
 
   const isDirty =
@@ -170,7 +162,8 @@ export function BrandingSection() {
     loginSubtext !== saved.loginSubtext ||
     employeeIdPrefix !== saved.employeeIdPrefix ||
     stockCodePrefix !== saved.stockCodePrefix ||
-    irmCodePrefix !== saved.irmCodePrefix;
+    irmCodePrefix !== saved.irmCodePrefix ||
+    rentalCodePrefix !== saved.rentalCodePrefix;
 
   useReportDirty("branding", isDirty);
 
@@ -197,6 +190,7 @@ export function BrandingSection() {
         setEmployeeIdPrefix(s.employeeIdPrefix);
         setStockCodePrefix(s.stockCodePrefix);
         setIrmCodePrefix(s.irmCodePrefix);
+        setRentalCodePrefix(s.rentalCodePrefix);
         setSaved({
           brandName: s.brandName,
           brandColor: s.brandColor,
@@ -206,6 +200,7 @@ export function BrandingSection() {
           employeeIdPrefix: s.employeeIdPrefix,
           stockCodePrefix: s.stockCodePrefix,
           irmCodePrefix: s.irmCodePrefix,
+          rentalCodePrefix: s.rentalCodePrefix,
         });
       } catch {
         // ignore — leave fields blank
@@ -224,13 +219,17 @@ export function BrandingSection() {
       });
       return;
     }
-    if (file.size > MAX_IMAGE_BYTES) {
+    // Downscale first, then measure. shrinkImage returns SVG and ICO untouched — both are allowed
+    // here and neither survives a canvas: an SVG would be rasterised away, and an .ico would come
+    // back as a single-size JPEG the browser no longer wants. A transparent PNG logo stays PNG.
+    const image = await shrinkImage(file);
+    if (image.size > MAX_IMAGE_BYTES) {
       setMsg({ type: "error", text: "Image must be under 2 MB." });
       return;
     }
     setUploading(type);
     try {
-      const dataUrl = await readFileAsDataUrl(file);
+      const dataUrl = await readFileAsDataUrl(image);
       const { url, settings } = await brandingService.uploadBrandingImage(type, dataUrl);
       if (type === "logo") setLogoUrl(url);
       else setFaviconUrl(url);
@@ -283,6 +282,10 @@ export function BrandingSection() {
       setMsg({ type: "error", text: "IRM code prefix must be 2–5 letters." });
       return;
     }
+    if (rentalCodePrefix && !/^[A-Z]{2,5}$/.test(rentalCodePrefix)) {
+      setMsg({ type: "error", text: "Rental code prefix must be 2–5 letters." });
+      return;
+    }
     setSaving(true);
     try {
       const settings = await settingsService.updateSettings({
@@ -294,6 +297,7 @@ export function BrandingSection() {
         employeeIdPrefix,
         stockCodePrefix,
         irmCodePrefix,
+        rentalCodePrefix,
       });
       setBranding(brandingFromSettings(settings));
       setBrandName(settings.brandName);
@@ -304,6 +308,7 @@ export function BrandingSection() {
       setEmployeeIdPrefix(settings.employeeIdPrefix);
       setStockCodePrefix(settings.stockCodePrefix);
       setIrmCodePrefix(settings.irmCodePrefix);
+      setRentalCodePrefix(settings.rentalCodePrefix);
       setSaved({
         brandName: settings.brandName,
         brandColor: settings.brandColor,
@@ -313,6 +318,7 @@ export function BrandingSection() {
         employeeIdPrefix: settings.employeeIdPrefix,
         stockCodePrefix: settings.stockCodePrefix,
         irmCodePrefix: settings.irmCodePrefix,
+        rentalCodePrefix: settings.rentalCodePrefix,
       });
       pushToast("Branding saved.");
     } catch (err) {
@@ -455,6 +461,37 @@ export function BrandingSection() {
               Next item looks like{" "}
               <span className="font-mono font-bold text-[var(--muted)]">
                 {(irmCodePrefix || "IRM")}-0009
+              </span>
+            </span>
+          </div>
+        </Field>
+
+        {/* Rentals number from their OWN sequence under a fixed counter key, so this changes the
+            display prefix only — it can never restart or collide numbering. Existing codes are
+            immutable, which is what keeps every barcode already printed and stuck to hired kit
+            readable: the label encodes the code. */}
+        <Field
+          label="Rental item code prefix"
+          hint="2–5 letters for new rental catalogue item codes. Existing codes — and the barcodes printed from them — don't change."
+        >
+          <div className="flex flex-wrap items-center gap-3">
+            <input
+              type="text"
+              value={rentalCodePrefix}
+              onChange={(e) =>
+                setRentalCodePrefix(
+                  e.target.value.toUpperCase().replace(/[^A-Z]/g, "").slice(0, 5),
+                )
+              }
+              placeholder="RNT"
+              maxLength={5}
+              spellCheck={false}
+              className={`${inputCls} max-w-[140px] font-mono uppercase tracking-widest`}
+            />
+            <span className="text-xs text-[var(--faint)]">
+              Next item looks like{" "}
+              <span className="font-mono font-bold text-[var(--muted)]">
+                {(rentalCodePrefix || "RNT")}-0011
               </span>
             </span>
           </div>

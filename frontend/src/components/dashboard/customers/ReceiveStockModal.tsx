@@ -81,6 +81,7 @@ export function ReceiveStockModal({
             Quantity received<RequiredMark />
           </label>
           <NumberInput
+            clamp
             min={1}
             max={remaining}
             step={1}

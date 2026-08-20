@@ -58,6 +58,8 @@ export interface PrfAttachment {
   createdAt: string;
 }
 
+import type { PrfRentalLine } from "./rental";
+
 export interface PurchaseRequest {
   id: string;
   code: string;
@@ -77,6 +79,9 @@ export interface PurchaseRequest {
   quoteValidUntil: string | null;
   // When the requester needs the goods on site — becomes the PO's expected delivery date.
   requiredByDate: string | null;
+  // Set by the server when the required-by date falls AFTER one of this request's hires has already
+  // started. Advisory — some hire companies bill from dispatch, so it is never a blocked save.
+  lateHireDelivery: { earliestHireStart: string; daysLate: number } | null;
   justification: string | null;
   notes: string | null;
   // Commercial terms: `deliveryTerms` is the Incoterm code (e.g. "DDP"), `deliveryTermsLabel`
@@ -93,6 +98,8 @@ export interface PurchaseRequest {
   vatTotal: number;
   grandTotal: number;
   items: PrfItem[];
+  /** Hired lines — each with its own period and, optionally, its own delivery address. */
+  rentalItems: PrfRentalLine[];
   attachments: PrfAttachment[];
   // The PO generated from this PRF (at most one), for the linked-PO badge + chain strip.
   purchaseOrder: { id: string; code: string; status: string } | null;

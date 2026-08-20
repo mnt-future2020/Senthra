@@ -9,6 +9,14 @@ export function findByEmail(email: string): Promise<Admin | null> {
   return prisma.admin.findUnique({ where: { email } });
 }
 
+// Name-only lookup for a batch of emails — the other half of resolving the people a DOCUMENT names.
+// A super admin is not a User, so without this a purchase order raised by one resolved to nothing
+// and printed a raw login instead of a person.
+export function findNamesByEmails(emails: string[]): Promise<{ email: string; name: string | null }[]> {
+  if (emails.length === 0) return Promise.resolve([]);
+  return prisma.admin.findMany({ where: { email: { in: emails } }, select: { email: true, name: true } });
+}
+
 export function findById(id: string): Promise<Admin | null> {
   return prisma.admin.findUnique({ where: { id } });
 }

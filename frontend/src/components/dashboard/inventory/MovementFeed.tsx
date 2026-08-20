@@ -11,6 +11,7 @@ import { listIrmItems } from "@/services/irm.service";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { Select, type SelectOption } from "@/components/ui/Select";
+import { FilterPopover } from "@/components/ui/FilterPopover";
 import type { Movement, MovementPage } from "@/types/stock-position";
 import { OwnerTag, TableSkeletonRows } from "./hubUi";
 
@@ -68,11 +69,15 @@ interface OptionLists {
 // `lockedWarehouse` is the feed's fixed scope, not a user choice, so it must NOT count as an active
 // filter — otherwise "Clear filters" is permanently visible on a scoped feed and appears to offer
 // something it can't do.
-function hasActiveFilter(f: MovementFilters, lockedWarehouse?: string): boolean {
+//
+// One count, used for both the Filters badge and whether a Clear is offered. Two separate definitions
+// of "is anything on?" would eventually disagree, and the badge is the only thing stopping a narrowed
+// ledger from reading as a short one.
+function activeFilterCount(f: MovementFilters, lockedWarehouse?: string): number {
   const warehouseChosenByUser = Boolean(f.warehouse) && f.warehouse !== lockedWarehouse;
-  return Boolean(
-    f.ownership || f.location || f.type || f.dateFrom || f.dateTo || f.irmItem || warehouseChosenByUser || f.engineer || f.customer,
-  );
+  return [
+    f.ownership, f.location, f.type, f.dateFrom, f.dateTo, f.irmItem, f.engineer, f.customer,
+  ].filter(Boolean).length + (warehouseChosenByUser ? 1 : 0);
 }
 
 function FilterBar({
@@ -97,27 +102,14 @@ function FilterBar({
   lockedWarehouse?: string;
 }) {
   const set = (patch: Partial<MovementFilters>) => onChange({ ...value, ...patch });
+  const active = activeFilterCount(value, lockedWarehouse);
   return (
+    /* Seven pickers, two dates and an export used to sit on one row: at 1024px that wrapped onto a
+       second line — ~46px of a full-height page, on top of a filter card that was already the tallest
+       band above the ledger. The DATE RANGE stays out here because it is the axis a ledger is actually
+       read along; everything else is set once and left, so it folds behind one trigger that carries the
+       active count. The same component and the same reasoning as the stock positions table. */
     <div className="flex flex-wrap items-center gap-2">
-      {scope === "admin" && (
-        <>
-          <Select size="sm" ariaLabel="Filter by item" value={value.irmItem ?? ""} onChange={(v) => set({ irmItem: v || undefined })} options={[{ value: "", label: "All items" }, ...lists.items]} />
-          {/* Both hidden when the feed is locked to one warehouse. The warehouse picker would let the
-              user navigate out of the page they're on; the LOCATION picker is worse than redundant —
-              "Warehouse" is already implied, and picking "Engineer van" asks the server for the
-              intersection of engineer-held and warehouse-held movements, which is always empty. */}
-          {!lockedWarehouse && (
-            <Select size="sm" ariaLabel="Filter by warehouse" value={value.warehouse ?? ""} onChange={(v) => set({ warehouse: v || undefined })} options={[{ value: "", label: "All warehouses" }, ...lists.warehouses]} />
-          )}
-          <Select size="sm" ariaLabel="Filter by engineer" value={value.engineer ?? ""} onChange={(v) => set({ engineer: v || undefined })} options={[{ value: "", label: "All engineers" }, ...lists.engineers]} />
-          <Select size="sm" ariaLabel="Filter by customer" value={value.customer ?? ""} onChange={(v) => set({ customer: v || undefined })} options={[{ value: "", label: "All customers" }, ...lists.customers]} />
-        </>
-      )}
-      <Select size="sm" ariaLabel="Filter by ownership" value={value.ownership ?? ""} onChange={(v) => set({ ownership: v || undefined })} options={OWNERSHIP_OPTIONS} />
-      {scope === "admin" && !lockedWarehouse && (
-        <Select size="sm" ariaLabel="Filter by location" value={value.location ?? ""} onChange={(v) => set({ location: v || undefined })} options={LOCATION_OPTIONS} />
-      )}
-      <Select size="sm" ariaLabel="Filter by movement type" value={value.type ?? ""} onChange={(v) => set({ type: v || undefined })} options={TYPE_OPTIONS} />
       <label className="flex items-center gap-1 text-[11px] text-[var(--muted)]">
         From
         <input type="date" aria-label="From date" className={dateCls} value={value.dateFrom ?? ""} onChange={(e) => set({ dateFrom: e.target.value || undefined })} />
@@ -126,11 +118,32 @@ function FilterBar({
         To
         <input type="date" aria-label="To date" className={dateCls} value={value.dateTo ?? ""} onChange={(e) => set({ dateTo: e.target.value || undefined })} />
       </label>
-      {hasActiveFilter(value, lockedWarehouse) && (
-        <button type="button" onClick={onClear} className="text-[11px] font-bold text-[var(--muted)] underline-offset-2 transition-colors hover:text-[var(--accent)] hover:underline">
-          Clear filters
-        </button>
-      )}
+
+      {/* Clearing resets to the LOCK, not to nothing — see the caller. The dates count towards the
+          badge and are cleared by it too: they are filters, and a badge that ignored them would call a
+          date-narrowed ledger unfiltered. */}
+      <FilterPopover activeCount={active} onClear={onClear}>
+        {scope === "admin" && (
+          <>
+            <Select size="sm" ariaLabel="Filter by item" value={value.irmItem ?? ""} onChange={(v) => set({ irmItem: v || undefined })} options={[{ value: "", label: "All items" }, ...lists.items]} />
+            {/* Both hidden when the feed is locked to one warehouse. The warehouse picker would let the
+                user navigate out of the page they're on; the LOCATION picker is worse than redundant —
+                "Warehouse" is already implied, and picking "Engineer van" asks the server for the
+                intersection of engineer-held and warehouse-held movements, which is always empty. */}
+            {!lockedWarehouse && (
+              <Select size="sm" ariaLabel="Filter by warehouse" value={value.warehouse ?? ""} onChange={(v) => set({ warehouse: v || undefined })} options={[{ value: "", label: "All warehouses" }, ...lists.warehouses]} />
+            )}
+            <Select size="sm" ariaLabel="Filter by engineer" value={value.engineer ?? ""} onChange={(v) => set({ engineer: v || undefined })} options={[{ value: "", label: "All engineers" }, ...lists.engineers]} />
+            <Select size="sm" ariaLabel="Filter by customer" value={value.customer ?? ""} onChange={(v) => set({ customer: v || undefined })} options={[{ value: "", label: "All customers" }, ...lists.customers]} />
+          </>
+        )}
+        <Select size="sm" ariaLabel="Filter by ownership" value={value.ownership ?? ""} onChange={(v) => set({ ownership: v || undefined })} options={OWNERSHIP_OPTIONS} />
+        {scope === "admin" && !lockedWarehouse && (
+          <Select size="sm" ariaLabel="Filter by location" value={value.location ?? ""} onChange={(v) => set({ location: v || undefined })} options={LOCATION_OPTIONS} />
+        )}
+        <Select size="sm" ariaLabel="Filter by movement type" value={value.type ?? ""} onChange={(v) => set({ type: v || undefined })} options={TYPE_OPTIONS} />
+      </FilterPopover>
+
       {canExport && (
         <button
           type="button"
@@ -147,7 +160,7 @@ function FilterBar({
   );
 }
 
-import { tableMinWidth } from "@/components/ui/tableLayout";
+import { CELL_ONE_LINE, tableMinWidth } from "@/components/ui/tableLayout";
 
 const HEADERS = ["Date", "Type", "Item", "Owner", "Location", "Qty", "Balance", "Reference", "Actor"];
 
@@ -160,20 +173,38 @@ function Row({ m }: { m: Movement }) {
     <tr className="border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]">
       <td className="whitespace-nowrap cell-y px-4 text-[var(--muted)]">{new Date(m.date).toLocaleString()}</td>
       <td className="cell-y px-4">
-        <span className="rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-2 py-0.5 text-[11px] font-semibold text-[var(--muted)]">{m.label}</span>
+        {/* nowrap: the auto layout had squeezed this column to 93px, so a two-word type ("Job Return",
+            "Marked Damaged") broke inside the pill and made EVERY row 65px — the badge, not the item
+            name, was the tallest thing in the row. The column's declared budget already allows for the
+            longest label; this stops the browser spending the difference on height instead. */}
+        <span className="whitespace-nowrap rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-2 py-0.5 text-[11px] font-semibold text-[var(--muted)]">{m.label}</span>
       </td>
+      {/* Name and code on ONE line, and the name TRUNCATES.
+          Rows here measured 47px, 59px and 79px at 1024px — three heights in one feed. Two separate
+          causes: the code sat on a second line, and the name had no truncate, so a long item name
+          wrapped on top of that. Inline fixes the first; `truncate` (with the full name on `title`)
+          fixes the second. A ledger is read by scanning down a column, and rows of three different
+          heights are the thing that makes that hard. */}
       <td className="cell-y px-4">
-        <div className="font-semibold text-[var(--ink)]">{m.itemName}</div>
-        {(m.itemCode || m.sku) && <div className="font-mono text-[10px] text-[var(--faint)]">{m.itemCode || m.sku}</div>}
+        <div className="flex items-center gap-2">
+          <span className="min-w-0 truncate font-semibold text-[var(--ink)]" title={m.itemName}>{m.itemName}</span>
+          {(m.itemCode || m.sku) && (
+            <span className="shrink-0 font-mono text-[10px] text-[var(--faint)]">{m.itemCode || m.sku}</span>
+          )}
+        </div>
       </td>
       <td className="cell-y px-4"><OwnerTag ownership={m.ownership} /></td>
-      <td className="cell-y px-4 text-[var(--muted)]">{m.locationLabel || "—"}</td>
+      {/* Truncate, don't wrap. With the item cell now one line the auto layout handed this column
+          less width, and "Damaged — London Logistics Hub" answered by wrapping to three lines — an
+          85px row. Row height is the one cost paid per row, so the long-text columns each carry their
+          own ceiling and put the full value on `title`, exactly as the stock positions table does. */}
+      <td className={`cell-y px-4 text-[var(--muted)] ${CELL_ONE_LINE}`} title={m.locationLabel || undefined}>{m.locationLabel || "—"}</td>
       <td className={`cell-y px-4 text-right font-semibold ${m.quantityDelta < 0 ? "text-[var(--neg)]" : "text-[var(--pos)]"}`}>
         {m.quantityDelta > 0 ? `+${m.quantityDelta}` : m.quantityDelta}
       </td>
       <td className="cell-y px-4 text-right text-[var(--muted)]">{m.balanceAfter ?? "—"}</td>
-      <td className="cell-y px-4 font-mono text-[11px] text-[var(--muted)]">{m.reference ?? "—"}</td>
-      <td className="cell-y px-4 text-[var(--muted)]">{m.actor ?? "—"}</td>
+      <td className="cell-y whitespace-nowrap px-4 font-mono text-[11px] text-[var(--muted)]">{m.reference ?? "—"}</td>
+      <td className={`cell-y px-4 text-[var(--muted)] ${CELL_ONE_LINE}`} title={m.actor ?? undefined}>{m.actor ?? "—"}</td>
     </tr>
   );
 }

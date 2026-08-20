@@ -14,7 +14,7 @@ import { actionLabel, actionTone, relativeTime, TONE_CLASSES } from "@/component
 import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
 import { GRN_QUALITY_LABELS, GrnStatusBadge, formatDate } from "./grnStatus";
 import { acceptedWording } from "./acceptedWording";
-import { AttachmentGrid, DocPicker, attachmentToDoc, type PickedDoc } from "./DeliveryDocuments";
+import { AttachmentList, DocPicker, attachmentToDoc, type PickedDoc } from "./DeliveryDocuments";
 import { Pagination } from "@/components/ui/Pagination";
 import type { AuditEntry } from "@/types/audit";
 import type { GoodsReceipt } from "@/types/goods-in";
@@ -248,7 +248,7 @@ function Overview({ grn }: { grn: GoodsReceipt }) {
       </div>
 
       <Card title={`Delivery documents${grn.attachments.length ? ` (${grn.attachments.length})` : ""}`}>
-        <AttachmentGrid items={grn.attachments.map(attachmentToDoc)} />
+        <AttachmentList items={grn.attachments.map(attachmentToDoc)} />
       </Card>
     </div>
   );
@@ -256,8 +256,6 @@ function Overview({ grn }: { grn: GoodsReceipt }) {
 
 function Attachments({ grn, setGrn, canEdit }: { grn: GoodsReceipt; setGrn: (g: GoodsReceipt) => void; canEdit: boolean }) {
   const { pushToast } = useDashboard();
-  const [confirm, setConfirm] = React.useState<{ open: boolean; id: string | null }>({ open: false, id: null });
-  const [deleting, setDeleting] = React.useState(false);
   const totalBytes = grn.attachments.reduce((s, a) => s + a.fileSizeBytes, 0);
 
   const onPick = async (doc: PickedDoc) => {
@@ -272,17 +270,15 @@ function Attachments({ grn, setGrn, canEdit }: { grn: GoodsReceipt; setGrn: (g: 
     }
   };
 
-  const onDelete = async () => {
-    if (!confirm.id || deleting) return;
-    setDeleting(true);
+  // The confirmation lives in AttachmentList now, so every surface sharing that grid asks before a
+  // stored file goes — this screen was the only one that did, and it was the least dangerous of the
+  // three. Keeping a second dialog here would ask twice for one click.
+  const onDelete = async (id: string) => {
     try {
-      setGrn(await grnService.removeAttachment(grn.id, confirm.id));
+      setGrn(await grnService.removeAttachment(grn.id, id));
       pushToast("Document removed.", "success");
-      setConfirm({ open: false, id: null });
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Delete failed.", "alert");
-    } finally {
-      setDeleting(false);
     }
   };
 
@@ -293,8 +289,11 @@ function Attachments({ grn, setGrn, canEdit }: { grn: GoodsReceipt; setGrn: (g: 
           <DocPicker count={grn.attachments.length} totalBytes={totalBytes} onPick={onPick} />
         </div>
       )}
-      <AttachmentGrid items={grn.attachments.map(attachmentToDoc)} onRemove={canEdit && grn.status === "draft" ? (id) => setConfirm({ open: true, id }) : undefined} />
-      <ConfirmDialog open={confirm.open} danger busy={deleting} title="Remove document" message="Remove this document from the receipt?" confirmLabel="Remove" onConfirm={onDelete} onClose={() => { if (!deleting) setConfirm({ open: false, id: null }); }} />
+      <AttachmentList
+        items={grn.attachments.map(attachmentToDoc)}
+        onRemove={canEdit && grn.status === "draft" ? onDelete : undefined}
+        removePrompt={{ title: "Remove document", message: "Remove this document from the receipt?" }}
+      />
     </div>
   );
 }

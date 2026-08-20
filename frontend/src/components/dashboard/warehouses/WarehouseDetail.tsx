@@ -47,6 +47,8 @@ import { VanRequestsWorkspace } from "@/components/dashboard/van-requests/VanReq
 import { DemandTab } from "@/components/dashboard/goods-management/DemandTab";
 import { DamagedStockView } from "@/components/dashboard/goods-management/DamagedStockView";
 import { ExpectedDeliveries } from "./ExpectedDeliveries";
+import { AwaitingHireDeliveries } from "./AwaitingHireDeliveries";
+import { WarehouseHireStock } from "./WarehouseHireStock";
 import type { PagedAuditLogs } from "@/types/audit";
 import type { CustomerStockEntry, PendingStockItem } from "@/types/customer";
 import type { Warehouse } from "@/types/warehouse";
@@ -58,7 +60,8 @@ import { formatDate as fmtDate } from "@/lib/formatDate";
 // consistent with the GRN list (skeleton rows, not a spinner). Pass the column headers + min width.
 function TableSkeleton({ headers, minWidth }: { headers: string[]; minWidth: number }) {
   return (
-    <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+    <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+      <div className="overflow-x-auto">
       <table className="w-full text-left text-sm" style={{ minWidth }}>
         <thead>
           <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
@@ -73,6 +76,7 @@ function TableSkeleton({ headers, minWidth }: { headers: string[]; minWidth: num
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }
@@ -417,11 +421,20 @@ function IncomingTab({
   const searchParams = useSearchParams();
   const canGrn = can("goods_in.view");
   const canCustomer = can("stock_requests.view");
+  // Hire deliveries are a THIRD receiving flow at this warehouse, not a third kind of stock. Its own
+  // pane because a goods receipt ends in an inventory balance and hired kit never becomes our stock —
+  // one pill for both would be the first step towards a GRN for equipment we do not own.
+  const canRental = can("rentals.view");
 
   const requested = searchParams.get("pool");
-  const pool: "grn" | "customer" =
-    requested === "customer" || requested === "grn" ? requested : canGrn ? "grn" : "customer";
-  const active: "grn" | "customer" = canGrn && canCustomer ? pool : canGrn ? "grn" : "customer";
+  const POOLS = ["grn", "customer", "rental"] as const;
+  type Pool = (typeof POOLS)[number];
+  const allowed: Record<Pool, boolean> = { grn: canGrn, customer: canCustomer, rental: canRental };
+  const firstAllowed: Pool = (POOLS.find((k) => allowed[k]) ?? "grn") as Pool;
+  const pool: Pool = POOLS.includes(requested as Pool) ? (requested as Pool) : firstAllowed;
+  // A pool the viewer cannot see falls back to the first they can, so a shared link never lands
+  // somebody on an empty pane they have no permission to fill.
+  const active: Pool = allowed[pool] ? pool : firstAllowed;
 
   // Clicking a pane control that is SHOWING A COUNT lands on that queue's rows, not merely on the
   // list they live in — GRN history holds every completed receipt too, so "Received 3" opening all of
@@ -429,7 +442,7 @@ function IncomingTab({
   // navigates plainly, so an empty queue never applies a filter that hides the history.
   const go = (query: string) =>
     router.replace(`/dashboard/warehouses/${warehouseCode}?${query}`, { scroll: false });
-  const setPool = (p: "grn" | "customer") =>
+  const setPool = (p: Pool) =>
     go(followQuery(keysForPane("incoming", p), (k) => keyAttention(k).count) ?? `tab=incoming&pool=${p}`);
 
   // Within the Company (GRN) pool: "Expected" (open POs to receive — the WM worklist) vs "Receipts"
@@ -447,7 +460,8 @@ function IncomingTab({
   const setInbound = (v: "expected" | "received") =>
     go(followQuery(keysForPane("incoming", "grn", v), (k) => keyAttention(k).count) ?? `tab=incoming&pool=grn&inbound=${v}`);
 
-  const showOwnerToggle = canGrn && canCustomer;
+  // Shown as soon as there is more than one pane to choose between.
+  const showOwnerToggle = [canGrn, canCustomer, canRental].filter(Boolean).length > 1;
   const showViewSwitcher = active === "grn" && canExpected;
 
   // Slot in the toolbar row that ExpectedDeliveries portals its filter menu into. The filter stays
@@ -470,7 +484,12 @@ function IncomingTab({
             ([
               { key: "grn", label: "Company (GRN)" },
               { key: "customer", label: "Customer" },
-            ] as const).map((p) => {
+              // "Rental deliveries", not "Rental": the word that matters is what is happening, because
+              // this pane is not another pool of stock — the kit stays the supplier's.
+              { key: "rental", label: "Rental deliveries" },
+            ] as const)
+              .filter((p) => allowed[p.key])
+              .map((p) => {
               const hit = sumKeys(keysForPane("incoming", p.key), keyAttention);
               return (
                 <button
@@ -549,8 +568,12 @@ function IncomingTab({
           ) : (
             <GoodsReceiptsView warehouseId={warehouseId} warehouseCode={warehouseCode} embedded />
           )
-        ) : (
+        ) : active === "customer" ? (
           <IncomingStock warehouseId={warehouseId} pushToast={pushToast} />
+        ) : (
+          // key: a different warehouse is a different queue, so remount rather than leave the previous
+          // warehouse's rows on screen through the refetch.
+          <AwaitingHireDeliveries key={warehouseId} warehouseId={warehouseId} />
         )}
       </div>
     </div>
@@ -901,11 +924,17 @@ function IncomingStock({
   );
 }
 
-// "Stock" tab: a pill toggle between three stock pools held at this warehouse —
-// company IRM inventory (gated by inventory.view), customer consignment stock, and
-// the damaged pool (also gated by inventory.view). The chosen pool lives in ?pool=
-// so it survives a refresh / is shareable. A user without inventory.view sees only
-// the customer pool, with no toggle.
+// "Stock" tab: a pill toggle between the pools of equipment held at this warehouse —
+// company IRM inventory (gated by inventory.view), customer consignment stock, the
+// damaged pool (also inventory.view) and hired-in equipment (rentals.view). The chosen
+// pool lives in ?pool= so it survives a refresh / is shareable. A user without
+// inventory.view sees only the pools their own permissions reach.
+//
+// "Rental" sits with them because the QUESTION is the same — what is at my site, and what do I owe
+// somebody for it — and the roles that answer it are warehouse-scoped. What it deliberately does not
+// share is the plumbing: hired kit has no inventory balance, no stock movement and no valuation, and
+// the pane reads the hire lines directly. One pill next to three does not make it a fourth pool of
+// stock, and the backend fails its build if the two are ever wired together.
 function StockTab({
   warehouseCode,
   warehouseId,
@@ -920,19 +949,23 @@ function StockTab({
   const { can } = useAuth();
   const searchParams = useSearchParams();
   const canIrm = can("inventory.view");
+  const canRental = can("rentals.view");
+
+  const POOLS = ["irm", "customer", "damaged", "rental"] as const;
+  type Pool = (typeof POOLS)[number];
+  // What this viewer may open. Customer stock has no separate gate — the tab itself is the gate.
+  const allowed: Record<Pool, boolean> = { irm: canIrm, customer: true, damaged: canIrm, rental: canRental };
+  const firstAllowed: Pool = (POOLS.find((k) => allowed[k]) ?? "customer") as Pool;
 
   const requested = searchParams.get("pool");
-  const pool: "irm" | "customer" | "damaged" =
-    requested === "customer" || requested === "irm" || requested === "damaged"
-      ? requested
-      : canIrm
-        ? "irm"
-        : "customer";
-  const active: "irm" | "customer" | "damaged" = canIrm ? pool : "customer";
+  const pool: Pool = POOLS.includes(requested as Pool) ? (requested as Pool) : firstAllowed;
+  // A pool the viewer cannot see falls back to the first they can, so a shared link never lands on an
+  // empty pane behind a pill they never pressed — the Incoming tab's own rule.
+  const active: Pool = allowed[pool] ? pool : firstAllowed;
 
   // Same rule as the Incoming tab's pills — see the note on `go` there. The customer pool holds both
   // draft and active entries, so "Customer 2" without the filter opens the whole consignment list.
-  const setPool = (p: "irm" | "customer" | "damaged") =>
+  const setPool = (p: Pool) =>
     router.replace(
       `/dashboard/warehouses/${warehouseCode}?${
         followQuery(keysForPane("inventory", p), (k) => keyAttention(k).count) ?? `tab=inventory&pool=${p}`
@@ -942,18 +975,19 @@ function StockTab({
 
   // "Received stock to catalogue" is customer-pool work, and this tab opens on Company (IRM) — so
   // without the count on the pill the Inventory tab's number points at a pane nobody opens.
-  const POOL_PILLS = canIrm
-    ? ([
-        { key: "irm", label: "Company (IRM)" },
-        { key: "customer", label: "Customer" },
-        { key: "damaged", label: "Damaged" },
-      ] as const)
-    : ([] as const);
+  const ALL_PILLS = [
+    { key: "irm", label: "Company (IRM)" },
+    { key: "customer", label: "Customer" },
+    { key: "damaged", label: "Damaged" },
+    { key: "rental", label: "Rental (hired in)" },
+  ] as const;
+  // Only shown once there is a CHOICE — a single pill is a label pretending to be a control.
+  const POOL_PILLS = POOLS.filter((k) => allowed[k]).length > 1 ? ALL_PILLS.filter((p) => allowed[p.key]) : [];
 
   return (
     <div className="stack flex h-full flex-col">
-      {canIrm && (
-        <div className="flex shrink-0 items-center gap-2">
+      {POOL_PILLS.length > 0 && (
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
           {POOL_PILLS.map((p) => {
             const hit = sumKeys(keysForPane("inventory", p.key), keyAttention);
             return (
@@ -988,6 +1022,12 @@ function StockTab({
       ) : active === "damaged" ? (
         <div className="min-h-0 flex-1">
           <DamagedStockView warehouseId={warehouseId} fill />
+        </div>
+      ) : active === "rental" ? (
+        // Keyed on the warehouse for the same reason the receiving pane is: the rows, error and page
+        // inside are per-warehouse, and remounting is how they reset.
+        <div className="min-h-0 flex-1">
+          <WarehouseHireStock key={warehouseId} warehouseId={warehouseId} />
         </div>
       ) : (
         <div className="min-h-0 flex-1">

@@ -8,7 +8,6 @@ import { param, queryInt, queryStr } from "../../utils/request.js";
 import type {
   CreatePurchaseRequestInput,
   GenerateReorderInput,
-  PrfAttachmentInput,
   PrfCancelInput,
   PrfRejectInput,
   PrfReopenInput,
@@ -111,10 +110,6 @@ export const duplicatePurchaseRequest = asyncHandler(async (req, res) => {
 });
 
 // --- attachments ------------------------------------------------------------
-export const addAttachment = asyncHandler(async (req, res) => {
-  const purchaseRequest = await prfService.addAttachment(param(req, "id"), req.body as PrfAttachmentInput, actorFrom(req));
-  res.status(201).json({ purchaseRequest });
-});
 export const removeAttachment = asyncHandler(async (req, res) => {
   const purchaseRequest = await prfService.removeAttachment(param(req, "id"), param(req, "attachmentId"), actorFrom(req));
   res.json({ purchaseRequest });

@@ -180,7 +180,7 @@ export function SiteImportModal({
           </div>
           <div className="max-h-[46vh] overflow-auto rounded-xl border border-[var(--border)]">
             <table className="w-full text-left text-xs">
-              <thead className="sticky top-0 bg-[var(--surface-2)] text-[var(--faint)]">
+              <thead className="sticky top-0 z-10 bg-[var(--surface-2)] text-[var(--faint)]">
                 <tr><th className="px-2 py-1.5">#</th><th className="px-2 py-1.5">Name</th><th className="px-2 py-1.5">Postcode</th><th className="px-2 py-1.5">Status</th></tr>
               </thead>
               <tbody>

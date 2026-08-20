@@ -4,7 +4,7 @@ import * as grnController from "./goods-in.controller.js";
 import { requireAuth, requirePermission } from "../../middleware/auth.middleware.js";
 import { writeLimiter, exportLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
-import { createGoodsReceiptSchema, grnAttachmentSchema, grnCancelSchema, updateGoodsReceiptSchema } from "./goods-in.validation.js";
+import { createGoodsReceiptSchema, grnCancelSchema, updateGoodsReceiptSchema } from "./goods-in.validation.js";
 
 const router = Router();
 
@@ -25,7 +25,6 @@ router.post("/:id/complete", requirePermission("goods_in.complete"), writeLimite
 router.post("/:id/cancel", requirePermission("goods_in.cancel"), writeLimiter, validateBody(grnCancelSchema), grnController.cancelGoodsReceipt);
 
 // --- attachments ------------------------------------------------------------
-router.post("/:id/attachments", requirePermission("goods_in.edit"), writeLimiter, validateBody(grnAttachmentSchema), grnController.addAttachment);
 router.delete("/:id/attachments/:attachmentId", requirePermission("goods_in.edit"), writeLimiter, grnController.removeAttachment);
 
 export default router;

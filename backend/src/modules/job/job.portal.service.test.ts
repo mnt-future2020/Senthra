@@ -53,6 +53,7 @@ const detailRow = (over: Record<string, unknown> = {}) => ({
   plannerName: "Their Planner",
   plannerPhone: "0113 000 0000",
   attachments: ["https://example.com/pack.pdf"],
+  attachmentRows: [],
   assignedAt: new Date("2026-08-02T09:00:00.000Z"),
   acceptedAt: new Date("2026-08-03T09:00:00.000Z"),
   startedAt: null,
@@ -389,6 +390,37 @@ describe("getJobForCustomer — the detail page", () => {
     expect(job.kitLines[0]).not.toHaveProperty("customerStockEntryId");
     // Staff-to-staff free text, same rule as the job-level notes.
     expect(job.kitLines[0]).not.toHaveProperty("notes");
+  });
+
+  // Attachments live in TWO stores while pre-migration jobs exist: the legacy `attachments` array and
+  // the new rows. Reading only one is a silent failure — the field is still populated, so nothing
+  // looks broken, and the customer simply never sees the documents their account team attached.
+  it("merges the legacy array and the new rows into one list", async () => {
+    findById.mockResolvedValue(
+      detailRow({
+        attachments: ["https://ok.com/legacy.pdf"],
+        attachmentRows: [{ url: "https://ok.com/new.pdf", internal: false }],
+      }),
+    );
+    const job = await getJobForCustomer(CUST, "j1");
+    expect(job.attachments).toEqual(["https://ok.com/legacy.pdf", "https://ok.com/new.pdf"]);
+  });
+
+  // Staff-only files are withheld from BOTH stores. The legacy ones carry the marker in the URL, the
+  // new ones in a column — the customer's privacy must not depend on which shape the file happens to
+  // be stored in.
+  it("withholds internal files whether the marker is a URL fragment or a column", async () => {
+    findById.mockResolvedValue(
+      detailRow({
+        attachments: ["https://ok.com/legacy.pdf", "https://ok.com/legacy-staff.pdf#internal"],
+        attachmentRows: [
+          { url: "https://ok.com/new.pdf", internal: false },
+          { url: "https://ok.com/new-staff.pdf", internal: true },
+        ],
+      }),
+    );
+    const job = await getJobForCustomer(CUST, "j1");
+    expect(job.attachments).toEqual(["https://ok.com/legacy.pdf", "https://ok.com/new.pdf"]);
   });
 
   // Validation only guards writes, so a row stored before the http(s) rule still holds whatever was

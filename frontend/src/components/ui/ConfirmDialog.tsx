@@ -30,6 +30,7 @@ export function ConfirmDialog({
   open,
   title,
   message,
+  field,
   confirmLabel = "Confirm",
   danger,
   busy,
@@ -39,6 +40,15 @@ export function ConfirmDialog({
   open: boolean;
   title: string;
   message: React.ReactNode;
+  /**
+   * Form content the confirmation needs — typically a required reason.
+   *
+   * Rendered at the dialog's FULL WIDTH, deliberately outside the icon column. `message` is the
+   * icon's description and is indented past it, which is right for a sentence and wrong for an input:
+   * a three-row textarea in that column leaves a tall dead strip beside it and reads as misaligned
+   * rather than as indented.
+   */
+  field?: React.ReactNode;
   confirmLabel?: string;
   danger?: boolean;
   busy?: boolean;
@@ -67,8 +77,10 @@ export function ConfirmDialog({
       Array.from(panel?.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR) ?? []).filter(
         (el) => el.offsetParent !== null,
       );
-    // Lands on Cancel (the first control), NOT the destructive button — a stray Enter on a "Delete
-    // this?" dialog must not be what deletes it.
+    // Lands on the first control, NOT the destructive button — a stray Enter on a "Delete this?"
+    // dialog must not be what deletes it. With no `field` that is Cancel; with one it is the field
+    // itself, which is both what the user came to type in and just as safe (Enter in a textarea
+    // types a newline).
     if (panel && !panel.contains(document.activeElement)) {
       (focusables()[0] ?? panel).focus();
     }
@@ -141,6 +153,7 @@ export function ConfirmDialog({
             <div id={messageId} className="mt-1 text-sm text-[var(--muted)]">{message}</div>
           </div>
         </div>
+        {field && <div className="mt-4">{field}</div>}
         <div className="mt-5 flex justify-end gap-2">
           <button
             type="button"

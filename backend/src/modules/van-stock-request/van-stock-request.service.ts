@@ -18,6 +18,7 @@ import { badRequest, conflict, forbidden, notFound } from "../../utils/http-erro
 import * as vsrRepo from "./van-stock-request.repository.js";
 import type { CreateRequestData, CreateRequestLineData, FulfilEntry, RequestWithLines } from "./van-stock-request.repository.js";
 import { randomUUID } from "node:crypto";
+import { readPriority } from "./van-stock-request.validation.js";
 import type {
   ApproveVanStockRequestInput,
   CloseShortInput,
@@ -25,6 +26,7 @@ import type {
   DeclineVanStockRequestInput,
   FulfilVanStockRequestInput,
   ScanLookupInput,
+  VanStockPriority,
   WalkInInput,
 } from "./van-stock-request.validation.js";
 
@@ -128,7 +130,7 @@ export interface PublicVanStockRequest {
   code: string;
   type: string;
   status: string;
-  priority: string;
+  priority: VanStockPriority; // normalised on the way out — see readPriority()
   createdVia: string;
   engineerId: string;
   engineerName: string;
@@ -242,7 +244,9 @@ export function toPublic(r: RequestWithLines, now: Date, scope: string[] | undef
     code: r.code,
     type: r.type,
     status: r.status,
-    priority: r.priority,
+    // Read through readPriority, not straight off the row: requests raised before "high" was retired
+    // still hold it, and every client-side priority type is now the two-value scale.
+    priority: readPriority(r.priority),
     createdVia: r.createdVia,
     engineerId: r.engineerId,
     engineerName: r.engineerName,

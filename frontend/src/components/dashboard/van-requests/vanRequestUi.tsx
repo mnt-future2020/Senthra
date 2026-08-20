@@ -4,7 +4,7 @@ import * as React from "react";
 import { Check, ExternalLink, Loader2, MapPin, Plus, Search, Trash2 } from "lucide-react";
 
 import * as vanStockSvc from "@/services/vanStockRequest.service";
-import type { VanStockFulfilment, VanStockItemOption, VanStockLine, VanStockRequest } from "@/services/vanStockRequest.service";
+import type { VanStockFulfilment, VanStockItemOption, VanStockLine, VanStockPriority, VanStockRequest } from "@/services/vanStockRequest.service";
 import { CopyableCode } from "@/components/ui/CopyableCode";
 import { useDashboard } from "@/hooks/useDashboard";
 import { fmtDateTime } from "@/components/dashboard/portal/portalUi";
@@ -16,6 +16,22 @@ import { VSR_STATUS } from "@/components/dashboard/engineer/EngineerVanStock";
 // Shared presentational bits for the Field Stock (VSR) lists — used by BOTH the warehouse board and
 // the engineer's own list so the two read as one system. Kept in a neutral module (not either list
 // file) to avoid a circular import between them.
+
+// The Field Stock priority scale, rendered identically by the engineer's composer, the counter's
+// walk-in and the warehouse queue's filter. One list, because three copies is how "high" survived in
+// a filter after it had gone from both composers.
+export const VAN_STOCK_PRIORITY_OPTIONS: Array<{ value: VanStockPriority; label: string }> = [
+  { value: "normal", label: "Normal" },
+  { value: "urgent", label: "Urgent" },
+];
+
+/** Reads the queue's `?vPriority=` URL parameter, which outlives the scale it was written against.
+ *  A bookmark from before "high" was retired still names it; the API answers such a filter with the
+ *  urgent rows, so the dropdown must say Urgent too — otherwise the control sits blank above a
+ *  filtered list, and the reviewer can't tell what they are looking at. "" is All priorities. */
+export function readPriorityParam(param: string): string {
+  return param === "high" ? "urgent" : param;
+}
 
 // Restock / Return badge.
 export function VanStockTypeBadge({ type }: { type: VanStockRequest["type"] }) {

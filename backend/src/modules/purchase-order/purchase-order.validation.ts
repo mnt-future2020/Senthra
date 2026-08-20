@@ -79,6 +79,13 @@ const itemsField = z
   .min(1, "Add at least one item.")
   .refine(noDupItems, { message: "Each item can only be added once." });
 
+// The same lines on an EDIT, where an empty array is legitimate: an order converted from a
+// hire-only request has no IRM lines at all, and `.min(1)` made it impossible to edit. "Must still
+// have a line of some kind" is enforced in the service, which can see the rental lines too.
+const editableItemsField = z
+  .array(lineSchema)
+  .refine(noDupItems, { message: "Each item can only be added once." });
+
 // Shared optional header fields.
 const sharedHeader = {
   referenceNumber: z.string().trim().max(60).optional(),
@@ -170,7 +177,7 @@ export const updatePurchaseOrderSchema = z
     orderDate: optionalDate,
     expectedDeliveryDate: optionalDate,
     ...sharedHeader,
-    items: itemsField.optional(),
+    items: editableItemsField.optional(),
   })
   .refine(datesOk, datesError);
 export type UpdatePurchaseOrderInput = z.infer<typeof updatePurchaseOrderSchema>;
@@ -205,10 +212,16 @@ const optionalDateField = z.preprocess(
 export const poSupplierAcceptSchema = z
   .object({
     acceptedDate: optionalDateField, // defaults to "now" server-side
-    // REQUIRED: accepting an order means committing to a delivery date. This is the authoritative
-    // date the warehouse plans against, and it stays revisable afterwards via the delivery-date
-    // endpoint — so asking for it up front costs nothing and removes the guesswork.
-    confirmedDeliveryDate: requiredDate("Confirmed delivery date"),
+    // CONDITIONALLY required, and the condition is the order's STATUS — which a body schema cannot
+    // see, so the service enforces it (recordSupplierAcceptance).
+    //
+    // On an order still awaiting delivery it is mandatory: accepting means committing to a date, and
+    // that date is what the warehouse plans against. Once the goods are IN there is nothing left to
+    // plan against, the real arrival is already on the receipt, and demanding a "confirmed delivery
+    // date" invites somebody to type the date it actually turned up — filing an arrival under a field
+    // that means "what the supplier promised". A late acknowledgement is about the reference and the
+    // notes; the promise is optional history.
+    confirmedDeliveryDate: optionalDateField,
     supplierAckReference: z.string().trim().max(120).optional(),
     notes: z.string().trim().max(2000).optional(),
   })
@@ -303,3 +316,24 @@ export const poAttachmentSchema = z.object({
     }
   });
 export type PoAttachmentInput = z.infer<typeof poAttachmentSchema>;
+
+// ── Rental hire actions ───────────────────────────────────────────────────────────────────────
+// `hireStatus` is never client-settable as a free string — "return" is its own endpoint, so the
+// only transition a caller can ask for is the one that endpoint performs.
+
+export const extendHireSchema = z.object({
+  hireEndDate: z.string({ error: "Select a new hire end date." }).refine((v) => !Number.isNaN(Date.parse(v)), "Enter a valid date."),
+  // Optional: extending may also change how much warning the new deadline gets. Same 0–365 sanity
+  // range as the PRF line — a lead longer than the hire is clamped, not refused.
+  notifyDaysBefore: z.coerce.number().int().min(0, "Reminder days must be between 0 and 365.").max(365, "Reminder days must be between 0 and 365.").optional(),
+  // What the extension was AGREED at, when that is not what the rate calculates — the supplier may
+  // quote the extra days differently, and on the `total` basis there is no rate to calculate from at
+  // all. Absent means "use the calculated figure".
+  additionalChargePence: z.coerce
+    .number()
+    .int("The additional charge must be a whole number of pence.")
+    .min(0, "The additional charge can't be negative.")
+    .max(1_000_000_000)
+    .optional(),
+});
+export type ExtendHireInput = z.infer<typeof extendHireSchema>;

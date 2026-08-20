@@ -18,6 +18,7 @@ vi.mock("./goods-in.repository.js", () => ({
 vi.mock("#modules/purchase-order/purchase-order.service.js", () => ({
   requireReceivablePurchaseOrder: vi.fn(),
   applyGoodsReceipt: vi.fn(),
+  recordReceiptStatusChange: vi.fn(),
 }));
 vi.mock("#modules/purchase-order/purchase-order.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/inventory/inventory.service.js", () => ({ applyInbound: vi.fn() }));
@@ -32,10 +33,8 @@ import * as poService from "#modules/purchase-order/purchase-order.service.js";
 import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import * as inventoryService from "#modules/inventory/inventory.service.js";
 import * as audit from "#modules/audit/audit.service.js";
-import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
-import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
 import * as attachmentService from "#modules/attachment/attachment.service.js";
-import { addAttachment, cancelGoodsReceipt, completeGoodsReceipt, createGoodsReceipt, deleteGoodsReceipt, getGoodsReceipt, removeAttachment, updateGoodsReceipt } from "./goods-in.service.js";
+import { assertCanAttach, cancelGoodsReceipt, completeGoodsReceipt, createGoodsReceipt, deleteGoodsReceipt, getGoodsReceipt, removeAttachment, updateGoodsReceipt } from "./goods-in.service.js";
 
 const GRN_ID = "e".repeat(24);
 const PO_ID = "f".repeat(24);
@@ -100,6 +99,7 @@ function grnRow(over: Record<string, unknown> = {}) {
     qualityNotes: null,
     internalNotes: null,
     items: [],
+    rentalItems: [],
     attachments: [],
     createdBy: null,
     completedBy: null,
@@ -265,7 +265,7 @@ describe("completeGoodsReceipt — the only inventory-writing action", () => {
     expect(mockApplyInbound).toHaveBeenCalledTimes(1);
     expect(mockApplyInbound.mock.calls[0][1]).toMatchObject({ irmItemId: IRM_ID, warehouseId: WH_ID, quantity: 5, sourceType: "goods_receipt", sourceCode: "GRN-0001" });
     // PO advanced with the received delta (6).
-    expect(mockApplyReceipt).toHaveBeenCalledWith({}, PO_ID, [{ purchaseOrderItemId: POI_ID, receivedDelta: 6 }], { type: "admin", email: "wh@x.com" });
+    expect(mockApplyReceipt).toHaveBeenCalledWith({}, PO_ID, [{ purchaseOrderItemId: POI_ID, receivedDelta: 6 }]);
     expect(mockCompleteTx).toHaveBeenCalledWith({}, GRN_ID, "wh@x.com");
     expect(auditActions()).toContain("goods_in.completed");
     expect(r.status).toBe("completed");
@@ -327,7 +327,7 @@ describe("completeGoodsReceipt — in-transaction revalidation (race guards)", (
       .mockResolvedValueOnce(grnRow({ status: "completed", items: [] }));
     mockFindByIdTx.mockResolvedValue(grnRow({ status: "draft", items: [grnItem({ receivedQuantity: 4, damagedQuantity: 0, acceptedQuantity: 4 })] }));
     await completeGoodsReceipt(GRN_ID);
-    expect(mockApplyReceipt).toHaveBeenCalledWith({}, PO_ID, [{ purchaseOrderItemId: POI_ID, receivedDelta: 4 }], undefined);
+    expect(mockApplyReceipt).toHaveBeenCalledWith({}, PO_ID, [{ purchaseOrderItemId: POI_ID, receivedDelta: 4 }]);
     expect(mockApplyInbound.mock.calls[0][1]).toMatchObject({ quantity: 4 });
   });
 });
@@ -365,48 +365,35 @@ describe("cancel + draft-only guards", () => {
   });
 });
 
+// The rules these assert did not move when the base64 endpoint was deleted — they live in
+// `assertCanAttach`, which the direct-upload path calls as its preCheck BEFORE minting a signature.
+// Testing them there rather than through the old uploader keeps the coverage on the rule itself.
 describe("attachments — draft-only guard", () => {
   const mockAddAtt = grnRepo.addAttachment as ReturnType<typeof vi.fn>;
   const mockFindAtt = grnRepo.findAttachment as ReturnType<typeof vi.fn>;
   const mockRemoveAtt = grnRepo.removeAttachment as ReturnType<typeof vi.fn>;
-  const mockCreds = getCloudinaryCreds as ReturnType<typeof vi.fn>;
-  const mockUpload = uploadFileToCloudinary as ReturnType<typeof vi.fn>;
-  const att = { label: "Invoice", fileName: "inv.pdf", fileType: "pdf", fileSizeBytes: 1000, data: "data:application/pdf;base64,AAAA" } as Parameters<typeof addAttachment>[1];
 
-  it("adds an attachment on a DRAFT receipt", async () => {
-    mockFindById.mockResolvedValue(grnRow({ status: "draft" }));
-    mockCreds.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
-    mockUpload.mockResolvedValue({ url: "https://cdn/inv.pdf", publicId: "senthra/goods-in/uuid.pdf", resourceType: "raw" });
-    await addAttachment(GRN_ID, att, { type: "admin", email: "x@x.com" });
-    expect(mockAddAtt).toHaveBeenCalledTimes(1);
-    // Identity, not just the URL — this is what makes the file deletable later.
-    expect(mockAddAtt.mock.calls[0][0]).toMatchObject({
-      url: "https://cdn/inv.pdf",
-      publicId: "senthra/goods-in/uuid.pdf",
-      resourceType: "raw",
-    });
-    expect(auditActions()).toContain("goods_in.attachment_added");
-  });
-
-  it("blocks the 6th file (max 5 documents) before any upload", async () => {
+  it("blocks the 6th file (max 5 documents)", async () => {
     const five = Array.from({ length: 5 }, (_, i) => ({ id: `a${i}`, fileSizeBytes: 1000 }));
     mockFindById.mockResolvedValue(grnRow({ status: "draft", attachments: five }));
-    await expect(addAttachment(GRN_ID, att)).rejects.toThrow(/at most 5 documents/i);
-    expect(mockUpload).not.toHaveBeenCalled();
-    expect(mockAddAtt).not.toHaveBeenCalled();
+    await expect(assertCanAttach(GRN_ID, 1000)).rejects.toThrow(/at most 5 documents/i);
   });
 
   it("blocks a file that pushes the running total over 20 MB", async () => {
     mockFindById.mockResolvedValue(grnRow({ status: "draft", attachments: [{ id: "a0", fileSizeBytes: 20 * 1024 * 1024 - 100 }] }));
-    const big = { ...att, fileSizeBytes: 1000 };
-    await expect(addAttachment(GRN_ID, big)).rejects.toThrow(/20 MB/i);
-    expect(mockUpload).not.toHaveBeenCalled();
-    expect(mockAddAtt).not.toHaveBeenCalled();
+    await expect(assertCanAttach(GRN_ID, 1000)).rejects.toThrow(/20 MB/i);
+  });
+
+  // Refused BEFORE a signature is minted, which is the point of running this as a preCheck: an
+  // upload the receipt cannot accept never reaches Cloudinary, so there is no orphan to reap.
+  it("allows a file that fits", async () => {
+    mockFindById.mockResolvedValue(grnRow({ status: "draft", attachments: [] }));
+    await expect(assertCanAttach(GRN_ID, 1000)).resolves.toBeUndefined();
   });
 
   it("blocks adding an attachment on a COMPLETED receipt", async () => {
     mockFindById.mockResolvedValue(grnRow({ status: "completed" }));
-    await expect(addAttachment(GRN_ID, att)).rejects.toThrow(/only draft/i);
+    await expect(assertCanAttach(GRN_ID, 1000)).rejects.toThrow(/only draft/i);
     expect(mockAddAtt).not.toHaveBeenCalled();
   });
 

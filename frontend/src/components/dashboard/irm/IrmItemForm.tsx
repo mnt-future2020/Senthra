@@ -20,6 +20,7 @@ import { firstActiveId } from "@/lib/utils";
 import { useAuth } from "@/hooks/useAuth";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { CreatableSelect } from "@/components/ui/CreatableSelect";
+import { UOM_SELECT_OPTIONS } from "@/lib/uom";
 import { Select } from "@/components/ui/Select";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { FieldError, FormAsideCard, FormField, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
@@ -30,7 +31,6 @@ import { buildSkuCandidate, categoryPrefix, findSkuPrefixMismatch, normalizeSku 
 // The IRM catalogue now lives in the Inventory Hub (Inventory → IRM → Catalogue), so that's the
 // fallback "list" destination when there's no in-app history to go back to.
 const IRM_LIST = "/dashboard/inventory?tab=company&irm=catalogue";
-const UOM_OPTIONS = ["Each", "Metre", "Roll", "Pack", "Box", "Set", "Pair", "Reel"];
 const CURRENCY_OPTIONS = ["GBP", "EUR"];
 const CURRENCY_LABELS: Record<string, string> = { GBP: "GBP (£)", EUR: "EUR (€)" };
 
@@ -631,7 +631,7 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
                 <Select
                   value={baseUnit}
                   onChange={(v) => { setBaseUnit(v); clearError("baseUnit"); }}
-                  options={UOM_OPTIONS.map((u) => ({ value: u, label: u }))}
+                  options={UOM_SELECT_OPTIONS}
                   ariaLabel="Base unit"
                   invalid={Boolean(errors.baseUnit)}
                 />
@@ -740,7 +740,13 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
             <div className="space-y-3 text-sm">
               <div>
                 <p className="text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">Code</p>
-                <p className="font-mono text-[var(--ink)]">{mode === "edit" && o ? o.code : "Auto-assigned (IRM-####)"}</p>
+                {/* No prefix quoted here. It is configurable in Settings → Branding, and this form cannot
+                    read it — the full settings payload needs `settings.view`, which a person adding a
+                    catalogue item may well not have, and the PUBLIC branding endpoint (served to the
+                    login page with no auth) is no place for internal numbering conventions. A
+                    hardcoded guess is worse than silence: it read "IRM-####" while the configured
+                    prefix was something else entirely. */}
+                <p className="font-mono text-[var(--ink)]">{mode === "edit" && o ? o.code : "Auto-assigned on save"}</p>
               </div>
               <div>
                 <p className="text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">Status</p>

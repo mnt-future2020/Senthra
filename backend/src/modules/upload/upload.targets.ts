@@ -3,9 +3,10 @@ import type { AuditActor } from "#modules/audit/audit.service.js";
 import * as prfService from "#modules/purchase-request/purchase-request.service.js";
 import * as poService from "#modules/purchase-order/purchase-order.service.js";
 import * as grnService from "#modules/goods-in/goods-in.service.js";
+import * as hireDeliveryService from "#modules/rental-receipt/rental-receipt.service.js";
 
 import { UPLOAD_PURPOSES, type UploadPurposeKey } from "./upload.catalog.js";
-import { commitAttachment, releasePending, type VerifiedAsset } from "./upload.service.js";
+import { commitAttachment, releasePending, stampPendingAsset, type VerifiedAsset } from "./upload.service.js";
 
 /**
  * Where each `attach` purpose sends its verified asset.
@@ -56,6 +57,17 @@ const TARGETS: Partial<Record<UploadPurposeKey, { preCheck: PreCheck; attach: At
       return dto;
     },
   },
+  hire_delivery_photo: {
+    preCheck: (id, bytes, _label, actor) => hireDeliveryService.assertCanAttach(id, bytes, actor),
+    attach: async (id, asset, label, actor) => {
+      await commitAttachment(asset, (tx) =>
+        hireDeliveryService.attachUploadedAsset(id, { ...asset, label }, actor, tx),
+      );
+      const dto = await hireDeliveryService.getRentalReceipt(id, actor);
+      hireDeliveryService.recordAttachmentAudit(dto, actor);
+      return dto;
+    },
+  },
   grn_attachment: {
     preCheck: (id, bytes, _label, actor) => grnService.assertCanAttach(id, bytes, actor),
     attach: async (id, asset, label, actor) => {
@@ -81,10 +93,11 @@ export function preCheckFor(purpose: UploadPurposeKey): ((targetId: string, file
 /**
  * Hand a verified asset to the module that owns it.
  *
- * `return-url` purposes have no record to attach to yet — a job being created, a van-stock request
- * being composed — so the URL goes back to the form and is written when the user saves, exactly as it
- * is today. The ledger row is released at that point, which means an abandoned FORM still leaks the
- * asset: the existing, separately-deferred gap that needs those `String[]` fields to become rows.
+ * `return-url` and `deferred-attach` purposes have no record to attach to yet — a job being created,
+ * a van-stock request being composed — so the URL goes back to the form and is written when the user
+ * saves. They differ in what happens to the ledger row, and that difference is the whole point:
+ * `return-url` releases it (an abandoned form leaks the asset — the remaining, separately-deferred
+ * gap), while `deferred-attach` keeps it so the reaper reclaims exactly that case.
  */
 export async function attachTo(
   purpose: UploadPurposeKey,
@@ -93,7 +106,15 @@ export async function attachTo(
   label: string | undefined,
   actor?: AuditActor,
 ): Promise<{ attachment: unknown } | { url: string }> {
-  if (UPLOAD_PURPOSES[purpose].mode === "return-url") {
+  const mode = UPLOAD_PURPOSES[purpose].mode;
+  if (mode === "deferred-attach") {
+    // The row is KEPT. Stamping the URL onto it is what lets the save path find this identity again
+    // from the only thing the form holds — and leaving the row pending is what lets the reaper
+    // reclaim the asset if that save never comes. See FinalizeMode's note on the mode.
+    await stampPendingAsset(asset);
+    return { url: asset.url };
+  }
+  if (mode === "return-url") {
     await releasePending(asset.publicId);
     return { url: asset.url };
   }

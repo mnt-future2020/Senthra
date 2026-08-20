@@ -1,5 +1,4 @@
 import type { Prisma } from "@prisma/client";
-import { randomUUID } from "node:crypto";
 
 import * as prfRepo from "./purchase-request.repository.js";
 import type { PrfLineRow, PurchaseRequestWithRelations } from "./purchase-request.repository.js";
@@ -8,17 +7,22 @@ import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import * as jobRepo from "#modules/job/job.repository.js";
 import * as supplierService from "#modules/supplier/supplier.service.js";
 import * as warehouseService from "#modules/warehouse/warehouse.service.js";
+import { daysBetween } from "../../utils/calendar-day.js";
+import { computeNotifyOnDate } from "#modules/purchase-order/rentalHire.predicate.js";
+import { resolveDeliveryLocation, resolveReturnLocation, type ReturnContext } from "#modules/purchase-order/rentalReturn.js";
+import { calculateUnitPricePence, type RatePeriod } from "../../utils/rental-pricing.js";
 import * as irmService from "#modules/irm/irm.service.js";
+import * as rentalItemService from "#modules/rental-item/rental-item.service.js";
 // Safe one-way edge: inventory.service reaches back only to purchase-request.REPOSITORY (never this
 // service), so consuming its live reorder suggestions here cannot create an import cycle.
 import * as inventoryService from "#modules/inventory/inventory.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import * as attachmentService from "#modules/attachment/attachment.service.js";
-import { getCloudinaryCreds, getRegionalSettings } from "#modules/settings/settings.service.js";
+import { getRegionalSettings } from "#modules/settings/settings.service.js";
 import { formatDate } from "#modules/document/document.formatter.js";
 import { EXPORT_MAX, EXPORT_PAGING, toCsv } from "../../utils/csv.js";
-import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
+import { publicLateHireDelivery } from "../../utils/hire-delivery.js";
 import { withTransaction } from "../../lib/prisma.js";
 import {
   emitAttentionChanged,
@@ -33,8 +37,8 @@ import { diffProcurementChanges } from "../../utils/procurement-diff.js";
 import type {
   CreatePurchaseRequestInput,
   GenerateReorderInput,
-  PrfAttachmentInput,
   PrfLineInput,
+  PrfRentalLineInput,
   UpdatePurchaseRequestInput,
 } from "./purchase-request.validation.js";
 import { incotermLabel } from "#modules/purchase-order/purchase-order.validation.js";
@@ -99,6 +103,33 @@ export interface PublicPrfItem {
   notes: string | null;
   irmItem: { id: string; code: string; name: string; status: string } | null;
 }
+export interface PublicPrfRentalLine {
+  id: string;
+  rentalItemId: string;
+  itemName: string;
+  baseUnit: string | null;
+  quantity: number;
+  hireStartDate: string;
+  hireEndDate: string;
+  hireDays: number;
+  notifyDaysBefore: number;
+  deliveryAddress: string | null;
+  ratePeriod: string;
+  ratePence: number | null;
+  priceOverridden: boolean;
+  returnMode: string;
+  returnAddress: string | null;
+  /** BOTH legs of the round trip, resolved once here — see rentalReturn.ts. */
+  deliveryLocation: { label: string; address: string | null };
+  returnLocation: { label: string; address: string | null };
+  unitPricePence: number;
+  unitPrice: number;
+  vatRate: number;
+  lineTotalPence: number;
+  lineTotal: number;
+  notes: string | null;
+  rentalItem: { id: string; code: string; name: string; status: string } | null;
+}
 export interface PublicPrfAttachment {
   id: string;
   label: string | null;
@@ -127,6 +158,11 @@ export interface PublicPurchaseRequest {
   quoteDate: string | null;
   quoteValidUntil: string | null;
   requiredByDate: string | null;
+  // Set when the required-by date falls AFTER one of this request's hires has already started —
+  // days billed with nothing on site. Derived here, like `hireDays`, so the request screen, the
+  // order screen and any export read one answer. A warning, never a block: some hire companies
+  // bill from the day the kit leaves their yard.
+  lateHireDelivery: { earliestHireStart: string; daysLate: number } | null;
   justification: string | null;
   notes: string | null;
   deliveryTerms: string | null;
@@ -140,6 +176,7 @@ export interface PublicPurchaseRequest {
   vatTotal: number;
   grandTotal: number;
   items: PublicPrfItem[];
+  rentalItems: PublicPrfRentalLine[];
   attachments: PublicPrfAttachment[];
   // The PO generated from this PRF (at most one), for the linked-PO badge + chain strip.
   purchaseOrder: { id: string; code: string; status: string } | null;
@@ -180,6 +217,27 @@ function warehouseAddress(w: PurchaseRequestWithRelations["warehouse"]): string 
   return parts.length ? parts.join(", ") : null;
 }
 
+/**
+ * The facts BOTH legs of a hire's round trip are resolved from — see rentalReturn.ts.
+ *
+ * Built once per line so the outbound and return chains can never be handed different facts about the
+ * same hire. `orderDeliveryAddress` is null by definition here: the "deliver to a different address"
+ * override belongs to a purchase order, and a request has no order yet.
+ */
+function returnCtx(
+  prf: PurchaseRequestWithRelations,
+  r: PurchaseRequestWithRelations["rentalItems"][number],
+): ReturnContext {
+  return {
+    returnMode: r.returnMode,
+    returnAddress: r.returnAddress,
+    deliveryAddress: r.deliveryAddress,
+    orderDeliveryAddress: null,
+    warehouseName: prf.warehouse?.name ?? null,
+    warehouseAddress: warehouseAddress(prf.warehouse),
+  };
+}
+
 function toPublic(prf: PurchaseRequestWithRelations): PublicPurchaseRequest {
   const s = prf.supplier;
   const paymentTerms = s ? (s.paymentTerms === "Custom" ? s.customPaymentTerms : s.paymentTerms) : null;
@@ -216,6 +274,7 @@ function toPublic(prf: PurchaseRequestWithRelations): PublicPurchaseRequest {
     quoteDate: iso(prf.quoteDate),
     quoteValidUntil: iso(prf.quoteValidUntil),
     requiredByDate: iso(prf.requiredByDate),
+    lateHireDelivery: publicLateHireDelivery(prf.requiredByDate, prf.rentalItems),
     justification: prf.justification,
     notes: prf.notes,
     deliveryTerms: prf.deliveryTerms,
@@ -242,6 +301,41 @@ function toPublic(prf: PurchaseRequestWithRelations): PublicPurchaseRequest {
       lineTotal: pounds(i.lineTotalPence),
       notes: i.notes,
       irmItem: i.irmItem ? { id: i.irmItem.id, code: i.irmItem.code, name: i.irmItem.name, status: i.irmItem.status } : null,
+    })),
+    // ONE context for both legs — see rentalReturn.ts. Built here rather than inline twice so the
+    // outbound and return chains can never be handed different facts about the same line.
+    rentalItems: prf.rentalItems.map((r) => ({
+      id: r.id,
+      rentalItemId: r.rentalItemId,
+      itemName: r.itemName,
+      baseUnit: r.baseUnit,
+      quantity: r.quantity,
+      hireStartDate: r.hireStartDate.toISOString(),
+      hireEndDate: r.hireEndDate.toISOString(),
+      // Derived here rather than on the client so the PRF screen, the PO screen and any export all
+      // read one answer for "how long is this hire".
+      hireDays: daysBetween(r.hireStartDate, r.hireEndDate),
+      notifyDaysBefore: r.notifyDaysBefore,
+      deliveryAddress: r.deliveryAddress,
+      ratePeriod: r.ratePeriod,
+      ratePence: r.ratePence,
+      priceOverridden: r.priceOverridden,
+      returnMode: r.returnMode,
+      returnAddress: r.returnAddress,
+      // BOTH legs of the round trip, resolved server-side so the request screen, the order document
+      // and the on-hire list can never name three different places for one hire. A request has no
+      // order-level override to fall back to — that only exists once a PO carries the line.
+      deliveryLocation: resolveDeliveryLocation(returnCtx(prf, r)),
+      returnLocation: resolveReturnLocation(returnCtx(prf, r)),
+      unitPricePence: r.unitPricePence,
+      unitPrice: pounds(r.unitPricePence),
+      vatRate: r.vatRate,
+      lineTotalPence: r.lineTotalPence,
+      lineTotal: pounds(r.lineTotalPence),
+      notes: r.notes,
+      rentalItem: r.rentalItem
+        ? { id: r.rentalItem.id, code: r.rentalItem.code, name: r.rentalItem.name, status: r.rentalItem.status }
+        : null,
     })),
     attachments: prf.attachments.map((a) => ({
       id: a.id,
@@ -281,6 +375,54 @@ export function computeTotals(lines: { quantity: number; unitPricePence: number;
     vat += Math.round((lineTotal * l.vatRate) / 100);
   }
   return { subtotalPence: subtotal, vatPence: vat, grandTotalPence: subtotal + vat };
+}
+
+/**
+ * Validate each rental line's item is ACTIVE, snapshot its name/unit, and compute the line total.
+ *
+ * The dates arrive already normalised to UTC midnight by the validation layer, so nothing here has
+ * to think about time-of-day — see utils/calendar-day.ts.
+ */
+async function buildRentalLineRows(lines: PrfRentalLineInput[]): Promise<prfRepo.PrfRentalLineRow[]> {
+  if (lines.length === 0) return [];
+  await rentalItemService.requireActiveRentalItems(lines.map((l) => l.rentalItemId));
+  // One lookup for the whole set, so the snapshots come from the same read the guard validated.
+  const items = await rentalItemService.getRentalItemsByIds(lines.map((l) => l.rentalItemId));
+  return lines.map((line, i) => {
+    const item = items.get(line.rentalItemId)!; // guaranteed by requireActiveRentalItems
+    // Resolved ONCE and used for both the unit price and the line total. Computing it twice is how
+    // a line ends up filed with a £2,475 unit price and a £0.03 total: the second reader used the
+    // figure the client sent instead of the one the server decided.
+    const unitPricePence = agreedUnitPricePence(line);
+    return {
+      rentalItemId: line.rentalItemId,
+      itemName: item.name,
+      baseUnit: item.baseUnit ?? null,
+      quantity: line.quantity,
+      hireStartDate: line.hireStartDate,
+      hireEndDate: line.hireEndDate,
+      notifyDaysBefore: line.notifyDaysBefore ?? 3,
+      deliveryAddress: line.deliveryAddress ?? null,
+      // The MONEY is decided here, not by the client. On a rate basis the price is arithmetic, so a
+      // sent figure is at best redundant and at worst a way to file a number that does not match the
+      // rate printed beside it. The one exception is a line someone deliberately overrode — a
+      // negotiated price is not the arithmetic, and the rate stays on the line to show the gap.
+      ratePeriod: line.ratePeriod ?? "total",
+      ratePence: (line.ratePeriod ?? "total") === "total" ? null : (line.ratePence ?? null),
+      priceOverridden: Boolean(line.priceOverridden) && (line.ratePeriod ?? "total") !== "total",
+      // Absent means `delivery` — what every line meant before the field existed.
+      returnMode: line.returnMode ?? "delivery",
+      returnAddress: line.returnMode === "other" ? (line.returnAddress ?? null) : null,
+      unitPricePence,
+      // The LINE's own VAT, with no catalogue fallback: the rental master carries no pricing at
+      // all, because what a hire costs is negotiated per period and per supplier. An IRM line still
+      // falls back to its item's rate — that master legitimately holds one.
+      vatRate: line.vatRate ?? 0,
+      lineTotalPence: line.quantity * unitPricePence,
+      sortOrder: i,
+      notes: trimToNull(line.notes),
+    };
+  });
 }
 
 // Validate each line's IRM item is ACTIVE, snapshot its name/sku/unit, and compute the line total.
@@ -420,26 +562,50 @@ export async function exportPurchaseRequestLinesCsv(
 
   const regional = await getRegionalSettings();
   const date = (v: string | null) => formatDate(v, regional.dateFormat, regional.timezone);
-  const all = prfs.flatMap((prf) =>
-    prf.items.map((i) => [
-      prf.code,
-      prf.status,
-      prf.supplier?.name ?? prf.supplierName,
-      prf.warehouse?.name,
-      prf.job?.jobNumber,
-      date(prf.requiredByDate),
-      // The PO this request became — the join key to the PO line export.
-      prf.purchaseOrder?.code,
+  // Header cells shared by both kinds of line, so an IRM row and a hire row line up column-for-column.
+  const headerCells = (prf: PublicPurchaseRequest) => [
+    prf.code,
+    prf.status,
+    prf.supplier?.name ?? prf.supplierName,
+    prf.warehouse?.name,
+    prf.job?.jobNumber,
+    date(prf.requiredByDate),
+    // The PO this request became — the join key to the PO line export.
+    prf.purchaseOrder?.code,
+  ];
+  // BOTH kinds. Exporting `items` alone gave a hire-only request ZERO rows — it vanished from its
+  // own export while still appearing in the list that offered the download.
+  const all = prfs.flatMap((prf) => [
+    ...prf.items.map((i) => [
+      ...headerCells(prf),
+      "Item",
       i.itemName,
       i.sku,
       i.baseUnit,
       i.quantity,
+      "",
+      "",
       i.unitPrice.toFixed(2),
       i.vatRate,
       i.lineTotal.toFixed(2),
       prf.currency,
     ]),
-  );
+    ...prf.rentalItems.map((r) => [
+      ...headerCells(prf),
+      "Rental",
+      r.itemName,
+      "",
+      r.baseUnit,
+      r.quantity,
+      // UTC: a hire date is a calendar day stored as UTC midnight.
+      formatDate(r.hireStartDate, regional.dateFormat, "UTC"),
+      formatDate(r.hireEndDate, regional.dateFormat, "UTC"),
+      r.unitPrice.toFixed(2),
+      r.vatRate,
+      r.lineTotal.toFixed(2),
+      prf.currency,
+    ]),
+  ]);
   // Capped on LINES, not requests: one request can carry hundreds.
   const rows = all.slice(0, EXPORT_MAX);
 
@@ -447,7 +613,9 @@ export async function exportPurchaseRequestLinesCsv(
     [
       "PRF Number", "Status", "Supplier", "Warehouse", "Job",
       `Required By (${regional.timezone})`, "Purchase Order",
-      "Item", "SKU", "Unit", "Quantity", "Unit Price", "VAT %", "Line Total", "Currency",
+      "Line Type", "Item", "SKU", "Unit", "Quantity",
+      "Hire From", "Hire Until",
+      "Unit Price", "VAT %", "Line Total", "Currency",
     ],
     rows,
   );
@@ -468,8 +636,10 @@ export async function createPurchaseRequest(input: CreatePurchaseRequestInput, a
   const supplier = await supplierService.requireActiveSupplier(input.supplierId);
   await warehouseService.requireActiveWarehouse(input.warehouseId);
   const jobId = await resolveJobId(input.jobId);
-  const lineRows = await buildLineRows(input.items);
-  const totals = computeTotals(lineRows);
+  const lineRows = await buildLineRows(input.items ?? []);
+  const rentalRows = await buildRentalLineRows(input.rentalItems ?? []);
+  // ONE roll-up over BOTH kinds of line. An IRM-only request totals exactly what it did before.
+  const totals = computeTotals([...lineRows, ...rentalRows]);
   const actorLabel = actor?.email ?? null;
 
   const created = await prfRepo.createWithCode(
@@ -494,6 +664,7 @@ export async function createPurchaseRequest(input: CreatePurchaseRequestInput, a
       updatedBy: actorLabel,
     },
     lineRows,
+    rentalRows,
   );
   audit.record({ actor, action: "purchase_request.created", targetType: "purchase_request", targetId: created.id, targetLabel: created.code });
   emitPrfUpdated(created);
@@ -533,22 +704,102 @@ export async function updatePurchaseRequest(id: string, input: UpdatePurchaseReq
   if (input.paymentTerms !== undefined) headerPatch.paymentTerms = trimToNull(input.paymentTerms);
 
   let result: PurchaseRequestWithRelations;
-  if (input.items !== undefined) {
-    const lineRows = await buildLineRows(input.items);
-    const totals = computeTotals(lineRows);
-    result = await prfRepo.replaceItemsAndTotals(id, lineRows, totals, headerPatch);
+  if (input.items !== undefined || input.rentalItems !== undefined) {
+    // Either array being sent replaces BOTH, so the header totals are always computed over the
+    // complete set. Whichever array the client omitted is re-derived from what is already stored —
+    // replacing one kind of line while silently dropping the other is how a rental-only edit would
+    // wipe a request's IRM lines.
+    const lineRows =
+      input.items !== undefined
+        ? await buildLineRows(input.items)
+        : existing.items.map((l, i) => ({
+            irmItemId: l.irmItemId,
+            itemName: l.itemName,
+            sku: l.sku,
+            baseUnit: l.baseUnit,
+            quantity: l.quantity,
+            unitPricePence: l.unitPricePence,
+            vatRate: l.vatRate,
+            lineTotalPence: l.lineTotalPence,
+            sortOrder: i,
+            notes: l.notes,
+          }));
+    const rentalRows =
+      input.rentalItems !== undefined
+        ? await buildRentalLineRows(input.rentalItems)
+        : existing.rentalItems.map((l, i) => ({
+            rentalItemId: l.rentalItemId,
+            itemName: l.itemName,
+            baseUnit: l.baseUnit,
+            quantity: l.quantity,
+            hireStartDate: l.hireStartDate,
+            hireEndDate: l.hireEndDate,
+            notifyDaysBefore: l.notifyDaysBefore,
+            deliveryAddress: l.deliveryAddress,
+            ratePeriod: l.ratePeriod,
+            ratePence: l.ratePence,
+            priceOverridden: l.priceOverridden,
+            returnMode: l.returnMode,
+            returnAddress: l.returnAddress,
+            unitPricePence: l.unitPricePence,
+            vatRate: l.vatRate,
+            lineTotalPence: l.lineTotalPence,
+            sortOrder: i,
+            notes: l.notes,
+          }));
+    // A request must still have a line of SOME kind afterwards. This lives here rather than on the
+    // schema because only the service can see both the incoming arrays AND the stored ones: sending
+    // `items: []` alone is legitimate when the request has rental lines, and a schema refine would
+    // either reject that or — as it did — let `{items: [], rentalItems: []}` wipe the request and
+    // zero its totals, which the old `.min(1)` on `items` used to prevent.
+    if (lineRows.length === 0 && rentalRows.length === 0) {
+      throw badRequest("Add at least one item or rental line.");
+    }
+    const totals = computeTotals([...lineRows, ...rentalRows]);
+    result = await prfRepo.replaceItemsAndTotals(id, lineRows, totals, headerPatch, rentalRows);
   } else {
     result = await prfRepo.update(id, headerPatch);
   }
   // Field-level change audit (Zoho/SAP-style): capture the before→after of the commercially-meaningful
   // fields — supplier, warehouse, and each line's qty/price/VAT — so a pre-approval edit is traceable.
   // `result` carries the fully-resolved post-update values; lines only diffed when the update sent them.
-  const changes = diffProcurementChanges(existing, {
-    supplierId: result.supplierId,
-    supplierName: result.supplierName,
-    warehouseId: result.warehouseId,
-    items: input.items !== undefined ? result.items : undefined,
-  });
+  // Rental lines are diffed alongside the IRM ones — a hire's quantity or price changing before
+  // approval is exactly the kind of edit this trail exists to record, and leaving them out made
+  // every rental change invisible. They are labelled "(hire)" so the entry reads unambiguously and
+  // an IRM item sharing a name cannot be mistaken for one.
+  const asDiffLines = (
+    items: { irmItemId: string; itemName: string; quantity: number; unitPricePence: number; vatRate: number }[],
+    rentals: {
+      rentalItemId: string;
+      itemName: string;
+      hireStartDate: Date | string;
+      hireEndDate: Date | string;
+      deliveryAddress: string | null;
+      quantity: number;
+      unitPricePence: number;
+      vatRate: number;
+    }[],
+  ) => [
+    ...items.map((i) => ({ ...i, lineKey: i.irmItemId })),
+    ...rentals.map((r) => ({
+      ...r,
+      itemName: `${r.itemName} (hire)`,
+      // The same composite the compound unique index uses — a rental item may legitimately appear
+      // twice with different periods, so its id alone would pair the wrong before with the wrong after.
+      lineKey: [r.rentalItemId, String(r.hireStartDate), String(r.hireEndDate), r.deliveryAddress ?? ""].join("|"),
+    })),
+  ];
+
+  const linesTouched = input.items !== undefined || input.rentalItems !== undefined;
+  const changes = diffProcurementChanges(
+    { ...existing, items: asDiffLines(existing.items, existing.rentalItems) },
+    {
+      supplierId: result.supplierId,
+      supplierName: result.supplierName,
+      warehouseId: result.warehouseId,
+      items: linesTouched ? asDiffLines(result.items, result.rentalItems) : undefined,
+    },
+  );
   audit.record({
     actor,
     action: "purchase_request.updated",
@@ -593,7 +844,12 @@ function emitPrfUpdated(prf: { id: string; code: string; status: string }): void
 export async function submitPurchaseRequest(id: string, actor?: AuditActor): Promise<PublicPurchaseRequest> {
   const prf = await loadOrThrow(id, actor);
   assertTransition(prf.status, "submitted");
-  if (prf.items.length === 0) throw badRequest("Add at least one item before submitting.");
+  // A line of EITHER kind. A rental-only request is legitimate — checking `items` alone made every
+  // hire-only request unsubmittable, which no create-time validation would have caught because the
+  // request itself saved cleanly.
+  if (prf.items.length === 0 && prf.rentalItems.length === 0) {
+    throw badRequest("Add at least one item or rental line before submitting.");
+  }
   const updated = await prfRepo.update(id, { status: "submitted", submittedBy: actor?.email ?? null, submittedAt: new Date() });
   recordStatus(actor, id, updated.code, "purchase_request.submitted");
   emitPrfUpdated(updated);
@@ -696,6 +952,29 @@ export interface ConvertResult {
   purchaseOrderCode: string;
 }
 
+/**
+ * The money a rental line is stored with.
+ *
+ * On a rate basis it is the arithmetic — computed here so the figure filed can never disagree with
+ * the rate filed beside it. An OVERRIDDEN line keeps what was sent: a supplier-negotiated price is
+ * a commercial fact, not a calculation, and the rate is still recorded so the difference is visible.
+ */
+function agreedUnitPricePence(line: {
+  ratePeriod?: string;
+  ratePence?: number | null;
+  priceOverridden?: boolean;
+  unitPricePence: number;
+  hireStartDate: Date;
+  hireEndDate: Date;
+}): number {
+  const period = (line.ratePeriod ?? "total") as RatePeriod;
+  if (period === "total" || line.priceOverridden) return line.unitPricePence;
+  return (
+    calculateUnitPricePence(period, line.ratePence, line.hireStartDate, line.hireEndDate) ??
+    line.unitPricePence
+  );
+}
+
 export async function convertPurchaseRequest(id: string, actor?: AuditActor): Promise<ConvertResult> {
   const prf = await loadOrThrow(id, actor);
   assertTransition(prf.status, "converted"); // clear pre-check (the tx re-checks authoritatively)
@@ -712,6 +991,7 @@ export async function convertPurchaseRequest(id: string, actor?: AuditActor): Pr
   await warehouseService.requireActiveWarehouse(prf.warehouseId);
   // Every line's item must still be active — a PO must never be issued for a retired item.
   await irmService.requireActiveIrmItems(prf.items.map((l) => l.irmItemId));
+  await rentalItemService.requireActiveRentalItems(prf.rentalItems.map((l) => l.rentalItemId));
 
   const actorLabel = actor?.email ?? null;
   const internalParts: string[] = [];
@@ -767,6 +1047,34 @@ export async function convertPurchaseRequest(id: string, actor?: AuditActor): Pr
           sortOrder: i,
           notes: l.notes,
         }));
+        // The COMPLETE rental line, not just the id — the PO is the record the supplier reads and
+        // the deadline alert counts, so a partial copy would leave the hire without its period or
+        // its price. notifyOnDate is recomputed rather than copied because the PRF has no such
+        // column: the alert is a PO-side concept (a PRF that never converted hired nothing).
+        const rentalLines = live.rentalItems.map((l, i) => ({
+          rentalItemId: l.rentalItemId,
+          itemName: l.itemName,
+          baseUnit: l.baseUnit,
+          quantity: l.quantity,
+          hireStartDate: l.hireStartDate,
+          hireEndDate: l.hireEndDate,
+          notifyDaysBefore: l.notifyDaysBefore,
+          deliveryAddress: l.deliveryAddress,
+          ratePeriod: l.ratePeriod,
+          ratePence: l.ratePence,
+          priceOverridden: l.priceOverridden,
+          returnMode: l.returnMode,
+          returnAddress: l.returnAddress,
+          unitPricePence: l.unitPricePence,
+          vatRate: l.vatRate,
+          lineTotalPence: l.lineTotalPence,
+          sortOrder: i,
+          notes: l.notes,
+          // Committed, NOT delivered. The warehouse confirms arrival (POST .../receive), and only
+          // then does the hire start counting towards any return deadline.
+          hireStatus: "awaiting_delivery",
+          notifyOnDate: computeNotifyOnDate(l.hireStartDate, l.hireEndDate, l.notifyDaysBefore),
+        }));
         poId = await poRepo.createPoTx(
           tx,
           {
@@ -782,7 +1090,10 @@ export async function convertPurchaseRequest(id: string, actor?: AuditActor): Pr
             orderDate,
             expectedDeliveryDate,
             currency: "GBP",
-            ...computeTotals(lines),
+            // BOTH kinds of line. Computing this from `lines` alone made a hire-only order total
+            // ZERO — the figure an approver signs off and the supplier reads — while its own PRF
+            // showed the real number.
+            ...computeTotals([...lines, ...rentalLines]),
             // Carry the commercial terms captured on the PRF onto the PO. Payment term falls back
             // to the supplier's standing default when the PRF left it blank.
             deliveryTerms: live.deliveryTerms,
@@ -813,6 +1124,7 @@ export async function convertPurchaseRequest(id: string, actor?: AuditActor): Pr
             resourceType: a.resourceType,
             uploadedBy: a.uploadedBy,
           })),
+          rentalLines,
         );
         await prfRepo.setConvertedTx(tx, id, actorLabel);
       });
@@ -859,6 +1171,7 @@ export async function duplicatePurchaseRequest(id: string, actor?: AuditActor): 
   const supplier = await supplierService.requireActiveSupplier(original.supplierId);
   await warehouseService.requireActiveWarehouse(original.warehouseId);
   await irmService.requireActiveIrmItems(original.items.map((l) => l.irmItemId));
+  await rentalItemService.requireActiveRentalItems(original.rentalItems.map((l) => l.rentalItemId));
   const actorLabel = actor?.email ?? null;
 
   const created = await prfRepo.createWithCode(
@@ -893,6 +1206,29 @@ export async function duplicatePurchaseRequest(id: string, actor?: AuditActor): 
       sku: l.sku,
       baseUnit: l.baseUnit,
       quantity: l.quantity,
+      unitPricePence: l.unitPricePence,
+      vatRate: l.vatRate,
+      lineTotalPence: l.lineTotalPence,
+      sortOrder: i,
+      notes: l.notes,
+    })),
+    // The rental lines travel too. The header's totals are copied verbatim above, so dropping these
+    // would mint a revision whose grand total does not match the lines it shows — and a hire-only
+    // request would duplicate into an empty one carrying a price.
+    original.rentalItems.map((l, i) => ({
+      rentalItemId: l.rentalItemId,
+      itemName: l.itemName,
+      baseUnit: l.baseUnit,
+      quantity: l.quantity,
+      hireStartDate: l.hireStartDate,
+      hireEndDate: l.hireEndDate,
+      notifyDaysBefore: l.notifyDaysBefore,
+      deliveryAddress: l.deliveryAddress,
+      ratePeriod: l.ratePeriod,
+      ratePence: l.ratePence,
+      priceOverridden: l.priceOverridden,
+      returnMode: l.returnMode,
+      returnAddress: l.returnAddress,
       unitPricePence: l.unitPricePence,
       vatRate: l.vatRate,
       lineTotalPence: l.lineTotalPence,
@@ -1181,34 +1517,6 @@ export async function attachUploadedAsset(
  */
 export function recordAttachmentAudit(prf: { id: string; code: string }, actor?: AuditActor): void {
   audit.record({ actor, action: "purchase_request.attachment_added", targetType: "purchase_request", targetId: prf.id, targetLabel: prf.code });
-}
-
-/**
- * Upload a document THROUGH this server, then record it.
- *
- * The original path, kept for callers that still post a data URI. The upload is all it does that
- * `attachUploadedAsset` does not — the guards, the row, the audit event and the DTO are that
- * function's, so there is exactly one implementation of what an attachment IS.
- */
-export async function addAttachment(prfId: string, input: PrfAttachmentInput, actor?: AuditActor): Promise<PublicPurchaseRequest> {
-  // Before the upload, so a rejected attachment never reaches Cloudinary as an orphan.
-  await assertCanAttach(prfId, input.fileSizeBytes, actor);
-  const creds = await getCloudinaryCreds();
-  if (!creds) throw badRequest("File uploads aren't configured. Add Cloudinary credentials in Settings first.");
-  const asset = await uploadFileToCloudinary(input.data, randomUUID(), creds);
-  return attachUploadedAsset(
-    prfId,
-    {
-      label: input.label,
-      fileName: input.fileName,
-      fileType: input.fileType,
-      fileSizeBytes: input.fileSizeBytes,
-      url: asset.url,
-      publicId: asset.publicId,
-      resourceType: asset.resourceType,
-    },
-    actor,
-  );
 }
 
 export async function removeAttachment(prfId: string, attachmentId: string, actor?: AuditActor): Promise<PublicPurchaseRequest> {

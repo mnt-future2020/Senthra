@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { vi } from "vitest";
 vi.mock("../../lib/prisma.js", () => ({ prisma: {} }));
 
-import { buildWhere, RECEIVABLE_PO_STATUSES } from "./purchase-order.repository.js";
+import { buildWhere, LIVE_GRN, RECEIVABLE_PO_STATUSES, withRelations } from "./purchase-order.repository.js";
 
 describe("buildWhere — PO list status filtering", () => {
   it("maps a single status to an equality filter (backward compatible)", () => {
@@ -205,5 +205,20 @@ describe("buildWhere — the `receivable` derived pseudo-status", () => {
     const where = buildWhere({ status: "receivable", warehouseIds: ["w1"] });
     expect(where.status).toEqual({ in: [...RECEIVABLE_PO_STATUSES] });
     expect(where.AND).toEqual([{ warehouseId: { in: ["w1"] } }]);
+  });
+});
+
+
+// The chain strip renders every one of these as a clickable node, and a draft goods receipt can be
+// deleted — so an unfiltered list put a button on the order that landed on "Goods receipt not
+// found." Exactly what a deleted purchase order did to the request that generated it.
+describe("the chained goods receipts are LIVE only", () => {
+  it("filters deleted receipts out of the include", () => {
+    expect(withRelations.goodsReceipts.where).toEqual(LIVE_GRN);
+  });
+
+  // Mongo: `{ deletedAt: null }` alone misses a row whose create omitted the field.
+  it("accepts both the null and the missing shape", () => {
+    expect(LIVE_GRN.OR).toEqual([{ deletedAt: null }, { deletedAt: { isSet: false } }]);
   });
 });

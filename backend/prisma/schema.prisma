@@ -74,6 +74,12 @@ model Settings {
   // numeric sequence lives under a fixed internal counter, so changing this never resets or
   // collides numbering and EXISTING item codes are immutable. Only affects NEW items.
   irmCodePrefix      String?
+  // Display prefix for RENTAL catalogue item codes (e.g. "RNT" -> RNT-0011). Same rule again: the
+  // sequence lives under the fixed "RNT" counter key, never under this value — deriving the key from
+  // a setting would restart numbering at 1 on every change and collide with live codes the moment
+  // anyone changed it back. Existing codes are immutable, which also keeps every barcode already
+  // printed and stuck to hired kit valid: the label encodes the code, and the code never moves.
+  rentalCodePrefix   String?
 
   // --- Company profile (legal identity for official documents — PO PDF letterhead etc.) ---
   // Pure reference data, surfaced via getCompanyProfile(). Distinct from the display brand above
@@ -234,6 +240,7 @@ model Warehouse {
   purchaseOrders   PurchaseOrder[]
   // Goods In + inventory at this warehouse (back-relations; no DB column).
   goodsReceipts         GoodsReceipt[]
+  rentalReceipts        RentalReceipt[]
   inventoryBalances     InventoryBalance[]
   inventoryTransactions InventoryTransaction[]
   // Stock transfers leaving / arriving at this warehouse (back-relations; no DB column).
@@ -542,6 +549,81 @@ model IrmItemSupplier {
   @@index([supplierId])
 }
 
+// ── Rentals — equipment the company HIRES rather than owns ────────────────────────────
+// Procurement plus a deadline: a rental goes through the same PRF → PO flow as an IRM item,
+// carrying a hire period and an optional delivery address, and raises an alert before the
+// period ends. It NEVER enters Goods In, never becomes an inventory balance, and never
+// reaches the reorder engine — see docs/superpowers/specs/2026-08-13-rental-items-design.md.
+
+// Rental taxonomy master. DELIBERATELY separate from IrmCategory: that one is IRM-specific
+// (a single referent, IRM-named module/RBAC/UI copy) and this codebase keeps one category
+// master per domain — see the spec §2.2. Same shape as IrmCategory.
+model RentalCategory {
+  id          String       @id @default(auto()) @map("_id") @db.ObjectId
+  key         String       @unique // auto slug from name: "Test Equipment" -> "test_equipment"
+  name        String
+  // Lowercased `name`, kept in sync by the repository on every write. The @unique index here is
+  // what actually enforces case-insensitive name uniqueness at the DB; the application pre-check
+  // is just for a friendly message.
+  nameLower   String       @unique
+  description String?
+  status      String       @default("active") // active | inactive
+  sortOrder   Int          @default(0)
+  items       RentalItem[] // back-relation
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+}
+
+// A piece of equipment the company hires. MASTER DATA ONLY.
+//
+// Stock-policy and tracking-flag fields are deliberately ABSENT: a hire has no stock level and must
+// never reach the reorder engine, and it never becomes an inventory balance. There is no suppliers
+// junction either — the PRF's own `supplierId` IS the hire provider, and a second place to name one
+// is a second answer.
+//
+// A rental item DOES have a printable barcode, and still no barcode COLUMN. The label is
+// `Code128(code)`, `code` is allocated once and never freed, so the image is a pure function of an
+// immutable value and is rendered on read (rental-item.service.ts `renderBarcode`). Storing it would
+// add a "generate it first" step before anyone could print, and leave every row created before the
+// column needing a backfill — for a value that can always be recomputed exactly. IRM stores its own
+// image because IRM also carries a MANUFACTURER barcode, which no code can be derived from, and it is
+// that free-text column — not the image — that needs the partial unique index.
+model RentalItem {
+  id          String  @id @default(auto()) @map("_id") @db.ObjectId
+  code        String  @unique // auto-allocated, e.g. RNT-0001 — never freed
+  name        String
+  description String?
+  status      String  @default("active") // active | inactive
+
+  rentalCategoryId String         @db.ObjectId
+  rentalCategory   RentalCategory @relation(fields: [rentalCategoryId], references: [id])
+
+  baseUnit String // e.g. "Each" — required: a hire is always quantified in something
+
+  // NO PRICING HERE, deliberately. This master answers "what can be hired"; what a hire COSTS is a
+  // property of the individual request, negotiated per period and per supplier, and lives on
+  // PurchaseRequestRentalLine (unitPricePence, vatRate) and the PO line copied from it.
+  //
+  // A reference rate here would be a second, staler answer to a question the line already answers,
+  // and the two would drift the moment a supplier quoted anything else. Do not reintroduce
+  // standardHireRatePence, hireRatePeriod, currency or vatRatePercent.
+
+  notes String?
+
+  // Rental lines referencing this item (back-relations; no DB column).
+  prfRentalLines PurchaseRequestRentalLine[]
+  poRentalLines  PurchaseOrderRentalLine[]
+
+  deletedAt DateTime? // soft delete — excluded from listings; history stays intact
+  createdBy String? // staff email that created the item
+  updatedBy String? // staff email that last updated it
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([status])
+  @@index([rentalCategoryId])
+}
+
 // ── Purchase Requests (PRF) — the pre-PO procurement document ────────────────────────
 // Captures the supplier quotation (structured fields + file attachments) and the internal
 // Purchase Request Form, routes it through Finance review, and converts — exactly once —
@@ -620,6 +702,7 @@ model PurchaseRequest {
   updatedAt DateTime  @updatedAt
 
   items       PurchaseRequestItem[]
+  rentalItems PurchaseRequestRentalLine[]
   attachments PurchaseRequestAttachment[]
   // The PO generated from this PRF (back-relation; AT MOST ONE — enforced by the convert
   // transaction + status machine, not @unique: Prisma+Mongo would build a NON-SPARSE unique
@@ -660,6 +743,76 @@ model PurchaseRequestItem {
   @@unique([purchaseRequestId, irmItemId])
   @@index([purchaseRequestId])
   @@index([irmItemId])
+}
+
+// A HIRED item on a purchase request.
+//
+// A separate table rather than making PurchaseRequestItem.irmItemId nullable: on MongoDB a
+// compound unique index over a nullable column is NOT sparse, so the second row with a null
+// irmItemId is rejected outright (prisma#23870). Holding rentals here keeps that uniqueness
+// guarantee AND leaves every existing reader of irmItemId untouched. Spec §2.1.
+model PurchaseRequestRentalLine {
+  id                String          @id @default(auto()) @map("_id") @db.ObjectId
+  purchaseRequestId String          @db.ObjectId
+  purchaseRequest   PurchaseRequest @relation(fields: [purchaseRequestId], references: [id])
+  rentalItemId      String          @db.ObjectId
+  rentalItem        RentalItem      @relation(fields: [rentalItemId], references: [id])
+
+  // Snapshots (denormalised for self-contained, historically-accurate lines).
+  itemName String
+  baseUnit String?
+
+  quantity Int
+  // The hire period. CALENDAR DAYS, stored as UTC midnight — every rental date goes through
+  // utils/calendar-day.ts. hireEndDate is the deadline the reminder counts back from.
+  hireStartDate    DateTime
+  hireEndDate      DateTime
+  notifyDaysBefore Int      @default(3)
+  // Optional. Same free-text multiline shape as PurchaseOrder.deliveryAddress — that IS this
+  // codebase's delivery-address concept, and no second one is introduced.
+  deliveryAddress  String?
+
+  // WHERE THE HIRE GOES BACK. A hire is a round trip and this is the leg the paperwork used to be
+  // silent about: the order told the supplier where to deliver and nothing at all about collection,
+  // so whoever handled the return had to ask.
+  //
+  // A MODE rather than a bare address, because a bare optional address is empty on almost every
+  // line — and an empty field answers nothing, which is the state this replaces. The mode always
+  // resolves to a real place (see rentalReturn.ts), so the order can print a definite collection
+  // point on every line.
+  //
+  // NOT part of the uniqueness key below: including it would let the same item, period and address
+  // be added twice by changing only the return mode, which is exactly what that key exists to stop.
+  returnMode       String  @default("delivery") // delivery | warehouse | other
+  returnAddress    String? // required by validation when returnMode is "other", null otherwise
+
+  // HOW the price was arrived at. The rate is an input BASIS, never the stored money: a price
+  // derived at read time by five callers is five chances to disagree, so `unitPricePence` below
+  // stays the agreed figure everything else reads. Part periods bill in full and a month is a
+  // CALENDAR month — see utils/rental-pricing.ts, which owns every rule.
+  ratePeriod String @default("total") // total | day | week | month
+  ratePence  Int? // the quoted rate for that basis; null when the basis is `total`
+  // Set when someone typed over the calculated figure — a supplier-negotiated price is not the
+  // arithmetic, and a later date or basis change must not silently overwrite it.
+  priceOverridden Boolean @default(false)
+
+  unitPricePence Int // the agreed price for ONE unit for the whole hire period
+  vatRate        Float   @default(0)
+  lineTotalPence Int     @default(0) // system-calculated: quantity * unitPricePence (ex-VAT)
+  notes          String?
+  sortOrder      Int     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // The same rental item MAY repeat with a different period or address — that is the whole
+  // reason those fields are line-level (one tester at site A for 30 days plus one at site B for
+  // 7 days does not merge into a quantity). Only an IDENTICAL (item, period, address) is an
+  // error, because that one does merge. The first four columns are never null, so the compound
+  // key is never wholly null and the non-sparse-null trap above does not apply. Spec §2.3.
+  @@unique([purchaseRequestId, rentalItemId, hireStartDate, hireEndDate, deliveryAddress])
+  // No standalone purchaseRequestId index — it is the unique key's leading prefix. Spec §5.5.
+  @@index([rentalItemId])
 }
 
 // A file attached to a purchase request — the supplier quotation / supporting docs.
@@ -794,8 +947,10 @@ model PurchaseOrder {
   updatedAt DateTime @updatedAt
 
   items         PurchaseOrderItem[]
+  rentalItems   PurchaseOrderRentalLine[]
   attachments   PurchaseOrderAttachment[]
   goodsReceipts GoodsReceipt[] // Goods In receipts against this PO (back-relation; no DB column)
+  rentalReceipts RentalReceipt[] // hire deliveries against this PO — supplier-owned kit, never stock
 
   @@index([status])
   @@index([supplierId])
@@ -838,6 +993,144 @@ model PurchaseOrderItem {
   @@index([irmItemId])
 }
 
+// A HIRED item on a purchase order — the COMMITTED hire, and the ONLY source of deadline
+// alerts. A PRF that never converted hired nothing, so it never raises one. Spec §2 (4).
+model PurchaseOrderRentalLine {
+  id              String        @id @default(auto()) @map("_id") @db.ObjectId
+  purchaseOrderId String        @db.ObjectId
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id])
+  rentalItemId    String        @db.ObjectId
+  rentalItem      RentalItem    @relation(fields: [rentalItemId], references: [id])
+
+  itemName String
+  baseUnit String?
+
+  quantity         Int
+  hireStartDate    DateTime
+  hireEndDate      DateTime
+  notifyDaysBefore Int      @default(3)
+  deliveryAddress  String?
+  // Copied from the request at conversion, like every other line field — see the note on
+  // PurchaseRequestRentalLine. This is the copy the supplier's order document prints from.
+  returnMode       String   @default("delivery") // delivery | warehouse | other
+  returnAddress    String?
+
+  // Copied from the request at conversion like every other line field — the order has to be able to
+  // say "£55/day × 45 days" on the supplier's document, and an extension has to have a rate to
+  // price from. See utils/rental-pricing.ts.
+  ratePeriod      String  @default("total") // total | day | week | month
+  ratePence       Int?
+  priceOverridden Boolean @default(false)
+
+  unitPricePence Int
+  vatRate        Float   @default(0)
+  lineTotalPence Int     @default(0)
+  notes          String?
+  sortOrder      Int     @default(0)
+
+  // The hire's own state. LOAD-BEARING, not decoration: without a terminal state every hire
+  // that ever ended stays overdue forever and the red badge only grows — the count would stop
+  // meaning "work a human still owes", which is the attention registry's first rule of entry.
+  // What EXTENDING this hire has added, cumulative across every extension.
+  //
+  // Deliberately NOT folded into unitPricePence / lineTotalPence / the order's totals: those are the
+  // amount the supplier was sent and agreed to, and an extension is a later commitment against it.
+  // Rewriting a committed order's money silently is what a PO amendment exists to do properly; until
+  // there is one, the charge is recorded beside the order rather than inside it — and every screen
+  // that shows it says so. Each extension is also a separate audit entry, so this number never has to
+  // serve as the history.
+  extensionChargePence Int @default(0)
+
+  // How many units of this line have actually turned up, summed from its receipts. The STATUS says
+  // whether the hire has started; this says how much of it is here — 2 of 3 testers delivered is a
+  // real, ordinary situation, and one number cannot carry both facts.
+  receivedQuantity Int @default(0)
+  // Whether every ordered unit has turned up. STORED, not derived, for the same reason `notifyOnDate`
+  // is: the real condition is `receivedQuantity < quantity`, a comparison between two COLUMNS, which a
+  // Prisma/MongoDB `where` cannot express. Without it the receiving queue can only ask about the
+  // STATUS — and a part-delivered line is `on_hire`, so the units still to come vanish from the queue
+  // and from the badge that chases them.
+  //
+  // Maintained in the same transaction as `receivedQuantity`, by the only two writers that move it
+  // (recording a delivery, voiding one), so it can never disagree with the number it summarises.
+  fullyReceived Boolean @default(false)
+  // What has gone BACK, and whether all of it has. The mirror of the two fields above, for the same
+  // reason: a hire goes back in parts as readily as it arrives in them, and `hireStatus` cannot say
+  // "3 of 5 collected". `fullyReturned` is stored because `returnedQuantity < receivedQuantity` is a
+  // column-to-column comparison a Prisma/MongoDB `where` cannot express.
+  returnedQuantity Int     @default(0)
+  fullyReturned    Boolean @default(false)
+  // Units of this line reported DAMAGED while in our hands — the running total of the live damage
+  // reports against it (direction `damage`), maintained by the same transaction that writes them and
+  // recomputed from the set when one is voided.
+  //
+  // Stored, like the two pairs above, because the question the warehouse asks is "what damaged hire
+  // kit is at MY site", and answering it by summing note lines would be a join across every hire on
+  // every order to render one pane. Deliberately NOT decremented when units go back: it is a count of
+  // what was reported, and the screens clamp it to what is still held — a hire cannot hold more
+  // damaged units than it holds units.
+  damagedQuantity Int @default(0)
+  // Every physical delivery against this line, each with its own date, condition and evidence. A
+  // running total alone cannot answer "which units arrived on the 18th, and which of those were
+  // already damaged" — and that question is what a damage dispute at return turns on.
+  receipts RentalReceiptLine[]
+
+  // Every EXTENSION of this hire, one row each — the breakdown of the running total above. Same
+  // reason `receipts` exists beside `receivedQuantity`: a total cannot say when, by how much, or how
+  // many times. See the HireExtension model.
+  extensions HireExtension[]
+
+  // awaiting_delivery | on_hire | returned — see rentalHire.predicate.ts, which owns the list.
+  //
+  // A hire starts AWAITING DELIVERY, not on hire: the purchase order commits us to the provider, but
+  // the kit is not in our hands until someone at the warehouse says so. Every deadline this module
+  // raises — "ending soon", "overdue for return", the reminder email — filters on `on_hire`, so a
+  // hire nobody has received yet raises none of them: it cannot be overdue for return before it has
+  // arrived.
+  //
+  // The default changed with that step. Rows created BEFORE it keep `on_hire`, which is correct — they
+  // are live hires, already delivered, and re-deriving their state would push real hires off the
+  // badges they are counted on.
+  hireStatus String    @default("awaiting_delivery")
+  // Stamped when the warehouse confirms the kit arrived. Null while it is still awaiting delivery.
+  receivedAt DateTime?
+  // Who signed for it on our side. Named `receivedBy` because that is what it was when only deliveries
+  // existed; on a return it is who handed the equipment over.
+  receivedBy String?
+  returnedAt DateTime?
+  returnedBy String? // actor email snapshot
+
+  // DERIVED and CLAMPED to never precede hireStartDate, recomputed on every write that touches
+  // either input. It exists because the alert's real condition — hireEndDate - notifyDaysBefore
+  // <= today — compares two COLUMNS, which a Prisma/Mongo `where` cannot express. Storing the
+  // crossing date makes it one indexed range comparison, which is what lets the badge, the list
+  // and the sweep share a predicate instead of drifting apart. Spec §5.5 / §5.7.
+  notifyOnDate DateTime
+
+  // The reminder lease. The TOKEN is the ownership proof, not the expiry: a lease can lapse
+  // while its holder is still inside a slow SMTP call, so every completion and release is a
+  // compare-and-set on this token. Without it a stale worker's release would clear the LIVE
+  // worker's claim and a third could then send mid-flight. Spec §5.3.
+  deadlineNotifyClaimToken   String?
+  deadlineNotifyClaimExpires DateTime?
+  deadlineNotifiedAt         DateTime?
+  deadlineNotifyAttempts     Int       @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Two two-key indexes cover all four real queries (badge x2, list, sweep). Mongo uses a
+  // prefix of equalities plus ONE range, so a third key would serve nothing. Spec §5.5.
+  @@index([fullyReceived, hireStatus]) // the receiving queue: units still to come
+  @@index([hireStatus, notifyOnDate]) // "expiring soon" + the sweep claim
+  @@index([hireStatus, hireEndDate]) // "overdue" + the on-hire list's sort
+  @@index([purchaseOrderId])
+  @@index([rentalItemId])
+  // Deliberately NO unique index: these rows are system-written from already-deduplicated PRF
+  // lines, and extending a hire edits hireEndDate — an index would let one extend fail because
+  // it coincidentally aligned two hires of the same item at the same address.
+}
+
 // A file attached to a purchase order (supplier quote/invoice/supporting doc). Uploaded to
 // Cloudinary (raw for PDF/DOCX, image for PNG/JPG).
 model PurchaseOrderAttachment {
@@ -858,6 +1151,41 @@ model PurchaseOrderAttachment {
   createdAt       DateTime @default(now())
 
   @@index([purchaseOrderId])
+  @@index([resourceType, publicId])
+}
+
+// A file attached to a Job — the job-pack documents, drawings and site photos.
+//
+// A ROW, not a string in `Job.attachments`, and the whole reason is deletion: an asset is addressed
+// in Cloudinary by the `publicId` + `resourceType` PAIR, so a store that keeps only the URL can
+// never remove the file it points at. Every other attachment in this app is already shaped this way
+// (PurchaseRequestAttachment, PurchaseOrderAttachment, GoodsReceiptAttachment) and removal runs
+// through the one guarded path — attachment.service#releaseAsset → countRefs → destroy.
+//
+// `publicId`/`resourceType` are NULLABLE for one reason only: the rows backfilled from the legacy
+// `Job.attachments` strings have no identity to recover. releaseAsset skips those and logs, exactly
+// as it does for the other tables' legacy rows.
+model JobAttachment {
+  id            String  @id @default(auto()) @map("_id") @db.ObjectId
+  jobId         String  @db.ObjectId
+  job           Job     @relation(fields: [jobId], references: [id])
+  label         String?
+  fileName      String
+  fileType      String // pdf | docx | png | jpg
+  fileSizeBytes Int
+  url           String
+  publicId      String?
+  resourceType  String? // "image" | "raw"
+  // Whether the CUSTOMER may see this file on their portal. The job form already offers the
+  // Customer/Internal toggle; it had nowhere to live while attachments were bare strings, so it was
+  // encoded into the URL as a "#internal" fragment. A column ends that.
+  internal      Boolean @default(false)
+  uploadedBy    String?
+  createdAt     DateTime @default(now())
+
+  @@index([jobId])
+  // Mirrors the other attachment tables: countRefs looks an asset up by the identity PAIR across
+  // every table before destroying it, so each one needs this compound to answer without a scan.
   @@index([resourceType, publicId])
 }
 
@@ -1009,6 +1337,171 @@ model GoodsReceiptAttachment {
   createdAt      DateTime @default(now())
 
   @@index([goodsReceiptId])
+  @@index([resourceType, publicId])
+}
+
+// ── HIRE DELIVERIES (supplier-owned kit arriving) ──────────────────────────────────────
+//
+// The rental twin of a goods receipt, and deliberately NOT a GoodsReceipt.
+//
+// A GRN's completion adds accepted quantity to an inventory balance and writes stock movements. Hired
+// kit is the SUPPLIER'S — it never becomes our stock, never gets a valuation, and must never reach the
+// reorder engine (see the note on RentalItem). Reusing GoodsReceipt would mean either lying about
+// ownership or threading a "don't touch stock" branch through the whole receiving pipeline, which is
+// precisely what modules/__tests__/rental.boundary.test.ts exists to prevent.
+//
+// What it DOES share with a GRN is the shape, because the warehouse job is the same one: a header for
+// the delivery (when, by whom, on whose delivery note) and a line per ordered line saying how much of
+// it turned up. What it adds is CUSTODY EVIDENCE — condition on arrival and the supplier's own asset
+// tags — because a hire ends in a handover back, and every damage dispute is about which side broke it.
+//
+// No draft/completed lifecycle: a GRN is drafted so the inventory write can be checked before it
+// lands, and there is no inventory write here. A mistake is VOIDED (audited) rather than edited, so
+// the quantities a hire was moved by are always the sum of records nobody rewrote.
+model RentalReceipt {
+  id   String @id @default(auto()) @map("_id") @db.ObjectId
+  code String @unique // HDN-0001 (delivery), HRN-0001 (return), HDM-0001 (damage) — never freed
+
+  // WHICH WAY the equipment moved, or that it moved at all:
+  //   in     — the supplier delivered it (HDN)
+  //   out    — it went back to the supplier (HRN)
+  //   damage — it was damaged while we had it (HDM); quantities move nothing
+  //
+  // One table rather than three, because the three record the SAME facts about the same equipment —
+  // when, how much, in what condition, with which of the supplier's asset tags, photographed. And
+  // because the question a hire ends in is a COMPARISON: it arrived scratched, did it go back worse?
+  // That answer is one query over one table; across three it is a join nobody would write.
+  direction String @default("in") // in | out | damage
+
+  purchaseOrderId String        @db.ObjectId
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id])
+  poCode          String? // snapshot at create
+
+  // Snapshots, resolved live through the PO — no direct FK, so supplier deletion stays guarded by the
+  // purchase order that references it (the same rule GoodsReceipt follows).
+  supplierId   String? @db.ObjectId
+  supplierName String?
+
+  // Where it was delivered. Taken from the PO, never chosen by the user: the hire's delivery
+  // destination is already resolved (rentalReturn.ts), and a second answer here is a second truth.
+  warehouseId String    @db.ObjectId
+  warehouse   Warehouse @relation(fields: [warehouseId], references: [id])
+
+  // The date it happened — arrived, was collected, or was found damaged. Not always today: paperwork
+  // catches up, and a hire's clock has to run from when the equipment actually moved.
+  deliveryDate DateTime
+
+  carrier         String? // who drove it — on a return, who collected
+  deliveryNoteRef String? // the supplier's own note number, for their side of a dispute
+  notes           String?
+
+  // Condition summary for the whole delivery; per-line damagedQuantity carries the detail. Mirrors
+  // GoodsReceipt's qualityStatus/qualityNotes pair, for the same reason: one flag to scan, with the
+  // numbers underneath it.
+  condition      String  @default("good") // good | damaged
+  conditionNotes String?
+
+  receivedBy String?
+
+  // The supplier's own reference for what they are charging — their quote or invoice number. Header
+  // level, because one document covers the whole note, and it is the string somebody reconciling an
+  // invoice actually searches for.
+  damageChargeRef String?
+
+  // REVERSED rather than deleted — the note that moved a hire's quantities stays readable, and the
+  // reversal is a fact of its own.
+  //
+  // "Reverse" and not "cancel": cancelling, everywhere else in this schema (PurchaseRequest,
+  // PurchaseOrder, GoodsReceipt, VanStockRequest, Job, EngineerStockTransfer), means stopping
+  // something BEFORE it takes effect. This undoes an effect that has already landed, which is a
+  // different act and takes a different word.
+  reversedAt     DateTime?
+  reversedBy     String?
+  reversalReason String?
+
+  createdBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lines       RentalReceiptLine[]
+  attachments RentalReceiptAttachment[]
+
+  @@index([purchaseOrderId, direction])
+  @@index([warehouseId, deliveryDate])
+  // Live-vs-reversed is asked by every read, so it leads the compound the worklist sorts on.
+  @@index([reversedAt, deliveryDate])
+}
+
+model RentalReceiptLine {
+  id              String        @id @default(auto()) @map("_id") @db.ObjectId
+  rentalReceiptId String        @db.ObjectId
+  rentalReceipt   RentalReceipt @relation(fields: [rentalReceiptId], references: [id])
+
+  purchaseOrderRentalLineId String                  @db.ObjectId
+  purchaseOrderRentalLine   PurchaseOrderRentalLine @relation(fields: [purchaseOrderRentalLineId], references: [id])
+
+  // Snapshots (denormalised for self-contained, historically-accurate lines).
+  itemName String
+  baseUnit String?
+
+  orderedQuantity    Int // the hire line's quantity at the time of this event
+  previouslyReceived Int @default(0) // what had already moved this way before it
+  receivedQuantity   Int // moved in THIS event — arrived, went back, or was found damaged
+  damagedQuantity    Int @default(0) // of those, damaged: on arrival, at collection, or in service
+
+  // The SUPPLIER's own asset tags / serials for the units delivered. Recorded as text, not tracked:
+  // these identify equipment we do not own, and the only question they ever answer is "is this the
+  // unit they gave us" at collection time.
+  assetTags String[]
+
+  // What the SUPPLIER is charging us for the damage on this line, in integer pence.
+  //
+  // NULLABLE, and the difference matters: `null` is "no charge recorded", `0` is "we asked and they
+  // are not charging". A damage report is written the day the fault is found; the quote or invoice
+  // arrives days later, so a field that had to be filled at report time would be guessed or left at
+  // zero — and a guessed zero is indistinguishable from a settled one.
+  //
+  // Only ever set on OUR damage — the `damage` and `out` legs. Damage recorded on ARRIVAL is the
+  // supplier's own fault and already evidenced against them; a charge against that leg would be us
+  // recording a payment for their mistake, so the service refuses it.
+  //
+  // Unlike every quantity on this row it drives NO running total, which is why it is the one value
+  // here that may be set after the fact instead of requiring the note to be reversed: correcting it
+  // cannot leave a stored total disagreeing with the records it summarises. Each change is audited.
+  damageChargePence Int?
+
+  notes     String?
+  sortOrder Int     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // One line per ordered line per delivery. A second row for the same pair would double-count the
+  // running total the hire line carries.
+  @@unique([rentalReceiptId, purchaseOrderRentalLineId])
+  @@index([purchaseOrderRentalLineId])
+}
+
+// Condition evidence — the photographs taken as the kit came off the van.
+//
+// MUST be counted by attachment.repository.ts `countRefs`. A table missing from that count is a table
+// whose rows do not protect their Cloudinary asset, and the failure is silent: the file simply
+// disappears from a live record.
+model RentalReceiptAttachment {
+  id              String        @id @default(auto()) @map("_id") @db.ObjectId
+  rentalReceiptId String        @db.ObjectId
+  rentalReceipt   RentalReceipt @relation(fields: [rentalReceiptId], references: [id])
+  label           String?
+  fileName        String
+  fileType        String // pdf | docx | png | jpg
+  fileSizeBytes   Int
+  url             String
+  publicId        String?
+  resourceType    String? // "image" | "raw"
+  uploadedBy      String?
+  createdAt       DateTime @default(now())
+
+  @@index([rentalReceiptId])
   @@index([resourceType, publicId])
 }
 
@@ -1397,7 +1890,6 @@ model JobKitRequest {
 
   reason      String
   notes       String?
-  attachments String[] // optional evidence image URLs (Cloudinary)
 
   // Review (the PM / planner).
   reviewedByUserId String?   @db.ObjectId
@@ -1485,7 +1977,11 @@ model VanStockRequest {
 
   type       String // restock | return
   status     String @default("pending") // pending | approved | partially_fulfilled | fulfilled | declined | cancelled
-  priority   String @default("normal") // normal | high | urgent
+  // normal | urgent. "high" was retired 2026-08-20 — an incoming one is rewritten to urgent, so no
+  // new row carries it, but rows raised before then still hold it: every read goes through
+  // readPriority() in the validation module. src/scripts/retire-van-stock-high-priority.ts rewrites
+  // the stored ones.
+  priority   String @default("normal")
   createdVia String @default("engineer_request") // engineer_request | walk_in
 
   engineerId    String @db.ObjectId
@@ -1771,7 +2267,14 @@ model User {
   signatureUpdatedAt  DateTime?
 
   // Employment record.
-  employeeId    String?   @unique // human staff reference, auto-generated (e.g. SNT-0007)
+  // Human staff reference, auto-generated (e.g. SNT-0007). NOT `@unique` — same reason as
+  // PendingUpload.url: an optional `@unique` is a NON-sparse index on MongoDB, so the second user
+  // created without one would be rejected. Every create goes through userRepo.createWithEmployeeId
+  // and always sets it, so this is latent rather than live — but the landmine is identical, and it
+  // arms itself the first time a create path omits the field. Uniqueness is enforced by the PARTIAL
+  // unique index in userRepo.ensureEmployeeIdUniqueIndex, whose name still carries "employeeId" so
+  // the P2002 conflict-retry in withEmployeeId keeps recognising the clash.
+  employeeId    String?
   jobTitle      String? // designation, e.g. "Field Engineer"
   department    String? // team, e.g. "Operations"
   dateOfJoining DateTime?
@@ -2207,7 +2710,19 @@ model Job {
   plannerPhone String?
 
   notes       String?
-  attachments String[] @default([]) // Cloudinary URLs of the original job-pack files
+  // LEGACY: the original job-pack files as bare Cloudinary URLs.
+  //
+  // Superseded by the `attachmentRows` relation below and kept ONLY so pre-migration jobs still
+  // render. A URL alone cannot be deleted from Cloudinary — the destroy API addresses an asset by
+  // `publicId` + `resourceType`, and parsing those back out of a URL is how you delete the WRONG
+  // file (versions, transformations and folders all live in that string). So these rows are shown,
+  // never destroyed; see the backfill script for what it can and cannot recover.
+  //
+  // Nothing writes to this any more. New attachments go to JobAttachment.
+  attachments String[] @default([])
+
+  // Attachments (back-relation; no DB column). The replacement for `attachments` above.
+  attachmentRows JobAttachment[]
 
   // Kit lines (back-relation; no DB column).
   kitLines JobKitLine[]
@@ -2434,6 +2949,20 @@ model PendingUpload {
   // Server-minted, and the join key finalize looks up by — never a value the client chose.
   publicId     String  @unique
   resourceType String // image | raw — needed to address the asset for a destroy
+  // Filled at FINALIZE, once the asset exists and has been measured. They are what lets a
+  // `deferred-attach` purpose rebuild a full attachment row from nothing but the URL its form kept:
+  // a job being created has no record to attach to yet, so the identity has to survive somewhere
+  // until save, and the ledger row it already owns is that somewhere. Nullable because the row is
+  // minted at SIGNATURE time, before any of this is known.
+  // NOT `@unique`: on MongoDB that builds a NON-sparse unique index, where null counts as a value —
+  // and every row is minted here WITHOUT a url, so the second one would be rejected with a
+  // duplicate-key error and direct browser uploads would stop app-wide (prisma/prisma#23870).
+  // Uniqueness is enforced instead by a PARTIAL unique index over string urls only, created in
+  // uploadRepo.ensurePendingUploadUrlUniqueIndex — same mechanism as IrmItem.skuLower/barcode.
+  url           String?
+  fileName      String?
+  fileType      String?
+  fileSizeBytes Int?
   // Which upload contract this was authorised under. Re-checked at finalize so a signature obtained
   // for a 2 MB engineer photo cannot be spent attaching a 10 MB document to a purchase order.
   purpose      String
@@ -2458,4 +2987,61 @@ model PendingUpload {
 
   // The reaper's query: old enough, and not actively leased.
   @@index([createdAt, claimExpiresAt])
+}
+
+/// One EXTENSION of one hire — the breakdown behind PurchaseOrderRentalLine.extensionChargePence.
+///
+/// That column is a running total: extend a hire three times for £275, £300 and £150 and it reads
+/// £725. Correct, and unanswerable — "how much extension did we agree in July" cannot be asked of it,
+/// because the number carries no dates and no events, only their sum. The audit log holds each
+/// extension, but an activity trail is not something a report can filter, join to a hire and total.
+///
+/// So each extension is recorded here as a fact of its own, in the SAME transaction that moves the
+/// running total — a breakdown that could disagree with the number it explains would be worse than
+/// no breakdown at all.
+///
+/// Rows written BEFORE this model existed have no entry, and none is invented: the audit metadata
+/// identifies its hire only by item NAME, and matching on that would attribute money to the wrong
+/// line on any order carrying the same item twice. Every screen shows the unexplained remainder
+/// instead, labelled — see the `extensionsKnown` note in purchase-order.service.
+model HireExtension {
+  id String @id @default(auto()) @map("_id") @db.ObjectId
+
+  purchaseOrderRentalLineId String                  @db.ObjectId
+  purchaseOrderRentalLine   PurchaseOrderRentalLine @relation(fields: [purchaseOrderRentalLineId], references: [id])
+
+  // Denormalised so a period report can group by order and item without loading the hire line and
+  // its order for every row. Snapshots, like every other copy in this schema.
+  purchaseOrderId String  @db.ObjectId
+  poCode          String?
+  supplierName    String?
+  itemName        String
+
+  // What the extension DID. `addedDays` is stored rather than derived so a report never has to
+  // re-run the calendar arithmetic — and so a later edit to either date cannot silently rewrite it.
+  previousEndDate DateTime
+  newEndDate      DateTime
+  addedDays       Int
+
+  // The money, in integer pence, and BOTH figures — what the rate calculated and what was actually
+  // agreed. A negotiated extension is ordinary, and the pair is what makes it visible; the same
+  // pairing the line's own price keeps. `chargePence` is the LINE total (per unit x quantity), which
+  // is exactly what was added to the running total.
+  chargePence           Int
+  calculatedChargePence Int?
+  priceOverridden       Boolean @default(false)
+  quantity              Int
+  ratePeriod            String?
+  ratePence             Int?
+
+  // WHO agreed it and WHEN it was recorded. `createdAt` is the date a period report groups on: an
+  // extension is agreed and entered in the same conversation, so there is no second date to keep.
+  createdBy String?
+  createdAt DateTime @default(now())
+
+  // The breakdown on one hire, in the order it happened.
+  @@index([purchaseOrderRentalLineId, createdAt])
+  // The period report: every extension agreed between two dates.
+  @@index([createdAt])
+  @@index([purchaseOrderId])
 }

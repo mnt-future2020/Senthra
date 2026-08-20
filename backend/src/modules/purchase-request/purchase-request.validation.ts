@@ -1,5 +1,8 @@
 import { z } from "zod";
 
+import { RETURN_MODES } from "#modules/purchase-order/rentalReturn.js";
+import { RATE_PERIODS } from "../../utils/rental-pricing.js";
+
 // Purchase Request (PRF) validation. Codes/status/totals are SYSTEM-owned and never accepted
 // from the client; sourceType/sourceId are provenance fields reserved for future request-module
 // integrations and are likewise never client-settable. Editable only in `draft` (enforced in
@@ -7,7 +10,7 @@ import { z } from "zod";
 // (qty ≥ 1, quoted unit price ≥ 0). Money is integer GBP pence.
 
 import { INCOTERM_CODES } from "#modules/purchase-order/purchase-order.validation.js";
-import { attachmentTypeMatches, dataUriBytes } from "../../utils/data-uri.js";
+import { toCalendarDay } from "../../utils/calendar-day.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 
@@ -59,10 +62,149 @@ const noDupItems = (lines: { irmItemId: string }[]) => {
   const ids = lines.map((l) => l.irmItemId);
   return new Set(ids).size === ids.length;
 };
+// No `.min(1)` here any more: a RENTAL-ONLY request is legitimate, so "at least one line" is a rule
+// about the whole body and lives on the body schema (`hasAnyLine`) where it can see both arrays.
 const itemsField = z
   .array(lineSchema)
-  .min(1, "Add at least one item.")
   .refine(noDupItems, { message: "Each item can only be added once." });
+
+// ── Rental lines ──────────────────────────────────────────────────────────────────────────────
+//
+// A hired item on the request: an IRM line plus a hire period and an optional delivery address.
+// Every rule shared with an IRM line is mirrored field-for-field, so the two can never disagree
+// about what a valid quantity or price is.
+
+export const MAX_NOTIFY_DAYS_BEFORE = 365;
+
+/**
+ * A hire date is a CALENDAR DAY, not an instant — normalised to UTC midnight before anything
+ * compares or stores it.
+ *
+ * Load-bearing for more than tidiness: the DB's compound unique index includes both hire dates, so
+ * without this the same item, period and address could be added twice by sending one of them with a
+ * time on it, and the duplicate the index exists to refuse would sail through.
+ */
+const calendarDayField = (message: string) =>
+  z.preprocess((v) => {
+    if (typeof v !== "string" && !(v instanceof Date)) return v;
+    try {
+      return toCalendarDay(v);
+    } catch {
+      return undefined;
+    }
+  }, z.date({ error: message }));
+
+export const rentalLineSchema = z
+  .object({
+    rentalItemId: z.string().regex(OBJECT_ID_RE, "Select a rental item."),
+    quantity: z.coerce
+      .number({ error: "Quantity is required." })
+      .int("Use a whole number.")
+      .min(1, "Quantity must be at least 1.")
+      .max(10_000_000),
+    hireStartDate: calendarDayField("Select a hire start date."),
+    hireEndDate: calendarDayField("Select a hire end date."),
+    // A sanity range only. A lead LONGER than the hire is legitimate and gets clamped to the start
+    // date when stored — refusing it here would make every hire shorter than four days unsavable,
+    // because the lead defaults to 3.
+    notifyDaysBefore: z.coerce
+      .number()
+      .int("Use a whole number of days.")
+      .min(0, "Reminder days must be between 0 and 365.")
+      .max(MAX_NOTIFY_DAYS_BEFORE, "Reminder days must be between 0 and 365.")
+      .optional(),
+    deliveryAddress: z.preprocess(
+      (v) => (typeof v === "string" && v.trim() === "" ? null : v),
+      z.string().trim().max(300, "Delivery address is too long.").nullable().optional(),
+    ),
+    // HOW the price was arrived at. Optional on the way in: absent means `total`, which is what
+    // every line meant before a rate could be quoted.
+    ratePeriod: z.enum(RATE_PERIODS, { error: "Choose how the hire is priced." }).optional(),
+    ratePence: z.preprocess(
+      emptyToUndef,
+      z.coerce
+        .number()
+        .int("The rate must be a whole number of pence.")
+        .min(0, "The rate can't be negative.")
+        .max(1_000_000_000)
+        .nullable()
+        .optional(),
+    ),
+    // Says the agreed price is NOT the arithmetic — someone negotiated it. The service trusts the
+    // sent price only on such a line; otherwise it recomputes from the rate.
+    priceOverridden: z.coerce.boolean().optional(),
+    // Where the hire goes BACK. A mode rather than a bare address — see rentalReturn.ts. Optional
+    // on the way in so an older client (or a line written before the field existed) still saves;
+    // absent means `delivery`, which is what every such line already meant.
+    returnMode: z.enum(RETURN_MODES, { error: "Choose where the hire is collected from." }).optional(),
+    returnAddress: z.preprocess(
+      (v) => (typeof v === "string" && v.trim() === "" ? null : v),
+      z.string().trim().max(300, "Return address is too long.").nullable().optional(),
+    ),
+    unitPricePence: z.coerce
+      .number({ error: "Unit price is required." })
+      .int("Unit price must be a whole number of pence.")
+      .min(0, "Unit price can't be negative.")
+      .max(1_000_000_000),
+    vatRate: z.preprocess(
+      emptyToUndef,
+      z.coerce.number().min(0, "VAT can't be negative.").max(100, "VAT must be 0–100%.").optional(),
+    ),
+    notes: z.string().trim().max(2000).optional(),
+  })
+  // Drops anything the client invents — notably `lineTotalPence` and `notifyOnDate`, both of which
+  // the service computes. Accepting either is how a stored total stops matching its own line.
+  .strip()
+  // Both sides are already UTC midnights, so this compares calendar days.
+  .refine((l) => l.hireEndDate.getTime() > l.hireStartDate.getTime(), {
+    message: "The hire end date must be after the start date.",
+    path: ["hireEndDate"],
+  })
+  // A rate basis with no rate is a line whose price cannot be arrived at — and the price it would
+  // then carry is whatever the client happened to send, which is the ambiguity this replaces.
+  .refine((l) => (l.ratePeriod ?? "total") === "total" || l.ratePence != null, {
+    message: "Enter the rate for the chosen pricing basis.",
+    path: ["ratePence"],
+  })
+  // "Other" is the one mode that carries no fallback: the other two resolve to an address that
+  // already exists. Accepting it empty would store a line whose collection point is a promise the
+  // document cannot keep.
+  .refine((l) => l.returnMode !== "other" || Boolean(l.returnAddress), {
+    message: "Enter the address the hire is collected from.",
+    path: ["returnAddress"],
+  })
+  .refine((l) => l.quantity * l.unitPricePence <= Number.MAX_SAFE_INTEGER, {
+    message: "This line total is too large. Reduce the quantity or unit price.",
+    path: ["unitPricePence"],
+  });
+export type PrfRentalLineInput = z.infer<typeof rentalLineSchema>;
+
+// The same rental item MAY repeat with a different period or address — that is why those fields are
+// line-level. Only an identical (item, period, address) triple is an error, because that one merges
+// into quantity. Same rule the DB's compound unique index enforces, checked here for a readable
+// message rather than a raw Prisma collision.
+const noDupRentalLines = (lines: PrfRentalLineInput[]) => {
+  const keys = lines.map(
+    (l) =>
+      `${l.rentalItemId}|${l.hireStartDate.toISOString()}|${l.hireEndDate.toISOString()}|${l.deliveryAddress ?? ""}`,
+  );
+  return new Set(keys).size === keys.length;
+};
+
+const rentalItemsField = z.array(rentalLineSchema).refine(noDupRentalLines, {
+  // The second sentence names what the key IGNORES. Without it the rule reads as arbitrary to the one
+  // person it fires on most: someone who did change something — the pricing basis — and cannot see
+  // why the line is still "the same". The form shows this wording verbatim.
+  message:
+    "The same rental item, period and delivery address can only be added once — use quantity instead. " +
+    "Pricing basis, rate and return details don't make it a separate line.",
+});
+
+// At least one line of SOME kind. `items` alone used to carry this as `.min(1)`; a rental-only
+// request is legitimate now, so the rule moved to where both arrays are visible.
+const hasAnyLine = (b: { items?: unknown[]; rentalItems?: unknown[] }) =>
+  (b.items?.length ?? 0) + (b.rentalItems?.length ?? 0) > 0;
+const hasAnyLineError = { message: "Add at least one item or rental line.", path: ["items"] };
 
 // ── Reorder-workbench generation ──────────────────────────────────────────────
 // The confirmed workbench rows. The service re-validates and CAPS each row against the LIVE
@@ -130,8 +272,10 @@ export const createPurchaseRequestSchema = z
     // stuck (it can't be approved or sent). Editable later while the PRF is still a draft.
     requiredByDate: requiredDate("Required-by date"),
     ...sharedHeader,
-    items: itemsField,
+    items: itemsField.optional(),
+    rentalItems: rentalItemsField.optional(),
   })
+  .refine(hasAnyLine, hasAnyLineError)
   .refine(quoteDatesOk, quoteDatesError);
 export type CreatePurchaseRequestInput = z.infer<typeof createPurchaseRequestSchema>;
 
@@ -151,6 +295,7 @@ export const updatePurchaseRequestSchema = z
     ),
     ...sharedHeader,
     items: itemsField.optional(),
+    rentalItems: rentalItemsField.optional(),
   })
   .refine(quoteDatesOk, quoteDatesError);
 export type UpdatePurchaseRequestInput = z.infer<typeof updatePurchaseRequestSchema>;
@@ -170,9 +315,6 @@ export type PrfReopenInput = z.infer<typeof prfReopenSchema>;
 
 export const prfCancelSchema = z.object({ reason: z.string().trim().max(500).optional() });
 export type PrfCancelInput = z.infer<typeof prfCancelSchema>;
-
-// --- attachment upload (data URI from the form) -----------------------------
-const TEN_MB = 10 * 1024 * 1024;
 
 /**
  * How many documents one purchase request may carry.
@@ -199,43 +341,3 @@ export const PRF_ATTACHMENT_MAX_COUNT = 10;
  * this is a ceiling that actually holds.
  */
 export const PRF_ATTACHMENT_MAX_TOTAL_BYTES = 40 * 1024 * 1024;
-// The declared `fileType` and `fileSizeBytes` above are the CALLER'S CLAIMS about a payload the
-// server used to never open — so "pdf, 40 KB" would carry anything, at any size. Both are now
-// settled against `data` itself:
-//
-//   size  measured from the payload, so the per-file ceiling above is real. It also makes the
-//         PRF total a cap that holds, since that total is summed from stored sizes.
-//   type  read from the file's leading bytes (%PDF-, PK, PNG, JPEG), not from the URI's media type
-//         — that media type is text the caller wrote, so checking it only relocates the claim.
-//
-// Refined on the OBJECT rather than the `data` field because both checks compare two fields. Each
-// reports against the field the user can act on.
-export const prfAttachmentSchema = z.object({
-  label: z.string().trim().max(80).optional(),
-  fileName: z.string().trim().min(1, "File name is required.").max(200),
-  fileType: z.enum(PRF_ATTACHMENT_TYPES, { error: "Unsupported file type. Use PDF, DOCX, PNG or JPG." }),
-  fileSizeBytes: z.coerce.number().int().min(1).max(TEN_MB, "File must be 10 MB or smaller."),
-  data: z.string().startsWith("data:", "Upload a valid file."),
-})
-  .superRefine((v, ctx) => {
-    const actual = dataUriBytes(v.data);
-    if (actual === 0) {
-      ctx.addIssue({ code: "custom", path: ["data"], message: "Upload a valid file." });
-      return;
-    }
-    if (actual > TEN_MB) {
-      ctx.addIssue({ code: "custom", path: ["data"], message: "File must be 10 MB or smaller." });
-    } else if (actual !== v.fileSizeBytes) {
-      // A mismatch means the two halves of one upload disagree — a broken client, or a declaration
-      // aimed at slipping past the ceiling. Neither is worth storing under a size nobody can trust.
-      ctx.addIssue({ code: "custom", path: ["fileSizeBytes"], message: "File size doesn't match the uploaded file." });
-    }
-    if (!attachmentTypeMatches(v.data, v.fileType)) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["fileType"],
-        message: "That file isn't a valid PDF, DOCX, PNG or JPG.",
-      });
-    }
-  });
-export type PrfAttachmentInput = z.infer<typeof prfAttachmentSchema>;

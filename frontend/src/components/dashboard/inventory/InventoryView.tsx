@@ -13,6 +13,7 @@ import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
+import { FilterPopover } from "@/components/ui/FilterPopover";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ghostBtn } from "@/components/ui/styles";
 import { ReportDamageModal, type ReportDamageTarget } from "@/components/dashboard/goods-management/ReportDamageModal";
@@ -143,6 +144,15 @@ export function InventoryView({ warehouseId, embedded }: { warehouseId?: string;
   const rows = data?.inventory ?? [];
   const showSkeleton = loading && rows.length === 0;
   const isFiltered = Boolean(debounced) || Boolean(warehouse) || Boolean(category) || Boolean(status);
+  // Only the three that moved behind the trigger — the search box is still on the row, so counting it
+  // would badge the popover for a filter the user can already see.
+  const activeFilterCount = [warehouse, category, status].filter(Boolean).length;
+  const clearFilters = () => {
+    setWarehouse("");
+    setCategory("");
+    setStatus("");
+    setPage(1);
+  };
 
   const onExport = async () => {
     setExporting(true);
@@ -163,23 +173,32 @@ export function InventoryView({ warehouseId, embedded }: { warehouseId?: string;
     // component, which meant the search box and the warehouse/category/status filters scrolled away
     // with the rows: you'd lose the controls exactly when a long list makes you want them.
     <div className={`flex h-full flex-col ${embedded ? "gap-4" : "gap-5"}`}>
-      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:flex-wrap lg:items-center">
-        <div className="relative w-full lg:min-w-64 lg:max-w-xs lg:flex-1">
+      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:flex-wrap sm:items-center">
+        <div className="relative w-full sm:min-w-64 sm:max-w-xs sm:flex-1">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="Search item or SKU…" className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]" />
         </div>
-        {!warehouseId && (
-          <Select size="sm" value={warehouse} onChange={(v) => { setWarehouse(v); setPage(1); }} options={[{ value: "", label: "All warehouses" }, ...warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))]} ariaLabel="Filter by warehouse" />
-        )}
-        <Select size="sm" value={category} onChange={(v) => { setCategory(v); setPage(1); }} options={[{ value: "", label: "All categories" }, ...categories.map((c) => ({ value: c.id, label: c.name }))]} ariaLabel="Filter by category" />
-        <Select size="sm" value={status} onChange={(v) => { setStatus(v as "" | InventoryStatus); setPage(1); }} options={[{ value: "", label: "All statuses" }, ...(Object.keys(INVENTORY_STATUS_LABELS) as InventoryStatus[]).map((s) => ({ value: s, label: INVENTORY_STATUS_LABELS[s] }))]} ariaLabel="Filter by stock status" />
         {/* The three action labels collapse to icons below `xl`. At 1024px — a common laptop width,
             and the one this row visibly broke at — search + three selects + three labelled buttons
             don't fit, so the row wrapped to two lines and stole ~50px of table height permanently
             (this panel is full-height, so nothing scrolls that cost away). Each button keeps its
             `title` and gains an `aria-label`, so the icon-only state is still announced and hoverable
             rather than a bare glyph. */}
-        <div className="flex items-center gap-2 lg:ml-auto">
+        <div className="flex items-center gap-2 sm:ml-auto">
+          {/* Warehouse / category / status live behind ONE control. Collapsing the three action
+              labels to icons was not enough on its own: at 1024px the search box plus three Selects
+              plus three buttons still ran onto a second line, and this panel is full-height, so that
+              ~50px never scrolls back. These are the filters set once and left alone; the trigger
+              carries the ACTIVE count, which is what makes hiding them safe — a narrowed list must
+              never be mistakable for a short one. Same treatment, and the same component, the stock
+              positions table already uses. */}
+          <FilterPopover activeCount={activeFilterCount} onClear={clearFilters}>
+            {!warehouseId && (
+              <Select size="sm" value={warehouse} onChange={(v) => { setWarehouse(v); setPage(1); }} options={[{ value: "", label: "All warehouses" }, ...warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))]} ariaLabel="Filter by warehouse" />
+            )}
+            <Select size="sm" value={category} onChange={(v) => { setCategory(v); setPage(1); }} options={[{ value: "", label: "All categories" }, ...categories.map((c) => ({ value: c.id, label: c.name }))]} ariaLabel="Filter by category" />
+            <Select size="sm" value={status} onChange={(v) => { setStatus(v as "" | InventoryStatus); setPage(1); }} options={[{ value: "", label: "All statuses" }, ...(Object.keys(INVENTORY_STATUS_LABELS) as InventoryStatus[]).map((s) => ({ value: s, label: INVENTORY_STATUS_LABELS[s] }))]} ariaLabel="Filter by stock status" />
+          </FilterPopover>
           {can("inventory.export") && (
             <button onClick={onExport} disabled={exporting || rows.length === 0} aria-label="Export CSV" className="flex shrink-0 items-center gap-1.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] transition-all hover:border-[var(--accent)] disabled:opacity-60" title="Export the filtered list to CSV">
               {exporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />} <span className="hidden xl:inline">Export CSV</span>
@@ -230,13 +249,24 @@ export function InventoryView({ warehouseId, embedded }: { warehouseId?: string;
                 <tbody>
                   {rows.map((r) => (
                     <tr key={r.id} onClick={() => router.push(`/dashboard/inventory/${r.id}`)} className="cursor-pointer border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]">
+                      {/* Name and code on ONE line, not stacked.
+                          Measured at 1024px: the stacked pair made this row 66px — a 20px name, a
+                          16px code line and the cell's padding — while the column itself was 438px
+                          wide and its longest name needed ~250px. So ~180px of horizontal room sat
+                          unused and the second line was billed vertically instead, once PER ROW. Side
+                          by side the row is 50px, which is two more rows of data on the same screen.
+                          The name truncates first (`min-w-0` + CELL_ONE_LINE, full text in `title`)
+                          and the code is `shrink-0`, so the identifier stays whole at every width —
+                          it is what warehouse staff match against a label. */}
                       <td className="cell-y px-4">
-                        <div className={`font-semibold text-[var(--ink)] ${CELL_ONE_LINE}`} title={r.itemName}>{r.itemName}</div>
-                        {/* The CODE is the copy target here, not the name: this row navigates to the
-                            item on click, so a copy button on the name would swallow the navigation
-                            everyone already expects. CopyableCode stops propagation, so copying the
-                            code doesn't open the item either. */}
-                        <CopyableCode code={r.itemCode} className="text-[11px] text-[var(--faint)]" />
+                        <div className="flex items-center gap-2">
+                          <span className={`min-w-0 font-semibold text-[var(--ink)] ${CELL_ONE_LINE}`} title={r.itemName}>{r.itemName}</span>
+                          {/* The CODE is the copy target here, not the name: this row navigates to the
+                              item on click, so a copy button on the name would swallow the navigation
+                              everyone already expects. CopyableCode stops propagation, so copying the
+                              code doesn't open the item either. */}
+                          <CopyableCode code={r.itemCode} className="shrink-0 text-[11px] text-[var(--faint)]" />
+                        </div>
                       </td>
                       <td className={`cell-y px-4 text-[var(--muted)] ${colClass("xl")}`}>{r.sku ?? "—"}</td>
                       <td className={`cell-y px-4 text-[var(--muted)] ${CELL_ONE_LINE}`} title={r.warehouseName}>{r.warehouseName}</td>
@@ -284,15 +314,27 @@ export function InventoryView({ warehouseId, embedded }: { warehouseId?: string;
                 </tbody>
               </table>
             </div>
-            {data && (
-              <div className="flex shrink-0 flex-wrap justify-end gap-x-8 gap-y-1 border-t border-[var(--border)] p-4 text-sm">
-                <span className="text-[var(--muted)]">Total stock value (this view) <strong className="text-[var(--ink)]">{formatMoney(data.totalValue)}</strong></span>
-              </div>
-            )}
           </>
         )}
         {data && data.total > 0 && (
-            <Pagination embedded page={data.page} totalPages={data.totalPages} total={data.total} label="records" onPage={setPage} />
+            <Pagination
+              embedded
+              page={data.page}
+              totalPages={data.totalPages}
+              total={data.total}
+              label="records"
+              onPage={setPage}
+              // The value rides the count strip rather than a band of its own. It had one — a
+              // `border-t p-4 text-sm` row directly above this — which cost ~53px on a full-height
+              // panel where nothing scrolls that back. Both lines are counts about the same filtered
+              // list, and this is where someone is already reading them; "(this view)" stays because
+              // the summary card above totals the WHOLE pool and the two disagree under a filter.
+              note={
+                <span className="font-normal text-[var(--muted)]">
+                  · Stock value (this view) <strong className="font-bold text-[var(--ink)]">{formatMoney(data.totalValue)}</strong>
+                </span>
+              }
+            />
         )}
       </div>
 

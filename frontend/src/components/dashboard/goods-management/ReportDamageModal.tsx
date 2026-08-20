@@ -16,7 +16,7 @@ import Image from "next/image";
 import { Camera, Loader2, Trash2 } from "lucide-react";
 
 import * as gmService from "@/services/goodsManagement.service";
-import { MAX_IMAGE_BYTES, readFileAsDataUrl } from "@/lib/image";
+import { readFileAsDataUrl, shrinkImage } from "@/lib/image";
 import { clampQuantityInput } from "@/lib/quantity";
 import { useDashboard } from "@/hooks/useDashboard";
 import { Modal } from "@/components/ui/Modal";
@@ -84,13 +84,17 @@ export function ReportDamageModal({
     const file = e.target.files?.[0];
     if (fileRef.current) fileRef.current.value = ""; // let the same file be re-picked after a failure
     if (!file) return;
-    if (file.size > MAX_IMAGE_BYTES) {
-      pushToast("That photo is over 2 MB — pick a smaller one.", "alert");
-      return;
-    }
+    // Shrink ONCE and use the result for both the preview and the upload. Reading the original as a
+    // data URI would put a multi-MB base64 string into React state purely to draw a thumbnail.
+    //
+    // There is no size check left here. The old one refused anything over 2 MB, which is most photos
+    // a phone takes — the very files this modal exists to collect. The real limit lives in the
+    // backend's upload catalog, and it is still enforced before a single byte moves: uploadDirect
+    // asks for a signature first, and an oversized file is refused by that JSON round trip.
+    const photo = await shrinkImage(file);
     let dataUrl: string;
     try {
-      dataUrl = await readFileAsDataUrl(file);
+      dataUrl = await readFileAsDataUrl(photo);
     } catch {
       pushToast("Could not read the photo.", "alert");
       return;
@@ -100,7 +104,7 @@ export function ReportDamageModal({
     setUploading(true);
     try {
       // Straight to Cloudinary — the photo no longer travels through our API as base64.
-      setPhotoUrl(await uploadDirectForUrl({ purpose: "damage_photo", file }));
+      setPhotoUrl(await uploadDirectForUrl({ purpose: "damage_photo", file: photo }));
     } catch (err) {
       // Clear the preview too, so "there's a photo on screen" can never mean "a photo was saved".
       setPhotoPreview(null);

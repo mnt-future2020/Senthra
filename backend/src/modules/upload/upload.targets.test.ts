@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("./upload.service.js", () => ({
   commitAttachment: vi.fn(),
   releasePending: vi.fn(),
+  stampPendingAsset: vi.fn(),
 }));
 vi.mock("#modules/purchase-request/purchase-request.service.js", () => ({
   assertCanAttach: vi.fn(),
@@ -30,11 +31,12 @@ import * as prfService from "#modules/purchase-request/purchase-request.service.
 import * as poService from "#modules/purchase-order/purchase-order.service.js";
 import * as grnService from "#modules/goods-in/goods-in.service.js";
 
-import { commitAttachment, releasePending } from "./upload.service.js";
+import { commitAttachment, releasePending, stampPendingAsset } from "./upload.service.js";
 import { attachTo, preCheckFor } from "./upload.targets.js";
 
 const commit = vi.mocked(commitAttachment);
 const release = vi.mocked(releasePending);
+const stamp = vi.mocked(stampPendingAsset);
 
 const ASSET = {
   url: "https://res.cloudinary.com/c/raw/upload/s--x--/senthra/purchase-orders/quote.pdf",
@@ -128,11 +130,31 @@ describe("attachTo — attach purposes", () => {
   });
 });
 
-describe("attachTo — return-url purposes", () => {
-  // A job being created has no record yet, so the URL goes back to the form. The ledger row is released
-  // rather than committed, because there is no attachment write to pair it with.
-  it("hands back the URL and releases the ledger row", async () => {
+describe("attachTo — deferred-attach purposes", () => {
+  // A job being created has no record yet, so the URL goes back to the form. The ledger row is KEPT
+  // and stamped with the asset's identity: keeping it is what lets the reaper reclaim an abandoned
+  // form, and the stamp is what lets the eventual save turn the URL back into a real attachment.
+  it("hands back the URL and keeps the ledger row, stamped", async () => {
     const result = await attachTo("job_attachment", undefined, ASSET, undefined, ACTOR);
+
+    expect(result).toEqual({ url: ASSET.url });
+    expect(stamp).toHaveBeenCalledWith(ASSET);
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  // The distinction that keeps this safe. Releasing here would strand the asset exactly as the old
+  // behaviour did — invisible, because the upload itself still succeeds.
+  it("never releases the row, which would put the asset beyond the reaper's reach", async () => {
+    await attachTo("job_attachment", undefined, ASSET, undefined, ACTOR);
+    expect(release).not.toHaveBeenCalled();
+  });
+});
+
+describe("attachTo — return-url purposes", () => {
+  // The surfaces not yet converted. They still release, and so still leak an abandoned form's file:
+  // the remaining, separately-deferred half of this gap.
+  it("hands back the URL and releases the ledger row", async () => {
+    const result = await attachTo("damage_photo", undefined, ASSET, undefined, ACTOR);
 
     expect(result).toEqual({ url: ASSET.url });
     expect(release).toHaveBeenCalledWith(ASSET.publicId);

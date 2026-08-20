@@ -6,7 +6,10 @@ import type { JobKitWarehouse } from "@/types/job";
 
 export type VanStockRequestType = "restock" | "return";
 export type VanStockRequestStatus = "pending" | "approved" | "partially_fulfilled" | "fulfilled" | "declined" | "cancelled";
-export type VanStockPriority = "normal" | "high" | "urgent";
+// Two levels on purpose — "high" was retired 2026-08-20. The server normalises the legacy rows that
+// still hold it (readPriority in van-stock-request.validation.ts), so nothing here ever sees a third
+// value; the option list rendered by every composer lives in van-requests/vanRequestUi.
+export type VanStockPriority = "normal" | "urgent";
 
 export interface VanStockLine {
   id: string;

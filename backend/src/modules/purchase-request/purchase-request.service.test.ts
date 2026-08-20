@@ -31,6 +31,10 @@ vi.mock("#modules/job/job.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/supplier/supplier.service.js", () => ({ requireActiveSupplier: vi.fn() }));
 vi.mock("#modules/warehouse/warehouse.service.js", () => ({ requireActiveWarehouse: vi.fn() }));
 vi.mock("#modules/irm/irm.service.js", () => ({ requireActiveIrmItem: vi.fn(), requireActiveIrmItems: vi.fn() }));
+vi.mock("#modules/rental-item/rental-item.service.js", () => ({
+  requireActiveRentalItems: vi.fn(),
+  getRentalItemsByIds: vi.fn(),
+}));
 // The reorder generation revalidates against the LIVE workbench read; mocking it also cuts the
 // heavy inventory-service import graph out of this unit-test module.
 vi.mock("#modules/inventory/inventory.service.js", () => ({ getReorderSuggestions: vi.fn() }));
@@ -59,13 +63,12 @@ import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import * as supplierService from "#modules/supplier/supplier.service.js";
 import * as warehouseService from "#modules/warehouse/warehouse.service.js";
 import * as irmService from "#modules/irm/irm.service.js";
+import * as rentalItemService from "#modules/rental-item/rental-item.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import { emitToRoom, PURCHASE_ORDER_WATCHERS_ROOM, PURCHASE_REQUEST_WATCHERS_ROOM } from "../../lib/realtime.js";
 import * as prfEmail from "./purchase-request.email.js";
 import * as inventoryService from "#modules/inventory/inventory.service.js";
 import * as attachmentService from "#modules/attachment/attachment.service.js";
-import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
-import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
 import {
   approvePurchaseRequest,
   cancelPurchaseRequest,
@@ -80,7 +83,8 @@ import {
   reopenPurchaseRequest,
   submitPurchaseRequest,
   updatePurchaseRequest,
-  addAttachment,
+  assertCanAttach,
+  attachUploadedAsset,
   removeAttachment,
 } from "./purchase-request.service.js";
 import { createPurchaseRequestSchema, updatePurchaseRequestSchema } from "./purchase-request.validation.js";
@@ -153,6 +157,9 @@ function prfRow(over: Record<string, unknown> = {}) {
     revisionOfId: null,
     deletedAt: null,
     items: [prfItem()],
+    // Present and empty by default: the repository's include always supplies the array, so a
+    // fixture omitting it would be testing a shape production never produces.
+    rentalItems: [],
     attachments: [],
     purchaseOrders: [],
     createdAt: new Date("2026-07-01T00:00:00Z"),
@@ -423,6 +430,9 @@ describe("convert — generate the PO from an approved PRF (one per PRF, transac
     items: [
       { irmItemId: IRM_ID, itemName: "CAT6", sku: "C6", baseUnit: "Each", quantity: 10, unitPricePence: 500, vatRate: 20, lineTotalPence: 5000, notes: null, sortOrder: 0 },
     ],
+    // The convert seam's include always supplies this array. Rental-specific conversion behaviour
+    // has its own tests below; these existing ones prove an IRM-only PRF converts exactly as before.
+    rentalItems: [],
     attachments: [
       {
         label: "Quote",
@@ -813,8 +823,6 @@ describe("PRF attachments — Cloudinary cleanup", () => {
   const mockFindAtt = prfRepo.findAttachment as ReturnType<typeof vi.fn>;
   const mockRemoveAtt = prfRepo.removeAttachment as ReturnType<typeof vi.fn>;
   const mockAddAtt = prfRepo.addAttachment as ReturnType<typeof vi.fn>;
-  const mockUpload = uploadFileToCloudinary as ReturnType<typeof vi.fn>;
-  const mockCreds = getCloudinaryCreds as ReturnType<typeof vi.fn>;
   const release = attachmentService.releaseAsset as ReturnType<typeof vi.fn>;
   const ATT = { id: "att1", purchaseRequestId: PRF_ID, publicId: "senthra/purchase-orders/q.pdf", resourceType: "raw" };
 
@@ -824,9 +832,15 @@ describe("PRF attachments — Cloudinary cleanup", () => {
   });
 
   it("stores the Cloudinary identity when an attachment is added", async () => {
-    mockCreds.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
-    mockUpload.mockResolvedValue({ url: "https://cdn/q.pdf", publicId: "senthra/purchase-orders/q.pdf", resourceType: "raw" });
-    await addAttachment(PRF_ID, { fileName: "q.pdf", fileType: "pdf", fileSizeBytes: 9, data: "data:application/pdf;base64,AA" } as Parameters<typeof addAttachment>[1]);
+    await attachUploadedAsset(PRF_ID, {
+      fileName: "q.pdf",
+      fileType: "pdf",
+      fileSizeBytes: 9,
+      url: "https://cdn/q.pdf",
+      publicId: "senthra/purchase-orders/q.pdf",
+      resourceType: "raw",
+    });
+    // Identity, not just the URL. A row with only a URL can never have its file destroyed.
     expect(mockAddAtt.mock.calls[0][0]).toMatchObject({
       url: "https://cdn/q.pdf",
       publicId: "senthra/purchase-orders/q.pdf",
@@ -933,52 +947,40 @@ describe("PRF attachments — Cloudinary cleanup", () => {
 
   // Ten documents, not the GRN's five: a PRF is one supplier's quotation package. Bounded because the
   // detail read loads every attachment on the record.
+  // Ten documents, not the GRN's five: a PRF is one supplier's quotation package. Bounded because the
+  // detail read loads every attachment on the record.
+  //
+  // Asserted against `assertCanAttach` rather than an uploader: that is the function the direct-upload
+  // path runs as its preCheck, BEFORE a signature is minted — so a refusal here means the file never
+  // reaches Cloudinary at all, and there is no orphan for the reaper to find.
   describe("count cap", () => {
-    const att = { fileName: "q.pdf", fileType: "pdf", fileSizeBytes: 9, data: "data:application/pdf;base64,AA" } as Parameters<typeof addAttachment>[1];
     const attRow = (i: number) => ({
       id: `a${i}`, label: null, fileName: `q${i}.pdf`, fileType: "pdf", fileSizeBytes: 100,
       url: `https://cdn/q${i}.pdf`, publicId: `p${i}`, resourceType: "raw", uploadedBy: null,
       createdAt: new Date("2026-07-01T00:00:00Z"),
     });
     const withN = (n: number) => prfRow({ status: "draft", attachments: Array.from({ length: n }, (_, i) => attRow(i)) });
+    const big = (i: number) => ({ ...attRow(i), fileSizeBytes: 8 * 1024 * 1024 });
 
     it("accepts the tenth document", async () => {
       mockFindById.mockResolvedValue(withN(9));
-      mockCreds.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
-      mockUpload.mockResolvedValue({ url: "https://cdn/q.pdf", publicId: "p", resourceType: "raw" });
-      await addAttachment(PRF_ID, att);
-      expect(mockAddAtt).toHaveBeenCalledTimes(1);
-    });
-
-    // The count alone left a gap: ten files at the 10 MB per-file ceiling is 100 MB on one record.
-    it("refuses a document that would push the record past 40 MB", async () => {
-      const big = (i: number) => ({ ...attRow(i), fileSizeBytes: 8 * 1024 * 1024 });
-      mockFindById.mockResolvedValue(prfRow({ status: "draft", attachments: Array.from({ length: 5 }, (_, i) => big(i)) }));
-      const oneMore = { ...att, fileSizeBytes: 2 * 1024 * 1024 } as Parameters<typeof addAttachment>[1];
-      await expect(addAttachment(PRF_ID, oneMore)).rejects.toThrow(/can't exceed 40 MB/i);
-      expect(mockUpload).not.toHaveBeenCalled();
-    });
-
-    it("accepts one that stays inside 40 MB", async () => {
-      const big = (i: number) => ({ ...attRow(i), fileSizeBytes: 8 * 1024 * 1024 });
-      mockFindById.mockResolvedValue(prfRow({ status: "draft", attachments: Array.from({ length: 4 }, (_, i) => big(i)) }));
-      mockCreds.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
-      mockUpload.mockResolvedValue({ url: "https://cdn/q.pdf", publicId: "p", resourceType: "raw" });
-      await addAttachment(PRF_ID, { ...att, fileSizeBytes: 2 * 1024 * 1024 } as Parameters<typeof addAttachment>[1]);
-      expect(mockAddAtt).toHaveBeenCalledTimes(1);
+      await expect(assertCanAttach(PRF_ID, 9)).resolves.toBeUndefined();
     });
 
     it("refuses the eleventh", async () => {
       mockFindById.mockResolvedValue(withN(10));
-      await expect(addAttachment(PRF_ID, att)).rejects.toThrow(/at most 10 documents/i);
+      await expect(assertCanAttach(PRF_ID, 9)).rejects.toThrow(/at most 10 documents/i);
     });
 
-    // Refused BEFORE the upload, so a rejected attachment never lands in Cloudinary as an orphan.
-    it("never reaches Cloudinary when the cap is full", async () => {
-      mockFindById.mockResolvedValue(withN(10));
-      await expect(addAttachment(PRF_ID, att)).rejects.toThrow();
-      expect(mockUpload).not.toHaveBeenCalled();
-      expect(mockAddAtt).not.toHaveBeenCalled();
+    // The count alone left a gap: ten files at the 10 MB per-file ceiling is 100 MB on one record.
+    it("refuses a document that would push the record past 40 MB", async () => {
+      mockFindById.mockResolvedValue(prfRow({ status: "draft", attachments: Array.from({ length: 5 }, (_, i) => big(i)) }));
+      await expect(assertCanAttach(PRF_ID, 2 * 1024 * 1024)).rejects.toThrow(/can't exceed 40 MB/i);
+    });
+
+    it("accepts one that stays inside 40 MB", async () => {
+      mockFindById.mockResolvedValue(prfRow({ status: "draft", attachments: Array.from({ length: 4 }, (_, i) => big(i)) }));
+      await expect(assertCanAttach(PRF_ID, 2 * 1024 * 1024)).resolves.toBeUndefined();
     });
   });
 
@@ -986,5 +988,437 @@ describe("PRF attachments — Cloudinary cleanup", () => {
   it("soft-deleting the PRF destroys nothing", async () => {
     await deletePurchaseRequest(PRF_ID);
     expect(release).not.toHaveBeenCalled();
+  });
+});
+
+
+// ── Rental lines on conversion ────────────────────────────────────────────────────────────────
+
+describe("convert — rental lines", () => {
+  const RENTAL_ID = "e".repeat(24);
+  const mockReqRentals = rentalItemService.requireActiveRentalItems as ReturnType<typeof vi.fn>;
+
+  const rentalRow = (over: Record<string, unknown> = {}) => ({
+    rentalItemId: RENTAL_ID,
+    itemName: "Fibre Tester",
+    baseUnit: "Each",
+    quantity: 2,
+    hireStartDate: new Date("2026-09-01T00:00:00Z"),
+    hireEndDate: new Date("2026-10-01T00:00:00Z"),
+    notifyDaysBefore: 3,
+    deliveryAddress: "Unit 4\nLeeds",
+    unitPricePence: 15000,
+    vatRate: 20,
+    lineTotalPence: 30000,
+    notes: "Calibrated",
+    sortOrder: 0,
+    ...over,
+  });
+
+  const liveWithRental = (rentalItems: Record<string, unknown>[]) => ({
+    id: PRF_ID,
+    code: "PRF-0001",
+    status: "approved",
+    supplierId: SUP_ID,
+    warehouseId: WH_ID,
+    jobId: null,
+    projectRef: null,
+    quoteReference: null,
+    requiredByDate: FUTURE_REQUIRED_BY,
+    justification: null,
+    notes: null,
+    deliveryTerms: null,
+    paymentTerms: null,
+    subtotalPence: 30000,
+    vatPence: 6000,
+    grandTotalPence: 36000,
+    currency: "GBP",
+    items: [],
+    rentalItems,
+    attachments: [],
+  });
+
+  beforeEach(() => {
+    mockReqRentals.mockResolvedValue(undefined);
+    mockFindById.mockResolvedValue(prfRow({ status: "approved", rentalItems: [rentalRow()] }));
+    mockFindForConvertTx.mockResolvedValue(liveWithRental([rentalRow()]));
+    mockAllocateCode.mockResolvedValue("PO-0001");
+    mockCreatePoTx.mockResolvedValue("po1");
+  });
+
+  // Requirement: the COMPLETE snapshot and commercial data, not just the id. Naming every field
+  // rather than spot-checking two is the point — a partial copy leaves the hire without its period
+  // or its price on the record the supplier actually reads.
+  it("copies every rental line field onto the purchase order", async () => {
+    await convertPurchaseRequest(PRF_ID);
+    const created = (mockCreatePoTx.mock.calls[0]![5] as Record<string, unknown>[])[0];
+    expect(created).toEqual({
+      rentalItemId: RENTAL_ID,
+      itemName: "Fibre Tester",
+      baseUnit: "Each",
+      quantity: 2,
+      hireStartDate: new Date("2026-09-01T00:00:00Z"),
+      hireEndDate: new Date("2026-10-01T00:00:00Z"),
+      notifyDaysBefore: 3,
+      deliveryAddress: "Unit 4\nLeeds",
+      unitPricePence: 15000,
+      vatRate: 20,
+      lineTotalPence: 30000,
+      notes: "Calibrated",
+      sortOrder: 0,
+      hireStatus: "awaiting_delivery",
+      // 30-day hire, 3-day lead → day 27.
+      notifyOnDate: new Date("2026-09-28T00:00:00Z"),
+    });
+  });
+
+  // The order is a commitment to the provider, not a delivery. A converted hire used to land on
+  // `on_hire`, so the on-hire list showed kit nobody had touched and a hire whose end date passed
+  // while the delivery was still in transit went red for a return that could not happen.
+  it("starts a converted hire AWAITING DELIVERY, not on hire", async () => {
+    await convertPurchaseRequest(PRF_ID);
+    const created = (mockCreatePoTx.mock.calls[0]![5] as Record<string, unknown>[])[0]!;
+    expect(created.hireStatus).toBe("awaiting_delivery");
+    // The reminder date is still computed at conversion — the deadline exists, it just does not
+    // count until someone confirms the kit arrived.
+    expect(created.notifyOnDate).toEqual(new Date("2026-09-28T00:00:00Z"));
+  });
+
+  it("starts a converted hire un-notified so the reminder can still fire", async () => {
+    await convertPurchaseRequest(PRF_ID);
+    const created = (mockCreatePoTx.mock.calls[0]![5] as Record<string, unknown>[])[0]!;
+    expect(created.deadlineNotifiedAt).toBeUndefined();
+    expect(created.deadlineNotifyClaimToken).toBeUndefined();
+  });
+
+  // A short hire keeps the default 3-day lead and is simply reminded on its start date.
+  it("clamps the reminder for a hire shorter than its lead", async () => {
+    const short = rentalRow({ hireStartDate: new Date("2026-09-01T00:00:00Z"), hireEndDate: new Date("2026-09-03T00:00:00Z") });
+    mockFindForConvertTx.mockResolvedValue(liveWithRental([short]));
+    await convertPurchaseRequest(PRF_ID);
+    const created = (mockCreatePoTx.mock.calls[0]![5] as Record<string, unknown>[])[0]!;
+    expect(created.notifyOnDate).toEqual(new Date("2026-09-01T00:00:00Z"));
+  });
+
+  it("refuses to convert when a rental item has been retired", async () => {
+    mockReqRentals.mockRejectedValue(new Error("One or more rental items are no longer active."));
+    await expect(convertPurchaseRequest(PRF_ID)).rejects.toThrow(/no longer active/i);
+    expect(mockCreatePoTx).not.toHaveBeenCalled();
+  });
+
+  // The figure an approver signs off and the supplier reads. Computing it from the IRM lines alone
+  // made a hire-only order total ZERO while its own request showed the real number.
+  it("totals the purchase order over BOTH kinds of line", async () => {
+    await convertPurchaseRequest(PRF_ID);
+    const header = mockCreatePoTx.mock.calls[0]![1] as Record<string, number>;
+    // 2 x 15000 ex-VAT, 20% VAT.
+    expect(header.subtotalPence).toBe(30000);
+    expect(header.vatPence).toBe(6000);
+    expect(header.grandTotalPence).toBe(36000);
+  });
+
+  it("totals an IRM-only order exactly as before", async () => {
+    mockFindForConvertTx.mockResolvedValue(liveApprovedForRental());
+    await convertPurchaseRequest(PRF_ID);
+    const header = mockCreatePoTx.mock.calls[0]![1] as Record<string, number>;
+    expect(header.subtotalPence).toBe(5000);
+    expect(header.grandTotalPence).toBe(6000);
+  });
+
+  it("passes an empty rental array for an IRM-only request", async () => {
+    mockFindById.mockResolvedValue(prfRow({ status: "approved" }));
+    mockFindForConvertTx.mockResolvedValue(liveApprovedForRental());
+    await convertPurchaseRequest(PRF_ID);
+    expect(mockCreatePoTx.mock.calls[0]![5]).toEqual([]);
+  });
+
+  function liveApprovedForRental() {
+    return { ...liveWithRental([]), items: [{ irmItemId: IRM_ID, itemName: "CAT6", sku: "C6", baseUnit: "Each", quantity: 10, unitPricePence: 500, vatRate: 20, lineTotalPence: 5000, notes: null, sortOrder: 0 }] };
+  }
+});
+
+// ── Rental-only requests move through the workflow ────────────────────────────────────────────
+//
+// THE regression the browser pass caught: a hire-only request saved cleanly and then could not be
+// submitted, because the submit gate counted IRM lines alone. No create-time validation would have
+// found it — the request itself was valid.
+describe("submit — a request carrying only rental lines", () => {
+  const rentalLine = {
+    id: "rl1",
+    rentalItemId: "e".repeat(24),
+    itemName: "Fibre Tester",
+    baseUnit: "Each",
+    quantity: 1,
+    hireStartDate: new Date("2026-09-01T00:00:00Z"),
+    hireEndDate: new Date("2026-10-01T00:00:00Z"),
+    notifyDaysBefore: 3,
+    deliveryAddress: null,
+    unitPricePence: 15000,
+    vatRate: 20,
+    lineTotalPence: 15000,
+    notes: null,
+    sortOrder: 0,
+    rentalItem: { id: "e".repeat(24), code: "RNT-0001", name: "Fibre Tester", status: "active" },
+  };
+
+  it("submits a rental-only request", async () => {
+    mockFindById.mockResolvedValue(prfRow({ status: "draft", items: [], rentalItems: [rentalLine] }));
+    mockUpdate.mockResolvedValue(prfRow({ status: "submitted", items: [], rentalItems: [rentalLine] }));
+    await expect(submitPurchaseRequest(PRF_ID)).resolves.toBeTruthy();
+  });
+
+  it("still refuses a request with no lines of either kind", async () => {
+    mockFindById.mockResolvedValue(prfRow({ status: "draft", items: [], rentalItems: [] }));
+    await expect(submitPurchaseRequest(PRF_ID)).rejects.toThrow(/at least one item or rental line/i);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+});
+
+// ── Edits must not silently drop what they did not send ───────────────────────────────────────
+
+describe("update — rental lines and the wipe guard", () => {
+  const rentalRow = {
+    id: "rl1",
+    rentalItemId: "e".repeat(24),
+    itemName: "Fibre Tester",
+    baseUnit: "Each",
+    quantity: 1,
+    hireStartDate: new Date("2026-09-01T00:00:00Z"),
+    hireEndDate: new Date("2026-10-01T00:00:00Z"),
+    notifyDaysBefore: 3,
+    deliveryAddress: null,
+    unitPricePence: 15000,
+    vatRate: 20,
+    lineTotalPence: 15000,
+    notes: null,
+    sortOrder: 0,
+    rentalItem: { id: "e".repeat(24), code: "RNT-0001", name: "Fibre Tester", status: "active" },
+  };
+
+  beforeEach(() => {
+    (rentalItemService.requireActiveRentalItems as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    (rentalItemService.getRentalItemsByIds as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Map([["e".repeat(24), { name: "Fibre Tester", baseUnit: "Each", vatRatePercent: 20 }]]),
+    );
+  });
+
+  // The MONEY on a rate basis is the server's arithmetic, never the client's number: a browser that
+  // sends a stale (or invented) price must not be able to file it beside a rate that contradicts it.
+  describe("pricing basis — the server decides the money", () => {
+    const hire = (over: Record<string, unknown>) => ({
+      rentalItemId: "e".repeat(24),
+      quantity: 3,
+      // Dates, not strings: the schema turns them into UTC midnights before the service ever sees
+      // a line, so a string fixture would be testing a shape production never produces.
+      hireStartDate: new Date("2026-08-17T00:00:00.000Z"),
+      hireEndDate: new Date("2026-10-01T00:00:00.000Z"), // 45 days
+      unitPricePence: 1, // deliberately wrong — the server must ignore it
+      vatRate: 20,
+      ...over,
+    });
+    const create = async (rentalItems: Record<string, unknown>[]) => {
+      mockCreateWithCode.mockImplementation((header: Record<string, unknown>) => Promise.resolve(prfRow({ ...header, items: [] })));
+      await createPurchaseRequest({
+        supplierId: SUP_ID, warehouseId: WH_ID, requiredByDate: "2026-12-31", items: [], rentalItems,
+      } as unknown as Parameters<typeof createPurchaseRequest>[0]);
+      return mockCreateWithCode.mock.calls.at(-1)!;
+    };
+
+    it("recomputes a daily rate and ignores the price the client sent", async () => {
+      const [, , rentals] = await create([hire({ ratePeriod: "day", ratePence: 5500 })]);
+      // £55 × 45 days = £2,475 per unit; × 3 = £7,425.
+      expect(rentals[0]).toMatchObject({ unitPricePence: 247_500, lineTotalPence: 742_500 });
+    });
+
+    // THE regression: the unit price was recomputed while the line total was still multiplying the
+    // number the client sent, so a £2,475 line was filed with a £0.03 total.
+    it("uses the SAME price for the line total", async () => {
+      const [, , rentals] = await create([hire({ ratePeriod: "week", ratePence: 30_000 })]);
+      expect(rentals[0].lineTotalPence).toBe(rentals[0].quantity * rentals[0].unitPricePence);
+    });
+
+    it("keeps a NEGOTIATED price, and the rate beside it", async () => {
+      const [, , rentals] = await create([
+        hire({ ratePeriod: "day", ratePence: 5500, priceOverridden: true, unitPricePence: 230_000 }),
+      ]);
+      expect(rentals[0]).toMatchObject({ unitPricePence: 230_000, ratePence: 5500, priceOverridden: true });
+    });
+
+    it("takes the typed figure on the total basis, and files no rate", async () => {
+      const [, , rentals] = await create([hire({ ratePeriod: "total", unitPricePence: 16_500 })]);
+      expect(rentals[0]).toMatchObject({ unitPricePence: 16_500, ratePence: null, priceOverridden: false });
+    });
+
+    // An override only means something where there is a calculation to override.
+    it("cannot be overridden on the total basis", async () => {
+      const [, , rentals] = await create([hire({ ratePeriod: "total", unitPricePence: 16_500, priceOverridden: true })]);
+      expect(rentals[0].priceOverridden).toBe(false);
+    });
+  });
+
+  // THE regression. `itemsField` lost its `.min(1)` when rental lines arrived and the replacement
+  // body rule landed on the CREATE schema only, so this PATCH wiped every line and zeroed the
+  // totals — something the old rule had always refused.
+  it("refuses an update that would leave the request with no lines at all", async () => {
+    mockFindById.mockResolvedValue(prfRow({ status: "draft", items: [prfItem()], rentalItems: [rentalRow] }));
+    await expect(updatePurchaseRequest(PRF_ID, { items: [], rentalItems: [] })).rejects.toThrow(
+      /at least one item or rental line/i,
+    );
+    expect(prfRepo.replaceItemsAndTotals).not.toHaveBeenCalled();
+  });
+
+  // Sending one array is legitimate when the OTHER kind still carries the request.
+  it("allows clearing the IRM lines when rental lines remain", async () => {
+    mockFindById.mockResolvedValue(prfRow({ status: "draft", items: [prfItem()], rentalItems: [rentalRow] }));
+    (prfRepo.replaceItemsAndTotals as ReturnType<typeof vi.fn>).mockResolvedValue(
+      prfRow({ status: "draft", items: [], rentalItems: [rentalRow] }),
+    );
+    await updatePurchaseRequest(PRF_ID, { items: [] });
+    const call = (prfRepo.replaceItemsAndTotals as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(call[1]).toEqual([]);
+    // The rental lines are re-derived from what is stored, not dropped.
+    expect(call[4]).toHaveLength(1);
+    // ...and the totals still count them.
+    expect(call[2]).toMatchObject({ subtotalPence: 15000 });
+  });
+});
+
+describe("duplicate — the revision carries the whole request", () => {
+  // The header's totals are copied verbatim, so dropping the rental lines minted a revision whose
+  // grand total did not match the lines it showed.
+  it("copies rental lines onto the duplicate", async () => {
+    const rentalRow = {
+      rentalItemId: "e".repeat(24),
+      itemName: "Fibre Tester",
+      baseUnit: "Each",
+      quantity: 2,
+      hireStartDate: new Date("2026-09-01T00:00:00Z"),
+      hireEndDate: new Date("2026-10-01T00:00:00Z"),
+      notifyDaysBefore: 3,
+      deliveryAddress: "Unit 4",
+      unitPricePence: 15000,
+      vatRate: 20,
+      lineTotalPence: 30000,
+      notes: null,
+      sortOrder: 0,
+    };
+    mockFindById.mockResolvedValue(prfRow({ status: "converted", items: [], rentalItems: [rentalRow] }));
+    mockCreateWithCode.mockResolvedValue(prfRow({ status: "draft", items: [], rentalItems: [rentalRow] }));
+    (rentalItemService.requireActiveRentalItems as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+
+    await duplicatePurchaseRequest(PRF_ID);
+
+    expect(mockCreateWithCode.mock.calls[0]![2]).toEqual([
+      expect.objectContaining({ rentalItemId: "e".repeat(24), quantity: 2, lineTotalPence: 30000, deliveryAddress: "Unit 4" }),
+    ]);
+  });
+});
+
+
+// ── The rental master holds no pricing ────────────────────────────────────────────────────────
+//
+// Price, VAT and currency are negotiated per hire, so they live on the LINE. The master used to
+// carry a reference rate and a VAT default; removing them changed exactly one behaviour — a line
+// that sends no VAT now falls back to 0 rather than to a catalogue figure — and that is pinned here.
+describe("rental lines take their commercial terms from the line, not the catalogue", () => {
+  const RENTAL_ID = "e".repeat(24);
+  const line = (over: Record<string, unknown> = {}) => ({
+    rentalItemId: RENTAL_ID,
+    quantity: 2,
+    hireStartDate: new Date("2026-09-01T00:00:00Z"),
+    hireEndDate: new Date("2026-10-01T00:00:00Z"),
+    unitPricePence: 15000,
+    ...over,
+  });
+  const header = () => ({ supplierId: SUP_ID, warehouseId: WH_ID, requiredByDate: FUTURE_REQUIRED_BY.toISOString() });
+
+  beforeEach(() => {
+    (rentalItemService.requireActiveRentalItems as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    // Name and unit only — there is no rate or VAT to hand back.
+    (rentalItemService.getRentalItemsByIds as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Map([[RENTAL_ID, { name: "Fibre Tester", baseUnit: "Each" }]]),
+    );
+    mockCreateWithCode.mockImplementation((header: Record<string, unknown>) =>
+      Promise.resolve(prfRow({ ...header, items: [], rentalItems: [] })),
+    );
+  });
+
+  it("stores the VAT the line sent", async () => {
+    await createPurchaseRequest({ ...header(), items: [], rentalItems: [line({ vatRate: 20 })] });
+    expect(mockCreateWithCode.mock.calls[0]![2][0]).toMatchObject({ vatRate: 20 });
+  });
+
+  it("falls back to zero VAT when the line sends none — no catalogue default exists", async () => {
+    await createPurchaseRequest({ ...header(), items: [], rentalItems: [line()] });
+    expect(mockCreateWithCode.mock.calls[0]![2][0]).toMatchObject({ vatRate: 0 });
+  });
+
+  it("snapshots only the name and unit from the master", async () => {
+    await createPurchaseRequest({ ...header(), items: [], rentalItems: [line({ vatRate: 20 })] });
+    const stored = mockCreateWithCode.mock.calls[0]![2][0] as Record<string, unknown>;
+    expect(stored).toMatchObject({ itemName: "Fibre Tester", baseUnit: "Each", unitPricePence: 15000 });
+    // The price is the LINE's, never a catalogue rate.
+    expect(stored.lineTotalPence).toBe(30000);
+  });
+
+  // The header roll-up is unaffected by the master losing its rate.
+  it("totals a rental-only request from its own lines", async () => {
+    await createPurchaseRequest({ ...header(), items: [], rentalItems: [line({ vatRate: 20 })] });
+    expect(mockCreateWithCode.mock.calls[0]![0]).toMatchObject({
+      subtotalPence: 30000,
+      vatPence: 6000,
+      grandTotalPence: 36000,
+    });
+  });
+});
+
+// A hire's start date is the first day it is BILLED, so kit that arrives later is charged for days
+// it was never on site — and the app's own "awaiting delivery, hire has already started" alert
+// fires on the day the order is raised. Reported, never blocked: some hire companies bill from the
+// day the kit leaves their yard, and there a later delivery is legitimate.
+describe("purchase request — late hire delivery flag", () => {
+  const hireLine = (start: string) => ({
+    id: "rl1",
+    rentalItemId: "e".repeat(24),
+    itemName: "Fibre Tester",
+    baseUnit: "Each",
+    quantity: 1,
+    hireStartDate: new Date(`${start}T00:00:00.000Z`),
+    hireEndDate: new Date("2026-09-30T00:00:00.000Z"),
+    hireDays: 1,
+    notifyDaysBefore: 3,
+    deliveryAddress: null,
+    returnMode: "delivery",
+    returnAddress: null,
+    ratePeriod: "total",
+    ratePence: null,
+    priceOverridden: false,
+    unitPricePence: 15000,
+    vatRate: 20,
+    lineTotalPence: 15000,
+    notes: null,
+    rentalItem: null,
+  });
+
+  beforeEach(() => vi.clearAllMocks());
+
+  it("flags a required-by date that falls after the hire has started", async () => {
+    mockFindById.mockResolvedValue(
+      prfRow({ requiredByDate: new Date("2026-09-02T00:00:00.000Z"), rentalItems: [hireLine("2026-09-01")] }),
+    );
+    const prf = await getPurchaseRequest(PRF_ID);
+    expect(prf.lateHireDelivery).toEqual({ earliestHireStart: "2026-09-01T00:00:00.000Z", daysLate: 1 });
+  });
+
+  it("is null when the kit is due on the day the hire starts", async () => {
+    mockFindById.mockResolvedValue(
+      prfRow({ requiredByDate: new Date("2026-09-01T00:00:00.000Z"), rentalItems: [hireLine("2026-09-01")] }),
+    );
+    expect((await getPurchaseRequest(PRF_ID)).lateHireDelivery).toBeNull();
+  });
+
+  it("is null on a request with no hire lines", async () => {
+    mockFindById.mockResolvedValue(prfRow({ rentalItems: [] }));
+    expect((await getPurchaseRequest(PRF_ID)).lateHireDelivery).toBeNull();
   });
 });

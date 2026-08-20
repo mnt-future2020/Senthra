@@ -18,6 +18,7 @@ const WAREHOUSE_KEYS = [
   "wh.van_returns",
   "wh.customer_intake",
   "wh.stock_entry_drafts",
+  "wh.rental_intake",
 ];
 
 describe("WAREHOUSE_KEY_PANE", () => {
@@ -36,10 +37,21 @@ describe("WAREHOUSE_KEY_PANE", () => {
 // from this one map, so the test is really checking that the derivation helpers agree — which is what
 // stops a future key being added to a tab and forgotten on the pill.
 describe("a tab's count is exactly the sum of its panes'", () => {
-  it("Incoming stock splits into Company (GRN) and Customer with nothing left over", () => {
-    expect([...keysForPane("incoming", "grn"), ...keysForPane("incoming", "customer")].sort()).toEqual(
-      keysForTab("incoming").sort(),
-    );
+  it("Incoming stock splits into Company (GRN), Customer and Rental with nothing left over", () => {
+    expect(
+      [
+        ...keysForPane("incoming", "grn"),
+        ...keysForPane("incoming", "customer"),
+        ...keysForPane("incoming", "rental"),
+      ].sort(),
+    ).toEqual(keysForTab("incoming").sort());
+  });
+
+  // The pane that had no count at all. Every pane of this tab ends in someone pressing Receive, and
+  // this was the only one that announced its work nowhere — so a hire sat there waiting to be
+  // received with no badge on the tab, the pane, the sidebar row or the Warehouses list row.
+  it("counts the hires waiting on the Rental deliveries pane", () => {
+    expect(keysForPane("incoming", "rental")).toEqual(["wh.rental_intake"]);
   });
 
   it("Inventory's only queue is on the Customer pane, not the pane it opens on", () => {

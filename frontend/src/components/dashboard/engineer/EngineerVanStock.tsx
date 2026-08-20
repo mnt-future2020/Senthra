@@ -12,6 +12,7 @@ import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Notice } from "@/components/ui/Notice";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
+import { FilterPopover } from "@/components/ui/FilterPopover";
 import { toolbarActionsCls, toolbarBtn, toolbarPrimaryBtn } from "@/components/ui/styles";
 import { EmptyState, fmtDateTime } from "@/components/dashboard/portal/portalUi";
 import { singlePickup, VanRequestItemsSummary, VanRequestLinesTable, VanRequestListSkeleton, VanStockAttachments, VanStockCompletionBadge, VanStockPostings, VanStockWalkInBadge, warehouseCaption } from "@/components/dashboard/van-requests/vanRequestUi";
@@ -191,8 +192,8 @@ export function EngineerVanStock() {
       {/* Toolbar — search + filters + sort. Same pattern (and same URL-state approach) as the engineer
           Jobs and Transfers pages; the reviewer board offers the mirror-image filters over the same
           list, so both sides can ask the same questions of it. */}
-      <div className="flex shrink-0 flex-col gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-xs lg:flex-row lg:flex-wrap lg:items-center">
-        <div className="relative w-full lg:min-w-60 lg:max-w-xs lg:flex-1">
+      <div className="flex shrink-0 flex-col gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 shadow-xs sm:flex-row sm:flex-wrap sm:items-center">
+        <div className="relative w-full sm:min-w-60 sm:max-w-xs sm:flex-1">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--faint)]" />
           <input
             type="text"
@@ -203,16 +204,24 @@ export function EngineerVanStock() {
             className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
           />
         </div>
+        {/* Status stays out — "what's still pending?" is the question an engineer asks every time they
+            open this. Type / origin / sort are set once, so they fold behind one trigger carrying the
+            ACTIVE count. Sort is not counted: it reorders, it never hides. */}
         <Select size="sm" ariaLabel="Filter by status" value={status} onChange={onFilter("status")} options={STATUS_OPTIONS} />
-        <Select size="sm" ariaLabel="Filter by type" value={type} onChange={onFilter("type")} options={TYPE_OPTIONS} />
-        <Select size="sm" ariaLabel="Filter by origin" value={createdVia} onChange={onFilter("origin")} options={ORIGIN_OPTIONS} />
-        <Select size="sm" ariaLabel="Sort order" value={sort} onChange={onFilter("sort")} options={SORT_OPTIONS} />
+        <FilterPopover
+          activeCount={(type ? 1 : 0) + (createdVia ? 1 : 0)}
+          onClear={() => patchParams({ type: null, origin: null, sort: null }, true)}
+        >
+          <Select size="sm" ariaLabel="Filter by type" value={type} onChange={onFilter("type")} options={TYPE_OPTIONS} />
+          <Select size="sm" ariaLabel="Filter by origin" value={createdVia} onChange={onFilter("origin")} options={ORIGIN_OPTIONS} />
+          <Select size="sm" ariaLabel="Sort order" value={sort} onChange={onFilter("sort")} options={SORT_OPTIONS} />
+        </FilterPopover>
 
         {/* The page's actions, at the right-hand end of the row rather than in the top bar. Up there
             they sat against the browser's own chrome, a screen's width from the list they act on —
-            and this is an engineer on a van, working one-handed. `lg:` because THIS toolbar becomes
-            a row at lg. Toolbar geometry, so they sit level with the Selects beside them. */}
-        <div className={`${toolbarActionsCls} lg:ml-auto`}>
+            and this is an engineer on a van, working one-handed. `sm:` because THIS toolbar becomes
+            a row at sm. Toolbar geometry, so they sit level with the Selects beside them. */}
+        <div className={`${toolbarActionsCls} sm:ml-auto`}>
           <button type="button" onClick={() => router.push("/dashboard/engineer/van-stock/return")} className={toolbarBtn}>
             <Undo2 className="h-3.5 w-3.5" /> Return stock
           </button>

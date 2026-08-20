@@ -17,11 +17,12 @@ import { Select } from "@/components/ui/Select";
 import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { BarcodePanel } from "@/components/dashboard/irm/BarcodePanel";
 import { PO_STATUS_LABELS } from "@/components/dashboard/purchase-orders/poStatus";
-import { AttachmentGrid, DocPicker, attachmentToDoc, type DocItem, type PickedDoc } from "./DeliveryDocuments";
+import { AttachmentList, DocPicker, attachmentToDoc, type DocItem, type PickedDoc } from "./DeliveryDocuments";
 import { acceptedWording } from "./acceptedWording";
 import type { GoodsReceipt, GrnAttachment } from "@/types/goods-in";
 import type { PurchaseOrder } from "@/types/purchase-order";
 import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
+import { uploadDirect } from "@/lib/upload";
 
 const GRN_LIST = "/dashboard/goods-in";
 const QUALITY = ["passed", "partial", "failed"] as const;
@@ -141,7 +142,10 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
   // Delivery documents — edit: live (uploaded immediately to the existing draft); create: staged
   // in memory and uploaded right after the draft is created. Limits/validation live in DocPicker.
   const [attachments, setAttachments] = React.useState<GrnAttachment[]>(o?.attachments ?? []);
-  const [staged, setStaged] = React.useState<{ key: string; fileName: string; fileType: string; fileSizeBytes: number; dataUrl: string }[]>([]);
+  // `previewUrl` is an object URL held for the life of the staged row and revoked when it goes. The
+  // list needs SOME src to render its preview, and a blob: URL costs a pointer where the base64 the
+  // row used to carry cost 1.33× the file — for a 5 MB delivery note, in React state, per document.
+  const [staged, setStaged] = React.useState<{ key: string; fileType: string; file: File; previewUrl: string }[]>([]);
 
   const [lines, setLines] = React.useState<LineState[]>(() =>
     o
@@ -392,33 +396,45 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
   // Unify saved (edit) + staged (create) docs for the grid; counts feed the picker's caps.
   const docItems: DocItem[] = mode === "edit"
     ? attachments.map(attachmentToDoc)
-    : staged.map((s) => ({ id: s.key, fileName: s.fileName, fileType: s.fileType, fileSizeBytes: s.fileSizeBytes, src: s.dataUrl }));
-  const docTotalBytes = (mode === "edit" ? attachments : staged).reduce((sum, a) => sum + a.fileSizeBytes, 0);
+    : staged.map((s) => ({ id: s.key, fileName: s.file.name, fileType: s.fileType, fileSizeBytes: s.file.size, src: s.previewUrl }));
+  const docTotalBytes = mode === "edit"
+    ? attachments.reduce((sum, a) => sum + a.fileSizeBytes, 0)
+    : staged.reduce((sum, s) => sum + s.file.size, 0);
   const canEditDocs = mode === "create" || o?.status === "draft";
 
   const onPickDoc = async (doc: PickedDoc) => {
-    // Both branches post base64 through this server, so both pay for the read — but only here, and
-    // only once. See PickedDoc.readDataUrl.
+    // Edit: the receipt exists, so the file goes straight to Cloudinary and finalize attaches it —
+    // the same path the detail page uses. Create: there is nothing to attach to yet, so the file is
+    // held as-is and uploaded the moment the draft is created.
     if (mode === "edit" && o) {
       try {
-        const updated = await grnService.addAttachment(o.id, { fileName: doc.fileName, fileType: doc.fileType, fileSizeBytes: doc.fileSizeBytes, data: await doc.readDataUrl() });
-        setAttachments(updated.attachments);
+        const result = await uploadDirect({ purpose: "grn_attachment", file: doc.file, targetId: o.id });
+        if ("attachment" in result) setAttachments((result.attachment as GoodsReceipt).attachments);
         pushToast("Document added.", "success");
       } catch (e) {
         pushToast(e instanceof Error ? e.message : "Upload failed.", "alert");
       }
       return;
     }
-    const dataUrl = await doc.readDataUrl();
     setStaged((prev) => [...prev, {
       key: crypto.randomUUID(),
-      fileName: doc.fileName,
       fileType: doc.fileType,
-      fileSizeBytes: doc.fileSizeBytes,
-      dataUrl,
+      file: doc.file,
+      previewUrl: URL.createObjectURL(doc.file),
     }]);
     touch();
   };
+
+  // Every staged document's object URL, released when the form goes away. Without this, leaving a
+  // create form with documents still staged keeps each file alive in memory until the tab closes.
+  React.useEffect(() => {
+    return () => {
+      setStaged((rows) => {
+        for (const r of rows) URL.revokeObjectURL(r.previewUrl);
+        return rows;
+      });
+    };
+  }, []);
 
   const onRemoveDoc = async (id: string) => {
     if (mode === "edit" && o) {
@@ -429,6 +445,10 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
       }
       return;
     }
+    // Revoked here rather than left to the page unload: a user who picks and removes several large
+    // documents would otherwise pin every one of them in memory for as long as the tab is open.
+    const going = staged.find((s) => s.key === id);
+    if (going) URL.revokeObjectURL(going.previewUrl);
     setStaged((prev) => prev.filter((s) => s.key !== id));
   };
 
@@ -456,7 +476,7 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
         const failed: typeof staged = [];
         for (const doc of staged) {
           try {
-            await grnService.addAttachment(created.id, { fileName: doc.fileName, fileType: doc.fileType, fileSizeBytes: doc.fileSizeBytes, data: doc.dataUrl });
+            await uploadDirect({ purpose: "grn_attachment", file: doc.file, targetId: created.id });
           } catch {
             failed.push(doc);
           }
@@ -623,7 +643,7 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
                               </button>
                             )}
                           </div>
-                          <NumberInput className={inputCls} min={0} max={remaining} value={l.receive} onChange={(e) => updateLine(idx, { receive: e.target.value })} placeholder="e.g. 100" aria-invalid={over} />
+                          <NumberInput className={inputCls} clamp min={0} max={remaining} value={l.receive} onChange={(e) => updateLine(idx, { receive: e.target.value })} placeholder="e.g. 100" aria-invalid={over} />
                           {over && <p className="mt-1 text-[11px] font-semibold text-[var(--neg)]">Only {remaining} left to receive on this line.</p>}
                         </div>
                         <div>
@@ -635,7 +655,7 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
                               </button>
                             )}
                           </div>
-                          <NumberInput className={inputCls} min={0} max={receiveNum || undefined} value={l.accepted} onChange={(e) => updateLine(idx, { accepted: e.target.value })} placeholder="e.g. 100" aria-invalid={acceptedOver || acceptedMissing} />
+                          <NumberInput className={inputCls} clamp min={0} max={receiveNum || undefined} value={l.accepted} onChange={(e) => updateLine(idx, { accepted: e.target.value })} placeholder="e.g. 100" aria-invalid={acceptedOver || acceptedMissing} />
                           {acceptedOver && <p className="mt-1 text-[11px] font-semibold text-[var(--neg)]">Accepted can&apos;t exceed received ({receiveNum}).</p>}
                           {acceptedMissing && <p className="mt-1 text-[11px] font-semibold text-[var(--neg)]">Enter how many passed inspection (0 if all rejected).</p>}
                         </div>
@@ -737,7 +757,14 @@ export function GoodsReceiptForm({ mode, order }: { mode: "create" | "edit"; ord
                 {mode === "create" && <p className="mt-1.5 text-[11px] text-[var(--faint)]">Files upload automatically when you create the draft.</p>}
               </div>
             )}
-            <AttachmentGrid items={docItems} onRemove={canEditDocs ? onRemoveDoc : undefined} />
+            <AttachmentList
+              items={docItems}
+              onRemove={canEditDocs ? onRemoveDoc : undefined}
+              // Only an EDIT removes a stored file; on a new receipt the list is still just staged
+              // picks, and asking to confirm un-picking a file is ceremony.
+              confirmRemove={mode === "edit"}
+              removePrompt={{ title: "Remove document", message: "Remove this document from the receipt?" }}
+            />
           </FormSection>
         </div>
 

@@ -166,7 +166,8 @@ export function OverdueHoldingsView({ warehouseId }: { warehouseId?: string }) {
   const body = error ? (
     <p className="py-8 text-center text-sm font-semibold text-[var(--neg)]">{error}</p>
   ) : rows === null ? (
-    <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+    <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+      <div className="overflow-x-auto">
       <table className="w-full text-left text-sm" style={{ minWidth: 650 }}>
         <thead>
           <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
@@ -185,6 +186,7 @@ export function OverdueHoldingsView({ warehouseId }: { warehouseId?: string }) {
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   ) : rows.length === 0 ? (
     <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-14 text-center">

@@ -1,9 +1,12 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { CalendarClock, CheckCircle2, ChevronRight, ClipboardCheck, Download, FileText, Loader2, Package, Paperclip, Pencil, ScrollText, Send, Trash2, Upload, UserRound, XCircle } from "lucide-react";
+import { AlertTriangle, CalendarClock, CheckCircle2, ChevronRight, ClipboardCheck, Download, FileText, Loader2, Package, PackageCheck, PackageX, Paperclip, Pencil, ScrollText, Send, Trash2, Upload, UserRound, XCircle } from "lucide-react";
 
+import { hireWindowState } from "@/components/dashboard/rentals/hireWindow";
+import { HireDeadline, HireStatusBadge } from "@/components/dashboard/rentals/rentalHireStatus";
 import * as poService from "@/services/purchase-order.service";
 import * as auditService from "@/services/audit.service";
 import * as grnService from "@/services/goods-in.service";
@@ -24,6 +27,11 @@ import type { AuditEntry } from "@/types/audit";
 import type { GoodsReceipt } from "@/types/goods-in";
 import type { PurchaseOrder } from "@/types/purchase-order";
 import { uploadDirect } from "@/lib/upload";
+import { shrinkImage } from "@/lib/image";
+import { returnLegSummary } from "@/lib/rentalReturn";
+import { hireDeliveryWarning } from "@/lib/hireDelivery";
+import { Notice } from "@/components/ui/Notice";
+import { HireDeliveries, HireDeliveriesHeading } from "./HireDeliveries";
 
 const EXT_TYPE: Record<string, string> = { pdf: "pdf", docx: "docx", png: "png", jpg: "jpg", jpeg: "jpg" };
 
@@ -37,7 +45,12 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   const [po, setPo] = React.useState<PurchaseOrder>(initial);
   // Read-only traceability: this PO's goods receipts. The GRN stays the single
   // stock-affecting document — here we only LIST it, never write stock from the PO side.
-  const canViewReceipts = can("goods_in.view");
+  //
+  // Hidden entirely on a HIRE-ONLY order: a goods receipt is only ever raised against IRM lines (the
+  // receivable worklist requires them), so on an order carrying nothing but hires the tab can never
+  // hold a row — and "Receipts (0)" sitting beside an Overview that shows a delivered hire reads as a
+  // contradiction rather than as an empty list.
+  const canViewReceipts = can("goods_in.view") && po.items.length > 0;
   // The Audit trail tab hits GET /audit (needs audit.view) — only show it to holders of that
   // permission, so a role without it never lands on a tab that 403s.
   const TABS: Tab[] = [
@@ -269,14 +282,65 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   // available after goods start arriving (the warehouse plans against this date).
   if (po.confirmedDeliveryDate && !["closed", "cancelled"].includes(s) && can("purchase_orders.acknowledge"))
     actions.push(<ActionBtn key="delivery-date" icon={CalendarClock} onClick={() => setDeliveryDateOpen(true)} disabled={busy}>Update delivery date</ActionBtn>);
-  // Receive: launch the existing Goods In form with this PO preselected. Only for
-  // receivable statuses (sent / supplier_accepted / partially_received) — never draft/approved
-  // (not sent yet) or fully_received/cancelled/completed (terminal). The form + backend stay
-  // authoritative.
-  if (RECEIVABLE_STATUSES.includes(s) && can("goods_in.create"))
-    actions.push(<ActionBtn key="receive" icon={Package} primary onClick={() => router.push(`/dashboard/goods-in/new?po=${po.id}`)} disabled={busy}>Receive</ActionBtn>);
+  // Receive — and WHICH receive depends on what is on the order.
+  //
+  // Goods and hires are booked in by different flows for a reason the backend enforces: a goods
+  // receipt writes an inventory balance and a stock movement, and hired kit stays the supplier's. A
+  // hire-only order sent to the GRN form used to land on "select a purchase order" with nothing to
+  // receive — the button was there, it just could not do anything.
+  //
+  // An order carrying BOTH gets both buttons, because they are two separate arrivals: the goods and
+  // the hired equipment turn up on their own vans, on their own days.
+  const hasGoods = po.items.length > 0;
+  const hiresOutstanding = po.rentalItems.some(
+    (r) => r.hireStatus !== "returned" && r.quantity - (r.receivedQuantity ?? 0) > 0,
+  );
+  // Kit we are actually HOLDING — what can go back, and what can be reported damaged. Asked on the
+  // quantities rather than the status because a part-delivered line is `on_hire` with units still to
+  // come, and the units that are here can be collected before the rest arrives.
+  const hiresHeld = po.rentalItems.some(
+    (r) => r.hireStatus === "on_hire" && (r.receivedQuantity ?? 0) - (r.returnedQuantity ?? 0) > 0,
+  );
+  // Narrower than "we are holding it": a unit already reported damaged cannot be reported again — the
+  // count is of damaged UNITS, not of damage events. Without this the button opens a form with every
+  // line filtered out, which reads as the feature being broken rather than as there being nothing to
+  // report.
+  const hiresDamageable = po.rentalItems.some(
+    (r) =>
+      r.hireStatus === "on_hire" &&
+      (r.receivedQuantity ?? 0) - (r.returnedQuantity ?? 0) - (r.damagedQuantity ?? 0) > 0,
+  );
+  // Either hire-floor key — the same pair every /rental-receipts write route accepts.
+  const canMoveHires = can("rentals.hire.receive") || can("rentals.hire.manage");
+  // Where kit can still be in our hands: the receiving window plus the order that has taken all of it.
+  // `closed` is absent because closing is refused while any hire is still out.
+  const HOLDING_STATUSES: string[] = [...RECEIVABLE_STATUSES, "fully_received"];
+  if (RECEIVABLE_STATUSES.includes(s) && hasGoods && can("goods_in.create"))
+    actions.push(<ActionBtn key="receive" icon={Package} primary onClick={() => router.push(`/dashboard/goods-in/new?po=${po.id}`)} disabled={busy}>{hiresOutstanding ? "Receive goods" : "Receive"}</ActionBtn>);
+  // The SAME window goods use — `RECEIVABLE_STATUSES`, the constant the button above reads.
+  //
+  // A hire follows the IRM flow, so an order that has not been issued cannot be received against. It
+  // used to allow anything but closed/cancelled, which put a Receive button on a draft order (two
+  // Receive buttons with two different rules on one screen) and, worse, on `pending_approval` and
+  // `approved` — statuses the service refuses, so the form was filled in and then rejected on save.
+  if (RECEIVABLE_STATUSES.includes(s) && hiresOutstanding && canMoveHires)
+    actions.push(<ActionBtn key="receive-hire" icon={PackageCheck} primary onClick={() => router.push(`/dashboard/rentals/receive/${po.code}`)} disabled={busy}>{hasGoods ? "Receive hire" : "Receive"}</ActionBtn>);
+  // Wider than receiving, and it has to be: a fully-received order is the ordinary state for a hire
+  // that is out. Not primary — on an order still being delivered the arrival is the job, and the
+  // return is what happens weeks later.
+  if (HOLDING_STATUSES.includes(s) && hiresHeld && canMoveHires)
+    actions.push(<ActionBtn key="return-hire" icon={PackageX} onClick={() => router.push(`/dashboard/rentals/return/${po.code}`)} disabled={busy}>Return hire</ActionBtn>);
+  // Available whenever we hold the kit, because that is when it breaks. Recorded then, with a
+  // photograph, it is evidence; the same fact remembered at the handover is our word against theirs.
+  if (HOLDING_STATUSES.includes(s) && hiresDamageable && canMoveHires)
+    actions.push(<ActionBtn key="damage-hire" icon={AlertTriangle} onClick={() => router.push(`/dashboard/rentals/damage/${po.code}`)} disabled={busy}>Report damage</ActionBtn>);
+  // An order whose hired equipment is still out is not finished — the service refuses it, so the
+  // button says why rather than failing after the click. DISABLED and not hidden, unlike the hire
+  // actions above: the answer here is something the user can go and do ("record the return"), and a
+  // Close that silently vanished on a rental order would read as a missing feature.
+  const hiresOpen = po.rentalItems.some((r) => r.hireStatus !== "returned");
   if ((s === "partially_received" || s === "fully_received") && can("purchase_orders.close"))
-    actions.push(<ActionBtn key="close" icon={CheckCircle2} primary onClick={() => run(() => poService.closePurchaseOrder(po.id), "Purchase order closed.")} disabled={busy}>Close</ActionBtn>);
+    actions.push(<ActionBtn key="close" icon={CheckCircle2} primary onClick={() => run(() => poService.closePurchaseOrder(po.id), "Purchase order closed.")} disabled={busy || hiresOpen} title={hiresOpen ? "Equipment is still on hire — record its return before closing." : undefined}>Close</ActionBtn>);
   if (["draft", "pending_approval", "approved", "pm_review", "sent", "supplier_accepted"].includes(s) && can("purchase_orders.cancel"))
     actions.push(<ActionBtn key="cancel" icon={XCircle} onClick={() => { setReason(""); setReasonFor("cancel"); }} disabled={busy}>Cancel</ActionBtn>);
 
@@ -315,7 +379,9 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
       <div className="shrink-0 flex gap-1 overflow-x-auto border-b border-[var(--border)]">
         {TABS.map((t) => (
           <button key={t} onClick={() => setTab(t)} className={`shrink-0 border-b-2 px-3.5 py-2.5 text-xs font-bold capitalize transition-colors ${tab === t ? "border-[var(--accent)] text-[var(--accent)]" : "border-transparent text-[var(--muted)] hover:text-[var(--ink)]"}`}>
-            {t === "audit" ? "Audit trail" : t === "receipts" ? `Receipts (${receiptsTotal})` : t}
+            {/* "Goods receipts", not "Receipts": hire movements are receipts too, in every sense a
+                user means, and they are listed on the Overview. This tab counts GRNs only. */}
+            {t === "audit" ? "Audit trail" : t === "receipts" ? `Goods receipts (${receiptsTotal})` : t}
           </button>
         ))}
       </div>
@@ -324,6 +390,7 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
         {tab === "overview" && (
           <Overview
             po={po}
+            onOrderChanged={refresh}
             onEditAcceptance={
               !busy && !["closed", "cancelled"].includes(po.status) && can("purchase_orders.acknowledge")
                 ? () => setAcceptOpen(true)
@@ -560,8 +627,15 @@ function SupplierAcceptanceDialog({ po, busy, onConfirm, onClose }: { po: Purcha
   const [supplierAckReference, setSupplierAckReference] = React.useState(po.supplierAckReference ?? "");
   const [notes, setNotes] = React.useState(po.supplierAcceptNotes ?? "");
 
+  // REQUIRED only while the delivery is still ahead. Accepting an order that has not arrived is a
+  // commitment to a date, and that date is what the warehouse plans against. Once the goods are in
+  // there is nothing left to plan: the real arrival is on the receipt, and demanding a "confirmed
+  // delivery date" would push somebody to type the date it actually turned up — filing an arrival
+  // under a field that means "what the supplier promised". Mirrors recordSupplierAcceptance.
+  const dateRequired = po.status === "sent" || po.status === "supplier_accepted";
+
   const confirm = () => {
-    if (!confirmedDeliveryDate) {
+    if (dateRequired && !confirmedDeliveryDate) {
       pushToast("Enter the delivery date the supplier confirmed.", "alert");
       return;
     }
@@ -586,7 +660,8 @@ function SupplierAcceptanceDialog({ po, busy, onConfirm, onClose }: { po: Purcha
             and be explicit that it won't rewind the order's status. */}
         {(po.status === "partially_received" || po.status === "fully_received") && (
           <p className="mt-2 rounded-lg bg-[var(--surface-2)] px-2.5 py-1.5 text-[11px] text-[var(--muted)]">
-            Goods have already been received. This records the supplier&apos;s acknowledgement without changing the order status.
+            Goods have already been received. This records the supplier&apos;s acknowledgement — their
+            reference and anything they flagged — without changing the order status or the delivery date.
           </p>
         )}
         <div className="mt-4 grid gap-3 sm:grid-cols-2">
@@ -595,8 +670,17 @@ function SupplierAcceptanceDialog({ po, busy, onConfirm, onClose }: { po: Purcha
             <input type="date" className={inputCls} value={acceptedDate} onChange={(e) => setAcceptedDate(e.target.value)} />
           </div>
           <div>
-            <label className={labelCls}>Confirmed delivery date<span className="ml-0.5 text-[var(--neg)]">*</span></label>
+            <label className={labelCls}>
+              Confirmed delivery date
+              {dateRequired && <span className="ml-0.5 text-[var(--neg)]">*</span>}
+            </label>
             <input type="date" className={inputCls} value={confirmedDeliveryDate} onChange={(e) => setConfirmedDeliveryDate(e.target.value)} min={acceptedDate || undefined} />
+            {/* Says WHICH it is and why, so a blank box is never a guess. */}
+            <p className="mt-1 text-[11px] text-[var(--faint)]">
+              {dateRequired
+                ? "The date the supplier committed to. The warehouse plans against it."
+                : "Optional — the goods are already in. Fill it only to record what the supplier originally promised; leave it blank and the date already on the order is kept."}
+            </p>
           </div>
           <div className="sm:col-span-2">
             <label className={labelCls}>Supplier reference</label>
@@ -666,7 +750,21 @@ function DeliveryDateDialog({ po, busy, onConfirm, onClose }: { po: PurchaseOrde
 
 // `onEditAcceptance` is supplied only when the viewer may amend the acknowledgement — the parent
 // owns the permission/status decision, so this stays a dumb renderer.
-function Overview({ po, onEditAcceptance }: { po: PurchaseOrder; onEditAcceptance?: () => void }) {
+function Overview({
+  po,
+  onEditAcceptance,
+  onOrderChanged,
+}: {
+  po: PurchaseOrder;
+  onEditAcceptance?: () => void;
+  /** Voiding a hire delivery moves the order's quantities and can move its STATUS — the page's own
+      copy is stale after it, so the panel says so rather than refetching a record it does not own. */
+  onOrderChanged?: () => void;
+}) {
+  // Reported up by the movements panel, which is the only thing that knows how many there are.
+  // The heading rendered a hardcoded 0, and its own `count > 0` test meant the number never
+  // appeared at all.
+  const [movementCount, setMovementCount] = React.useState(0);
   const router = useRouter();
   return (
     <div className="space-y-4">
@@ -707,6 +805,164 @@ function Overview({ po, onEditAcceptance }: { po: PurchaseOrder; onEditAcceptanc
         </div>
       </div>
 
+      {po.rentalItems.length > 0 && (
+        <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+          <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
+            <h3 className="text-sm font-extrabold text-[var(--ink)]">Rental lines</h3>
+            {/* Returns and damage are done from THIS page now — the header carries both, and the
+                movements they write are listed below. Only the EXTENSION still lives elsewhere, so
+                that is all this line still points at. It used to send people away for work the page
+                in front of them already does. */}
+            <p className="text-[11px] text-[var(--muted)]">
+              Extend a hire on the{" "}
+              <Link href="/dashboard/inventory?tab=rental&rental=on-hire" className="font-semibold text-[var(--accent)] hover:underline">
+                On hire
+              </Link>{" "}
+              tab.
+            </p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[820px] text-left text-sm">
+              <thead>
+                <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
+                  <th className="cell-y px-4">Item</th>
+                  <th className="cell-y px-4">Qty</th>
+                  <th className="cell-y px-4">Hire period</th>
+                  <th className="cell-y px-4">Returns by</th>
+                  <th className="cell-y px-4">Delivery</th>
+                  <th className="cell-y px-4">Status</th>
+                  <th className="cell-y px-4">Line Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {po.rentalItems.map((r) => (
+                  <tr key={r.id} className="border-b border-[var(--border)] last:border-0">
+                    <td className="cell-y px-4">
+                      <div className="font-semibold text-[var(--ink)]">{r.itemName}</div>
+                      {r.rentalItem && <div className="text-[11px] text-[var(--faint)]">{r.rentalItem.code}</div>}
+                    </td>
+                    <td className="cell-y px-4 text-[var(--muted)]">
+                      {r.quantity}
+                      {r.baseUnit ? ` ${r.baseUnit}` : ""}
+                    </td>
+                    <td className="cell-y px-4 text-[var(--muted)]">
+                      {formatDate(r.hireStartDate)} → {formatDate(r.hireEndDate)}
+                      <span className="ml-1 text-[11px] text-[var(--faint)]">({r.hireDays}d)</span>
+                    </td>
+                    <td className="cell-y px-4">
+                      {/* Only a LIVE hire carries a deadline colour — a returned one is done, and
+                          colouring it would keep an urgent-looking row on screen forever. */}
+                      {r.hireStatus === "on_hire" ? (
+                        <HireDeadline window={hireWindowState(r.hireEndDate, r.notifyDaysBefore, new Date(), r.hireStartDate)}>
+                          {formatDate(r.hireEndDate)}
+                        </HireDeadline>
+                      ) : (
+                        <span className="text-[var(--muted)]">{formatDate(r.hireEndDate)}</span>
+                      )}
+                    </td>
+                    <td className="cell-y max-w-[14rem] px-4 text-[var(--muted)]">
+                      {/* The line's OWN address when it has one, otherwise what it actually resolves
+                          to — named, not spelled out, because the order's Delivery panel above
+                          carries that address in full. It used to read "Delivery warehouse"
+                          unconditionally, which is wrong on an order that overrides its delivery
+                          address: the kit goes to the override and the row named the depot. */}
+                      {r.deliveryAddress ? (
+                        <span className="whitespace-pre-line">{r.deliveryAddress}</span>
+                      ) : (
+                        <span className="text-[var(--faint)]">{r.deliveryLocation.label}</span>
+                      )}
+                      {/* The return leg, under the outbound one. Resolved by the server so this can
+                          never name a different place from the order document the supplier reads —
+                          shortened here only when the place is one this cell or the header has
+                          already named, so a third address is the one that prints in full. */}
+                      <div className="mt-1 text-[11px] text-[var(--faint)]">
+                        Back to: {returnLegSummary(r.returnMode, r.returnLocation, r.deliveryAddress)}
+                      </div>
+                      {/* How the price was struck. Without it a reader sees £2,475 and cannot tell
+                          whether that was quoted as a lump or as £55 a day. */}
+                      {r.ratePeriod !== "total" && r.ratePence != null && (
+                        <div className="mt-0.5 text-[11px] text-[var(--faint)]">
+                          {formatMoney(r.ratePence / 100, po.currency)}/{r.ratePeriod}
+                          {r.priceOverridden ? " · price manually adjusted" : ""}
+                        </div>
+                      )}
+                      {/* Extensions are a later commitment against an order the supplier already
+                          agreed to, so they are shown beside its money rather than folded into it —
+                          and the row says which, or someone reconciling an invoice will assume the
+                          order total covers them. */}
+                      {r.extensionChargePence > 0 && (
+                        <div className="mt-0.5 text-[11px] font-semibold text-[var(--warn,#d97706)]">
+                          + {formatMoney(r.extensionCharge, po.currency)} extensions — not in this order&apos;s total
+                          {/* The BREAKDOWN, because the total alone cannot be checked against
+                              anything: "+£725" on a hire extended three times says nothing about
+                              when any of it was agreed or how much each time was, and that is
+                              exactly what somebody holding the supplier's invoice is looking for. */}
+                          <ul className="mt-1 space-y-0.5 font-normal text-[var(--muted)]">
+                            {r.extensions.map((e) => (
+                              <li key={e.id}>
+                                {formatDate(e.agreedAt)} · {formatDate(e.newEndDate)} (+{e.addedDays}d) ·{" "}
+                                <span className="font-semibold text-[var(--ink)]">{formatMoney(e.charge, po.currency)}</span>
+                                {/* A negotiated extension shows what the rate said beside what was
+                                    agreed — the gap between them is the discount, invisible from
+                                    either figure alone. */}
+                                {e.priceOverridden && e.calculatedCharge != null && (
+                                  <span className="text-[var(--faint)]"> · rate said {formatMoney(e.calculatedCharge, po.currency)}</span>
+                                )}
+                              </li>
+                            ))}
+                            {/* Extensions agreed before they were recorded one by one. Said out
+                                loud, because a list quietly adding up to less than the total above
+                                it reads as the total being wrong. */}
+                            {r.unexplainedExtensionCharge > 0 && (
+                              <li className="text-[var(--faint)]">
+                                {formatMoney(r.unexplainedExtensionCharge, po.currency)} agreed before extensions were
+                                itemised — see the order&apos;s Audit Trail
+                              </li>
+                            )}
+                          </ul>
+                        </div>
+                      )}
+                    </td>
+                    <td className="cell-y px-4">
+                      <HireStatusBadge status={r.hireStatus} />
+                      {/* WHO said the kit arrived, and when. The same stamp the return leg carries —
+                          "on hire" is a claim somebody made, and this is the record of it. */}
+                      {r.receivedAt && r.hireStatus !== "returned" && (
+                        <div className="mt-1 text-[11px] text-[var(--faint)]">
+                          received {formatDate(r.receivedAt)}
+                          {r.receivedBy ? ` · ${r.receivedBy}` : ""}
+                        </div>
+                      )}
+                      {r.returnedAt && (
+                        <div className="mt-1 text-[11px] text-[var(--faint)]">
+                          {formatDate(r.returnedAt)}
+                          {r.returnedBy ? ` · ${r.returnedBy}` : ""}
+                        </div>
+                      )}
+                    </td>
+                    <td className="cell-y px-4 font-semibold text-[var(--ink)]">{formatMoney(r.lineTotal, po.currency)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* WHAT ACTUALLY HAPPENED to the equipment — arrivals, returns and damage in one timeline.
+              The quantities above are the sum of these records, so this is also where a mistake is
+              undone: a record is voided, which gives its units back. */}
+          <div className="border-t border-[var(--border)]">
+            <div className="border-b border-[var(--border)] px-4 py-3">
+              <HireDeliveriesHeading count={movementCount} />
+              <p className="mt-0.5 text-[11px] text-[var(--muted)]">
+                Hired kit stays the supplier&apos;s — a delivery here starts the hire, a return ends it,
+                and neither adds anything to stock.
+              </p>
+            </div>
+            <HireDeliveries purchaseOrderId={po.id} poStatus={po.status} onChanged={() => onOrderChanged?.()} onCount={setMovementCount} />
+          </div>
+        </div>
+      )}
+
       <div className="grid gap-4 lg:grid-cols-2">
         <Card title="Supplier">
           <div className="grid grid-cols-2 gap-3">
@@ -729,6 +985,20 @@ function Overview({ po, onEditAcceptance }: { po: PurchaseOrder; onEditAcceptanc
                 <span className="font-semibold text-[var(--neg)]">Not set — required before sending</span>
               )}
             </Field>
+            {/* Advisory: this is the date printed on the PDF the supplier reads, and it falls after
+                one of the hires has already started. Never blocks the send — some hire companies
+                bill from dispatch. Same wording as the request screen and the request form. */}
+            {po.lateHireDelivery && (
+              <div className="col-span-2">
+                <Notice
+                  msg={{
+                    type: "warn",
+                    text: hireDeliveryWarning(po.lateHireDelivery.daysLate, po.lateHireDelivery.earliestHireStart),
+                  }}
+                  size="xs"
+                />
+              </div>
+            )}
             <Field label="Reference">{po.referenceNumber}</Field>
             <Field label="Priority">{PO_PRIORITY_LABELS[po.priority]}</Field>
             <Field label="Project reference">{po.projectRef}</Field>
@@ -851,15 +1121,10 @@ function Attachments({ po, setPo, canEdit }: { po: PurchaseOrder; setPo: (p: Pur
   const [deleting, setDeleting] = React.useState(false);
   const inputRef = React.useRef<HTMLInputElement>(null);
 
-  const onFile = (file: File) => {
-    const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
-    const fileType = EXT_TYPE[ext];
-    if (!fileType) {
+  const onFile = (rawFile: File) => {
+    const ext = rawFile.name.split(".").pop()?.toLowerCase() ?? "";
+    if (!EXT_TYPE[ext]) {
       pushToast("Unsupported file. Use PDF, DOCX, PNG or JPG.", "alert");
-      return;
-    }
-    if (file.size > 10 * 1024 * 1024) {
-      pushToast("File must be 10 MB or smaller.", "alert");
       return;
     }
     setUploading(true);
@@ -867,6 +1132,14 @@ function Attachments({ po, setPo, canEdit }: { po: PurchaseOrder; setPo: (p: Pur
     // permissions, same caps, same audit event, same DTO back.
     void (async () => {
       try {
+        // Downscale before measuring. These pickers take site photos as well as paperwork, and a
+        // phone photo clears 10 MB easily — refusing it on its original size would reject a file
+        // that stores as a few hundred KB. PDFs and DOCX come back untouched.
+        const file = await shrinkImage(rawFile);
+        if (file.size > 10 * 1024 * 1024) {
+          pushToast("File must be 10 MB or smaller.", "alert");
+          return;
+        }
         const result = await uploadDirect({ purpose: "po_attachment", file, targetId: po.id });
         if ("attachment" in result) setPo(result.attachment as typeof po);
         pushToast("Attachment added.", "success");

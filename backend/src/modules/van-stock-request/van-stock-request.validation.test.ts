@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   approveVanStockRequestSchema,
+  priorityFilterValues,
+  readPriority,
   declineVanStockRequestSchema,
   closeShortSchema,
   createVanStockRequestSchema,
@@ -75,6 +77,16 @@ describe("createVanStockRequestSchema", () => {
     const ok = createVanStockRequestSchema.parse({ type: "restock", reason: "x", lines: [line] });
     expect(ok.priority).toBe("normal");
     expect(createVanStockRequestSchema.safeParse({ type: "restock", reason: "x", priority: "asap", lines: [line] }).success).toBe(false);
+  });
+
+  // Field Stock is a two-level scale: Normal, or Urgent. A build still offering the retired "high" —
+  // an engineer's phone that hasn't been reinstalled — must not have its request bounced with a
+  // schema error it can do nothing about. The value is understood and stored as the urgent it meant,
+  // so no row is ever written at "high" again.
+  it("takes a stale client's high as urgent rather than refusing it", () => {
+    const stale = createVanStockRequestSchema.parse({ type: "restock", reason: "x", priority: "high", lines: [line] });
+    expect(stale.priority).toBe("urgent");
+    expect(createVanStockRequestSchema.parse({ type: "restock", reason: "x", priority: "urgent", lines: [line] }).priority).toBe("urgent");
   });
 
   it("rejects qty < 1 and non-integers", () => {
@@ -168,6 +180,47 @@ describe("walkInSchema", () => {
   });
   it("rejects duplicate items across lines", () => {
     expect(walkInSchema.safeParse({ engineerId: oid, warehouseId: oid, reason: "counter", lines: [line, { ...line, qty: 5 }] }).success).toBe(false);
+  });
+  // The counter writes the same two-level scale the engineer's composer does — a walk-in is the same
+  // request, raised by someone else, so it reads a stale "high" the same way.
+  it("takes a stale client's high as urgent", () => {
+    const base = { engineerId: oid, warehouseId: oid, reason: "counter", lines: [line] };
+    expect(walkInSchema.parse({ ...base, priority: "high" }).priority).toBe("urgent");
+    expect(walkInSchema.parse({ ...base, priority: "urgent" }).priority).toBe("urgent");
+  });
+});
+
+// Nothing STORES "high" any more; the rows already in Mongo still hold it. `priority` is a plain
+// String there, so closing the scale never touched them — these two functions are the whole reason a
+// legacy row still behaves, whether or not the retirement backfill has been run in a given
+// environment.
+describe("readPriority", () => {
+  it("reads a legacy high row as the urgent it always meant", () => {
+    expect(readPriority("high")).toBe("urgent");
+  });
+  it("passes through the two live values", () => {
+    expect(readPriority("normal")).toBe("normal");
+    expect(readPriority("urgent")).toBe("urgent");
+  });
+  // Anything else is a row no code ever wrote. Reading it as normal keeps a junk value out of the
+  // reviewer's urgent lane rather than inventing a shout.
+  it("falls back to normal for an unrecognised value", () => {
+    expect(readPriority("asap")).toBe("normal");
+    expect(readPriority("")).toBe("normal");
+  });
+});
+
+describe("priorityFilterValues", () => {
+  it("matches legacy high rows when the reviewer filters urgent", () => {
+    expect(priorityFilterValues("urgent")).toEqual(["urgent", "high"]);
+  });
+  // A bookmarked queue URL (?vPriority=high) predates the retirement. Reading it as an exact match
+  // would return nothing at all — a silent zero the reviewer would read as "no urgent requests".
+  it("reads a saved high filter as the urgent filter it now is", () => {
+    expect(priorityFilterValues("high")).toEqual(["urgent", "high"]);
+  });
+  it("leaves every other filter exact", () => {
+    expect(priorityFilterValues("normal")).toEqual(["normal"]);
   });
 });
 // ── Attachment upload contract ──────────────────────────────────────────────────────────────────

@@ -281,6 +281,7 @@ export function EngineersOverview() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const canViewTransfers = can("engineer_stock.view") || can("engineer_stock.transfer");
+  const canExport = can("inventory.export");
 
   const [selected, setSelected] = React.useState<EngineerOverviewRow | null>(null);
 
@@ -300,42 +301,53 @@ export function EngineersOverview() {
 
   return (
     <div className="flex h-full flex-col gap-3">
-      {/* Sub-nav toggle: Engineers / Transfers */}
-      {canViewTransfers && (
-        <div className="flex shrink-0 items-center gap-1 self-start rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-1">
-          <button
-            type="button"
-            onClick={() => setView("list")}
-            className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-bold transition-colors ${
-              view === "list" ? "bg-[var(--accent)] text-white" : "text-[var(--muted)] hover:text-[var(--ink)]"
-            }`}
-          >
-            <Truck className="h-3.5 w-3.5" /> Engineers
-          </button>
-          <button
-            type="button"
-            onClick={() => setView("transfers")}
-            className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-bold transition-colors ${
-              view === "transfers" ? "bg-[var(--accent)] text-white" : "text-[var(--muted)] hover:text-[var(--ink)]"
-            }`}
-          >
-            <ArrowRightLeft className="h-3.5 w-3.5" /> Transfers
-          </button>
-        </div>
-      )}
+      {/* ONE action bar: sub-nav on the left, the export on the right — the shape the IRM and Rentals
+          lenses use in this same hub. The export used to sit in a band of its own below the toggle,
+          right-aligned against an otherwise empty row: ~46px of a full-height page (band + the
+          layout's gap) to show one button, while the row above it had its whole right half free.
+          Rendered only when it would hold something, so a user without either never pays for an
+          empty band. */}
+      {(canViewTransfers || (view === "list" && canExport)) && (
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          {canViewTransfers && (
+            <div className="flex items-center gap-1 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-1">
+              <button
+                type="button"
+                onClick={() => setView("list")}
+                className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-bold transition-colors ${
+                  view === "list" ? "bg-[var(--accent)] text-white" : "text-[var(--muted)] hover:text-[var(--ink)]"
+                }`}
+              >
+                <Truck className="h-3.5 w-3.5" /> Engineers
+              </button>
+              <button
+                type="button"
+                onClick={() => setView("transfers")}
+                className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-bold transition-colors ${
+                  view === "transfers" ? "bg-[var(--accent)] text-white" : "text-[var(--muted)] hover:text-[var(--ink)]"
+                }`}
+              >
+                <ArrowRightLeft className="h-3.5 w-3.5" /> Transfers
+              </button>
+            </div>
+          )}
 
-      {/* Field-stock reconciliation. The screen above is a ROLL-UP (one row per engineer); the file
-          is the per-item detail behind it, which is what a stock count is actually done against.
-          It reuses the positions export filtered to `location=engineer` rather than adding an
-          endpoint — same rows, same permission, and no second definition of "engineer-held stock"
-          to drift from the one the Inventory Hub already uses. */}
-      {view === "list" && can("inventory.export") && (
-        <div className="flex shrink-0 justify-end">
-          <ExportButton
-            label="Export field stock"
-            title="Export every item currently held by an engineer to CSV"
-            onExport={() => svc.exportPositionsCsv({ location: "engineer" })}
-          />
+          {/* Field-stock reconciliation. The screen below is a ROLL-UP (one row per engineer); the file
+              is the per-item detail behind it, which is what a stock count is actually done against.
+              It reuses the positions export filtered to `location=engineer` rather than adding an
+              endpoint — same rows, same permission, and no second definition of "engineer-held stock"
+              to drift from the one the Inventory Hub already uses.
+              `ml-auto` rather than the row's `justify-between`, so it still sits hard right when the
+              Transfers toggle isn't there to push it. */}
+          {view === "list" && canExport && (
+            <div className="ml-auto">
+              <ExportButton
+                label="Export field stock"
+                title="Export every item currently held by an engineer to CSV"
+                onExport={() => svc.exportPositionsCsv({ location: "engineer" })}
+              />
+            </div>
+          )}
         </div>
       )}
 

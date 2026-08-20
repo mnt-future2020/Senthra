@@ -18,6 +18,10 @@ import { PrfStatusBadge, formatDate, formatMoney } from "./prfStatus";
 import type { AuditEntry } from "@/types/audit";
 import type { PurchaseRequest } from "@/types/purchase-request";
 import { uploadDirect } from "@/lib/upload";
+import { shrinkImage } from "@/lib/image";
+import { returnLegSummary } from "@/lib/rentalReturn";
+import { hireDeliveryWarning } from "@/lib/hireDelivery";
+import { Notice } from "@/components/ui/Notice";
 
 const EXT_TYPE: Record<string, string> = { pdf: "pdf", docx: "docx", png: "png", jpg: "jpg", jpeg: "jpg" };
 
@@ -402,6 +406,85 @@ function Overview({ prf }: { prf: PurchaseRequest }) {
         </div>
       </div>
 
+      {prf.rentalItems.length > 0 && (
+        <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+          <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
+            <h3 className="text-sm font-extrabold text-[var(--ink)]">Rental lines</h3>
+            {/* The earliest end date across the hires — the "noted on the PRF" deadline, surfaced
+                where an approver reads the request rather than buried in a row. */}
+            <p className="text-[11px] text-[var(--muted)]">
+              Earliest return{" "}
+              <strong className="text-[var(--ink)]">
+                {formatDate(
+                  prf.rentalItems.reduce((earliest, r) => (r.hireEndDate < earliest ? r.hireEndDate : earliest), prf.rentalItems[0]!.hireEndDate),
+                )}
+              </strong>
+            </p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[760px] text-left text-sm">
+              <thead>
+                <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
+                  <th className="cell-y px-4">Item</th>
+                  <th className="cell-y px-4">Qty</th>
+                  <th className="cell-y px-4">Hire period</th>
+                  <th className="cell-y px-4">Returns by</th>
+                  <th className="cell-y px-4">Delivery</th>
+                  <th className="cell-y px-4">Line Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {prf.rentalItems.map((r) => (
+                  <tr key={r.id} className="border-b border-[var(--border)] last:border-0">
+                    <td className="cell-y px-4">
+                      <div className="font-semibold text-[var(--ink)]">{r.itemName}</div>
+                      {r.rentalItem && <div className="text-[11px] text-[var(--faint)]">{r.rentalItem.code}</div>}
+                    </td>
+                    <td className="cell-y px-4 text-[var(--muted)]">
+                      {r.quantity}
+                      {r.baseUnit ? ` ${r.baseUnit}` : ""}
+                    </td>
+                    <td className="cell-y px-4 text-[var(--muted)]">
+                      {formatDate(r.hireStartDate)} → {formatDate(r.hireEndDate)}
+                      <span className="ml-1 text-[11px] text-[var(--faint)]">({r.hireDays}d)</span>
+                    </td>
+                    <td className="cell-y px-4 font-semibold text-[var(--ink)]">{formatDate(r.hireEndDate)}</td>
+                    <td className="cell-y max-w-[14rem] px-4 text-[var(--muted)]">
+                      {/* The line's OWN address when it has one, otherwise what it actually resolves
+                          to — named, not spelled out, because the order's Delivery panel above
+                          carries that address in full. It used to read "Delivery warehouse"
+                          unconditionally, which is wrong on an order that overrides its delivery
+                          address: the kit goes to the override and the row named the depot. */}
+                      {r.deliveryAddress ? (
+                        <span className="whitespace-pre-line">{r.deliveryAddress}</span>
+                      ) : (
+                        <span className="text-[var(--faint)]">{r.deliveryLocation.label}</span>
+                      )}
+                      {/* The return leg, under the outbound one. Resolved by the server so this can
+                          never name a different place from the order document the supplier reads —
+                          shortened here only when the place is one this cell or the header has
+                          already named, so a third address is the one that prints in full. */}
+                      <div className="mt-1 text-[11px] text-[var(--faint)]">
+                        Back to: {returnLegSummary(r.returnMode, r.returnLocation, r.deliveryAddress)}
+                      </div>
+                      {/* How the price was struck. Without it a reader sees £2,475 and cannot tell
+                          whether that was quoted as a lump or as £55 a day. */}
+                      {r.ratePeriod !== "total" && r.ratePence != null && (
+                        <div className="mt-0.5 text-[11px] text-[var(--faint)]">
+                          {formatMoney(r.ratePence / 100, prf.currency)}/{r.ratePeriod}
+                          {r.priceOverridden ? " · price manually adjusted" : ""}
+                        </div>
+                      )}
+                    </td>
+                    <td className="cell-y px-4 font-semibold text-[var(--ink)]">{formatMoney(r.lineTotal, prf.currency)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       <div className="grid gap-4 lg:grid-cols-2">
         <Card title="Supplier">
           <div className="grid grid-cols-2 gap-3">
@@ -462,6 +545,18 @@ function Overview({ prf }: { prf: PurchaseRequest }) {
             {/* Sits with the warehouse (where) as the matching "when" — it becomes the generated
                 purchase order's expected delivery date. */}
             <Field label="Required by">{formatDate(prf.requiredByDate)}</Field>
+            {/* Advisory: the kit is due after one of the hires has already started. Never a blocked
+                save — some hire companies bill from dispatch. Wording is shared with the form and
+                the purchase order so a user never reads two versions of the same warning. */}
+            {prf.lateHireDelivery && (
+              <Notice
+                msg={{
+                  type: "warn",
+                  text: hireDeliveryWarning(prf.lateHireDelivery.daysLate, prf.lateHireDelivery.earliestHireStart),
+                }}
+                size="xs"
+              />
+            )}
           </div>
         </Card>
         <Card title="Approval">
@@ -498,15 +593,10 @@ function Attachments({ prf, setPrf, canEdit }: { prf: PurchaseRequest; setPrf: (
   const [deleting, setDeleting] = React.useState(false);
   const inputRef = React.useRef<HTMLInputElement>(null);
 
-  const onFile = (file: File) => {
-    const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
-    const fileType = EXT_TYPE[ext];
-    if (!fileType) {
+  const onFile = (rawFile: File) => {
+    const ext = rawFile.name.split(".").pop()?.toLowerCase() ?? "";
+    if (!EXT_TYPE[ext]) {
       pushToast("Unsupported file. Use PDF, DOCX, PNG or JPG.", "alert");
-      return;
-    }
-    if (file.size > 10 * 1024 * 1024) {
-      pushToast("File must be 10 MB or smaller.", "alert");
       return;
     }
     setUploading(true);
@@ -514,6 +604,14 @@ function Attachments({ prf, setPrf, canEdit }: { prf: PurchaseRequest; setPrf: (
     // permissions, same caps, same audit event, same DTO back.
     void (async () => {
       try {
+        // Downscale before measuring. These pickers take site photos as well as paperwork, and a
+        // phone photo clears 10 MB easily — refusing it on its original size would reject a file
+        // that stores as a few hundred KB. PDFs and DOCX come back untouched.
+        const file = await shrinkImage(rawFile);
+        if (file.size > 10 * 1024 * 1024) {
+          pushToast("File must be 10 MB or smaller.", "alert");
+          return;
+        }
         const result = await uploadDirect({ purpose: "prf_attachment", file, targetId: prf.id });
         if ("attachment" in result) setPrf(result.attachment as typeof prf);
         pushToast("Attachment added.", "success");

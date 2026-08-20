@@ -40,8 +40,22 @@
 //                                        "nobody has picked this up yet" queue.
 //   • Master data (Suppliers, IRM catalogue, all *-types, Settings, Audit Log) — no workflow at all.
 //
-// RENTAL — the module does not exist yet. When it ships, its "expiring soon" / "overdue return" keys
-// slot in here as one more ITEMS block + one SOURCE; nothing else in the system needs to change.
+// RENTAL — every key counts LINES on a PURCHASE ORDER, because the PO is the committed hire; a
+// purchase request that never converted hired nothing, so it raises no deadline.
+//
+// A hire is worked by TWO different people and therefore needs two kinds of key, which the first
+// pass missed. The `rentals.*` keys are the PM's: company-wide, rolled up to Inventory, asking "is
+// this hire running away from us?" (ending soon, overdue, should-already-be-here). `wh.rental_intake`
+// is the WAREHOUSE's: scoped to the actor's own doors, rolled up to Warehouses, asking "is there kit
+// to receive?" — and it is the one that was missing. Its absence meant a hire could sit in a
+// warehouse's Rental deliveries pane with a Receive button on it and raise no count anywhere: not on
+// the pane's pill, not on the Incoming stock tab, not on the Warehouses list row, not on the sidebar.
+// The only rental key that touched it, `rentals.awaiting_delivery`, is bounded by the hire START
+// date, so it stayed silent until the hire was ALREADY LATE, and then linked to Inventory rather
+// than to the warehouse holding the Receive button.
+//
+// The two overlap on purpose and neither is a subset of the other: they have different scopes,
+// different owners and different sidebar rows. Collapsing them would silence one of the two jobs.
 
 import * as prfRepo from "#modules/purchase-request/purchase-request.repository.js";
 import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
@@ -195,6 +209,22 @@ export const ATTENTION_ITEMS: AttentionItemMeta[] = [
   // rework" opened every draft in the module, including ones the reader had just started.
   { key: "prf.rework", label: "Rejected — needs rework", perms: ["purchase_requests.submit"], tone: "attention", nav: ATTENTION_NAV.purchaseRequests, href: "/dashboard/purchase-requests?status=rework", hrefPerms: ["purchase_requests.view"] },
 
+  // Rentals — a hire is work a human still owes right up to the moment it goes back, and the
+  // on-hire tab's filters share the very predicates these counts use, so each badge opens exactly
+  // its own rows. They roll up to the INVENTORY row because rentals are reached through the
+  // Inventory Hub (Inventory → Rentals), exactly like the IRM catalogue.
+  { key: "rentals.expiring_soon", label: "Hires ending soon", perms: ["rentals.view"], tone: "attention", nav: ATTENTION_NAV.inventory, href: "/dashboard/inventory?tab=rental&rental=on-hire&status=expiring" },
+  { key: "rentals.overdue", label: "Hires overdue for return", perms: ["rentals.view"], tone: "critical", nav: ATTENTION_NAV.inventory, href: "/dashboard/inventory?tab=rental&rental=on-hire&status=overdue" },
+  // Every deadline above filters on `on_hire`, so a hire nobody has received raises NONE of them.
+  // That is correct — kit that has not arrived cannot be overdue for return — but it means one
+  // forgotten click could leave a hire billing with nothing chasing it. This badge asks about the
+  // step itself, and only once the hire should already have started.
+  //
+  // `?status=late` is the DERIVED window sharing overdueDeliveryWhere with this count. It pointed at
+  // `?status=awaiting` — the whole receiving queue — so the badge read one number and opened a longer
+  // list, which is the same broken promise the registry records for `?status=sent` and `?status=draft`.
+  { key: "rentals.awaiting_delivery", label: "Hires not yet received", perms: ["rentals.view"], tone: "attention", nav: ATTENTION_NAV.inventory, href: "/dashboard/inventory?tab=rental&rental=on-hire&status=late" },
+
   // Purchase Orders
   // ?status=awaiting_approval and ?status=awaiting_send are DERIVED pseudo-statuses sharing the exact
   // predicates these counts use (awaitingApprovalPoWhere / awaitingSendPoWhere) — each queue spans
@@ -202,11 +232,22 @@ export const ATTENTION_ITEMS: AttentionItemMeta[] = [
   // badge counted. awaiting_send is PM-scoped on both sides for an actor without assign_pm.
   { key: "po.awaiting_approval", label: "POs to approve", perms: ["purchase_orders.approve"], tone: "attention", nav: ATTENTION_NAV.purchaseOrders, href: "/dashboard/purchase-orders?status=awaiting_approval", hrefPerms: ["purchase_orders.view"] },
   { key: "po.awaiting_send", label: "Approved — send to supplier", perms: ["purchase_orders.send", "purchase_orders.assign_pm"], tone: "attention", nav: ATTENTION_NAV.purchaseOrders, href: "/dashboard/purchase-orders?status=awaiting_send", hrefPerms: ["purchase_orders.view"] },
+  // Overlaps the two above on a `sent` order that also has goods to receive, and is deliberately NOT
+  // marked a subset: it is neither nested in them (a hire-only order is `sent` with nothing to
+  // receive, so it is here and not there) nor the same work — chasing an acknowledgement and booking
+  // a delivery in are two follow-ups, often by two people holding different permissions. Narrowing
+  // the COUNT to make the row arithmetic tidier would also have to narrow `?status=sent`, or the
+  // badge would open more rows than it counted, which is the failure the notes above guard against.
   { key: "po.awaiting_acceptance", label: "Awaiting supplier acceptance", perms: ["purchase_orders.acknowledge"], tone: "info", nav: ATTENTION_NAV.purchaseOrders, href: "/dashboard/purchase-orders?status=sent", hrefPerms: ["purchase_orders.view"] },
   // ?status=overdue is the DERIVED pseudo-status sharing RECEIVABLE_PO_STATUSES and the same
   // "confirmed ?? expected < start of today" rule as this count — the badge opens exactly its rows,
   // not every sent PO.
-  { key: "po.overdue_delivery", label: "Deliveries overdue", perms: ["purchase_orders.view"], tone: "critical", nav: ATTENTION_NAV.purchaseOrders, href: "/dashboard/purchase-orders?status=overdue" },
+  // A STRICT SUBSET of "Deliveries to receive": `expectedDeliveries` selects through the very same
+  // `receivableWhere()` and then keeps the rows whose ETA has passed. Both sit on the Purchase Orders
+  // row, so adding both counted every late order twice on that badge — the defect the hire predicates
+  // are engineered and tested against ("the three Inventory hire badges never count one line twice").
+  // It still shows as its own chip, and still lends the row its critical tone; only the number folds in.
+  { key: "po.overdue_delivery", label: "Deliveries overdue", perms: ["purchase_orders.view"], tone: "critical", nav: ATTENTION_NAV.purchaseOrders, href: "/dashboard/purchase-orders?status=overdue", subsetOf: "wh.goods_in_waiting" },
   { key: "po.awaiting_close", label: "Received — ready to close", perms: ["purchase_orders.close"], tone: "info", nav: ATTENTION_NAV.purchaseOrders, href: "/dashboard/purchase-orders?status=fully_received", hrefPerms: ["purchase_orders.view"] },
 
   // Jobs
@@ -254,6 +295,19 @@ export const ATTENTION_ITEMS: AttentionItemMeta[] = [
   // Both customer-stock queues sit behind their tab's inner POOL toggle, so the tab id alone would
   // open the company (IRM/GRN) pane and show none of the counted rows.
   { key: "wh.customer_intake", label: "Customer stock to receive", perms: ["stock_requests.complete"], tone: "attention", nav: ATTENTION_NAV.warehouses, warehouseQuery: "tab=incoming&pool=customer" },
+  // The THIRD pane on the same tab, and the one that had no count at all. Every pane of Incoming
+  // stock ends in someone pressing Receive; Company (GRN) and Customer each carried a badge, so a
+  // hire arriving at a warehouse was the only receiving job in the product that announced itself
+  // nowhere — not on the Warehouses row, not on the tab, not on its own pane, not on the list row.
+  //
+  // Counts what the pane LISTS (every hire still awaiting delivery here), not `rentals.awaiting_
+  // delivery`'s narrower "should already be here" set — see countAwaitingHireDeliveries. The two
+  // keys are different jobs for different people and both stay: this is the warehouse's work, that
+  // one is the PM's chase, and collapsing them would silence one of the two.
+  //
+  // the hire-floor keys, because that is what recording the delivery requires — a badge nobody can
+  // act on is noise (RULE 1).
+  { key: "wh.rental_intake", label: "Hire deliveries to receive", perms: ["rentals.hire.receive", "rentals.hire.manage"], tone: "attention", nav: ATTENTION_NAV.warehouses, warehouseQuery: "tab=incoming&pool=rental" },
   { key: "wh.stock_entry_drafts", label: "Received stock to catalogue", perms: ["stock_requests.complete"], tone: "info", nav: ATTENTION_NAV.warehouses, warehouseQuery: "tab=inventory&pool=customer" },
 
   // Inventory. Both queues are the Reorder workbench, which is the only screen that lists shortfalls
@@ -309,6 +363,31 @@ export const ATTENTION_SOURCES: AttentionSource[] = [
         "po.overdue_delivery": eta.overdue,
       };
     },
+  },
+  {
+    id: "rentals",
+    keys: ["rentals.expiring_soon", "rentals.overdue", "rentals.awaiting_delivery"],
+    // Company-wide, not warehouse-scoped: a hire is delivered to a site or a warehouse, and the
+    // person who must chase its return is the PM on the order, not whoever holds that warehouse.
+    run: async ({ dayStart }) => {
+      const [expiring, overdue, awaiting] = await Promise.all([
+        poRepo.countExpiringHires(dayStart),
+        poRepo.countOverdueHires(dayStart),
+        poRepo.countOverdueDeliveryHires(dayStart),
+      ]);
+      return {
+        "rentals.expiring_soon": expiring,
+        "rentals.overdue": overdue,
+        "rentals.awaiting_delivery": awaiting,
+      };
+    },
+  },
+  {
+    id: "hire_intake",
+    keys: ["wh.rental_intake"],
+    // Warehouse-SCOPED, unlike the `rentals` source above: this is the receiving queue at a door the
+    // actor holds, so an actor scoped to one warehouse must not see another's arrivals.
+    run: async ({ scope }) => ({ "wh.rental_intake": await poRepo.countAwaitingHireDeliveries(scope) }),
   },
   {
     id: "jobs",
@@ -437,6 +516,13 @@ export const ATTENTION_ENTITY_SOURCES: AttentionEntitySource[] = [
       const c = await customerRepo.countIntakeByWarehouse(scope);
       return byEntity({ "wh.customer_intake": c.assignmentsOpen, "wh.stock_entry_drafts": c.stockEntryDrafts });
     },
+  },
+  {
+    id: "hire_intake_by_warehouse",
+    dimension: "warehouse",
+    keys: ["wh.rental_intake"],
+    run: async ({ scope }) =>
+      byEntity({ "wh.rental_intake": await poRepo.countAwaitingHireDeliveriesByWarehouse(scope) }),
   },
   {
     id: "customers_by_customer",

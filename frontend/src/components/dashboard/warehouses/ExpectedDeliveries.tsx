@@ -7,6 +7,7 @@ import { AlertTriangle, Check, ChevronDown, ListFilter, PackageCheck, Truck } fr
 
 import { Skeleton } from "@/components/ui/Skeleton";
 import { Pagination } from "@/components/ui/Pagination";
+import { PoCodeLink } from "@/components/dashboard/purchase-orders/PoCodeLink";
 import { listPurchaseOrders } from "@/services/purchase-order.service";
 import { useAuth } from "@/hooks/useAuth";
 import { PO_PRIORITY_LABELS, PoStatusBadge, formatDate } from "@/components/dashboard/purchase-orders/poStatus";
@@ -301,7 +302,8 @@ function WorklistSkeleton() {
   return (
     <div className="flex h-full flex-col gap-3">
       <div className="min-h-0 flex-1 overflow-auto">
-        <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+        <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+          <div className="overflow-x-auto">
           <table className="w-full text-left text-sm" style={{ minWidth: 760 }}>
             <thead>
               <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
@@ -323,6 +325,7 @@ function WorklistSkeleton() {
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       </div>
     </div>
@@ -491,7 +494,8 @@ export function ExpectedDeliveries({
       {menu && (filterSlot ? createPortal(menu, filterSlot) : <div className="flex shrink-0 justify-end">{menu}</div>)}
 
       <div className="min-h-0 flex-1 overflow-auto">
-        <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+        <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
+          <div className="overflow-x-auto">
           <table className="w-full text-left text-sm" style={{ minWidth: 760 }}>
             <thead>
               <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
@@ -510,7 +514,7 @@ export function ExpectedDeliveries({
                 return (
                   <tr key={po.id} className="border-b border-[var(--border)] align-top last:border-0">
                     <td className="cell-y px-4">
-                      <a href={`/dashboard/purchase-orders/${po.code}`} className="font-mono text-xs font-bold text-[var(--accent)] hover:underline">{po.code}</a>
+                      <PoCodeLink code={po.code} className="font-mono text-xs font-bold text-[var(--accent)]" />
                       <div className="mt-1"><PoStatusBadge status={po.status} /></div>
                     </td>
                     <td className="cell-y px-4 font-semibold text-[var(--ink)]">{po.supplierName ?? po.supplier?.name ?? "—"}</td>
@@ -565,15 +569,16 @@ export function ExpectedDeliveries({
               )}
             </tbody>
           </table>
+          </div>
+          <Pagination
+            embedded
+            page={Math.min(page, totalPages)}
+            totalPages={totalPages}
+            total={matchCount}
+            label="deliveries"
+            onPage={setPage}
+          />
         </div>
-        <Pagination
-          embedded
-          page={Math.min(page, totalPages)}
-          totalPages={totalPages}
-          total={matchCount}
-          label="deliveries"
-          onPage={setPage}
-        />
       </div>
     </div>
   );

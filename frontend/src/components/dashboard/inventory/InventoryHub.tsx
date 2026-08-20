@@ -13,6 +13,7 @@ import { AdjustStockForm } from "./AdjustStockForm";
 import { CustomerTransferForm } from "./CustomerTransferForm";
 import { RestoreDamagedDialog } from "./RestoreDamagedDialog";
 import { IrmPanel, IRM_TABS, type IrmTab } from "@/components/dashboard/irm/IrmPanel";
+import { RentalPanel, RENTAL_TABS, type RentalTab } from "@/components/dashboard/rentals/RentalPanel";
 import { TabCount } from "@/components/dashboard/shell/TabCount";
 import { AttentionBar } from "@/components/dashboard/shell/AttentionBar";
 import { ArrowRight, RotateCcw } from "lucide-react";
@@ -21,14 +22,21 @@ import { useAuth } from "@/hooks/useAuth";
 import { useGoodsSocket } from "@/hooks/useGoodsSocket";
 import type { StockPosition } from "@/types/stock-position";
 
-type Lens = "all" | "company" | "customer" | "engineer" | "damaged" | "movements" | "reorder";
+type Lens = "all" | "company" | "rental" | "customer" | "engineer" | "damaged" | "movements" | "reorder";
 type IrmSubTab = "stock" | "catalogue";
 
 // `attention` = a key from the backend attention catalog. Present only where the tab IS a work queue
 // (Reorder). The other lenses are reference views — a count on them would be a metric, not a backlog.
-const TABS: { id: Lens; label: string; attention?: string }[] = [
+// `perm` is present only where a lens needs MORE than inventory.view. Rentals is the first such
+// lens: without this a holder of inventory.view saw a tab that answered 403 and offered no
+// sub-tabs to escape from.
+const TABS: { id: Lens; label: string; attention?: string; perm?: string }[] = [
   { id: "all", label: "All Inventory" },
   { id: "company", label: "IRM" },
+  // Rentals sits beside IRM rather than in the sidebar: to a user these are two catalogues of the
+  // same kind, so they are reached the same way. Hired equipment is still NOT stock — it never
+  // enters Goods In and never becomes a balance — which is why it is its own lens, not a filter.
+  { id: "rental", label: "Rentals", attention: "rentals.overdue", perm: "rentals.view" },
   { id: "customer", label: "Customer" },
   { id: "engineer", label: "Engineer" },
   { id: "damaged", label: "Damaged" },
@@ -78,11 +86,22 @@ export function InventoryHub() {
   // The active lens lives in ?tab= so it survives a refresh and is restored on back-navigation
   // (e.g. returning from an item detail) — same pattern as the Warehouses / IRM modules.
   const tabParam = searchParams.get("tab");
-  const lens: Lens = TABS.some((t) => t.id === tabParam) ? (tabParam as Lens) : "all";
+  const visibleLenses = TABS.filter((t) => !t.perm || can(t.perm));
+  // Clamped to a lens this actor may actually see, so a stale bookmark or a link from someone with
+  // wider rights lands on a real view rather than a permission error.
+  const lens: Lens = visibleLenses.some((t) => t.id === tabParam) ? (tabParam as Lens) : "all";
 
   // The IRM sub-views also live in the URL so they survive a refresh (like the lens ?tab=): the
   // "In stock" vs "Catalogue" toggle is ?irm=, and the Catalogue/Types/Categories sub-tab is ?cat=.
   const irmSubTab: IrmSubTab = searchParams.get("irm") === "catalogue" ? "catalogue" : "stock";
+
+  // Rentals sub-tabs, same shape as the IRM catalogue's: the active one lives in ?rental= so a
+  // refresh — and the deadline badges' deep link — land on the tab they name.
+  const visibleRentalTabs = RENTAL_TABS.filter((t) => can(t.perm));
+  const rentalParam = searchParams.get("rental");
+  const rentalActive: RentalTab = visibleRentalTabs.some((t) => t.id === rentalParam)
+    ? (rentalParam as RentalTab)
+    : (visibleRentalTabs[0]?.id ?? "catalogue");
 
   // IRM Catalogue sub-tabs the user can see, and the effective active one (from ?cat=, clamped to a visible tab).
   const visibleIrmTabs = IRM_TABS.filter((t) => can(t.perm));
@@ -110,6 +129,16 @@ export function InventoryHub() {
     for (const k of ["q", "status", "sort", "page"]) params.delete(k);
     router.replace(`/dashboard/inventory?${params.toString()}`, { scroll: false });
   };
+  const setRentalTab = (v: RentalTab) => {
+    const params = new URLSearchParams(window.location.search);
+    params.set("tab", "rental");
+    params.set("rental", v);
+    // Fresh on nav, matching setIrmCatTab: ?status belongs to On hire and would silently filter the
+    // catalogue by a value it does not understand — and ?dir / the date period belong to Movements.
+    for (const k of ["q", "status", "sort", "page", "category", "dir", "from", "to", "live"]) params.delete(k);
+    router.replace(`/dashboard/inventory?${params.toString()}`, { scroll: false });
+  };
+
   const [showAdjust, setShowAdjust] = React.useState(false);
   const [transferRow, setTransferRow] = React.useState<StockPosition | null>(null);
   const [restoreRow, setRestoreRow] = React.useState<StockPosition | null>(null);
@@ -145,22 +174,31 @@ export function InventoryHub() {
           that tab pre-filtered to its urgent slice — so this is where they belong, and on a row that
           already exists they cost no vertical space. They previously sat in a block of their own
           above, paying the layout's 20px flex gap on top of their own height. */}
-      <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-[var(--border)]">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => switchLens(t.id)}
-            className={`-mb-px border-b-2 px-3.5 py-2 text-sm transition-colors ${
-              lens === t.id
-                ? "border-[var(--accent)] font-semibold text-[var(--ink)]"
-                : "border-transparent text-[var(--muted)] hover:text-[var(--ink)]"
-            }`}
-          >
-            {t.label}
-            {t.attention ? <TabCount attentionKey={t.attention} /> : null}
-          </button>
-        ))}
-        <AttentionBar nav="/dashboard/inventory" className="ml-auto flex flex-wrap items-center gap-1.5 pb-1.5" />
+      {/* The tabs SCROLL sideways rather than wrapping. Eight lenses plus their badges no longer fit
+          one line on a 1024px laptop, and wrapping spent a second ~38px band — on the page that is
+          already five bands deep — to show one stray tab. Same treatment the IRM detail page's tab
+          strip gets. Horizontal scrolling is the cheap direction here: the vertical axis is the one
+          rows are counted in. */}
+      <div className="flex shrink-0 items-end gap-2 border-b border-[var(--border)]">
+        <div className="flex min-w-0 flex-1 gap-1 overflow-x-auto">
+          {visibleLenses.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => switchLens(t.id)}
+              className={`shrink-0 border-b-2 px-3.5 py-2 text-sm transition-colors ${
+                lens === t.id
+                  ? "border-[var(--accent)] font-semibold text-[var(--ink)]"
+                  : "border-transparent text-[var(--muted)] hover:text-[var(--ink)]"
+              }`}
+            >
+              {t.label}
+              {t.attention ? <TabCount attentionKey={t.attention} /> : null}
+            </button>
+          ))}
+        </div>
+        {/* Outside the scroller: these are the page's alerts, and scrolling them out of sight is the
+            one thing they must never do. */}
+        <AttentionBar nav="/dashboard/inventory" className="flex shrink-0 flex-wrap items-center gap-1.5 pb-1.5" />
       </div>
 
       {/* IRM lens action bar — toggle on the left; Adjust (In stock) or catalogue sub-tabs (Catalogue) on the right */}
@@ -204,6 +242,26 @@ export function InventoryHub() {
                   ))}
                 </div>
               )}
+        </div>
+      )}
+      {/* Rentals lens action bar — the module's own tabs, rendered by the host like IRM's. */}
+      {!formOpen && lens === "rental" && visibleRentalTabs.length > 1 && (
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+          <div className="flex items-center gap-1 rounded-xl border border-[var(--border)] bg-[var(--surface-2)] p-1">
+            {visibleRentalTabs.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setRentalTab(t.id)}
+                className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-bold transition-colors ${
+                  rentalActive === t.id ? "bg-[var(--accent)] text-white" : "text-[var(--muted)] hover:text-[var(--ink)]"
+                }`}
+              >
+                <t.icon className="h-4 w-4" />
+                {t.label}
+              </button>
+            ))}
+          </div>
         </div>
       )}
       {/* Content area — a single full-height region; the table scrolls inside it */}
@@ -259,6 +317,10 @@ export function InventoryHub() {
               <InventoryView key={`company-${refreshKey}`} embedded />
             </div>
           )
+        ) : lens === "rental" ? (
+          <React.Suspense fallback={null}>
+            <RentalPanel key={`rental-${refreshKey}`} embedded tab={rentalActive} />
+          </React.Suspense>
         ) : lens === "customer" ? (
           <StockPositionTable
             key={`customer-${refreshKey}`}

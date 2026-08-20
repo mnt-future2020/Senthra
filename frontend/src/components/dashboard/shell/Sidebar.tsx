@@ -74,6 +74,8 @@ export const NAV: NavItem[] = [
   // warehouse (final, or the pending restock's collection warehouse), so the queue lives in the
   // warehouse detail's "Van Requests" tab and the Overview worklist deep-links straight there.
   { href: "/dashboard/inventory", label: "Inventory", icon: Boxes, perms: ["inventory.view"] },
+  // Rentals has NO top-level entry, exactly like the IRM catalogue: it is reached through the
+  // Inventory Hub (Inventory → Rentals). Its deadline badges surface on the Inventory row.
   {
     // Only the perms that map to a real Settings section (see SettingsPanel). Master-data view perms
     // (warehouse/supplier/IRM types + IRM categories, and customer stock categories) belong to their

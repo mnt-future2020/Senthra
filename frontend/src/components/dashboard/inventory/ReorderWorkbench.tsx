@@ -11,9 +11,11 @@ import type { GenerateReorderResult } from "@/services/purchase-request.service"
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { Modal } from "@/components/ui/Modal";
+import { Pagination } from "@/components/ui/Pagination";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { Select } from "@/components/ui/Select";
-import { tableMinWidth } from "@/components/ui/tableLayout";
+import { FilterPopover } from "@/components/ui/FilterPopover";
+import { CELL_ONE_LINE, tableMinWidth } from "@/components/ui/tableLayout";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { formatMoney } from "./inventoryStatus";
 
@@ -62,6 +64,42 @@ export function mergeVisibleSelection(prev: ReadonlySet<string>, visibleKeys: re
     else next.add(k);
   }
   return next;
+}
+
+/**
+ * What the header checkbox should show.
+ *
+ * It acts on the whole FILTERED set, not the page — one click still selects every matching row,
+ * which is the point of a bulk workbench and is what `chosen` and the confirm dialog read. But once
+ * the table is paged, "every row I can see is ticked" stops meaning "all selected", so a two-state
+ * box renders EMPTY above twenty ticked rows and reads as broken. "some" is the honest third state
+ * and maps to the checkbox's own `indeterminate`.
+ */
+export function selectAllState(selectedCount: number, selectableCount: number): "none" | "some" | "all" {
+  if (selectableCount === 0 || selectedCount === 0) return "none";
+  return selectedCount >= selectableCount ? "all" : "some";
+}
+
+/** How many rows the workbench draws at once. Matches the app's other list views. */
+export const REORDER_PAGE_SIZE = 20;
+
+export const pageCount = (total: number, pageSize = REORDER_PAGE_SIZE): number =>
+  Math.max(1, Math.ceil(total / pageSize));
+
+/**
+ * The rows to DRAW for a page — nothing else.
+ *
+ * Paging here is deliberately a rendering concern and must stay one. Every selection helper
+ * (`selectableRows`, `allSelected`, `toggleAll`) and `chosen` keep reading the full filtered set, so
+ * ticking rows on page 1 and generating from page 3 raises exactly the PRFs the confirm dialog
+ * listed. Letting the selection follow the page instead would silently raise fewer.
+ *
+ * The page is CLAMPED rather than trusted: narrowing a filter while sitting on page 3 must land on
+ * the last page, not on a blank table with no way back.
+ */
+export function pageSlice<T>(rows: readonly T[], page: number, pageSize = REORDER_PAGE_SIZE): T[] {
+  const safe = Math.min(Math.max(1, page), pageCount(rows.length, pageSize));
+  return rows.slice((safe - 1) * pageSize, safe * pageSize) as T[];
 }
 
 // Expanded row: the calculation breakdown (why this number) + a surplus panel showing other
@@ -159,21 +197,55 @@ export function ReorderWorkbench() {
 
   // Selection + per-row edited quantity, keyed item|warehouse. Editing a qty does NOT auto-select.
   const [selected, setSelected] = React.useState<Set<string>>(new Set());
+  const [page, setPage] = React.useState(1);
   const [qtyOverrides, setQtyOverrides] = React.useState<Record<string, string>>({});
   const [expanded, setExpanded] = React.useState<string | null>(null);
 
-  const [search, setSearch] = React.useState("");
-  const [warehouseFilter, setWarehouseFilter] = React.useState("");
-  const [supplierFilter, setSupplierFilter] = React.useState("");
-  const [categoryFilter, setCategoryFilter] = React.useState("");
-  const [reasonFilter, setReasonFilter] = React.useState("");
+  const [search, setSearchRaw] = React.useState("");
+  const [warehouseFilter, setWarehouseFilterRaw] = React.useState("");
+  const [supplierFilter, setSupplierFilterRaw] = React.useState("");
+  const [categoryFilter, setCategoryFilterRaw] = React.useState("");
+  const [reasonFilter, setReasonFilterRaw] = React.useState("");
   // Seeded from ?critical=1, which is where the "Critical stock" badge lands. That badge counts
   // exactly the rows this checkbox leaves on screen (getReorderSummary's criticalCount is
   // `actionable.filter(s => s.critical)`), so arriving with the box already ticked is what makes the
   // number and the list the same set. It is a normal filter afterwards — untick and the URL is not
   // rewritten, because the user is now browsing, not following a badge.
-  const [criticalOnly, setCriticalOnly] = React.useState(() => searchParams.get("critical") === "1");
-  const [showCovered, setShowCovered] = React.useState(false);
+  const [criticalOnly, setCriticalOnlyRaw] = React.useState(() => searchParams.get("critical") === "1");
+  const [showCovered, setShowCoveredRaw] = React.useState(false);
+
+  // EVERY filter change returns to page 1, and it is wired here rather than at the call sites so a
+  // filter added later cannot forget. Without it, narrowing to fewer rows than the current page
+  // holds and then widening again drops the user on a page they never asked for: filter down to 5
+  // rows while on page 3, clear the filter, and 45 rows come back showing page 3.
+  const onFilterChange =
+    <T,>(set: React.Dispatch<React.SetStateAction<T>>) =>
+    (value: React.SetStateAction<T>) => {
+      setPage(1);
+      set(value);
+    };
+  const setSearch = onFilterChange(setSearchRaw);
+  const setWarehouseFilter = onFilterChange(setWarehouseFilterRaw);
+  const setSupplierFilter = onFilterChange(setSupplierFilterRaw);
+  const setCategoryFilter = onFilterChange(setCategoryFilterRaw);
+  const setReasonFilter = onFilterChange(setReasonFilterRaw);
+  const setCriticalOnly = onFilterChange(setCriticalOnlyRaw);
+  const setShowCovered = onFilterChange(setShowCoveredRaw);
+  // What the Filters trigger counts, and what its Clear resets. The SEARCH box is deliberately not
+  // included: it stays out on the row, and badging a filter the user can already see reads as a
+  // second, phantom one.
+  const activeFilterCount =
+    [warehouseFilter, supplierFilter, categoryFilter, reasonFilter].filter(Boolean).length +
+    (criticalOnly ? 1 : 0) +
+    (showCovered ? 1 : 0);
+  const clearFilters = () => {
+    setWarehouseFilter("");
+    setSupplierFilter("");
+    setCategoryFilter("");
+    setReasonFilter("");
+    setCriticalOnly(false);
+    setShowCovered(false);
+  };
 
   const [confirmOpen, setConfirmOpen] = React.useState(false);
   const [requiredBy, setRequiredBy] = React.useState("");
@@ -249,8 +321,19 @@ export function ReorderWorkbench() {
       else next.add(key);
       return next;
     });
+  // Paging is presentation only — see pageSlice. `rows` (the filtered set) is what everything below
+  // still measures, so selection is untouched by which page is on screen.
+  const totalPages = pageCount(rows.length);
+  // Filtering down to fewer rows than the current page holds must not strand the user on a blank
+  // table. Handled by CLAMPING every read rather than by correcting the state in an effect: pageSlice
+  // clamps, and the footer is handed a clamped `page` too, so the next/prev buttons step from the
+  // page actually on screen. Same rule the Expected-deliveries worklist uses.
+  const pageRows = pageSlice(rows, page);
+
   const selectableRows = rows.filter(orderable);
-  const allSelected = selectableRows.length > 0 && selectableRows.every((s) => selected.has(rowKey(s)));
+  const selectedSelectableCount = selectableRows.filter((s) => selected.has(rowKey(s))).length;
+  const headerState = selectAllState(selectedSelectableCount, selectableRows.length);
+  const allSelected = headerState === "all";
   const toggleAll = () =>
     setSelected((prev) => mergeVisibleSelection(prev, selectableRows.map(rowKey), allSelected));
 
@@ -368,36 +451,42 @@ export function ReorderWorkbench() {
 
   return (
     <div className="flex h-full flex-col gap-3">
-      {/* Freshness + filters + generate */}
-      {/* lg:flex-wrap is load-bearing — without it this becomes a single unwrappable row at lg and
-          above, and with a search box, four selects, two checkboxes, a timestamp and two buttons it
-          overflowed the card at 1024px: "Critical only" and "Show covered" were clipped off the
-          right edge with no way to reach them. Wrapping costs a second line; clipping costs the
-          control entirely. */}
-      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:flex-wrap lg:items-center">
-        <div className="relative w-full lg:max-w-xs">
+      {/* Freshness + filters + generate.
+          Search, Refresh and Generate stay on the row; the four selects and the two toggles fold
+          behind one trigger. Even after shortening every label below xl, a search box + four selects
+          + two checkboxes + a timestamp + two buttons still ran onto a second line at 1024px — ~56px
+          of a full-height page, and this is a workbench: the rows below are what you came to read and
+          tick. The trigger carries the ACTIVE count, so a narrowed list can never be mistaken for a
+          short one. Same component the stock positions, inventory and movement lists use. */}
+      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:flex-wrap sm:items-center">
+        <div className="relative w-full sm:max-w-xs sm:flex-1">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search item, code or SKU…" className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]" />
         </div>
-        <Select size="sm" value={warehouseFilter} onChange={setWarehouseFilter} options={[{ value: "", label: "All warehouses" }, ...warehouseOptions]} ariaLabel="Filter by warehouse" />
-        {supplierOptions.length > 0 && (
-          <Select size="sm" value={supplierFilter} onChange={setSupplierFilter} options={[{ value: "", label: "All suppliers" }, ...supplierOptions]} ariaLabel="Filter by supplier" />
-        )}
-        {categoryOptions.length > 0 && (
-          <Select size="sm" value={categoryFilter} onChange={setCategoryFilter} options={[{ value: "", label: "All categories" }, ...categoryOptions]} ariaLabel="Filter by category" />
-        )}
-        <Select size="sm" value={reasonFilter} onChange={setReasonFilter} options={[{ value: "", label: "All reasons" }, ...(Object.keys(REASON_LABELS) as ReorderReason[]).map((r) => ({ value: r, label: REASON_LABELS[r] }))]} ariaLabel="Filter by reason" />
-        <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-xs font-semibold text-[var(--muted)]" title="Show only items at or below their critical level">
-          <input type="checkbox" checked={criticalOnly} onChange={(e) => setCriticalOnly(e.target.checked)} className="h-4 w-4 accent-[var(--neg)]" />
-          Critical only
-        </label>
-        {coveredCount > 0 && (
-          <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-xs font-semibold text-[var(--muted)]" title="Also show items that are low but already covered by incoming stock — nothing to buy">
-            <input type="checkbox" checked={showCovered} onChange={(e) => setShowCovered(e.target.checked)} className="h-4 w-4 accent-[var(--accent)]" />
-            Show covered ({coveredCount})
+        <FilterPopover activeCount={activeFilterCount} onClear={clearFilters}>
+          <Select size="sm" value={warehouseFilter} onChange={setWarehouseFilter} options={[{ value: "", label: "All warehouses" }, ...warehouseOptions]} ariaLabel="Filter by warehouse" />
+          {supplierOptions.length > 0 && (
+            <Select size="sm" value={supplierFilter} onChange={setSupplierFilter} options={[{ value: "", label: "All suppliers" }, ...supplierOptions]} ariaLabel="Filter by supplier" />
+          )}
+          {categoryOptions.length > 0 && (
+            <Select size="sm" value={categoryFilter} onChange={setCategoryFilter} options={[{ value: "", label: "All categories" }, ...categoryOptions]} ariaLabel="Filter by category" />
+          )}
+          <Select size="sm" value={reasonFilter} onChange={setReasonFilter} options={[{ value: "", label: "All reasons" }, ...(Object.keys(REASON_LABELS) as ReorderReason[]).map((r) => ({ value: r, label: REASON_LABELS[r] }))]} ariaLabel="Filter by reason" />
+          {/* The two toggles narrow the list exactly as the selects do, so they belong beside them —
+              and they count towards the badge for the same reason. Show covered stays discoverable
+              because the empty state names it: "turn on Show covered to view". */}
+          <label className="flex cursor-pointer items-center gap-1.5 text-xs font-semibold text-[var(--muted)]" title="Show only items at or below their critical level">
+            <input type="checkbox" checked={criticalOnly} onChange={(e) => setCriticalOnly(e.target.checked)} className="h-4 w-4 accent-[var(--neg)]" />
+            Critical only
           </label>
-        )}
-        <div className="flex items-center gap-2 lg:ml-auto">
+          {coveredCount > 0 && (
+            <label className="flex cursor-pointer items-center gap-1.5 text-xs font-semibold text-[var(--muted)]" title="Also show items that are low but already covered by incoming stock — nothing to buy">
+              <input type="checkbox" checked={showCovered} onChange={(e) => setShowCovered(e.target.checked)} className="h-4 w-4 accent-[var(--accent)]" />
+              Show covered ({coveredCount})
+            </label>
+          )}
+        </FilterPopover>
+        <div className="flex items-center gap-2 sm:ml-auto">
           {/* The timestamp and the Refresh label drop below xl. Both are the least load-bearing things
               in this row — the timestamp is informational, and Refresh keeps its icon, title and
               aria-label — so shedding them buys width for the controls that actually filter. */}
@@ -465,33 +554,56 @@ export function ReorderWorkbench() {
             <table className="w-full text-left text-sm" style={{ minWidth: TABLE_MIN_WIDTH }}>
               <thead>
                 <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
-                  <th className="w-10 px-3 py-3">
-                    <input type="checkbox" checked={allSelected} onChange={toggleAll} aria-label="Select all" className="h-4 w-4 accent-[var(--accent)]" />
+                  <th className="w-10 cell-y px-3">
+                    {/* Acts on every row matching the filters, not just this page — the label says
+                        so, and `indeterminate` is what stops it reading as empty above a page of
+                        ticked rows. Set through a callback ref because `indeterminate` is a DOM
+                        property with no HTML attribute. */}
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      ref={(el) => {
+                        if (el) el.indeterminate = headerState === "some";
+                      }}
+                      onChange={toggleAll}
+                      disabled={selectableRows.length === 0}
+                      aria-label={
+                        allSelected
+                          ? `Deselect all ${selectableRows.length} matching items`
+                          : `Select all ${selectableRows.length} matching items`
+                      }
+                      title={
+                        allSelected
+                          ? `Deselect all ${selectableRows.length} items matching the filters`
+                          : `Select all ${selectableRows.length} items matching the filters`
+                      }
+                      className="h-4 w-4 accent-[var(--accent)]"
+                    />
                   </th>
-                  <th className="px-3 py-3">Item</th>
-                  <th className="px-3 py-3">Warehouse</th>
-                  <th className="px-3 py-3 text-right">On hand</th>
-                  <th className="px-3 py-3 text-right">Available</th>
-                  <th className="px-3 py-3 text-right">On order</th>
-                  <th className="px-3 py-3 text-right">Open PRF</th>
-                  <th className="px-3 py-3 text-right" title="Active jobs' planned-but-unissued kit quantity drawing from this warehouse">Planned</th>
-                  <th className="px-3 py-3 text-right">Projected</th>
-                  <th className="px-3 py-3 text-right">Reorder lvl</th>
-                  <th className="px-3 py-3">Suggested</th>
-                  <th className="px-3 py-3">Reason</th>
-                  <th className="px-3 py-3">Supplier</th>
-                  <th className="w-8 px-2 py-3" />
+                  <th className="cell-y px-3">Item</th>
+                  <th className="cell-y px-3">Warehouse</th>
+                  <th className="cell-y px-3 text-right">On hand</th>
+                  <th className="cell-y px-3 text-right">Available</th>
+                  <th className="cell-y px-3 text-right">On order</th>
+                  <th className="cell-y px-3 text-right">Open PRF</th>
+                  <th className="cell-y px-3 text-right" title="Active jobs' planned-but-unissued kit quantity drawing from this warehouse">Planned</th>
+                  <th className="cell-y px-3 text-right">Projected</th>
+                  <th className="cell-y px-3 text-right">Reorder lvl</th>
+                  <th className="cell-y px-3">Suggested</th>
+                  <th className="cell-y px-3">Reason</th>
+                  <th className="cell-y px-3">Supplier</th>
+                  <th className="w-8 cell-y px-2" />
                 </tr>
               </thead>
               <tbody>
-                {rows.map((s) => {
+                {pageRows.map((s) => {
                   const key = rowKey(s);
                   const selectable = orderable(s);
                   const isOpen = expanded === key;
                   return (
                     <React.Fragment key={key}>
                       <tr className={`border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]/60 ${s.covered ? "opacity-60" : ""}`}>
-                        <td className="px-3 py-2.5">
+                        <td className="cell-y px-3">
                           <input
                             type="checkbox"
                             checked={selected.has(key)}
@@ -510,19 +622,28 @@ export function ReorderWorkbench() {
                             className="h-4 w-4 accent-[var(--accent)] disabled:opacity-40"
                           />
                         </td>
-                        <td className="px-3 py-2.5">
-                          <div className="font-semibold text-[var(--ink)]">{s.itemName}</div>
-                          <div className="font-mono text-[11px] text-[var(--faint)]">{s.itemCode}{s.sku ? ` · ${s.sku}` : ""}</div>
+                        {/* Name and code on ONE line, name truncating first — the same treatment the
+                            other inventory tables get. A stacked pair is ~19px per row, and this is
+                            the widest table in the hub (twelve columns), so it is the one screen
+                            where every row of extra height is felt twice. */}
+                        <td className="cell-y px-3">
+                          <div className="flex items-center gap-2">
+                            <span className="min-w-0 truncate font-semibold text-[var(--ink)]" title={s.itemName}>{s.itemName}</span>
+                            <span className="shrink-0 font-mono text-[11px] text-[var(--faint)]">{s.itemCode}{s.sku ? ` · ${s.sku}` : ""}</span>
+                          </div>
                         </td>
-                        <td className="px-3 py-2.5 text-[var(--muted)]">{s.warehouseName}</td>
-                        <td className={`px-3 py-2.5 text-right font-semibold ${s.onHand < 0 ? "text-[var(--neg)]" : "text-[var(--ink)]"}`}>{s.onHand}</td>
-                        <td className="px-3 py-2.5 text-right text-[var(--muted)]">{s.available}</td>
-                        <td className="px-3 py-2.5 text-right text-[var(--muted)]">{s.incoming > 0 ? `+${s.incoming}` : "—"}</td>
-                        <td className="px-3 py-2.5 text-right text-[var(--muted)]">{s.openPrf > 0 ? s.openPrf : "—"}</td>
-                        <td className="px-3 py-2.5 text-right text-[var(--muted)]">{s.plannedDemand > 0 ? `−${s.plannedDemand}` : "—"}</td>
-                        <td className={`px-3 py-2.5 text-right font-semibold ${s.projected < 0 ? "text-[var(--neg)]" : "text-[var(--ink)]"}`}>{s.projected}</td>
-                        <td className="px-3 py-2.5 text-right text-[var(--muted)]">{s.reorderLevel ?? "—"}</td>
-                        <td className="px-3 py-2.5">
+                        {/* Truncate rather than wrap: "London Fulfillment Centre" in a 178px column was breaking
+                            over two lines and taking the whole row to 65px. Twelve columns share this table, so
+                            the long-text ones each need their own ceiling — full value on `title`. */}
+                        <td className={`cell-y px-3 text-[var(--muted)] ${CELL_ONE_LINE}`} title={s.warehouseName}>{s.warehouseName}</td>
+                        <td className={`cell-y px-3 text-right font-semibold ${s.onHand < 0 ? "text-[var(--neg)]" : "text-[var(--ink)]"}`}>{s.onHand}</td>
+                        <td className="cell-y px-3 text-right text-[var(--muted)]">{s.available}</td>
+                        <td className="cell-y px-3 text-right text-[var(--muted)]">{s.incoming > 0 ? `+${s.incoming}` : "—"}</td>
+                        <td className="cell-y px-3 text-right text-[var(--muted)]">{s.openPrf > 0 ? s.openPrf : "—"}</td>
+                        <td className="cell-y px-3 text-right text-[var(--muted)]">{s.plannedDemand > 0 ? `−${s.plannedDemand}` : "—"}</td>
+                        <td className={`cell-y px-3 text-right font-semibold ${s.projected < 0 ? "text-[var(--neg)]" : "text-[var(--ink)]"}`}>{s.projected}</td>
+                        <td className="cell-y px-3 text-right text-[var(--muted)]">{s.reorderLevel ?? "—"}</td>
+                        <td className="cell-y px-3">
                           {s.covered ? (
                             <span className="text-[var(--faint)]" title="Already covered by incoming stock — nothing to order">—</span>
                           ) : (
@@ -536,7 +657,7 @@ export function ReorderWorkbench() {
                             />
                           )}
                         </td>
-                        <td className="px-3 py-2.5">
+                        <td className="cell-y px-3">
                           {s.covered ? (
                             <span className="inline-flex whitespace-nowrap rounded-full bg-[var(--pos)]/12 px-2 py-0.5 text-[10px] font-bold text-[var(--pos)]" title="Physically low but already covered by incoming stock">Covered</span>
                           ) : (
@@ -548,7 +669,7 @@ export function ReorderWorkbench() {
                             </span>
                           )}
                         </td>
-                        <td className="px-3 py-2.5">
+                        <td className={`cell-y px-3 ${CELL_ONE_LINE}`} title={s.primarySupplier?.name ?? "No primary supplier"}>
                           {s.primarySupplier ? (
                             s.primarySupplier.status === "active" ? (
                               <span className="text-[var(--muted)]">{s.primarySupplier.name}</span>
@@ -561,7 +682,7 @@ export function ReorderWorkbench() {
                             <span className="text-[11px] font-semibold text-[var(--warn,#d97706)]" title="This item has no primary supplier — set one on the IRM item to enable generation.">No supplier</span>
                           )}
                         </td>
-                        <td className="px-2 py-2.5">
+                        <td className="cell-y px-2">
                           <button type="button" onClick={() => setExpanded(isOpen ? null : key)} aria-label="Show calculation" className="rounded-lg p-1.5 text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--ink)]">
                             <ChevronDown className={`h-4 w-4 transition-transform ${isOpen ? "rotate-180" : ""}`} />
                           </button>
@@ -578,6 +699,19 @@ export function ReorderWorkbench() {
               </tbody>
             </table>
           </div>
+        )}
+        {rows.length > 0 && (
+          <Pagination
+            embedded
+            page={Math.min(page, totalPages)}
+            totalPages={totalPages}
+            total={rows.length}
+            label="items"
+            onPage={setPage}
+            // Selection spans the whole filtered set, not the page — say so, but only once there
+            // is more than one page to span.
+            note={selected.size > 0 && totalPages > 1 ? `${selected.size} selected across all pages` : undefined}
+          />
         )}
       </div>
 

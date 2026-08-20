@@ -2,6 +2,7 @@ import React, { useCallback, useRef, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 import { Image } from "expo-image";
 import * as ImagePicker from "expo-image-picker";
+
 import { useRouter } from "expo-router";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import {
@@ -15,6 +16,7 @@ import {
 } from "@/services/account.service";
 import { lookupPostcode } from "@/services/geo.service";
 import { principalName, useAuth } from "@/lib/auth";
+import { MAX_UPLOAD_BYTES, shrinkImage } from "@/lib/image";
 import { useLoad } from "@/lib/useLoad";
 import { useToast } from "@/lib/toast";
 import {
@@ -33,7 +35,6 @@ import {
 import { colors } from "@/lib/theme";
 import type { SessionInfo } from "@/types";
 
-const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 
 // ── Web AccountPanel helpers, ported ──────────────────────────────────────────
 
@@ -98,8 +99,19 @@ async function pickImage(): Promise<{ dataUri: string; fileName: string } | { er
   if (!asset || !base64) return null;
   const mime = asset.mimeType ?? "image/jpeg";
   if (mime !== "image/png" && mime !== "image/jpeg") return { error: "Use a PNG or JPG image." };
-  if ((asset.fileSize ?? base64.length * 0.75) > MAX_IMAGE_BYTES) return { error: "Image must be under 2 MB." };
-  return { dataUri: `data:${mime};base64,${base64}`, fileName: asset.fileName ?? "image.jpg" };
+
+  // Downscale FIRST, then measure. The old check read the picked file's size, so a phone photo was
+  // refused for being 4 MB when what we would actually upload is a few hundred KB — the same defect
+  // the web pickers had, and the user was told to go and shrink it by hand.
+  const shrunk = await shrinkImage(asset.uri, base64, asset.width ?? 0, asset.height ?? 0, mime);
+  if (shrunk.bytes > MAX_UPLOAD_BYTES) return { error: "Image must be under 2 MB." };
+  // Named after what the URI actually HOLDS. A PNG that skipped the downscale stays a PNG, and one
+  // that went through it is re-encoded as PNG too (alpha is load-bearing here — this same picker
+  // supplies the signature printed on the PO). Trusting the picked name would label a re-encoded
+  // file with the extension it no longer has.
+  const ext = shrunk.mimeType === "image/png" ? "png" : "jpg";
+  const stem = (asset.fileName ?? "image").replace(/\.[^/.]+$/, "") || "image";
+  return { dataUri: shrunk.dataUri, fileName: `${stem}.${ext}` };
 }
 
 export default function AccountScreen() {

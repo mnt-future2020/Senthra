@@ -107,6 +107,7 @@ describe("attention catalog integrity", () => {
     "wh.to_issue", "wh.awaiting_return", "wh.overdue_holdings", // warehouse detail → Goods Management
     "wh.van_requests", "wh.van_returns", // warehouse detail → Field Stock Requests
     "wh.customer_intake", "wh.stock_entry_drafts", // warehouse detail → Incoming / Inventory, customer pool
+    "wh.rental_intake", // warehouse detail → Incoming, rental pool (Receive lives on that pane)
     "cust.stock_requests", "cust.awaiting_assignment", // customer detail → Submissions tab
     "cust.portal_invites", // customer detail → portal users
   ]);
@@ -152,7 +153,7 @@ describe("attention catalog integrity", () => {
     "/dashboard/purchase-orders": ["status", "awaiting"],
     "/dashboard/jobs": ["status", "customer", "engineer", "q"],
     "/dashboard/goods-in": ["status"],
-    "/dashboard/inventory": ["status", "tab", "critical"],
+    "/dashboard/inventory": ["status", "tab", "critical", "rental"],
     "/dashboard/customers": ["tab"],
   };
 
@@ -168,7 +169,14 @@ describe("attention catalog integrity", () => {
     // `rework` is derived — buildWhere resolves it from reworkPrfWhere, the predicate the badge counts.
     "/dashboard/purchase-requests?status": ["rework", "draft", "submitted", "approved", "converted", "cancelled"],
     "/dashboard/goods-in?status": ["draft", "completed", "cancelled"],
-    "/dashboard/inventory?tab": ["all", "company", "customer", "engineer", "damaged", "movements", "reorder"],
+    "/dashboard/inventory?tab": ["all", "company", "rental", "customer", "engineer", "damaged", "movements", "reorder"],
+    "/dashboard/inventory?rental": ["catalogue", "on-hire", "categories"],
+    // All three are DERIVED windows, resolved from the same expiringSoonWhere / overdueWhere /
+    // awaitingDeliveryWhere the badges count — so each badge opens exactly its own rows rather than
+    // every live hire.
+    // `late` is the narrower half of `awaiting` — nothing arrived AND the hire has started — and is
+    // the one the "Hires not yet received" badge counts.
+    "/dashboard/inventory?status": ["all", "awaiting", "late", "expiring", "overdue"],
   };
 
   it("passes filter VALUES the destination screen knows", () => {
@@ -212,16 +220,22 @@ describe("attention catalog integrity", () => {
     }
   });
 
-  // A subset is only counted correctly if its parent is visible to the same people; otherwise an actor
-  // holding just the child's permission sees a chip whose count never reaches the badge.
-  it("a subset is gated by the same permissions as its parent", () => {
+  // A subset MAY be gated differently from its parent — "Deliveries overdue" is `purchase_orders.view`
+  // while its parent "Deliveries to receive" is `goods_in.create`, so a project manager sees one and
+  // not the other. What makes that safe is the rollup, which stands a subset down only when the parent
+  // is permitted for THAT actor (attention.service, step 5). This pins the pairing the rule depends
+  // on: whatever the permissions are, the child must be reachable by somebody, and every subset must
+  // still name a real parent on the same row (asserted above).
+  it("a subset whose parent is gated differently is still counted for the actor who sees only it", () => {
     const byKey = new Map(ATTENTION_ITEMS.map((i) => [i.key, i]));
-    for (const item of ATTENTION_ITEMS) {
-      if (!item.subsetOf) continue;
-      expect([...item.perms].sort(), `"${item.key}" can be visible when "${item.subsetOf}" is not`).toEqual(
-        [...byKey.get(item.subsetOf)!.perms].sort(),
-      );
-    }
+    const divergent = ATTENTION_ITEMS.filter(
+      (i) => i.subsetOf && [...i.perms].sort().join() !== [...byKey.get(i.subsetOf)!.perms].sort().join(),
+    );
+    // Not a prohibition — a record of which pairs rely on the permission-aware rollup, so that
+    // removing that behaviour breaks here rather than silently under-counting a live sidebar row.
+    expect(divergent.map((i) => `${i.key} ⊂ ${i.subsetOf}`).sort()).toEqual([
+      "po.overdue_delivery ⊂ wh.goods_in_waiting",
+    ]);
   });
 
   it("keeps red for genuine emergencies — critical stays a small minority", () => {
@@ -286,5 +300,43 @@ describe("attention entity catalog integrity", () => {
       if (item.href || exempt.has(item.key)) continue;
       expect(split, `"${item.key}" has no href and no per-row count — nothing can reach it`).toContain(item.key);
     }
+  });
+});
+
+// The warehouse's Incoming stock tab has THREE receiving panes — Company (GRN), Customer and Rental
+// deliveries — and every one of them ends in someone pressing Receive. Two carried a count; the
+// third did not, so a hire arriving at a warehouse raised NO badge on the Warehouses row, none on
+// the tab, none on its pane, and none on the Warehouses list row. The only rental key rolls up to
+// Inventory, is company-wide, and fires only once the hire has already started.
+describe("hire deliveries are receiving work like any other pool", () => {
+  const byKey = (key: string) => ATTENTION_ITEMS.find((i) => i.key === key);
+
+  it("gives the rental receiving pane a warehouse-scoped count", () => {
+    const item = byKey("wh.rental_intake");
+    expect(item, "no key counts hires waiting to be received at a warehouse").toBeDefined();
+    expect(item!.nav).toBe(ATTENTION_NAV.warehouses);
+    expect(item!.warehouseQuery).toBe("tab=incoming&pool=rental");
+  });
+
+  // A badge nobody can act on is noise — recording a hire delivery is gated on the hire-floor keys.
+  it("shows it to whoever can actually record the delivery", () => {
+    expect(byKey("wh.rental_intake")!.perms).toEqual(["rentals.hire.receive", "rentals.hire.manage"]);
+  });
+
+  // Every other pane on this tab fans out per warehouse, because the work is done ON a warehouse
+  // page and the aggregate is not openable. Without this the Warehouses LIST row stays silent.
+  it("fans out per warehouse like the other receiving queues", () => {
+    const source = ATTENTION_ENTITY_SOURCES.find((s) => s.keys.includes("wh.rental_intake"));
+    expect(source, "no per-warehouse split — the Warehouses list row would not show it").toBeDefined();
+    expect(source!.dimension).toBe("warehouse");
+  });
+
+  // The two rental keys answer DIFFERENT questions and must not be collapsed: this one is the
+  // warehouse's work ("kit to receive at my door"), rentals.awaiting_delivery is the PM's chase
+  // ("this should already be here"). Different owners, different scope, different sidebar row.
+  it("keeps the chase badge separate from the receiving badge", () => {
+    expect(byKey("rentals.awaiting_delivery")!.nav).toBe(ATTENTION_NAV.inventory);
+    expect(byKey("wh.rental_intake")!.nav).toBe(ATTENTION_NAV.warehouses);
+    expect(byKey("wh.rental_intake")!.tone).toBe("attention");
   });
 });

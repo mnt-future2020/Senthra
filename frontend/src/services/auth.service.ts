@@ -50,10 +50,15 @@ export function resetPassword(token: string, newPassword: string): Promise<void>
 }
 
 // --- Super-admin account (Settings → Account) — /auth/credentials ---
-export function changeEmail(currentPassword: string, email: string): Promise<void> {
+// Name and email travel together: they are one "your account" form and one confirm-with-password
+// step. Either may be omitted — the server refuses a request that changes nothing.
+export function updateAccount(
+  currentPassword: string,
+  changes: { email?: string; name?: string },
+): Promise<void> {
   return api("/auth/credentials", {
     method: "PATCH",
-    body: { currentPassword, email },
+    body: { currentPassword, ...changes },
   }).then(() => undefined);
 }
 

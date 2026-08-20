@@ -51,6 +51,10 @@ export const DEFAULT_STOCK_CODE_PREFIX = "CSE";
 // Matches the historical hardcoded value so existing item codes stay consistent.
 export const DEFAULT_IRM_CODE_PREFIX = "IRM";
 
+// Default display prefix for rental catalogue item codes (RNT-0001). The COUNTER key is a separate,
+// fixed constant in rentalCode.ts — see the note there.
+export const DEFAULT_RENTAL_CODE_PREFIX = "RNT";
+
 // Read-time defaults for the company-profile + regional settings. Applied only when the stored
 // value is blank, so they stay fully overridable (never hardcoded into downstream documents).
 export const DEFAULT_COMPANY_COUNTRY = "United Kingdom";
@@ -106,6 +110,19 @@ function normalizeIrmCodePrefix(raw?: string | null): string {
 export async function getIrmCodePrefix(): Promise<string> {
   const s = await settingsRepo.getOrCreate();
   return normalizeIrmCodePrefix(s.irmCodePrefix);
+}
+
+// Clean a stored/configured RENTAL item-code prefix (uppercase, letters only, 2–5 chars); falls back
+// to the default when invalid/blank so code allocation always has a sane prefix.
+function normalizeRentalCodePrefix(raw?: string | null): string {
+  const clean = (raw ?? "").trim().toUpperCase().replace(/[^A-Z]/g, "");
+  return clean.length >= 2 ? clean.slice(0, 5) : DEFAULT_RENTAL_CODE_PREFIX;
+}
+
+// The effective rental item-code prefix, for the rental module's code allocation.
+export async function getRentalCodePrefix(): Promise<string> {
+  const s = await settingsRepo.getOrCreate();
+  return normalizeRentalCodePrefix(s.rentalCodePrefix);
 }
 
 // --- Branding (all public) ---
@@ -226,6 +243,7 @@ export interface PublicSettings extends PublicBranding {
   employeeIdPrefix: string;
   stockCodePrefix: string;
   irmCodePrefix: string;
+  rentalCodePrefix: string;
   // Company profile (legal identity for documents) + regional formatting. Default-filled on read.
   companyLegalName: string;
   companyRegNumber: string;
@@ -279,6 +297,9 @@ function publicSettings(s: Settings): PublicSettings {
 
     // IRM item-code prefix (effective value, default-filled).
     irmCodePrefix: normalizeIrmCodePrefix(s.irmCodePrefix),
+
+    // Rental item-code prefix (effective value, default-filled).
+    rentalCodePrefix: normalizeRentalCodePrefix(s.rentalCodePrefix),
 
     // Company profile (text fields empty when unset; country/regional default-filled).
     companyLegalName: s.companyLegalName || "",
@@ -358,6 +379,7 @@ export interface UpdateSettingsParams {
   employeeIdPrefix?: string;
   stockCodePrefix?: string;
   irmCodePrefix?: string;
+  rentalCodePrefix?: string;
   // Company profile + regional (all optional; empty string clears back to null → default on read).
   companyLegalName?: string;
   companyRegNumber?: string;
@@ -458,6 +480,9 @@ export async function updateSettings(input: UpdateSettingsParams): Promise<Publi
   }
   if (typeof input.irmCodePrefix === "string") {
     data.irmCodePrefix = input.irmCodePrefix.trim().toUpperCase() || null;
+  }
+  if (typeof input.rentalCodePrefix === "string") {
+    data.rentalCodePrefix = input.rentalCodePrefix.trim().toUpperCase() || null;
   }
 
   // --- Company profile + regional (trim; empty string clears to null → default applies on read) ---

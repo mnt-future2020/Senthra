@@ -20,6 +20,45 @@ import { z } from "zod";
 
 const objectId = z.string().regex(/^[a-f0-9]{24}$/i, "Must be a valid ObjectId.");
 
+// ── Priority: a two-level scale ─────────────────────────────────────────────────────────────────
+//
+// Normal, or Urgent. "high" was retired (2026-08-20, client request): the reviewer's queue is worked
+// oldest-first, and a middle rung between "normal" and "urgent" only asked the engineer to grade
+// their own hurry — three shades of "soon" that the queue never sorted by and nobody could act on
+// differently. Jobs and Purchase Orders keep their own four-level scales; those are separate lists
+// with separate enums, and this is deliberately not a shared constant.
+export const VAN_STOCK_PRIORITIES = ["normal", "urgent"] as const;
+export type VanStockPriority = (typeof VAN_STOCK_PRIORITIES)[number];
+
+// The retired value is UNDERSTOOD on the way in, not refused. A client still offering "high" is a
+// build nobody can fix from here — an engineer's phone that hasn't been reinstalled, a browser tab
+// open since before the deploy — and bouncing their restock with "expected one of normal|urgent"
+// strands them mid-job over a label. Rewriting it to the urgent it always meant costs the request
+// nothing, and the row still lands on a live value: nothing writes "high" to Mongo again.
+//
+// Genuine nonsense ("asap") is still rejected, and the error names only the two live options.
+const prioritySchema = z.preprocess((v) => (v === "high" ? "urgent" : v), z.enum(VAN_STOCK_PRIORITIES)).default("normal");
+
+// Requests raised BEFORE the retirement still hold "high" in Mongo. `priority` is a plain String
+// there, so closing the enum above changed writes only — nothing rewrote the rows already stored,
+// and src/scripts/retire-van-stock-high-priority.ts may not have been run in every environment.
+// Every read goes through this, so a legacy row surfaces as the urgent it always meant instead of a
+// third value the UI has no option for. Anything unrecognised reads as normal: a junk value should
+// not promote itself into the reviewer's urgent lane.
+export function readPriority(stored: string): VanStockPriority {
+  return stored === "urgent" || stored === "high" ? "urgent" : "normal";
+}
+
+/** The STORED values a priority filter must match — the read-side mirror of readPriority(), so
+ *  filtering "Urgent" in the warehouse queue still returns the legacy high rows it renders as urgent.
+ *
+ *  Symmetric on purpose: the queue's filter lives in the URL (`?vPriority=`), so a reviewer's saved
+ *  or shared link can still name the retired level. Matching that exactly would return NOTHING —
+ *  an empty queue reading as "no urgent requests" rather than as a stale bookmark. */
+export function priorityFilterValues(priority: string): string[] {
+  return priority === "urgent" || priority === "high" ? ["urgent", "high"] : [priority];
+}
+
 const requestLineSchema = z.object({
   irmItemId: objectId,
   itemName: z.string().trim().min(1, "Item name is required.").max(300),
@@ -48,7 +87,7 @@ export const createVanStockRequestSchema = z
     type: z.enum(["restock", "return"]),
     reason: z.string().trim().min(1, "Tell the warehouse why you need this.").max(2000),
     notes: z.string().trim().max(2000).optional(),
-    priority: z.enum(["normal", "high", "urgent"]).default("normal"),
+    priority: prioritySchema,
     attachments: z.array(z.string().url("Attachment must be a valid URL.")).max(10).optional(),
     preferredWarehouseId: objectId.optional(), // restock only — REQUIRED there (routes the request)
     warehouseId: objectId.optional(), // return only — final
@@ -142,7 +181,7 @@ export const walkInSchema = z.object({
   engineerId: objectId,
   warehouseId: objectId,
   reason: z.string().trim().min(1, "A reason is required.").max(2000),
-  priority: z.enum(["normal", "high", "urgent"]).default("normal"),
+  priority: prioritySchema,
   notes: z.string().trim().max(2000).optional(),
   lines: dedupedLines,
 });

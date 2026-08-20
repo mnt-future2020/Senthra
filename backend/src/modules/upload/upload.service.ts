@@ -382,6 +382,52 @@ export async function commitAttachment<T>(
   });
 }
 
+/**
+ * Record a finalized asset's URL + metadata on its ledger row, keeping the row PENDING.
+ *
+ * The `deferred-attach` counterpart to releasePending: the browser gets the URL, and the row stays
+ * reapable until a save commits it. See FinalizeMode.
+ */
+export async function stampPendingAsset(asset: VerifiedAsset): Promise<void> {
+  await pendingRepo.stampAsset(asset.publicId, {
+    url: asset.url,
+    fileName: asset.fileName,
+    fileType: asset.fileType,
+    fileSizeBytes: asset.fileSizeBytes,
+  });
+}
+
+/**
+ * Claim a deferred upload by the URL a form is holding, so a save can turn it into a real row.
+ *
+ * Returns null when there is no pending row for that URL — which is the normal case for a URL the
+ * user pasted by hand, and for one already committed by an earlier save. Callers treat both the
+ * same way: keep the URL, own no asset. Never invent an identity for a URL we did not mint.
+ */
+export async function claimDeferredUpload(url: string): Promise<{
+  publicId: string;
+  resourceType: string;
+  fileName: string;
+  fileType: string;
+  fileSizeBytes: number;
+  lease: Date;
+} | null> {
+  const row = await pendingRepo.findByUrl(url);
+  if (!row?.url || !row.fileName || !row.fileType || row.fileSizeBytes == null) return null;
+  const lease = await pendingRepo.claim(row.publicId, LEASE_MS);
+  // Someone else holds it — a double-submit, or the reaper mid-pass. The save keeps the URL and
+  // simply does not own the asset, which is the safe half of the race.
+  if (!lease) return null;
+  return {
+    publicId: row.publicId,
+    resourceType: row.resourceType,
+    fileName: row.fileName,
+    fileType: row.fileType,
+    fileSizeBytes: row.fileSizeBytes,
+    lease,
+  };
+}
+
 /** Release the ledger row for an upload whose URL is handed back to a form (`return-url` purposes). */
 export async function releasePending(publicId: string): Promise<void> {
   await pendingRepo.remove(publicId);

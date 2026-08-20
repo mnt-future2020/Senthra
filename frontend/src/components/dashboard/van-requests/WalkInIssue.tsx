@@ -12,7 +12,7 @@ import { Notice } from "@/components/ui/Notice";
 import { Select } from "@/components/ui/Select";
 import { inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import type { Msg } from "@/components/ui/types";
-import { VanStockCartTable, VanStockItemSearch, type SearchItemOption, type VanStockCartItem } from "./vanRequestUi";
+import { VAN_STOCK_PRIORITY_OPTIONS, VanStockCartTable, VanStockItemSearch, type SearchItemOption, type VanStockCartItem } from "./vanRequestUi";
 
 // Counter issue: the reviewer builds a PRE-APPROVED request for an engineer standing in front of them,
 // then scan-fulfils it. Mirrors the engineer's own composer (same FormSection shell, same shared item
@@ -21,12 +21,6 @@ import { VanStockCartTable, VanStockItemSearch, type SearchItemOption, type VanS
 // A page inside the tab, not a modal: this stacks a catalogue search over a cart the backend lets run
 // to 100 lines, and in a `<Modal size="lg" scrollBody>` that meant three nested scroll regions inside
 // 32rem — the search results, the cart, and the modal body. Three items was already uncomfortable.
-
-const PRIORITY_OPTIONS = [
-  { value: "normal", label: "Normal" },
-  { value: "high", label: "High" },
-  { value: "urgent", label: "Urgent" },
-];
 
 export function WalkInIssue({
   warehouse,
@@ -204,7 +198,7 @@ export function WalkInIssue({
                 </div>
                 <div>
                   <label className={labelCls}>Priority</label>
-                  <Select ariaLabel="Priority" value={priority} onChange={(v) => setPriority(v as VanStockPriority)} options={PRIORITY_OPTIONS} />
+                  <Select ariaLabel="Priority" value={priority} onChange={(v) => setPriority(v as VanStockPriority)} options={VAN_STOCK_PRIORITY_OPTIONS} />
                 </div>
               </div>
               <div className="mt-4">

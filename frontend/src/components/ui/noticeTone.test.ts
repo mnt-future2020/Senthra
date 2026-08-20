@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { NOTICE_SIZE_CLS, NOTICE_TONE_CLS, type NoticeSize, type NoticeType } from "./noticeTone";
 
 const ALL: NoticeType[] = ["success", "warn", "error"];
-const SIZES: NoticeSize[] = ["sm", "md"];
+const SIZES: NoticeSize[] = ["xs", "sm", "md"];
 
 // Notice was `success ? green : red` — a boolean, not a lookup. That shape is why a NON-BLOCKING
 // advisory ("you already have an open request… you can still send this one") rendered in the same
@@ -50,11 +50,20 @@ describe("NOTICE_SIZE_CLS — form-level vs inline density", () => {
     expect(new Set(SIZES.map((s) => NOTICE_SIZE_CLS[s])).size).toBe(SIZES.length);
   });
 
-  // The compact tier has to actually be compact — text-xs against text-sm. Asserted on the type scale
-  // rather than the padding because the type is what drives the block's height.
-  it("makes sm smaller than md", () => {
+  // The compact tiers have to actually be compact — asserted on the type scale rather than the
+  // padding, because the type is what drives the block's height.
+  it("steps the type down at each tier", () => {
+    expect(NOTICE_SIZE_CLS.xs).toContain("text-[11px]");
     expect(NOTICE_SIZE_CLS.sm).toContain("text-xs");
     expect(NOTICE_SIZE_CLS.md).toContain("text-sm");
+  });
+
+  // `xs` exists to sit INSIDE a read-only detail card, among 11px labels and 14px values. At sm it
+  // read as the loudest thing on the card — louder than the figures it was commenting on. 11px is
+  // the register every inline hint in the app already uses (hintCls in styles.ts).
+  it("matches the inline-hint register the rest of the app uses", () => {
+    expect(NOTICE_SIZE_CLS.xs).toContain("text-[11px]");
+    expect(NOTICE_SIZE_CLS.xs).not.toContain("text-xs");
   });
 
   // 39 call sites render a bare <Notice msg={…} /> with no size. They were all written against the

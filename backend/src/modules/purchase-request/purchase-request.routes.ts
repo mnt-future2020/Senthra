@@ -7,7 +7,6 @@ import { validateBody } from "../../middleware/validate.middleware.js";
 import {
   createPurchaseRequestSchema,
   generateReorderSchema,
-  prfAttachmentSchema,
   prfCancelSchema,
   prfRejectSchema,
   prfReopenSchema,
@@ -79,13 +78,6 @@ router.post("/:id/convert", requirePermission("purchase_requests.convert"), writ
 router.post("/:id/duplicate", requirePermission("purchase_requests.create"), writeLimiter, prfController.duplicatePurchaseRequest);
 
 // --- attachments ------------------------------------------------------------
-router.post(
-  "/:id/attachments",
-  requirePermission("purchase_requests.edit"),
-  writeLimiter,
-  validateBody(prfAttachmentSchema),
-  prfController.addAttachment,
-);
 router.delete(
   "/:id/attachments/:attachmentId",
   requirePermission("purchase_requests.edit"),

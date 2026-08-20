@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { UOM_OPTIONS } from "../../utils/uom.js";
+
 import { emailField, optionalPhoneField as phoneField } from "../../utils/validation.js";
 import { postcodeField as ukPostcode } from "../../utils/postcode.js";
 
@@ -24,7 +26,8 @@ const postcodeField = ukPostcode().optional();
 
 // Units of measure (UK telecom field-services stock). Kept in lockstep with the
 // frontend stock item modal list.
-export const UOM_OPTIONS = ["Each", "Metre", "Roll", "Pack", "Box", "Set", "Pair", "Reel"] as const;
+// One vocabulary for the whole app — see utils/uom.ts.
+export { UOM_OPTIONS } from "../../utils/uom.js";
 const uomField = z.preprocess(emptyToUndef, z.enum(UOM_OPTIONS).optional());
 
 // ISO date (from <input type="date">) or empty. Validated as parseable; the service

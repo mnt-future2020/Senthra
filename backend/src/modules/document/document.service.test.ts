@@ -7,11 +7,15 @@ vi.mock("#modules/settings/settings.service.js", () => ({
   getRegionalSettings: vi.fn(),
   getBranding: vi.fn(),
 }));
-vi.mock("#modules/user/user.service.js", () => ({ getSignatureForEmail: vi.fn() }));
+vi.mock("#modules/user/user.service.js", () => ({
+  getSignatureForEmail: vi.fn(),
+  getDisplayNamesForEmails: vi.fn(),
+}));
 
 import type { PurchaseOrderWithRelations } from "#modules/purchase-order/purchase-order.repository.js";
 import { getBranding, getCompanyProfile, getRegionalSettings } from "#modules/settings/settings.service.js";
-import { getSignatureForEmail } from "#modules/user/user.service.js";
+import { getDisplayNamesForEmails, getSignatureForEmail } from "#modules/user/user.service.js";
+import { pdfPageCount, pdfText } from "./document.pdfText.testkit.js";
 import { generatePurchaseOrderPdf } from "./document.service.js";
 
 const company = {
@@ -71,15 +75,16 @@ function po(over: Record<string, unknown> = {}): PurchaseOrderWithRelations {
     },
     warehouse: { name: "Leeds DC", addressLine1: "1 Depot", addressLine2: null, city: "Leeds", county: null, postcode: "LS2", country: "UK" },
     items: [{ itemName: "CAT6", sku: "C6", baseUnit: "Each", notes: null, quantity: 10, unitPricePence: 500, lineTotalPence: 5000 }],
+    // Always supplied by the repository's include; hire rendering is covered in the builder tests.
+    rentalItems: [],
     ...over,
   } as unknown as PurchaseOrderWithRelations;
 }
 
 const isPdf = (b: Buffer) => b.subarray(0, 5).toString("latin1") === "%PDF-";
-// Count page objects in the PDF. The page-tree root is `/Type /Pages` (excluded via the lookahead),
-// so this counts only real pages — guards against the footer accidentally spawning trailing blanks.
-const countPdfPages = (b: Buffer): number =>
-  (b.toString("latin1").match(/\/Type\s*\/Page(?![s])/g) ?? []).length;
+// Counts only real pages (the page-tree root `/Type /Pages` is excluded) — guards against a block
+// accidentally spawning trailing blanks.
+const countPdfPages = pdfPageCount;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -87,6 +92,7 @@ beforeEach(() => {
   (getRegionalSettings as ReturnType<typeof vi.fn>).mockResolvedValue(regional);
   (getBranding as ReturnType<typeof vi.fn>).mockResolvedValue(branding);
   (getSignatureForEmail as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+  (getDisplayNamesForEmails as ReturnType<typeof vi.fn>).mockResolvedValue({});
   // No network in tests — any image fetch fails fast and degrades to null.
   vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
 });
@@ -137,5 +143,35 @@ describe("generatePurchaseOrderPdf", () => {
     );
     expect(isPdf(out.buffer)).toBe(true);
     expect(countPdfPages(out.buffer)).toBe(1);
+  });
+
+  // The signature block used to be dropped WHOLESALE when the issuer had no signature graphic on
+  // file — taking the signer's name with it. An official PO then left the building naming nobody
+  // who issued it. Most users never upload a signature, so this was the normal case, not the edge.
+  it("still names the issuer when they have no signature image on file", async () => {
+    (getSignatureForEmail as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    (getDisplayNamesForEmails as ReturnType<typeof vi.fn>).mockResolvedValue({ "buyer@x.co": { name: "Ava Stone", jobTitle: "Buyer" } });
+    const out = await generatePurchaseOrderPdf(po(), null);
+    expect(isPdf(out.buffer)).toBe(true);
+    expect(pdfText(out.buffer)).toContain("Ava Stone");
+    // ...and their designation, exactly as it appears when they DO have a signature image.
+    expect(pdfText(out.buffer)).toContain("Buyer");
+  });
+
+  it("omits the signature block entirely for an unknown issuer", async () => {
+    (getSignatureForEmail as ReturnType<typeof vi.fn>).mockResolvedValue(null);
+    (getDisplayNamesForEmails as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    const out = await generatePurchaseOrderPdf(po(), null);
+    expect(pdfText(out.buffer)).not.toContain("AUTHORISED BY");
+  });
+
+  // One lookup covers the signer AND the Prepared/Approved By names — the PDF is generated on every
+  // send, every download and every archive, so a per-name round trip would be three queries a hit.
+  it("resolves every person on the document in a single lookup", async () => {
+    await generatePurchaseOrderPdf(po({ createdBy: "raiser@x.co", approvedBy: "boss@x.co" }), null);
+    expect(getDisplayNamesForEmails).toHaveBeenCalledTimes(1);
+    expect((getDisplayNamesForEmails as ReturnType<typeof vi.fn>).mock.calls[0][0]).toEqual(
+      expect.arrayContaining(["raiser@x.co", "boss@x.co", "buyer@x.co"]),
+    );
   });
 });

@@ -39,6 +39,12 @@ export function buildTransport(cfg: SmtpConfig): Transporter {
       cfg.username || cfg.password
         ? { user: cfg.username, pass: cfg.password }
         : undefined,
+    // Explicit timeouts. Without them a hung relay sits for the OS default, which hangs the
+    // caller of every email in the app — and makes the rental reminder's lease length a guess,
+    // since that lease has to outlast one send. 10 + 10 + 30 bounds a send at roughly 50s.
+    connectionTimeout: 10_000,
+    greetingTimeout: 10_000,
+    socketTimeout: 30_000,
     // TLS certificates are verified by default (production-safe). Do NOT disable
     // verification — it would allow MITM attacks. Use a properly-issued cert.
   });

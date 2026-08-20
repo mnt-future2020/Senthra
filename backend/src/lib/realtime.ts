@@ -48,6 +48,20 @@ export const PURCHASE_ORDER_WATCHERS_ROOM = "purchase_orders:watchers";
 // own scoped REST call, so the shared room leaks nothing.
 export const PURCHASE_REQUEST_WATCHERS_ROOM = "purchase_requests:watchers";
 
+// Shared room for the rental (hire) surfaces — every user who can VIEW rentals joins it, so a hire's
+// movements fan out to everyone watching one: the on-hire board, the warehouse's receiving pane, the
+// order's own hire panel. A hire is worked by people in different buildings — a PM raises it, a
+// warehouse books it in, a site reports it damaged, the warehouse hands it back — so a list left open
+// on one desk goes stale the moment another does something to it, and a stale receiving row is how the
+// same delivery gets recorded twice.
+//
+// Its own room rather than the PO watchers' one because the permissions genuinely differ: a warehouse
+// receiver holds `rentals.view` and often not `purchase_orders.view`, so hire events sent to the PO
+// room would never reach the person actually doing the work. Same contract as the rooms above — the
+// payload is a scope-agnostic refetch signal and every client re-pulls through its own scoped REST
+// call, so the shared room leaks nothing.
+export const RENTAL_WATCHERS_ROOM = "rentals:watchers";
+
 // Shared room for the global ATTENTION signal (sidebar badges + the dashboard attention strip).
 // Unlike the rooms above it is NOT permission-gated, and deliberately so: the rooms above are keyed
 // on *.view, but pending work is gated by ACTION permissions (purchase_orders.approve, goods_in.create,
@@ -148,7 +162,7 @@ export function initRealtime(httpServer: HttpServer): IOServer {
 // jobs.view; VAN_STOCK_REVIEWERS_ROOM = van_stock_request.review (same gate as VSR's isReviewer,
 // so a warehouse manager — who lacks jobs.view — still gets a live field-stock board);
 // PURCHASE_ORDER_WATCHERS_ROOM = purchase_orders.view and PURCHASE_REQUEST_WATCHERS_ROOM =
-// purchase_requests.view (the same gates their REST routes use).
+// purchase_requests.view; RENTAL_WATCHERS_ROOM = rentals.view (the same gates their REST routes use).
 // Best-effort: any failure just skips the rooms (REST still works, the surface just won't
 // live-refresh).
 async function joinScopedRooms(socket: Socket, auth: SocketAuth): Promise<void> {
@@ -163,6 +177,7 @@ async function joinScopedRooms(socket: Socket, auth: SocketAuth): Promise<void> 
         Promise.resolve(socket.join(VAN_STOCK_REVIEWERS_ROOM)),
         Promise.resolve(socket.join(PURCHASE_ORDER_WATCHERS_ROOM)),
         Promise.resolve(socket.join(PURCHASE_REQUEST_WATCHERS_ROOM)),
+        Promise.resolve(socket.join(RENTAL_WATCHERS_ROOM)),
       ]);
       return;
     }
@@ -173,9 +188,17 @@ async function joinScopedRooms(socket: Socket, auth: SocketAuth): Promise<void> 
     if (roleGrants(perms, "van_stock_request.review")) joins.push(Promise.resolve(socket.join(VAN_STOCK_REVIEWERS_ROOM)));
     if (roleGrants(perms, "purchase_orders.view")) joins.push(Promise.resolve(socket.join(PURCHASE_ORDER_WATCHERS_ROOM)));
     if (roleGrants(perms, "purchase_requests.view")) joins.push(Promise.resolve(socket.join(PURCHASE_REQUEST_WATCHERS_ROOM)));
+    if (roleGrants(perms, "rentals.view")) joins.push(Promise.resolve(socket.join(RENTAL_WATCHERS_ROOM)));
     await Promise.all(joins);
-  } catch {
-    /* best-effort — a missed room join just means no live refresh for that surface on this socket */
+  } catch (e) {
+    // Best-effort by design — REST still works. But it is NOT nothing: this socket has joined no
+    // permission-gated room at all, so that user's jobs, VSR, procurement and rental surfaces stay
+    // frozen for the whole connection. Silently, and only for them. Logged so the cause (usually a
+    // failed user/role read) is findable instead of arriving as "realtime doesn't work for me".
+    console.error(
+      `Realtime room join failed for principal ${auth.principalId}; this socket gets no live updates:`,
+      e instanceof Error ? e.message : e,
+    );
   }
 }
 

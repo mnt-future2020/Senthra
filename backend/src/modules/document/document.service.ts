@@ -5,6 +5,7 @@
 
 import type { PurchaseOrderWithRelations } from "#modules/purchase-order/purchase-order.repository.js";
 import { getBranding, getCompanyProfile, getRegionalSettings } from "#modules/settings/settings.service.js";
+import { getDisplayNamesForEmails } from "#modules/user/user.service.js";
 import { buildPurchaseOrderDocument } from "./document.builder.js";
 import { renderPurchaseOrderPdf } from "./document.renderer.js";
 import { resolveSignatureBlock } from "./document.signature.js";
@@ -13,7 +14,7 @@ import type { DocumentContext, DocumentMeta, RenderedDocument } from "./document
 
 // Resolve the shared letterhead (company identity + regional + branding + fetched logo) from the
 // single-source-of-truth readers. Reused by every document type — never read the raw Settings row.
-async function resolveLetterhead(): Promise<Omit<DocumentContext, "signature" | "meta">> {
+async function resolveLetterhead(): Promise<Omit<DocumentContext, "signature" | "meta" | "people">> {
   const [company, regional, branding] = await Promise.all([
     getCompanyProfile(),
     getRegionalSettings(),
@@ -56,7 +57,9 @@ export async function generatePurchaseOrderPdf(
   generatedBy?: string | null,
 ): Promise<RenderedDocument> {
   const base = await resolveLetterhead();
-  const signature = await resolveSignatureBlock(po.sentBy);
+  // ONE lookup for every person this document names — its raiser, its approver and its signer.
+  const people = await getDisplayNamesForEmails([po.createdBy, po.approvedBy, po.sentBy]);
+  const signature = await resolveSignatureBlock(po.sentBy, people);
   const meta: DocumentMeta = {
     documentId: po.id,
     documentCode: po.code,
@@ -64,7 +67,7 @@ export async function generatePurchaseOrderPdf(
     generatedAt: new Date(),
     generatedBy: generatedBy ?? null,
   };
-  const ctx: DocumentContext = { ...base, signature, meta };
+  const ctx: DocumentContext = { ...base, people, signature, meta };
   const data = buildPurchaseOrderDocument(po, ctx);
   const buffer = await renderPurchaseOrderPdf(data, base.regional);
   return { buffer, filename: getDocumentFileName("purchase_order", po.code), mimeType: "application/pdf" };

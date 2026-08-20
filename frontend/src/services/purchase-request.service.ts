@@ -2,6 +2,7 @@ import { api, LONG_WRITE_TIMEOUT } from "@/lib/api";
 import { downloadCsv, withoutPaging } from "@/lib/csvExport";
 import { registerClientCache } from "@/lib/clientCache";
 import type { PurchaseRequest } from "@/types/purchase-request";
+import type { RentalLinePayload } from "@/components/dashboard/purchase-requests/rentalLineRows";
 
 // Typed wrappers around the backend /purchase-requests endpoints (CRUD + workflow + attachments).
 // The PRF is the quotation step before a Purchase Order — Convert generates the PO.
@@ -54,6 +55,9 @@ export interface PurchaseRequestPayload {
   deliveryTerms?: string | null;
   paymentTerms?: string | null;
   items?: PrfLinePayload[];
+  // Sending either array replaces BOTH server-side, so the header totals always see the complete
+  // set — omit one and it is re-derived from what is stored.
+  rentalItems?: RentalLinePayload[];
 }
 
 export interface PrfAttachmentPayload {

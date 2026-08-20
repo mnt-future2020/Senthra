@@ -87,12 +87,18 @@ interface StockPositionTableProps {
 function cellValue(r: StockPosition, c: Col): React.ReactNode {
   switch (c) {
     case "item":
+      // Name and code side by side, NOT stacked. Measured at 1024px: stacked made the row 66px
+      // against 47px for a row whose item has no code — so the list ran at two different row heights
+      // AND spent ~19px per row on a second line, while this column had horizontal room going spare.
+      // The name truncates first (`min-w-0`); the code is `shrink-0` so the identifier someone
+      // matches against a printed label never gets cut. The `<td>` already carries the full
+      // "name · code" text as its `title` (see cellText).
       return (
-        <div className="min-w-0">
-          <div className="truncate font-semibold text-[var(--ink)]">{r.itemName}</div>
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="min-w-0 truncate font-semibold text-[var(--ink)]">{r.itemName}</span>
           {/* Copy the CODE, not the name — the row navigates on click, and CopyableCode stops
               propagation so copying never doubles as opening the item. */}
-          {r.itemCode ? <CopyableCode code={r.itemCode} className="text-[11px] text-[var(--faint)]" /> : null}
+          {r.itemCode ? <CopyableCode code={r.itemCode} className="shrink-0 text-[11px] text-[var(--faint)]" /> : null}
         </div>
       );
     case "sku":
@@ -334,9 +340,9 @@ export function StockPositionTable({
   return (
     <div className="flex h-full flex-col gap-3">
       {/* Filter bar — shown when any filter or export is configured */}
-      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:flex-wrap lg:items-center">
+      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:flex-wrap sm:items-center">
         {/* Search always shown */}
-        <div className="relative w-full lg:min-w-64 lg:max-w-xs lg:flex-1">
+        <div className="relative w-full sm:min-w-64 sm:max-w-xs sm:flex-1">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input
             value={searchInput}
@@ -355,7 +361,7 @@ export function StockPositionTable({
             The trigger sat mid-row before, which put its panel over the Item column — the column you
             read the list by. From the right end the panel opens into the table's trailing columns
             instead (and popoverPlacement flips it if even that doesn't fit). */}
-        <div className="flex items-center gap-2 lg:ml-auto">
+        <div className="flex items-center gap-2 sm:ml-auto">
         <FilterPopover activeCount={activeFilterCount} onClear={clearFilters}>
           {showOwner && (
             <Select

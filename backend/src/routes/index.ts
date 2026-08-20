@@ -16,6 +16,9 @@ import goodsManagementRoutes from "#modules/goods-management/goods-management.ro
 import inventoryRoutes from "#modules/inventory/inventory.routes.js";
 import irmRoutes from "#modules/irm/irm.routes.js";
 import irmCategoryRoutes from "#modules/irm-category/irm-category.routes.js";
+import rentalCategoryRoutes from "#modules/rental-category/rental-category.routes.js";
+import rentalItemRoutes from "#modules/rental-item/rental-item.routes.js";
+import rentalReceiptRoutes from "#modules/rental-receipt/rental-receipt.routes.js";
 import irmTypeRoutes from "#modules/irm-type/irm-type.routes.js";
 import jobRoutes, { portalRouter as customerJobRoutes } from "#modules/job/job.routes.js";
 import uploadRoutes from "#modules/upload/upload.routes.js";
@@ -57,6 +60,10 @@ router.use("/supplier-types", supplierTypeRoutes);
 router.use("/irm-items", irmRoutes);
 router.use("/irm-types", irmTypeRoutes);
 router.use("/irm-categories", irmCategoryRoutes);
+router.use("/rental-categories", rentalCategoryRoutes);
+router.use("/rental-items", rentalItemRoutes);
+// Hire deliveries — supplier-owned kit arriving. Deliberately NOT under /goods-in: a GRN writes stock.
+router.use("/rental-receipts", rentalReceiptRoutes);
 router.use("/purchase-requests", purchaseRequestRoutes);
 router.use("/purchase-orders", purchaseOrderRoutes);
 router.use("/goods-in", goodsInRoutes);

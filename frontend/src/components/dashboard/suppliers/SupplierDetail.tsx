@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Loader2, Pencil, Power, ScrollText } from "lucide-react";
+import { Loader2, Pencil, Power, Rows3, ScrollText } from "lucide-react";
 
 import * as supplierService from "@/services/supplier.service";
 import * as auditService from "@/services/audit.service";
@@ -410,6 +410,7 @@ function Procurement({ supplier }: { supplier: Supplier }) {
                   />
                   <ExportButton
                     label="Lines"
+              icon={Rows3}
                     title="Export every request LINE for this supplier — item, quantity, unit price"
                     onExport={() => prfService.exportPurchaseRequestLinesCsv({ supplier: supplier.id })}
                   />

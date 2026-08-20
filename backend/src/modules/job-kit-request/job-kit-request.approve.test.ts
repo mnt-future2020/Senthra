@@ -84,7 +84,6 @@ const request = (over: Record<string, unknown> = {}) => ({
   requestedByEngineerEmail: "azar@x.com",
   reason: "extra kit",
   notes: null,
-  attachments: [],
   reviewedByUserId: null,
   reviewedByEmail: null,
   reviewedAt: null,

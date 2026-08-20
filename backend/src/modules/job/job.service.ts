@@ -8,8 +8,12 @@ import * as supplierRepo from "#modules/supplier/supplier.repository.js";
 import * as irmRepo from "#modules/irm/irm.repository.js";
 import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
+import * as prfRepo from "#modules/purchase-request/purchase-request.repository.js";
+import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import * as userRepo from "#modules/user/user.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
+import * as attachmentService from "#modules/attachment/attachment.service.js";
+import * as uploadService from "#modules/upload/upload.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { sendTemplatedEmail } from "#modules/email/email.service.js";
 import { notify } from "#modules/notification/notification.service.js";
@@ -249,7 +253,13 @@ function toPublic(j: JobWithRelations | JobListRow): PublicJob {
     // row written before the validation rule existed can still hold a `javascript:`/`data:` link.
     // Staff click their own job pages far more often than customers do, so exempting the office side
     // would leave the bigger surface as the unguarded one.
-    attachments: safeHttpUrls(j.attachments),
+    // Legacy strings first, then the rows. Both are URLs on the wire — the form and every viewer
+    // still speak that shape — with `#internal` re-appended so the staff-only marker survives the
+    // move from a URL fragment to a column.
+    attachments: [
+      ...safeHttpUrls(j.attachments),
+      ...safeHttpUrls((j.attachmentRows ?? []).map((a) => (a.internal ? `${a.url}#internal` : a.url))),
+    ],
     kitLines: kitLines.map((l) => ({
       id: l.id,
       lineType: l.lineType,
@@ -667,7 +677,8 @@ export async function createJob(input: CreateJobInput, actor?: AuditActor): Prom
       plannerName: trimToNull(input.plannerName),
       plannerPhone: trimToNull(input.plannerPhone),
       notes: trimToNull(input.notes),
-      attachments: input.attachments ?? [],
+      // Rows, not this array — see the Attachments section. Reconciled after the job has an id.
+      attachments: [],
       assignedAt: now,
       createdByUserId: actor?.id ?? null,
       createdBy: actorEmail,
@@ -676,7 +687,10 @@ export async function createJob(input: CreateJobInput, actor?: AuditActor): Prom
     rows,
   );
 
-  const job = toPublic(created);
+  // After the job exists — the rows need its id — and before the DTO is built, so the response and
+  // every realtime payload already describe the attachments that were just committed.
+  await reconcileAttachments(created.id, input.attachments ?? [], created.jobNumber, actor);
+  const job = toPublic((await jobRepo.findById(created.id)) ?? created);
   if (job.assignedEngineerId) {
     emitToUser(job.assignedEngineerId, "job:new", job); // engineer's portal list
     notify(job.assignedEngineerId, { title: "New job assigned", body: `${job.jobNumber} · ${job.name}`, data: { type: "job", jobId: job.id } });
@@ -877,7 +891,9 @@ export async function updateJob(id: string, input: UpdateJobInput, actor?: Audit
   if (input.plannerName !== undefined) headerPatch.plannerName = trimToNull(input.plannerName);
   if (input.plannerPhone !== undefined) headerPatch.plannerPhone = trimToNull(input.plannerPhone);
   if (input.notes !== undefined) headerPatch.notes = trimToNull(input.notes);
-  if (input.attachments !== undefined) headerPatch.attachments = input.attachments;
+  // `attachments` is NOT patched onto the header at all: it lives in rows now, reconciled below once
+  // the header write has settled. The legacy array is retired AFTER that reconcile, not here — see
+  // the note at the call site for why the order is the safety property.
 
   let result: JobWithRelations;
   if (input.kitLines !== undefined) {
@@ -942,6 +958,23 @@ export async function updateJob(id: string, input: UpdateJobInput, actor?: Audit
   }
   audit.record({ actor, action: "job.updated", targetType: "job", targetId: id, targetLabel: result.jobNumber });
 
+  // Attachments are reconciled AFTER the header write, so a failed edit never orphans a claim, and
+  // the DTO is rebuilt from a fresh read so the response shows exactly what now exists.
+  if (input.attachments !== undefined) {
+    await reconcileAttachments(id, input.attachments, result.jobNumber, actor);
+    // Retire the legacy array only NOW, once every URL it held has a row of its own.
+    //
+    // These are two writes with no transaction across them, so whichever runs first is the one that
+    // survives a failure in the other. Emptying the array in the header write meant a reconcile that
+    // threw part-way left the URLs in NEITHER place — the array already cleared, only some rows
+    // written, and nothing anywhere else holding them. This way round the worst case is a URL listed
+    // twice (toPublic concatenates the legacy strings and the rows) until the next successful save.
+    //
+    // Guarded on the array actually having held something, so an ordinary edit to an already-migrated
+    // job does not take a second write to set an empty field empty.
+    if (existing.attachments?.length) await jobRepo.update(id, { attachments: [] });
+    result = (await jobRepo.findById(id)) ?? result;
+  }
   const job = toPublic(result);
   // A re-assignment via PATCH fires the same realtime + notification as assignJob.
   if (reassigned) {
@@ -1202,6 +1235,14 @@ export async function cancelJob(id: string, reason: string | undefined, actor?: 
 // so the history stays intact.
 const DELETABLE_STATUSES = new Set(["draft", "assigned", "rejected", "cancelled"]);
 
+// Anything that would be left pointing at nothing. One entry per referencing table, mirroring the
+// supplier / warehouse delete guards.
+type DependencyChecker = { label: string; count: (jobId: string) => Promise<number> };
+const DELETE_DEPENDENCY_CHECKERS: DependencyChecker[] = [
+  { label: "purchase requests", count: (id) => prfRepo.countByJob(id) },
+  { label: "purchase orders", count: (id) => poRepo.countByJob(id) },
+];
+
 export async function deleteJob(id: string, actor?: AuditActor): Promise<void> {
   const existing = await jobRepo.findById(id);
   if (!existing) throw notFound("Job not found.");
@@ -1244,6 +1285,22 @@ export async function deleteJob(id: string, actor?: AuditActor): Promise<void> {
       `This job still has ${outstanding} unit${outstanding === 1 ? "" : "s"} out with the engineer. ` +
         `Return the stock, or write it off from Goods Management, before deleting.`,
     );
+  }
+
+  // A job named on a purchase request or order cannot be deleted either.
+  //
+  // Those documents render the job as a LINK ("JOB-0031 — Fibre pull"), and every job read filters
+  // `deletedAt`, so deleting it left the request pointing at a record the loader refuses — a click
+  // to "Job not found." with nothing on the request saying why. It also erases the answer to the
+  // question a buyer asks about a spend: what was this bought FOR.
+  //
+  // Same shape as the supplier and warehouse guards, and for the same reason they list every
+  // referencing table: adding a future reference should be one line here rather than a hole nobody
+  // notices until a link dies.
+  for (const checker of DELETE_DEPENDENCY_CHECKERS) {
+    if ((await checker.count(id)) > 0) {
+      throw conflict(`This job is named on existing ${checker.label} and can't be deleted — cancel it instead.`);
+    }
   }
 
   await jobRepo.softDelete(id);
@@ -1747,7 +1804,12 @@ export async function getJobForCustomer(customerId: string, jobId: string): Prom
     // http(s) rule existed still hold whatever was typed — and this surface renders them as links in
     // a customer's browser. Dropping the ones we can't vouch for is the only version of this that
     // covers data already in the database. Internal-only attachments (#internal hash) are withheld.
-    attachments: safeHttpUrls(job.attachments).filter((url) => !url.toLowerCase().endsWith("#internal")),
+    attachments: safeHttpUrls([
+      // Legacy rows still carry the marker in the URL; new rows carry it as a column. Both are
+      // withheld from the customer — the office decides who sees a file, not the storage shape.
+      ...job.attachments.filter((url) => !url.toLowerCase().endsWith("#internal")),
+      ...job.attachmentRows.filter((a) => !a.internal).map((a) => a.url),
+    ]),
     assignedAt: iso(job.assignedAt),
     acceptedAt: iso(job.acceptedAt),
     startedAt: iso(job.startedAt),
@@ -1778,6 +1840,88 @@ export async function getJobForCustomer(customerId: string, jobId: string): Prom
 /** Count of the customer's jobs that are still happening — the portal dashboard's Jobs card. */
 export function countActiveJobsForCustomer(customerId: string): Promise<number> {
   return jobRepo.countByCustomerPortal(customerId, { statuses: ACTIVE_STATUSES });
+}
+
+// ── Attachments ───────────────────────────────────────────────────────────────────────────────
+//
+// A job's files live in JobAttachment ROWS. The legacy `Job.attachments` string array is still READ
+// (pre-migration jobs) but never written: a bare URL cannot be deleted from Cloudinary, because the
+// destroy API addresses an asset by publicId + resourceType and neither survives in a URL you can
+// safely parse back.
+//
+// The form still sends plain URLs, and that is deliberate — the identity does not have to travel
+// through the browser at all. Finalize stamps it onto the pending-upload ledger row (keyed by the
+// URL), and `reconcileAttachments` claims it back here at save time. One consequence worth naming:
+// a URL the user PASTED by hand has no ledger row, so its row is created with a null identity and
+// removing it deletes nothing from Cloudinary — which is correct, we never owned that file.
+
+/** The `#internal` fragment the form appends is a marker, not part of the address. */
+function splitInternalFragment(raw: string): { url: string; internal: boolean } {
+  const trimmed = raw.trim();
+  const internal = /#internal$/i.test(trimmed);
+  return { url: internal ? trimmed.replace(/#internal$/i, "") : trimmed, internal };
+}
+
+/**
+ * Bring a job's attachment rows in line with the URLs its form just submitted.
+ *
+ * Additions claim their ledger row, which both hands over the identity AND removes the pending
+ * entry — so the reaper stops watching an asset that now has an owner. Removals go through
+ * `releaseAsset`, which counts references across every attachment table before destroying anything.
+ *
+ * A form that is never submitted reaches none of this: its ledger rows stay pending and the reaper
+ * reclaims them on its next pass. That is the whole point of `deferred-attach`.
+ */
+async function reconcileAttachments(
+  jobId: string,
+  submitted: string[],
+  jobLabel: string,
+  actor?: AuditActor,
+): Promise<void> {
+  const wanted = submitted.map(splitInternalFragment).filter((a) => a.url);
+  const existing = await jobRepo.findAttachments(jobId);
+  const byUrl = new Map(existing.map((a) => [a.url, a]));
+
+  for (const { url, internal } of wanted) {
+    const row = byUrl.get(url);
+    if (row) {
+      byUrl.delete(url); // survives this save
+      if (row.internal !== internal) await jobRepo.setAttachmentInternal(row.id, internal);
+      continue;
+    }
+    const claimed = await uploadService.claimDeferredUpload(url);
+    if (!claimed) {
+      // No ledger row: a hand-pasted link, or one already claimed. Recorded so the job still lists
+      // it, with a null identity so removal never tries to destroy a file we did not upload.
+      await jobRepo.addAttachment({
+        jobId, url, internal, fileName: url.split("/").pop() || "attachment",
+        fileType: "link", fileSizeBytes: 0, uploadedBy: actor?.email ?? null,
+      });
+      continue;
+    }
+    // ONE transaction: the row and the ledger removal together, with the lease re-asserted. A crash
+    // between them would either strand the asset or let the reaper destroy a live one.
+    await uploadService.commitAttachment(claimed, (tx) =>
+      jobRepo.addAttachment(
+        {
+          jobId, url, internal,
+          fileName: claimed.fileName,
+          fileType: claimed.fileType,
+          fileSizeBytes: claimed.fileSizeBytes,
+          publicId: claimed.publicId,
+          resourceType: claimed.resourceType,
+          uploadedBy: actor?.email ?? null,
+        },
+        tx,
+      ),
+    );
+  }
+
+  // Whatever is left in the map was dropped from the form.
+  for (const gone of byUrl.values()) {
+    await jobRepo.removeAttachment(gone.id);
+    await attachmentService.releaseAsset(gone, `job ${jobLabel}`);
+  }
 }
 
 /**

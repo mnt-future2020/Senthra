@@ -4,6 +4,7 @@ import * as React from "react";
 import { ArrowLeft } from "lucide-react";
 
 import { Skeleton } from "@/components/ui/Skeleton";
+import { cn } from "@/lib/utils";
 
 // Shared page chrome for the full-page Add/Edit forms (users + roles): a sticky
 // header bar, a titled section card, a layout-matched skeleton, and an error state.
@@ -137,6 +138,51 @@ export function FormAsideCard({
       </p>
       {children}
     </section>
+  );
+}
+
+/**
+ * One `label —————— value` line of a form's summary aside.
+ *
+ * WHY THIS EXISTS
+ * Every aside in the app hand-rolled `<div className="flex justify-between gap-3">` with two bare
+ * spans, and none of them guarded the value. A flex item's default `min-width: auto` refuses to
+ * shrink below its content, and an email or a warehouse code is a single unbreakable token — so
+ * "shahul@mntfuture.com" under "Created by" rendered straight through the right edge of the card
+ * and out over the page. It was invisible until a value happened to be long enough, which is why it
+ * survived in six asides at once.
+ *
+ * The fix is two classes, and they only work as a pair: `shrink-0` on the LABEL (so the label is not
+ * squeezed instead) and `min-w-0` + `wrap-break-word` on the VALUE (so it may shrink, and may break
+ * mid-token when there is no space to break at).
+ *
+ * `valueClassName` goes through `cn()` — Tailwind resolves same-property classes by stylesheet
+ * order, not attribute order, so a caller passing `text-[var(--neg)]` needs twMerge to actually beat
+ * the default. Money and quantity rows pass their own weight/colour and are unaffected by the
+ * wrapping rules, which never fire on a short value.
+ */
+export function SummaryRow({
+  label,
+  valueClassName,
+  className,
+  children,
+}: {
+  label: React.ReactNode;
+  /** Weight / colour for the value — e.g. "font-extrabold text-[var(--neg)]". */
+  valueClassName?: string;
+  /** Extra classes for the ROW, e.g. a separator: "border-t border-[var(--border)] pt-2.5". */
+  className?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    // `flex-wrap` is the half that makes this READ well, not just fit. The aside is ~200px wide on a
+    // 1024px laptop, so an email beside its label has ~90px and breaks into three ragged fragments.
+    // Wrapping drops the value onto its own full-width line first — where it usually fits whole — and
+    // the character-level break below stays as the last resort for a value too long even for that.
+    <div className={cn("flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5", className)}>
+      <span className="shrink-0 text-[var(--muted)]">{label}</span>
+      <span className={cn("min-w-0 grow text-right wrap-break-word text-[var(--ink)]", valueClassName)}>{children}</span>
+    </div>
   );
 }
 

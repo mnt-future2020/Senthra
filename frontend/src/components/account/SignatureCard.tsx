@@ -6,7 +6,7 @@ import { Loader2, PenLine, Trash2, Upload } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import * as userService from "@/services/user.service";
-import { MAX_IMAGE_BYTES, readFileAsDataUrl } from "@/lib/image";
+import { MAX_IMAGE_BYTES, readFileAsDataUrl, shrinkImage } from "@/lib/image";
 
 // Self-service signature for the signed-in staff user. The signature is printed on documents the
 // user issues (e.g. the Purchase Order PDF emailed to suppliers). Optional — mirrors the avatar
@@ -30,14 +30,17 @@ export function SignatureCard({ style }: { style?: React.CSSProperties }) {
       setMsg({ type: "error", text: "Use a PNG or JPG image." });
       return;
     }
-    if (file.size > MAX_IMAGE_BYTES) {
+    // A signature is normally a transparent PNG, and shrinkImage keeps it one — re-encoding it as
+    // JPEG would fill the transparent background with white and print a white box onto the PO PDF.
+    const image = await shrinkImage(file);
+    if (image.size > MAX_IMAGE_BYTES) {
       setMsg({ type: "error", text: "Image must be under 2 MB." });
       return;
     }
     setBusy(true);
     try {
-      const data = await readFileAsDataUrl(file);
-      const updated = await userService.uploadMySignature(data, file.name);
+      const data = await readFileAsDataUrl(image);
+      const updated = await userService.uploadMySignature(data, image.name);
       setUrl(updated.signatureUrl);
       pushToast("Document signature saved.");
     } catch (e) {

@@ -10,7 +10,7 @@ import { listWarehouses } from "@/services/warehouse.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useAuth } from "@/hooks/useAuth";
 import { inputCls, ghostBtn, labelCls, primaryBtn } from "@/components/ui/styles";
-import { FieldError, FormAsideCard, FormSection } from "@/components/ui/FormScaffold";
+import { FieldError, FormAsideCard, FormSection, SummaryRow } from "@/components/ui/FormScaffold";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { clampQuantityInput } from "@/lib/quantity";
 import { Select } from "@/components/ui/Select";
@@ -448,50 +448,27 @@ export function AdjustStockForm({ onDone }: AdjustStockFormProps) {
         <aside className="lg:sticky lg:top-6 lg:self-start">
           <FormAsideCard title="Summary">
             <div className="space-y-2.5 text-sm">
-              <div className="flex justify-between gap-3">
-                <span className="text-[var(--muted)]">Item</span>
-                <span className="text-right font-semibold text-[var(--ink)]">
-                  {selectedItem ? selectedItem.name : "—"}
-                </span>
-              </div>
-              <div className="flex justify-between gap-3">
-                <span className="text-[var(--muted)]">Warehouse</span>
-                <span className="text-right font-semibold text-[var(--ink)]">
-                  {targetWh ? `${targetWh.name} (${targetWh.code})` : "—"}
-                </span>
-              </div>
-              <div className="flex justify-between gap-3">
-                <span className="text-[var(--muted)]">Available now</span>
-                <span className="font-semibold text-[var(--ink)]">{available ?? "—"}</span>
-              </div>
-              <div className="flex justify-between gap-3">
-                <span className="text-[var(--muted)]">Qty to remove</span>
-                <span className="font-extrabold text-rose-600">
-                  {Number.isInteger(qtyNum) && qtyNum > 0 ? `−${qtyNum}` : "—"}
-                </span>
-              </div>
-              <div className="flex justify-between gap-3">
-                <span className="text-[var(--muted)]">New balance</span>
-                {/* Never renders a negative. An over-removal shows "Not possible" rather than the
-                    arithmetic result — the adjustment is blocked here and floored by the backend, so
-                    printing "−4" would be stating an outcome that cannot occur. */}
-                <span className={`font-extrabold ${overAvailable ? "text-[var(--neg)]" : "text-[var(--ink)]"}`}>
-                  {overAvailable ? "Not possible" : (newBalance ?? "—")}
-                </span>
-              </div>
+              <SummaryRow label="Item" valueClassName="font-semibold">{selectedItem ? selectedItem.name : "—"}</SummaryRow>
+              <SummaryRow label="Warehouse" valueClassName="font-semibold">{targetWh ? `${targetWh.name} (${targetWh.code})` : "—"}</SummaryRow>
+              <SummaryRow label="Available now" valueClassName="font-semibold">{available ?? "—"}</SummaryRow>
+              <SummaryRow label="Qty to remove" valueClassName="font-extrabold text-rose-600">{Number.isInteger(qtyNum) && qtyNum > 0 ? `−${qtyNum}` : "—"}</SummaryRow>
+              {/* Never renders a negative. An over-removal shows "Not possible" rather than the
+                  arithmetic result — the adjustment is blocked here and floored by the backend, so
+                  printing "−4" would be stating an outcome that cannot occur. */}
+              <SummaryRow
+                label="New balance"
+                valueClassName={`font-extrabold ${overAvailable ? "text-[var(--neg)]" : "text-[var(--ink)]"}`}
+              >
+                {overAvailable ? "Not possible" : (newBalance ?? "—")}
+              </SummaryRow>
               <div className="mt-1 space-y-2.5 border-t border-[var(--border)] pt-3">
-                <div className="flex justify-between gap-3">
-                  <span className="text-[var(--muted)]">Adjustment No</span>
-                  <span
-                    className={`text-right font-mono font-bold ${savedAdjustment ? "text-[var(--ink)]" : "text-[var(--faint)]"}`}
-                  >
-                    {savedAdjustment ? savedAdjustment.code : "Auto-generated after save"}
-                  </span>
-                </div>
-                <div className="flex justify-between gap-3">
-                  <span className="text-[var(--muted)]">Created by</span>
-                  <span className="text-right font-semibold text-[var(--ink)]">{currentUserName}</span>
-                </div>
+                <SummaryRow
+                  label="Adjustment No"
+                  valueClassName={`font-mono font-bold ${savedAdjustment ? "text-[var(--ink)]" : "text-[var(--faint)]"}`}
+                >
+                  {savedAdjustment ? savedAdjustment.code : "Auto-generated after save"}
+                </SummaryRow>
+                <SummaryRow label="Created by" valueClassName="font-semibold">{currentUserName}</SummaryRow>
               </div>
             </div>
           </FormAsideCard>

@@ -21,13 +21,17 @@ export const NOTICE_TONE_CLS: Record<NoticeType, string> = {
 //  • "md" — the reply to "I pressed Save", sitting at the foot of a form. It has earned the room, and
 //    it is the shape all the existing bare <Notice msg={…} /> call sites were written against, so it
 //    stays the default.
+//  • "xs" — a line INSIDE a read-only detail card, among 11px labels and 14px values. At sm it read
+//    as the loudest thing on the card, louder than the figures it was commenting on. 11px is the
+//    register every inline hint in the app already uses (hintCls in styles.ts).
 //  • "sm" — a footnote pinned to something else on the page (a table row, a picker). At md, two
 //    stacked advisories took up more height than the three items they were commenting on. Matches the
 //    text-[11px]/text-xs register the surrounding inline hints already use, and rounded-LG, since
 //    that is this app's radius for the compact control family (see toolbarBtn in styles.ts).
-export type NoticeSize = "sm" | "md";
+export type NoticeSize = "xs" | "sm" | "md";
 
 export const NOTICE_SIZE_CLS: Record<NoticeSize, string> = {
+  xs: "gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px]",
   sm: "gap-1.5 rounded-lg px-3 py-2 text-xs",
   md: "gap-2 rounded-xl px-3.5 py-2.5 text-sm",
 };

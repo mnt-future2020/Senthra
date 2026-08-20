@@ -15,13 +15,12 @@ import { useReferenceData } from "@/hooks/useReferenceData";
 import { FieldError, FormAsideCard, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { inputCls, labelCls, primaryBtn, hintCls } from "@/components/ui/styles";
 import { NumberInput } from "@/components/ui/NumberInput";
+import { UOM_SELECT_OPTIONS } from "@/lib/uom";
 import { Select } from "@/components/ui/Select";
 import type { CustomerStockEntry } from "@/types/customer";
 import type { Category } from "@/types/category";
 import type { PagedWarehouses } from "@/services/warehouse.service";
 
-// Standard units of measure — mirrors the IRM item form + backend UOM_OPTIONS.
-const UOM_OPTIONS = ["Each", "Metre", "Roll", "Pack", "Box", "Set", "Pair", "Reel"];
 
 interface CustomerInfo {
   id: string;
@@ -257,7 +256,7 @@ export function AddStockEntryPage({ customer }: { customer: CustomerInfo }) {
                   <Select
                     value={uom}
                     onChange={(v) => setUom(v)}
-                    options={UOM_OPTIONS.map((u) => ({ value: u, label: u }))}
+                    options={UOM_SELECT_OPTIONS}
                     placeholder="— Select unit —"
                     ariaLabel="Unit of measure"
                   />

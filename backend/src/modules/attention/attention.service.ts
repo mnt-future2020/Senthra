@@ -183,10 +183,17 @@ export async function getAttention(actor: Principal, opts: { fresh?: boolean; no
   //    report more work than exists. Every other pair of keys is disjoint, so the rest is a plain sum.
   //    `subsetOf` is read from the catalog, not from `items` — a parent whose count is zero is absent
   //    from the payload, and the subset must still not be double-added on the strength of that.
+  //
+  //    It stands down ONLY when the parent is permitted for THIS actor. The two keys can be gated on
+  //    different permissions — "Deliveries overdue" is `purchase_orders.view` while its parent
+  //    "Deliveries to receive" is `goods_in.create` — so a project manager sees the subset and not the
+  //    parent. Subtracting it unconditionally would leave that row reporting LESS work than exists,
+  //    which is the same defect as double counting, pointing the other way.
   const byNav: Record<string, AttentionNavRollup> = {};
-  const counted = withWork.filter((i) => !i.subsetOf);
+  const absorbed = (i: { subsetOf?: string }) => Boolean(i.subsetOf && visibleKeys.has(i.subsetOf));
+  const counted = withWork.filter((i) => !absorbed(i));
   for (const i of withWork) {
-    const add = i.subsetOf ? 0 : i.count;
+    const add = absorbed(i) ? 0 : i.count;
     const row = byNav[i.nav];
     if (row) {
       row.count += add;
