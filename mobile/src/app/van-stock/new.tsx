@@ -28,6 +28,13 @@ import {
 import { colors } from "@/lib/theme";
 import type { VanStockItemOption, VanStockPriority } from "@/types";
 
+// Field Stock runs a two-level scale: Normal or Urgent. The web composer, the counter walk-in and
+// this screen must offer the same rungs — the backend enum rejects anything else outright.
+const PRIORITY_OPTIONS: Array<{ key: VanStockPriority; label: string }> = [
+  { key: "normal", label: "Normal" },
+  { key: "urgent", label: "Urgent" },
+];
+
 interface DraftLine {
   irmItemId: string;
   itemName: string;
@@ -387,11 +394,7 @@ export default function NewVanStockScreen() {
 
       <SectionTitle>Priority</SectionTitle>
       <Segmented
-        options={[
-          { key: "normal", label: "Normal" },
-          { key: "high", label: "High" },
-          { key: "urgent", label: "Urgent" },
-        ]}
+        options={PRIORITY_OPTIONS}
         value={priority}
         onChange={(key) => setPriority(key as VanStockPriority)}
       />

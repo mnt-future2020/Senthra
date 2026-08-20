@@ -11,8 +11,9 @@ import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { primaryBtn } from "@/components/ui/styles";
 import { WorkspaceToolbar } from "@/components/ui/WorkspaceToolbar";
+import { FilterPopover } from "@/components/ui/FilterPopover";
 import { EmptyState, fmtDateTime } from "@/components/dashboard/portal/portalUi";
-import { VanRequestItemsSummary, VanRequestLinesTable, VanRequestListSkeleton, VanStockCompletionBadge, VanStockTypeBadge, VanStockWalkInBadge, linesForWarehouse, warehouseCaption, warehouseStatus } from "./vanRequestUi";
+import { VAN_STOCK_PRIORITY_OPTIONS, readPriorityParam, VanRequestItemsSummary, VanRequestLinesTable, VanRequestListSkeleton, VanStockCompletionBadge, VanStockTypeBadge, VanStockWalkInBadge, linesForWarehouse, warehouseCaption, warehouseStatus } from "./vanRequestUi";
 
 // Warehouse-side board for NON-job van stock requests: review pending restocks (approve with trims /
 // decline), receive returns and fulfil approved restocks by scan, close short, and raise walk-ins.
@@ -33,12 +34,9 @@ const TYPE_OPTIONS = [
   { value: "return", label: "Return" },
 ];
 
-const PRIORITY_FILTER_OPTIONS = [
-  { value: "", label: "All priorities" },
-  { value: "normal", label: "Normal" },
-  { value: "high", label: "High" },
-  { value: "urgent", label: "Urgent" },
-];
+// Built from the composers' list so a retired level can never linger here as a filter for something
+// nobody can raise. Filtering Urgent also returns pre-retirement "high" rows — the server widens it.
+const PRIORITY_FILTER_OPTIONS = [{ value: "", label: "All priorities" }, ...VAN_STOCK_PRIORITY_OPTIONS];
 
 // A walk-in is pre-approved at the counter, never reviewed — so "what did we actually review?" and
 // "what went out over the counter?" are different questions the reviewer needs to ask separately.
@@ -77,7 +75,7 @@ export function VanRequestsBoard({
   // which swaps this whole board out for the detail — the queue never renders both.
   const status = searchParams.get("vStatus") ?? "";
   const type = searchParams.get("vType") ?? "";
-  const priority = searchParams.get("vPriority") ?? "";
+  const priority = readPriorityParam(searchParams.get("vPriority") ?? "");
   const createdVia = searchParams.get("vOrigin") ?? "";
   const sort = searchParams.get("vSort") ?? "newest";
   const urlSearch = searchParams.get("vSearch") ?? "";
@@ -142,11 +140,21 @@ export function VanRequestsBoard({
         search={{ value: search, onChange: setSearch, placeholder: "Search code / engineer / reason…", ariaLabel: "Search van requests" }}
         filters={
           <>
+            {/* Status stays out in the open — it is the one a reviewer changes on almost every visit
+                ("show me the pending ones"). Type / priority / origin / sort are set once and left,
+                so they fold behind one trigger that reports how many are ACTIVE. Sort is deliberately
+                NOT counted: it reorders the list, it never hides a row, and a count that includes it
+                would say something is hidden when nothing is. */}
             <Select size="sm" ariaLabel="Filter by status" value={status} onChange={onFilter("vStatus")} options={STATUS_OPTIONS} />
-            <Select size="sm" ariaLabel="Filter by type" value={type} onChange={onFilter("vType")} options={TYPE_OPTIONS} />
-            <Select size="sm" ariaLabel="Filter by priority" value={priority} onChange={onFilter("vPriority")} options={PRIORITY_FILTER_OPTIONS} />
-            <Select size="sm" ariaLabel="Filter by origin" value={createdVia} onChange={onFilter("vOrigin")} options={ORIGIN_OPTIONS} />
-            <Select size="sm" ariaLabel="Sort order" value={sort} onChange={onFilter("vSort")} options={SORT_OPTIONS} />
+            <FilterPopover
+              activeCount={(type ? 1 : 0) + (priority ? 1 : 0) + (createdVia ? 1 : 0)}
+              onClear={() => patch({ vType: null, vPriority: null, vOrigin: null, vSort: null, vPage: null })}
+            >
+              <Select size="sm" ariaLabel="Filter by type" value={type} onChange={onFilter("vType")} options={TYPE_OPTIONS} />
+              <Select size="sm" ariaLabel="Filter by priority" value={priority} onChange={onFilter("vPriority")} options={PRIORITY_FILTER_OPTIONS} />
+              <Select size="sm" ariaLabel="Filter by origin" value={createdVia} onChange={onFilter("vOrigin")} options={ORIGIN_OPTIONS} />
+              <Select size="sm" ariaLabel="Sort order" value={sort} onChange={onFilter("vSort")} options={SORT_OPTIONS} />
+            </FilterPopover>
           </>
         }
         actions={

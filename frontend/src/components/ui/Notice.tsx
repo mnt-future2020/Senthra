@@ -10,6 +10,7 @@ const ICONS: Record<NoticeType, typeof Check> = {
 };
 
 const ICON_SIZE: Record<NoticeSize, string> = {
+  xs: "h-3 w-3",
   sm: "h-3.5 w-3.5",
   md: "h-4 w-4",
 };

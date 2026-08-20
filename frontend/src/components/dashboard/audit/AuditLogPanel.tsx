@@ -7,6 +7,7 @@ import * as auditService from "@/services/audit.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
+import { FilterPopover } from "@/components/ui/FilterPopover";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { toolbarActionsCls, toolbarBtn } from "@/components/ui/styles";
 import type { AuditEntry, AuditFacets, PagedAuditLogs } from "@/types/audit";
@@ -122,17 +123,6 @@ export function AuditLogPanel() {
   const isFiltered = Boolean(debounced || action || actorType || targetType || from || to);
   const total = data?.total ?? 0;
 
-  const clearFilters = () => {
-    setSearch("");
-    setDebounced("");
-    setAction("");
-    setActorType("");
-    setTargetType("");
-    setFrom("");
-    setTo("");
-    setPage(1);
-  };
-
   const doExport = async () => {
     setExporting(true);
     try {
@@ -153,19 +143,32 @@ export function AuditLogPanel() {
   return (
     <div className="stack flex h-full flex-col">
       {/* Filter bar — carries the Export action at its right-hand end. */}
-      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:items-center lg:flex-wrap">
-        <div className="relative w-full lg:max-w-xs">
+      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:items-center sm:flex-wrap">
+        <div className="relative w-full sm:max-w-xs sm:flex-1">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input
+            type="search"
             value={search}
             onChange={(e) => {
               setSearch(e.target.value);
               setPage(1);
             }}
             placeholder="Search actor, target or action…"
+            aria-label="Search the audit log"
             className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
           />
         </div>
+        <FilterPopover
+          activeCount={(action ? 1 : 0) + (targetType ? 1 : 0) + (actorType ? 1 : 0) + (from ? 1 : 0) + (to ? 1 : 0)}
+          onClear={() => {
+            setAction("");
+            setActorType("");
+            setTargetType("");
+            setFrom("");
+            setTo("");
+            setPage(1);
+          }}
+        >
         <Select
           size="sm"
           value={action}
@@ -220,18 +223,15 @@ export function AuditLogPanel() {
             className={selectCls}
           />
         </label>
-        {/* Clear + Export share the pushed-right group. Export is a PAGE action but it belongs on
-            this row, not in the top bar: up there it sat against the browser's own chrome, a screen's
-            width from the rows it exports. `lg:` because THIS bar becomes a row at lg, not sm. */}
-        <div className={`${toolbarActionsCls} lg:ml-auto`}>
-          {isFiltered && (
-            <button onClick={clearFilters} className="text-xs font-bold text-[var(--accent)] hover:opacity-80">
-              Clear filters
-            </button>
-          )}
-          <button onClick={doExport} disabled={exporting || total === 0} className={toolbarBtn}>
+        </FilterPopover>
+        {/* Export is a PAGE action but it belongs on this row, not in the top bar: up there it sat
+            against the browser's own chrome, a screen's width from the rows it exports. `sm:` because
+            THIS bar becomes a row at sm now. "Clear filters" moved inside the popover, next to the
+            filters it clears. */}
+        <div className={`${toolbarActionsCls} sm:ml-auto`}>
+          <button onClick={doExport} disabled={exporting || total === 0} aria-label="Export CSV" className={toolbarBtn}>
             <Download className="h-3.5 w-3.5" />
-            {exporting ? "Exporting…" : "Export CSV"}
+            <span className="hidden xl:inline">{exporting ? "Exporting…" : "Export CSV"}</span>
           </button>
         </div>
       </div>

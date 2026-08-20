@@ -36,7 +36,6 @@ export const createKitRequestSchema = z.object({
   jobId: objectId,
   reason: z.string().trim().min(1, "Tell the planner why you need these items.").max(2000),
   notes: z.string().trim().max(2000).optional(),
-  attachments: z.array(z.string().url("Attachment must be a valid URL.")).max(10).optional(),
   lines: z
     .array(requestLineSchema)
     .min(1, "Add at least one item.")
@@ -135,23 +134,3 @@ export const declineKitRequestSchema = z.object({
   decisionNote: z.string().trim().max(2000).optional(),
 });
 export type DeclineKitRequestInput = z.infer<typeof declineKitRequestSchema>;
-
-// ~2 MB budget (same as branding / engineer-transfer uploads).
-const MAX_DATA_URI_CHARS = 3 * 1024 * 1024;
-export const uploadAttachmentSchema = z.object({
-  image: z
-    .string()
-    .max(MAX_DATA_URI_CHARS, "Attachment is too large (max ~2 MB).")
-    .regex(
-      // `application/octet-stream` used to be accepted here. It is the media type a browser emits
-      // when it knows nothing about a file, so accepting it meant this endpoint accepted ANY payload
-      // — an executable, an archive — as long as the caller labelled it that way. Nothing produces it:
-      // the picker filters to `image/*`, and a file the browser cannot type is not one we can either.
-      // Anchored to `;base64,`. Without it `data:image/png,hello` passed validation and failed later
-      // inside Cloudinary — an error from the wrong layer, wearing a message about nothing the caller
-      // did. Every other image endpoint (settings, user, customer) anchors it.
-      /^data:(image\/(png|jpe?g|gif|webp|svg\+xml)|application\/pdf);base64,/i,
-      "Attachment must be a PDF or a PNG, JPG, GIF, WEBP or SVG image.",
-    ),
-});
-export type UploadAttachmentInput = z.infer<typeof uploadAttachmentSchema>;

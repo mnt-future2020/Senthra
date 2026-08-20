@@ -4,6 +4,7 @@ import { Image } from "expo-image";
 import * as ImagePicker from "expo-image-picker";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { colors } from "../lib/theme";
+import { MAX_UPLOAD_BYTES, shrinkImage } from "../lib/image";
 
 // Image attachments for composers, mirroring the web's 64×64 thumbnail grid with
 // an upload tile: pick from the photo library, upload as a data URI through the
@@ -31,11 +32,32 @@ export function AttachmentPicker({
       quality: 0.7,
       base64: true,
     });
-    if (result.canceled || !result.assets[0]?.base64) return;
+    if (result.canceled) return;
+    // Taken and tested in one step so `base64` narrows to a string for the call below — the previous
+    // shape checked `result.assets[0]?.base64` and then re-read the asset, which TypeScript cannot
+    // connect back to the guard.
     const asset = result.assets[0];
-    const dataUri = `data:${asset.mimeType ?? "image/jpeg"};base64,${asset.base64}`;
+    if (!asset?.base64) return;
     setUploading(true);
     try {
+      // `quality` alone re-encodes but keeps every pixel, so a phone capture still arrives at
+      // several MB and the endpoint — which measures the base64, 4/3 of the file — refuses it.
+      // Resizing is what makes an ordinary photo fit, and it happens before the upload so the
+      // spinner covers it.
+      const { dataUri, bytes } = await shrinkImage(
+        asset.uri,
+        asset.base64,
+        asset.width ?? 0,
+        asset.height ?? 0,
+        asset.mimeType ?? "image/jpeg",
+      );
+      // Only reachable when shrinking could not run — a format the decoder refused, or a device that
+      // would not hold the bitmap — because a resized photo lands far under this. Saying so here
+      // beats a round trip that comes back with the server's own size error and no way forward.
+      if (bytes > MAX_UPLOAD_BYTES) {
+        setError("That image is too large to upload. Try taking a new photo.");
+        return;
+      }
       const url = await upload(dataUri);
       onChange([...attachments, url]);
     } catch (err) {

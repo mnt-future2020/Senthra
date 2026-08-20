@@ -417,7 +417,9 @@ export type VanStockRequestStatus =
   | "fulfilled"
   | "declined"
   | "cancelled";
-export type VanStockPriority = "normal" | "high" | "urgent";
+// Two levels — "high" was retired 2026-08-20. The API normalises the older rows that still hold it,
+// so a phone never receives a third value. Options list lives beside the composer that renders it.
+export type VanStockPriority = "normal" | "urgent";
 
 export interface VanStockLine {
   id: string;

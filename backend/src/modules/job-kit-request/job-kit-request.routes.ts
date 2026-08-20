@@ -4,7 +4,7 @@ import * as ctrl from "./job-kit-request.controller.js";
 import { requireAuth, requirePermission, requireAnyPermission } from "../../middleware/auth.middleware.js";
 import { writeLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
-import { createKitRequestSchema, approveKitRequestSchema, declineKitRequestSchema, uploadAttachmentSchema } from "./job-kit-request.validation.js";
+import { createKitRequestSchema, approveKitRequestSchema, declineKitRequestSchema } from "./job-kit-request.validation.js";
 
 // FE→PM additional-kit requests. Field engineers (engineer.jobs.request_kit) raise + cancel their own;
 // PMs/planners (jobs.kit_request.review) review the queue + approve/decline.
@@ -31,9 +31,6 @@ router.get("/", requirePermission("jobs.kit_request.review"), ctrl.listAll);
 router.post("/", requirePermission("engineer.jobs.request_kit"), writeLimiter, validateBody(createKitRequestSchema), ctrl.create);
 
 // ---- Upload attachment (returns a URL; does NOT create a request) ----------------------------
-// POST /job-kit-requests/attachments
-router.post("/attachments", requirePermission("engineer.jobs.request_kit"), writeLimiter, validateBody(uploadAttachmentSchema), ctrl.uploadAttachment);
-
 // ---- Single request detail (reviewer OR the requester — service scopes) ----------------------
 // GET /job-kit-requests/:id
 router.get("/:id", requireAnyPermission("engineer.jobs.request_kit", "jobs.kit_request.review"), ctrl.getOne);

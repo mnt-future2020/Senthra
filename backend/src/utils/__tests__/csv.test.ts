@@ -42,10 +42,13 @@ describe("csvEscape", () => {
       expect(csvEscape("WH-0009")).toBe("WH-0009");
     });
 
-    it("still neutralises a NEGATIVE NUMBER, which is the accepted trade-off", () => {
-      // `-5` starts with `-`, so it gets the apostrophe and lands in the sheet as text. Safety wins:
-      // the alternative is parsing every cell to decide whether it's arithmetic or an attack.
-      expect(csvEscape("-5")).toBe("'-5");
+    // This used to assert the opposite, calling the mangling an accepted trade-off — "the alternative
+    // is parsing every cell to decide whether it's arithmetic or an attack". Opening a real export
+    // settled it: `Days Remaining` on an overdue hire arrived as the text `'-5`, and a finance column
+    // that cannot be summed is not a trade-off anybody accepted. Deciding is also not "parsing every
+    // cell" — a bare integer or decimal is not arithmetic, and nothing else is let through.
+    it("no longer mangles a plain negative number", () => {
+      expect(csvEscape("-5")).toBe("-5");
     });
   });
 });
@@ -75,5 +78,39 @@ describe("toCsv", () => {
   it("escapes every cell of every row", () => {
     const csv = toCsv(["Item", "Warehouse"], [["=BAD()", "Leeds, UK"], ["Fine", "London"]]);
     expect(csv).toBe('Item,Warehouse\r\n\'=BAD(),"Leeds, UK"\r\nFine,London');
+  });
+});
+
+// ── A NEGATIVE NUMBER IS DATA, NOT A FORMULA ──────────────────────────────────────────────────
+//
+// Every one of these arrived in Excel as the literal text `'-1`. An apostrophe TYPED into a cell is
+// a hidden text marker; the same character read from a FILE is content, so the column showed
+// left-aligned strings that could not be summed or sorted — and looked like a broken export.
+describe("negative numbers survive the injection guard", () => {
+  it("leaves a plain negative integer alone", () => {
+    expect(csvEscape("-1")).toBe("-1");
+  });
+
+  it("leaves a negative decimal alone", () => {
+    expect(csvEscape("-450.25")).toBe("-450.25");
+  });
+
+  // The reason the guard exists. A minus that begins ARITHMETIC is still a formula.
+  it("still neutralises a leading minus that is not just a number", () => {
+    expect(csvEscape("-1+1+cmd|'/c calc'!A0")).toBe("'-1+1+cmd|'/c calc'!A0");
+    expect(csvEscape("-1 day")).toBe("'-1 day");
+    expect(csvEscape("- 1")).toBe("'- 1");
+  });
+
+  // A leading `+` stays escaped: an international phone number is not arithmetic anybody wants
+  // evaluated, and nothing in this codebase exports a `+`-prefixed number.
+  it("keeps a leading plus escaped", () => {
+    expect(csvEscape("+44 20 7946 0000")).toBe("'+44 20 7946 0000");
+    expect(csvEscape("+1")).toBe("'+1");
+  });
+
+  it("still neutralises every other trigger", () => {
+    expect(csvEscape("=SUM(A1)")).toBe("'=SUM(A1)");
+    expect(csvEscape("@import")).toBe("'@import");
   });
 });

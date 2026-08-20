@@ -3,7 +3,7 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ClipboardList, MoreHorizontal, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { ClipboardList, MoreHorizontal, Pencil, Plus, Rows3, Search, Trash2 } from "lucide-react";
 
 import * as poService from "@/services/purchase-order.service";
 import { useAuth } from "@/hooks/useAuth";
@@ -321,6 +321,7 @@ export function PurchaseOrdersView() {
                 header, "what did we spend on this item" is only pivotable from the lines. */}
             <ExportButton
               label="Export lines"
+              icon={Rows3}
               onExport={() => poService.exportPurchaseOrderLinesCsv(exportParams)}
               disabled={orders.length === 0}
               title="Export every order LINE — item, quantity, unit price (for spend analysis)"

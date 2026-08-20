@@ -17,8 +17,12 @@ export function MovementsTable() {
           only the damaged leg produces a row here, so a reader comparing the two legs of a damage
           report would otherwise conclude the feed had lost one. States what IS true; no promise
           about what might change. */}
+      {/* One line at 1024px. The pools were previously spelled out here ("warehouse, engineer van,
+          customer consignment and damaged"), which took the sentence onto a second line — and the
+          Location column plus the pool filter already enumerate them. The caveat is the half worth the
+          space, so that is the half that stayed. */}
       <p className="shrink-0 text-xs text-[var(--muted)]">
-        Every stock movement across all pools — warehouse, engineer van, customer consignment and damaged. Newest first.{" "}
+        Every stock movement across all pools, newest first.{" "}
         <span className="text-[var(--faint)]">Customer consignment shows the damaged leg only.</span>
       </p>
       <div className="min-h-0 flex-1">

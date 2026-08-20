@@ -5,6 +5,7 @@ import type { Prisma } from "@prisma/client";
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
 import type { CloudinaryImageAsset } from "../../lib/cloudinary.js";
 import * as roleRepo from "#modules/role/role.repository.js";
+import * as adminRepo from "#modules/auth/admin.repository.js";
 import { assertEmailNamespaceFree } from "#modules/auth/email-namespace.js";
 import { ALL_PERMISSIONS } from "#modules/role/permissions.js";
 import * as userRepo from "./user.repository.js";
@@ -323,6 +324,67 @@ export async function getSignatureForEmail(
     url: u.signatureUrl,
     mimeType: u.signatureMimeType,
   };
+}
+
+// Resolve a batch of actor emails to display names, keyed by the LOWERCASED email. Documents record
+// who raised / approved / issued them as an email, and a raw login is not a name the reader can ask
+// for. Batched on purpose: a PO PDF is rendered on every send, download and archive, and it names
+// three people — one query, not three. An email with no account (or an account with no name) is
+// simply absent from the map, which is the caller's signal to fall back to the email itself.
+export interface DocumentPerson {
+  name: string;
+  /** Designation ("Procurement Manager"), NOT the permission role. Null when unset. */
+  jobTitle: string | null;
+}
+
+export async function getDisplayNamesForEmails(
+  emails: (string | null | undefined)[],
+): Promise<Record<string, DocumentPerson>> {
+  const wanted = [...new Set(emails.map((e) => e?.trim().toLowerCase()).filter((e): e is string => Boolean(e)))];
+  if (wanted.length === 0) return {};
+  // BOTH identity stores, because a super admin is not a User — a purchase order raised by one
+  // resolved to nothing here and printed a raw login instead of a person.
+  const [users, admins] = await Promise.all([
+    userRepo.findNamesByEmails(wanted),
+    adminRepo.findNamesByEmails(wanted),
+  ]);
+
+  const staffName = (r: { firstName: string; lastName: string }) => `${r.firstName ?? ""} ${r.lastName ?? ""}`.trim();
+
+  // Precedence, and it matters: an email should normally belong to exactly one identity (the
+  // namespace guard in auth keeps admin/staff/customer disjoint), but legacy rows predate it. Where
+  // two claim the same address, whoever holds it NOW answers for it:
+  //
+  //   1. live staff  — the richest identity, and the one with a job title
+  //   2. admin       — always live; has a name and nothing else
+  //   3. deleted staff — only when nothing live claims the email, so a leaver is still named on
+  //                      their own archived orders
+  //
+  // A LIVE identity with no name on file deliberately resolves to nothing rather than falling
+  // through to a deleted row: the caller then prints the email, which names nobody — honest — where
+  // the deleted row would name the wrong person. That is exactly how a soft-deleted test account
+  // came to sign a purchase order sent to a supplier.
+  const claimed = new Set<string>();
+  const out: Record<string, DocumentPerson> = {};
+  const claim = (email: string, person: DocumentPerson | null) => {
+    const key = email.toLowerCase();
+    if (claimed.has(key)) return;
+    claimed.add(key);
+    if (person) out[key] = person;
+  };
+
+  for (const r of users) {
+    if (r.deletedAt) continue;
+    claim(r.email, staffName(r) ? { name: staffName(r), jobTitle: r.jobTitle?.trim() || null } : null);
+  }
+  for (const a of admins) {
+    claim(a.email, a.name?.trim() ? { name: a.name.trim(), jobTitle: null } : null);
+  }
+  for (const r of users) {
+    if (!r.deletedAt) continue;
+    claim(r.email, staffName(r) ? { name: staffName(r), jobTitle: r.jobTitle?.trim() || null } : null);
+  }
+  return out;
 }
 
 export interface ListUsersParams {

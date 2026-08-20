@@ -47,6 +47,10 @@ export const WAREHOUSE_KEY_PANE: Record<string, WarehousePane> = {
   "wh.grn_drafts": { tab: "incoming", pool: "grn", inbound: "received", filter: { status: "draft" } },
   // The Customer pane IS the intake worklist — it lists nothing else, so there is nothing to narrow.
   "wh.customer_intake": { tab: "incoming", pool: "customer" },
+  // Same for the Rental pane: it lists hires awaiting delivery here and nothing else. This was the
+  // one receiving pane on the tab with no count — the tab, the pill, the sidebar row and the
+  // Warehouses list row all stayed silent while a hire sat waiting for someone to press Receive.
+  "wh.rental_intake": { tab: "incoming", pool: "rental" },
   "wh.stock_entry_drafts": { tab: "inventory", pool: "customer", filter: { stockFilter: "draft" } },
   // The Goods Management and Field Stock tabs have no inner split, so the tab IS the pane.
   "wh.to_issue": { tab: "goods" },

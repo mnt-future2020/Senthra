@@ -6,7 +6,7 @@ import { AlertTriangle, Loader2, RefreshCw, Upload, UserRound } from "lucide-rea
 import * as userService from "@/services/user.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { PostcodeField } from "@/components/ui/PostcodeField";
-import { MAX_IMAGE_BYTES, readFileAsDataUrl } from "@/lib/image";
+import { MAX_IMAGE_BYTES, readFileAsDataUrl, shrinkImage } from "@/lib/image";
 import { optimizeCloudinaryUrl } from "@/lib/utils";
 import type { User } from "@/types/user";
 
@@ -75,11 +75,14 @@ export function ProfileEditCard() {
       setMsg({ type: "error", text: "Use a PNG or JPG image." });
       return;
     }
-    if (file.size > MAX_IMAGE_BYTES) {
+    // Downscale before measuring. A photo straight off a phone is several MB and would fail the
+    // check below on its original size, even though what we would actually store is a fraction of it.
+    const image = await shrinkImage(file);
+    if (image.size > MAX_IMAGE_BYTES) {
       setMsg({ type: "error", text: "Image must be under 2 MB." });
       return;
     }
-    setNewImage(await readFileAsDataUrl(file));
+    setNewImage(await readFileAsDataUrl(image));
     setRemoveImage(false);
   };
 

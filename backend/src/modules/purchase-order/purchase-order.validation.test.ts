@@ -104,8 +104,26 @@ describe("updatePurchaseOrderSchema", () => {
     expect(updatePurchaseOrderSchema.safeParse({ priority: "blocker" }).success).toBe(false);
   });
 
-  it("rejects an empty items array when provided", () => {
-    expect(updatePurchaseOrderSchema.safeParse({ items: [] }).success).toBe(false);
+  // An empty items array is now legitimate HERE: an order converted from a hire-only request has
+  // no IRM lines at all, and refusing it made such an order impossible to edit. The rule did not
+  // disappear — it moved to the service, which can see the rental lines and refuses only when the
+  // order would be left with no line of either kind (see updatePurchaseOrder).
+  it("accepts an empty items array — the 'must keep a line' rule lives in the service", () => {
+    expect(updatePurchaseOrderSchema.safeParse({ items: [] }).success).toBe(true);
+  });
+
+  // The manual CREATE still requires one: there is no way to enter a rental line by hand, so an
+  // order created with no items would have nothing on it at all.
+  it("still rejects an empty items array on create", () => {
+    expect(
+      createPurchaseOrderSchema.safeParse({
+        supplierId: "a".repeat(24),
+        warehouseId: "b".repeat(24),
+        orderDate: "2026-09-01",
+        expectedDeliveryDate: "2026-09-10",
+        items: [],
+      }).success,
+    ).toBe(false);
   });
 
   // An EDIT must be able to CLEAR jobId / deliveryTerms via an explicit null (not omission).
@@ -135,12 +153,14 @@ describe("poSupplierAcceptSchema — confirmed delivery can't precede acceptance
     expect(poSupplierAcceptSchema.safeParse({ acceptedDate: "2026-07-20", confirmedDeliveryDate: "2026-07-10" }).success).toBe(false);
   });
 
-  // Accepting an order means committing to a delivery date — it's what the warehouse plans
-  // against, and it stays revisable afterwards via the delivery-date endpoint.
-  it("REQUIRES the confirmed delivery date", () => {
-    expect(poSupplierAcceptSchema.safeParse({ acceptedDate: "2026-07-20" }).success).toBe(false);
-    expect(poSupplierAcceptSchema.safeParse({}).success).toBe(false);
-    expect(poSupplierAcceptSchema.safeParse({ confirmedDeliveryDate: "" }).success).toBe(false);
+  // The confirmed date is CONDITIONALLY required, and the condition is the order's STATUS — which a
+  // body schema cannot see. The rule lives in recordSupplierAcceptance; the schema only has to stop
+  // refusing the late-acknowledgement case, where the goods are already in and there is no delivery
+  // left to plan for.
+  it("accepts an acknowledgement with no confirmed delivery date", () => {
+    expect(poSupplierAcceptSchema.safeParse({ acceptedDate: "2026-07-20" }).success).toBe(true);
+    expect(poSupplierAcceptSchema.safeParse({}).success).toBe(true);
+    expect(poSupplierAcceptSchema.safeParse({ confirmedDeliveryDate: "" }).success).toBe(true);
   });
 
   it("allows a SAME-DAY confirmed delivery when acceptedDate is omitted (date-only compare, not now)", () => {

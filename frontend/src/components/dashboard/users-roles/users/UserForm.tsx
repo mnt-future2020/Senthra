@@ -32,7 +32,7 @@ import {
   validateDateOfBirth,
   validateDateOfJoining,
 } from "@/lib/validation";
-import { MAX_IMAGE_BYTES, readFileAsDataUrl } from "@/lib/image";
+import { MAX_IMAGE_BYTES, readFileAsDataUrl, shrinkImage } from "@/lib/image";
 import { DepartmentCombobox } from "@/components/dashboard/users-roles/departments/DepartmentCombobox";
 import { JobTitleCombobox } from "@/components/dashboard/users-roles/job-titles/JobTitleCombobox";
 import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
@@ -287,11 +287,14 @@ export function UserForm({
 
   const pickImage = async (file: File) => {
     setError(null);
-    if (file.size > MAX_IMAGE_BYTES) {
+    // Measure what we would STORE, not what was picked: shrinkImage turns a multi-MB phone photo
+    // into a few hundred KB, so checking the original would reject files that comfortably fit.
+    const image = await shrinkImage(file);
+    if (image.size > MAX_IMAGE_BYTES) {
       showError("Image must be under 2 MB.");
       return;
     }
-    const data = await readFileAsDataUrl(file);
+    const data = await readFileAsDataUrl(image);
     setImageData(data);
     setPreviewUrl(data);
     setRemoveImage(false);

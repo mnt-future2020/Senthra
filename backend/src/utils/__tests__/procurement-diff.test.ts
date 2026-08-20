@@ -3,7 +3,10 @@ import { describe, it, expect } from "vitest";
 import { diffProcurementChanges } from "../procurement-diff.js";
 
 // A minimal existing/incoming shape — only the fields the diff inspects.
+// `lineKey` is the pairing identity. For an IRM line it IS the item id; a rental line supplies the
+// (item, period, address) composite instead, because the same rental item may appear twice.
 const line = (irmItemId: string, quantity: number, unitPricePence: number, vatRate: number, itemName = irmItemId) => ({
+  lineKey: irmItemId,
   irmItemId,
   itemName,
   quantity,

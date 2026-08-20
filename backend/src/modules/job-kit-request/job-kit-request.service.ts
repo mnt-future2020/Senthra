@@ -13,15 +13,12 @@ import * as engineerStockRepo from "#modules/engineer-stock/engineer-stock.repos
 import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as transferRepo from "#modules/engineer-transfer/engineer-transfer.repository.js";
-import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
-import { uploadToCloudinary } from "../../lib/cloudinary.js";
 import { notify } from "#modules/notification/notification.service.js";
 import { emitAttentionChanged, emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
 import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
 import * as kitRequestRepo from "./job-kit-request.repository.js";
 import type { CreateKitRequestData, CreateKitRequestLineData, KitRequestWithLines } from "./job-kit-request.repository.js";
 import type { ApproveKitRequestInput, CreateKitRequestInput, DeclineKitRequestInput } from "./job-kit-request.validation.js";
-import { randomUUID } from "node:crypto";
 
 // ---- DTOs ------------------------------------------------------------------------------------
 
@@ -65,7 +62,6 @@ export interface PublicKitRequest {
   requestedByEngineerEmail: string | null;
   reason: string;
   notes: string | null;
-  attachments: string[];
   reviewedByUserId: string | null;
   reviewedByEmail: string | null;
   reviewedAt: string | null;
@@ -108,7 +104,6 @@ function toPublic(
     requestedByEngineerEmail: r.requestedByEngineerEmail,
     reason: r.reason,
     notes: r.notes,
-    attachments: r.attachments,
     reviewedByUserId: r.reviewedByUserId,
     reviewedByEmail: r.reviewedByEmail,
     reviewedAt: iso(r.reviewedAt),
@@ -230,7 +225,6 @@ export async function create(input: CreateKitRequestInput, actor: AuditActor): P
     requestedByEngineerEmail: job.assignedEngineerEmail ?? actor.email ?? null,
     reason: input.reason,
     notes: input.notes ?? null,
-    attachments: input.attachments ?? [],
     createdBy: actor.email ?? null,
   };
 
@@ -970,16 +964,6 @@ export async function searchItems(q: string, jobId?: string): Promise<KitItemOpt
   }));
 
   return [...irmOptions, ...customerOptions];
-}
-
-export async function uploadAttachment(image: string): Promise<{ url: string }> {
-  const creds = await getCloudinaryCreds();
-  if (!creds) throw badRequest("Cloudinary is not configured. Contact an administrator.");
-  // Unique per upload: uploadToCloudinary overwrites on a repeated publicId, so a timestamp meant two
-  // engineers attaching kit-request evidence in the same millisecond kept only the second photo.
-  const publicId = `kitreq-${randomUUID()}`;
-  const { url } = await uploadToCloudinary(image, publicId, creds, "senthra/kit-requests");
-  return { url };
 }
 
 // Availability for a KNOWN set of items — the composer's planned-item rows and its cart, which come

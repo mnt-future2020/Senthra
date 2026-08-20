@@ -75,7 +75,7 @@ app.use(
 // the decision — body-parser marks the request and the second one steps aside — so a route-level
 // parser mounted after would never get the chance to widen anything.
 export const UPLOAD_BODY_PATHS =
-  /^\/(?:jobs\/attachment|goods-management\/damage-photo|(?:purchase-requests|purchase-orders|goods-in)\/[^/]+\/attachments)\/?$/;
+  /^\/(?:jobs\/attachment|goods-management\/damage-photo|purchase-orders\/[^/]+\/attachments)\/?$/;
 const uploadJson = express.json({ limit: "15mb" });
 app.use((req, res, next) => (UPLOAD_BODY_PATHS.test(req.path) ? uploadJson(req, res, next) : next()));
 

@@ -16,6 +16,10 @@ import { UPLOAD_BODY_PATHS } from "../app.js";
 // confirmed that the routes someone remembered were correct. That is the same shape of hole as an
 // orphan sweep that has to be told about every consumer.
 //
+// The list shrinks as forms move to direct upload: the PRF and GRN base64 endpoints are gone, so
+// their widening went with them. The other half of the rule below is what makes that shrink matter —
+// a widened path that no longer needs widening is an oversized body ceiling nobody is using.
+//
 // So the table below is CHECKED AGAINST THE SOURCE. Every schema in the codebase that accepts a
 // `data:` URI is discovered by scanning, and a schema missing from the table fails — the decision about
 // each one has to be made, not remembered.
@@ -46,9 +50,7 @@ const GLOBAL_FILE_CEILING = fileCeiling(GLOBAL_LIMIT_BYTES); // ~3.7 MB
 const UPLOAD_SCHEMAS: { schema: string; route: string; advertised: number }[] = [
   // --- documents: file size capped directly ---
   { schema: "uploadAttachmentSchema", route: "/jobs/attachment", advertised: 10 * 1024 * 1024 },
-  { schema: "prfAttachmentSchema", route: "/purchase-requests/64b7f9c2e1a4d5f6a7b8c9d0/attachments", advertised: 10 * 1024 * 1024 },
   { schema: "poAttachmentSchema", route: "/purchase-orders/64b7f9c2e1a4d5f6a7b8c9d0/attachments", advertised: 10 * 1024 * 1024 },
-  { schema: "grnAttachmentSchema", route: "/goods-in/64b7f9c2e1a4d5f6a7b8c9d0/attachments", advertised: 5 * 1024 * 1024 },
   // --- images: the DATA URI's character count is capped, so the file is 3/4 of it ---
   { schema: "uploadDamagePhotoSchema", route: "/goods-management/damage-photo", advertised: fileCeiling(15_000_000) },
   { schema: "uploadBrandingSchema", route: "/settings/branding", advertised: fileCeiling(3 * 1024 * 1024) },
@@ -63,9 +65,12 @@ const UPLOAD_SCHEMAS: { schema: string; route: string; advertised: number }[] = 
   { schema: "updateMyProfileSchema", route: "/users/me", advertised: fileCeiling(3 * 1024 * 1024) },
 ];
 
-// `uploadAttachmentSchema` is declared in three modules (job, engineer-transfer, job-kit-request) and
-// they are separate contracts under one name. The job one is the only one above the global ceiling; the
-// other two cap the data URI at 3 MB and are covered by the entry above via the same name.
+// `uploadAttachmentSchema` is declared in two modules (job, engineer-transfer) and they are separate
+// contracts under one name. The job one is the only one above the global ceiling; the other caps the
+// data URI at 3 MB and is covered by the entry above via the same name.
+//
+// job-kit-request declared a third until its evidence-photo feature was removed whole — the engineer
+// picks the item itself, so a photo said nothing the request did not already carry.
 const DUPLICATE_SCHEMA_NAMES = new Set(["uploadAttachmentSchema"]);
 
 const validationFiles = walk(SRC)
@@ -118,7 +123,7 @@ describe("upload body limits", () => {
     const discovered = discoverDataUriSchemas();
     expect(discovered.length).toBeGreaterThanOrEqual(10);
     expect(discovered).toContain("uploadDamagePhotoSchema");
-    expect(discovered).toContain("prfAttachmentSchema");
+    expect(discovered).toContain("poAttachmentSchema");
   });
 
   const widened = UPLOAD_SCHEMAS.filter((u) => u.advertised > GLOBAL_FILE_CEILING);

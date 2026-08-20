@@ -1,4 +1,4 @@
-import { Prisma, type Job } from "@prisma/client";
+import { Prisma, type Job, type JobAttachment } from "@prisma/client";
 
 import { prisma, withTransaction } from "../../lib/prisma.js";
 import { escapeRegex } from "../../utils/search.js";
@@ -42,6 +42,7 @@ const withRelations = {
   supplier: { select: supplierSelect },
   assignedEngineer: { select: engineerSelect },
   kitLines: { orderBy: { createdAt: "asc" }, include: { irmItem: { select: irmItemSelect }, warehouse: { select: kitWarehouseSelect } } },
+  attachmentRows: { orderBy: { createdAt: "asc" } },
 } satisfies Prisma.JobInclude;
 
 export type JobWithRelations = Prisma.JobGetPayload<{ include: typeof withRelations }>;
@@ -56,6 +57,9 @@ const listRelations = {
   site: { select: siteSelect },
   supplier: { select: supplierSelect },
   assignedEngineer: { select: engineerSelect },
+  // Carried on the LIST too: the row count is tiny next to a kit line, and a list that silently
+  // dropped a job's attachments would make the detail and the list disagree about the same job.
+  attachmentRows: { orderBy: { createdAt: "asc" } },
 } satisfies Prisma.JobInclude;
 
 export type JobListRow = Prisma.JobGetPayload<{ include: typeof listRelations }>;
@@ -638,7 +642,14 @@ const portalJobDetailSelect = {
   plannerName: true,
   plannerPhone: true,
   // The original job-pack files — which the customer sent us in the first place.
+  // BOTH stores. `attachments` is the legacy string array (pre-migration jobs); `attachmentRows` is
+  // where every new one lives. Selecting only the first is how a customer stops seeing the documents
+  // their account team just attached — with no error anywhere, because the field is still populated.
   attachments: true,
+  // `internal` is selected so the portal can withhold staff-only files by COLUMN. The office DTO
+  // re-encodes that flag as a "#internal" URL fragment for the forms that still read it; filtering
+  // on a string suffix here would mean the customer's privacy depended on that encoding surviving.
+  attachmentRows: { orderBy: { createdAt: "asc" }, select: { url: true, internal: true } },
   // createdAt is already on the list select; the Record card reads it.
   kitLines: { orderBy: { createdAt: "asc" }, select: portalKitLineSelect },
 } satisfies Prisma.JobSelect;
@@ -727,6 +738,36 @@ export function findByIdForCustomer(jobId: string, customerId: string): Promise<
   if (!jobId) return Promise.resolve(null);
   return prisma.job.findFirst({ where: { id: jobId, ...buildCustomerWhere(customerId, {}) }, select: portalJobDetailSelect });
 }
+
+// --- attachments ------------------------------------------------------------------------------
+// Rows, not the legacy `Job.attachments` string array. The identity a Cloudinary destroy needs
+// (publicId + resourceType) has nowhere to live in a string, which is why removing a job attachment
+// used to leave the file behind forever. See the JobAttachment model.
+
+export function findAttachments(jobId: string): Promise<JobAttachment[]> {
+  return prisma.jobAttachment.findMany({ where: { jobId }, orderBy: { createdAt: "asc" } });
+}
+export function addAttachment(
+  data: Prisma.JobAttachmentUncheckedCreateInput,
+  tx?: Prisma.TransactionClient,
+): Promise<JobAttachment> {
+  // `tx` is passed by the direct-upload finalize, which commits this row and the removal of its
+  // pending-upload ledger entry together — so an asset is never both un-attached and un-reapable.
+  return (tx ?? prisma).jobAttachment.create({ data });
+}
+/** Flip the customer-visible / internal marker without touching the asset it points at. */
+export function setAttachmentInternal(id: string, internal: boolean): Promise<JobAttachment> {
+  return prisma.jobAttachment.update({ where: { id }, data: { internal } });
+}
+export function findAttachment(id: string): Promise<JobAttachment | null> {
+  return prisma.jobAttachment.findUnique({ where: { id } });
+}
+export function removeAttachment(id: string): Promise<JobAttachment> {
+  return prisma.jobAttachment.delete({ where: { id } });
+}
+// No bulk delete-by-job here on purpose. Deleting a job is a SOFT delete — the record can come
+// back — so destroying its files would make a restored job point at nothing. The rows go when the
+// user removes them, which is the only moment anyone has actually said the file is finished with.
 
 // --- header / status writes ------------------------------------------------------------------
 export function update(id: string, data: Prisma.JobUncheckedUpdateInput): Promise<JobWithRelations> {

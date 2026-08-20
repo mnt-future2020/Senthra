@@ -25,7 +25,7 @@ import {
 import * as gmService from "@/services/goodsManagement.service";
 import { WriteOffLostModal, type WriteOffTarget } from "./WriteOffLostModal";
 import { useDashboard } from "@/hooks/useDashboard";
-import { readFileAsDataUrl } from "@/lib/image";
+import { readFileAsDataUrl, shrinkImage } from "@/lib/image";
 import { ScannerInput } from "./ScannerInput";
 import { defaultScanDirection, scanDirections } from "./scanDirections";
 import type {
@@ -247,9 +247,12 @@ export function JobScanPanel({
     // Reset so the same file can be re-picked if needed.
     const input = photoRefs.current.get(key);
     if (input) input.value = "";
+    // Downscale once, then use that file for both the preview and the upload — an engineer on a
+    // phone would otherwise base64 a multi-MB capture into state just to render a thumbnail.
+    const photo = await shrinkImage(file);
     let dataUrl: string;
     try {
-      dataUrl = await readFileAsDataUrl(file);
+      dataUrl = await readFileAsDataUrl(photo);
     } catch {
       pushToast("Could not read the photo.", "alert");
       return;
@@ -261,7 +264,7 @@ export function JobScanPanel({
       damagePhotoUploading: true,
     });
     try {
-      const hostedUrl = await uploadDirectForUrl({ purpose: "damage_photo", file });
+      const hostedUrl = await uploadDirectForUrl({ purpose: "damage_photo", file: photo });
       updateLine(key, { damagePhotoUrl: hostedUrl, damagePhotoUploading: false });
     } catch (err) {
       // Clear the preview so the user knows the upload failed and must re-pick.

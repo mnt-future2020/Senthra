@@ -10,9 +10,24 @@
 // Five copies of a security control is four chances to fix a hole in the wrong one. Anything that
 // emits CSV must come through here.
 
+/**
+ * A PLAIN NEGATIVE NUMBER — the one leading-`-` value that is data rather than a formula.
+ *
+ * The guard below neutralises anything starting with `-`, which is right for `-1+1+cmd|...` and
+ * wrong for `-1`. Excel took the apostrophe literally on a value read from a FILE (unlike one typed
+ * into a cell, where it is a hidden text marker), so "Days Remaining" on an overdue hire arrived as
+ * the text `'-1`: left-aligned, unsummable, unsortable, and looking like a bug in the export.
+ *
+ * Deliberately narrow. `-1+1` does not match, `+44 20…` does not match (a leading `+` is left
+ * escaped, as a phone number is not arithmetic anybody wants evaluated), and neither does anything
+ * with a space, a currency symbol or an exponent. Only a bare integer or decimal passes.
+ */
+const PLAIN_NEGATIVE_NUMBER = /^-\d+(\.\d+)?$/;
+
 /** Escape one cell: neutralise formula triggers, then quote if the value contains CSV syntax. */
 export function csvEscape(value: string): string {
-  const safe = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  const risky = /^[=+\-@\t\r]/.test(value) && !PLAIN_NEGATIVE_NUMBER.test(value);
+  const safe = risky ? `'${value}` : value;
   return /["\n,\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 }
 

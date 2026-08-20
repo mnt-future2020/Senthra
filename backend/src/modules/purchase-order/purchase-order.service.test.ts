@@ -37,9 +37,10 @@ vi.mock("../../lib/realtime.js", () => ({
   emitToRoom: vi.fn(),
   emitToUser: vi.fn(),
   PURCHASE_ORDER_WATCHERS_ROOM: "purchase_orders:watchers",
+  RENTAL_WATCHERS_ROOM: "rentals:watchers",
 }));
 // PRF fast-path + PM routing collaborators.
-vi.mock("#modules/purchase-request/purchase-request.repository.js", () => ({ findById: vi.fn(), countBySupplier: vi.fn() }));
+vi.mock("#modules/purchase-request/purchase-request.repository.js", () => ({ findById: vi.fn(), countBySupplier: vi.fn(), revertConversion: vi.fn() }));
 vi.mock("#modules/job/job.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/user/user.repository.js", () => ({ findActiveWithRole: vi.fn() }));
 vi.mock("#modules/document/document.service.js", () => ({ generatePurchaseOrderPdf: vi.fn() }));
@@ -65,11 +66,12 @@ import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
 import { PO_ATTACHMENT_MAX_COUNT, PO_ATTACHMENT_MAX_TOTAL_BYTES } from "./purchase-order.validation.js";
 import { PRF_ATTACHMENT_MAX_COUNT, PRF_ATTACHMENT_MAX_TOTAL_BYTES } from "#modules/purchase-request/purchase-request.validation.js";
 import * as attachmentService from "#modules/attachment/attachment.service.js";
-import { emitToRoom, PURCHASE_ORDER_WATCHERS_ROOM } from "../../lib/realtime.js";
+import { emitAttentionChanged, emitToRoom, PURCHASE_ORDER_WATCHERS_ROOM } from "../../lib/realtime.js";
 import {
   ISSUED_PO_ATTACHMENT_LABEL,
   addAttachment,
   applyGoodsReceipt,
+  recordReceiptStatusChange,
   approvePurchaseOrder,
   assignPmPurchaseOrder,
   cancelPurchaseOrder,
@@ -78,6 +80,7 @@ import {
   createPurchaseOrder,
   createPurchaseOrdersBySplit,
   deletePurchaseOrder,
+  getPurchaseOrder,
   listPurchaseOrders,
   recordSupplierAcceptance,
   rejectPurchaseOrder,
@@ -126,6 +129,9 @@ function poRow(over: Record<string, unknown> = {}) {
     internalNotes: null,
     supplierNotes: null,
     items: [],
+    // Present and empty by default: the repository's include always supplies the array, so a
+    // fixture omitting it would be testing a shape production never produces.
+    rentalItems: [],
     attachments: [],
     // Procurement chain + PM routing + supplier acceptance (all null/empty by default).
     purchaseRequestId: null,
@@ -510,6 +516,65 @@ describe("draft-only editability + delete", () => {
   });
 });
 
+// Deleting a draft PO that came from a request used to strand that request: `converted` is terminal
+// (ALLOWED_TRANSITIONS.converted is empty), so it had no PO, no Generate PO and no Reopen — and it
+// still rendered a "View PO-…" button pointing at the deleted order.
+describe("deleting a converted-from PO gives the request back", () => {
+  const PRF_ID = "f".repeat(24);
+  const mockRevert = prfRepo.revertConversion as ReturnType<typeof vi.fn>;
+  const fromPrf = (over: Record<string, unknown> = {}) =>
+    poRow({ status: "draft", purchaseRequestId: PRF_ID, purchaseRequest: { id: PRF_ID, code: "PRF-0046", status: "converted" }, ...over });
+
+  it("returns the request to approved, naming the deleted order in the audit trail", async () => {
+    mockFindById.mockResolvedValue(fromPrf());
+    mockRevert.mockResolvedValue(true);
+
+    await deletePurchaseOrder(PO_ID, { email: "buyer@example.com" });
+
+    expect(mockRevert).toHaveBeenCalledWith(PRF_ID, "buyer@example.com");
+    expect(auditActions()).toEqual(["purchase_order.deleted", "purchase_request.conversion_reverted"]);
+    const reverted = mockAudit.mock.calls.map((c) => c[0]).find((e) => e.action === "purchase_request.conversion_reverted");
+    expect(reverted).toMatchObject({ targetType: "purchase_request", targetId: PRF_ID, targetLabel: "PRF-0046" });
+    // The PO code has to be IN the entry: read a month later, "returned to approved" with no cause
+    // is not an explanation.
+    expect(reverted?.metadata).toMatchObject({ purchaseOrderCode: "PO-0001" });
+  });
+
+  it("re-counts the request under 'Approved — generate PO'", async () => {
+    // The badge counts approved requests; without this the number stays one short until a refresh.
+    mockFindById.mockResolvedValue(fromPrf());
+    mockRevert.mockResolvedValue(true);
+    await deletePurchaseOrder(PO_ID);
+    expect(emitAttentionChanged).toHaveBeenCalledWith("purchase_requests");
+  });
+
+  it("does NOT claim the move when the conditional update matched nothing", async () => {
+    // Two deletes racing, or a request already moved on: only the caller whose update matched may
+    // write the audit entry, or the trail shows the same move twice.
+    mockFindById.mockResolvedValue(fromPrf());
+    mockRevert.mockResolvedValue(false);
+    await deletePurchaseOrder(PO_ID);
+    expect(auditActions()).toEqual(["purchase_order.deleted"]);
+    // The PO area still refreshes (every delete moves a PO queue) — the REQUEST area must not.
+    expect(emitAttentionChanged).not.toHaveBeenCalledWith("purchase_requests");
+  });
+
+  it("leaves a standalone PO alone — there is no request to give back", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "draft" }));
+    await deletePurchaseOrder(PO_ID);
+    expect(mockRevert).not.toHaveBeenCalled();
+    expect(auditActions()).toEqual(["purchase_order.deleted"]);
+  });
+
+  it("never rewinds a request whose order was already sent", async () => {
+    // Belt and braces on the draft-only guard: the refusal must happen BEFORE anything is written.
+    mockFindById.mockResolvedValue(fromPrf({ status: "sent" }));
+    await expect(deletePurchaseOrder(PO_ID)).rejects.toThrow(/only draft/i);
+    expect(mockSoftDelete).not.toHaveBeenCalled();
+    expect(mockRevert).not.toHaveBeenCalled();
+  });
+});
+
 // The Goods In → PO seam. `closed` and `cancelled` are terminal & immutable: a receipt must never
 // reopen or mutate such a PO (the bug this guards: completing a stale draft GRN silently un-closed
 // the PO and wrote inventory). All writes must be skipped and the tx rolled back. fully_received →
@@ -545,10 +610,26 @@ describe("applyGoodsReceipt — terminal-state guard (Goods In seam)", () => {
     mockLineTotals
       .mockResolvedValueOnce([{ id: LINE_ID, quantity: 10, receivedQuantity: 0 }]) // before
       .mockResolvedValueOnce([{ id: LINE_ID, quantity: 10, receivedQuantity: 5 }]); // after
-    await applyGoodsReceipt(tx, PO_ID, [{ purchaseOrderItemId: LINE_ID, receivedDelta: 5 }]);
+    const change = await applyGoodsReceipt(tx, PO_ID, [{ purchaseOrderItemId: LINE_ID, receivedDelta: 5 }]);
     expect(mockIncrement).toHaveBeenCalledWith(tx, LINE_ID, 5);
     expect(mockSetStatus).toHaveBeenCalledWith(tx, PO_ID, "partially_received");
-    expect(auditActions()).toContain("purchase_order.partially_received");
+    // REPORTED, not recorded here. `audit.record` commits on its own, so writing the entry inside this
+    // transaction left the trail asserting a status the rollback then undid. The caller records it
+    // once the transaction has actually landed.
+    expect(change).toEqual({ code: "PO-0001", status: "partially_received" });
+    expect(auditActions()).not.toContain("purchase_order.partially_received");
+  });
+
+  // The other half of the seam: the entry the transaction reported still has to reach the trail — it
+  // just does so once the transaction has committed, which is the caller's job.
+  it("records the reported change through the after-commit seam", () => {
+    recordReceiptStatusChange(PO_ID, { code: "PO-0001", status: "fully_received" });
+    expect(auditActions()).toContain("purchase_order.fully_received");
+  });
+
+  it("records nothing when the receipt moved no status", () => {
+    recordReceiptStatusChange(PO_ID, null);
+    expect(auditActions()).toEqual([]);
   });
 
   it("partially_received → fully_received: applies the remainder", async () => {
@@ -556,9 +637,10 @@ describe("applyGoodsReceipt — terminal-state guard (Goods In seam)", () => {
     mockLineTotals
       .mockResolvedValueOnce([{ id: LINE_ID, quantity: 10, receivedQuantity: 5 }]) // before
       .mockResolvedValueOnce([{ id: LINE_ID, quantity: 10, receivedQuantity: 10 }]); // after
-    await applyGoodsReceipt(tx, PO_ID, [{ purchaseOrderItemId: LINE_ID, receivedDelta: 5 }]);
+    const change = await applyGoodsReceipt(tx, PO_ID, [{ purchaseOrderItemId: LINE_ID, receivedDelta: 5 }]);
     expect(mockSetStatus).toHaveBeenCalledWith(tx, PO_ID, "fully_received");
-    expect(auditActions()).toContain("purchase_order.fully_received");
+    expect(change).toEqual({ code: "PO-0001", status: "fully_received" });
+    expect(auditActions()).not.toContain("purchase_order.fully_received");
   });
 });
 
@@ -1138,5 +1220,137 @@ describe("PO attachments — count cap", () => {
   // A PRF is capped at ten, so a full conversion can never exhaust the order's twenty on its own.
   it("leaves headroom above a full PRF's worth of copied documents", () => {
     expect(PO_ATTACHMENT_MAX_COUNT).toBeGreaterThan(PRF_ATTACHMENT_MAX_COUNT);
+  });
+});
+
+// The header roll-up must survive an edit that does not touch the hires.
+//
+// Conversion learned to total both kinds of line; a later draft edit recomputed from the IRM lines
+// alone and quietly took the hire value back out — a hire-only order dropped to £0 with its rental
+// lines still rendering underneath.
+describe("updatePurchaseOrder — totals keep the hire value", () => {
+  const rentalRow = {
+    id: "rl1",
+    rentalItemId: "e".repeat(24),
+    itemName: "Fibre Tester",
+    baseUnit: "Each",
+    quantity: 2,
+    hireStartDate: new Date("2026-09-01T00:00:00Z"),
+    hireEndDate: new Date("2026-10-01T00:00:00Z"),
+    notifyDaysBefore: 3,
+    notifyOnDate: new Date("2026-09-28T00:00:00Z"),
+    deliveryAddress: null,
+    unitPricePence: 15000,
+    vatRate: 20,
+    lineTotalPence: 30000,
+    notes: null,
+    sortOrder: 0,
+    hireStatus: "on_hire",
+    returnedAt: null,
+    returnedBy: null,
+    rentalItem: { id: "e".repeat(24), code: "RNT-0001", name: "Fibre Tester", status: "active" },
+  };
+
+  it("counts rental lines when only the IRM lines are replaced", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "draft", items: [], rentalItems: [rentalRow] }));
+    (poRepo.replaceItemsAndTotals as ReturnType<typeof vi.fn>).mockResolvedValue(
+      poRow({ status: "draft", items: [], rentalItems: [rentalRow] }),
+    );
+
+    await updatePurchaseOrder(PO_ID, { items: [] });
+
+    // 2 x 15000 ex-VAT + 20% VAT — the hire, untouched by this edit, still in the header.
+    expect((poRepo.replaceItemsAndTotals as ReturnType<typeof vi.fn>).mock.calls[0]![2]).toEqual({
+      subtotalPence: 30000,
+      vatPence: 6000,
+      grandTotalPence: 36000,
+    });
+  });
+
+  // The schema can no longer refuse an empty items array (a hire-only order legitimately has none),
+  // so the "must keep a line" rule lives here, where the rental lines are visible.
+  it("refuses an edit that would leave the order with no lines of either kind", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "draft", items: [], rentalItems: [] }));
+    await expect(updatePurchaseOrder(PO_ID, { items: [] })).rejects.toThrow(/at least one item or rental line/i);
+    expect(poRepo.replaceItemsAndTotals).not.toHaveBeenCalled();
+  });
+});
+
+// Mirrors the same flag on the purchase request — the order is where the consequence lands, since
+// `expectedDeliveryDate` is the date printed on the PDF the supplier reads.
+describe("purchase order — late hire delivery flag", () => {
+  const hireLine = (start: string) => ({
+    id: "rl1",
+    rentalItemId: "e".repeat(24),
+    itemName: "Fibre Tester",
+    baseUnit: "Each",
+    quantity: 1,
+    hireStartDate: new Date(`${start}T00:00:00.000Z`),
+    hireEndDate: new Date("2026-10-01T00:00:00.000Z"),
+    notifyDaysBefore: 3,
+    notifyOnDate: new Date("2026-09-28T00:00:00.000Z"),
+    deliveryAddress: null,
+    returnMode: "delivery",
+    returnAddress: null,
+    ratePeriod: "total",
+    ratePence: null,
+    priceOverridden: false,
+    unitPricePence: 15000,
+    vatRate: 20,
+    lineTotalPence: 15000,
+    notes: null,
+    sortOrder: 0,
+    hireStatus: "awaiting_delivery",
+    returnedAt: null,
+    returnedBy: null,
+    rentalItem: null,
+  });
+
+  beforeEach(() => vi.clearAllMocks());
+
+  it("flags an expected delivery that falls after the hire has started", async () => {
+    mockFindById.mockResolvedValue(
+      poRow({ expectedDeliveryDate: new Date("2026-09-03T00:00:00.000Z"), rentalItems: [hireLine("2026-09-01")] }),
+    );
+    const po = await getPurchaseOrder(PO_ID);
+    expect(po.lateHireDelivery).toEqual({ earliestHireStart: "2026-09-01T00:00:00.000Z", daysLate: 2 });
+  });
+
+  it("is null when the kit is due on the day the hire starts", async () => {
+    mockFindById.mockResolvedValue(
+      poRow({ expectedDeliveryDate: new Date("2026-09-01T00:00:00.000Z"), rentalItems: [hireLine("2026-09-01")] }),
+    );
+    expect((await getPurchaseOrder(PO_ID)).lateHireDelivery).toBeNull();
+  });
+
+  it("is null on a goods-only order", async () => {
+    mockFindById.mockResolvedValue(poRow({ rentalItems: [] }));
+    expect((await getPurchaseOrder(PO_ID)).lateHireDelivery).toBeNull();
+  });
+
+  // Once the supplier has COMMITTED to a date, that is the date the kit actually turns up — the
+  // warehouse worklist already plans against it in preference to the expected date. Measuring the
+  // superseded estimate would clear the warning on an order that is still going to be late.
+  it("measures the supplier's confirmed date once there is one", async () => {
+    mockFindById.mockResolvedValue(
+      poRow({
+        expectedDeliveryDate: new Date("2026-09-01T00:00:00.000Z"),
+        confirmedDeliveryDate: new Date("2026-09-04T00:00:00.000Z"),
+        rentalItems: [hireLine("2026-09-01")],
+      }),
+    );
+    const po = await getPurchaseOrder(PO_ID);
+    expect(po.lateHireDelivery).toEqual({ earliestHireStart: "2026-09-01T00:00:00.000Z", daysLate: 3 });
+  });
+
+  it("clears the warning when the supplier confirms a date that beats the hire start", async () => {
+    mockFindById.mockResolvedValue(
+      poRow({
+        expectedDeliveryDate: new Date("2026-09-04T00:00:00.000Z"),
+        confirmedDeliveryDate: new Date("2026-08-31T00:00:00.000Z"),
+        rentalItems: [hireLine("2026-09-01")],
+      }),
+    );
+    expect((await getPurchaseOrder(PO_ID)).lateHireDelivery).toBeNull();
   });
 });

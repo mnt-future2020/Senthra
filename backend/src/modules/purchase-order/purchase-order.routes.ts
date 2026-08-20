@@ -14,6 +14,7 @@ import {
   poRejectSchema,
   poSupplierAcceptSchema,
   updatePurchaseOrderSchema,
+  extendHireSchema,
 } from "./purchase-order.validation.js";
 
 const router = Router();
@@ -118,6 +119,44 @@ router.delete(
   requirePermission("purchase_orders.edit"),
   writeLimiter,
   poController.removeAttachment,
+);
+
+// Two-segment paths, so they cannot be shadowed by the single-segment "/:id" above. Keep them
+// two-segment: a bare "/rental-lines" GET would be read as a purchase-order id and 404.
+router.get("/rental-lines/on-hire", requirePermission("rentals.view"), poController.listOnHire);
+router.get(
+  "/rental-lines/on-hire/export",
+  requirePermission("rentals.export"),
+  exportLimiter,
+  poController.exportOnHireCsv,
+);
+// Every extension agreed in a period — the breakdown of the running total each hire carries.
+router.get("/rental-lines/extensions", requirePermission("rentals.view"), poController.listHireExtensions);
+router.get(
+  "/rental-lines/extensions/export.csv",
+  requirePermission("rentals.export"),
+  exportLimiter,
+  poController.exportHireExtensionsCsv,
+);
+
+// ── Rental hires ─────────────────────────────────────────────────────────────────────────────
+// Gated on rentals.hire.manage rather than purchase_orders.edit: these act on a LIVE hire
+// committed to a supplier, and "mark returned" is what takes it off the deadline badge.
+// Receiving a hire is NOT here: a delivery of hired kit is a RECORD (quantities, condition, the
+// supplier's asset tags, photographs) and it lives in its own module — POST /rental-receipts. A
+// one-click "mark received" could not carry any of that, and two ways to start a hire is one too many.
+router.patch(
+  "/:id/rental-lines/:lineId/return",
+  requirePermission("rentals.hire.manage"),
+  writeLimiter,
+  poController.markHireReturned,
+);
+router.patch(
+  "/:id/rental-lines/:lineId/extend",
+  requirePermission("rentals.hire.manage"),
+  writeLimiter,
+  validateBody(extendHireSchema),
+  poController.extendHire,
 );
 
 export default router;

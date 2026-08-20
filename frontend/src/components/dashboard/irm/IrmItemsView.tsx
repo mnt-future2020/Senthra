@@ -405,11 +405,24 @@ export function IrmItemsView() {
                     className="cursor-pointer border-b border-[var(--border)] transition-colors last:border-0 hover:bg-[var(--surface-2)]"
                   >
                     <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">{i.code}</td>
+                    {/* Name and the brand · MPN meta on ONE line, not stacked — the same reasoning as
+                        the inventory list's item cell: this column has horizontal room to spare and a
+                        second line is billed once PER ROW (66px vs 50px at 1024px). It also evens the
+                        rows out: the meta is optional, so a stacked list mixed tall and short rows.
+                        The name truncates first; the meta keeps its own ceiling so a long brand can't
+                        crowd out the name it belongs to. */}
                     <td className="cell-y px-4">
-                      <div className="font-semibold text-[var(--ink)]">{i.name}</div>
-                      {(i.brand || i.mpn) && (
-                        <div className="text-[11px] text-[var(--faint)]">{[i.brand, i.mpn].filter(Boolean).join(" · ")}</div>
-                      )}
+                      <div className="flex items-center gap-2">
+                        <span className={`min-w-0 font-semibold text-[var(--ink)] ${CELL_ONE_LINE}`} title={i.name}>{i.name}</span>
+                        {(i.brand || i.mpn) && (
+                          <span
+                            className="max-w-[11rem] shrink-0 truncate text-[11px] text-[var(--faint)]"
+                            title={[i.brand, i.mpn].filter(Boolean).join(" · ")}
+                          >
+                            {[i.brand, i.mpn].filter(Boolean).join(" · ")}
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="cell-y px-4 text-[var(--muted)]">{i.type?.name ?? "—"}</td>
                     <td className="cell-y px-4 text-[var(--muted)]">{i.category?.name ?? "—"}</td>

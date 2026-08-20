@@ -3,7 +3,7 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
 import { useRouter, useSearchParams } from "next/navigation";
-import { MoreHorizontal, PackageCheck, Pencil, Search, Trash2 } from "lucide-react";
+import { MoreHorizontal, PackageCheck, Pencil, Rows3, Search, Trash2 } from "lucide-react";
 
 import * as grnService from "@/services/goods-in.service";
 import { useAuth } from "@/hooks/useAuth";
@@ -269,6 +269,7 @@ export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { wa
                 damaged CAT6" becomes a pivot rather than a manual trawl. */}
             <ExportButton
               label="Export lines"
+              icon={Rows3}
               onExport={() => grnService.exportGoodsReceiptLinesCsv(exportParams)}
               disabled={rows.length === 0}
               title="Export every receipt LINE — ordered, received, accepted and damaged per item"

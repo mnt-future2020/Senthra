@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { UOM_OPTIONS } from "../../utils/uom.js";
+
 // IRM Catalogue item validation. Company-owned internal stock MASTER DATA. Code is
 // auto-allocated (IRM-0001). Type + Category reference the IRM masters (NOT the customer
 // Category). Cost is collected in POUNDS here and stored as integer pence by the service.
@@ -13,7 +15,9 @@ const statusEnum = z.enum(["active", "inactive"]);
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 
 // Units of measure — same list the customer catalogue uses.
-export const UOM_OPTIONS = ["Each", "Metre", "Roll", "Pack", "Box", "Set", "Pair", "Reel"] as const;
+// One vocabulary for the whole app — see utils/uom.ts. Re-exported so existing readers of
+// `irm.validation` keep working without learning a new import path.
+export { UOM_OPTIONS } from "../../utils/uom.js";
 export const CURRENCY_OPTIONS = ["GBP", "EUR"] as const;
 
 const emptyToUndef = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);

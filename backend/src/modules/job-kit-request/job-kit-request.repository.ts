@@ -18,7 +18,6 @@ export interface CreateKitRequestData {
   requestedByEngineerEmail: string | null;
   reason: string;
   notes?: string | null;
-  attachments: string[];
   createdBy?: string | null;
 }
 

@@ -17,7 +17,7 @@ import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardP
 import { ProjectModal } from "@/components/dashboard/customers/ProjectModal";
 import { optionalFor } from "@/lib/formPayload";
 import { inputCls, labelCls } from "@/components/ui/styles";
-import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
+import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark, SummaryRow } from "@/components/ui/FormScaffold";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { Select } from "@/components/ui/Select";
 import { PostcodeField } from "@/components/ui/PostcodeField";
@@ -37,6 +37,7 @@ import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 import { isHttpUrl } from "@/lib/validation";
 import { ATTACHMENT_MEDIA_TYPE, parseJobAttachment } from "./jobAttachment";
 import { uploadDirectForUrl } from "@/lib/upload";
+import { shrinkImage } from "@/lib/image";
 
 const JOBS_LIST = "/dashboard/jobs";
 const dateInput = (iso: string | null | undefined) => (iso ? iso.slice(0, 10) : "");
@@ -506,16 +507,22 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const rawFile = e.target.files?.[0];
+    if (!rawFile) return;
 
-    const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
-    if (!(ext in ATTACHMENT_MEDIA_TYPE)) {
+    const pickedExt = rawFile.name.split(".").pop()?.toLowerCase() ?? "";
+    if (!(pickedExt in ATTACHMENT_MEDIA_TYPE)) {
       pushToast("Unsupported file type. Use PDF, DOCX, PNG, JPG, or JPEG.", "alert");
       if (fileInputRef.current) fileInputRef.current.value = "";
       return;
     }
 
+    // Downscale before measuring. This picker advertises site photos, and a phone photo clears
+    // 10 MB easily — measuring the original would refuse a file that stores as a few hundred KB.
+    // Drawings and quotes are PDFs, which shrinkImage returns untouched.
+    const file = await shrinkImage(rawFile);
+    // Re-derived, because a PNG re-encoded as JPEG arrives here renamed.
+    const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
     const maxBytes = 10 * 1024 * 1024; // 10 MB per file limit
     if (file.size > maxBytes) {
       pushToast(`"${file.name}" exceeds the 10 MB limit.`, "alert");
@@ -966,13 +973,13 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
                   if (sel) irmWhOptions = [...irmWhOptions, sel];
                 }
                 return (
-                <div key={l._key} className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/30 p-3">
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-12">
-                    <div className="min-w-0 sm:col-span-6 lg:col-span-2">
+                <div key={l._key} className="@container rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/30 p-3">
+                  <div className="grid grid-cols-1 gap-3 @sm:grid-cols-12">
+                    <div className="min-w-0 @sm:col-span-6 @3xl:col-span-2">
                       <label className={labelCls}>Source</label>
                       <Select value={l.lineType} onChange={(v) => onPickLineType(l._key, v as JobLineType)} options={JOB_LINE_TYPES.map((t) => ({ value: t, label: JOB_LINE_TYPE_LABELS[t] }))} disabled={locked} ariaLabel="Line source" />
                     </div>
-                    <div className="min-w-0 sm:col-span-6 lg:col-span-4">
+                    <div className="min-w-0 @sm:col-span-6 @3xl:col-span-4">
                       <label className={labelCls}>Item<RequiredMark /></label>
                       {l.lineType === "customer_stock" ? (
                         !customerId ? (
@@ -986,7 +993,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
                         <input className={inputCls} value={l.itemName} onChange={(e) => { setLine(l._key, { itemName: e.target.value }); touch(); clearError("kitLines"); }} maxLength={200} placeholder="Item name" disabled={locked} />
                       )}
                     </div>
-                    <div className="min-w-0 sm:col-span-8 lg:col-span-3">
+                    <div className="min-w-0 @sm:col-span-8 @3xl:col-span-3">
                       <label className={labelCls}>Warehouse{l.lineType === "irm" ? <RequiredMark /> : null}</label>
                       {l.lineType === "irm" ? (
                         !l.irmItemId ? (
@@ -1008,7 +1015,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
                         <div className="flex h-[42px] items-center rounded-xl border border-dashed border-[var(--border)] px-3 text-[11px] text-[var(--faint)]">Not applicable</div>
                       )}
                     </div>
-                    <div className="min-w-0 sm:col-span-4 lg:col-span-3">
+                    <div className="min-w-0 @sm:col-span-4 @3xl:col-span-3">
                       <label className={labelCls}>Qty<RequiredMark /></label>
                       <NumberInput className={inputCls} min={minQty} step={1} value={l.qty}
                         onChange={(e) => { setLine(l._key, { qty: e.target.value }); touch(); clearError("kitLines"); }}
@@ -1038,7 +1045,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
                         ) : null
                       )}
                     </div>
-                    <div className="flex items-stretch gap-2 sm:col-span-12">
+                    <div className="flex items-stretch gap-2 @sm:col-span-12">
                       <input className={`${inputCls} min-w-0 flex-1`} value={l.notes} onChange={(e) => { setLine(l._key, { notes: e.target.value }); touch(); }} maxLength={500} placeholder="Line note (optional)" />
                       <button type="button" onClick={() => removeLine(l._key)} disabled={kitLines.length === 1 || locked} title={locked ? "Issued items can't be removed" : undefined} className="flex w-11 shrink-0 items-center justify-center rounded-lg text-[var(--muted)] hover:bg-[var(--surface-2)] hover:text-[var(--neg)] disabled:opacity-40" aria-label="Remove line"><Trash2 className="h-4 w-4" /></button>
                     </div>
@@ -1219,13 +1226,13 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
         <aside className="lg:sticky lg:top-6 lg:self-start">
           <FormAsideCard title="Job summary">
             <div className="space-y-2.5 text-sm">
-              <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">Customer</span><span className="text-right font-semibold text-[var(--ink)]">{customerName ?? "—"}</span></div>
-              <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">Project</span><span className="text-right font-semibold text-[var(--ink)]">{projectName ?? "—"}</span></div>
-              <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">Engineer</span><span className="text-right font-semibold text-[var(--ink)]">{engineerName ?? "—"}</span></div>
-              <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">Priority</span><span className="text-right font-semibold text-[var(--ink)]">{JOB_PRIORITY_LABELS[priority as keyof typeof JOB_PRIORITY_LABELS] ?? priority}</span></div>
-              <div className="flex justify-between"><span className="text-[var(--muted)]">Completion</span><span className="font-semibold text-[var(--ink)]">{completionDate || "—"}</span></div>
-              <div className="flex justify-between"><span className="text-[var(--muted)]">Kit lines</span><span className="font-semibold text-[var(--ink)]">{validLines.length}</span></div>
-              <div className="flex justify-between"><span className="text-[var(--muted)]">Total units</span><span className="font-extrabold text-[var(--ink)]">{totalUnits}</span></div>
+              <SummaryRow label="Customer" valueClassName="font-semibold">{customerName ?? "—"}</SummaryRow>
+              <SummaryRow label="Project" valueClassName="font-semibold">{projectName ?? "—"}</SummaryRow>
+              <SummaryRow label="Engineer" valueClassName="font-semibold">{engineerName ?? "—"}</SummaryRow>
+              <SummaryRow label="Priority" valueClassName="font-semibold">{JOB_PRIORITY_LABELS[priority as keyof typeof JOB_PRIORITY_LABELS] ?? priority}</SummaryRow>
+              <SummaryRow label="Completion" valueClassName="font-semibold">{completionDate || "—"}</SummaryRow>
+              <SummaryRow label="Kit lines" valueClassName="font-semibold">{validLines.length}</SummaryRow>
+              <SummaryRow label="Total units" valueClassName="font-extrabold">{totalUnits}</SummaryRow>
               <p className="rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/40 px-3 py-2.5 text-[11px] text-[var(--muted)]">{mode === "create" ? "On save the job is assigned to the engineer, who is notified in real time and accepts it from their portal. The job number is allocated on save." : "Saving updates the job header and replaces the kit list."}</p>
             </div>
           </FormAsideCard>

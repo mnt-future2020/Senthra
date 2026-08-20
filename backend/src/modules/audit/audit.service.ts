@@ -50,7 +50,13 @@ export function record(entry: AuditEntry): void {
   void auditLogRepo
     .create(data)
     .catch((e) =>
-      console.error("Audit log write failed:", e instanceof Error ? e.message : e),
+      // WHICH entry, not just that one was lost. The trail is what an incident is reconstructed from,
+      // so a gap in it has to name the action and the record it belonged to — otherwise a dropped
+      // write is one anonymous line among every other audit call site in the app.
+      console.error(
+        `Audit log write failed (${data.action}${data.targetType ? ` on ${data.targetType} ${data.targetId ?? "?"}` : ""}, actor ${data.actorEmail ?? data.actorType}):`,
+        e instanceof Error ? e.message : e,
+      ),
     );
 }
 

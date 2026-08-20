@@ -10,6 +10,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
 import { FieldError, FormAsideCard, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
+import { UOM_SELECT_OPTIONS } from "@/lib/uom";
 import { Select } from "@/components/ui/Select";
 import { inputCls, labelCls, primaryBtn, secondaryBtn, hintCls } from "@/components/ui/styles";
 import { printLabels, parseCopiesParam } from "@/lib/printBarcode";
@@ -19,8 +20,6 @@ import type { Category } from "@/types/category";
 import { formatDate as fmtDate } from "@/lib/formatDate";
 import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 
-// Standard units of measure — mirrors the IRM item form + backend UOM_OPTIONS.
-const UOM_OPTIONS = ["Each", "Metre", "Roll", "Pack", "Box", "Set", "Pair", "Reel"];
 
 const STATUS_STYLE: Record<StockEntryStatus, { label: string; cls: string }> = {
   draft: { label: "Draft", cls: "border-amber-400/30 bg-amber-400/10 text-amber-600" },
@@ -296,7 +295,7 @@ export function StockEntryDetail({ initial }: { initial: CustomerStockEntry }) {
                   <Select
                     value={uom}
                     onChange={(v) => setUom(v)}
-                    options={UOM_OPTIONS.map((u) => ({ value: u, label: u }))}
+                    options={UOM_SELECT_OPTIONS}
                     placeholder="— Select unit —"
                     disabled={!canEdit}
                     ariaLabel="Unit of measure"

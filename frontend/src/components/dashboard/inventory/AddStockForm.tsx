@@ -13,7 +13,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import { inputCls, ghostBtn, labelCls, primaryBtn } from "@/components/ui/styles";
-import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
+import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark, SummaryRow } from "@/components/ui/FormScaffold";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { Select } from "@/components/ui/Select";
 import { Notice } from "@/components/ui/Notice";
@@ -369,25 +369,22 @@ export function AddStockForm() {
         <aside className="lg:sticky lg:top-6 lg:self-start">
           <FormAsideCard title="Summary">
             <div className="space-y-2.5 text-sm">
-              <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">Item</span><span className="text-right font-semibold text-[var(--ink)]">{selectedItem ? selectedItem.name : "—"}</span></div>
-              <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">Warehouse</span><span className="text-right font-semibold text-[var(--ink)]">{targetWh ? `${targetWh.name} (${targetWh.code})` : "—"}</span></div>
-              <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">Current on hand</span><span className="font-semibold text-[var(--ink)]">{onHand ?? "—"}</span></div>
-              <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">Quantity to add</span><span className="font-extrabold text-[var(--ink)]">{Number.isInteger(qtyNum) && qtyNum > 0 ? qtyNum : "—"}</span></div>
-              <div className="flex justify-between gap-3"><span className="text-[var(--muted)]">New on hand</span><span className="font-extrabold text-[var(--ink)]">{onHand !== null && Number.isInteger(qtyNum) && qtyNum > 0 ? onHand + qtyNum : "—"}</span></div>
+              <SummaryRow label="Item" valueClassName="font-semibold">{selectedItem ? selectedItem.name : "—"}</SummaryRow>
+              <SummaryRow label="Warehouse" valueClassName="font-semibold">{targetWh ? `${targetWh.name} (${targetWh.code})` : "—"}</SummaryRow>
+              <SummaryRow label="Current on hand" valueClassName="font-semibold">{onHand ?? "—"}</SummaryRow>
+              <SummaryRow label="Quantity to add" valueClassName="font-extrabold">{Number.isInteger(qtyNum) && qtyNum > 0 ? qtyNum : "—"}</SummaryRow>
+              <SummaryRow label="New on hand" valueClassName="font-extrabold">{onHand !== null && Number.isInteger(qtyNum) && qtyNum > 0 ? onHand + qtyNum : "—"}</SummaryRow>
 
               {/* Audit info: the ADJ number (backend is the source of truth — preview only until saved)
                   and the operator performing the add. Both display-only. */}
               <div className="mt-1 space-y-2.5 border-t border-[var(--border)] pt-3">
-                <div className="flex justify-between gap-3">
-                  <span className="text-[var(--muted)]">Adjustment No</span>
-                  <span className={`text-right font-mono font-bold ${savedAdjustment ? "text-[var(--ink)]" : "text-[var(--faint)]"}`}>
-                    {savedAdjustment ? savedAdjustment.code : "Auto-generated after save"}
-                  </span>
-                </div>
-                <div className="flex justify-between gap-3">
-                  <span className="text-[var(--muted)]">Created by</span>
-                  <span className="text-right font-semibold text-[var(--ink)]">{currentUserName}</span>
-                </div>
+                <SummaryRow
+                  label="Adjustment No"
+                  valueClassName={`font-mono font-bold ${savedAdjustment ? "text-[var(--ink)]" : "text-[var(--faint)]"}`}
+                >
+                  {savedAdjustment ? savedAdjustment.code : "Auto-generated after save"}
+                </SummaryRow>
+                <SummaryRow label="Created by" valueClassName="font-semibold">{currentUserName}</SummaryRow>
               </div>
             </div>
           </FormAsideCard>

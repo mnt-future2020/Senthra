@@ -16,7 +16,7 @@ import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark } 
 import { TempPasswordModal } from "@/components/ui/TempPasswordModal";
 import { PostcodeField } from "@/components/ui/PostcodeField";
 import { EMAIL_RE, UK_POSTCODE_RE, WEBSITE_RE, isPhone } from "@/lib/validation";
-import { MAX_IMAGE_BYTES, readFileAsDataUrl } from "@/lib/image";
+import { MAX_IMAGE_BYTES, readFileAsDataUrl, shrinkImage } from "@/lib/image";
 import type { UserStatus } from "@/types/user";
 import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 
@@ -157,12 +157,15 @@ export function CustomerForm({ mode, customer }: { mode: "create" | "edit"; cust
       showError("Please choose an image file (PNG or JPG).");
       return;
     }
-    if (file.size > MAX_IMAGE_BYTES) {
-      showError("Logo must be under 2 MB.");
-      return;
-    }
     try {
-      const data = await readFileAsDataUrl(file);
+      // Downscale first — a logo exported at print resolution is routinely over the limit, and
+      // shrinking it is exactly what the user would otherwise be told to go and do by hand.
+      const image = await shrinkImage(file);
+      if (image.size > MAX_IMAGE_BYTES) {
+        showError("Logo must be under 2 MB.");
+        return;
+      }
+      const data = await readFileAsDataUrl(image);
       setImageData(data);
       setPreviewUrl(data);
       setRemoveLogo(false);

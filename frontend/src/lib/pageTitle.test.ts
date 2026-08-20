@@ -57,6 +57,15 @@ describe("resolvePageTitle", () => {
     expect(resolvePageTitle("/dashboard/roles/new")).toBe("Users & Roles");
   });
 
+  // Both catalogues are reached from the Inventory Hub rather than the rail, so the sidebar sweep
+  // above can't catch them. The rental item pages read "Dashboard" until this entry existed.
+  it("names the catalogues that live inside the Inventory Hub", () => {
+    expect(resolvePageTitle("/dashboard/irm/IRM-0004")).toBe("IRM Catalogue");
+    expect(resolvePageTitle("/dashboard/rentals")).toBe("Rental Catalogue");
+    expect(resolvePageTitle("/dashboard/rentals/RNT-0004")).toBe("Rental Catalogue");
+    expect(resolvePageTitle("/dashboard/rentals/RNT-0004/edit")).toBe("Rental Catalogue");
+  });
+
   // Nested DESTINATIONS, as opposed to nested forms. A form states its own name in its FormScaffold
   // header, so inheriting its section's title costs nothing; a list page has no such header any more,
   // so inheriting means it states its name NOWHERE. Stock movements did exactly that — reached from

@@ -3,7 +3,7 @@ import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
 import { param, queryInt, queryStr } from "../../utils/request.js";
 import { forbidden } from "../../utils/http-error.js";
-import type { ApproveKitRequestInput, CreateKitRequestInput, DeclineKitRequestInput, UploadAttachmentInput } from "./job-kit-request.validation.js";
+import type { ApproveKitRequestInput, CreateKitRequestInput, DeclineKitRequestInput } from "./job-kit-request.validation.js";
 
 // Collapse a possibly-array query value to its first string (matches the engineer-transfer convention).
 
@@ -89,10 +89,4 @@ export const decline = asyncHandler(async (req, res) => {
 // POST /job-kit-requests/:id/cancel  (requester, while pending)
 export const cancel = asyncHandler(async (req, res) => {
   res.json({ request: await kitRequestService.cancel(param(req, "id"), actorFrom(req)) });
-});
-
-// POST /job-kit-requests/attachments  (returns a URL; does NOT create a request)
-export const uploadAttachment = asyncHandler(async (req, res) => {
-  const { image } = req.body as UploadAttachmentInput;
-  res.json(await kitRequestService.uploadAttachment(image));
 });

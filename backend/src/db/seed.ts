@@ -7,8 +7,10 @@ import * as emailTemplateRepo from "#modules/email/emailTemplate.repository.js";
 import * as irmRepo from "#modules/irm/irm.repository.js";
 import * as irmTypeRepo from "#modules/irm-type/irm-type.repository.js";
 import * as irmCategoryRepo from "#modules/irm-category/irm-category.repository.js";
+import * as rentalCategoryRepo from "#modules/rental-category/rental-category.repository.js";
 import * as roleRepo from "#modules/role/role.repository.js";
 import * as supplierTypeRepo from "#modules/supplier-type/supplier-type.repository.js";
+import * as uploadRepo from "#modules/upload/upload.repository.js";
 import * as userRepo from "#modules/user/user.repository.js";
 import * as warehouseTypeRepo from "#modules/warehouse-type/warehouse-type.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
@@ -104,6 +106,11 @@ const FINANCE_PROCUREMENT_PERMISSIONS = [
   "suppliers.view",
   "warehouse.view",
   "irm.view",
+  // The RENTAL catalogue, for the same reason `irm.view` is here: a purchase request can carry hire
+  // lines, and its item picker reads /rental-items. Without it the rental half of the form the client
+  // asked for is a dropdown that silently returns nothing — the failure mode every read on this list
+  // is here to prevent. Read only: raising a hire is a purchase-request permission, not a rental one.
+  "rentals.view",
   // Read-only jobs — the PRF/PO form's OPTIONAL "link to a job" picker (Finance raises the PRF).
   "jobs.view",
   // Read the audit trail — the PRF/PO detail's "Audit trail" tab (who submitted/approved/sent,
@@ -131,6 +138,18 @@ const PM_PROCUREMENT_PERMISSIONS = [
   "suppliers.view",
   "warehouse.view",
   "irm.view",
+  // The hire side of the orders this role sends and chases. `rentals.view` is not optional: the PO
+  // detail's Hire movements panel reads /rental-receipts, which gates on it, so a PM opening a rental
+  // order got an error where the deliveries should be.
+  //
+  // `rentals.hire.manage` is the COMMERCIAL half of the hire split (the floor half lives on the
+  // warehouse manager): extend a hire period, close one without a handover record, void a movement.
+  // It sits here because this is the role that already sends the order to the supplier and
+  // acknowledges their reply — extending it is the same authority over the same commitment, one step
+  // later. Move it if the client's process puts hire extensions with Finance; nothing else depends on
+  // where it lands.
+  "rentals.view",
+  "rentals.hire.manage",
   // Read the audit trail — the PRF/PO detail's "Audit trail" tab.
   "audit.view",
   // The PM reviews and routes POs, so they can download the same list. No PRF export: the PM does
@@ -529,6 +548,23 @@ export async function seedDatabase(): Promise<void> {
     console.log(`Seeded ${SEED_IRM_CATEGORIES.length} IRM categories.`);
   }
 
+  // Starter rental categories, fresh DB only — ordinary admin-managed records, so once seeded a
+  // rename or delete sticks. Separate from the IRM categories on purpose: one master per domain.
+  if ((await rentalCategoryRepo.findMany()).length === 0) {
+    const SEED_RENTAL_CATEGORIES = [
+      "Test Equipment",
+      "Power Tools",
+      "Access Equipment",
+      "Generators",
+      "Vehicles",
+    ];
+    for (let i = 0; i < SEED_RENTAL_CATEGORIES.length; i++) {
+      const name = SEED_RENTAL_CATEGORIES[i]!;
+      await rentalCategoryRepo.create({ key: slugify(name), name, status: "active", sortOrder: i });
+    }
+    console.log(`Seeded ${SEED_RENTAL_CATEGORIES.length} rental categories.`);
+  }
+
   // Enforce GLOBAL-FOREVER SKU uniqueness for IRM items at the DB with a partial unique
   // index (Prisma can't express partial/sparse indexes for MongoDB — see the repository).
   // Idempotent — a no-op once the index exists, so it runs safely on every boot.
@@ -540,6 +576,14 @@ export async function seedDatabase(): Promise<void> {
   // a full collection scan. Idempotent — no-ops once the indexes exist.
   await irmRepo.ensureBarcodeUniqueIndex();
   await customerRepo.ensureStockEntryBarcodeUniqueIndex();
+
+  // Same partial-unique mechanics for the two columns that USED to carry an optional `@unique` —
+  // which on MongoDB is a non-sparse index that rejects the second row leaving the field unset.
+  // PendingUpload.url was the live case: every ledger row is minted without a url, so the plain
+  // `@unique` broke direct browser uploads app-wide. User.employeeId is the same shape, latent.
+  // Idempotent — no-ops once the indexes exist.
+  await uploadRepo.ensurePendingUploadUrlUniqueIndex();
+  await userRepo.ensureEmployeeIdUniqueIndex();
 
   // One-time migration: backfill Warehouse.typeId from the legacy `type` string, then
   // ensure EVERY warehouse has a typeId (so it can become the single source of truth).

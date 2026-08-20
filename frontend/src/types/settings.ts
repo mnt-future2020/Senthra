@@ -37,6 +37,10 @@ export interface Settings extends Branding {
   // Display prefix for IRM catalogue item codes (e.g. "IRM" → IRM-0004).
   // Effective value (default-filled by the backend). Only affects new items.
   irmCodePrefix: string;
+  // Display prefix for RENTAL catalogue item codes (e.g. "RNT" → RNT-0011).
+  // Effective value (default-filled by the backend). Only affects new items — an existing code, and
+  // therefore the barcode printed from it, never changes.
+  rentalCodePrefix: string;
   // Company profile (legal identity for official documents) + regional formatting.
   // Default-filled by the backend (country/timezone/dateFormat/timeFormat).
   companyLegalName: string;

@@ -3,6 +3,15 @@ import { Prisma, type PurchaseOrder, type PurchaseOrderAttachment } from "@prism
 import { isWriteConflict, prisma, withTransaction } from "../../lib/prisma.js";
 import { escapeRegex } from "../../utils/search.js";
 import { effectiveEta, isDeliveryOverdue } from "./po-overdue.js";
+import {
+  atWarehouses,
+  awaitingDeliveryWhere,
+  expiringSoonWhere,
+  onHireWhere,
+  overdueDeliveryWhere,
+  overdueWhere,
+  returnedWhere,
+} from "./rentalHire.predicate.js";
 
 // Data-access layer for Purchase Orders. The ONLY place Prisma is touched for POs. Soft-deleted
 // POs (deletedAt set) are excluded from normal reads. Header + lines + totals are written
@@ -41,6 +50,9 @@ const warehouseSelect = {
   country: true,
 } satisfies Prisma.WarehouseSelect;
 
+/** A goods receipt that still exists. */
+const LIVE_GRN = { OR: [{ deletedAt: null }, { deletedAt: { isSet: false } }] } satisfies Prisma.GoodsReceiptWhereInput;
+
 const withRelations = {
   supplier: { select: supplierSelect },
   warehouse: { select: warehouseSelect },
@@ -48,13 +60,36 @@ const withRelations = {
     orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
     include: { irmItem: { select: { id: true, code: true, name: true, status: true } } },
   },
+  rentalItems: {
+    orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+    include: {
+      rentalItem: { select: { id: true, code: true, name: true, status: true } },
+      // The breakdown behind each hire's running extension total, oldest first — read with the order
+      // rather than fetched per line, which on a five-hire order would be five more round trips for
+      // a handful of rows.
+      extensions: { orderBy: { createdAt: "asc" } },
+    },
+  },
   attachments: { orderBy: { createdAt: "asc" } },
   // Procurement-chain slices: the source PRF, the optional job, and the GRNs received against
   // this PO — compact selects only (the detail chain strip + linked badges render from these).
   purchaseRequest: { select: { id: true, code: true, status: true } },
   job: { select: { id: true, jobNumber: true, name: true, status: true } },
-  goodsReceipts: { select: { id: true, code: true, status: true, receivedDate: true }, orderBy: { createdAt: "asc" } },
+  // LIVE ONLY, for the same reason the request's linked-PO include filters: a draft receipt can be
+  // deleted, every GRN read filters `deletedAt`, and the chain strip renders each of these as a
+  // clickable node — so an unfiltered list puts a button on the order that lands the user on
+  // "Goods receipt not found." Mongo: a row whose create omitted the field does not match
+  // `{ deletedAt: null }`, so both shapes have to be asked for.
+  goodsReceipts: {
+    where: LIVE_GRN,
+    select: { id: true, code: true, status: true, receivedDate: true },
+    orderBy: { createdAt: "asc" },
+  },
 } satisfies Prisma.PurchaseOrderInclude;
+
+// Exported so the include can be pinned by a test: dropping the `where` is a silent regression —
+// it compiles, and every read still returns rows.
+export { LIVE_GRN, withRelations };
 
 export type PurchaseOrderWithRelations = Prisma.PurchaseOrderGetPayload<{ include: typeof withRelations }>;
 
@@ -112,6 +147,24 @@ export interface PurchaseOrderListFilters {
 // opens are the same set of rows, not two similar ideas.
 export const RECEIVABLE_PO_STATUSES = ["sent", "supplier_accepted", "partially_received"] as const;
 
+/**
+ * A purchase order Goods In can actually act on: issued, AND still carrying goods to receive.
+ *
+ * The status alone is not enough. A HIRE-ONLY order is `sent` like any other, so it used to sit in the
+ * warehouse's Company (GRN) worklist with a Receive button that opened an empty receipt form — there
+ * was nothing to receive, because hired kit is received as a hire delivery (rental-receipt), not as a
+ * goods receipt. Requiring at least one IRM line keeps those orders in their own queue.
+ *
+ * Deliberately NOT "outstanding quantity > 0": that comparison is between two COLUMNS, which a
+ * Prisma/Mongo `where` cannot express — the same limitation that made `notifyOnDate` a stored column.
+ * `partially_received` already means some remains, and a fully-received order leaves the window by
+ * status, so the line-EXISTS test is what this can honestly ask for.
+ */
+export const receivableWhere = (): Prisma.PurchaseOrderWhereInput => ({
+  status: { in: [...RECEIVABLE_PO_STATUSES] },
+  items: { some: {} },
+});
+
 // The two approval-queue predicates, defined ONCE and shared by countAttention (the badge) and
 // buildWhere (the list the badge opens) — the same contract RECEIVABLE_PO_STATUSES gives the overdue
 // badge. Previously the badge summed these while its href pointed at a single real status, so a
@@ -168,9 +221,11 @@ export function buildWhere(filters: PurchaseOrderListFilters): Prisma.PurchaseOr
     // DERIVED pseudo-status: everything the warehouse can still book in — the exact set countAttention
     // measures for "Deliveries to receive". It spans three real statuses, and the badge used to open
     // `?status=sent` instead: a chip reading 14 opened a list of 7, with the other 7 sitting under
-    // supplier_accepted / partially_received. Same RECEIVABLE_PO_STATUSES the overdue branch uses, so
-    // there is one definition of "receivable" in this file, not three.
+    // supplier_accepted / partially_received. Same `receivableWhere` the badge counts, so there is one
+    // definition of "receivable" in this file, not three — and a hire-only order, which has no goods
+    // to book in at all, is in neither.
     where.status = { in: [...RECEIVABLE_PO_STATUSES] };
+    where.items = { some: {} };
   } else if (filters.status === "awaiting_approval" || filters.status === "awaiting_send") {
     // DERIVED pseudo-statuses, never stored — the approval and send queues, which each span more
     // than one real status. AND'd like the overdue branch above so they compose with (and can't be
@@ -272,6 +327,9 @@ export function countBySupplier(supplierId: string): Promise<number> {
 }
 export function countByWarehouse(warehouseId: string): Promise<number> {
   return prisma.purchaseOrder.count({ where: { warehouseId, deletedAt: null } });
+}
+export function countByJob(jobId: string): Promise<number> {
+  return prisma.purchaseOrder.count({ where: { jobId, deletedAt: null } });
 }
 export function countByIrmItem(irmItemId: string): Promise<number> {
   return prisma.purchaseOrderItem.count({ where: { irmItemId, purchaseOrder: { is: { deletedAt: null } } } });
@@ -515,15 +573,44 @@ export async function allocatePoCodeTx(tx: Prisma.TransactionClient): Promise<st
 
 // Create a PO (header + lines + attachment rows) INSIDE an existing transaction. `deletedAt`
 // persisted as an explicit null for the Prisma+Mongo read-filter reason documented below.
+// The scalar fields written to a PO RENTAL line — the committed hire.
+export interface PoRentalLineRow {
+  rentalItemId: string;
+  itemName: string;
+  baseUnit: string | null;
+  quantity: number;
+  hireStartDate: Date;
+  hireEndDate: Date;
+  notifyDaysBefore: number;
+  deliveryAddress: string | null;
+  ratePeriod: string;
+  ratePence: number | null;
+  priceOverridden: boolean;
+  returnMode: string;
+  returnAddress: string | null;
+  unitPricePence: number;
+  vatRate: number;
+  lineTotalPence: number;
+  sortOrder: number;
+  notes: string | null;
+  hireStatus: string;
+  /** Only ever written by extendHire — conversion starts every hire at zero. */
+  extensionChargePence?: number;
+  notifyOnDate: Date;
+}
+
 export async function createPoTx(
   tx: Prisma.TransactionClient,
   header: Omit<Prisma.PurchaseOrderUncheckedCreateInput, "code">,
   code: string,
   lines: PoLineRow[],
   attachments: Omit<Prisma.PurchaseOrderAttachmentUncheckedCreateInput, "purchaseOrderId">[] = [],
+  rentalLines: PoRentalLineRow[] = [],
 ): Promise<string> {
   const po = await tx.purchaseOrder.create({ data: { deletedAt: null, ...header, code } });
   if (lines.length) await tx.purchaseOrderItem.createMany({ data: lines.map((l) => ({ purchaseOrderId: po.id, ...l })) });
+  if (rentalLines.length)
+    await tx.purchaseOrderRentalLine.createMany({ data: rentalLines.map((l) => ({ purchaseOrderId: po.id, ...l })) });
   if (attachments.length) {
     await tx.purchaseOrderAttachment.createMany({ data: attachments.map((a) => ({ ...a, purchaseOrderId: po.id })) });
   }
@@ -587,12 +674,12 @@ export async function expectedDeliveries(now: Date, dayStart: Date, warehouseIds
   // fall back to the expected date when it isn't set yet. Because the effective date can be EITHER
   // column, we can't filter by date in the where clause — the open-receivable set is small, so we
   // fetch it and split in memory. A row with neither date is "no ETA" and simply doesn't count.
+  // `receivableWhere`, so hire-only orders are excluded. Their kit is expected too, but it is counted
+  // by the hire side's own badge ("Hires not yet received", driven by the hire START date) — counting
+  // it here as well would put one real-world arrival on two badges, and this one opens a list whose
+  // Receive button has nothing to receive.
   const rows = await prisma.purchaseOrder.findMany({
-    where: {
-      deletedAt: null,
-      status: { in: ["sent", "supplier_accepted", "partially_received"] },
-      ...whereWarehouse(warehouseIds),
-    },
+    where: { ...receivableWhere(), deletedAt: null, ...whereWarehouse(warehouseIds) },
     select: { expectedDeliveryDate: true, confirmedDeliveryDate: true },
   });
   let dueThisWeek = 0;
@@ -630,9 +717,9 @@ export async function countAttention(
     prisma.purchaseOrder.count({ where: { OR: awaitingSendPoWhere(opts.pmUserId), ...scoped } }),
     prisma.purchaseOrder.count({ where: { status: "sent", ...scoped } }),
     prisma.purchaseOrder.count({ where: { status: "fully_received", ...scoped } }),
-    prisma.purchaseOrder.count({
-      where: { status: { in: [...RECEIVABLE_PO_STATUSES] }, ...scoped },
-    }),
+    // The warehouse's goods-in backlog. Through `receivableWhere`, so it counts exactly the rows
+    // `?status=receivable` opens — a hire-only order has nothing to receive here and is in neither.
+    prisma.purchaseOrder.count({ where: { ...receivableWhere(), ...scoped } }),
   ]);
   return {
     awaitingApproval,
@@ -716,13 +803,336 @@ export async function statusWorklist(status: string, opts: { pmUserId?: string; 
   return rows.map(mapPoWorklist);
 }
 
-/** POs that can still receive goods (warehouse-scoped receive queue). */
+/**
+ * POs that can still receive GOODS (warehouse-scoped receive queue).
+ *
+ * Through `receivableWhere`, so a hire-only order is not in it. One used to appear here with a Receive
+ * button that opened an empty goods-receipt form: hired kit is booked in as a hire delivery, which is
+ * its own queue, because a GRN writes stock and hired kit is the supplier's.
+ */
 export async function receivableWorklist(warehouseIds?: string[]): Promise<PoWorklistRow[]> {
   const rows = await prisma.purchaseOrder.findMany({
-    where: { status: { in: ["sent", "supplier_accepted", "partially_received"] }, deletedAt: null, ...whereWarehouse(warehouseIds) },
+    where: { ...receivableWhere(), deletedAt: null, ...whereWarehouse(warehouseIds) },
     select: poWorklistSelect,
     orderBy: { expectedDeliveryDate: "asc" },
     take: WORKLIST_QUERY_CAP,
   });
   return rows.map(mapPoWorklist);
+}
+
+// --- rental hires (the committed hire rows on this order) ------------------------------------
+
+export function findRentalLine(lineId: string) {
+  return prisma.purchaseOrderRentalLine.findUnique({ where: { id: lineId } });
+}
+
+export function updateRentalLine(lineId: string, data: Prisma.PurchaseOrderRentalLineUpdateInput) {
+  return prisma.purchaseOrderRentalLine.update({ where: { id: lineId }, data });
+}
+
+/**
+ * Extend a hire: move the line AND record what moved it, in ONE transaction.
+ *
+ * The two must land together or not at all. `extensionChargePence` is a running total and this row is
+ * the explanation of it — a breakdown that can disagree with the number it explains is worse than no
+ * breakdown, because both look authoritative and only one is checked. Same rule the receipt writes
+ * follow for `receivedQuantity`.
+ */
+export async function extendRentalLine(
+  lineId: string,
+  data: Prisma.PurchaseOrderRentalLineUpdateInput,
+  extension: Prisma.HireExtensionUncheckedCreateInput,
+): Promise<void> {
+  await withTransaction(async (tx) => {
+    await tx.purchaseOrderRentalLine.update({ where: { id: lineId }, data });
+    await tx.hireExtension.create({ data: extension });
+  });
+}
+
+// --- the extension register ------------------------------------------------------------------
+//
+// Every extension agreed in a period. The question `extensionChargePence` cannot answer, because a
+// sum carries no dates: three extensions of £275, £300 and £150 read as £725 and nothing more.
+
+export interface HireExtensionListFilters {
+  /** Order code, supplier or item. */
+  search?: string;
+  purchaseOrderId?: string;
+  /** Inclusive bounds on when the extension was AGREED — the reporting period. */
+  dateFrom?: Date;
+  dateTo?: Date;
+}
+
+function buildExtensionWhere(f: HireExtensionListFilters): Prisma.HireExtensionWhereInput {
+  const where: Prisma.HireExtensionWhereInput = {};
+  if (f.purchaseOrderId) where.purchaseOrderId = f.purchaseOrderId;
+  if (f.dateFrom || f.dateTo) {
+    where.createdAt = { ...(f.dateFrom ? { gte: f.dateFrom } : {}), ...(f.dateTo ? { lte: f.dateTo } : {}) };
+  }
+  if (f.search) {
+    // escapeRegex, always: Prisma injects `contains` into a Mongo $regex unescaped, so a bare "(" in
+    // a search box is a 500 rather than no results.
+    const q = escapeRegex(f.search);
+    where.OR = [
+      { poCode: { contains: q, mode: "insensitive" } },
+      { supplierName: { contains: q, mode: "insensitive" } },
+      { itemName: { contains: q, mode: "insensitive" } },
+    ];
+  }
+  return where;
+}
+
+export function findManyExtensions(filters: HireExtensionListFilters, skip = 0, take = 20) {
+  return prisma.hireExtension.findMany({
+    where: buildExtensionWhere(filters),
+    // Newest agreement first, and the id as the tie-break so two extensions recorded in the same
+    // moment cannot swap places between a page and its export.
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    skip,
+    take,
+  });
+}
+
+export function countExtensions(filters: HireExtensionListFilters): Promise<number> {
+  return prisma.hireExtension.count({ where: buildExtensionWhere(filters) });
+}
+
+// --- the deadline badge, the on-hire list and the reminder sweep ------------------------------
+//
+// All three build their filter from rentalHire.predicate, never from a local copy. A count and the
+// list it opens computed by two predicates is the bug the attention registry already documents for
+// `?status=rework` and `?status=awaiting_send`.
+
+export function countExpiringHires(todayStart: Date): Promise<number> {
+  return prisma.purchaseOrderRentalLine.count({ where: expiringSoonWhere(todayStart) });
+}
+
+export function countOverdueHires(todayStart: Date): Promise<number> {
+  return prisma.purchaseOrderRentalLine.count({ where: overdueWhere(todayStart) });
+}
+
+/** Hires whose start date has passed with nobody confirming the kit arrived. */
+export function countOverdueDeliveryHires(todayStart: Date): Promise<number> {
+  return prisma.purchaseOrderRentalLine.count({ where: overdueDeliveryWhere(todayStart) });
+}
+
+/**
+ * Hires still awaiting delivery at these warehouses — the warehouse floor's receiving queue.
+ *
+ * DELIBERATELY not `overdueDeliveryWhere`: that one asks "should this already be here?", which is
+ * the chase. This one asks "is there kit to receive at my door?", which is the WORK, and it is the
+ * exact set the warehouse's Rental deliveries pane lists (`onHireFilter("awaiting")`). Counting the
+ * narrower set left every hire not yet due with a Receive button and no badge in the product.
+ */
+export function countAwaitingHireDeliveries(warehouseIds?: string[]): Promise<number> {
+  return prisma.purchaseOrderRentalLine.count({ where: atWarehouses(awaitingDeliveryWhere(), warehouseIds) });
+}
+
+/**
+ * The same queue split per receiving warehouse — the Warehouses list's per-row count and the
+ * warehouse detail tab count.
+ *
+ * Tallied in memory rather than with a groupBy because the warehouse lives on the ORDER, not on the
+ * line, and Prisma cannot group by a relation field. The set is small by construction: only hires
+ * nobody has received yet, which is a desk-sized queue, not a history.
+ */
+export async function countAwaitingHireDeliveriesByWarehouse(
+  warehouseIds?: string[],
+): Promise<Record<string, number>> {
+  const rows = await prisma.purchaseOrderRentalLine.findMany({
+    where: atWarehouses(awaitingDeliveryWhere(), warehouseIds),
+    select: { purchaseOrder: { select: { warehouseId: true } } },
+  });
+  const out: Record<string, number> = {};
+  for (const r of rows) {
+    // An order with no warehouse would otherwise tally under "undefined" and render as a phantom row.
+    const id = r.purchaseOrder?.warehouseId;
+    if (id) out[id] = (out[id] ?? 0) + 1;
+  }
+  return out;
+}
+
+// ONE list, so the endpoint's `?status=` whitelist cannot drift from the filter's own vocabulary. A
+// value the filter resolves but the endpoint refuses is silently downgraded to "all" — which opens
+// EVERY live hire under a badge that counted three.
+// `returned` is the ODD ONE OUT and belongs here anyway: every other entry narrows the LIVE hires,
+// and it selects the finished ones. A register of its own would need a second copy of every column,
+// filter and export this list already has — and the row is the same row, at the end of the same life.
+export const ON_HIRE_STATUSES = ["all", "expiring", "overdue", "awaiting", "late", "returned"] as const;
+export type OnHireStatus = (typeof ON_HIRE_STATUSES)[number];
+
+// Exported so the badge that links here can be tested against the filter it opens: "Hires not yet
+// received" counted `overdueDeliveryWhere` while its link resolved to `awaiting`, so the badge read
+// one number and the list showed a larger one.
+export function onHireFilter(status: OnHireStatus, todayStart: Date): Prisma.PurchaseOrderRentalLineWhereInput {
+  if (status === "expiring") return expiringSoonWhere(todayStart);
+  if (status === "overdue") return overdueWhere(todayStart);
+  // The receiving queue. Deliberately part of THIS list rather than a screen of its own: it is the
+  // same rows at an earlier point in the same life, and a separate page would need its own copy of
+  // every column, filter and export.
+  if (status === "awaiting") return awaitingDeliveryWhere();
+  // The narrower half of that queue — nothing has arrived AND the hire has already started. It is
+  // what the `rentals.awaiting_delivery` badge counts, and it exists so that badge can open exactly
+  // its own rows instead of the whole receiving queue.
+  if (status === "late") return overdueDeliveryWhere(todayStart);
+  // Finished hires — what a period report is built from. See returnedWhere for why it asks the
+  // status rather than `fullyReturned`.
+  if (status === "returned") return returnedWhere();
+  return onHireWhere();
+}
+
+/**
+ * Where a typed word is looked for on a hire — the item, the order, the supplier, the item's code.
+ *
+ * escapeRegex on every arm: Prisma injects `contains` into a Mongo $regex unescaped, so a bare "("
+ * from a search box is a 500 rather than no results.
+ */
+function searchArms(raw: string): Prisma.PurchaseOrderRentalLineWhereInput[] {
+  const q = escapeRegex(raw.trim());
+  return [
+    { itemName: { contains: q, mode: "insensitive" } },
+    { purchaseOrder: { is: { code: { contains: q, mode: "insensitive" } } } },
+    { purchaseOrder: { is: { supplierName: { contains: q, mode: "insensitive" } } } },
+    { rentalItem: { is: { code: { contains: q, mode: "insensitive" } } } },
+  ];
+}
+
+export async function listOnHire(args: {
+  status: OnHireStatus;
+  todayStart: Date;
+  page: number;
+  pageSize: number;
+  /** Narrow to the hires arriving at ONE warehouse — the receiving pane on a warehouse page. */
+  warehouseId?: string;
+  /** Narrow to ONE catalogue item — the live hires shown on its own page, and where a scan lands. */
+  rentalItemId?: string;
+  /** Item, order code or supplier — the same free-text box every other register in the app carries. */
+  search?: string;
+}) {
+  const base = onHireFilter(args.status, args.todayStart);
+  // Every hire on an order addressed to this warehouse — including the lines carrying their own
+  // delivery address.
+  //
+  // Those were excluded at first, on the reasoning that a line with a site address never reaches the
+  // warehouse door. That reasoning hid rows: an order raised against this warehouse simply vanished
+  // from its queue, with nothing on screen saying where it had gone, and the delivery it represents
+  // still has to be confirmed by somebody. The order's warehouse is who chases it, so the row stays —
+  // and the list shows the destination instead, which is the honest version of the same fact.
+  // Narrowed through the SHARED helper, which is also what the receiving badge counts with — the
+  // pane and the badge that opens it cannot select different rows.
+  const where = {
+    ...atWarehouses(base, args.warehouseId ? [args.warehouseId] : undefined),
+    // Merged onto the shared predicate rather than replacing it: "this item's live hires" must mean
+    // the same thing as the badge that counts them, only narrower.
+    ...(args.rentalItemId ? { rentalItemId: args.rentalItemId } : {}),
+    // The free-text box, ANDed on so it can only ever narrow the window the caller asked for — a
+    // search that widened a badge's rows would put hires on screen the badge never counted.
+    //
+    // Under `AND` rather than a top-level `OR`, because the predicates above own the top level: an
+    // `OR` written there would sit BESIDE them instead of inside, and a search for "Fibre" would
+    // return every matching hire on every order, overdue or not.
+    ...(args.search ? { AND: [{ OR: searchArms(args.search) }] } : {}),
+  };
+  const [rows, total] = await Promise.all([
+    prisma.purchaseOrderRentalLine.findMany({
+      where,
+      include: {
+        // `deliveryAddress` + the warehouse block come along so the collection point can be resolved
+        // by the SAME function the order document uses (rentalReturn.ts) rather than a second guess.
+        purchaseOrder: {
+          select: {
+            id: true, code: true, status: true, supplierName: true, warehouseId: true, deliveryAddress: true,
+            warehouse: { select: { name: true, addressLine1: true, addressLine2: true, city: true, county: true, postcode: true, country: true } },
+          },
+        },
+        rentalItem: { select: { id: true, code: true, name: true } },
+      },
+      // Soonest deadline first while a hire is LIVE — that list is a worklist, and the top of it is
+      // what is owed next. A finished hire owes nothing, so its register reads as history instead:
+      // most recently ended first. Descending on the same key, so `@@index([hireStatus, hireEndDate])`
+      // still serves it and no second index is needed.
+      orderBy: { hireEndDate: args.status === "returned" ? "desc" : "asc" },
+      skip: (args.page - 1) * args.pageSize,
+      take: args.pageSize,
+    }),
+    prisma.purchaseOrderRentalLine.count({ where }),
+  ]);
+  return { rows, total };
+}
+
+const REMINDER_LEASE_MS = 2 * 60 * 1000;
+
+// Mongo: a field the create omitted does NOT match `{ f: null }`, so both arms are always needed.
+const UNSET_NOTIFIED = { OR: [{ deadlineNotifiedAt: null }, { deadlineNotifiedAt: { isSet: false } }] };
+const claimable = (now: Date) => ({
+  OR: [
+    { deadlineNotifyClaimExpires: null },
+    { deadlineNotifyClaimExpires: { isSet: false } },
+    { deadlineNotifyClaimExpires: { lt: now } },
+  ],
+});
+
+/**
+ * Live hires whose reminder is due, not yet sent, not held by a live lease, and still being tried.
+ *
+ * `maxAttempts` is the last of those and it is not cosmetic. Giving up writes neither
+ * `deadlineNotifiedAt` nor a lease, so without this bound a given-up row keeps matching for as long
+ * as it remains inside its notify window — and it sorts to the FRONT, because `hireEndDate asc` puts
+ * the soonest first and a row that has burned every attempt is among the soonest. It therefore
+ * consumes one of `take` slots on every pass. A few days of broken SMTP fills the batch with rows
+ * that will never be sent, and a genuinely-due hire past position `take` gets no reminder at all.
+ */
+export function findDueForReminder(todayStart: Date, take: number, maxAttempts: number) {
+  return prisma.purchaseOrderRentalLine.findMany({
+    where: {
+      ...expiringSoonWhere(todayStart),
+      deadlineNotifyAttempts: { lt: maxAttempts },
+      AND: [UNSET_NOTIFIED, claimable(new Date())],
+    },
+    include: { purchaseOrder: { select: { code: true, pmEmail: true, createdBy: true } } },
+    take,
+    orderBy: { hireEndDate: "asc" },
+  });
+}
+
+/**
+ * Take the reminder lease under THIS worker's token, or lose the race. The affected-row count is
+ * the whole mechanism: two instances sweeping together means one of them simply skips the row.
+ */
+export async function claimReminder(lineId: string, token: string, leaseMs = REMINDER_LEASE_MS): Promise<boolean> {
+  const now = new Date();
+  const res = await prisma.purchaseOrderRentalLine.updateMany({
+    where: { id: lineId, ...UNSET_NOTIFIED, AND: [claimable(now)] },
+    data: { deadlineNotifyClaimToken: token, deadlineNotifyClaimExpires: new Date(now.getTime() + leaseMs) },
+  });
+  return res.count === 1;
+}
+
+/**
+ * Complete the reminder — ONLY if this worker still holds the lease it claimed.
+ *
+ * Conditional on the TOKEN, not just the id. A worker whose lease expired inside a slow SMTP call
+ * no longer owns the row, and an unconditional write here would stamp over whoever does. `false`
+ * means the lease was lost mid-send; the caller records that and writes nothing else.
+ */
+export async function markReminderSent(lineId: string, token: string): Promise<boolean> {
+  const res = await prisma.purchaseOrderRentalLine.updateMany({
+    where: { id: lineId, deadlineNotifyClaimToken: token },
+    data: { deadlineNotifiedAt: new Date(), deadlineNotifyClaimToken: null, deadlineNotifyClaimExpires: null },
+  });
+  return res.count === 1;
+}
+
+/**
+ * Hand the row back after a failed send so the next pass can retry — again only if this worker
+ * still holds it. THIS is the write the token exists for: an unconditional release by a stale
+ * worker would clear the LIVE worker's lease, and a third worker could then claim mid-send, turning
+ * a bounded duplicate into an unbounded one.
+ */
+export async function releaseReminderClaim(lineId: string, token: string, attempts: number): Promise<boolean> {
+  const res = await prisma.purchaseOrderRentalLine.updateMany({
+    where: { id: lineId, deadlineNotifyClaimToken: token },
+    data: { deadlineNotifyClaimToken: null, deadlineNotifyClaimExpires: null, deadlineNotifyAttempts: attempts },
+  });
+  return res.count === 1;
 }

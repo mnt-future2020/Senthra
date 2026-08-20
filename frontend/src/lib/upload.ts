@@ -1,4 +1,5 @@
 import { api } from "./api";
+import { shrinkImage } from "./image";
 
 // ── Direct browser upload ──────────────────────────────────────────────────────────────────────
 //
@@ -55,8 +56,10 @@ export type UploadPurpose =
   | "damage_photo"
   | "vsr_attachment"
   | "vsr_damage_photo"
-  | "kit_request_attachment"
-  | "transfer_attachment";
+  | "transfer_attachment"
+  // Condition evidence on a hire delivery. `attach` mode, unlike the other evidence photos: its record
+  // exists by the time the photo is taken, so the asset keeps an identity that can be released with it.
+  | "hire_delivery_photo";
 
 interface SignatureResponse {
   cloudName: string;
@@ -166,15 +169,29 @@ function postToCloudinary(
  * no cleanup call here: this side cannot be relied on to run one.
  */
 export async function uploadDirect(opts: UploadOptions): Promise<UploadResult> {
+  // Downscale FIRST, so every value below describes the file that is actually going to be sent.
+  //
+  // This sits here rather than in each picker because it is the one place every direct upload passes
+  // through, and getting it wrong is invisible: a picker that forgot to shrink would still work, just
+  // slowly and at 20× the storage, and nobody would notice until the Cloudinary bill. `shrinkImage`
+  // returns documents untouched, so the document pickers are safe to route through it — a PDF is not
+  // an image and never reaches a canvas.
+  //
+  // The ORDER matters. `sizeBytes` is what the server signs the size cap against, and `mediaTypeFor`
+  // reads the extension, which a PNG→JPEG re-encode changes. Shrinking after either one would sign a
+  // cap for a file that no longer exists and declare a type the bytes contradict — and finalize now
+  // rejects a media type whose resource type disagrees with the signature's.
+  const file = await shrinkImage(opts.file);
+
   const signed = await api<SignatureResponse>("/uploads/signature", {
     method: "POST",
     body: {
       purpose: opts.purpose,
-      fileName: opts.file.name,
-      sizeBytes: opts.file.size,
+      fileName: file.name,
+      sizeBytes: file.size,
       // Same derivation at BOTH ends, and that is now load-bearing: finalize rejects a media type
       // whose resource type disagrees with the one the signature was minted for.
-      mediaType: mediaTypeFor(opts.file),
+      mediaType: mediaTypeFor(file),
       ...(opts.targetId ? { targetId: opts.targetId } : {}),
       // Sent at signature time too, so a rejected label (the reserved issued-PO archive name) fails
       // the user in the picker rather than after the file has already gone to Cloudinary.
@@ -182,7 +199,7 @@ export async function uploadDirect(opts: UploadOptions): Promise<UploadResult> {
     },
   });
 
-  const uploaded = await postToCloudinary(signed, opts.file, opts.onProgress, opts.signal);
+  const uploaded = await postToCloudinary(signed, file, opts.onProgress, opts.signal);
 
   return api<UploadResult>("/uploads/finalize", {
     method: "POST",
@@ -191,10 +208,10 @@ export async function uploadDirect(opts: UploadOptions): Promise<UploadResult> {
       publicId: uploaded.public_id,
       version: uploaded.version,
       signature: uploaded.signature,
-      fileName: opts.file.name,
+      fileName: file.name,
       // Same derivation at BOTH ends, and that is now load-bearing: finalize rejects a media type
       // whose resource type disagrees with the one the signature was minted for.
-      mediaType: mediaTypeFor(opts.file),
+      mediaType: mediaTypeFor(file),
       ...(opts.label ? { label: opts.label } : {}),
       ...(opts.targetId ? { targetId: opts.targetId } : {}),
     },

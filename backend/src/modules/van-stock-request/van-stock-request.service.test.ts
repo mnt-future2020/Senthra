@@ -65,6 +65,14 @@ describe("toPublic scope propagation (regression: default-param must not coerce 
     expect(pub.myProgress).not.toBeNull();
     expect(pub.myProgress!.allMineDone).toBe(false); // 0/1 fulfilled
   });
+  // "high" is retired; rows raised before that still hold it. toPublic is the ONE door every request
+  // leaves the API through, so normalising here is what keeps a legacy row off a UI that no longer
+  // has a third option to render — rather than each list learning the old value.
+  it("surfaces a legacy high row as urgent", () => {
+    expect(toPublic({ ...baseReq, priority: "high" } as unknown as RequestWithLines, d, undefined).priority).toBe("urgent");
+    expect(toPublic(baseReq, d, undefined).priority).toBe("normal");
+  });
+
   it("null scope (engineer) ⇒ isMine=false, myProgress null", () => {
     const pub = toPublic(baseReq, d, null);
     expect(pub.lines[0].isMine).toBe(false);

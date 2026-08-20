@@ -97,7 +97,6 @@ describe("deterministic and evidence assets have no deletion path", () => {
     "modules/settings/settings.service.ts", // logo / favicon — publicId is the literal type
     "modules/goods-management/goods-management.service.ts", // damage photos — audit evidence
     "modules/engineer-transfer/engineer-transfer.service.ts", // acknowledgement signature
-    "modules/job-kit-request/job-kit-request.service.ts",
     "modules/van-stock-request/van-stock-request.service.ts",
   ];
 
@@ -110,14 +109,22 @@ describe("deterministic and evidence assets have no deletion path", () => {
   });
 });
 
-// Job attachments are a bare `String[]` edited by replacing the whole array, so there is no
-// "this one was removed" event to hang cleanup on and no row to hold an identity in. Deferred
-// lifecycle debt, recorded here so it reads as a known gap rather than an oversight.
-describe("job attachments remain deferred", () => {
-  it("stores only URLs and never deletes", () => {
+// Job attachments were the one table that could never delete its files: a bare `String[]` has
+// nowhere to hold the publicId + resourceType a Cloudinary destroy needs. They are rows now, and
+// this asserts the two halves of that — the removal path, and the reason it can exist at all.
+describe("job attachments delete their files", () => {
+  it("routes removal through the one guarded path, like every other attachment", () => {
     const job = files.find((f) => f.rel === "modules/job/job.service.ts")!;
-    expect(job.src).toContain("uploadFileToCloudinary");
-    expect(job.src).not.toContain("releaseAsset");
+    expect(job.src).toContain("releaseAsset");
+  });
+
+  // The identity never travels through the browser — the form still posts plain URLs. It is stamped
+  // onto the pending-upload ledger at finalize and claimed back at save, which is what makes the
+  // removal above addressable at all.
+  it("recovers the identity from the ledger rather than parsing it out of the URL", () => {
+    const job = files.find((f) => f.rel === "modules/job/job.service.ts")!;
+    expect(job.src).toContain("claimDeferredUpload");
+    expect(job.src).toContain("commitAttachment");
   });
 });
 
@@ -154,7 +161,6 @@ describe("upload ids cannot collide", () => {
       "modules/van-stock-request/van-stock-request.service.ts",
       "modules/goods-management/goods-management.service.ts",
       "modules/job/job.service.ts",
-      "modules/job-kit-request/job-kit-request.service.ts",
     ];
     for (const r of rel) {
       const f = files.find((x) => x.rel === r);

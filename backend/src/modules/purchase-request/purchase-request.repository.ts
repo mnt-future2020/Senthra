@@ -42,6 +42,14 @@ const warehouseSelect = {
 
 const jobSelect = { id: true, jobNumber: true, name: true, status: true } satisfies Prisma.JobSelect;
 
+/**
+ * A purchase order that still exists.
+ *
+ * Mongo: a row whose create omitted the field does not match `{ deletedAt: null }`, so both shapes
+ * have to be asked for.
+ */
+const LIVE_PO = { OR: [{ deletedAt: null }, { deletedAt: { isSet: false } }] } satisfies Prisma.PurchaseOrderWhereInput;
+
 const withRelations = {
   supplier: { select: supplierSelect },
   warehouse: { select: warehouseSelect },
@@ -50,11 +58,25 @@ const withRelations = {
     orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
     include: { irmItem: { select: { id: true, code: true, name: true, status: true } } },
   },
+  rentalItems: {
+    orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+    include: { rentalItem: { select: { id: true, code: true, name: true, status: true } } },
+  },
   attachments: { orderBy: { createdAt: "asc" } },
   // The PO generated from this PRF (at most one — see the schema note) for the linked-PO
   // badge + procurement-chain strip.
-  purchaseOrders: { select: { id: true, code: true, status: true } },
+  //
+  // LIVE ONLY. Without the filter a soft-deleted purchase order kept being returned here, so the
+  // request rendered a "View PO-0051" button whose target the PO loader refuses — one click to a
+  // "Purchase order not found." page, with nothing on the request saying the order was deleted.
+  // Mongo: a row whose create omitted the field does not match `{ deletedAt: null }`, so both
+  // shapes have to be asked for.
+  purchaseOrders: { where: LIVE_PO, select: { id: true, code: true, status: true } },
 } satisfies Prisma.PurchaseRequestInclude;
+
+// Exported so the include above can be pinned by a test: dropping the `where` is a silent
+// regression — everything still compiles and every read still returns a row.
+export { LIVE_PO, withRelations };
 
 export type PurchaseRequestWithRelations = Prisma.PurchaseRequestGetPayload<{ include: typeof withRelations }>;
 
@@ -65,6 +87,29 @@ export interface PrfLineRow {
   sku: string | null;
   baseUnit: string | null;
   quantity: number;
+  unitPricePence: number;
+  vatRate: number;
+  lineTotalPence: number;
+  sortOrder: number;
+  notes: string | null;
+}
+
+// The scalar fields written to a RENTAL line. Separate from PrfLineRow because a hire carries a
+// period and a delivery address an IRM line has no place for.
+export interface PrfRentalLineRow {
+  rentalItemId: string;
+  itemName: string;
+  baseUnit: string | null;
+  quantity: number;
+  hireStartDate: Date;
+  hireEndDate: Date;
+  notifyDaysBefore: number;
+  deliveryAddress: string | null;
+  ratePeriod: string;
+  ratePence: number | null;
+  priceOverridden: boolean;
+  returnMode: string;
+  returnAddress: string | null;
   unitPricePence: number;
   vatRate: number;
   lineTotalPence: number;
@@ -169,6 +214,24 @@ export function findByCode(code: string): Promise<PurchaseRequestWithRelations |
   return prisma.purchaseRequest.findFirst({ where: { code, deletedAt: null }, include: withRelations });
 }
 
+/**
+ * Return a request to `approved` because the purchase order generated from it was deleted.
+ *
+ * CONDITIONAL on the status, not a plain update: the affected-row count is what decides whether THIS
+ * call was the one that moved it. Two deletes arriving together, or a delete racing a re-conversion,
+ * would otherwise both "succeed" and both write an audit entry claiming the move.
+ *
+ * `converted` is the only status that can come back this way. A cancelled or already-approved
+ * request is left exactly where it is.
+ */
+export async function revertConversion(id: string, actorEmail: string | null): Promise<boolean> {
+  const { count } = await prisma.purchaseRequest.updateMany({
+    where: { id, status: "converted", deletedAt: null },
+    data: { status: "approved", updatedBy: actorEmail },
+  });
+  return count === 1;
+}
+
 // Generic header update — used by the workflow actions (status/timestamps/actor). NEVER used to
 // change lines; line edits go through replaceItemsAndTotals.
 export function update(id: string, data: Prisma.PurchaseRequestUncheckedUpdateInput): Promise<PurchaseRequestWithRelations> {
@@ -185,10 +248,14 @@ export async function replaceItemsAndTotals(
   lines: PrfLineRow[],
   totals: PrfTotals,
   headerPatch: Prisma.PurchaseRequestUncheckedUpdateInput,
+  rentalLines: PrfRentalLineRow[] = [],
 ): Promise<PurchaseRequestWithRelations> {
   return withTransaction(async (tx) => {
     await tx.purchaseRequestItem.deleteMany({ where: { purchaseRequestId: prfId } });
+    await tx.purchaseRequestRentalLine.deleteMany({ where: { purchaseRequestId: prfId } });
     if (lines.length) await tx.purchaseRequestItem.createMany({ data: lines.map((l) => ({ purchaseRequestId: prfId, ...l })) });
+    if (rentalLines.length)
+      await tx.purchaseRequestRentalLine.createMany({ data: rentalLines.map((l) => ({ purchaseRequestId: prfId, ...l })) });
     await tx.purchaseRequest.update({ where: { id: prfId }, data: { ...headerPatch, ...totals } });
     return tx.purchaseRequest.findUniqueOrThrow({ where: { id: prfId }, include: withRelations });
   });
@@ -201,6 +268,9 @@ export function countBySupplier(supplierId: string): Promise<number> {
 export function countByWarehouse(warehouseId: string): Promise<number> {
   return prisma.purchaseRequest.count({ where: { warehouseId, deletedAt: null } });
 }
+export function countByJob(jobId: string): Promise<number> {
+  return prisma.purchaseRequest.count({ where: { jobId, deletedAt: null } });
+}
 
 // --- convert seam (tx-aware; called only from the PRF-conversion transaction) ----------------
 // Re-read the PRF INSIDE the transaction so the status guard + copied lines/attachments can't
@@ -208,7 +278,11 @@ export function countByWarehouse(warehouseId: string): Promise<number> {
 export function findForConvertTx(tx: Prisma.TransactionClient, id: string) {
   return tx.purchaseRequest.findFirst({
     where: { id, deletedAt: null },
-    include: { items: { orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }] }, attachments: true },
+    include: {
+      items: { orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }] },
+      rentalItems: { orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }] },
+      attachments: true,
+    },
   });
 }
 export function setConvertedTx(tx: Prisma.TransactionClient, id: string, updatedBy: string | null) {
@@ -289,6 +363,7 @@ async function fastForwardCounter(): Promise<void> {
 export async function createWithCode(
   header: Omit<Prisma.PurchaseRequestUncheckedCreateInput, "code">,
   lines: PrfLineRow[],
+  rentalLines: PrfRentalLineRow[] = [],
 ): Promise<PurchaseRequestWithRelations> {
   for (let attempt = 0; attempt < 5; attempt++) {
     const seq = await nextSequence();
@@ -299,6 +374,8 @@ export async function createWithCode(
         // read filter does NOT match documents where the field is missing. Mirrors poRepo.createWithCode.
         const prf = await tx.purchaseRequest.create({ data: { deletedAt: null, ...header, code } });
         if (lines.length) await tx.purchaseRequestItem.createMany({ data: lines.map((l) => ({ purchaseRequestId: prf.id, ...l })) });
+        if (rentalLines.length)
+          await tx.purchaseRequestRentalLine.createMany({ data: rentalLines.map((l) => ({ purchaseRequestId: prf.id, ...l })) });
         return tx.purchaseRequest.findUniqueOrThrow({ where: { id: prf.id }, include: withRelations });
       });
     } catch (e) {

@@ -3,13 +3,14 @@
 import * as React from "react";
 import { createPortal } from "react-dom";
 import { useRouter, useSearchParams } from "next/navigation";
-import { FileText, MoreHorizontal, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { FileText, MoreHorizontal, Pencil, Plus, Rows3, Search, Trash2 } from "lucide-react";
 
 import * as prfService from "@/services/purchase-request.service";
 import { listSuppliers } from "@/services/supplier.service";
 import { listWarehouses } from "@/services/warehouse.service";
 import { useAuth } from "@/hooks/useAuth";
 import { ExportButton } from "@/components/ui/ExportButton";
+import { FilterPopover } from "@/components/ui/FilterPopover";
 import { useDashboard } from "@/hooks/useDashboard";
 import { usePurchaseRequestSocket } from "@/hooks/usePurchaseRequestSocket";
 import { useReferenceData } from "@/hooks/useReferenceData";
@@ -293,8 +294,12 @@ export function PurchaseRequestsView() {
           nav="/dashboard/purchase-requests"
           className="flex flex-wrap items-center gap-1.5 border-b border-[var(--border)] pb-3"
         />
-        <div className="flex flex-col gap-3 lg:flex-row lg:flex-wrap lg:items-center">
-        <div className="relative w-full lg:max-w-xs">
+        {/* Stacks only below `sm`, not below `lg`. At the old cutoff a 768px tablet got the PHONE
+            layout — seven full-width blocks, ~380px of a shrink-0 panel, before the first request
+            appeared. With the filters folded and the export labels collapsed there is easily room for
+            search + one filter chip + three buttons from 640px up. */}
+        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
+        <div className="relative w-full sm:max-w-xs sm:flex-1">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input
             value={searchInput}
@@ -303,9 +308,18 @@ export function PurchaseRequestsView() {
             className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]"
           />
         </div>
-        <Select size="sm" value={statusFilter} onChange={(v) => patchParams({ status: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All statuses" }, ...PRF_DERIVED_STATUS_OPTIONS, ...(Object.keys(PRF_STATUS_LABELS) as PrfStatus[]).map((s) => ({ value: s, label: PRF_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
-        <Select size="sm" value={supplierFilter || "all"} onChange={(v) => patchParams({ supplier: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All suppliers" }, ...suppliers.map((s) => ({ value: s.id, label: s.name }))]} ariaLabel="Filter by supplier" />
-        <Select size="sm" value={warehouseFilter || "all"} onChange={(v) => patchParams({ warehouse: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All warehouses" }, ...warehouses.map((w) => ({ value: w.id, label: w.name }))]} ariaLabel="Filter by warehouse" />
+        {/* Status / supplier / warehouse behind ONE control — the same bargain Inventory already
+            makes: these are set once and left alone, and the trigger carries the ACTIVE count, which
+            is what makes folding them safe. A narrowed list must never be mistakable for a short one.
+            Search stays outside; it is the one people touch on every visit. */}
+        <FilterPopover
+          activeCount={(statusFilter !== "all" ? 1 : 0) + (supplierFilter ? 1 : 0) + (warehouseFilter ? 1 : 0)}
+          onClear={() => patchParams({ status: null, supplier: null, warehouse: null }, true)}
+        >
+          <Select size="sm" value={statusFilter} onChange={(v) => patchParams({ status: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All statuses" }, ...PRF_DERIVED_STATUS_OPTIONS, ...(Object.keys(PRF_STATUS_LABELS) as PrfStatus[]).map((s) => ({ value: s, label: PRF_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
+          <Select size="sm" value={supplierFilter || "all"} onChange={(v) => patchParams({ supplier: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All suppliers" }, ...suppliers.map((s) => ({ value: s.id, label: s.name }))]} ariaLabel="Filter by supplier" />
+          <Select size="sm" value={warehouseFilter || "all"} onChange={(v) => patchParams({ warehouse: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All warehouses" }, ...warehouses.map((w) => ({ value: w.id, label: w.name }))]} ariaLabel="Filter by warehouse" />
+        </FilterPopover>
         {/* Before "New request" and outside its ml-auto, so the primary action stays hard right. */}
         {can("purchase_requests.export") && (
           <>
@@ -319,6 +333,7 @@ export function PurchaseRequestsView() {
                 compare what was requested against what was ordered. */}
             <ExportButton
               label="Export lines"
+              icon={Rows3}
               onExport={() => prfService.exportPurchaseRequestLinesCsv(exportParams)}
               disabled={requests.length === 0}
               title="Export every request LINE — item, quantity, unit price"
@@ -326,7 +341,7 @@ export function PurchaseRequestsView() {
           </>
         )}
         {can("purchase_requests.create") && (
-          <button onClick={() => router.push("/dashboard/purchase-requests/new")} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 lg:ml-auto">
+          <button onClick={() => router.push("/dashboard/purchase-requests/new")} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 sm:ml-auto">
             <Plus className="h-4 w-4" /> New request
           </button>
         )}

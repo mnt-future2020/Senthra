@@ -13,7 +13,7 @@ import type {
   WarehouseAvailability,
 } from "@/services/vanStockRequest.service";
 import { useDashboard } from "@/hooks/useDashboard";
-import { VanStockCartTable, VanStockItemSearch, type VanStockCartItem } from "@/components/dashboard/van-requests/vanRequestUi";
+import { VAN_STOCK_PRIORITY_OPTIONS, VanStockCartTable, VanStockItemSearch, type VanStockCartItem } from "@/components/dashboard/van-requests/vanRequestUi";
 import { FieldError, FormPageHeader, FormSection, FormAsideCard, RequiredMark } from "@/components/ui/FormScaffold";
 import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 import { Notice } from "@/components/ui/Notice";
@@ -31,12 +31,6 @@ import { uploadDirectForUrl } from "@/lib/upload";
 //  - Return: pick from own on-hand (qty capped) → warehouse → reason.
 
 const LIST_URL = "/dashboard/engineer/van-stock";
-
-const PRIORITY_OPTIONS = [
-  { value: "normal", label: "Normal" },
-  { value: "high", label: "High" },
-  { value: "urgent", label: "Urgent" },
-];
 
 // Non-blocking duplicate warning (spec §8): items already on one of the engineer's OPEN requests.
 function useOpenLineMap(type: "restock" | "return"): Map<string, string> {
@@ -337,7 +331,7 @@ export function RestockComposerPage() {
             <div className="space-y-4">
               <div className="sm:max-w-xs">
                 <label className={labelCls}>Priority</label>
-                <Select ariaLabel="Priority" value={priority} onChange={(v) => setPriority((v || "normal") as VanStockPriority)} options={PRIORITY_OPTIONS} />
+                <Select ariaLabel="Priority" value={priority} onChange={(v) => setPriority((v || "normal") as VanStockPriority)} options={VAN_STOCK_PRIORITY_OPTIONS} />
               </div>
               <div>
                 <label className={labelCls} htmlFor="restock-reason">Reason <RequiredMark /></label>

@@ -212,17 +212,21 @@ function drawMeta(doc: Doc, data: PurchaseOrderDocumentData, x: number, y: numbe
   rows.push(["Priority", data.order.priority]);
   let yy = y;
   for (const [label, value] of rows) {
+    const startY = yy;
     doc
       .font("Helvetica")
       .fontSize(FONT.label)
       .fillColor(COLORS.faint)
-      .text(label.toUpperCase(), x, yy + 1, { width: w * 0.5, lineBreak: false });
+      .text(label.toUpperCase(), x, startY + 1, { width: w * 0.5, lineBreak: false });
     doc
       .font("Helvetica-Bold")
       .fontSize(FONT.small)
       .fillColor(COLORS.ink)
-      .text(value, x + w * 0.5, yy, { width: w * 0.5, align: "right", lineBreak: false });
-    yy += 14;
+      .text(value, x + w * 0.5, startY, { width: w * 0.5, align: "right" });
+    // A value wider than the column WRAPS — a job-linked PO's project reference ("JOBNUM — Job
+    // name") routinely does. Advancing a fixed 14pt regardless printed the next rows (Currency,
+    // Priority) straight on top of it, so take whichever ended lower. Same rule as drawTerms.
+    yy = Math.max(doc.y, startY + 14);
   }
   return yy;
 }
@@ -263,10 +267,13 @@ function drawItemsTable(
   W: number,
   accent: string,
 ): number {
+  // A VAT column, because every line carries its OWN rate: on a mixed-rate order (20% goods and a
+  // zero-rated line) a single lump VAT figure at the bottom is one the supplier cannot reconcile.
   const cols = {
-    name: { x, w: W * 0.46 },
-    qty: { x: x + W * 0.46, w: W * 0.16 },
-    unit: { x: x + W * 0.62, w: W * 0.19 },
+    name: { x, w: W * 0.42 },
+    qty: { x: x + W * 0.42, w: W * 0.13 },
+    unit: { x: x + W * 0.55, w: W * 0.17 },
+    vat: { x: x + W * 0.72, w: W * 0.09 },
     total: { x: x + W * 0.81, w: W * 0.19 },
   };
   const padX = 6;
@@ -280,6 +287,7 @@ function drawItemsTable(
     doc.text("ITEM", cols.name.x + padX, yy + 7, { width: cols.name.w - padX * 2, lineBreak: false });
     doc.text("QTY", cols.qty.x, yy + 7, { width: cols.qty.w - padX, align: "right", lineBreak: false });
     doc.text("UNIT PRICE", cols.unit.x, yy + 7, { width: cols.unit.w - padX, align: "right", lineBreak: false });
+    doc.text("VAT", cols.vat.x, yy + 7, { width: cols.vat.w - padX, align: "right", lineBreak: false });
     doc.text("LINE TOTAL", cols.total.x, yy + 7, { width: cols.total.w - padX, align: "right", lineBreak: false });
     yy += 22;
   };
@@ -322,6 +330,7 @@ function drawItemsTable(
     doc.font("Helvetica").fontSize(FONT.small).fillColor(COLORS.ink);
     doc.text(line.quantity, cols.qty.x, yy + padY, { width: cols.qty.w - padX, align: "right", lineBreak: false });
     doc.text(line.unitPrice, cols.unit.x, yy + padY, { width: cols.unit.w - padX, align: "right", lineBreak: false });
+    doc.text(line.vatRate, cols.vat.x, yy + padY, { width: cols.vat.w - padX, align: "right", lineBreak: false });
     doc.text(line.lineTotal, cols.total.x, yy + padY, { width: cols.total.w - padX, align: "right", lineBreak: false });
 
     yy += rowH;
@@ -339,10 +348,20 @@ function drawItemsTable(
   return yy;
 }
 
+// Subtotal / VAT / Grand Total. Kept WHOLE on one page: at the wrong line count this block used to
+// straddle the page boundary, printing VAT on top of the page footer and orphaning "Grand Total"
+// alone onto the next page — with a blank page behind it, because drawing into the bottom margin
+// makes pdfkit auto-spawn one page per text() call.
 function drawTotals(doc: Doc, data: PurchaseOrderDocumentData, x: number, y: number, W: number): number {
   const boxW = W * 0.4;
   const boxX = x + W - boxW;
+  const pageBottom = doc.page.height - PAGE.margin - 30;
+  const estH = 6 + 16 + 16 + 6 + 20; // start offset + subtotal + VAT + rule + grand total
   let yy = y + 6;
+  if (yy + estH > pageBottom) {
+    doc.addPage();
+    yy = PAGE.margin;
+  }
   const row = (label: string, value: string, bold: boolean) => {
     const size = bold ? FONT.body : FONT.small;
     doc
@@ -358,7 +377,8 @@ function drawTotals(doc: Doc, data: PurchaseOrderDocumentData, x: number, y: num
     yy += bold ? 20 : 16;
   };
   row("Subtotal", data.totals.subtotal, false);
-  row("VAT", data.totals.vat, false);
+  // "VAT (20%)" on a single-rate order — the reader can check the figure without a calculator.
+  row(data.totals.vatLabel, data.totals.vat, false);
   doc.lineWidth(0.5).strokeColor(COLORS.line).moveTo(boxX, yy).lineTo(boxX + boxW, yy).stroke();
   yy += 6;
   row("Grand Total", data.totals.grandTotal, true);
@@ -366,10 +386,39 @@ function drawTotals(doc: Doc, data: PurchaseOrderDocumentData, x: number, y: num
 }
 
 function drawNotes(doc: Doc, notes: string, x: number, y: number, W: number): number {
-  doc.font("Helvetica-Bold").fontSize(FONT.label).fillColor(COLORS.faint).text("NOTES", x, y);
+  const noteW = W * 0.72;
+  const pageBottom = doc.page.height - PAGE.margin - 30;
+  doc.font("Helvetica").fontSize(FONT.small);
+  // Same page-boundary rule as the totals and terms blocks: a note drawn into the bottom margin
+  // lands on the footer and spawns a blank page behind it.
+  let top = y;
+  if (top + 14 + doc.heightOfString(notes, { width: noteW }) > pageBottom) {
+    doc.addPage();
+    top = PAGE.margin;
+  }
+  doc.font("Helvetica-Bold").fontSize(FONT.label).fillColor(COLORS.faint).text("NOTES", x, top);
   const yy = doc.y + 2;
-  doc.font("Helvetica").fontSize(FONT.small).fillColor(COLORS.muted).text(notes, x, yy, { width: W * 0.72 });
+  doc.font("Helvetica").fontSize(FONT.small).fillColor(COLORS.muted).text(notes, x, yy, { width: noteW });
   return doc.y;
+}
+
+// Blank paper reserved for the signature GRAPHIC — only when there is one to draw.
+//
+// Uploading a signature is optional and most issuers never do, so this slot is usually empty. It was
+// reserved regardless, which put 46pt of nothing between "AUTHORISED BY" and the rule: on a document
+// the supplier receives that reads as a MISSING signature, and on an order whose content already ran
+// near the foot of the page it pushed the whole block onto a second sheet carrying nothing else.
+const SIGNATURE_IMAGE_SLOT = 42;
+const SIGNATURE_LABEL_GAP = 15;
+const SIGNATURE_RULE_GAP = 4;
+
+/**
+ * How much room the AUTHORISED BY block needs — the page-fit guard and the layout read the SAME
+ * number, so the guard can never reserve for a graphic the block then doesn't draw.
+ */
+export function signatureBlockHeight(hasImage: boolean, hasJobTitle = false): number {
+  const toRule = SIGNATURE_LABEL_GAP + (hasImage ? SIGNATURE_IMAGE_SLOT : 0) + SIGNATURE_RULE_GAP;
+  return toRule + 4 + 12 + (hasJobTitle ? 12 : 0) + 4;
 }
 
 function drawSignature(doc: Doc, data: PurchaseOrderDocumentData, x: number, y: number, W: number): void {
@@ -377,21 +426,23 @@ function drawSignature(doc: Doc, data: PurchaseOrderDocumentData, x: number, y: 
   if (!sig) return;
   let yy = y + 6;
   const pageBottom = doc.page.height - PAGE.margin - 30;
-  if (yy + 92 > pageBottom) {
+  const needed = signatureBlockHeight(Boolean(sig.image), Boolean(sig.jobTitle));
+  if (yy + needed > pageBottom) {
     doc.addPage();
     yy = PAGE.margin;
   }
   const w = W * 0.4;
   doc.font("Helvetica-Bold").fontSize(FONT.label).fillColor(COLORS.faint).text("AUTHORISED BY", x, yy, { width: w });
-  const imgY = yy + 15;
+  const imgY = yy + SIGNATURE_LABEL_GAP;
   if (sig.image) {
     try {
-      doc.image(sig.image, x, imgY, { fit: [150, 42] });
+      doc.image(sig.image, x, imgY, { fit: [150, SIGNATURE_IMAGE_SLOT] });
     } catch {
-      // Bad/unsupported image — fall back to the name + line only.
+      // Bad/unsupported image — fall back to the name + line only. The slot stays reserved: the
+      // guard above already measured for it, and shrinking now would leave a gap mid-page anyway.
     }
   }
-  const lineY = imgY + 46;
+  const lineY = imgY + (sig.image ? SIGNATURE_IMAGE_SLOT : 0) + SIGNATURE_RULE_GAP;
   doc.lineWidth(0.5).strokeColor(COLORS.line).moveTo(x, lineY).lineTo(x + w, lineY).stroke();
   doc.font("Helvetica-Bold").fontSize(FONT.small).fillColor(COLORS.ink).text(sig.signerName, x, lineY + 4, { width: w });
   if (sig.jobTitle) {

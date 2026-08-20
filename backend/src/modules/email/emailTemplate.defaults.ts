@@ -128,6 +128,25 @@ Regards,
 {{companyLegalName}}`,
   },
   {
+    key: "rental_deadline_reminder",
+    name: "Rental Deadline Reminder",
+    category: "notification",
+    subject: "Rental ending soon — {{itemName}} ({{poCode}})",
+    variables: ["poCode", "itemName", "quantity", "hireEndDate", "brandName", "currentYear"],
+    // The PO number and the date are what make the message actionable; without either it is noise.
+    requiredVariables: ["poCode", "hireEndDate"],
+    // INFORMATIONAL ONLY, and that is a constraint rather than a style choice: reminder delivery is
+    // at-least-once (SMTP has no idempotency key), so a duplicate copy must do nothing the first
+    // did not. No one-time credential, no action token, no link that changes state.
+    body: `The hire below is due to end.
+
+Purchase order: {{poCode}}
+Item: {{itemName}} (x{{quantity}})
+Hire ends: {{hireEndDate}}
+
+Arrange the return, or extend the hire on the purchase order.`,
+  },
+  {
     key: "po.cancelled",
     name: "Purchase Order Cancelled",
     category: "notification",

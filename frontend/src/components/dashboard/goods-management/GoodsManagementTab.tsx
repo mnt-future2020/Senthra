@@ -32,6 +32,7 @@ import { CopyableCode } from "@/components/ui/CopyableCode";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { WorkspaceToolbar } from "@/components/ui/WorkspaceToolbar";
+import { FilterPopover } from "@/components/ui/FilterPopover";
 import { toolbarBtn, toolbarDateCls } from "@/components/ui/styles";
 import { JobScanPanel } from "./JobScanPanel";
 import { OverdueHoldingsView } from "./OverdueHoldingsView";
@@ -195,7 +196,8 @@ const SECTION_PILLS: { key: GmSection; label: string; icon: React.ElementType }[
 // Loading skeleton — mirrors the queue table shape (matches the warehouse detail's other tabs).
 function QueueSkeleton() {
   return (
-    <div className="overflow-x-auto rounded-2xl border border-[var(--border)] bg-[var(--surface)] shadow-xs">
+    <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)] shadow-xs">
+      <div className="overflow-x-auto">
       <table className="w-full text-left text-sm" style={{ minWidth: 1020 }}>
         <thead>
           <tr className="border-b border-[var(--border)] text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]">
@@ -214,6 +216,7 @@ function QueueSkeleton() {
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }
@@ -648,6 +651,11 @@ export function GoodsManagementTab({
                 </>
               ) : (
                 <>
+                  {/* Stage stays in the open — "show me what's awaiting return" is the question this
+                      tab is opened to answer. Due / kit-line density / sort fold behind one trigger.
+                      Only DUE counts towards the badge: density and sort change how the same rows are
+                      drawn, they never remove one, and counting them would make "Filters 2" claim
+                      something is hidden when nothing is. */}
                   <Select
                     size="sm"
                     ariaLabel="Filter by goods stage"
@@ -655,28 +663,33 @@ export function GoodsManagementTab({
                     onChange={(v) => patch({ gmStatus: v === "active" ? null : v })}
                     options={STATUS_FILTER_OPTIONS}
                   />
-                  <Select
-                    size="sm"
-                    ariaLabel="Filter by due date"
-                    value={dueFilter}
-                    onChange={(v) => patch({ gmDue: v || null })}
-                    options={DUE_OPTIONS}
-                  />
-                  {/* Purely how much of each kit is drawn — no refetch, so it isn't in the fetch deps. */}
-                  <Select
-                    size="sm"
-                    ariaLabel="Kit line visibility"
-                    value={showAllLines ? "all" : "relevant"}
-                    onChange={(v) => patch({ gmLines: v === "all" ? "all" : null }, false)}
-                    options={LINE_OPTIONS}
-                  />
-                  <Select
-                    size="sm"
-                    ariaLabel="Sort order"
-                    value={queueSort}
-                    onChange={(v) => patch({ gmSort: v === "newest" ? null : v })}
-                    options={SORT_OPTIONS}
-                  />
+                  <FilterPopover
+                    activeCount={dueFilter ? 1 : 0}
+                    onClear={() => patch({ gmDue: null, gmLines: null, gmSort: null })}
+                  >
+                    <Select
+                      size="sm"
+                      ariaLabel="Filter by due date"
+                      value={dueFilter}
+                      onChange={(v) => patch({ gmDue: v || null })}
+                      options={DUE_OPTIONS}
+                    />
+                    {/* Purely how much of each kit is drawn — no refetch, so it isn't in the fetch deps. */}
+                    <Select
+                      size="sm"
+                      ariaLabel="Kit line visibility"
+                      value={showAllLines ? "all" : "relevant"}
+                      onChange={(v) => patch({ gmLines: v === "all" ? "all" : null }, false)}
+                      options={LINE_OPTIONS}
+                    />
+                    <Select
+                      size="sm"
+                      ariaLabel="Sort order"
+                      value={queueSort}
+                      onChange={(v) => patch({ gmSort: v === "newest" ? null : v })}
+                      options={SORT_OPTIONS}
+                    />
+                  </FilterPopover>
                   {collapseAllBtn}
                 </>
               )

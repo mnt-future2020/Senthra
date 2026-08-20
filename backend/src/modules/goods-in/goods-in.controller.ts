@@ -5,7 +5,7 @@ import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
 import { sendCsv } from "../../utils/csv-response.js";
 import { param, queryInt, queryStr } from "../../utils/request.js";
-import type { CreateGoodsReceiptInput, GRNAttachmentInput, GRNCancelInput, UpdateGoodsReceiptInput } from "./goods-in.validation.js";
+import type { CreateGoodsReceiptInput, GRNCancelInput, UpdateGoodsReceiptInput } from "./goods-in.validation.js";
 
 // GET /goods-in?search=&status=&warehouse=&purchaseOrder=&sort=&page=&pageSize=
 // The list's filters, parsed once. Shared with the CSV export so the download is exactly the rows
@@ -71,10 +71,6 @@ export const cancelGoodsReceipt = asyncHandler(async (req, res) => {
 });
 
 // --- attachments ------------------------------------------------------------
-export const addAttachment = asyncHandler(async (req, res) => {
-  const goodsReceipt = await grnService.addAttachment(param(req, "id"), req.body as GRNAttachmentInput, actorFrom(req));
-  res.status(201).json({ goodsReceipt });
-});
 export const removeAttachment = asyncHandler(async (req, res) => {
   res.json({ goodsReceipt: await grnService.removeAttachment(param(req, "id"), param(req, "attachmentId"), actorFrom(req)) });
 });

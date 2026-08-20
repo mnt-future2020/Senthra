@@ -47,7 +47,13 @@ function getSocket(): Socket {
  * Returns an unsubscribe fn; the shared socket disconnects once the last
  * subscriber unsubscribes (unmount / logout).
  */
-export function subscribe(events: readonly string[], handler: () => void): () => void {
+export function subscribe(
+  events: readonly string[],
+  // The event's payload, forwarded verbatim. Optional in the signature because a RECONNECT fires the
+  // same handler with nothing — a consumer that reads the payload has to cope with its absence, and
+  // one that ignores it (most of them) keeps its no-argument callback unchanged.
+  handler: (payload?: unknown) => void,
+): () => void {
   const s = getSocket();
   refCount += 1;
   events.forEach((ev) => s.on(ev, handler));

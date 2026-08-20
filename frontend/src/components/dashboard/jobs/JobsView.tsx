@@ -11,6 +11,7 @@ import { listEngineerOptions } from "@/services/warehouse.service";
 import type { WarehouseManager } from "@/types/warehouse";
 import { useAuth } from "@/hooks/useAuth";
 import { ExportButton } from "@/components/ui/ExportButton";
+import { FilterPopover } from "@/components/ui/FilterPopover";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
 import { useJobSocket } from "@/hooks/useJobSocket";
@@ -256,14 +257,23 @@ export function JobsView() {
 
   return (
     <div className="stack flex h-full flex-col">
-      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs lg:flex-row lg:flex-wrap lg:items-center">
-        <div className="relative w-full lg:max-w-xs">
+      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:flex-wrap sm:items-center">
+        <div className="relative w-full sm:max-w-xs sm:flex-1">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input value={searchInput} onChange={(e) => setSearchInput(e.target.value)} placeholder="Search job, name, customer or engineer…" className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]" />
         </div>
         <Select size="sm" value={statusFilter} onChange={(v) => patchParams({ status: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All statuses" }, { value: "overdue", label: "Overdue" }, ...(Object.keys(JOB_STATUS_LABELS) as JobStatus[]).map((s) => ({ value: s, label: JOB_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
-        <Select size="sm" value={customer} onChange={(v) => patchParams({ customer: v || null }, true)} options={[{ value: "", label: "All customers" }, ...customers.map((c) => ({ value: c.id, label: c.name }))]} ariaLabel="Filter by customer" />
-        <Select size="sm" value={engineer} onChange={(v) => patchParams({ engineer: v || null }, true)} options={[{ value: "", label: "All engineers" }, ...engineers.map((u) => ({ value: u.id, label: u.name }))]} ariaLabel="Filter by engineer" />
+        {/* Customer and engineer fold away; status stays out. Both of these are set once and left, and
+            they are the two widest controls in the row (a customer name and a full engineer name).
+            The trigger carries the ACTIVE count so a list narrowed to one engineer can never be
+            mistaken for a quiet week. */}
+        <FilterPopover
+          activeCount={(customer ? 1 : 0) + (engineer ? 1 : 0)}
+          onClear={() => patchParams({ customer: null, engineer: null }, true)}
+        >
+          <Select size="sm" value={customer} onChange={(v) => patchParams({ customer: v || null }, true)} options={[{ value: "", label: "All customers" }, ...customers.map((c) => ({ value: c.id, label: c.name }))]} ariaLabel="Filter by customer" />
+          <Select size="sm" value={engineer} onChange={(v) => patchParams({ engineer: v || null }, true)} options={[{ value: "", label: "All engineers" }, ...engineers.map((u) => ({ value: u.id, label: u.name }))]} ariaLabel="Filter by engineer" />
+        </FilterPopover>
         {/* Breakdown of the sidebar's Jobs badge — rejected jobs to reassign, overdue work, jobs
             awaiting acceptance, kit requests to review. It sat in a row of its own above this card, costing a
             chip row plus the flex gap for two chips; the toolbar's free space between the filters and
@@ -279,7 +289,7 @@ export function JobsView() {
           />
         )}
         {can("jobs.create") && (
-          <button onClick={() => router.push("/dashboard/jobs/new")} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 lg:ml-auto">
+          <button onClick={() => router.push("/dashboard/jobs/new")} className="flex shrink-0 items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 sm:ml-auto">
             <Plus className="h-4 w-4" /> New job
           </button>
         )}

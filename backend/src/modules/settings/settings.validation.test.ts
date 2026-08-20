@@ -88,6 +88,25 @@ describe("updateSettingsSchema — stock code prefix", () => {
   });
 });
 
+describe("updateSettingsSchema — rental code prefix", () => {
+  it.each([["RNT"], ["EQ"], ["hire"]])("accepts %s", (v) => {
+    expect(updateSettingsSchema.safeParse({ rentalCodePrefix: v }).success).toBe(true);
+  });
+
+  it("accepts an empty string (clears back to the default)", () => {
+    expect(updateSettingsSchema.safeParse({ rentalCodePrefix: "" }).success).toBe(true);
+  });
+
+  it.each([
+    ["one letter", "R"],
+    ["six letters", "RENTAL"],
+    ["contains a digit", "RN1"],
+    ["contains a dash", "R-T"],
+  ])("rejects %s", (_label, v) => {
+    expect(updateSettingsSchema.safeParse({ rentalCodePrefix: v }).success).toBe(false);
+  });
+});
+
 describe("updateSettingsSchema — IRM code prefix", () => {
   it.each([["IRM"], ["AB"], ["abcde"]])("accepts %s", (v) => {
     expect(updateSettingsSchema.safeParse({ irmCodePrefix: v }).success).toBe(true);

@@ -5,7 +5,7 @@ import { Loader2, RotateCcw } from "lucide-react";
 
 import { restoreDamaged } from "@/services/stockPosition.service";
 import { useDashboard } from "@/hooks/useDashboard";
-import { FieldError } from "@/components/ui/FormScaffold";
+import { FieldError, SummaryRow } from "@/components/ui/FormScaffold";
 import { inputCls, labelCls, ghostBtn, primaryBtn } from "@/components/ui/styles";
 import { NumberInput } from "@/components/ui/NumberInput";
 import type { StockPosition } from "@/types/stock-position";
@@ -166,38 +166,19 @@ export function RestoreDamagedDialog({ row, onDone }: RestoreDamagedDialogProps)
               Restore summary
             </p>
             <div className="space-y-2.5 text-sm">
-              <div className="flex justify-between gap-3">
-                <span className="text-[var(--muted)]">Item</span>
-                <span className="text-right font-semibold text-[var(--ink)]">{row.itemName}</span>
-              </div>
-              <div className="flex justify-between gap-3">
-                <span className="text-[var(--muted)]">Owner</span>
-                <span className="text-right font-semibold text-[var(--ink)]">
-                  {row.ownership === "customer"
-                    ? (row.customerName ?? "Customer")
-                    : "Company"}
-                </span>
-              </div>
-              <div className="flex justify-between gap-3">
-                <span className="text-[var(--muted)]">From location</span>
-                <span className="text-right font-semibold text-[var(--ink)]">
-                  {row.locationLabel}
-                </span>
-              </div>
-              <div className="flex justify-between gap-3 border-t border-[var(--border)] pt-2.5">
-                <span className="text-[var(--muted)]">Qty restoring</span>
-                <span className="font-extrabold text-emerald-600">
-                  {Number.isInteger(qtyNum) && qtyNum > 0 ? `+${qtyNum}` : "—"}
-                </span>
-              </div>
-              <div className="flex justify-between gap-3">
-                <span className="text-[var(--muted)]">Remaining damaged</span>
-                <span className="font-extrabold text-[var(--ink)]">
-                  {Number.isInteger(qtyNum) && qtyNum > 0
-                    ? Math.max(0, row.quantity - qtyNum)
-                    : row.quantity}
-                </span>
-              </div>
+              <SummaryRow label="Item" valueClassName="font-semibold">{row.itemName}</SummaryRow>
+              <SummaryRow label="Owner" valueClassName="font-semibold">
+  {row.ownership === "customer"
+                      ? (row.customerName ?? "Customer")
+                      : "Company"}
+</SummaryRow>
+              <SummaryRow label="From location" valueClassName="font-semibold">{row.locationLabel}</SummaryRow>
+              <SummaryRow label="Qty restoring" valueClassName="font-extrabold text-emerald-600" className="border-t border-[var(--border)] pt-2.5">{Number.isInteger(qtyNum) && qtyNum > 0 ? `+${qtyNum}` : "—"}</SummaryRow>
+              <SummaryRow label="Remaining damaged" valueClassName="font-extrabold">
+  {Number.isInteger(qtyNum) && qtyNum > 0
+                      ? Math.max(0, row.quantity - qtyNum)
+                      : row.quantity}
+</SummaryRow>
             </div>
           </div>
         </aside>

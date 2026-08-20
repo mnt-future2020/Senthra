@@ -96,8 +96,41 @@ export function findByEmailIncludingDeleted(email: string): Promise<User | null>
 
 // Uniqueness check for auto-generated employee IDs (matches soft-deleted rows too,
 // since employeeId is a unique index across every row).
+//
+// `findFirst`, not `findUnique`: uniqueness lives in a PARTIAL index (see
+// ensureEmployeeIdUniqueIndex) rather than a Prisma `@unique`, so the client does not offer
+// employeeId as a unique selector. The guarantee is unchanged — a duplicate is still rejected.
 export function findByEmployeeId(employeeId: string): Promise<User | null> {
-  return prisma.user.findUnique({ where: { employeeId } });
+  return prisma.user.findFirst({ where: { employeeId } });
+}
+
+/**
+ * Enforce employeeId uniqueness at the database with a PARTIAL unique index.
+ *
+ * `@unique` on this optional column cannot be used: Prisma renders it as a NON-sparse unique index
+ * on MongoDB, where null is an indexed value, so the second user created without an employeeId
+ * would be rejected (prisma/prisma#23870). Today every create goes through createWithEmployeeId and
+ * always supplies one — so that is latent rather than live — but the plain `create` export above
+ * does not, and one caller reaching for it is all it takes to arm it.
+ *
+ * The index NAME deliberately still contains "employeeId": isEmployeeIdConflict below identifies
+ * the clash by reading the target out of the P2002 error, and the allocation retry in
+ * `withEmployeeId` depends on recognising it.
+ *
+ * Idempotent: createIndexes is a no-op once an identical index exists — safe on every boot.
+ */
+export async function ensureEmployeeIdUniqueIndex(): Promise<void> {
+  await prisma.$runCommandRaw({
+    createIndexes: "User",
+    indexes: [
+      {
+        key: { employeeId: 1 },
+        name: "User_employeeId_unique",
+        unique: true,
+        partialFilterExpression: { employeeId: { $type: "string" } },
+      },
+    ],
+  });
 }
 
 // Lookup by the human employee reference (e.g. "STR-0007"), non-deleted, with role —
@@ -116,6 +149,24 @@ export function findByEmailWithRole(email: string): Promise<UserWithRole | null>
   return prisma.user.findFirst({
     where: { email, deletedAt: null },
     include: { role: true },
+  });
+}
+
+// Name-only lookup for a batch of emails — resolves the actors a DOCUMENT records (its raiser,
+// approver, signer) to people. Soft-deleted users are deliberately INCLUDED: a leaver is still the
+// person who raised that order, and an archived document must keep naming them.
+export function findNamesByEmails(
+  emails: string[],
+): Promise<{ email: string; firstName: string; lastName: string; jobTitle: string | null; deletedAt: Date | null }[]> {
+  if (emails.length === 0) return Promise.resolve([]);
+  return prisma.user.findMany({
+    where: { email: { in: emails } },
+    // jobTitle is the DESIGNATION ("Procurement Manager"), never the permission role — a role name
+    // on an outward-facing document tells a supplier who holds system access and means nothing else.
+    // `deletedAt` comes along so the caller can rank a LIVE identity above a soft-deleted one on the
+    // same email — a leaver should still be named on their own archived orders, but never in
+    // preference to whoever holds that address now.
+    select: { email: true, firstName: true, lastName: true, jobTitle: true, deletedAt: true },
   });
 }
 

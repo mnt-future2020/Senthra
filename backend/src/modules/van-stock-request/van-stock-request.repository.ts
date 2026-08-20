@@ -3,6 +3,7 @@ import { Prisma, type VanStockRequest, type VanStockRequestLine, type VanStockFu
 import { prisma, withTransaction } from "../../lib/prisma.js";
 import { conflict, notFound } from "../../utils/http-error.js";
 import { escapeRegex } from "../../utils/search.js";
+import { priorityFilterValues, readPriority } from "./van-stock-request.validation.js";
 
 // The ONLY place Prisma is touched for the four VanStock* models. Code allocation copies the JKR
 // atomic Counter + retry mechanism; the posting transaction mirrors GM's createMovementWithCode.
@@ -245,7 +246,9 @@ export async function listRequests(params: ListParams = {}): Promise<{ requests:
   else if (status) and.push({ status });
   if (type) and.push({ type });
   if (engineerId) and.push({ engineerId });
-  if (priority) and.push({ priority });
+  // Matched against the STORED values, which still include the retired "high" on older rows — so the
+  // queue's Urgent filter returns everything the queue actually shows as urgent.
+  if (priority) and.push({ priority: { in: priorityFilterValues(priority) } });
   if (createdVia) and.push({ createdVia });
   if (search?.trim()) and.push({ OR: searchOr(search.trim()) });
   if (warehouseId) and.push(belongsToWarehouses([warehouseId]));
@@ -693,7 +696,7 @@ export async function pendingWorklist(warehouseScope?: string[]): Promise<Array<
     code: r.code,
     type: r.type,
     engineerName: r.engineerName,
-    priority: r.priority,
+    priority: readPriority(r.priority), // legacy "high" rows read as urgent, same as everywhere else
     createdAt: r.createdAt,
     targetWarehouseCode: r.warehouseCode ?? r.preferredWarehouseCode,
   }));

@@ -25,6 +25,11 @@ export const changeCredentialsSchema = z.object({
   // matching the original behaviour rather than 400-rejecting the whole request.
   email: z.string().trim().optional(),
   newPassword: z.string().min(8, "New password must be at least 8 characters.").optional(),
+  // The super admin's display name — what the issued documents print instead of a raw login. The
+  // column existed and nothing ever wrote it, so every PO a super admin raised was signed by an
+  // email address. Sent blank on purpose CLEARS it (back to printing the email); the service stores
+  // that as null rather than "".
+  name: z.string().trim().max(120, "Name must be 120 characters or fewer.").optional(),
 });
 export type ChangeCredentialsInput = z.infer<typeof changeCredentialsSchema>;
 

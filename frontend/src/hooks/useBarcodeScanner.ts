@@ -57,6 +57,10 @@ export function useBarcodeScanner() {
     [stop],
   );
 
+  // Deliberately NOT downscaled, unlike every other image path in the app. A barcode is decoded from
+  // the width of its bars, and resizing is exactly what destroys that — a code that reads fine at
+  // full resolution stops resolving once the bars fall below a pixel each. Nothing is stored here
+  // either: the file is read, decoded, and dropped, so there are no bytes to save.
   const decodeImageFile = useCallback(async (file: File): Promise<string> => {
     const dataUrl = await readFileAsDataUrl(file);
     const reader = getReader();

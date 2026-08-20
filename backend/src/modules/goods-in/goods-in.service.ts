@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 
 import type { Prisma } from "@prisma/client";
 
@@ -10,16 +9,15 @@ import * as inventoryService from "#modules/inventory/inventory.service.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import * as attachmentService from "#modules/attachment/attachment.service.js";
-import { getCloudinaryCreds, getRegionalSettings } from "#modules/settings/settings.service.js";
+import { getRegionalSettings } from "#modules/settings/settings.service.js";
 import { formatDate } from "#modules/document/document.formatter.js";
 import { EXPORT_MAX, EXPORT_PAGING, toCsv } from "../../utils/csv.js";
-import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
 import { emitAttentionChanged } from "../../lib/realtime.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { withTransaction } from "../../lib/prisma.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import { paginate } from "../../utils/pagination.js";
-import type { CreateGoodsReceiptInput, GRNLineInput, GRNAttachmentInput, UpdateGoodsReceiptInput } from "./goods-in.validation.js";
+import type { CreateGoodsReceiptInput, GRNLineInput, UpdateGoodsReceiptInput } from "./goods-in.validation.js";
 import { GRN_ATTACHMENT_MAX_COUNT, GRN_ATTACHMENT_MAX_TOTAL_BYTES } from "./goods-in.validation.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
@@ -584,6 +582,10 @@ export async function completeGoodsReceipt(id: string, actor?: AuditActor): Prom
   if (!trimToNull(grn.deliveryNoteNumber)) throw badRequest("Enter the supplier's delivery note number before completing this receipt.");
   const actorEmail = actor?.email ?? null;
 
+  // Captured inside the transaction, recorded after it commits — see applyGoodsReceipt.
+  let poStatusChange: poService.ReceiptStatusChange | null = null;
+  let poId: string | null = null;
+
   await withTransaction(async (tx) => {
     // 0) Re-read the GRN INSIDE the tx and revalidate — never trust the pre-tx snapshot. A
     //    concurrent complete (status no longer draft) or edit (updatedAt moved) must abort here so
@@ -599,11 +601,11 @@ export async function completeGoodsReceipt(id: string, actor?: AuditActor): Prom
 
     // 1) Advance the PO first (validates remaining against the live PO inside the tx; throwing
     //    here rolls back everything, including any inventory below).
-    await poService.applyGoodsReceipt(
+    poId = fresh.purchaseOrderId;
+    poStatusChange = await poService.applyGoodsReceipt(
       tx,
       fresh.purchaseOrderId,
       fresh.items.map((i) => ({ purchaseOrderItemId: i.purchaseOrderItemId, receivedDelta: i.receivedQuantity })),
-      actor,
     );
     // 2) Increase warehouse inventory by the ACCEPTED quantity (good stock only; damaged units
     //    are recorded on the line but never enter on-hand). Only items that track inventory.
@@ -625,6 +627,8 @@ export async function completeGoodsReceipt(id: string, actor?: AuditActor): Prom
   });
 
   audit.record({ actor, action: "goods_in.completed", targetType: "goods_receipt", targetId: id, targetLabel: grn.code });
+  // The PO's own status entry, now that the transaction it describes has actually landed.
+  if (poId) poService.recordReceiptStatusChange(poId, poStatusChange, actor);
   // Completing moves several queues at once — GRN drafts, the PO's receive/close state (advanced
   // inside the tx above, which has no emit of its own) and inventory reorder levels. One signal is
   // enough: the client refetches the whole attention payload, not just this area.
@@ -727,27 +731,6 @@ export async function attachUploadedAsset(
  */
 export function recordAttachmentAudit(grn: { id: string; code: string }, actor?: AuditActor): void {
   audit.record({ actor, action: "goods_in.attachment_added", targetType: "goods_receipt", targetId: grn.id, targetLabel: grn.code });
-}
-
-export async function addAttachment(grnId: string, input: GRNAttachmentInput, actor?: AuditActor): Promise<PublicGoodsReceipt> {
-  // Before the upload, so a rejected attachment never reaches Cloudinary as an orphan.
-  await assertCanAttach(grnId, input.fileSizeBytes, actor);
-  const creds = await getCloudinaryCreds();
-  if (!creds) throw badRequest("File uploads aren't configured. Add Cloudinary credentials in Settings first.");
-  const asset = await uploadFileToCloudinary(input.data, randomUUID(), creds, "senthra/goods-in");
-  return attachUploadedAsset(
-    grnId,
-    {
-      label: input.label,
-      fileName: input.fileName,
-      fileType: input.fileType,
-      fileSizeBytes: input.fileSizeBytes,
-      url: asset.url,
-      publicId: asset.publicId,
-      resourceType: asset.resourceType,
-    },
-    actor,
-  );
 }
 
 export async function removeAttachment(grnId: string, attachmentId: string, actor?: AuditActor): Promise<PublicGoodsReceipt> {

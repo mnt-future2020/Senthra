@@ -19,7 +19,15 @@
 // The subset of a procurement line the diff inspects. Both the loaded record's lines and the freshly
 // built line rows expose these (extra fields are ignored).
 export interface ProcurementLineLike {
-  irmItemId: string;
+  /**
+   * Stable identity for the line, used to pair a before with an after.
+   *
+   * For an IRM line this is the item id — a procurement line is unique per item on both documents
+   * (DB-enforced). A RENTAL line is not: the same item may appear again with a different hire
+   * period or delivery address, so it supplies the same composite the compound unique index uses.
+   * Hence a neutral name rather than `irmItemId`.
+   */
+  lineKey: string;
   itemName: string;
   quantity: number;
   unitPricePence: number;
@@ -70,7 +78,7 @@ const lineSummary = (l: ProcurementLineLike): string => `${l.quantity} × ${gbp(
 /**
  * Diff the commercially-meaningful fields of a procurement document. Returns an ordered list of
  * {field, from, to, label} changes (empty when nothing financial changed). Lines are matched by
- * `irmItemId` — a procurement line is unique per item on both documents (DB-enforced) — so a keyed
+ * `lineKey` — unique per line on both documents (DB-enforced for IRM lines, composite for hires) — so a keyed
  * comparison is a faithful match. When `incoming.items` is undefined the update didn't touch lines,
  * so only the header (supplier/warehouse) is compared.
  */
@@ -92,12 +100,12 @@ export function diffProcurementChanges(existing: ProcurementDocLike, incoming: P
   // ── Lines ───────────────────────────────────────────────────────────────────────────────────
   // Only when the update actually carried lines. A header-only patch leaves them untouched.
   if (incoming.items !== undefined) {
-    const existingByItem = new Map(existing.items.map((l) => [l.irmItemId, l]));
-    const incomingByItem = new Map(incoming.items.map((l) => [l.irmItemId, l]));
+    const existingByItem = new Map(existing.items.map((l) => [l.lineKey, l]));
+    const incomingByItem = new Map(incoming.items.map((l) => [l.lineKey, l]));
 
     // Changed + added — iterate the incoming set (preserves the caller's line order).
     for (const inc of incoming.items) {
-      const prev = existingByItem.get(inc.irmItemId);
+      const prev = existingByItem.get(inc.lineKey);
       if (!prev) {
         changes.push({ field: "line.added", item: inc.itemName, from: null, to: lineSummary(inc), label: `Line added: ${inc.itemName} — ${lineSummary(inc)}` });
         continue;
@@ -117,7 +125,7 @@ export function diffProcurementChanges(existing: ProcurementDocLike, incoming: P
 
     // Removed — in existing but not incoming.
     for (const prev of existing.items) {
-      if (!incomingByItem.has(prev.irmItemId)) {
+      if (!incomingByItem.has(prev.lineKey)) {
         changes.push({ field: "line.removed", item: prev.itemName, from: lineSummary(prev), to: null, label: `Line removed: ${prev.itemName} — ${lineSummary(prev)}` });
       }
     }

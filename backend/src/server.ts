@@ -6,6 +6,7 @@ import { seedDatabase } from "./db/seed.js";
 import { initRealtime } from "./lib/realtime.js";
 import { prisma } from "./lib/prisma.js";
 import { startUploadReaper } from "#modules/upload/upload.reaper.js";
+import { startRentalDeadlineSweep } from "#modules/purchase-order/rentalHire.sweep.js";
 
 async function start(): Promise<void> {
   // Ensure the admin + settings exist before accepting requests.
@@ -25,9 +26,13 @@ async function start(): Promise<void> {
   // and every row is claimed through a conditional update, so several instances sweeping at once is
   // safe — one simply skips what another took.
   const stopReaper = startUploadReaper();
+  // Rental deadline reminders — same in-process-timer reasoning as above (rentalHire.sweep.ts).
+  const stopRentalSweep = startRentalDeadlineSweep();
 
   const shutdown = async (): Promise<void> => {
     stopReaper();
+    // Stopped like the reaper: a pass starting during teardown would query a disconnecting client.
+    stopRentalSweep();
     await prisma.$disconnect();
     server.close(() => process.exit(0));
   };

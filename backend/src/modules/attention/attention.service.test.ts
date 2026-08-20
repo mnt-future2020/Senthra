@@ -43,13 +43,17 @@ vi.mock("./attention.registry.js", () => ({
     { key: "inv.reorder", label: "Reorder", perms: ["inventory.view"], tone: "attention", nav: "/dashboard/inventory", href: "/inv" },
     // The urgent slice of inv.reorder — its rows are already inside that count.
     { key: "inv.critical", label: "Critical", perms: ["inventory.view"], tone: "critical", nav: "/dashboard/inventory", href: "/inv?c=1", subsetOf: "inv.reorder" },
+    // A subset gated DIFFERENTLY from its parent — the real pair is "Deliveries overdue"
+    // (purchase_orders.view) inside "Deliveries to receive" (goods_in.create), which a project
+    // manager sees only half of.
+    { key: "po.overdue_sub", label: "Overdue", perms: ["purchase_orders.view"], tone: "critical", nav: "/dashboard/purchase-orders", href: "/po?od", subsetOf: "po.receive" },
     // The link-less shapes: an aggregate with a warehouse tab behind it, one with nothing at all.
     { key: "wh.issue", label: "Kit to issue", perms: ["goods_management.issue"], tone: "attention", nav: "/dashboard/warehouses", warehouseQuery: "tab=goods" },
     { key: "wh.van", label: "Field requests", perms: ["van_stock_request.review"], tone: "info", nav: "/dashboard/warehouses", warehouseQuery: "tab=van" },
     { key: "cust.requests", label: "Stock requests", perms: ["stock_requests.approve"], tone: "critical", nav: "/dashboard/customers" },
   ],
   ATTENTION_SOURCES: [
-    { id: "purchase_orders", keys: ["po.approve", "po.overdue", "po.receive", "po.send"], run: runPo },
+    { id: "purchase_orders", keys: ["po.approve", "po.overdue", "po.receive", "po.send", "po.overdue_sub"], run: runPo },
     { id: "jobs", keys: ["jobs.rejected"], run: runJobs },
     { id: "inventory", keys: ["inv.reorder", "inv.critical"], run: runInv },
     { id: "warehouses", keys: ["wh.issue", "wh.van"], run: vi.fn(async () => ({ "wh.issue": 7, "wh.van": 2 })) },
@@ -138,6 +142,29 @@ describe("getAttention — zero suppression + nav rollup", () => {
     expect(res.items.find((i) => i.key === "inv.critical")?.count).toBe(1);
     // 27, not 28: the whole payload's total excludes the contained key as well.
     expect(res.total).toBe(27);
+  });
+
+  // A subset stands down ONLY when its parent is permitted for THIS actor. The two can be gated
+  // differently — the live pair is "Deliveries overdue" (purchase_orders.view) inside "Deliveries to
+  // receive" (goods_in.create) — so an actor holding just the child's permission sees no parent, and
+  // subtracting it anyway would report LESS work than exists.
+  describe("a subset gated differently from its parent", () => {
+    it("is absorbed when the actor can see the parent too", async () => {
+      runPo.mockResolvedValue({ "po.receive": 4, "po.overdue_sub": 1 });
+      const res = await getAttention(admin);
+      // 4, not 5 — and red, because the contained rows are the overdue ones.
+      expect(res.byNav["/dashboard/purchase-orders"]).toMatchObject({ count: 4, tone: "critical" });
+    });
+
+    it("counts for itself when the actor cannot see the parent", async () => {
+      runPo.mockResolvedValue({ "po.receive": 4, "po.overdue_sub": 1 });
+      // Holds the child's permission and NOT the parent's — a project manager's shape.
+      const pm = { type: "user", id: "u9", email: "pm@x.co", permissions: ["purchase_orders.view"] } as unknown as Principal;
+      const res = await getAttention(pm);
+      expect(res.items.map((i) => i.key)).toEqual(["po.overdue_sub"]);
+      // 1, not 0: this actor has one thing to do and the badge has to say so.
+      expect(res.byNav["/dashboard/purchase-orders"]).toEqual({ count: 1, tone: "critical" });
+    });
   });
 
   // The client's own header total has to skip it too, so `subsetOf` travels with the item.

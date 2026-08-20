@@ -48,7 +48,6 @@ export interface KitRequest {
   requestedByEngineerEmail: string | null;
   reason: string;
   notes: string | null;
-  attachments: string[];
   reviewedByUserId: string | null;
   reviewedByEmail: string | null;
   reviewedAt: string | null;
@@ -81,7 +80,6 @@ export interface CreateKitRequestPayload {
   jobId: string;
   reason: string;
   notes?: string;
-  attachments?: string[];
   lines: KitRequestLinePayload[];
 }
 

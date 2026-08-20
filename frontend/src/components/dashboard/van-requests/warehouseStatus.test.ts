@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { completionBadge, lineProgress, linesForWarehouse, postingsForLines, warehouseStatus } from "./vanRequestUi";
+import { completionBadge, lineProgress, linesForWarehouse, postingsForLines, readPriorityParam, warehouseStatus } from "./vanRequestUi";
 
 // Each source warehouse reviews and issues ONLY its own lines, so a request's own status describes
 // the whole thing and not this warehouse's share of it. Showing the global status in a warehouse
@@ -197,5 +197,19 @@ describe("completionBadge", () => {
   it("stays silent for a request that simply completed", () => {
     expect(completionBadge("complete", got)).toBeNull();
     expect(completionBadge(null, got)).toBeNull();
+  });
+});
+
+// The queue's filters live in the URL, so a reviewer's bookmark can name a priority the scale no
+// longer has. The server reads that filter as Urgent and returns the right rows — this is the other
+// half: the dropdown has to SHOW Urgent, or the list and the control disagree on screen.
+describe("readPriorityParam", () => {
+  it("reads a bookmarked high filter as urgent", () => {
+    expect(readPriorityParam("high")).toBe("urgent");
+  });
+  it("leaves the live values and the all-priorities blank alone", () => {
+    expect(readPriorityParam("urgent")).toBe("urgent");
+    expect(readPriorityParam("normal")).toBe("normal");
+    expect(readPriorityParam("")).toBe("");
   });
 });

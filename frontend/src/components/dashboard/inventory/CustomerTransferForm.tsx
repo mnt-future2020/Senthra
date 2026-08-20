@@ -6,7 +6,7 @@ import { ArrowRight, Loader2 } from "lucide-react";
 import { transferCustomerStock } from "@/services/stockPosition.service";
 import { listWarehouses } from "@/services/warehouse.service";
 import { useDashboard } from "@/hooks/useDashboard";
-import { FieldError } from "@/components/ui/FormScaffold";
+import { FieldError, SummaryRow } from "@/components/ui/FormScaffold";
 import { inputCls, labelCls, ghostBtn, primaryBtn } from "@/components/ui/styles";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { Select } from "@/components/ui/Select";
@@ -180,34 +180,11 @@ export function CustomerTransferForm({ row, onDone }: CustomerTransferFormProps)
               Transfer summary
             </p>
             <div className="space-y-2.5 text-sm">
-              <div className="flex justify-between gap-3">
-                <span className="text-[var(--muted)]">Item</span>
-                <span className="text-right font-semibold text-[var(--ink)]">{row.itemName}</span>
-              </div>
-              <div className="flex justify-between gap-3">
-                <span className="text-[var(--muted)]">Customer</span>
-                <span className="text-right font-semibold text-[var(--ink)]">
-                  {row.customerName ?? "—"}
-                </span>
-              </div>
-              <div className="flex justify-between gap-3">
-                <span className="text-[var(--muted)]">From</span>
-                <span className="text-right font-semibold text-[var(--ink)]">
-                  {row.locationLabel}
-                </span>
-              </div>
-              <div className="flex justify-between gap-3">
-                <span className="text-[var(--muted)]">To</span>
-                <span className="text-right font-semibold text-[var(--ink)]">
-                  {targetWh ? `${targetWh.name} (${targetWh.code})` : "—"}
-                </span>
-              </div>
-              <div className="flex justify-between gap-3 border-t border-[var(--border)] pt-2.5">
-                <span className="text-[var(--muted)]">Qty</span>
-                <span className="font-extrabold text-[var(--accent)]">
-                  {Number.isInteger(qtyNum) && qtyNum > 0 ? qtyNum : "—"}
-                </span>
-              </div>
+              <SummaryRow label="Item" valueClassName="font-semibold">{row.itemName}</SummaryRow>
+              <SummaryRow label="Customer" valueClassName="font-semibold">{row.customerName ?? "—"}</SummaryRow>
+              <SummaryRow label="From" valueClassName="font-semibold">{row.locationLabel}</SummaryRow>
+              <SummaryRow label="To" valueClassName="font-semibold">{targetWh ? `${targetWh.name} (${targetWh.code})` : "—"}</SummaryRow>
+              <SummaryRow label="Qty" valueClassName="font-extrabold text-[var(--accent)]" className="border-t border-[var(--border)] pt-2.5">{Number.isInteger(qtyNum) && qtyNum > 0 ? qtyNum : "—"}</SummaryRow>
             </div>
           </div>
         </aside>

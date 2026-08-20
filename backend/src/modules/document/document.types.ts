@@ -1,6 +1,7 @@
 // Document Platform — shared types. The builder produces a pure, render-agnostic payload; the
 // renderer (pdfkit today) draws it. A future PDF/engine swap touches only the renderer.
 
+import type { DocumentPerson } from "#modules/user/user.service.js";
 import { DOCUMENT_TYPES } from "./document.constants.js";
 
 export type DocumentType = (typeof DOCUMENT_TYPES)[number];
@@ -50,6 +51,10 @@ export interface DocumentMeta {
 // Everything resolved (I/O done) before the pure builder runs.
 export interface DocumentContext {
   company: DocumentCompany;
+  // Display names for the people a document names (its raiser, approver, signer), keyed by their
+  // LOWERCASED email — those columns store an actor's login, and a raw login is not a name a
+  // supplier can ask for. Missing key = unresolvable actor; the builder then prints the email.
+  people: Record<string, DocumentPerson>;
   regional: DocumentRegional;
   branding: DocumentBranding;
   signature: DocumentSignatureBlock | null;
@@ -63,6 +68,8 @@ export interface PoDocLine {
   description: string;
   quantity: string;
   unitPrice: string;
+  /** The line's VAT rate, already formatted (e.g. "20%") — a mixed-rate order is unreconcilable without it. */
+  vatRate: string;
   lineTotal: string;
 }
 
@@ -96,7 +103,9 @@ export interface PurchaseOrderDocumentData {
     approvedBy: string; // po.approvedBy (who approved it)
   };
   lines: PoDocLine[];
-  totals: { subtotal: string; vat: string; grandTotal: string };
+  // `vatLabel` qualifies the VAT total with the rate ("VAT (20%)") when every line shares one, and
+  // stays a plain "VAT" when they differ — there the per-line column is what explains the figure.
+  totals: { subtotal: string; vat: string; vatLabel: string; grandTotal: string };
   notes: string;
 }
 

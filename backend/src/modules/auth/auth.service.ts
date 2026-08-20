@@ -134,6 +134,8 @@ interface ChangeCredentialsParams {
   currentPassword: string;
   email?: string;
   newPassword?: string;
+  /** Display name printed on issued documents. Sent blank clears it. */
+  name?: string;
 }
 
 // Super-admin: change email and/or password (Settings → Account). Changing the
@@ -166,6 +168,13 @@ export async function changeCredentials(
       data.email = normalized;
       data.googleEmail = normalized;
     }
+  }
+
+  // Not a credential — it is the name printed on issued documents. Kept on this endpoint because it
+  // is the same "your account" form, and it deliberately does NOT end other sessions below.
+  if (params.name !== undefined) {
+    const trimmed = params.name.trim();
+    if (trimmed !== (admin.name ?? "")) data.name = trimmed || null;
   }
 
   let passwordChanged = false;

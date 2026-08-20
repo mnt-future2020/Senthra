@@ -22,7 +22,19 @@ export type FinalizeMode =
   // it does today. Finalize is the point at which we stop tracking the asset, which means an
   // abandoned FORM still leaks it. That is the existing, separately-deferred gap; direct upload does
   // not widen it, and closing it needs the String[] fields to become rows.
-  | "return-url";
+  | "return-url"
+  // Like `return-url` in what the browser gets back — a URL for a record that does not exist yet —
+  // but the ledger row is KEPT rather than released. That single difference is what closes the
+  // abandoned-form leak: the row stays pending, so a form the user never saves is reclaimed by the
+  // reaper on its normal pass, while a form that IS saved commits the row into a real attachment.
+  //
+  // The finalize also stamps the URL and file metadata onto the row, because the form keeps only the
+  // URL — that stamp is how `save` finds the identity again and builds a full attachment row from it.
+  //
+  // Used ONLY where the save path actually performs that commit. A purpose that adopts this mode
+  // without one gets its live files destroyed 24 hours later, which is why `return-url` remains the
+  // default for the surfaces that have not been converted.
+  | "deferred-attach";
 
 export interface UploadPurpose {
   /** Permission the caller must hold to obtain a signature. Mirrors the route that used to upload. */
@@ -56,7 +68,10 @@ export const UPLOAD_PURPOSES = {
     folder: "senthra/jobs",
     mediaTypes: DOCUMENT_TYPES,
     maxBytes: 10 * MB,
-    mode: "return-url",
+    // The job form composes attachments before the job exists, so there is nothing to attach to at
+    // finalize — but `createJob`/`updateJob` reconcile the URLs it sends back into JobAttachment
+    // rows, committing each ledger row as they go. That commit is what makes this mode safe here.
+    mode: "deferred-attach",
   },
   prf_attachment: {
     permissions: ["purchase_requests.edit"],
@@ -85,6 +100,17 @@ export const UPLOAD_PURPOSES = {
 
   // ── Evidence photos. Images only, so Cloudinary's own decode is the content check: it stores them
   // as `image` and rejects anything it cannot decode. Nothing here needs a magic-byte pass.
+  //
+  // ALL of them are 10 MB, and the number comes from the device rather than the use. Every one of
+  // these is captured on a phone — an engineer in a van, a manager on the warehouse floor — and a
+  // modern phone JPEG is routinely 4–15 MB. `damage_photo` learnt this the hard way (see the Aug
+  // 2026 fix: "a photo taken on a phone was rejected while the schema promised to allow it"); the
+  // other four were left at 2 MB, which is the same defect waiting in four more places.
+  //
+  // The browser now downscales before it uploads (frontend lib/image.ts), so a typical capture
+  // arrives a few hundred KB and never approaches this. The ceiling is the BACKSTOP for the cases
+  // compression cannot handle — a format canvas will not decode, a device too constrained to
+  // re-encode — where the original is sent as-is. Lowering it again re-blocks exactly those users.
   damage_photo: {
     permissions: ["goods_management.receive_return", "inventory.adjust"],
     anyPermission: true,
@@ -98,7 +124,7 @@ export const UPLOAD_PURPOSES = {
     anyPermission: false,
     folder: "senthra/van-stock-requests",
     mediaTypes: EVIDENCE_IMAGE_TYPES,
-    maxBytes: 2 * MB,
+    maxBytes: 10 * MB,
     mode: "return-url",
   },
   vsr_damage_photo: {
@@ -106,23 +132,32 @@ export const UPLOAD_PURPOSES = {
     anyPermission: false,
     folder: "senthra/damage-photos",
     mediaTypes: EVIDENCE_IMAGE_TYPES,
-    maxBytes: 2 * MB,
+    maxBytes: 10 * MB,
     mode: "return-url",
   },
-  kit_request_attachment: {
-    permissions: ["engineer.jobs.request_kit"],
-    anyPermission: false,
-    folder: "senthra/kit-requests",
+  // Condition evidence on a HIRE delivery — how the supplier's kit looked as it came off the van.
+  // `attach` rather than `return-url`, unlike the other evidence photos here: this one lands on a
+  // record that already exists by the time it is taken (the delivery), so it can carry the Cloudinary
+  // identity that lets the asset be destroyed with it. The return-url photos cannot — they are picked
+  // before their record exists, which is why theirs are stored as bare URLs.
+  hire_delivery_photo: {
+    // EITHER key, and `anyPermission` is what makes that true — `assertPermitted` reads `false` as
+    // `.every()`. The two keys are deliberately never held together (the warehouse manager gets
+    // `receive` and not `manage`; the PM the reverse), so requiring both left every seeded role
+    // unable to attach a photo and only a `*` super-admin able to — which is what dev testing runs as.
+    permissions: ["rentals.hire.receive", "rentals.hire.manage"],
+    anyPermission: true,
+    folder: "senthra/hire-deliveries",
     mediaTypes: EVIDENCE_IMAGE_TYPES,
-    maxBytes: 2 * MB,
-    mode: "return-url",
+    maxBytes: 10 * MB,
+    mode: "attach",
   },
   transfer_attachment: {
     permissions: ["engineer.transfer", "engineer_stock.transfer"],
     anyPermission: true,
     folder: "senthra/engineer-transfers",
     mediaTypes: EVIDENCE_IMAGE_TYPES,
-    maxBytes: 2 * MB,
+    maxBytes: 10 * MB,
     mode: "return-url",
   },
 } as const satisfies Record<string, UploadPurpose>;
