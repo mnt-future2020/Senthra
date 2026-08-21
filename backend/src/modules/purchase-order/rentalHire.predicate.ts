@@ -10,16 +10,31 @@ import { addDays } from "../../utils/calendar-day.js";
 // `?status=awaiting_send` notes in the attention registry.
 
 /**
- * The three hire states, in the order a hire moves through them. One list, read by validation, the
+ * The hire states, in the order a hire moves through them. One list, read by validation, the
  * predicates and the UI.
  *
  * `awaiting_delivery` is where every new hire starts. The purchase order is a commitment to the
  * provider; it is not delivery. Until the warehouse confirms the kit arrived, the hire is not ON hire
  * — which is why every predicate below asks for `on_hire` and not merely "not returned": a hire that
  * has not arrived cannot be ending soon, and it certainly cannot be overdue for RETURN.
+ *
+ * `cancelled` is the exit for a hire nothing ever arrived against, and it is a FOURTH state rather
+ * than a reuse of `returned` because the two are different facts and one report tells them apart:
+ * `returnedWhere` below is the finance register, and a hire that never happened is not hire spend.
+ * A hire that partly arrived ends `returned` — it happened — with the shortfall in
+ * `cancelledQuantity`. Both are terminal; only these two let a purchase order close.
  */
-export const HIRE_STATUSES = ["awaiting_delivery", "on_hire", "returned"] as const;
+export const HIRE_STATUSES = ["awaiting_delivery", "on_hire", "returned", "cancelled"] as const;
 export type HireStatus = (typeof HIRE_STATUSES)[number];
+
+/**
+ * The states a hire can no longer be acted on from. A purchase order closes when every hire on it is
+ * one of these, and every write path refuses one — exported so the guard and the writers cannot drift
+ * into disagreeing about what "finished" means.
+ */
+export const TERMINAL_HIRE_STATUSES = ["returned", "cancelled"] as const;
+export const isTerminalHireStatus = (status: string): boolean =>
+  (TERMINAL_HIRE_STATUSES as readonly string[]).includes(status);
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -28,7 +43,7 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
  *
  * Without this a deleted or cancelled purchase order keeps its rental lines — `softDelete` stamps
  * the header only — so the red badge counts a hire nobody can act on and the sweep keeps emailing
- * about it, while "mark returned" refuses because the order itself can no longer be loaded. The
+ * about it, while the return path refuses because the order itself can no longer be loaded. The
  * badge becomes unclearable.
  *
  * Every status but `cancelled` is included, deliberately: once kit is in our hands the hire's clock
@@ -165,11 +180,14 @@ export function onHireWhere(): Prisma.PurchaseOrderRentalLineWhereInput {
  * status-only queue dropped the outstanding units the moment the first one arrived: 2 of 5 delivered
  * and the other 3 stopped being anybody's job.
  *
- * `returned` is excluded rather than implied — a hire that went back is finished whatever its
- * quantities say, and the alternative is a returned line reappearing in a receiving queue forever.
+ * Both terminal states are excluded rather than implied — a hire that went back is finished whatever
+ * its quantities say, and one closed short is finished by definition: `fullyReceived` is set true on
+ * that path precisely so the units nobody is waiting for leave this queue. The status test is the
+ * belt to that braces, and it is what stops a `cancelled` line (which never received anything, so
+ * `fullyReceived` is false) reappearing here forever.
  */
 export function awaitingDeliveryWhere(): Prisma.PurchaseOrderRentalLineWhereInput {
-  return { ...ISSUED_ORDER, fullyReceived: false, hireStatus: { not: "returned" } };
+  return { ...ISSUED_ORDER, fullyReceived: false, hireStatus: { notIn: [...TERMINAL_HIRE_STATUSES] } };
 }
 
 /**
@@ -206,8 +224,22 @@ export function overdueDeliveryWhere(todayStart: Date): Prisma.PurchaseOrderRent
  * arrived went back — writes `returned`, and that is the fact a period report means by "completed".
  *
  * Cancelled and deleted orders stay excluded (LIVE_ORDER), exactly as they are everywhere else here:
- * a hire on a cancelled order is not hire spend.
+ * a hire on a cancelled order is not hire spend. Neither is a hire CANCELLED in its own right —
+ * nothing ever arrived against it — which is why that is a separate status and not a flavour of
+ * `returned`.
  */
 export function returnedWhere(): Prisma.PurchaseOrderRentalLineWhereInput {
   return { ...LIVE_ORDER, hireStatus: "returned" };
+}
+
+/**
+ * Hires that never happened — ordered, nothing ever arrived, closed short with a reason.
+ *
+ * Its own predicate rather than a flavour of `returnedWhere` because that one is the finance
+ * register and this is not hire spend. But it still needs somewhere to be READ: a record that can be
+ * created and then found on no screen is a record nobody can audit, which is why the on-hire board
+ * carries a pill for it beside Returned.
+ */
+export function cancelledWhere(): Prisma.PurchaseOrderRentalLineWhereInput {
+  return { ...LIVE_ORDER, hireStatus: "cancelled" };
 }

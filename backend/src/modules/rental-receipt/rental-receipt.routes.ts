@@ -2,6 +2,7 @@ import { Router } from "express";
 
 import * as receiptController from "./rental-receipt.controller.js";
 import { requireAnyPermission, requireAuth, requirePermission } from "../../middleware/auth.middleware.js";
+import { HIRE_SETTLE_PERMISSIONS } from "#modules/role/permissions.js";
 import { exportLimiter, writeLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import {
@@ -13,7 +14,7 @@ import {
 } from "./rental-receipt.validation.js";
 
 /** The warehouse floor's own work. `manage` is a superset, so it passes every one of these too. */
-const HIRE_FLOOR = ["rentals.hire.receive", "rentals.hire.manage"] as const;
+const HIRE_FLOOR = ["rentals.hire.receive", "rentals.hire.settle", "rentals.hire.manage"] as const;
 
 const router = Router();
 
@@ -75,22 +76,25 @@ router.post(
   receiptController.reportHireDamage,
 );
 // What the supplier is CHARGING for the damage — the one value on a note that can be set after the
-// fact, because it feeds no running total (see recordDamageCharge). `manage`, not the floor
-// permission: agreeing what we owe a supplier is a commercial act, and the person with the scanner
-// should not need that authority to do their job.
+// fact, because it feeds no running total (see recordDamageCharge). `settle`, not the bare floor key
+// and not `manage` either: the floor ALREADY types this figure, on the damage report and the return
+// note, whenever the driver hands it over at the door. Withholding the later correction meant the
+// same person could write £450 today and not fix it to £400 when the invoice arrived.
 router.patch(
   "/:id/damage-charge",
-  requirePermission("rentals.hire.manage"),
+  requireAnyPermission(...HIRE_SETTLE_PERMISSIONS),
   writeLimiter,
   validateBody(recordDamageChargeSchema),
   receiptController.recordDamageCharge,
 );
 
-// Reversing is the exception: it rewrites how much of a hire moved, after the fact, and that is a
-// commercial correction rather than a floor operation.
+// Reversing rewrites how much of a hire moved, after the fact — so it is `settle`, not the bare
+// floor key. It is not procurement's either: the note being corrected was typed at the receiving bay,
+// and the person who typed it wrong is the one who knows it. Scoped to the note's own warehouse by
+// assertWarehouseAccess, so a manager can only undo their own sites' records.
 router.patch(
   "/:id/reverse",
-  requirePermission("rentals.hire.manage"),
+  requireAnyPermission(...HIRE_SETTLE_PERMISSIONS),
   writeLimiter,
   validateBody(reverseRentalReceiptSchema),
   receiptController.reverseRentalReceipt,

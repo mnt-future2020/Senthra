@@ -64,12 +64,13 @@ async function applyHireWrite(tx: Prisma.TransactionClient, u: HireLineWrite): P
 /**
  * The order's hire lines as they stand INSIDE a transaction — the reversal's other pre-read.
  *
- * The reversal compares its recomputed totals against the line's own `receivedQuantity`, `quantity`
- * and `hireStatus`: they decide `fullyReturned`, whether the line goes back on the receiving queue,
- * and whether the reversal is refused because the kit has already gone back. Read before the
- * transaction opened, all three can have moved — a delivery landing mid-window makes `fullyReturned`
- * true against a total that is no longer the total, and a concurrent quick-close slips past the
- * already-returned guard entirely.
+ * The reversal compares its recomputed totals against the line's own `receivedQuantity`, `quantity`,
+ * `hireStatus` and `shortClosedAt`: they decide `fullyReturned`, whether the line goes back on the
+ * receiving queue, and whether the reversal is refused — because the kit has already gone back, or
+ * because the outstanding units were recorded as never arriving. Read before the transaction opened,
+ * all of them can have moved — a delivery landing mid-window makes `fullyReturned` true against a
+ * total that is no longer the total, a concurrent return slips past the already-returned guard
+ * entirely, and a short close landing there would have its shortfall silently unpicked.
  *
  * Reading them here rather than through the purchase-order repository is the same boundary this
  * module already sits on: it WRITES PurchaseOrderRentalLine (see applyHireWrite), because the hire's
@@ -78,8 +79,38 @@ async function applyHireWrite(tx: Prisma.TransactionClient, u: HireLineWrite): P
 export function hireLinesForOrderTx(tx: Prisma.TransactionClient, purchaseOrderId: string) {
   return tx.purchaseOrderRentalLine.findMany({
     where: { purchaseOrderId },
-    select: { id: true, itemName: true, quantity: true, receivedQuantity: true, hireStatus: true },
+    select: { id: true, itemName: true, quantity: true, receivedQuantity: true, hireStatus: true, shortClosedAt: true },
   });
+}
+
+/**
+ * Units of each hire line recorded damaged, across EVERY live note that can record it.
+ *
+ * Its own function rather than `receivedTotalsByLine(po, "damage", ...)` because damage has two
+ * sources, not one: a report filed while the kit is with us, and a collection note saying what went
+ * back broken. The service caps both against this same total so one unit cannot be counted — or
+ * charged — twice, which means the reversal has to rebuild it from both too. Filtered to reports
+ * alone, withdrawing one claim would silently erase a live note's damage along with it.
+ *
+ * `{ in: [...] }` is safe here where `movementDatesByHireLine` had to avoid it: the rows it can miss
+ * are the ones with no `direction` stored at all, and those are deliveries written before the field
+ * existed. A delivery carries no damage of ours — damage that arrived with the kit is the supplier's.
+ */
+export async function damagedTotalsByLine(
+  purchaseOrderId: string,
+  // The reversal MUST pass one, for the same reason receivedTotalsByLine does: read outside the
+  // transaction, the absolute figure derived from this is stale before it lands.
+  tx?: Prisma.TransactionClient,
+): Promise<Map<string, number>> {
+  const rows = await (tx ?? prisma).rentalReceiptLine.findMany({
+    where: { rentalReceipt: { is: { purchaseOrderId, direction: { in: ["damage", "out"] }, ...LIVE } } },
+    select: { purchaseOrderRentalLineId: true, damagedQuantity: true },
+  });
+  const totals = new Map<string, number>();
+  for (const r of rows) {
+    totals.set(r.purchaseOrderRentalLineId, (totals.get(r.purchaseOrderRentalLineId) ?? 0) + r.damagedQuantity);
+  }
+  return totals;
 }
 
 /** A reversed note moved nothing — every total, list and count reads live rows only. */

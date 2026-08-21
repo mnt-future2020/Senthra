@@ -25,6 +25,7 @@ import uploadRoutes from "#modules/upload/upload.routes.js";
 import jobKitRequestRoutes from "#modules/job-kit-request/job-kit-request.routes.js";
 import jobTitleRoutes from "#modules/jobTitle/jobTitle.routes.js";
 import notificationRoutes from "#modules/notification/notification.routes.js";
+import policyRoutes from "#modules/policy/policy.routes.js";
 import purchaseOrderRoutes from "#modules/purchase-order/purchase-order.routes.js";
 import purchaseRequestRoutes from "#modules/purchase-request/purchase-request.routes.js";
 import roleRoutes from "#modules/role/role.routes.js";
@@ -50,6 +51,9 @@ router.use("/dashboard", dashboardRoutes);
 // Global pending-work counts (sidebar badges + dashboard strip + module tab counts — one source).
 router.use("/attention", attentionRoutes);
 router.use("/settings", settingsRoutes);
+// Legal policies. Its GET /policies/privacy is PUBLIC (mounted before requireAuth inside the router,
+// like /settings/branding); every other route is permission-gated.
+router.use("/policies", policyRoutes);
 router.use("/users", userRoutes);
 router.use("/roles", roleRoutes);
 router.use("/categories", categoryRoutes);

@@ -16,7 +16,7 @@ import { CELL_ONE_LINE, colClass, colClassAt, tableMinWidth, type ColPriority } 
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { AttentionBar } from "@/components/dashboard/shell/AttentionBar";
-import { PO_DERIVED_STATUS_OPTIONS, PO_STATUS_LABELS, PoPriorityLabel, PoStatusBadge, formatDate, formatMoney } from "./poStatus";
+import { HireStateBadge, PO_DERIVED_STATUS_OPTIONS, PO_STATUS_LABELS, PoPriorityLabel, PoStatusBadge, formatDate, formatMoney } from "./poStatus";
 import type { PoStatus, PurchaseOrder } from "@/types/purchase-order";
 
 const PAGE_SIZE = 20;
@@ -161,7 +161,7 @@ export function PurchaseOrdersView() {
   // "overdue" is a DERIVED pseudo-status the server resolves (receivable POs whose confirmed-or-
   // expected ETA is before the company-timezone start of today) — the same predicate as the overdue
   // dashboard card and the Deliveries-overdue badge. Not a PoStatus: it never reaches a status chip.
-  const statusFilter = (searchParams.get("status") as "all" | "overdue" | PoStatus) ?? "all";
+  const statusFilter = (searchParams.get("status") as "all" | "overdue" | "awaiting_close" | PoStatus) ?? "all";
   // "Awaiting my action" — the PM worklist (orders in pm_review assigned to me). Overrides the
   // status filter while active; only offered to users who can actually send (i.e. act as a PM).
   const awaitingMine = searchParams.get("awaiting") === "1";
@@ -373,7 +373,15 @@ export function PurchaseOrdersView() {
                     <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">{po.code}</td>
                     <td className={`cell-y px-4 font-semibold text-[var(--ink)] ${CELL_ONE_LINE}`} title={po.supplierName ?? po.supplier?.name ?? undefined}>{po.supplierName ?? po.supplier?.name ?? "—"}</td>
                     <td className={`cell-y px-4 text-[var(--muted)] ${CELL_ONE_LINE}`} title={po.warehouse?.name ?? undefined}>{po.warehouse?.name ?? "—"}</td>
-                    <td className="cell-y px-4"><PoStatusBadge status={po.status} /></td>
+                    {/* Status AND hire state. Without the second one the list repeats the header's old lie at
+                            scale: an order whose kit went back weeks ago reads "Fully Received" and nothing
+                            else, on every row. Renders nothing for a goods-only order. */}
+                    <td className="cell-y px-4">
+                      <div className="flex flex-wrap items-center gap-1">
+                        <PoStatusBadge status={po.status} />
+                        <HireStateBadge rentalItems={po.rentalItems} />
+                      </div>
+                    </td>
                     <td className={`cell-y px-4 text-xs ${colClass("xl")}`}><PoPriorityLabel priority={po.priority} /></td>
                     <td className={`cell-y px-4 text-[var(--muted)] ${colClass("lg")}`}>{formatDate(po.orderDate)}</td>
                     <td className="cell-y px-4 text-[var(--muted)]">{formatDate(po.expectedDeliveryDate)}</td>

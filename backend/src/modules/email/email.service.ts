@@ -176,3 +176,18 @@ export async function sendAndLog(
     throw e;
   }
 }
+
+/**
+ * Purge delivery-log rows older than `cutoff`. Returns how many went.
+ *
+ * DELIBERATELY UNSCHEDULED. Nothing calls this — no timer, no route, no start-up hook — because the
+ * retention period it would run with has not been agreed. See emailLog.repository#deleteOlderThan
+ * for why the model is safe to purge (it is write-only) and why `cutoff` has no default.
+ *
+ * Sending, templating, delivery-status recording and retry behaviour are untouched by this: they
+ * only ever WRITE to the log, and this only ever deletes rows already written.
+ */
+export async function purgeEmailLogsOlderThan(cutoff: Date): Promise<number> {
+  const { count } = await emailLogRepo.deleteOlderThan(cutoff);
+  return count;
+}

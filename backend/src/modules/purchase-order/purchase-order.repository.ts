@@ -10,7 +10,9 @@ import {
   onHireWhere,
   overdueDeliveryWhere,
   overdueWhere,
+  cancelledWhere,
   returnedWhere,
+  TERMINAL_HIRE_STATUSES,
 } from "./rentalHire.predicate.js";
 
 // Data-access layer for Purchase Orders. The ONLY place Prisma is touched for POs. Soft-deleted
@@ -185,6 +187,30 @@ export const awaitingSendPoWhere = (pmScopeUserId?: string): Prisma.PurchaseOrde
   { status: "pm_review", ...(pmScopeUserId ? { pmUserId: pmScopeUserId } : {}) },
 ];
 
+/**
+ * Orders that have ARRIVED and have nothing left to hand back — the "Received — ready to close" queue.
+ *
+ * `fully_received` alone answered the wrong question on a rental order. It means every ordered unit
+ * turned up, which stays true forever once it happens; a hire, though, is a round trip, and
+ * `closePurchaseOrder` refuses an order whose kit is still out. So the badge counted orders nobody
+ * could act on, and clicking Close on one got "still on hire — record its return first". The
+ * attention registry's first rule is that a count means work a human still owes.
+ *
+ * ONE definition, read by the badge's count and by the list the badge opens. Written twice they end
+ * up different, and a chip reading 12 that opens 17 rows is worse than no chip.
+ *
+ * `none` is vacuously true on an order with no rental lines, so every goods-only order counts exactly
+ * as it did before — which is most of them.
+ */
+export function awaitingClosePoWhere(): Prisma.PurchaseOrderWhereInput {
+  return {
+    status: "fully_received",
+    // Through the shared list, so this and the close guard cannot drift into disagreeing about what
+    // "finished" means — a hire that went back and one closed short are equally done.
+    rentalItems: { none: { hireStatus: { notIn: [...TERMINAL_HIRE_STATUSES] } } },
+  };
+}
+
 export function buildWhere(filters: PurchaseOrderListFilters): Prisma.PurchaseOrderWhereInput {
   const where: Prisma.PurchaseOrderWhereInput = { deletedAt: null };
   if (filters.status === "overdue") {
@@ -217,6 +243,10 @@ export function buildWhere(filters: PurchaseOrderListFilters): Prisma.PurchaseOr
         ],
       },
     ];
+  } else if (filters.status === "awaiting_close") {
+    // DERIVED pseudo-status: arrived, and nothing still on hire. Same predicate the badge counts, so
+    // the chip and the list it opens can never disagree. See awaitingClosePoWhere.
+    Object.assign(where, awaitingClosePoWhere());
   } else if (filters.status === "receivable") {
     // DERIVED pseudo-status: everything the warehouse can still book in — the exact set countAttention
     // measures for "Deliveries to receive". It spans three real statuses, and the badge used to open
@@ -716,7 +746,9 @@ export async function countAttention(
     prisma.purchaseOrder.count({ where: { OR: awaitingApprovalPoWhere(), ...scoped } }),
     prisma.purchaseOrder.count({ where: { OR: awaitingSendPoWhere(opts.pmUserId), ...scoped } }),
     prisma.purchaseOrder.count({ where: { status: "sent", ...scoped } }),
-    prisma.purchaseOrder.count({ where: { status: "fully_received", ...scoped } }),
+    // Through the shared predicate, not a bare status: a rental order whose kit is still out cannot
+    // be closed, and counting it made the chip a list of work the server refuses.
+    prisma.purchaseOrder.count({ where: { ...awaitingClosePoWhere(), ...scoped } }),
     // The warehouse's goods-in backlog. Through `receivableWhere`, so it counts exactly the rows
     // `?status=receivable` opens — a hire-only order has nothing to receive here and is in neither.
     prisma.purchaseOrder.count({ where: { ...receivableWhere(), ...scoped } }),
@@ -828,6 +860,29 @@ export function findRentalLine(lineId: string) {
 
 export function updateRentalLine(lineId: string, data: Prisma.PurchaseOrderRentalLineUpdateInput) {
   return prisma.purchaseOrderRentalLine.update({ where: { id: lineId }, data });
+}
+
+/**
+ * Update a hire line only while it still looks the way the caller read it.
+ *
+ * The same optimistic guard the hire-note writes use (rental-receipt.repository's `applyHireWrite`),
+ * and needed for the same reason: a write whose VALUE is derived from a pre-read quantity is wrong
+ * the moment that quantity moves. Closing a hire short computes `cancelledQuantity` as
+ * `quantity - receivedQuantity`; if a delivery lands in the window between the read and the write,
+ * the stored shortfall describes a line that no longer exists and `received + cancelled` stops adding
+ * up to `ordered`. The two writes never overlap in time, so Mongo raises no conflict of its own.
+ *
+ * `updateMany`, because `update` takes a UNIQUE where and cannot carry the guard columns. Returns
+ * whether the row was still in the expected state; the caller turns `false` into a 409 with an
+ * instruction, rather than a 500 they would retry straight back into.
+ */
+export async function updateRentalLineIf(
+  lineId: string,
+  expect: Prisma.PurchaseOrderRentalLineWhereInput,
+  data: Prisma.PurchaseOrderRentalLineUncheckedUpdateInput,
+): Promise<boolean> {
+  const res = await prisma.purchaseOrderRentalLine.updateMany({ where: { id: lineId, ...expect }, data });
+  return res.count === 1;
 }
 
 /**
@@ -958,8 +1013,14 @@ export async function countAwaitingHireDeliveriesByWarehouse(
 // `returned` is the ODD ONE OUT and belongs here anyway: every other entry narrows the LIVE hires,
 // and it selects the finished ones. A register of its own would need a second copy of every column,
 // filter and export this list already has — and the row is the same row, at the end of the same life.
-export const ON_HIRE_STATUSES = ["all", "expiring", "overdue", "awaiting", "late", "returned"] as const;
+export const ON_HIRE_STATUSES = ["all", "expiring", "overdue", "awaiting", "late", "returned", "cancelled"] as const;
 export type OnHireStatus = (typeof ON_HIRE_STATUSES)[number];
+
+// The two pills that select rows OUTSIDE the live set — read, not worked, and so sorted as history.
+// Their own list because `TERMINAL_HIRE_STATUSES` is a vocabulary of hire STATUSES and this is one of
+// FILTERS; they happen to spell the same two words, and a shared constant would tie the day the
+// register grows a pill that is not a bare status to the day a hire grows a state.
+const TERMINAL_ON_HIRE_STATUSES: readonly OnHireStatus[] = ["returned", "cancelled"];
 
 // Exported so the badge that links here can be tested against the filter it opens: "Hires not yet
 // received" counted `overdueDeliveryWhere` while its link resolved to `awaiting`, so the badge read
@@ -978,6 +1039,10 @@ export function onHireFilter(status: OnHireStatus, todayStart: Date): Prisma.Pur
   // Finished hires — what a period report is built from. See returnedWhere for why it asks the
   // status rather than `fullyReturned`.
   if (status === "returned") return returnedWhere();
+  // Kept OUT of `returned` on purpose — that pill is the finance register and a hire that never
+  // happened is not hire spend. It still needs a home, or a short close would create a record found
+  // on no screen.
+  if (status === "cancelled") return cancelledWhere();
   return onHireWhere();
 }
 
@@ -1051,7 +1116,11 @@ export async function listOnHire(args: {
       // what is owed next. A finished hire owes nothing, so its register reads as history instead:
       // most recently ended first. Descending on the same key, so `@@index([hireStatus, hireEndDate])`
       // still serves it and no second index is needed.
-      orderBy: { hireEndDate: args.status === "returned" ? "desc" : "asc" },
+      //
+      // BOTH terminal pills, not just `returned`: sorted ascending, the cancelled register presented
+      // hires that never happened as a worklist with the most urgent at the top — a queue of work
+      // nobody can do, which is the one reading a terminal list must never invite.
+      orderBy: { hireEndDate: TERMINAL_ON_HIRE_STATUSES.includes(args.status) ? "desc" : "asc" },
       skip: (args.page - 1) * args.pageSize,
       take: args.pageSize,
     }),

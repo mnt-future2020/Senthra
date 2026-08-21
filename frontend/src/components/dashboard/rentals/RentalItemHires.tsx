@@ -8,6 +8,7 @@ import { useRentalHireStream } from "@/hooks/useRentalHireStream";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { PoCodeLink } from "@/components/dashboard/purchase-orders/PoCodeLink";
 import type { OnHireLine } from "@/types/rental";
+import { netOrdered } from "@/components/dashboard/rentals/hireActions";
 
 // This catalogue item's LIVE HIRES — where it is, on whose order, and when it is due back.
 //
@@ -93,7 +94,9 @@ export function RentalItemHires({ rentalItemId }: { rentalItemId: string }) {
             </div>
             <div className="shrink-0 text-right">
               <div className="text-xs text-[var(--muted)]">
-                <span className="font-semibold text-[var(--ink)]">{held}</span> of {r.quantity} held
+                {/* Against what the hire will EVER hold — see netOrdered. `r.quantity` would count
+                    units already written off, promising kit that is never coming. */}
+                <span className="font-semibold text-[var(--ink)]">{held}</span> of {netOrdered(r)} held
               </div>
               <div className="text-[11px] text-[var(--faint)]">
                 until {shortDate(r.hireEndDate)}

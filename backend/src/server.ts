@@ -7,6 +7,7 @@ import { initRealtime } from "./lib/realtime.js";
 import { prisma } from "./lib/prisma.js";
 import { startUploadReaper } from "#modules/upload/upload.reaper.js";
 import { startRentalDeadlineSweep } from "#modules/purchase-order/rentalHire.sweep.js";
+import { startExpiredSessionSweep } from "#modules/auth/session.sweep.js";
 
 async function start(): Promise<void> {
   // Ensure the admin + settings exist before accepting requests.
@@ -28,11 +29,16 @@ async function start(): Promise<void> {
   const stopReaper = startUploadReaper();
   // Rental deadline reminders — same in-process-timer reasoning as above (rentalHire.sweep.ts).
   const stopRentalSweep = startRentalDeadlineSweep();
+  // Remove session rows whose lifetime has already elapsed. Not a retention rule — those rows are
+  // already refused by findActive/listSessions/the device cap; this stops the dead row (and the IP
+  // on it) outliving the session because nobody happened to present its sid again.
+  const stopSessionSweep = startExpiredSessionSweep();
 
   const shutdown = async (): Promise<void> => {
     stopReaper();
     // Stopped like the reaper: a pass starting during teardown would query a disconnecting client.
     stopRentalSweep();
+    stopSessionSweep();
     await prisma.$disconnect();
     server.close(() => process.exit(0));
   };

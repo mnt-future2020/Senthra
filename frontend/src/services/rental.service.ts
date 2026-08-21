@@ -149,8 +149,20 @@ export function listOnHire(
 }
 
 /** Takes the hire off both deadline badges. */
-export function markHireReturned(purchaseOrderId: string, lineId: string): Promise<unknown> {
-  return api(`/purchase-orders/${purchaseOrderId}/rental-lines/${lineId}/return`, { method: "PATCH" });
+
+/**
+ * Record that a hire's outstanding units are never arriving.
+ *
+ * The exit for a hire that was ordered and not (fully) delivered — without it such a line sat on the
+ * warehouse's intake queue forever and its purchase order could never close. The server decides where
+ * the hire lands: `cancelled` if nothing ever arrived, `returned` if what did arrive is already back,
+ * otherwise it stays on hire until the held units go back.
+ */
+export function closeHireShort(purchaseOrderId: string, lineId: string, reason: string): Promise<unknown> {
+  return api(`/purchase-orders/${purchaseOrderId}/rental-lines/${lineId}/close-short`, {
+    method: "PATCH",
+    body: { reason },
+  });
 }
 
 /** Moves the end date. The server recomputes the reminder and clears the notification state. */

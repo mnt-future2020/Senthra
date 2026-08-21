@@ -39,7 +39,7 @@ describe("countAwaitingHireDeliveries", () => {
     await countAwaitingHireDeliveries(["wh1"]);
     const where = whereOf(rentalLine.count);
     expect(where.fullyReceived, "the queue is about units still to come, not about a status").toBe(false);
-    expect(where.hireStatus).toEqual({ not: "returned" });
+    expect(where.hireStatus).toEqual({ notIn: ["returned", "cancelled"] });
     expect(where.hireStartDate, "a start-date bound would hide hires that have not come due yet").toBeUndefined();
   });
 
@@ -73,7 +73,7 @@ describe("countAwaitingHireDeliveriesByWarehouse", () => {
     await countAwaitingHireDeliveriesByWarehouse(["wh1"]);
     const where = whereOf(rentalLine.findMany);
     expect(where.fullyReceived, "the queue is about units still to come, not about a status").toBe(false);
-    expect(where.hireStatus).toEqual({ not: "returned" });
+    expect(where.hireStatus).toEqual({ notIn: ["returned", "cancelled"] });
     expect(where.hireStartDate).toBeUndefined();
     expect(where.purchaseOrder.is.warehouseId).toEqual({ in: ["wh1"] });
   });
@@ -117,10 +117,28 @@ describe("onHireFilter — every badge has a filter that opens its own rows", ()
 // under a count of 3. Deriving the whitelist from one exported list makes the drift impossible.
 describe("ON_HIRE_STATUSES — the vocabulary the endpoint accepts", () => {
   it("accepts every status the filter knows how to resolve", () => {
-    // `returned` is the finished-hire register — the one entry that selects rows OUTSIDE the live
-    // set. It belongs in this vocabulary for the same reason as the rest: a status the filter can
-    // resolve but the endpoint's whitelist has never heard of is silently downgraded to "all".
-    expect([...ON_HIRE_STATUSES].sort()).toEqual(["all", "awaiting", "expiring", "late", "overdue", "returned"]);
+    // `returned` and `cancelled` are the two entries that select rows OUTSIDE the live set — the
+    // finished-hire register, and the hires that never happened. They belong in this vocabulary for
+    // the same reason as the rest: a status the filter can resolve but the endpoint's whitelist has
+    // never heard of is silently downgraded to "all".
+    expect([...ON_HIRE_STATUSES].sort()).toEqual([
+      "all",
+      "awaiting",
+      "cancelled",
+      "expiring",
+      "late",
+      "overdue",
+      "returned",
+    ]);
+  });
+
+  // The two terminal pills must not select each other's rows: `returned` is the finance register and
+  // a hire that never happened is not hire spend, which is the whole reason `cancelled` is a separate
+  // status rather than a flavour of returned.
+  it("keeps the finished register and the never-happened list disjoint", () => {
+    const TODAY = new Date("2026-09-28T00:00:00.000Z");
+    expect(onHireFilter("returned", TODAY)).toMatchObject({ hireStatus: "returned" });
+    expect(onHireFilter("cancelled", TODAY)).toMatchObject({ hireStatus: "cancelled" });
   });
 
   it("resolves each one to a predicate rather than falling through to the whole list", () => {
@@ -167,5 +185,13 @@ describe("`returned` — hires that are finished", () => {
     rentalLine.findMany.mockClear();
     await listOnHire({ status: "all", todayStart: TODAY, page: 1, pageSize: 20 });
     expect(rentalLine.findMany.mock.calls[0][0].orderBy).toEqual({ hireEndDate: "asc" });
+  });
+
+  // `cancelled` is the other terminal register and reads the same way. Sorted ascending it presented
+  // hires that never happened as a worklist with the most urgent at the top — a queue of work nobody
+  // can do, which is the reading a terminal list must never invite.
+  it("reads the never-happened register as history too, not as a worklist", async () => {
+    await listOnHire({ status: "cancelled", todayStart: TODAY, page: 1, pageSize: 20 });
+    expect(rentalLine.findMany.mock.calls[0][0].orderBy).toEqual({ hireEndDate: "desc" });
   });
 });

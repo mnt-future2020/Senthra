@@ -116,6 +116,18 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     ],
   },
   {
+    key: "policy",
+    label: "Legal & policies",
+    description:
+      "The privacy policy shown to the public. Editing the draft and publishing it are SEPARATE permissions — whoever writes the policy need not be whoever approves it going live.",
+    category: "System",
+    permissions: [
+      { key: "policy.view", action: "View", description: "View the policy draft, the published version and its history." },
+      { key: "policy.edit", action: "Edit", description: "Edit the policy draft. Does NOT publish it — the draft stays private until someone with Publish approves it." },
+      { key: "policy.publish", action: "Publish", description: "Publish the draft as the live policy the public sees. Creates a permanent, immutable version." },
+    ],
+  },
+  {
     key: "email_templates",
     label: "Email templates",
     description: "The templates used for the emails the system sends.",
@@ -299,16 +311,25 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       // Separate from `edit`: these act on a LIVE hire committed to a supplier, not on catalogue
       // master data.
       //
-      // Split in two because the two jobs sit in different buildings and carry different weight. The
-      // FLOOR books equipment in, hands it back and photographs what is broken — work done with a
-      // scanner in one hand, dozens of times a week. The COMMERCIAL side extends a hire (which commits
-      // money) and reverses a record (which rewrites what already happened). A warehouse receiver needs
-      // the first and should not be handed the second just to do their job.
+      // Split THREE ways, by who is in a position to know the thing being recorded.
       //
-      // Every floor route accepts EITHER key (requireAnyPermission), so a role that already held
-      // "Manage hires" keeps working untouched — no migration, no role that silently stops receiving.
+      // RECEIVE is the floor's own work — book equipment in, hand it back, photograph what is broken.
+      // A scanner in one hand, dozens of times a week.
+      //
+      // SETTLE is the floor finishing its own paperwork. Closing a hire short is decided by whoever
+      // is standing at the receiving bay being told the rest is not coming; reversing a note is undone
+      // by whoever typed it; and agreeing the damage figure follows the damage report that named it —
+      // which the floor already writes, charge included. Every one of these is warehouse-scoped at the
+      // service, so a manager reaches only their own sites' records.
+      //
+      // MANAGE is the one thing the floor genuinely cannot decide: extending a hire commits fresh
+      // money to a supplier. It stays a superset, so a role that already holds it loses nothing.
+      //
+      // Every route below `manage` accepts EITHER its own key or `manage` (requireAnyPermission), so
+      // no existing role changes behaviour and there is no migration.
       { key: "rentals.hire.receive", action: "Receive & return", description: "Book hired equipment in at a warehouse, record it going back, and report damage found while it is with us." },
-      { key: "rentals.hire.manage", action: "Manage hires", description: "Extend a hire period, mark a hire returned without a handover record, record what a supplier is charging for damage, and reverse a hire record. Includes everything Receive & return allows." },
+      { key: "rentals.hire.settle", action: "Settle hire records", description: "Close a hire short when the outstanding units are never arriving, reverse a hire record entered in error, and record what a supplier is charging for damage — for this role's own warehouses. Includes everything Receive & return allows." },
+      { key: "rentals.hire.manage", action: "Manage hires", description: "Extend a hire period — a fresh commitment of money to the supplier. Includes everything Receive & return and Settle hire records allow." },
     ],
   },
   {
@@ -691,7 +712,17 @@ export const WAREHOUSE_CUSTOMER_STOCK_PERMISSIONS = [
 //   • `.edit` only ever reaches a DRAFT purchase order (plus PO attachments), and a warehouse never
 //     sees a draft. Delivery paperwork belongs on the goods receipt via `goods_in.edit`.
 //
-// `irm.view` is NOT optional. Every warehouse item picker is built from GET /irm — Add Stock,
+/**
+ * Who may SETTLE a hire record — close one short, reverse a note, agree a damage charge.
+ *
+ * Exported from the catalogue rather than written out in each route file, because it is spelled in
+ * two of them (the hire line lives under purchase-orders, the notes under rental-receipts) and a list
+ * copied twice is a list that ends up different. `manage` rides along as the superset it is, so a
+ * role that already held it keeps every route it had.
+ */
+export const HIRE_SETTLE_PERMISSIONS = ["rentals.hire.settle", "rentals.hire.manage"] as const;
+
+// `irm.view` is NOT optional here. Every warehouse item picker is built from GET /irm — Add Stock,
 // Adjust Stock, Transfer and the movement feed — and each of those swallows the rejection, so
 // without it the dropdowns render silently EMPTY with no error shown. The Goods In form also reads
 // the catalogue for each line's serial/batch tracking flags, so a 403 there means serial and batch
@@ -725,13 +756,16 @@ export const WAREHOUSE_MANAGER_PERMISSIONS = [
   // tab — and without these two keys every one of them 403s or renders a pane with no actions, for the
   // role whose whole job is the equipment standing in the yard.
   //
-  // `rentals.hire.receive` and NOT `rentals.hire.manage`: booking kit in, handing it back and
-  // photographing what is broken is floor work. Extending a hire commits money to a supplier and
-  // reversing a record rewrites what already happened — those stay with procurement. That split is the
-  // reason the two keys exist; granting `manage` here would collapse it on the very role it was
-  // drawn for.
+  // `receive` + `settle`, and NOT `manage`. Booking kit in and photographing what is broken is floor
+  // work; so is finishing the paperwork on it — closing a hire short when the driver says there is no
+  // third one, and reversing a note this warehouse typed wrong. Both are warehouse-scoped at the
+  // service, so a manager reaches only their own sites.
+  //
+  // `manage` stays out because the one thing it still carries alone is EXTENDING a hire, which commits
+  // fresh money to a supplier. That is procurement's call, not the receiving bay's.
   "rentals.view",
   "rentals.hire.receive",
+  "rentals.hire.settle",
   // Warehouse-side customer consignment intake: receive a customer's stock into an assigned
   // warehouse, then fill in the entry + generate its barcode (see the constant's own doc for the
   // exact scope). Without these the Incoming stock → Customer and Inventory → Customer tabs 403
@@ -822,6 +856,10 @@ export const SYSTEM_ADMIN_PERMISSIONS = [
   // data is the question an auditor asks, and it should not have to be reassembled from ten lines.
   "users.export", "customers.export", "suppliers.export", "warehouse.export", "irm.export",
   "purchase_requests.export", "purchase_orders.export", "goods_in.export", "jobs.export",
+  // Legal policy: draft it, but do NOT publish it. `policy.publish` is deliberately absent and must
+  // stay absent — putting a policy in front of the public is the approval step, and it belongs to the
+  // super-admin (who holds "*") rather than to every IT/HR administrator. A test pins this.
+  "policy.view", "policy.edit",
 ];
 
 // The customer sub-entity groups. Each is a slice of a single customer record, so

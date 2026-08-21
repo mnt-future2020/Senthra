@@ -6,6 +6,8 @@ import { uploadToCloudinary } from "../../lib/cloudinary.js";
 import type { CloudinaryImageAsset } from "../../lib/cloudinary.js";
 import * as roleRepo from "#modules/role/role.repository.js";
 import * as adminRepo from "#modules/auth/admin.repository.js";
+import * as sessionService from "#modules/auth/session.service.js";
+import * as notificationService from "#modules/notification/notification.service.js";
 import { assertEmailNamespaceFree } from "#modules/auth/email-namespace.js";
 import { ALL_PERMISSIONS } from "#modules/role/permissions.js";
 import * as userRepo from "./user.repository.js";
@@ -103,6 +105,47 @@ function publicUser(u: UserWithRole, warehouses: AssignedWarehouse[] = []): Publ
     postcode: u.postcode,
     createdAt: u.createdAt.toISOString(),
     updatedAt: u.updatedAt.toISOString(),
+  };
+}
+
+/**
+ * One row of the STAFF DIRECTORY — who someone is and what they can do, and nothing else.
+ *
+ * Deliberately narrower than PublicUser, for the same reason exportUsersCsv is: a directory is not
+ * a personnel file. The list endpoint is read by anyone holding `users.view`, so it must not carry
+ * the record's personal data — date of birth, gender, home address, `notes` and phone are all
+ * absent, and so is every credential/signature field.
+ *
+ * The export already applied that rule and the JSON list beside it did not, which is the whole
+ * point of this shape. The FULL record still lives on the single-user read (GET /users/:id), where
+ * it is fetched deliberately rather than handed out a page at a time.
+ *
+ * Every field here is one the staff-list UI actually renders. Adding to it is a decision about who
+ * may see what, not a convenience — widen the single-user read instead.
+ */
+export interface DirectoryUser {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  status: string;
+  profileImageUrl: string | null;
+  role: { id: string; key: string; name: string } | null;
+  employeeId: string | null;
+  createdAt: string;
+}
+
+function directoryUser(u: UserWithRole): DirectoryUser {
+  return {
+    id: u.id,
+    firstName: u.firstName,
+    lastName: u.lastName,
+    email: u.email,
+    status: u.status,
+    profileImageUrl: u.profileImageUrl,
+    role: u.role ? { id: u.role.id, key: u.role.key, name: u.role.name } : null,
+    employeeId: u.employeeId,
+    createdAt: u.createdAt.toISOString(),
   };
 }
 
@@ -275,8 +318,34 @@ async function applyAvatarChange(
 }
 
 // --- User signature (self-service; printed on issued documents) ------------------------------
-// Upload under a DETERMINISTIC publicId so re-uploading overwrites the old asset (one signature
-// per user, never a gallery). Reuses the same credential resolution as branding/avatar.
+
+/**
+ * The ONE place a signature asset is named. Both the upload and the removal derive from these, so
+ * the id used to store the file and the id used to destroy it cannot drift apart.
+ *
+ * Deterministic on purpose (one signature per user, never a gallery): re-uploading overwrites the
+ * same asset in place, so a REPLACEMENT leaks nothing and needs no stored identity — which is why
+ * there is no `signaturePublicId` column, unlike the avatar.
+ */
+const SIGNATURE_FOLDER = "senthra/signatures";
+const signatureAssetName = (userId: string): string => `signature-${userId}`;
+
+/**
+ * The Cloudinary identity of a user's signature, rebuilt from the same constants the upload used.
+ *
+ * NOT the URL-parsing guess `releaseAsset` warns about — nothing is read back out of a delivery URL
+ * (where versions, transformations and folders all live in one string). This reconstructs the exact
+ * `folder` + `public_id` pair that was passed to the upload, both of which are the literals directly
+ * above. `resource_type` is `image` because `uploadToCloudinary` is image-only.
+ */
+function signatureAssetRef(userId: string): attachmentService.AssetRef {
+  return {
+    publicId: `${SIGNATURE_FOLDER}/${signatureAssetName(userId)}`,
+    resourceType: "image",
+  };
+}
+
+// Reuses the same credential resolution as branding/avatar.
 async function uploadSignatureImage(image: string, userId: string): Promise<string> {
   const creds = await getCloudinaryCreds();
   if (!creds) {
@@ -284,9 +353,7 @@ async function uploadSignatureImage(image: string, userId: string): Promise<stri
       "Cloudinary isn't configured. Add your credentials in Settings → Integrations to upload a signature.",
     );
   }
-  // `signature-${userId}` is deterministic: a new signature OVERWRITES the same asset, so nothing
-  // leaks and no identity needs keeping.
-  return (await uploadToCloudinary(image, `signature-${userId}`, creds, "senthra/signatures")).url;
+  return (await uploadToCloudinary(image, signatureAssetName(userId), creds, SIGNATURE_FOLDER)).url;
 }
 
 // Derive the mime type + byte size from a base64 image data URI (data:image/png;base64,XXXX),
@@ -399,14 +466,28 @@ export interface ListUsersParams {
 }
 
 export interface PagedUsers {
-  users: PublicUser[];
+  users: DirectoryUser[];
   total: number;
   page: number;
   pageSize: number;
   totalPages: number;
 }
 
-export async function listUsers(params: ListUsersParams = {}): Promise<PagedUsers> {
+/**
+ * The filtered, ordered, paged staff rows — the ONE query behind both the list endpoint and the
+ * CSV export, so the two can never drift on filtering, ordering or the page clamp.
+ *
+ * Returns the RAW rows. Each caller projects them itself: the endpoint to `directoryUser`, the
+ * export to its own column set. That is what lets the endpoint narrow without the export losing
+ * the employment columns it has always carried.
+ */
+async function listUserRows(params: ListUsersParams = {}): Promise<{
+  rows: UserWithRole[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}> {
   const filters = {
     search: params.search,
     status: params.status,
@@ -415,10 +496,19 @@ export async function listUsers(params: ListUsersParams = {}): Promise<PagedUser
   const total = await userRepo.count(filters);
   // Clamp the requested page so an out-of-range page returns the last page.
   const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total, params.maxPageSize);
-  const users = await userRepo.findMany(filters, skip, pageSize, params.sort);
-  // The list intentionally omits per-user warehouse assignments (avoids an N+1); publicUser
-  // defaults them to []. The single-user reads (get/create/update) populate them.
-  return { users: users.map((u) => publicUser(u)), total, page, pageSize, totalPages };
+  const rows = await userRepo.findMany(filters, skip, pageSize, params.sort);
+  return { rows, total, page, pageSize, totalPages };
+}
+
+/**
+ * The staff DIRECTORY page. Returns `DirectoryUser`, not `PublicUser` — see that type for why.
+ *
+ * The list also omits per-user warehouse assignments (avoids an N+1); the single-user reads
+ * (get/create/update) populate them.
+ */
+export async function listUsers(params: ListUsersParams = {}): Promise<PagedUsers> {
+  const { rows, total, page, pageSize, totalPages } = await listUserRows(params);
+  return { users: rows.map((u) => directoryUser(u)), total, page, pageSize, totalPages };
 }
 
 /**
@@ -436,8 +526,12 @@ export async function exportUsersCsv(
   // EXPORT_PAGING, not a bare pageSize: `paginate` clamps anything a client could ask for to 100,
   // so without its maxPageSize every export silently stopped at 100 rows AND reported itself
   // complete (capped was measured on the same clamped length). See utils/csv.
-  const { users } = await listUsers({ ...params, ...EXPORT_PAGING });
-  const rows = users.slice(0, EXPORT_MAX);
+  //
+  // Reads the RAW rows rather than the list endpoint's DTO: the directory shape deliberately drops
+  // phone / job title / department / joining date, and those columns have always been in this file.
+  // Same query, same filters, same order — only the projection differs.
+  const { rows: matched } = await listUserRows({ ...params, ...EXPORT_PAGING });
+  const rows = matched.slice(0, EXPORT_MAX);
 
   const regional = await getRegionalSettings();
   const csv = toCsv(
@@ -458,7 +552,7 @@ export async function exportUsersCsv(
   );
 
   audit.record({ actor, action: "user.exported", targetType: "user", targetLabel: `${rows.length} rows` });
-  return { csv, capped: users.length > EXPORT_MAX };
+  return { csv, capped: matched.length > EXPORT_MAX };
 }
 
 // A 24-char hex string is a Mongo ObjectId; anything else is treated as the human
@@ -811,6 +905,12 @@ export async function setUserStatus(
     await assertNotHoldingStock(id);
   }
   const updated = await userRepo.update(id, { status: next });
+  // Deactivating/suspending already locks the account out at requireAuth. Clear the artefacts too —
+  // but ONLY on the way out of "active": reinstating a user must not wipe anything, and the mobile
+  // app re-registers its device on the next signed-in launch anyway.
+  if (next !== "active") {
+    await revokeSignInArtifacts(id, `user.status.${next}`);
+  }
   audit.record({
     actor,
     action: `user.status.${next}`,
@@ -822,6 +922,33 @@ export async function setUserStatus(
   return publicUser(updated);
 }
 
+/**
+ * Clear the sign-in artefacts of an account that can no longer authenticate.
+ *
+ * NOT an access-control change — `requireAuth` already refuses a soft-deleted user (findById
+ * excludes them) and any status other than "active", so the account is locked out with or without
+ * this. What it removes is what those artefacts still HOLD once they can never be used again: the
+ * session row's IP address and user-agent, and the device tokens sitting in the push fan-out set
+ * until FCM eventually reports them dead.
+ *
+ * Best-effort, exactly like the audit write beside it. The state change is the authoritative act and
+ * has already been committed by the time this runs; making the caller fail because a cleanup failed
+ * would report a delete/suspend that actually went through as an error, and the retry would then hit
+ * "User not found". A failure is logged and the account stays locked out either way.
+ */
+async function revokeSignInArtifacts(userId: string, context: string): Promise<void> {
+  try {
+    await sessionService.endAll(userId, "user");
+  } catch (e) {
+    console.error(`[user] session cleanup failed for ${userId} (${context}):`, e instanceof Error ? e.message : e);
+  }
+  try {
+    await notificationService.clearDevicesForUser(userId);
+  } catch (e) {
+    console.error(`[user] device-token cleanup failed for ${userId} (${context}):`, e instanceof Error ? e.message : e);
+  }
+}
+
 export async function deleteUser(id: string, actor?: AuditActor): Promise<void> {
   const user = await userRepo.findById(id);
   if (!user) throw notFound("User not found.");
@@ -831,6 +958,8 @@ export async function deleteUser(id: string, actor?: AuditActor): Promise<void> 
   // check, which also made the role-capability guard bypassable (delete the holder, then revoke).
   await assertNotHoldingStock(id);
   await userRepo.softDelete(id);
+  // The account can no longer authenticate; drop what its sessions and devices still hold.
+  await revokeSignInArtifacts(id, "user.deleted");
   audit.record({
     actor,
     action: "user.deleted",
@@ -976,6 +1105,11 @@ export async function removeMySignature(actor?: AuditActor): Promise<PublicUser>
   const user = await userRepo.findById(actor.id);
   if (!user) throw notFound("User not found.");
 
+  // Whether there was actually a file to release. Read BEFORE the clear, since the clear is what
+  // destroys the evidence — and it keeps "remove when nothing is set" a pure database no-op rather
+  // than a pointless call to Cloudinary.
+  const hadSignature = Boolean(user.signatureUrl);
+
   const updated = await userRepo.update(user.id, {
     signatureUrl: null,
     signatureName: null,
@@ -984,6 +1118,30 @@ export async function removeMySignature(actor?: AuditActor): Promise<PublicUser>
     signatureUploadedAt: null,
     signatureUpdatedAt: null,
   });
+
+  /*
+   * Destroy the stored image, now that nothing references it.
+   *
+   * Before this, "Remove signature" cleared the six columns and left the file live at its public
+   * delivery URL forever — the user was told their signature was gone while it was still fetchable
+   * by anyone holding the URL, which for a signature is a deterministic id built from a user id the
+   * API hands out.
+   *
+   * AFTER the update has committed, never before: releasing first would leave a live `signatureUrl`
+   * pointing at a destroyed asset if the write then failed — a broken image on every issued PO PDF.
+   * The reverse can only ever leak an orphan file. That is the ordering rule attachment.service
+   * documents, and it is why this is not folded into the update above.
+   *
+   * `releaseAsset` never throws, so a Cloudinary outage cannot fail a removal that has already
+   * succeeded; it logs the asset instead. Its reference count reads the attachment tables and finds
+   * nothing, which is the right answer here for the same reason it is for an avatar: a signature is
+   * referenced by exactly one user row, and its id is derived from that user's own id, so no other
+   * record can name it.
+   */
+  if (hadSignature) {
+    await attachmentService.releaseAsset(signatureAssetRef(user.id), `user ${updated.email} signature`);
+  }
+
   audit.record({
     actor,
     action: "user.signature_removed",

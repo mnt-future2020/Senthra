@@ -161,7 +161,7 @@ describe("attention catalog integrity", () => {
   // as a filter the server drops on the floor, opening an unfiltered list under an urgent badge.
   const SUPPORTED_VALUES: Record<string, string[]> = {
     "/dashboard/purchase-orders?status": [
-      "awaiting_approval", "awaiting_send", "receivable", "overdue", // derived — buildWhere resolves each
+      "awaiting_approval", "awaiting_send", "receivable", "overdue", "awaiting_close", // derived — buildWhere resolves each
       "draft", "pending_approval", "approved", "pm_review", "sent",
       "supplier_accepted", "partially_received", "fully_received", "closed", "cancelled",
     ],
@@ -319,8 +319,14 @@ describe("hire deliveries are receiving work like any other pool", () => {
   });
 
   // A badge nobody can act on is noise — recording a hire delivery is gated on the hire-floor keys.
+  // Every key that reaches the receiving routes — the same list HIRE_FLOOR carries. A badge shown to
+  // fewer people than can act on it is a queue somebody never learns they own.
   it("shows it to whoever can actually record the delivery", () => {
-    expect(byKey("wh.rental_intake")!.perms).toEqual(["rentals.hire.receive", "rentals.hire.manage"]);
+    expect(byKey("wh.rental_intake")!.perms).toEqual([
+      "rentals.hire.receive",
+      "rentals.hire.settle",
+      "rentals.hire.manage",
+    ]);
   });
 
   // Every other pane on this tab fans out per warehouse, because the work is done ON a warehouse

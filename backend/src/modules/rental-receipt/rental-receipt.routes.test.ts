@@ -53,18 +53,31 @@ describe("the warehouse floor's routes accept either key", () => {
     expect(guard).not.toContain('requirePermission("rentals.hire.manage")');
   });
 
-  it("HIRE_FLOOR is exactly the two hire keys", () => {
-    expect(routes).toContain('const HIRE_FLOOR = ["rentals.hire.receive", "rentals.hire.manage"] as const;');
+  it("HIRE_FLOOR is every key that implies the floor's own work", () => {
+    expect(routes).toContain(
+      'const HIRE_FLOOR = ["rentals.hire.receive", "rentals.hire.settle", "rentals.hire.manage"] as const;',
+    );
   });
 });
 
-describe("reversing stays commercial", () => {
-  // Reversing rewrites how much of a hire moved, after the fact. That is a correction to a committed
-  // record, not a floor operation, and it is the one write here the receiver does not get.
-  it("requires rentals.hire.manage alone", () => {
-    const guard = guardFor("patch", "/:id/reverse");
-    expect(guard).toContain('requirePermission("rentals.hire.manage")');
+// The two writes that CORRECT a committed record rather than adding to it. Not the bare floor key —
+// a scanner alone should not rewrite what already happened — but not procurement's either: both are
+// warehouse-scoped at the service, and the person who typed a note wrong is the one who knows it.
+describe("correcting a committed record is `settle`, not the floor key and not `manage`", () => {
+  it.each([
+    ["patch", "/:id/reverse"],
+    ["patch", "/:id/damage-charge"],
+  ])("%s %s", (method, path) => {
+    const guard = guardFor(method, path);
+    expect(guard).toContain("requireAnyPermission(...HIRE_SETTLE_PERMISSIONS)");
+    // Never the bare floor list — that one is satisfied by `receive` alone.
     expect(guard).not.toContain("HIRE_FLOOR");
+  });
+
+  // ONE list, imported from the catalogue that defines the keys. Spelled out in each route file it
+  // would end up different in each — the hire line lives under purchase-orders and the notes here.
+  it("takes the list from the permission catalogue rather than restating it", () => {
+    expect(routes).toContain('import { HIRE_SETTLE_PERMISSIONS } from "#modules/role/permissions.js"');
   });
 });
 
@@ -139,8 +152,11 @@ describe("condition photos accept the same keys the routes do", () => {
   // never held together (warehouse manager gets `receive`, PM gets `manage`), so requiring both left
   // EVERY seeded role unable to attach a photo and only a `*` super-admin able to — which is what dev
   // testing runs as, so it looked fine.
-  it("is any-of, not all-of", () => {
-    expect(spec.permissions).toEqual(["rentals.hire.receive", "rentals.hire.manage"]);
+  // The SAME three keys HIRE_FLOOR carries. The photo rides on the notes those routes write, so
+  // anyone who can post the movement has to be able to attach its evidence — a warehouse manager
+  // holding `receive` + `settle` and no `manage` must not hit a 403 on the picture.
+  it("is any-of, not all-of, over every key the routes accept", () => {
+    expect(spec.permissions).toEqual(["rentals.hire.receive", "rentals.hire.settle", "rentals.hire.manage"]);
     expect(spec.anyPermission).toBe(true);
   });
 

@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ShieldCheck, Palette, Plug, Mail, MailCheck, Paintbrush, Building2, ArrowRightLeft } from "lucide-react";
+import { ShieldCheck, Palette, Plug, Mail, MailCheck, Paintbrush, Building2, ArrowRightLeft, FileText } from "lucide-react";
 
 import { AccountSection } from "./account/AccountSection";
 import { SecuritySection } from "./account/SecuritySection";
@@ -14,6 +14,7 @@ import { CloudinarySection } from "./integrations/CloudinarySection";
 import { EmailSection } from "./email/EmailSection";
 import { EmailTemplatesSection } from "./email/EmailTemplatesSection";
 import { OperationsSection } from "./operations/OperationsSection";
+import { LegalSection } from "./legal/LegalSection";
 import { useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import { useAuth } from "@/hooks/useAuth";
 import { SessionsCard } from "@/components/account/SessionsCard";
@@ -29,7 +30,8 @@ const NAV: {
   requires:
     | "admin"
     | "settings.view"
-    | "email_templates.view";
+    | "email_templates.view"
+    | "policy.view";
 }[] = [
   { id: "account", label: "Account & Security", icon: ShieldCheck, desc: "Email & password", requires: "admin" },
   { id: "company", label: "Company", icon: Building2, desc: "Legal details & regional", requires: "settings.view" },
@@ -39,6 +41,7 @@ const NAV: {
   { id: "email", label: "Email", icon: Mail, desc: "SMTP & delivery", requires: "settings.view" },
   { id: "email-templates", label: "Email Templates", icon: MailCheck, desc: "Customize sent emails", requires: "email_templates.view" },
   { id: "operations", label: "Operations", icon: ArrowRightLeft, desc: "Transfers & workflow", requires: "settings.view" },
+  { id: "legal", label: "Privacy Policy", icon: FileText, desc: "Draft, publish & history", requires: "policy.view" },
 ];
 
 export function SettingsPanel(appearance: AppearanceProps) {
@@ -144,6 +147,7 @@ export function SettingsPanel(appearance: AppearanceProps) {
           {activeSection === "email" && <EmailSection />}
           {activeSection === "email-templates" && <EmailTemplatesSection />}
           {activeSection === "operations" && <OperationsSection />}
+          {activeSection === "legal" && <LegalSection />}
         </div>
       </div>
     </div>

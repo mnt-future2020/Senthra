@@ -1,7 +1,8 @@
 import { Router } from "express";
 
 import * as poController from "./purchase-order.controller.js";
-import { requireAuth, requirePermission } from "../../middleware/auth.middleware.js";
+import { requireAnyPermission, requireAuth, requirePermission } from "../../middleware/auth.middleware.js";
+import { HIRE_SETTLE_PERMISSIONS } from "#modules/role/permissions.js";
 import { writeLimiter, exportLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import {
@@ -14,6 +15,7 @@ import {
   poRejectSchema,
   poSupplierAcceptSchema,
   updatePurchaseOrderSchema,
+  closeHireShortSchema,
   extendHireSchema,
 } from "./purchase-order.validation.js";
 
@@ -141,15 +143,24 @@ router.get(
 
 // ── Rental hires ─────────────────────────────────────────────────────────────────────────────
 // Gated on rentals.hire.manage rather than purchase_orders.edit: these act on a LIVE hire
-// committed to a supplier, and "mark returned" is what takes it off the deadline badge.
+// committed to a supplier, and closing one short writes off what the supplier still owes.
 // Receiving a hire is NOT here: a delivery of hired kit is a RECORD (quantities, condition, the
 // supplier's asset tags, photographs) and it lives in its own module — POST /rental-receipts. A
 // one-click "mark received" could not carry any of that, and two ways to start a hire is one too many.
+// `rentals.hire.settle`, not `manage`. Closing short IS a decision about what the supplier still
+// owes — but the person who learns it is the one at the receiving bay being told by the driver that
+// there is no third one, and routing it through procurement left the shortfall sitting on the
+// warehouse's own intake queue with no action available to the role the queue belongs to. Already
+// warehouse-scoped through loadOrThrow, so a manager reaches only their own sites' orders.
+//
+// EXTENDING stays `manage` alone: that is fresh money committed to a supplier, which the receiving
+// bay is not in a position to agree.
 router.patch(
-  "/:id/rental-lines/:lineId/return",
-  requirePermission("rentals.hire.manage"),
+  "/:id/rental-lines/:lineId/close-short",
+  requireAnyPermission(...HIRE_SETTLE_PERMISSIONS),
   writeLimiter,
-  poController.markHireReturned,
+  validateBody(closeHireShortSchema),
+  poController.closeHireShort,
 );
 router.patch(
   "/:id/rental-lines/:lineId/extend",

@@ -1051,9 +1051,30 @@ model PurchaseOrderRentalLine {
   // STATUS — and a part-delivered line is `on_hire`, so the units still to come vanish from the queue
   // and from the badge that chases them.
   //
-  // Maintained in the same transaction as `receivedQuantity`, by the only two writers that move it
-  // (recording a delivery, voiding one), so it can never disagree with the number it summarises.
+  // Maintained in the same transaction as `receivedQuantity`, by the only writers that move it
+  // (recording a delivery, voiding one, closing the hire short), so it can never disagree with the
+  // numbers it summarises.
+  //
+  // Reads as "nothing more is expected", which is what its ONE consumer — awaitingDeliveryWhere, the
+  // receiving queue — actually asks. Usually that means every ordered unit turned up; after a short
+  // close it means the rest is never coming. Both answers take the line off the queue, and
+  // `cancelledQuantity` below is what keeps the arithmetic honest when it is the second one.
   fullyReceived Boolean @default(false)
+  // Ordered units that will NEVER be delivered — the supplier cannot supply them, the site no longer
+  // needs them, the job was descoped. Written once, by closing the hire short, and it is what makes
+  // `received + cancelled = ordered` add up on a line that is off the receiving queue with fewer units
+  // than it ordered.
+  //
+  // Its own column rather than a silent adjustment of `quantity`: `quantity` is what the supplier was
+  // sent and agreed to, and rewriting a committed order's figures is what a PO amendment is for.
+  // Recorded beside the order, exactly like `extensionChargePence`.
+  cancelledQuantity Int       @default(0)
+  shortClosedAt     DateTime?
+  shortClosedBy     String?
+  // REQUIRED whenever the hire is closed short — the answer to "where did the other three go?", which
+  // is the only question anyone asks of this row afterwards. Same contract as a customer stock
+  // assignment's short close (customer.service.ts `closeAssignmentShort`).
+  shortCloseReason  String?
   // What has gone BACK, and whether all of it has. The mirror of the two fields above, for the same
   // reason: a hire goes back in parts as readily as it arrives in them, and `hireStatus` cannot say
   // "3 of 5 collected". `fullyReturned` is stored because `returnedQuantity < receivedQuantity` is a
@@ -1080,7 +1101,15 @@ model PurchaseOrderRentalLine {
   // many times. See the HireExtension model.
   extensions HireExtension[]
 
-  // awaiting_delivery | on_hire | returned — see rentalHire.predicate.ts, which owns the list.
+  // awaiting_delivery | on_hire | returned | cancelled — see rentalHire.predicate.ts, which owns the
+  // list.
+  //
+  // `cancelled` is the exit for a hire NOTHING ever arrived against. Without it such a line had no
+  // terminal state at all: return and mark-returned both refuse a hire that was never received, so it
+  // sat on the warehouse's intake queue and the "not yet received" badge forever, and its purchase
+  // order could never be closed (the close guard demands every hire be finished). A hire that DID
+  // partly arrive is never `cancelled` — it happened, we held kit and were billed for it, so it ends
+  // `returned` with `cancelledQuantity` carrying the shortfall.
   //
   // A hire starts AWAITING DELIVERY, not on hire: the purchase order commits us to the provider, but
   // the kit is not in our hands until someone at the warehouse says so. Every deadline this module
@@ -3044,4 +3073,65 @@ model HireExtension {
   // The period report: every extension agreed between two dates.
   @@index([createdAt])
   @@index([purchaseOrderId])
+}
+
+// ── LEGAL POLICIES — admin-managed, versioned published documents ──────────────────────────────
+//
+// One editable DRAFT and an append-only history of PUBLISHED snapshots, deliberately in two
+// collections. The public endpoint reads PolicyVersion and never PolicyDocument, so draft text
+// cannot reach a public reader through a mistaken filter — the separation is structural, not a
+// convention someone has to remember.
+//
+// Content is the authored plain text (see policy.content.ts for the three-rule block convention).
+// It is stored ONCE, in exactly one place per state: the working copy on the document, the snapshot
+// on the version. Nothing derives a second stored copy.
+model PolicyDocument {
+  id  String @id @default(auto()) @map("_id") @db.ObjectId
+  // The document kind. UNIQUE, and that is the whole "only one active Privacy Policy" guarantee —
+  // enforced by the database rather than by a service-layer check that a second code path could skip.
+  key String @unique // "privacy_policy"
+
+  // The working copy. Editing this NEVER touches a published version.
+  draftBody      String    @default("")
+  draftUpdatedAt DateTime?
+  draftUpdatedBy String? // staff email snapshot
+
+  // Optimistic-concurrency token, bumped on every draft write. An edit or a publish carries the
+  // revision it was based on; a conditional update that matches nothing means someone else moved
+  // first, which is a 409 rather than a silent overwrite of their work.
+  draftRevision Int @default(0)
+
+  // The version the public sees. Null = nothing published, and the public endpoint answers with no
+  // content at all rather than falling back to the draft.
+  publishedVersionId String? @db.ObjectId
+
+  // Highest version number handed out so far — the next publish is this + 1. Kept HERE, on the row
+  // both concurrent publishes already write, so the allocation collides on that document and Mongo
+  // aborts the loser (P2034) for withTransactionRetry to replay. A separate counter row would move
+  // the contention somewhere the transaction does not see, and could hand out the same number twice.
+  lastPublishedVersion Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// One PUBLISHED snapshot. IMMUTABLE: rows are created by publish and never updated or deleted, so
+// the text a reader was shown on a given date stays recoverable exactly as it was shown.
+model PolicyVersion {
+  id          String @id @default(auto()) @map("_id") @db.ObjectId
+  documentKey String // denormalised (no FK): the version outlives any reshaping of the document row
+  version     Int
+
+  // The snapshot. A COPY, not a pointer — the draft it came from is free to change immediately after.
+  body String
+
+  publishedAt   DateTime @default(now())
+  publishedById String?  @db.ObjectId
+  publishedBy   String? // staff email snapshot, same convention as the audit trail
+
+  // Defence in depth behind the in-transaction allocation above: if two publishes ever did derive
+  // the same number, the second insert fails rather than creating a duplicate version.
+  @@unique([documentKey, version])
+  // The history list, newest first.
+  @@index([documentKey, publishedAt])
 }

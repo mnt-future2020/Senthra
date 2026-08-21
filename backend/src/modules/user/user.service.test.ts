@@ -17,6 +17,12 @@ vi.mock("#modules/warehouse/warehouse.repository.js", () => ({ findActiveByIds: 
 vi.mock("#modules/role/role.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/engineer-stock/engineer-stock.repository.js", () => ({ countEngineerHeldStock: vi.fn() }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
+// Sign-in artefact cleanup on delete / deactivate. Mocked so these stay pure unit tests — and so the
+// calls themselves are assertable (see the "sign-in artefact cleanup" block below).
+vi.mock("#modules/auth/session.service.js", () => ({ endAll: vi.fn().mockResolvedValue(undefined) }));
+vi.mock("#modules/notification/notification.service.js", () => ({
+  clearDevicesForUser: vi.fn().mockResolvedValue(0),
+}));
 
 import * as userRepo from "./user.repository.js";
 import * as userWarehouseRepo from "./user-warehouse.repository.js";
@@ -24,6 +30,8 @@ import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as roleRepo from "#modules/role/role.repository.js";
 import * as engineerStockRepo from "#modules/engineer-stock/engineer-stock.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
+import * as sessionService from "#modules/auth/session.service.js";
+import * as notificationService from "#modules/notification/notification.service.js";
 import { deleteUser, setUserStatus, updateUser } from "./user.service.js";
 
 const USER_ID = "a".repeat(24);
@@ -329,3 +337,78 @@ describe("deleteUser — stock guard", () => {
     expect(auditActions()).toContain("user.deleted");
   });
 });
+
+/**
+ * Sessions and device tokens are cleared once an account can no longer sign in. This is a data-
+ * retention change, not an access-control one — requireAuth already refuses a soft-deleted or
+ * non-active user — so every test here also asserts the ORIGINAL behaviour is untouched.
+ */
+describe("deleteUser / setUserStatus — sign-in artefact cleanup", () => {
+  const mockEndAll = sessionService.endAll as ReturnType<typeof vi.fn>;
+  const mockClearDevices = notificationService.clearDevicesForUser as ReturnType<typeof vi.fn>;
+
+  it("clears sessions and device tokens when a user is deleted", async () => {
+    mockFindById.mockResolvedValue(userRow());
+    mockHeld.mockResolvedValue(0);
+
+    await deleteUser(USER_ID);
+    expect(mockEndAll).toHaveBeenCalledWith(USER_ID, "user");
+    expect(mockClearDevices).toHaveBeenCalledWith(USER_ID);
+  });
+
+  it("does not clear anything when the delete is refused by the stock guard", async () => {
+    mockFindById.mockResolvedValue(userRow());
+    mockHeld.mockResolvedValue(4);
+
+    await expect(deleteUser(USER_ID)).rejects.toThrow(/still holds stock/i);
+    expect(mockEndAll).not.toHaveBeenCalled();
+    expect(mockClearDevices).not.toHaveBeenCalled();
+  });
+
+  it("clears them on suspension and on deactivation", async () => {
+    for (const next of ["suspended", "inactive"]) {
+      vi.clearAllMocks();
+      mockFindById.mockResolvedValue(userRow({ status: "active" }));
+      mockHeld.mockResolvedValue(0);
+      mockUpdate.mockResolvedValue(userRow({ status: next }));
+
+      await setUserStatus(USER_ID, next);
+      expect(mockEndAll).toHaveBeenCalledWith(USER_ID, "user");
+      expect(mockClearDevices).toHaveBeenCalledWith(USER_ID);
+    }
+  });
+
+  it("does NOT clear anything when a user is reinstated to active", async () => {
+    mockFindById.mockResolvedValue(userRow({ status: "suspended" }));
+    mockUpdate.mockResolvedValue(userRow({ status: "active" }));
+
+    await setUserStatus(USER_ID, "active");
+    expect(mockEndAll).not.toHaveBeenCalled();
+    expect(mockClearDevices).not.toHaveBeenCalled();
+  });
+
+  it("still deletes the user when session cleanup fails — the state change is authoritative", async () => {
+    mockFindById.mockResolvedValue(userRow());
+    mockHeld.mockResolvedValue(0);
+    mockEndAll.mockRejectedValueOnce(new Error("mongo down"));
+
+    await expect(deleteUser(USER_ID)).resolves.toBeUndefined();
+    expect(mockSoftDeleteRef()).toHaveBeenCalledWith(USER_ID);
+    expect(auditActions()).toContain("user.deleted");
+    // The other cleanup still runs — one failing must not skip the next.
+    expect(mockClearDevices).toHaveBeenCalledWith(USER_ID);
+  });
+
+  it("still suspends the user when device-token cleanup fails", async () => {
+    mockFindById.mockResolvedValue(userRow({ status: "active" }));
+    mockHeld.mockResolvedValue(0);
+    mockUpdate.mockResolvedValue(userRow({ status: "suspended" }));
+    mockClearDevices.mockRejectedValueOnce(new Error("mongo down"));
+
+    const r = await setUserStatus(USER_ID, "suspended");
+    expect(r.status).toBe("suspended");
+    expect(auditActions()).toContain("user.status.suspended");
+  });
+});
+
+const mockSoftDeleteRef = () => userRepo.softDelete as ReturnType<typeof vi.fn>;

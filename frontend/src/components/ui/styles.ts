@@ -78,3 +78,23 @@ export const toolbarPrimaryBtn =
  * they should sit directly under them.
  */
 export const toolbarActionsCls = "flex flex-wrap items-center gap-2";
+
+/**
+ * A COUNT PILL — the shape every pending-work number wears, wherever it appears.
+ *
+ * The height and the minimum width are stated, not inherited from padding, and that is the whole
+ * point of the constant. Without them the badge's box was whatever its text happened to measure:
+ * "9" came out ~18x18 and read as a circle, "28" came out ~24x18 and read as an oval, so one
+ * sidebar column showed two different shapes depending on the number in it. `rounded-full` on a box
+ * that is not square gives a stadium, never a circle — the round ones were an accident of padding.
+ *
+ * `min-w` equal to `h` makes a single digit a TRUE circle and lets 2–3 characters grow into a pill
+ * of the same height, which is the convention every dense product uses for unbounded counts. A fixed
+ * circle sized for "99+" was the alternative, and it leaves every single-digit badge sitting in an
+ * oversized ring.
+ *
+ * Geometry only. TONE stays with the caller: the sidebar badge is solid and loud, the tab and row
+ * counts are tinted and quiet, and that difference is deliberate.
+ */
+export const countPillCls =
+  "inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full px-1.5 text-[10px] font-extrabold leading-none tabular-nums";

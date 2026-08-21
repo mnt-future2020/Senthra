@@ -1,6 +1,7 @@
 import { env } from "../config/env.js";
 import { prisma } from "../lib/prisma.js";
 import * as adminRepo from "#modules/auth/admin.repository.js";
+import * as policyRepo from "#modules/policy/policy.repository.js";
 import * as categoryRepo from "#modules/category/category.repository.js";
 import * as customerRepo from "#modules/customer/customer.repository.js";
 import * as emailTemplateRepo from "#modules/email/emailTemplate.repository.js";
@@ -750,6 +751,21 @@ export async function seedDatabase(): Promise<void> {
         await prisma.jobKitLine.updateMany({ where: { id: { in: toSet } }, data: { hasVanSource: true } });
         console.log(`Backfilled hasVanSource on ${toSet.length} kit line(s).`);
       }
+    }
+  }
+
+  // The privacy-policy document row. EMPTY on purpose: this seed creates the container, never the
+  // content. No legal wording is shipped in code — the client writes and approves the policy in the
+  // admin screen, and nothing is public until someone with `policy.publish` publishes it.
+  //
+  // `ensureDocument` is an existence-only upsert, so a restart can never reset a live draft. The
+  // `key` unique index is what guarantees there is exactly one Privacy Policy document.
+  {
+    // Logs ONLY on a real insert. Silence means the document was already there and nothing was
+    // written — the same convention every other idempotent step here follows.
+    const { created } = await policyRepo.ensureDocument(policyRepo.PRIVACY_POLICY_KEY);
+    if (created) {
+      console.log(`Seeded policy document: ${policyRepo.PRIVACY_POLICY_KEY} (empty draft).`);
     }
   }
 

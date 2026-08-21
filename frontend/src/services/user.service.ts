@@ -1,7 +1,7 @@
 import { api, LONG_WRITE_TIMEOUT } from "@/lib/api";
 import { downloadCsv, withoutPaging } from "@/lib/csvExport";
 import { registerClientCache } from "@/lib/clientCache";
-import type { User, UserStatus } from "@/types/user";
+import type { DirectoryUser, User, UserStatus } from "@/types/user";
 
 // Typed wrappers around the backend /users endpoints.
 
@@ -15,7 +15,9 @@ export interface UserListParams {
 }
 
 export interface PagedUsers {
-  users: User[];
+  // The narrow directory row, NOT the full record — see DirectoryUser. The personnel fields come
+  // from getUser(id) on the detail/edit pages, which fetch one user deliberately.
+  users: DirectoryUser[];
   total: number;
   page: number;
   pageSize: number;

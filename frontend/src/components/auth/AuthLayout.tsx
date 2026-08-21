@@ -31,11 +31,22 @@ export function AuthLayout({ children }: { children: React.ReactNode }) {
           </p>
         </div>
 
-        <div className="flex items-center justify-between text-xs text-white/70">
+        {/*
+          NO PRIVACY LINK HERE — deliberately.
+
+          The notice at /privacy is a DRAFT: its lawful bases, retention periods, controller identity
+          and rights-contact are unresolved placeholders awaiting legal sign-off. Linking to it from
+          the public sign-in screen would publish an unapproved document as this product's privacy
+          policy, which is worse than having no link at all.
+
+          The route still exists and is reachable directly, so the draft can be reviewed.
+
+          TO RESTORE once the notice is approved — put back:
+            <Link href="/privacy" className="transition-colors hover:text-white">Privacy Notice</Link>
+          alongside the footer text below, and re-add the next/link import.
+        */}
+        <div className="flex items-center text-xs text-white/70">
           <span>{footerText}</span>
-          <a href="#" className="transition-colors hover:text-white">
-            Privacy Policy
-          </a>
         </div>
       </div>
 

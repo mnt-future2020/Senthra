@@ -12,6 +12,7 @@ import { Pagination } from "@/components/ui/Pagination";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { PoCodeLink } from "@/components/dashboard/purchase-orders/PoCodeLink";
 import type { OnHireLine } from "@/types/rental";
+import { canMoveHires, netOrdered } from "@/components/dashboard/rentals/hireActions";
 
 // Hired equipment this warehouse is CURRENTLY HOLDING — supplier-owned kit, sitting in our yard.
 //
@@ -98,7 +99,7 @@ type View = (typeof VIEWS)[number]["id"];
 export function WarehouseHireStock({ warehouseId }: { warehouseId: string }) {
   const router = useRouter();
   const { can } = useAuth();
-  const canMove = can("rentals.hire.receive") || can("rentals.hire.manage");
+  const canMove = canMoveHires(can);
   // The order page is gated on its own key — see PoCodeLink for why this is asked here.
   const canViewPo = can("purchase_orders.view");
   const [rows, setRows] = React.useState<OnHireLine[] | null>(null);
@@ -258,7 +259,9 @@ export function WarehouseHireStock({ warehouseId }: { warehouseId: string }) {
                       </td>
                       <td className="cell-y px-4 text-[var(--muted)]">
                         <span className="font-semibold text-[var(--ink)]">{held(r)}</span>
-                        {r.quantity !== held(r) && <span className="ml-1.5 text-[11px]">of {r.quantity}</span>}
+                        {/* Net of anything written off, so the "of N" disappears once the hire holds
+                            all it ever will — see netOrdered. */}
+                        {netOrdered(r) !== held(r) && <span className="ml-1.5 text-[11px]">of {netOrdered(r)}</span>}
                         {damaged(r) > 0 && (
                           <div className="mt-0.5 inline-flex items-center gap-1 text-[11px] font-bold text-[var(--neg)]">
                             <AlertTriangle className="h-3 w-3" aria-hidden /> {damaged(r)} damaged with us

@@ -9,6 +9,7 @@ import { param, queryInt, queryStr } from "../../utils/request.js";
 import type {
   CreatePurchaseOrderInput,
   CreatePurchaseOrdersSplitInput,
+  CloseHireShortInput,
   ExtendHireInput,
   PoAssignPmInput,
   PoAttachmentInput,
@@ -168,11 +169,12 @@ export const removeAttachment = asyncHandler(async (req, res) => {
   res.json({ purchaseOrder });
 });
 
-// PATCH /purchase-orders/:id/rental-lines/:lineId/return
-export const markHireReturned = asyncHandler(async (req, res) => {
-  const purchaseOrder = await poService.markHireReturned(
+// PATCH /purchase-orders/:id/rental-lines/:lineId/close-short
+export const closeHireShort = asyncHandler(async (req, res) => {
+  const purchaseOrder = await poService.closeHireShort(
     param(req, "id"),
     param(req, "lineId"),
+    req.body as CloseHireShortInput,
     actorFrom(req),
   );
   res.json({ purchaseOrder });

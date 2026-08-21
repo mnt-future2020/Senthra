@@ -12,6 +12,7 @@ import { useReportDirty } from "@/providers/NavigationGuardProvider";
 import { ghostBtn, hintCls, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { AttachmentList, DocPicker } from "@/components/dashboard/goods-in/DeliveryDocuments";
+import { canSettleHires, damageableNow, hireTakesDelivery, shortfallAfterDelivery } from "./hireActions";
 import { Select } from "@/components/ui/Select";
 import {
   FieldError,
@@ -138,7 +139,10 @@ const MODES: Record<ReceiptDirection, Mode> = {
     linesTitle: "What arrived",
     linesDescription: "Enter the units that actually turned up. A part delivery is ordinary — the rest stays outstanding.",
     qtyLabel: "Received now",
-    linesEmpty: "Every hire line on this order has already been received in full.",
+    // BOTH ways this list empties. It used to name only the first, which after a short close read as
+    // a flat contradiction of the row the user had just written off.
+    linesEmpty:
+      "Nothing on this order is still expected — every hire line has either arrived in full or had the rest recorded as never arriving.",
     remainderLabel: "Outstanding",
     overLine: (n) => `Only ${n} still outstanding on this line.`,
     nothingEntered: "Enter the quantity received on at least one line.",
@@ -226,6 +230,11 @@ type LineState = {
   itemName: string;
   baseUnit: string | null;
   ordered: number;
+  cancelled: number;
+  /** What the SERVER holds. The close-short modal phrases its question from these two, and the write
+      is computed server-side from them — the box on this form has nothing to do with it. */
+  received: number;
+  returned: number;
   /** Units actually in our hands: received minus returned. The frame a damage report is read in. */
   held: number;
   /** What this movement counts against — already received / already returned / already reported. */
@@ -249,6 +258,9 @@ type LineState = {
    * figure is normally recorded afterwards from the movement panel on the order.
    */
   damageCharge: string;
+  /** "The rest is never coming", entered WITH the delivery — see shortfallAfterDelivery. */
+  notComing: boolean;
+  notComingReason: string;
 };
 
 /**
@@ -263,10 +275,14 @@ function readLine(direction: ReceiptDirection, r: PoRentalLine): LineState | nul
   const received = r.receivedQuantity ?? 0;
   const returned = r.returnedQuantity ?? 0;
 
-  // A returned hire is off every list for good; a hire that has not arrived can neither go back nor be
+  // A FINISHED hire is off every list for good; a hire that has not arrived can neither go back nor be
   // damaged in our hands.
   if (direction !== "in" && r.hireStatus !== "on_hire") return null;
-  if (direction === "in" && r.hireStatus === "returned") return null;
+  // The delivery leg asks `hireTakesDelivery` rather than the status alone, because a hire can stop
+  // expecting units without ending: closed short, it keeps whatever it is still holding and stays
+  // `on_hire`, but `createRentalReceipt` refuses a line carrying `shortClosedAt`. Listing it here
+  // would put the outstanding units in the form and let the save reject them.
+  if (direction === "in" && !hireTakesDelivery(r)) return null;
 
   // What this movement counts AGAINST, per direction. A damage report counts against nothing that has
   // moved — its running figure is what has already been reported broken, which is the number somebody
@@ -281,7 +297,11 @@ function readLine(direction: ReceiptDirection, r: PoRentalLine): LineState | nul
       ? r.quantity - received
       : direction === "out"
         ? received - returned
-        : received - returned - (r.damagedQuantity ?? 0);
+        : // NOT `held - damaged`: see damageableNow. `damagedQuantity` is a lifetime count, so a unit
+          // that went back damaged was being charged against the holding twice — refusing the
+          // undamaged unit behind it, and going negative once two had gone back, which dropped the
+          // line off this form entirely on a hire we are still holding.
+          damageableNow({ receivedQuantity: received, returnedQuantity: returned, damagedQuantity: r.damagedQuantity ?? 0 });
   if (remainder <= 0) return null;
 
   return {
@@ -289,6 +309,11 @@ function readLine(direction: ReceiptDirection, r: PoRentalLine): LineState | nul
     itemName: r.itemName,
     baseUnit: r.baseUnit,
     ordered: r.quantity,
+    /** Units written off — annotated beside `ordered`, or the return form reads "Ordered 5 · Still out 4"
+        with nothing saying where the fifth went. */
+    cancelled: r.cancelledQuantity ?? 0,
+    received,
+    returned,
     held: received - returned,
     alreadyMoved,
     remainder,
@@ -309,6 +334,8 @@ function readLine(direction: ReceiptDirection, r: PoRentalLine): LineState | nul
     // NEVER pre-filled, for the same reason the damaged box is not: a figure the system put here is
     // an amount nobody agreed to, and this one is money.
     damageCharge: "",
+    notComing: false,
+    notComingReason: "",
   };
 }
 
@@ -317,7 +344,14 @@ export function HireMovementForm({ poId, direction }: { poId: string; direction:
   const { pushToast } = useDashboard();
   // The server stamps `receivedBy` from the session. Shown so the person signing for somebody else's
   // movement can see whose name is going on it.
-  const { user } = useAuth();
+  const { user, can } = useAuth();
+  // The OTHER answer this screen can give. Every line on the delivery leg is a hire still expecting
+  // units, and the person filling this in is the one the driver just told the rest is not coming —
+  // so the decision belongs here, beside the box they would otherwise have to leave empty.
+  // Writing off the rest is entered WITH the delivery, not as a separate trip: "4 came, the 5th never
+  // will" is one event at the bay. The standalone action stays on the receiving queue and the on-hire
+  // board, where the event is different — "we took 4 last week, today we learned there is no fifth".
+  const canSettle = direction === "in" && canSettleHires(can);
   const me = user?.email ?? "this account";
   const mode = MODES[direction];
 
@@ -517,6 +551,16 @@ export function HireMovementForm({ poId, direction }: { poId: string; direction:
         errs.lines = `${l.itemName}: ${mode.overLine(l.remainder).toLowerCase()}`;
         break;
       }
+      // The reason is the only record that the shortfall was a DECISION. Checked here so the user is
+      // told before the delivery is written, not after — the two saves are sequential.
+      // Asked on the QUANTITY as well as the tick, matching the submit loop. The checkbox unmounts once
+      // the entered figure covers the line, but `notComing` stays where the user left it — so ticking
+      // the box and then correcting the quantity upwards left the form refusing to save over a control
+      // that is no longer on screen, with no way to clear it.
+      if (l.notComing && shortfallAfterDelivery(l.remainder, moved) > 0 && !l.notComingReason.trim()) {
+        errs.lines = `${l.itemName}: give a reason for the units that aren't coming.`;
+        break;
+      }
       if (mode.damagedColumn && (!Number.isFinite(damaged) || damaged < 0 || !Number.isInteger(damaged))) {
         errs.lines = `${l.itemName}: damaged must be a whole number of units.`;
         break;
@@ -625,6 +669,31 @@ export function HireMovementForm({ poId, direction }: { poId: string; direction:
             }));
       setSaved(true);
 
+      // The WRITE-OFFS, after the delivery and never before it. The server computes each shortfall
+      // from what it holds, so the delivery has to have landed first — otherwise "the remaining 1"
+      // becomes "all 5", which is exactly the trap that made this one form instead of two trips.
+      //
+      // Sequential, not atomic, and deliberately: the delivery is the record that matters and it is
+      // already written. Rolling it back because a write-off failed would throw away evidence of kit
+      // that physically arrived, to tidy up a number the receiving queue can still fix. So a failure
+      // here is REPORTED with the way to finish, not swallowed and not undone.
+      const shortFailures: string[] = [];
+      for (const l of lines) {
+        // Asked on the QUANTITY, not on the tick alone. The checkbox unmounts once the entered figure
+        // covers the line, but `notComing` stays where the user left it — so ticking the box and then
+        // correcting the quantity upwards (an ordinary thing to do) sent a write-off for a line with
+        // nothing outstanding, which the server always refuses. The offer only ever existed while
+        // this was above zero; the request has to agree.
+        if (!l.notComing || !l.notComingReason.trim()) continue;
+        if (shortfallAfterDelivery(l.remainder, num(l.quantity)) <= 0) continue;
+        try {
+          await rentalService.closeHireShort(po.id, l.purchaseOrderRentalLineId, l.notComingReason.trim());
+        } catch (e) {
+          shortFailures.push(`${l.itemName}: ${e instanceof Error ? e.message : "could not be closed short"}`);
+        }
+      }
+      if (shortFailures.length > 0) console.error(`${receipt.code} short closes failed —`, shortFailures);
+
       // The movement is RECORDED at this point; the photos are evidence hanging off it. A failed upload
       // must not read as a failed save — it is reported on its own and the quantities stand, because
       // re-submitting the form would try to move the same units twice.
@@ -640,22 +709,33 @@ export function HireMovementForm({ poId, direction }: { poId: string; direction:
         }
       }
       if (failures.length > 0) console.error(`${receipt.code} photo uploads failed —`, failures);
-      pushToast(
-        failures.length > 0
+
+      // ONE report for both kinds of aftermath. The delivery is written either way; what differs is
+      // what could not be finished on top of it, and each has its own recovery. Reported together
+      // because a person who lost a photo AND a write-off needs to be told both, once.
+      const aftermath = [
+        ...(failures.length > 0
           ? // NOT "add them from the order": there is no add-photo control there, only a remove. The
             // honest instruction is the one that actually recovers the evidence.
-            `${receipt.code} recorded, but ${failures.length} photo${failures.length === 1 ? "" : "s"} did not upload (${failures[0]}). Photograph again and record a damage report against this hire.`
-          : `${receipt.code} recorded.`,
-        failures.length > 0 ? "alert" : "success",
+            [`${failures.length} photo${failures.length === 1 ? "" : "s"} did not upload (${failures.join("; ")}) — photograph the equipment again and file a damage report against this hire if the evidence still matters`]
+          : []),
+        ...(shortFailures.length > 0
+          ? [`the write-off did not save (${shortFailures.join("; ")}) — close those lines short from the warehouse's hire queue`]
+          : []),
+      ];
+      pushToast(
+        aftermath.length > 0 ? `${receipt.code} recorded, but not everything with it.` : `${receipt.code} recorded.`,
+        aftermath.length > 0 ? "alert" : "success",
       );
-      // Stay put when evidence was lost, so the person can read what failed instead of watching it
+      // Stay put when something was lost, so the person can read what failed instead of watching it
       // scroll past in a toast. `saving` deliberately stays true: the record IS saved, and re-enabling
-      // the button would offer to save it a second time — which is a worse outcome than a lost photo.
-      if (failures.length === 0) {
+      // the button would offer to save it a second time — a duplicate delivery note for the same
+      // units, which is a worse outcome than either failure being reported here.
+      if (aftermath.length === 0) {
         router.replace(`/dashboard/purchase-orders/${po.code ?? poId}`);
       } else {
         setErrors({
-          form: `${receipt.code} was recorded. ${failures.length} photo${failures.length === 1 ? "" : "s"} did not upload — ${failures.join("; ")}. The record is saved; photograph the equipment again and file a damage report against this hire if the evidence still matters.`,
+          form: `${receipt.code} was recorded — the units that arrived are on file. What did not finish: ${aftermath.join(". ")}.`,
         });
       }
     } catch (err) {
@@ -846,7 +926,13 @@ export function HireMovementForm({ poId, direction }: { poId: string; direction:
                         <span className="text-[11px] text-[var(--muted)]">
                           {/* "Ordered" is the frame for a delivery and for a collection. On a damage
                               report it is noise — what matters is how much is in our hands. */}
-                          {direction === "damage" ? `With us ${l.held}` : `Ordered ${l.ordered}`} ·{" "}
+                          {direction === "damage" ? `With us ${l.held}` : `Ordered ${l.ordered}`}
+                          {/* Where the rest went. A short-closed line reaches the RETURN leg reading
+                              "Ordered 5 · Still out 4", and without this the missing unit looks like
+                              something still owed rather than something written off. */}
+                          {direction !== "damage" && l.cancelled > 0 && (
+                            <span className="text-[var(--faint)]"> ({l.cancelled} cancelled)</span>
+                          )}{" · "}
                           {/* "…WITH US", not "…damaged". The line below can read "1 already recorded as
                               damaged ON ARRIVAL", and two damage numbers a line apart read as a
                               contradiction unless each says which damage it counts. They are
@@ -912,6 +998,39 @@ export function HireMovementForm({ poId, direction }: { poId: string; direction:
                           </div>
                         );
                       })()}
+                      {/* "The rest is never coming", entered WITH the delivery. The count comes from
+                          the box above, so it can never contradict what the user just typed — the
+                          separate modal read the SERVER's figure and offered to write off all five
+                          while four sat unsaved in the form. Only shown while a shortfall would
+                          actually remain: an offer to write off nothing is not an offer. */}
+                      {canSettle && shortfallAfterDelivery(l.remainder, movedNow) > 0 && (
+                        <div className="mb-2.5 rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/40 px-3 py-2.5">
+                          <label className="flex cursor-pointer items-start gap-2">
+                            <input
+                              type="checkbox"
+                              checked={l.notComing}
+                              onChange={(e) => setLine(idx, { notComing: e.target.checked, ...(e.target.checked ? {} : { notComingReason: "" }) })}
+                              className="mt-0.5 h-3.5 w-3.5 accent-[var(--accent)]"
+                            />
+                            <span className="text-[11px] font-semibold text-[var(--ink)]">
+                              The remaining {shortfallAfterDelivery(l.remainder, movedNow)}{" "}
+                              {shortfallAfterDelivery(l.remainder, movedNow) === 1 ? "unit isn't" : "units aren't"} coming
+                              <span className="ml-1 font-normal text-[var(--muted)]">
+                                — records them as never arriving and takes them off the receiving queue.
+                              </span>
+                            </span>
+                          </label>
+                          {l.notComing && (
+                            <input
+                              value={l.notComingReason}
+                              onChange={(e) => setLine(idx, { notComingReason: e.target.value })}
+                              maxLength={500}
+                              placeholder="Reason * — e.g. Supplier cannot supply the remaining units"
+                              className={`${inputCls} mt-2 text-xs`}
+                            />
+                          )}
+                        </div>
+                      )}
                       <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
                         <div>
                           <div className="mb-1.5 flex items-center justify-between gap-2">

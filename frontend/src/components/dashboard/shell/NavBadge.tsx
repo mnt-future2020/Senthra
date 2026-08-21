@@ -2,6 +2,7 @@
 
 import { useNavAttention } from "@/hooks/useAttention";
 import type { AttentionTone } from "@/services/attention.service";
+import { countPillCls } from "@/components/ui/styles";
 
 // The count on a sidebar row. Reads the shared attention context — no fetch of its own, so N badge-able
 // rows still cost ONE request for the page.
@@ -57,7 +58,9 @@ export function NavBadge({ navHref, collapsed }: { navHref: string; collapsed: b
     <span
       aria-label={label}
       title={label}
-      className={`ml-auto shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-extrabold leading-none tabular-nums ${TONE_PILL[rollup.tone]}`}
+      // Shape from the shared constant so this and the tab counts cannot drift into two heights —
+      // they had, by half a pixel of padding. Tone stays here: the sidebar is the loud one.
+      className={`${countPillCls} ml-auto shrink-0 ${TONE_PILL[rollup.tone]}`}
     >
       {shown}
     </span>

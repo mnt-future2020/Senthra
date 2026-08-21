@@ -501,6 +501,17 @@ describe("WAREHOUSE_MANAGER_PERMISSIONS (the seeded warehouse-manager bundle)", 
     expect(closed.filter((k) => !WAREHOUSE_MANAGER_PERMISSIONS.includes(k))).toEqual([]);
   });
 
+  // The hire keys were split floor-vs-commercial, and the warehouse held only the floor one. Two of
+  // the commercial four turned out to belong on the floor after all: closing a hire short is decided
+  // by whoever is told the rest is not coming, and reversing a note is undone by whoever typed it.
+  // Both are already warehouse-scoped at the service, so a manager reaches only their own sites.
+  // EXTENDING stays out — that is a fresh commitment of money to a supplier.
+  it("settles its own hire records, but cannot commit money to a supplier", () => {
+    expect(WAREHOUSE_MANAGER_PERMISSIONS).toContain("rentals.hire.receive");
+    expect(WAREHOUSE_MANAGER_PERMISSIONS).toContain("rentals.hire.settle");
+    expect(WAREHOUSE_MANAGER_PERMISSIONS).not.toContain("rentals.hire.manage");
+  });
+
   it("stays warehouse-scoped: never pulls in the global customer directory", () => {
     // A warehouse manager is warehouse-scoped, so stock_requests.* must NOT imply `customers.view`
     // (the un-scoped, company-wide customer book). Mirrors WAREHOUSE_SIDE_CUSTOMER_CHILD_GROUPS.
