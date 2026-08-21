@@ -7,6 +7,7 @@ vi.mock("./purchase-order.repository.js", () => ({
   findByCode: vi.fn(),
   findRentalLine: vi.fn(),
   updateRentalLine: vi.fn(),
+  updateRentalLineIf: vi.fn(),
   // Extending writes the line AND the record of what moved it, in one transaction — see
   // extendRentalLine. Two calls could leave a running total with no breakdown behind it.
   extendRentalLine: vi.fn(),
@@ -29,7 +30,7 @@ import {
   closePurchaseOrder,
   extendHire,
   getPurchaseOrder,
-  markHireReturned,
+  closeHireShort,
   recomputeRentalReceiptStatus,
   recordSupplierAcceptance,
 } from "./purchase-order.service.js";
@@ -40,6 +41,7 @@ const ACTOR = { type: "user" as const, id: "u1", email: "pm@x.co", permissions: 
 const findById = vi.mocked(poRepo.findById);
 const findRentalLine = vi.mocked(poRepo.findRentalLine);
 const updateRentalLine = vi.mocked(poRepo.updateRentalLine);
+const updateRentalLineIf = vi.mocked(poRepo.updateRentalLineIf);
 const extendRentalLine = vi.mocked(poRepo.extendRentalLine);
 const record = vi.mocked(audit.record);
 
@@ -73,6 +75,13 @@ const line = (over: Record<string, unknown> = {}) =>
     // Pricing basis + the running extension total: present by default because the repository's read
     // always supplies them, so a fixture without them would be testing a shape production never has.
     quantity: 1,
+    // FULLY RECEIVED by default, because that is the only way a hire reaches `on_hire` in production:
+    // the status is written by a delivery, which moves these two in the same transaction. A fixture
+    // that was `on_hire` with nothing received described a row the system cannot produce — and it hid
+    // the fact that mark-returned would happily close a hire with units still to be delivered.
+    receivedQuantity: 1,
+    fullyReceived: true,
+    returnedQuantity: 0,
     ratePeriod: "total",
     ratePence: null,
     extensionChargePence: 0,
@@ -83,39 +92,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   findById.mockResolvedValue(poRow());
   updateRentalLine.mockResolvedValue({} as never);
+  updateRentalLineIf.mockResolvedValue(true);
   extendRentalLine.mockResolvedValue(undefined);
-});
-
-describe("markHireReturned", () => {
-  it("moves a live hire to returned and stamps who and when", async () => {
-    findRentalLine.mockResolvedValue(line());
-    await markHireReturned(PO_ID, "l1", ACTOR);
-    const patch = updateRentalLine.mock.calls[0]![1] as Record<string, unknown>;
-    expect(patch).toMatchObject({ hireStatus: "returned", returnedBy: "pm@x.co" });
-    expect(patch.returnedAt).toBeInstanceOf(Date);
-  });
-
-  it("refuses a hire that is already returned", async () => {
-    findRentalLine.mockResolvedValue(line({ hireStatus: "returned" }));
-    await expect(markHireReturned(PO_ID, "l1", ACTOR)).rejects.toThrow(/already been returned/i);
-    expect(updateRentalLine).not.toHaveBeenCalled();
-  });
-
-  // An id alone would let one purchase order act on another's line.
-  it("refuses a line belonging to a different purchase order", async () => {
-    findRentalLine.mockResolvedValue(line({ purchaseOrderId: "b".repeat(24) }));
-    await expect(markHireReturned(PO_ID, "l1", ACTOR)).rejects.toThrow(/not found on this purchase order/i);
-  });
-
-  it("records an audit entry naming the item", async () => {
-    findRentalLine.mockResolvedValue(line());
-    await markHireReturned(PO_ID, "l1", ACTOR);
-    expect(record.mock.calls[0]![0]).toMatchObject({
-      action: "purchase_order.rental_returned",
-      targetLabel: "PO-0001",
-      metadata: { item: "Fibre Tester" },
-    });
-  });
 });
 
 describe("extendHire", () => {
@@ -439,16 +417,6 @@ describe("extensions recorded before the breakdown existed", () => {
   });
 });
 
-describe("markHireReturned — the receive step comes first", () => {
-  // Nothing can go back that never arrived. Stamping a return date onto kit that was never in our
-  // hands would put a returnedAt on a hire that never started; the honest answer is to refuse.
-  it("refuses to return a hire that has not been received", async () => {
-    findRentalLine.mockResolvedValue(line({ hireStatus: "awaiting_delivery" }));
-    await expect(markHireReturned(PO_ID, "l1", ACTOR)).rejects.toThrow(/hasn't been received yet/i);
-    expect(updateRentalLine).not.toHaveBeenCalled();
-  });
-});
-
 describe("extendHire — an unreceived hire can still move", () => {
   // Dates change before delivery all the time: the provider slips a week, the job moves. Extending is
   // about the PERIOD, not about possession, so it must not require the kit to have arrived.
@@ -496,6 +464,52 @@ describe("recomputeRentalReceiptStatus respects the order's state machine", () =
       await recomputeRentalReceiptStatus(PO_ID, ACTOR);
       expect(poRepo.update, status).not.toHaveBeenCalled();
     }
+  });
+
+  // A hire closed short will NEVER receive its outstanding units — that is what closing short means,
+  // and `fullyReceived` on the line says exactly that. Counting only `receivedQuantity` left the order
+  // stuck at `partially_received` for good: it can still be closed (the transition exists), but it
+  // never reaches `fully_received`, so it never appears in "Received — ready to close" — the chip
+  // that is now the canonical worklist for closing orders. The write-off has to count.
+  it("counts units written off as no longer outstanding", async () => {
+    findById.mockResolvedValue(
+      order("partially_received", { rentalItems: [{ quantity: 5, receivedQuantity: 2, cancelledQuantity: 3 }] }),
+    );
+    await recomputeRentalReceiptStatus(PO_ID, ACTOR);
+    expect(vi.mocked(poRepo.update).mock.calls[0]![1]).toMatchObject({ status: "fully_received" });
+  });
+
+  // Units written off did NOT arrive. Folding them into `receivedQuantity` made "has anything turned
+  // up" true with an empty yard: a hire-only order whose single hire never arrived reported itself
+  // FULLY RECEIVED, and — far worse — `ALLOWED_TRANSITIONS` has no path from there or from
+  // `partially_received` back to `cancelled`. Closing a hire short permanently removed the buyer's
+  // ability to cancel the order, which is the honest exit when nothing ever came.
+  it("does not claim an order was received when the only thing that happened was a write-off", async () => {
+    findById.mockResolvedValue(
+      order("sent", { rentalItems: [{ quantity: 5, receivedQuantity: 0, cancelledQuantity: 5 }] }),
+    );
+    await recomputeRentalReceiptStatus(PO_ID, ACTOR);
+    expect(poRepo.update, "an order with an empty yard must stay cancellable").not.toHaveBeenCalled();
+  });
+
+  it("leaves a mixed order alone when the write-off is the only movement on it", async () => {
+    findById.mockResolvedValue(
+      order("sent", {
+        items: [{ quantity: 10, receivedQuantity: 0 }],
+        rentalItems: [{ quantity: 5, receivedQuantity: 0, cancelledQuantity: 5 }],
+      }),
+    );
+    await recomputeRentalReceiptStatus(PO_ID, ACTOR);
+    expect(poRepo.update).not.toHaveBeenCalled();
+  });
+
+  // Still short, and nobody has written the rest off — the order is genuinely still waiting.
+  it("leaves an order that is simply part-delivered alone", async () => {
+    findById.mockResolvedValue(
+      order("partially_received", { rentalItems: [{ quantity: 5, receivedQuantity: 2, cancelledQuantity: 0 }] }),
+    );
+    await recomputeRentalReceiptStatus(PO_ID, ACTOR);
+    expect(poRepo.update).not.toHaveBeenCalled();
   });
 
   // Once the order IS issued, the quantities recorded while it was a draft catch up.
@@ -569,27 +583,6 @@ describe("a reversal can move the receipt status backwards", () => {
     findById.mockResolvedValue(reversed(status));
     await recomputeRentalReceiptStatus(PO_ID, ACTOR, { allowDowngrade: true });
     expect(poRepo.update).not.toHaveBeenCalled();
-  });
-});
-
-// `returnedQuantity` has ONE writer once notes exist: the return notes themselves. Reversing a note
-// recomputes that column purely from the notes that survive, so a quantity written here with no note
-// behind it would be erased by the next reversal — a 2-unit note reversed after this closed a 5-unit
-// hire would wipe all five and reopen it as if nothing ever went back.
-describe("markHireReturned refuses to write over note-backed returns", () => {
-  it("refuses when units have already gone back on a record", async () => {
-    findById.mockResolvedValue({ id: PO_ID, code: "PO-0063", status: "sent", deletedAt: null } as never);
-    vi.mocked(poRepo.findRentalLine).mockResolvedValue({
-      id: "l1",
-      purchaseOrderId: PO_ID,
-      itemName: "Fibre Tester",
-      hireStatus: "on_hire",
-      receivedQuantity: 5,
-      returnedQuantity: 2,
-      hireEndDate: new Date("2026-10-01T00:00:00Z"),
-    } as never);
-    await expect(markHireReturned(PO_ID, "l1", ACTOR)).rejects.toThrow(/already has collection records/i);
-    expect(poRepo.updateRentalLine).not.toHaveBeenCalled();
   });
 });
 
@@ -710,5 +703,120 @@ describe("the confirmed delivery date is required only while the delivery is sti
     await recordSupplierAcceptance(PO_ID, { confirmedDeliveryDate: "2026-08-21" } as never, ACTOR);
     const [, data] = vi.mocked(poRepo.update).mock.calls[0]!;
     expect(data.confirmedDeliveryDate).toEqual(new Date("2026-08-21"));
+  });
+});
+
+// ── Ending a hire that was never fully delivered ───────────────────────────────────────────────
+//
+// Before `closeHireShort` existed there was NO exit from this: return and mark-returned both refuse a
+// hire nothing arrived against, so the line sat on the warehouse intake queue and the "not yet
+// received" badge forever, and its purchase order could never close. Mark-returned's unconditional
+// close was the only escape, and it took the shortfall down silently.
+
+describe("closeHireShort", () => {
+  // Nothing ever arrived: the hire never happened, so it is CANCELLED and not "returned" — the
+  // finished-hire register is a finance report, and this is not hire spend.
+  it("cancels a hire nothing ever arrived against", async () => {
+    findRentalLine.mockResolvedValue(
+      line({ hireStatus: "awaiting_delivery", quantity: 4, receivedQuantity: 0, fullyReceived: false }),
+    );
+    await closeHireShort(PO_ID, "l1", { reason: "Supplier cannot supply" }, ACTOR);
+    expect(updateRentalLineIf.mock.calls[0]![2]).toMatchObject({
+      hireStatus: "cancelled",
+      cancelledQuantity: 4,
+      // Off the receiving queue: nobody is waiting for these any more.
+      fullyReceived: true,
+      fullyReturned: true,
+      shortCloseReason: "Supplier cannot supply",
+      shortClosedBy: "pm@x.co",
+    });
+  });
+
+  // Part arrived and has already gone back. It HAPPENED — we held kit and were billed for it — so it
+  // ends `returned`, with the shortfall carried in cancelledQuantity rather than pretended away.
+  it("closes a part-delivered hire whose held units are already back as RETURNED, not cancelled", async () => {
+    findRentalLine.mockResolvedValue(
+      line({ quantity: 5, receivedQuantity: 2, returnedQuantity: 2, fullyReceived: false }),
+    );
+    await closeHireShort(PO_ID, "l1", { reason: "Rest descoped" }, ACTOR);
+    const patch = updateRentalLineIf.mock.calls[0]![2] as Record<string, unknown>;
+    expect(patch).toMatchObject({ hireStatus: "returned", cancelledQuantity: 3, fullyReceived: true });
+  });
+
+  // Kit still in our hands: the hire is NOT over, it just stops expecting the rest. Closing it here
+  // would drop equipment we are holding off every return deadline.
+  it("leaves a hire still holding kit on hire, and only takes the shortfall off the queue", async () => {
+    findRentalLine.mockResolvedValue(
+      line({ quantity: 5, receivedQuantity: 2, returnedQuantity: 0, fullyReceived: false }),
+    );
+    await closeHireShort(PO_ID, "l1", { reason: "Rest descoped" }, ACTOR);
+    const patch = updateRentalLineIf.mock.calls[0]![2] as Record<string, unknown>;
+    expect(patch).toMatchObject({ cancelledQuantity: 3, fullyReceived: true });
+    expect(patch.hireStatus).toBeUndefined();
+    expect(patch.fullyReturned).toBeUndefined();
+  });
+
+  it("refuses when nothing is outstanding", async () => {
+    findRentalLine.mockResolvedValue(line({ quantity: 3, receivedQuantity: 3, fullyReceived: true }));
+    await expect(closeHireShort(PO_ID, "l1", { reason: "x" }, ACTOR)).rejects.toThrow(/nothing outstanding/i);
+    expect(updateRentalLineIf).not.toHaveBeenCalled();
+  });
+
+  it("refuses a hire that is already finished, by either terminal state", async () => {
+    for (const hireStatus of ["returned", "cancelled"]) {
+      vi.clearAllMocks();
+      findById.mockResolvedValue(poRow());
+      findRentalLine.mockResolvedValue(line({ hireStatus, quantity: 5, receivedQuantity: 1 }));
+      await expect(closeHireShort(PO_ID, "l1", { reason: "x" }, ACTOR)).rejects.toThrow(/already finished/i);
+      expect(updateRentalLineIf).not.toHaveBeenCalled();
+    }
+  });
+
+  // The reason is the only record that the shortfall was a decision rather than an oversight, so it
+  // goes in the audit line with the numbers that make it answerable.
+  it("audits the shortfall and the reason", async () => {
+    findRentalLine.mockResolvedValue(line({ quantity: 5, receivedQuantity: 2, fullyReceived: false }));
+    await closeHireShort(PO_ID, "l1", { reason: "Supplier cannot supply" }, ACTOR);
+    expect(record.mock.calls[0]![0]).toMatchObject({
+      action: "purchase_order.rental_closed_short",
+      metadata: { item: "Fibre Tester", cancelledQuantity: 3, reason: "Supplier cannot supply" },
+    });
+  });
+});
+
+// The shortfall is DERIVED from the quantity read a moment earlier, which is exactly the write the
+// hire-note paths guard optimistically. A delivery landing in that window would leave
+// `cancelledQuantity` describing a line that no longer exists, and `received + cancelled` would stop
+// adding up to `ordered` — silently, because the two writes never overlap in time.
+describe("closeHireShort is guarded against a delivery landing mid-write", () => {
+  // BOTH quantities, because both decide the write. `receivedQuantity` gives the shortfall;
+  // `returnedQuantity` chooses the outcome — a return landing in the window turns "still holding kit,
+  // stay on hire" into "everything is back, close it", and pinning only the first lets the stale
+  // branch win. That leaves a line at `on_hire` with received === returned and `fullyReceived` true:
+  // the return path refuses it (nothing still out), mark-returned refuses it (collection records),
+  // and the board hides Close short (fullyReceived) — the exact dead-end this feature removes.
+  it("pins the write to both quantities the outcome was computed from", async () => {
+    findRentalLine.mockResolvedValue(
+      line({ quantity: 5, receivedQuantity: 2, returnedQuantity: 1, fullyReceived: false }),
+    );
+    await closeHireShort(PO_ID, "l1", { reason: "Rest descoped" }, ACTOR);
+    expect(updateRentalLineIf.mock.calls[0]![1]).toEqual({ receivedQuantity: 2, returnedQuantity: 1 });
+  });
+
+  it("refuses with an instruction when the line moved underneath it", async () => {
+    findRentalLine.mockResolvedValue(line({ quantity: 5, receivedQuantity: 2, fullyReceived: false }));
+    updateRentalLineIf.mockResolvedValue(false);
+    await expect(closeHireShort(PO_ID, "l1", { reason: "Rest descoped" }, ACTOR)).rejects.toThrow(
+      /another movement on this hire a moment ago/i,
+    );
+  });
+});
+
+describe("extendHire refuses a cancelled hire", () => {
+  it("will not re-arm a reminder for equipment that is never coming", async () => {
+    findRentalLine.mockResolvedValue(line({ hireStatus: "cancelled" }));
+    await expect(
+      extendHire(PO_ID, "l1", { hireEndDate: "2026-11-01" }, ACTOR),
+    ).rejects.toThrow(/cancelled and can no longer be extended/i);
   });
 });

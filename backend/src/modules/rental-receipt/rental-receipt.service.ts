@@ -497,6 +497,15 @@ export async function createRentalReceipt(
     if (hire.hireStatus === "returned") {
       throw conflict(`${hire.itemName} has already been returned — it can't take a new delivery.`);
     }
+    // Closed short: somebody recorded that these units are never arriving, with a reason. If they
+    // turn up after all that decision has to be revisited deliberately rather than overwritten by a
+    // delivery — reopening a short close is not modelled, exactly as it is not for a customer stock
+    // assignment. Checked BEFORE the outstanding maths below, which a short close has already zeroed.
+    if (hire.hireStatus === "cancelled" || hire.shortClosedAt) {
+      throw conflict(
+        `${hire.itemName} was closed short — the outstanding units were recorded as not arriving. Reopen the hire before receiving against it.`,
+      );
+    }
     const already = hire.receivedQuantity ?? 0;
     const outstanding = hire.quantity - already;
     if (outstanding <= 0) {
@@ -619,8 +628,9 @@ export async function createRentalReceipt(
  *
  * The mirror of a delivery, and deliberately built as one rather than as a status flip: a hire ends in
  * a handover, the handover is where damage gets argued about, and a boolean cannot hold a date, a
- * quantity, a collector's name, a condition or a photograph. The old "mark returned" button still
- * exists for the hire that simply ended — this is the path for the one somebody has to prove.
+ * quantity, a collector's name, a condition or a photograph. It is now the ONLY way a hire ends: the
+ * old "mark returned" shortcut wrote no note at all, so every hire closed through it reported a blank
+ * held period and a blank collection date on the register that exists to answer exactly that.
  *
  * Partial collections are ordinary: a supplier's van takes 3 of 5 today and the rest on Friday, so the
  * quantity is capped against what is still OUT (received minus already returned), re-read here rather
@@ -650,6 +660,12 @@ export async function createRentalReturn(
       throw conflict(`${hire.itemName} hasn't been received yet — record the delivery before returning it.`);
     }
     if (hire.hireStatus === "returned") throw conflict(`${hire.itemName} has already been returned.`);
+    // Nothing ever arrived against a cancelled hire, so there is nothing to hand back. (A hire that
+    // partly arrived and was closed short is `on_hire` or `returned`, never `cancelled` — its held
+    // units still go back through here normally.)
+    if (hire.hireStatus === "cancelled") {
+      throw conflict(`${hire.itemName} was cancelled — nothing was ever delivered against it.`);
+    }
 
     const here = hire.receivedQuantity ?? 0;
     const already = hire.returnedQuantity ?? 0;
@@ -663,6 +679,24 @@ export async function createRentalReturn(
     const damaged = l.damagedQuantity ?? 0;
     if (damaged > l.returnedQuantity) {
       throw badRequest(`${hire.itemName}: damaged can't be more than the quantity returned.`);
+    }
+    // Damage is a count of UNITS, not of events — and this note is the SECOND place that count can be
+    // written. A unit reported broken in week one and named again on the collection note six weeks
+    // later is the same unit, but the charge total takes every note that is not a delivery
+    // (movementDatesByHireLine), so it was billed twice while the tally it was billed against said
+    // one. Capped against units NEVER recorded damaged, so the two cannot overlap.
+    //
+    // Against `received - alreadyDamaged` rather than `held - alreadyDamaged`: a unit that went back
+    // damaged is off the site but still on the record, and the undamaged ones behind it can still
+    // break. Netting it against what is HELD would refuse them.
+    const alreadyDamaged = hire.damagedQuantity ?? 0;
+    const damageable = Math.min(l.returnedQuantity, here - alreadyDamaged);
+    if (damaged > damageable) {
+      throw conflict(
+        `${hire.itemName}: only ${damageable} of the ${l.returnedQuantity} going back ` +
+          `${damageable === 1 ? "is" : "are"} not already reported damaged. ` +
+          `A unit already on a damage report keeps its charge there — recording it again would bill it twice.`,
+      );
     }
 
     lines.push({
@@ -689,9 +723,18 @@ export async function createRentalReturn(
     const closes = total >= here && hire.fullyReceived;
     hireUpdates.push({
       id: hire.id,
-      expect: { returnedQuantity: already },
+      // `fullyReceived` is pinned alongside the total because `closes` is DERIVED from it. A short
+      // close landing in the window flips it true; a return that then commits its stale `closes:
+      // false` leaves the line `on_hire` with everything already back — refused by this path (nothing
+      // still out), refused by mark-returned (collection records), and with Close short hidden on the
+      // board. Losing the race has to mean reload-and-retry, and on the retry the hire closes.
+      expect: { returnedQuantity: already, fullyReceived: hire.fullyReceived, damagedQuantity: alreadyDamaged },
       data: {
         returnedQuantity: total,
+        // The SAME tally a damage report moves. Written here too, or damage found at the collection is
+        // invisible to every screen that counts it while its charge is counted anyway — a hire
+        // reading "Damaged Qty 0 · Damage Charge £450".
+        damagedQuantity: alreadyDamaged + damaged,
         // Everything we hold has gone back. Kept separate from the status for the case above: this is
         // what takes the line off the return deadlines, whether or not the hire itself is finished.
         fullyReturned: total >= here,
@@ -783,6 +826,11 @@ export async function reportHireDamage(
     if (hire.hireStatus === "returned") {
       throw conflict(`${hire.itemName} has gone back — damage found after a return is the supplier's to raise.`);
     }
+    // Nothing was ever delivered against a cancelled hire, so nothing of it can have been damaged
+    // here. (`awaiting_delivery` above says the same thing for a hire still expected.)
+    if (hire.hireStatus === "cancelled") {
+      throw conflict(`${hire.itemName} was cancelled — nothing was ever delivered against it.`);
+    }
     // Capped at what we actually HOLD, MINUS what is already reported damaged.
     //
     // Both halves matter. Against the order it would let three be damaged out of two on site, and a
@@ -797,7 +845,11 @@ export async function reportHireDamage(
     const held = (hire.receivedQuantity ?? 0) - (hire.returnedQuantity ?? 0);
     if (held <= 0) throw conflict(`${hire.itemName}: nothing from this line is still with us.`);
     const alreadyDamaged = hire.damagedQuantity ?? 0;
-    const reportable = held - alreadyDamaged;
+    // Two ceilings, and the lower wins: only kit HELD can be broken here, and only units never
+    // recorded damaged are left to record. The second is netted against what was RECEIVED, not what
+    // is held — a unit that went back damaged is off the site but still on the record, and netting it
+    // against the holding would quietly refuse an undamaged unit standing behind it.
+    const reportable = Math.min(held, (hire.receivedQuantity ?? 0) - alreadyDamaged);
     if (reportable <= 0) {
       throw conflict(
         `${hire.itemName}: all ${held} unit${held === 1 ? "" : "s"} with us ${held === 1 ? "is" : "are"} already reported damaged.`,
@@ -918,9 +970,8 @@ export async function reverseRentalReceipt(
   //
   // Reversing a return on a closed order put the hire back to `on_hire` while the order stayed
   // closed: the deadline badges started chasing it again, `Return hire` refused it (a closed order is
-  // outside the holding window), and the only way out left was the no-evidence quick close — on a
-  // hire whose record was being corrected precisely BECAUSE it needed evidence. It also produced the
-  // exact state closePurchaseOrder refuses to create, from the other direction.
+  // outside the holding window), and there was no way out left at all. It also produced the exact
+  // state closePurchaseOrder refuses to create, from the other direction.
   //
   // Refused rather than reopened: "a receipt must never reopen or mutate a closed or cancelled order"
   // is this module's rule, and a closed order's money is settled. A wrong record left standing in the
@@ -987,7 +1038,7 @@ export async function reverseRentalReceipt(
  * could only be entered with the report would be a guess, and a guessed zero is indistinguishable
  * from a settled one — so the report is written when the damage is found, and the money lands here.
  *
- * `rentals.hire.manage`, not the floor permission: agreeing what we owe a supplier is a commercial
+ * `rentals.hire.settle`, not the bare floor permission: agreeing what we owe a supplier is a commercial
  * act, and the person with the scanner should not need — or be given — that authority to do their job.
  */
 export async function recordDamageCharge(
@@ -1077,15 +1128,24 @@ async function buildReversalUpdates(
   // for what a pre-read absolute total does when a concurrent note lands in the window.
   tx: Prisma.TransactionClient,
 ): Promise<HireUpdate[]> {
+  // What the damaged tally becomes once THIS note stops counting — rebuilt from the notes that
+  // remain, never decremented. Read across both sources (see damagedTotalsByLine): a report and a
+  // collection note can each record damage, so a recompute filtered to one of them would wipe the
+  // other's units while withdrawing a claim that had nothing to do with them.
+  //
+  // ONE query for the whole note, read before the per-line work rather than inside it: the totals are
+  // keyed by line, so a note with six lines was firing six identical queries at the same transaction
+  // client, concurrently, for one answer.
+  const damagedLive = await receiptRepo.damagedTotalsByLine(existing.purchaseOrderId, tx);
+  const damagedAfter = (lineId: string, thisNote: number) =>
+    Math.max(0, (damagedLive.get(lineId) ?? 0) - thisNote);
+
   // A damage report moved no EQUIPMENT — but it did move the damaged tally, and a withdrawn claim
   // that leaves the warehouse's pane still counting it is the same drift as any other.
   if (direction === "damage") {
-    const live = await receiptRepo.receivedTotalsByLine(existing.purchaseOrderId, "damage", "damagedQuantity", tx);
     return existing.lines.map((l) => ({
       id: l.purchaseOrderRentalLineId,
-      data: {
-        damagedQuantity: Math.max(0, (live.get(l.purchaseOrderRentalLineId) ?? 0) - l.damagedQuantity),
-      },
+      data: { damagedQuantity: damagedAfter(l.purchaseOrderRentalLineId, l.damagedQuantity) },
     }));
   }
 
@@ -1102,6 +1162,10 @@ async function buildReversalUpdates(
         data: {
           returnedQuantity: next,
           fullyReturned: here > 0 && next >= here,
+          // A collection note MOVES the damaged tally now, so reversing one has to give it back.
+          // Left counted, the withdrawn note's units block the ones behind them from ever being
+          // reported — the cap is against units never recorded damaged.
+          damagedQuantity: damagedAfter(l.purchaseOrderRentalLineId, l.damagedQuantity),
           // Reopened: the kit is demonstrably still ours to give back. The stamps go with it — a
           // returned-on date left behind on a live hire is the kind of leftover nobody questions.
           ...(next < here ? { hireStatus: "on_hire", returnedAt: null, returnedBy: null } : {}),
@@ -1114,8 +1178,8 @@ async function buildReversalUpdates(
   //
   // TWO questions, because the two ways a hire gives kit back leave different traces.
   //
-  // The status catches a hire CLOSED without a handover record (`markHireReturned`), which writes no
-  // note at all. The live return NOTES catch a PARTIAL return, which leaves the line at `on_hire` and
+  // The status catches a hire already CLOSED by a full return. The live return NOTES catch a PARTIAL
+  // return, which leaves the line at `on_hire` and
   // therefore slipped straight past a status-only guard: reverse the delivery afterwards and the line
   // has returned more than it ever received. `held` then goes NEGATIVE, every screen clamps it to zero
   // with Math.max, and the warehouse pane — which lists `held > 0` — drops the one row that proves the
@@ -1125,6 +1189,23 @@ async function buildReversalUpdates(
   );
   if (closed) {
     throw conflict(`${closed.itemName} has already been returned — this delivery can no longer be reversed.`);
+  }
+  // A hire CLOSED SHORT is the third way this reversal can do damage, and the quietest. The recompute
+  // below owns `receivedQuantity`, `fullyReceived` and the status; it knows nothing about
+  // `cancelledQuantity`, so it would put the line back on the intake queue while the shortfall it
+  // cannot reach stays recorded beside it — `received + cancelled = ordered`, the invariant that
+  // column exists for, silently broken. Worse, the line could then never take a delivery again:
+  // `createRentalReceipt` refuses anything carrying `shortClosedAt`. Refused whole, for the same
+  // reason a delivery is — reopening a short close is a decision somebody makes deliberately, not a
+  // side effect of correcting a note.
+  const shortClosed = [...hireById.values()].find(
+    (r) => r.shortClosedAt && existing.lines.some((l) => l.purchaseOrderRentalLineId === r.id),
+  );
+  if (shortClosed) {
+    throw conflict(
+      `${shortClosed.itemName} was closed short — the outstanding units are recorded as not arriving, ` +
+        `and reversing this delivery would leave that shortfall describing a hire that no longer exists.`,
+    );
   }
   const returnedByLine = await receiptRepo.receivedTotalsByLine(existing.purchaseOrderId, "out", "receivedQuantity", tx);
   const partlyBack = existing.lines.find((l) => (returnedByLine.get(l.purchaseOrderRentalLineId) ?? 0) > 0);

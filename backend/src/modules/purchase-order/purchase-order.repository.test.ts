@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { vi } from "vitest";
 vi.mock("../../lib/prisma.js", () => ({ prisma: {} }));
 
-import { buildWhere, LIVE_GRN, RECEIVABLE_PO_STATUSES, withRelations } from "./purchase-order.repository.js";
+import { awaitingClosePoWhere, buildWhere, LIVE_GRN, RECEIVABLE_PO_STATUSES, withRelations } from "./purchase-order.repository.js";
 
 describe("buildWhere — PO list status filtering", () => {
   it("maps a single status to an equality filter (backward compatible)", () => {
@@ -220,5 +220,38 @@ describe("the chained goods receipts are LIVE only", () => {
   // Mongo: `{ deletedAt: null }` alone misses a row whose create omitted the field.
   it("accepts both the null and the missing shape", () => {
     expect(LIVE_GRN.OR).toEqual([{ deletedAt: null }, { deletedAt: { isSet: false } }]);
+  });
+});
+
+// ── "Received — ready to close" ─────────────────────────────────────────────────────────────────
+//
+// `fully_received` alone answered the wrong question on a rental order. It means every ordered unit
+// ARRIVED, which stays true forever once it happens — but a hire is a round trip, and closePurchaseOrder
+// refuses an order whose kit is still out. So the badge counted orders it was impossible to act on,
+// and the first rule of the attention registry is that a count means work a human still owes.
+describe("buildWhere — the `awaiting_close` derived pseudo-status", () => {
+  it("asks for orders that have arrived AND have nothing still on hire", () => {
+    const where = buildWhere({ status: "awaiting_close" });
+    expect(where).toMatchObject(awaitingClosePoWhere());
+    expect(where.status).toBe("fully_received");
+  });
+
+  // Both terminal states, via the predicate the close guard itself uses — a hire that went back and
+  // one closed short are equally finished, and the two must not drift into disagreeing.
+  it("counts a hire as finished only when it is returned or cancelled", () => {
+    const where = awaitingClosePoWhere();
+    expect(where.rentalItems).toEqual({ none: { hireStatus: { notIn: ["returned", "cancelled"] } } });
+  });
+
+  // A goods-only order has no rental lines at all, so `none` is vacuously true and it still counts —
+  // which is the behaviour that must not change for every non-rental order in the system.
+  it("leaves a goods-only order exactly where it was", () => {
+    expect(buildWhere({ status: "awaiting_close" }).status).toBe("fully_received");
+  });
+
+  it("composes with a search rather than being clobbered by it", () => {
+    const where = buildWhere({ status: "awaiting_close", search: "PO-1" });
+    expect(where.rentalItems).toBeDefined();
+    expect(where.OR).toHaveLength(3);
   });
 });

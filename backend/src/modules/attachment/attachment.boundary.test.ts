@@ -56,6 +56,12 @@ const DESTROY_ALLOWLIST = [
   "modules/upload/upload.service.test.ts",
   "modules/upload/upload.reaper.ts",
   "modules/upload/upload.reaper.test.ts",
+  // A TEST, and only a test. Signature removal reaches Cloudinary through `releaseAsset` like every
+  // other domain path — `user.service.ts` is deliberately absent from this list and must stay absent.
+  // This file mocks the transport so the reference check that decides whether a signature is
+  // destroyed is exercised for real rather than against a stubbed service, exactly as
+  // attachment.service.test.ts does.
+  "modules/user/user.signature.release.test.ts",
 ];
 
 describe("Cloudinary deletion has exactly one entrance", () => {

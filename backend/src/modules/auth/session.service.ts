@@ -118,6 +118,20 @@ export async function endOthers(
   await sessionRepo.deleteOthersForPrincipal(principalId, principalType, keepSid);
 }
 
+/**
+ * Delete sessions that have already expired. Returns how many went.
+ *
+ * NOT a retention rule and not a new policy: the lifetime is the SESSION_TTL_MS the row was created
+ * with, and every one of these rows is already unusable — `findActive` rejects an elapsed
+ * `expiresAt`, `listSessions` filters it out of the device list, and `startSession` does not count
+ * it toward the cap. This only stops the dead row (and the IP address on it) sitting there forever
+ * because nobody happened to touch it again.
+ */
+export async function purgeExpiredSessions(now = new Date()): Promise<number> {
+  const { count } = await sessionRepo.deleteExpired(now);
+  return count;
+}
+
 export async function listSessions(
   principalId: string,
   principalType: Actor,

@@ -2,6 +2,7 @@
 
 import { useAttention, useAttentionCount } from "@/hooks/useAttention";
 import type { AttentionEntityRow, AttentionTone } from "@/services/attention.service";
+import { countPillCls } from "@/components/ui/styles";
 
 // Pending-work counts rendered ON the thing that holds the work — a module tab, a warehouse row, a
 // customer row. This is the surface that carries every queue with no screen of its own: those counts
@@ -43,7 +44,7 @@ export function CountPill({
     <span
       aria-label={text}
       title={text}
-      className={`inline-block rounded-full px-1.5 py-px text-[10px] font-extrabold leading-none tabular-nums ${TONE[tone]} ${className}`}
+      className={`${countPillCls} ${TONE[tone]} ${className}`}
     >
       {count > 99 ? "99+" : count}
     </span>

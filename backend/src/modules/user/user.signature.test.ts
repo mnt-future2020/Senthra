@@ -11,6 +11,11 @@ vi.mock("./user.repository.js", () => ({
 vi.mock("#modules/auth/admin.repository.js", () => ({ findNamesByEmails: vi.fn() }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 vi.mock("../../lib/cloudinary.js", () => ({ uploadToCloudinary: vi.fn(), uploadFileToCloudinary: vi.fn() }));
+// The shared Cloudinary release path. Mocked so these stay pure unit tests AND so the destroy-on-
+// remove call is assertable; the real one reads every attachment table through Prisma.
+vi.mock("#modules/attachment/attachment.service.js", () => ({
+  releaseAsset: vi.fn().mockResolvedValue(undefined),
+}));
 vi.mock("#modules/settings/settings.service.js", () => ({
   getCloudinaryCreds: vi.fn(),
   getEmployeeIdPrefix: vi.fn(),
@@ -21,6 +26,7 @@ import * as adminRepo from "#modules/auth/admin.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import { uploadToCloudinary } from "../../lib/cloudinary.js";
 import { getCloudinaryCreds } from "#modules/settings/settings.service.js";
+import * as attachmentService from "#modules/attachment/attachment.service.js";
 import {
   getDisplayNamesForEmails,
   getSignatureForEmail,
@@ -133,6 +139,92 @@ describe("removeMySignature", () => {
       signatureUploadedAt: null,
       signatureUpdatedAt: null,
     });
+    expect(mockAudit.mock.calls[0][0].action).toBe("user.signature_removed");
+  });
+});
+
+/**
+ * Removing a signature used to clear the six columns and leave the image live at its public
+ * delivery URL forever — the user was told it was gone while it was still fetchable. These pin the
+ * destroy, the id it targets, and the ordering that keeps a storage failure harmless.
+ *
+ * The reference count and the destroy itself live behind `releaseAsset`, which is mocked here;
+ * user.signature.release.test.ts exercises the real one.
+ */
+describe("removeMySignature — the stored image is destroyed", () => {
+  const mockRelease = attachmentService.releaseAsset as ReturnType<typeof vi.fn>;
+  const SIG_REF = { publicId: `senthra/signatures/signature-${USER_ID}`, resourceType: "image" };
+
+  it("releases the asset by the deterministic id the upload stored it under", async () => {
+    mockFindById.mockResolvedValue(userRow({ signatureUrl: "https://cdn/sig.png" }));
+    await removeMySignature(actor);
+    expect(mockRelease).toHaveBeenCalledTimes(1);
+    expect(mockRelease.mock.calls[0][0]).toEqual(SIG_REF);
+  });
+
+  it("names the asset exactly as the upload did — the two cannot drift", async () => {
+    mockFindById.mockResolvedValue(userRow({ signatureUrl: null }));
+    await uploadMySignature({ signature: PNG, fileName: "sig.png" }, actor);
+    const [, uploadedPublicId, , uploadedFolder] = mockUpload.mock.calls[0];
+
+    vi.clearAllMocks();
+    mockUpdate.mockImplementation((_id: string, data: Record<string, unknown>) =>
+      Promise.resolve(userRow(data)),
+    );
+    mockFindById.mockResolvedValue(userRow({ signatureUrl: "https://cdn/sig.png" }));
+    await removeMySignature(actor);
+    expect(mockRelease.mock.calls[0][0].publicId).toBe(`${uploadedFolder}/${uploadedPublicId}`);
+  });
+
+  it("clears the database fields as well as destroying the file", async () => {
+    mockFindById.mockResolvedValue(userRow({ signatureUrl: "https://cdn/sig.png" }));
+    await removeMySignature(actor);
+    expect(mockUpdate.mock.calls[0][1]).toMatchObject({
+      signatureUrl: null,
+      signatureName: null,
+      signatureMimeType: null,
+      signatureFileSize: null,
+      signatureUploadedAt: null,
+      signatureUpdatedAt: null,
+    });
+  });
+
+  it("clears the record BEFORE releasing — a destroy must never outrun the row that points at it", async () => {
+    const order: string[] = [];
+    mockFindById.mockResolvedValue(userRow({ signatureUrl: "https://cdn/sig.png" }));
+    mockUpdate.mockImplementation(() => {
+      order.push("db");
+      return Promise.resolve(userRow({ signatureUrl: null }));
+    });
+    mockRelease.mockImplementation(() => {
+      order.push("release");
+      return Promise.resolve();
+    });
+    await removeMySignature(actor);
+    expect(order).toEqual(["db", "release"]);
+  });
+
+  it("does not release anything when the user has no signature on file", async () => {
+    mockFindById.mockResolvedValue(userRow({ signatureUrl: null }));
+    await removeMySignature(actor);
+    expect(mockRelease).not.toHaveBeenCalled();
+    expect(mockUpdate).toHaveBeenCalledTimes(1); // still clears — removal stays idempotent
+  });
+
+  it("is safe to call twice — the second pass releases nothing", async () => {
+    mockFindById.mockResolvedValueOnce(userRow({ signatureUrl: "https://cdn/sig.png" }));
+    await removeMySignature(actor);
+    expect(mockRelease).toHaveBeenCalledTimes(1);
+
+    mockFindById.mockResolvedValueOnce(userRow({ signatureUrl: null }));
+    await removeMySignature(actor);
+    expect(mockRelease).toHaveBeenCalledTimes(1);
+  });
+
+  it("audits the removal alongside the release", async () => {
+    mockFindById.mockResolvedValue(userRow({ signatureUrl: "https://cdn/sig.png" }));
+    await removeMySignature(actor);
+    expect(mockRelease).toHaveBeenCalledTimes(1);
     expect(mockAudit.mock.calls[0][0].action).toBe("user.signature_removed");
   });
 });

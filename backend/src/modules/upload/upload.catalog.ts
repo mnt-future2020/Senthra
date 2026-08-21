@@ -141,11 +141,14 @@ export const UPLOAD_PURPOSES = {
   // identity that lets the asset be destroyed with it. The return-url photos cannot — they are picked
   // before their record exists, which is why theirs are stored as bare URLs.
   hire_delivery_photo: {
-    // EITHER key, and `anyPermission` is what makes that true — `assertPermitted` reads `false` as
-    // `.every()`. The two keys are deliberately never held together (the warehouse manager gets
-    // `receive` and not `manage`; the PM the reverse), so requiring both left every seeded role
-    // unable to attach a photo and only a `*` super-admin able to — which is what dev testing runs as.
-    permissions: ["rentals.hire.receive", "rentals.hire.manage"],
+    // ANY of the three, and `anyPermission` is what makes that true — `assertPermitted` reads `false`
+    // as `.every()`. No role holds them all (the warehouse gets `receive` + `settle`, the PM
+    // `manage`), so requiring every one left every seeded role unable to attach a photo and only a
+    // `*` super-admin able to — which is what dev testing runs as.
+    //
+    // The SAME list as HIRE_FLOOR in rental-receipt.routes.ts: this photo rides on the notes those
+    // routes write, so a role that can post the movement must be able to attach its evidence.
+    permissions: ["rentals.hire.receive", "rentals.hire.settle", "rentals.hire.manage"],
     anyPermission: true,
     folder: "senthra/hire-deliveries",
     mediaTypes: EVIDENCE_IMAGE_TYPES,

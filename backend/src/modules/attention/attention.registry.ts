@@ -248,7 +248,11 @@ export const ATTENTION_ITEMS: AttentionItemMeta[] = [
   // are engineered and tested against ("the three Inventory hire badges never count one line twice").
   // It still shows as its own chip, and still lends the row its critical tone; only the number folds in.
   { key: "po.overdue_delivery", label: "Deliveries overdue", perms: ["purchase_orders.view"], tone: "critical", nav: ATTENTION_NAV.purchaseOrders, href: "/dashboard/purchase-orders?status=overdue", subsetOf: "wh.goods_in_waiting" },
-  { key: "po.awaiting_close", label: "Received — ready to close", perms: ["purchase_orders.close"], tone: "info", nav: ATTENTION_NAV.purchaseOrders, href: "/dashboard/purchase-orders?status=fully_received", hrefPerms: ["purchase_orders.view"] },
+  // `?status=awaiting_close`, the DERIVED pseudo-status — not the bare `fully_received` it used to
+  // open. A rental order stays `fully_received` forever once its kit arrived, but it cannot be closed
+  // until the kit goes back, so the raw status listed rows the Close button refuses. Same predicate
+  // the count uses (awaitingClosePoWhere), so chip and list can never disagree.
+  { key: "po.awaiting_close", label: "Received — ready to close", perms: ["purchase_orders.close"], tone: "info", nav: ATTENTION_NAV.purchaseOrders, href: "/dashboard/purchase-orders?status=awaiting_close", hrefPerms: ["purchase_orders.view"] },
 
   // Jobs
   { key: "jobs.rejected", label: "Rejected — reassign", perms: ["jobs.assign"], tone: "critical", nav: ATTENTION_NAV.jobs, href: "/dashboard/jobs?status=rejected", hrefPerms: ["jobs.view"] },
@@ -307,7 +311,7 @@ export const ATTENTION_ITEMS: AttentionItemMeta[] = [
   //
   // the hire-floor keys, because that is what recording the delivery requires — a badge nobody can
   // act on is noise (RULE 1).
-  { key: "wh.rental_intake", label: "Hire deliveries to receive", perms: ["rentals.hire.receive", "rentals.hire.manage"], tone: "attention", nav: ATTENTION_NAV.warehouses, warehouseQuery: "tab=incoming&pool=rental" },
+  { key: "wh.rental_intake", label: "Hire deliveries to receive", perms: ["rentals.hire.receive", "rentals.hire.settle", "rentals.hire.manage"], tone: "attention", nav: ATTENTION_NAV.warehouses, warehouseQuery: "tab=incoming&pool=rental" },
   { key: "wh.stock_entry_drafts", label: "Received stock to catalogue", perms: ["stock_requests.complete"], tone: "info", nav: ATTENTION_NAV.warehouses, warehouseQuery: "tab=inventory&pool=customer" },
 
   // Inventory. Both queues are the Reorder workbench, which is the only screen that lists shortfalls

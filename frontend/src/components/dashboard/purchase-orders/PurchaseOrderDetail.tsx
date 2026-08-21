@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { AlertTriangle, CalendarClock, CheckCircle2, ChevronRight, ClipboardCheck, Download, FileText, Loader2, Package, PackageCheck, PackageX, Paperclip, Pencil, ScrollText, Send, Trash2, Upload, UserRound, XCircle } from "lucide-react";
 
 import { hireWindowState } from "@/components/dashboard/rentals/hireWindow";
+import { canMoveHires, damageableNow, hireKeepsOrderOpen, hireRefusesDeliveryReversal, hireTakesDelivery, netOrdered } from "@/components/dashboard/rentals/hireActions";
 import { HireDeadline, HireStatusBadge } from "@/components/dashboard/rentals/rentalHireStatus";
 import * as poService from "@/services/purchase-order.service";
 import * as auditService from "@/services/audit.service";
@@ -21,7 +22,7 @@ import { inputCls, labelCls } from "@/components/ui/styles";
 import { actionLabel, actionTone, changeLabels, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
 import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
 import { GrnStatusBadge, formatDate as grnDate } from "@/components/dashboard/goods-in/grnStatus";
-import { ACCEPTANCE_RECORDABLE_STATUSES, PO_PRIORITY_LABELS, PoStatusBadge, RECEIVABLE_STATUSES, formatDate, formatMoney } from "./poStatus";
+import { ACCEPTANCE_RECORDABLE_STATUSES, HireStateBadge, PO_PRIORITY_LABELS, PoStatusBadge, RECEIVABLE_STATUSES, formatDate, formatMoney } from "./poStatus";
 import { Pagination } from "@/components/ui/Pagination";
 import type { AuditEntry } from "@/types/audit";
 import type { GoodsReceipt } from "@/types/goods-in";
@@ -292,9 +293,10 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   // An order carrying BOTH gets both buttons, because they are two separate arrivals: the goods and
   // the hired equipment turn up on their own vans, on their own days.
   const hasGoods = po.items.length > 0;
-  const hiresOutstanding = po.rentalItems.some(
-    (r) => r.hireStatus !== "returned" && r.quantity - (r.receivedQuantity ?? 0) > 0,
-  );
+  // Asked as "is anything still expected", never as `quantity - received > 0` — see hireActions.
+  // The subtraction still reads 3 on a hire that ordered 5, received 2 and had the rest closed
+  // short, so it put a Receive button on a line the API refuses.
+  const hiresOutstanding = po.rentalItems.some(hireTakesDelivery);
   // Kit we are actually HOLDING — what can go back, and what can be reported damaged. Asked on the
   // quantities rather than the status because a part-delivered line is `on_hire` with units still to
   // come, and the units that are here can be collected before the rest arrives.
@@ -305,13 +307,19 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   // count is of damaged UNITS, not of damage events. Without this the button opens a form with every
   // line filtered out, which reads as the feature being broken rather than as there being nothing to
   // report.
+  // Through the same cap the form and the server use — `held - damaged` hid this button on a hire
+  // still holding undamaged kit, once a damaged unit had gone back. See damageableNow.
   const hiresDamageable = po.rentalItems.some(
     (r) =>
       r.hireStatus === "on_hire" &&
-      (r.receivedQuantity ?? 0) - (r.returnedQuantity ?? 0) - (r.damagedQuantity ?? 0) > 0,
+      damageableNow({
+        receivedQuantity: r.receivedQuantity ?? 0,
+        returnedQuantity: r.returnedQuantity ?? 0,
+        damagedQuantity: r.damagedQuantity ?? 0,
+      }) > 0,
   );
   // Either hire-floor key — the same pair every /rental-receipts write route accepts.
-  const canMoveHires = can("rentals.hire.receive") || can("rentals.hire.manage");
+  const canMoveHire = canMoveHires(can);
   // Where kit can still be in our hands: the receiving window plus the order that has taken all of it.
   // `closed` is absent because closing is refused while any hire is still out.
   const HOLDING_STATUSES: string[] = [...RECEIVABLE_STATUSES, "fully_received"];
@@ -323,22 +331,25 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
   // used to allow anything but closed/cancelled, which put a Receive button on a draft order (two
   // Receive buttons with two different rules on one screen) and, worse, on `pending_approval` and
   // `approved` — statuses the service refuses, so the form was filled in and then rejected on save.
-  if (RECEIVABLE_STATUSES.includes(s) && hiresOutstanding && canMoveHires)
+  if (RECEIVABLE_STATUSES.includes(s) && hiresOutstanding && canMoveHire)
     actions.push(<ActionBtn key="receive-hire" icon={PackageCheck} primary onClick={() => router.push(`/dashboard/rentals/receive/${po.code}`)} disabled={busy}>{hasGoods ? "Receive hire" : "Receive"}</ActionBtn>);
   // Wider than receiving, and it has to be: a fully-received order is the ordinary state for a hire
   // that is out. Not primary — on an order still being delivered the arrival is the job, and the
   // return is what happens weeks later.
-  if (HOLDING_STATUSES.includes(s) && hiresHeld && canMoveHires)
+  if (HOLDING_STATUSES.includes(s) && hiresHeld && canMoveHire)
     actions.push(<ActionBtn key="return-hire" icon={PackageX} onClick={() => router.push(`/dashboard/rentals/return/${po.code}`)} disabled={busy}>Return hire</ActionBtn>);
   // Available whenever we hold the kit, because that is when it breaks. Recorded then, with a
   // photograph, it is evidence; the same fact remembered at the handover is our word against theirs.
-  if (HOLDING_STATUSES.includes(s) && hiresDamageable && canMoveHires)
+  if (HOLDING_STATUSES.includes(s) && hiresDamageable && canMoveHire)
     actions.push(<ActionBtn key="damage-hire" icon={AlertTriangle} onClick={() => router.push(`/dashboard/rentals/damage/${po.code}`)} disabled={busy}>Report damage</ActionBtn>);
   // An order whose hired equipment is still out is not finished — the service refuses it, so the
   // button says why rather than failing after the click. DISABLED and not hidden, unlike the hire
   // actions above: the answer here is something the user can go and do ("record the return"), and a
   // Close that silently vanished on a rental order would read as a missing feature.
-  const hiresOpen = po.rentalItems.some((r) => r.hireStatus !== "returned");
+  // BOTH terminal states, matching the service's own guard. Written as `!== "returned"` this kept
+  // Close disabled on an order whose last hire was CANCELLED, with a tooltip asking for a return
+  // that can never happen — while the server would have closed it.
+  const hiresOpen = po.rentalItems.some(hireKeepsOrderOpen);
   if ((s === "partially_received" || s === "fully_received") && can("purchase_orders.close"))
     actions.push(<ActionBtn key="close" icon={CheckCircle2} primary onClick={() => run(() => poService.closePurchaseOrder(po.id), "Purchase order closed.")} disabled={busy || hiresOpen} title={hiresOpen ? "Equipment is still on hire — record its return before closing." : undefined}>Close</ActionBtn>);
   if (["draft", "pending_approval", "approved", "pm_review", "sent", "supplier_accepted"].includes(s) && can("purchase_orders.cancel"))
@@ -352,8 +363,16 @@ export function PurchaseOrderDetail({ initial }: { initial: PurchaseOrder }) {
         badges={
           <>
             <PoStatusBadge status={po.status} />
-            {/* Delivery is "scheduled" once the supplier has confirmed a date. */}
-            {po.confirmedDeliveryDate && !["cancelled", "closed"].includes(po.status) && (
+            {/* WHERE THE HIRED KIT IS, beside what arrived. See hireSummary: the status answers
+                "what turned up", which on a hire is only half the question. */}
+            <HireStateBadge rentalItems={po.rentalItems} />
+            {/* Delivery is "scheduled" only while it is still AHEAD.
+                It used to show on any order that was not closed or cancelled, so a fully-received
+                order carried "Fully Received · Delivery scheduled 21 Aug" — two chips contradicting
+                each other, on goods orders as much as hires. Once anything has been booked in, the
+                delivery is not a plan any more and the receipts carry its real dates. */}
+            {po.confirmedDeliveryDate &&
+              !["cancelled", "closed", "partially_received", "fully_received"].includes(po.status) && (
               <span className="inline-block whitespace-nowrap rounded-full bg-teal-500/12 px-2.5 py-0.5 text-[11px] font-bold text-teal-600">
                 Delivery scheduled · {formatDate(po.confirmedDeliveryDate)}
               </span>
@@ -765,6 +784,19 @@ function Overview({
   // The heading rendered a hardcoded 0, and its own `count > 0` test meant the number never
   // appeared at all.
   const [movementCount, setMovementCount] = React.useState(0);
+  // Which hires will no longer take a DELIVERY reversal — the one thing the movements panel needs the
+  // order's own lines for. It knows only the ORDER's status, which says nothing about any individual
+  // hire, and the server refuses this on two counts (see hireRefusesDeliveryReversal).
+  const deliveryLockedHireLineIds = React.useMemo(
+    () => new Set(po.rentalItems.filter(hireRefusesDeliveryReversal).map((r) => r.id)),
+    [po.rentalItems],
+  );
+  // What each hire will ever hold, LIVE. The notes below store an `orderedQuantity` snapshot from the
+  // day they were written, which a later short close turns into a promise of units nobody expects.
+  const netOrderedByHireLine = React.useMemo(
+    () => new Map(po.rentalItems.map((r) => [r.id, netOrdered(r)])),
+    [po.rentalItems],
+  );
   const router = useRouter();
   return (
     <div className="space-y-4">
@@ -844,6 +876,21 @@ function Overview({
                     <td className="cell-y px-4 text-[var(--muted)]">
                       {r.quantity}
                       {r.baseUnit ? ` ${r.baseUnit}` : ""}
+                      {/* Where the rest went. This panel is where somebody holding the supplier's
+                          invoice asks it, and without this the row orders 5, sits off the receiving
+                          queue and never says why — the on-hire board answered it and the order
+                          page, which is the one reached from the invoice, did not. */}
+                      {r.cancelledQuantity > 0 && (
+                        <div
+                          className="mt-0.5 text-[11px] font-semibold text-[var(--faint)]"
+                          title={r.shortCloseReason ? `Closed short: ${r.shortCloseReason}` : undefined}
+                        >
+                          {r.receivedQuantity} received · {r.cancelledQuantity} cancelled
+                        </div>
+                      )}
+                      {r.shortCloseReason && (
+                        <div className="mt-0.5 max-w-[12rem] text-[11px] text-[var(--faint)]">{r.shortCloseReason}</div>
+                      )}
                     </td>
                     <td className="cell-y px-4 text-[var(--muted)]">
                       {formatDate(r.hireStartDate)} → {formatDate(r.hireEndDate)}
@@ -958,7 +1005,7 @@ function Overview({
                 and neither adds anything to stock.
               </p>
             </div>
-            <HireDeliveries purchaseOrderId={po.id} poStatus={po.status} onChanged={() => onOrderChanged?.()} onCount={setMovementCount} />
+            <HireDeliveries purchaseOrderId={po.id} poStatus={po.status} deliveryLockedHireLineIds={deliveryLockedHireLineIds} netOrderedByHireLine={netOrderedByHireLine} onChanged={() => onOrderChanged?.()} onCount={setMovementCount} />
           </div>
         </div>
       )}

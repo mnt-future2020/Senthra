@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import { daysBetween } from "../../utils/calendar-day.js";
 import {
   HIRE_STATUSES,
+  isTerminalHireStatus,
+  TERMINAL_HIRE_STATUSES,
   atWarehouses,
   awaitingDeliveryWhere,
   computeNotifyOnDate,
@@ -98,8 +100,19 @@ describe("the hire predicates", () => {
 describe("HIRE_STATUSES", () => {
   // One list, so validation, the predicates and the UI can never disagree about what a hire can be.
   // In LIFE ORDER: committed to the provider, in our hands, sent back.
-  it("is exactly awaiting_delivery, on_hire and returned", () => {
-    expect([...HIRE_STATUSES]).toEqual(["awaiting_delivery", "on_hire", "returned"]);
+  it("is exactly awaiting_delivery, on_hire, returned and cancelled", () => {
+    expect([...HIRE_STATUSES]).toEqual(["awaiting_delivery", "on_hire", "returned", "cancelled"]);
+  });
+
+  // `cancelled` is the exit for a hire nothing arrived against; `returned` for one that ran. A
+  // purchase order closes on either, and every write path refuses both — one list so the close guard
+  // and the writers cannot drift into disagreeing about what "finished" means.
+  it("treats returned and cancelled — and only those — as terminal", () => {
+    expect([...TERMINAL_HIRE_STATUSES]).toEqual(["returned", "cancelled"]);
+    expect(isTerminalHireStatus("returned")).toBe(true);
+    expect(isTerminalHireStatus("cancelled")).toBe(true);
+    expect(isTerminalHireStatus("on_hire")).toBe(false);
+    expect(isTerminalHireStatus("awaiting_delivery")).toBe(false);
   });
 });
 
@@ -115,14 +128,14 @@ describe("awaiting delivery", () => {
   it("is a queue of outstanding UNITS, not of a status", () => {
     const w = awaitingDeliveryWhere();
     expect(w.fullyReceived).toBe(false);
-    expect(w.hireStatus).toEqual({ not: "returned" });
+    expect(w.hireStatus).toEqual({ notIn: ["returned", "cancelled"] });
     expect(onHireWhere().hireStatus).toBe("on_hire");
   });
 
   // A hire that went back is finished whatever its quantities say — without this a part-delivered,
   // then-returned line would sit in the receiving queue forever.
   it("excludes a returned hire even with units never delivered", () => {
-    expect(awaitingDeliveryWhere().hireStatus).toEqual({ not: "returned" });
+    expect(awaitingDeliveryWhere().hireStatus).toEqual({ notIn: ["returned", "cancelled"] });
     // The chase badge asks for `awaiting_delivery` outright, so `returned` is excluded a fortiori —
     // and, unlike "not returned", it also stays clear of the two on_hire badges it shares a sidebar
     // row with. See "the three Inventory hire badges never count one line twice" below.
@@ -254,7 +267,7 @@ describe("atWarehouses", () => {
     expect(w.purchaseOrder.is.OR).toEqual([{ deletedAt: null }, { deletedAt: { isSet: false } }]);
     // The queue's own terms survive the narrowing — it asks for outstanding UNITS, not for a status.
     expect(w.fullyReceived).toBe(false);
-    expect(w.hireStatus).toEqual({ not: "returned" });
+    expect(w.hireStatus).toEqual({ notIn: ["returned", "cancelled"] });
   });
 
   // An unscoped actor (an admin who can reach every warehouse) must not be narrowed to none.

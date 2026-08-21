@@ -11,6 +11,8 @@ import { Pagination } from "@/components/ui/Pagination";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { PoCodeLink } from "@/components/dashboard/purchase-orders/PoCodeLink";
 import type { OnHireLine } from "@/types/rental";
+import { canMoveHires, canSettleHires, netOrdered } from "@/components/dashboard/rentals/hireActions";
+import { CloseHireShortModal, type CloseHireShortTarget } from "@/components/dashboard/rentals/CloseHireShortModal";
 
 // The warehouse's HIRE receiving queue: supplier-owned equipment on its way here, waiting for somebody
 // to confirm it arrived.
@@ -80,8 +82,13 @@ function QueueSkeleton() {
 // body, i.e. a cascading render on every warehouse switch.
 export function AwaitingHireDeliveries({ warehouseId }: { warehouseId: string }) {
   const { can } = useAuth();
-  // Either hire-floor key — the same pair every /rental-receipts write route accepts.
-  const canReceive = can("rentals.hire.receive") || can("rentals.hire.manage");
+  // Either hire-floor key — the same list every /rental-receipts write route accepts.
+  const canReceive = canMoveHires(can);
+  // The other answer this queue needs. Every row here is a hire still waiting for units, and the
+  // person reading it is the one the driver just told there is no third one — so the decision that
+  // takes the row OFF this queue belongs on the row, not three screens away on the on-hire board.
+  const canSettle = canSettleHires(can);
+  const [shortClosing, setShortClosing] = React.useState<CloseHireShortTarget | null>(null);
   const [rows, setRows] = React.useState<OnHireLine[] | null>(null);
   const [total, setTotal] = React.useState(0);
   const [page, setPage] = React.useState(1);
@@ -169,14 +176,40 @@ export function AwaitingHireDeliveries({ warehouseId }: { warehouseId: string })
                     {r.deliveryAddress ?? <span className="text-[var(--faint)]">{r.deliveryLocation.label}</span>}
                   </td>
                   <td className="cell-y px-4 text-[var(--muted)]">
-                    {r.quantity - r.receivedQuantity}
+                    {/* Against what the hire will EVER hold. A short-closed line leaves this queue
+                        (`fullyReceived` takes it off `awaitingDeliveryWhere`), so this is belt to that
+                        braces — but a denominator that is right only because a predicate elsewhere
+                        filters the rows is a denominator waiting to be wrong. */}
+                    {netOrdered(r) - r.receivedQuantity}
                     {r.receivedQuantity > 0 && (
                       <span className="ml-1.5 text-[11px] text-[var(--faint)]">
-                        of {r.quantity} · {r.receivedQuantity} already here
+                        of {netOrdered(r)} · {r.receivedQuantity} already here
                       </span>
                     )}
                   </td>
                   <td className="cell-y px-4 text-right">
+                    {/* Secondary to Receive, and deliberately so: the ordinary answer to a row on this
+                        queue is that the kit turns up. Writing the rest off is the exception, and it
+                        needs a reason. */}
+                    {canSettle && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setShortClosing({
+                            purchaseOrderId: r.purchaseOrderId,
+                            lineId: r.id,
+                            poCode: r.purchaseOrderCode,
+                            itemName: r.itemName,
+                            quantity: r.quantity,
+                            receivedQuantity: r.receivedQuantity,
+                            returnedQuantity: r.returnedQuantity,
+                          })
+                        }
+                        className="mr-1.5 inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-[11px] font-bold text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)]"
+                      >
+                        Close short
+                      </button>
+                    )}
                     {canReceive && (
                       // The ORDER, not the row: one van arrives with several lines on one delivery
                       // note, and a per-row action would mint a separate delivery record for each.
@@ -204,6 +237,15 @@ export function AwaitingHireDeliveries({ warehouseId }: { warehouseId: string })
           />
         </div>
       </div>
+
+      {/* The same component the on-hire board mounts — one place the wording lives, and it differs by
+          case in a way the user cannot infer. Closing short takes the row off this very queue, so the
+          list reloads behind it. */}
+      <CloseHireShortModal
+        target={shortClosing}
+        onClose={() => setShortClosing(null)}
+        onDone={() => setReloadKey((k) => k + 1)}
+      />
     </div>
   );
 }

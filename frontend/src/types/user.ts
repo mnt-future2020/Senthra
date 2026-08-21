@@ -14,6 +14,26 @@ export interface AssignedWarehouse {
   name: string;
 }
 
+/**
+ * One row of the staff DIRECTORY — what `GET /users` returns.
+ *
+ * Deliberately narrower than `User`: the list is read by anyone with `users.view`, so it carries
+ * who someone is and what they can do, and none of the personnel record (date of birth, gender,
+ * home address, notes, phone) or anything about their credentials. The full record comes from the
+ * single-user read, `getUser(id)`.
+ */
+export interface DirectoryUser {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  status: UserStatus;
+  profileImageUrl: string | null;
+  role: UserRoleRef | null;
+  employeeId: string | null;
+  createdAt: string;
+}
+
 export interface User {
   id: string;
   firstName: string;

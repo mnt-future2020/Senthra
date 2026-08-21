@@ -337,3 +337,17 @@ export const extendHireSchema = z.object({
     .optional(),
 });
 export type ExtendHireInput = z.infer<typeof extendHireSchema>;
+
+// Closing a hire short — the outstanding units are never arriving.
+//
+// The reason is REQUIRED and cannot be blank, exactly as it is on a customer stock assignment's short
+// close: this write is the only record that the shortfall was a decision rather than an oversight,
+// and "where did the other three go?" is the one question anyone asks of the line afterwards.
+export const closeHireShortSchema = z.object({
+  reason: z
+    .string({ error: "Give a reason for closing this hire short." })
+    .trim()
+    .min(1, "Give a reason for closing this hire short.")
+    .max(500, "Keep the reason under 500 characters."),
+});
+export type CloseHireShortInput = z.infer<typeof closeHireShortSchema>;

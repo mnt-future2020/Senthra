@@ -8,7 +8,7 @@ export type RentalStatus = "active" | "inactive";
 // Mirrors the server's HIRE_STATUSES (rentalHire.predicate.ts), in life order. A hire starts
 // AWAITING DELIVERY: the purchase order commits us to the provider, but the kit is not ours until the
 // warehouse confirms it arrived — and no return deadline applies before that.
-export type HireStatus = "awaiting_delivery" | "on_hire" | "returned";
+export type HireStatus = "awaiting_delivery" | "on_hire" | "returned" | "cancelled";
 
 export interface RentalCategory {
   id: string;
@@ -114,8 +114,13 @@ export interface PoRentalLine extends Omit<PrfRentalLine, "rentalItem"> {
   hireStatus: HireStatus;
   /** Ordered vs actually arrived — a part delivery is ordinary, and every screen has to show it. */
   receivedQuantity: number;
-  /** Every ordered unit is here — what takes the line off the receiving queue. */
+  /** Nothing more is expected — every unit arrived, or the rest was closed short. */
   fullyReceived: boolean;
+  /** Ordered units recorded as never arriving, and why. `received + cancelled = ordered`. */
+  cancelledQuantity: number;
+  shortClosedAt: string | null;
+  shortClosedBy: string | null;
+  shortCloseReason: string | null;
   /** What has gone BACK, and whether everything we hold has. The return form caps on these. */
   returnedQuantity: number;
   fullyReturned: boolean;
@@ -158,6 +163,9 @@ export interface OnHireLine {
   /** How much of this hire is actually here, and how much has already gone back. */
   receivedQuantity: number;
   fullyReceived: boolean;
+  /** Ordered units recorded as never arriving, and why — the row shows "2 of 5 · 3 cancelled". */
+  cancelledQuantity: number;
+  shortCloseReason: string | null;
   returnedQuantity: number;
   fullyReturned: boolean;
   /** Reported damaged while with us — what the warehouse's rental pane filters on. */
@@ -211,7 +219,7 @@ export interface OnHireLine {
 // `returned` is the odd one out and belongs here anyway: every other value narrows the LIVE hires and
 // it selects the finished ones — the same rows at the end of the same life, and the only place a
 // completed hire can be found. Every other rental surface is live-only by design.
-export type OnHireFilter = "all" | "expiring" | "overdue" | "awaiting" | "late" | "returned";
+export type OnHireFilter = "all" | "expiring" | "overdue" | "awaiting" | "late" | "returned" | "cancelled";
 
 // ── Hire deliveries ─────────────────────────────────────────────────────────────────────────────
 //

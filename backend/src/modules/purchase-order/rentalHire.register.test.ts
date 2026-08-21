@@ -10,7 +10,7 @@ vi.mock("./purchase-order.repository.js", () => ({
   listOnHire: vi.fn(),
   findManyExtensions: vi.fn(),
   countExtensions: vi.fn(),
-  ON_HIRE_STATUSES: ["all", "expiring", "overdue", "awaiting", "late", "returned"],
+  ON_HIRE_STATUSES: ["all", "expiring", "overdue", "awaiting", "late", "returned", "cancelled"],
 }));
 vi.mock("#modules/rental-receipt/rental-receipt.repository.js", () => ({ movementDatesByHireLine: vi.fn() }));
 vi.mock("#modules/settings/settings.service.js", () => ({
@@ -202,9 +202,30 @@ describe("the hire export", () => {
     expect(await valueOf("Reminder Due (Europe/London)")).toBe("");
   });
 
+  // The same is true of a CANCELLED hire, and more so: nothing ever arrived, so there was never a
+  // deadline to be past. A row reading "Days Remaining -14" in the register is the countdown of a
+  // hire that did not happen.
+  it("stops counting down on a hire that never happened either", async () => {
+    listRepo.mockResolvedValue({ rows: [hireRow({ hireStatus: "cancelled" })], total: 1 });
+    expect(await valueOf("Days Remaining")).toBe("");
+    expect(await valueOf("Reminder Due (Europe/London)")).toBe("");
+  });
+
   it("still counts down on a live one", async () => {
     listRepo.mockResolvedValue({ rows: [hireRow({ hireStatus: "on_hire" })], total: 1 });
     expect(await valueOf("Days Remaining")).not.toBe("");
+  });
+
+  // Without these the file has the same hole the screen had before the badge was added: a row
+  // ordering 5 and receiving 2, off the receiving queue, with nothing saying where the other 3 went.
+  // The board shows it; a period report reconciled against a supplier invoice needs it more.
+  it("carries the shortfall and the reason it was written off", async () => {
+    listRepo.mockResolvedValue({
+      rows: [hireRow({ quantity: 5, receivedQuantity: 2, cancelledQuantity: 3, shortCloseReason: "Supplier cannot supply" })],
+      total: 1,
+    });
+    expect(await valueOf("Cancelled Qty")).toBe("3");
+    expect(await valueOf("Short Close Reason")).toBe("Supplier cannot supply");
   });
 
   it("reports what arrived, what went back and what came back broken", async () => {

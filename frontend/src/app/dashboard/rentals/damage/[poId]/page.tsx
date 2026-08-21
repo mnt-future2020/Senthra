@@ -4,6 +4,7 @@ import { useParams } from "next/navigation";
 
 import { PermissionGate } from "@/components/auth/PermissionGate";
 import { HireMovementForm } from "@/components/dashboard/rentals/HireMovementForm";
+import { HIRE_FLOOR_PERMISSIONS } from "@/components/dashboard/rentals/hireActions";
 
 // Reporting damage found while hired kit is WITH US — the third leg, and the one that moves nothing.
 //
@@ -14,7 +15,7 @@ export default function ReportHireDamagePage() {
   const params = useParams();
   const poId = String(params.poId);
   return (
-    <PermissionGate anyOf={["rentals.hire.receive", "rentals.hire.manage"]}>
+    <PermissionGate anyOf={HIRE_FLOOR_PERMISSIONS}>
       <HireMovementForm key={poId} poId={poId} direction="damage" />
     </PermissionGate>
   );

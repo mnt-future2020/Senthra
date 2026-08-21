@@ -4,6 +4,7 @@ import { useParams } from "next/navigation";
 
 import { PermissionGate } from "@/components/auth/PermissionGate";
 import { HireMovementForm } from "@/components/dashboard/rentals/HireMovementForm";
+import { HIRE_FLOOR_PERMISSIONS } from "@/components/dashboard/rentals/hireActions";
 
 // Handing hired kit BACK. The same screen as receiving, in the other direction — see HireMovementForm
 // for why that is one component and not two.
@@ -15,7 +16,7 @@ export default function ReturnHirePage() {
   const params = useParams();
   const poId = String(params.poId);
   return (
-    <PermissionGate anyOf={["rentals.hire.receive", "rentals.hire.manage"]}>
+    <PermissionGate anyOf={HIRE_FLOOR_PERMISSIONS}>
       <HireMovementForm key={poId} poId={poId} direction="out" />
     </PermissionGate>
   );

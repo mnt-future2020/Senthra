@@ -10,7 +10,6 @@ import { useDashboard } from "@/hooks/useDashboard";
 import { useRentalHireStream } from "@/hooks/useRentalHireStream";
 import * as rentalService from "@/services/rental.service";
 import type { OnHireFilter, OnHireLine } from "@/types/rental";
-import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Modal } from "@/components/ui/Modal";
 import { ExportButton } from "@/components/ui/ExportButton";
 import { Pagination } from "@/components/ui/Pagination";
@@ -21,6 +20,8 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { PoCodeLink } from "@/components/dashboard/purchase-orders/PoCodeLink";
 import { CELL_ONE_LINE, colClass, tableMinWidth } from "@/components/ui/tableLayout";
 import { inputCls } from "@/components/ui/styles";
+import { CloseHireShortModal, type CloseHireShortTarget } from "./CloseHireShortModal";
+import { canManageHires, canMoveHires, canSettleHires, hireTakesDelivery } from "./hireActions";
 import { daysRemainingLabel } from "./hireWindow";
 import { HireDeadline } from "./rentalHireStatus";
 
@@ -66,6 +67,11 @@ const FILTERS: { id: OnHireFilter; label: string }[] = [
   // every rental screen at once and survive only inside the movement panel of an order you had to
   // already know the number of.
   { id: "returned", label: "Returned" },
+  // Hires that never happened — ordered, nothing ever arrived, closed short with a reason. Kept OUT
+  // of "Returned" because that pill is the finance register and this is not hire spend; kept here
+  // rather than nowhere because a record you can create and then find on no screen is a record
+  // nobody can audit.
+  { id: "cancelled", label: "Cancelled" },
 ];
 
 /** How the actual hire compared with the one that was billed. Null when they agree. */
@@ -93,9 +99,13 @@ export function OnHireView() {
   const searchParams = useSearchParams();
   // Extending commits money and is the commercial key; recording a physical movement is the floor's,
   // and `manage` is a superset of it. Two questions, because the answer differs for a warehouse user.
-  const canExtend = can("rentals.hire.manage");
-  const canMove = can("rentals.hire.receive") || canExtend;
-  const canAct = canExtend || canMove;
+  // THREE different answers, because the server now asks three different questions. Extending
+  // commits fresh money (`manage`); closing short corrects what the supplier still owes (`settle`,
+  // which the warehouse holds); moving kit is the floor's own work.
+  const canExtend = canManageHires(can);
+  const canSettle = canSettleHires(can);
+  const canMove = canMoveHires(can);
+  const canAct = canExtend || canSettle || canMove;
 
   // CLAMPED to a pill this screen actually offers. The server still resolves `awaiting`, which the
   // warehouse's intake pane calls directly — but reached through the URL it would filter the list
@@ -105,7 +115,8 @@ export function OnHireView() {
   const status: OnHireFilter = FILTERS.some((f) => f.id === requested) ? requested! : "all";
   // A FINISHED hire is read, not worked: no deadline to colour, no next step to offer, and the
   // questions asked of it are what it cost and how long it was really held. Same table, two jobs.
-  const finished = status === "returned";
+  // Both terminal pills are read-only — a cancelled hire has even less to act on than a returned one.
+  const finished = status === "returned" || status === "cancelled";
   const page = Math.max(1, Number(searchParams.get("page")) || 1);
 
   // Memoised because the debounced search effect depends on it — a fresh function every render would
@@ -138,7 +149,10 @@ export function OnHireView() {
   const [error, setError] = React.useState<string | null>(null);
   const [reloadKey, setReloadKey] = React.useState(0);
 
-  const [returning, setReturning] = React.useState<OnHireLine | null>(null);
+  // Closing short needs a REASON, so it is a form rather than a confirm — the reason is the only
+  // record that the shortfall was a decision and not an oversight. Shared with the receiving screen,
+  // which offers the same decision to the warehouse manager who is the one being told it.
+  const [shortClosing, setShortClosing] = React.useState<CloseHireShortTarget | null>(null);
   const [extending, setExtending] = React.useState<OnHireLine | null>(null);
   // The agreed extension charge, in pounds. Left empty it means "whatever the rate calculates".
   /**
@@ -200,21 +214,6 @@ export function OnHireView() {
   // Somebody in the yard books a hire in or hands one back while this board is open. Without it the
   // row keeps offering "Receive" for equipment that is already here.
   useRentalHireStream(React.useCallback(() => setReloadKey((k) => k + 1), []));
-
-  const doReturn = async () => {
-    if (!returning || busy) return;
-    setBusy(true);
-    try {
-      await rentalService.markHireReturned(returning.purchaseOrderId, returning.id);
-      pushToast("Hire marked returned.", "success");
-      setReturning(null);
-      setReloadKey((k) => k + 1);
-    } catch (e) {
-      pushToast(e instanceof Error ? e.message : "Could not mark it returned.", "alert");
-    } finally {
-      setBusy(false);
-    }
-  };
 
   // Mirrors the server's extensionChargePence: reprice the whole hire, subtract the old price.
   const calculatedExtra = React.useMemo(() => {
@@ -399,6 +398,17 @@ export function OnHireView() {
                           {r.receivedQuantity} here
                         </span>
                       )}
+                      {/* What the row would otherwise not add up to: a line reading "5 · 2 here" that
+                          is off the receiving queue looks broken until it says the other three were
+                          written off, and why. */}
+                      {r.cancelledQuantity > 0 && (
+                        <span
+                          className="ml-1.5 whitespace-nowrap text-[10px] font-semibold text-[var(--muted)]"
+                          title={r.shortCloseReason ? `Closed short: ${r.shortCloseReason}` : "Recorded as never arriving"}
+                        >
+                          {r.cancelledQuantity} cancelled
+                        </span>
+                      )}
                       {r.extensionCharge > 0 && (
                         <span className="ml-1.5 whitespace-nowrap text-[10px] font-semibold text-[var(--warn,#d97706)]" title="Charged by extending this hire. Not included in the purchase order's total.">
                           +{formatMoney(r.extensionCharge)}
@@ -493,15 +503,27 @@ export function OnHireView() {
                               Extend
                             </button>
                           )}
-                          {/* The quick close, kept for the hire that simply ended — the supplier
-                              collected from site, an engineer handed it back. It writes no handover
-                              record, which is why it is the SECONDARY action next to "Return". */}
-                          {canExtend && r.hireStatus === "on_hire" && (
+                          {/* The exit for a hire whose outstanding units are never arriving. Offered
+                              only when some ARE outstanding — the server refuses it otherwise, and a
+                              button that can only fail is not an option. Without it a part- or
+                              never-delivered hire had no terminal state at all: it sat on the intake
+                              queue forever and its order could never close. */}
+                          {canSettle && hireTakesDelivery(r) && (
                             <button
-                              onClick={() => setReturning(r)}
+                              onClick={() =>
+                                setShortClosing({
+                                  purchaseOrderId: r.purchaseOrderId,
+                                  lineId: r.id,
+                                  poCode: r.purchaseOrderCode,
+                                  itemName: r.itemName,
+                                  quantity: r.quantity,
+                                  receivedQuantity: r.receivedQuantity,
+                                  returnedQuantity: r.returnedQuantity,
+                                })
+                              }
                               className="rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-[11px] font-bold text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)]"
                             >
-                              Mark returned
+                              Close short
                             </button>
                           )}
                           {/* One primary action per row, and it is the NEXT step in the hire's life:
@@ -547,26 +569,11 @@ export function OnHireView() {
         )}
       </div>
 
-      <ConfirmDialog
-        open={Boolean(returning)}
-        title="Mark hire returned"
-        confirmLabel="Mark returned"
-        busy={busy}
-        onClose={() => setReturning(null)}
-        onConfirm={doReturn}
-        message={
-          <>
-            Mark <strong className="text-[var(--ink)]">{returning?.itemName}</strong> on{" "}
-            {returning?.purchaseOrderCode} as returned? It comes off the deadline alerts.
-            {/* Said out loud, because it is the difference between the two paths and it cannot be
-                added afterwards: nobody can photograph a handover that has already happened. */}
-            <span className="mt-2 block text-[11px] text-[var(--muted)]">
-              This records no handover — no date, collector, condition or photos. Use{" "}
-              <strong className="text-[var(--ink)]">Return</strong> instead if the supplier is
-              collecting and the condition it goes back in might be argued about.
-            </span>
-          </>
-        }
+      {/* See CloseHireShortModal for why the wording lives in a component of its own. */}
+      <CloseHireShortModal
+        target={shortClosing}
+        onClose={() => setShortClosing(null)}
+        onDone={() => setReloadKey((k) => k + 1)}
       />
 
       <Modal open={Boolean(extending)} onClose={closeExtend} title="Extend hire">

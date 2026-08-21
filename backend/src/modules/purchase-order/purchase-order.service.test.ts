@@ -1354,3 +1354,68 @@ describe("purchase order — late hire delivery flag", () => {
     expect((await getPurchaseOrder(PO_ID)).lateHireDelivery).toBeNull();
   });
 });
+
+// ── A cancelled order must not strand the supplier's kit ───────────────────────────────────────
+//
+// Cancelling is a one-way door with no way back through it: every hire predicate excludes a cancelled
+// order (rentalHire.predicate's LIVE_ORDER) and the return path only accepts one in the receiving
+// window, so a hire caught by it could never be handed back. Its equipment would sit in the yard on
+// no list, no badge and no report.
+describe("cancelPurchaseOrder — hired kit still in our hands", () => {
+  const held = (over: Record<string, unknown> = {}) => ({
+    id: "rl1",
+    itemName: "Fibre Tester",
+    quantity: 5,
+    receivedQuantity: 3,
+    returnedQuantity: 0,
+    hireStatus: "on_hire",
+    ...over,
+  });
+
+  it("refuses while units are still held, naming how many", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "sent", rentalItems: [held()] }));
+    await expect(cancelPurchaseOrder(PO_ID, "No longer needed")).rejects.toThrow(
+      /3 Fibre Tester are still on hire here/i,
+    );
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  // Asked on the QUANTITIES, not the status: a part-delivered line whose delivered units have all
+  // gone back is still `on_hire` and holds nothing, so blocking on the status would refuse a
+  // cancellation that is perfectly safe.
+  it("allows it once everything received has gone back, even while the line reads on_hire", async () => {
+    mockFindById.mockResolvedValue(
+      poRow({ status: "sent", rentalItems: [held({ receivedQuantity: 3, returnedQuantity: 3 })] }),
+    );
+    await expect(cancelPurchaseOrder(PO_ID, "No longer needed")).resolves.toMatchObject({ status: "cancelled" });
+  });
+
+  // Cancelling the order is the RIGHT way to end a hire that never arrived — those lines leave every
+  // queue with it, so there is nothing to strand.
+  it("allows it for a hire that never arrived", async () => {
+    mockFindById.mockResolvedValue(
+      poRow({
+        status: "sent",
+        rentalItems: [held({ hireStatus: "awaiting_delivery", receivedQuantity: 0, returnedQuantity: 0 })],
+      }),
+    );
+    await expect(cancelPurchaseOrder(PO_ID, "Supplier cannot supply")).resolves.toMatchObject({ status: "cancelled" });
+  });
+
+  // The close guard's other half: a hire cancelled in its own right is finished, so it must not hold
+  // its order open forever.
+  it("closePurchaseOrder accepts a cancelled hire as finished", async () => {
+    mockFindById.mockResolvedValue(
+      poRow({
+        status: "fully_received",
+        rentalItems: [held({ hireStatus: "cancelled", receivedQuantity: 0, returnedQuantity: 0 })],
+      }),
+    );
+    await expect(closePurchaseOrder(PO_ID)).resolves.toMatchObject({ status: "closed" });
+  });
+
+  it("closePurchaseOrder still refuses a hire that is genuinely still out", async () => {
+    mockFindById.mockResolvedValue(poRow({ status: "fully_received", rentalItems: [held()] }));
+    await expect(closePurchaseOrder(PO_ID)).rejects.toThrow(/still on hire/i);
+  });
+});

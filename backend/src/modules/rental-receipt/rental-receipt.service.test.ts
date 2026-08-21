@@ -8,6 +8,7 @@ vi.mock("./rental-receipt.repository.js", () => ({
   reverseReceipt: vi.fn(),
   updateDamageCharges: vi.fn(),
   receivedTotalsByLine: vi.fn(),
+  damagedTotalsByLine: vi.fn(),
   hireLinesForOrderTx: vi.fn(),
   addAttachment: vi.fn(),
   findAttachment: vi.fn(),
@@ -66,6 +67,9 @@ const createWithCode = vi.mocked(receiptRepo.createWithCode);
 const reverseReceipt = vi.mocked(receiptRepo.reverseReceipt);
 const findReceipt = vi.mocked(receiptRepo.findById);
 const receivedTotals = vi.mocked(receiptRepo.receivedTotalsByLine);
+// Damage is counted across BOTH the notes that can record it — a report and a collection note — so
+// the reversal recompute reads its own total rather than the direction-filtered one.
+const damagedTotals = vi.mocked(receiptRepo.damagedTotalsByLine);
 
 // A stand-in transaction client. reverseReceipt now takes the RECOMPUTE rather than its result and
 // runs it against the transaction that writes the answer, so a test that wants to see the updates
@@ -151,6 +155,7 @@ beforeEach(() => {
   vi.mocked(receiptRepo.hireLinesForOrderTx).mockImplementation(
     (async () => ((await findPo(PO_ID)) as unknown as { rentalItems: [] } | null)?.rentalItems ?? []) as never,
   );
+  damagedTotals.mockResolvedValue(new Map());
 });
 
 // A delivery of hired kit is a RECORD, not an assertion: quantities, condition, the supplier's asset
@@ -423,6 +428,26 @@ describe("reverseRentalReceipt", () => {
     expect(reverseReceipt).not.toHaveBeenCalled();
   });
 
+  // Reversing the delivery is the one movement that can UNDO half a short close. The recompute owns
+  // `receivedQuantity`, `fullyReceived` and the status; it knows nothing about `cancelledQuantity`,
+  // so it would put the line back on the intake queue while the shortfall it cannot reach stays
+  // recorded beside it — `received + cancelled = ordered`, the invariant that column exists for,
+  // quietly broken. And the line could never take a delivery again, because `shortClosedAt` refuses
+  // one. Refused whole, for the same reason a delivery is: reopening a short close is a decision to
+  // make deliberately, not a side effect of correcting a note.
+  it("refuses to reverse a delivery against a hire that was closed short", async () => {
+    findPo.mockResolvedValue(
+      po({
+        rentalItems: [
+          hire({ quantity: 5, receivedQuantity: 2, fullyReceived: true, hireStatus: "on_hire", shortClosedAt: new Date("2026-09-05") }),
+        ],
+      }),
+    );
+    await expect(reverseRentalReceipt(RECEIPT_ID, { reason: "recorded twice" }, ACTOR)).rejects.toThrow(
+      /closed short/i,
+    );
+  });
+
   // A PARTIAL return leaves the line `on_hire`, so a status-only guard let this through: reverse the
   // delivery afterwards and the line has returned more than it ever received. `held` goes negative,
   // every screen clamps it to zero, and the warehouse pane — which lists `held > 0` — drops the one
@@ -596,6 +621,80 @@ describe("createRentalReturn", () => {
   });
 });
 
+// ── Damage counted ONCE, across both notes that can record it ───────────────────────────────────
+//
+// A damage report and a return note can each carry `damagedQuantity` and a charge. They wrote to
+// different places — the report moved the hire's own tally, the return moved nothing — while the
+// charge total summed BOTH (movementDatesByHireLine takes every note that is not a delivery). So the
+// same broken unit reported in week one and named again on the collection note six weeks later was
+// billed twice, and the tally it was billed against said one.
+describe("damage is a count of UNITS, and both notes that record it share the count", () => {
+  const onHire = (over: Record<string, unknown> = {}) =>
+    hire({ receivedQuantity: 3, fullyReceived: true, hireStatus: "on_hire", ...over });
+  const ret = (damagedQuantity: number, returnedQuantity = 3) =>
+    ({
+      purchaseOrderId: PO_ID,
+      returnDate: new Date("2026-09-10"),
+      lines: [{ purchaseOrderRentalLineId: LINE_ID, returnedQuantity, damagedQuantity }],
+    }) as never;
+
+  beforeEach(() => {
+    findPo.mockResolvedValue(po({ status: "fully_received", rentalItems: [onHire()] }));
+  });
+
+  it("moves the hire's damaged tally, so a return is not invisible to every screen that counts it", async () => {
+    await createRentalReturn(ret(1), ACTOR);
+    const updates = createWithCode.mock.calls[0]![2] as { data: Record<string, unknown> }[];
+    expect(updates[0]!.data).toMatchObject({ damagedQuantity: 1 });
+  });
+
+  it("adds to what is already on file rather than starting again", async () => {
+    findPo.mockResolvedValue(po({ status: "fully_received", rentalItems: [onHire({ damagedQuantity: 1 })] }));
+    await createRentalReturn(ret(1), ACTOR);
+    const updates = createWithCode.mock.calls[0]![2] as { data: Record<string, unknown> }[];
+    expect(updates[0]!.data).toMatchObject({ damagedQuantity: 2 });
+  });
+
+  // THE BUG. All three units already reported damaged; the collection note names one of them again
+  // and carries the supplier's invoice. Nothing refused it, and the charge total took both.
+  it("refuses a return that re-reports units already recorded damaged", async () => {
+    findPo.mockResolvedValue(po({ status: "fully_received", rentalItems: [onHire({ damagedQuantity: 3 })] }));
+    await expect(createRentalReturn(ret(1), ACTOR)).rejects.toThrow(/already reported damaged/i);
+    expect(createWithCode).not.toHaveBeenCalled();
+  });
+
+  it("still allows damage discovered AT the collection, on units nobody had reported", async () => {
+    findPo.mockResolvedValue(po({ status: "fully_received", rentalItems: [onHire({ damagedQuantity: 1 })] }));
+    await createRentalReturn(ret(2), ACTOR);
+    const updates = createWithCode.mock.calls[0]![2] as { data: Record<string, unknown> }[];
+    expect(updates[0]!.data).toMatchObject({ damagedQuantity: 3 });
+  });
+
+  // Same optimistic contract the other two columns on this write already use: the new total is
+  // DERIVED from the one read a moment ago, so a damage report landing in the window must lose.
+  it("pins the write to the tally the new total was computed from", async () => {
+    findPo.mockResolvedValue(po({ status: "fully_received", rentalItems: [onHire({ damagedQuantity: 1 })] }));
+    await createRentalReturn(ret(1), ACTOR);
+    const updates = createWithCode.mock.calls[0]![2] as { expect: Record<string, unknown> }[];
+    expect(updates[0]!.expect).toMatchObject({ damagedQuantity: 1 });
+  });
+
+  // The cap is against units NEVER recorded damaged, not against what is held — a unit that went back
+  // damaged is off the site but still on the record, and the two undamaged ones behind it can still
+  // break. `held - alreadyDamaged` would refuse the second of them.
+  it("still lets the units nobody has reported be reported, after a damaged one went back", async () => {
+    findPo.mockResolvedValue(
+      po({ rentalItems: [onHire({ returnedQuantity: 1, damagedQuantity: 1 })] }),
+    );
+    await reportHireDamage(
+      { purchaseOrderId: PO_ID, reportedDate: new Date("2026-08-25"), conditionNotes: "Both cracked.", lines: [{ purchaseOrderRentalLineId: LINE_ID, damagedQuantity: 2 }] } as never,
+      ACTOR,
+    );
+    const [, , updates] = createWithCode.mock.calls[0]!;
+    expect(updates[0]!.data).toMatchObject({ damagedQuantity: 3 });
+  });
+});
+
 // The third direction: a six-week hire breaks in the MIDDLE of a hire, and a photograph taken then is
 // evidence. The same fact typed into a return note six weeks later is our word against the supplier's.
 describe("reportHireDamage", () => {
@@ -715,7 +814,9 @@ describe("reverseRentalReceipt: returns and damage", () => {
     const updates = await updatesOf();
     expect(updates[0]).toEqual({
       id: LINE_ID,
-      data: { returnedQuantity: 0, fullyReturned: false, hireStatus: "on_hire", returnedAt: null, returnedBy: null },
+      // `damagedQuantity` rides along because a collection note can record damage — reversing one
+      // gives that back with the rest of what it claimed.
+      data: { returnedQuantity: 0, fullyReturned: false, damagedQuantity: 0, hireStatus: "on_hire", returnedAt: null, returnedBy: null },
     });
   });
 
@@ -733,7 +834,7 @@ describe("reverseRentalReceipt: returns and damage", () => {
     const updates = await updatesOf();
     expect(updates[0]).toEqual({
       id: LINE_ID,
-      data: { returnedQuantity: 1, fullyReturned: false, hireStatus: "on_hire", returnedAt: null, returnedBy: null },
+      data: { returnedQuantity: 1, fullyReturned: false, damagedQuantity: 0, hireStatus: "on_hire", returnedAt: null, returnedBy: null },
     });
   });
 
@@ -759,16 +860,56 @@ describe("reverseRentalReceipt: returns and damage", () => {
       }),
     );
     reverseReturning(returnRow({ direction: "damage", reversedAt: new Date() }));
-    // 2 damaged still on file across live reports; this one carried 1.
-    receivedTotals.mockResolvedValue(new Map([[LINE_ID, 2]]));
+    // 2 damaged still on file across every live note; this one carried 1.
+    damagedTotals.mockResolvedValue(new Map([[LINE_ID, 2]]));
     await reverseRentalReceipt(RECEIPT_ID, { reason: "reported twice" }, ACTOR);
     const updates = await updatesOf();
     // Recomputed from the reports that remain — never decremented — and NOTHING about where the
     // equipment is is touched.
     expect(updates).toEqual([{ id: LINE_ID, data: { damagedQuantity: 1 } }]);
     // Through the transaction, so the total and the write it feeds are one commit.
-    expect(receivedTotals).toHaveBeenCalledWith(PO_ID, "damage", "damagedQuantity", TX);
+    expect(damagedTotals).toHaveBeenCalledWith(PO_ID, TX);
+    expect(receivedTotals).not.toHaveBeenCalledWith(PO_ID, "damage", "damagedQuantity", TX);
     expect(vi.mocked(audit.record).mock.calls[0]![0]!.action).toBe("rental_damage.reversed");
+  });
+
+  // The recompute reads BOTH kinds of note. Filtered to damage reports it would rebuild the tally
+  // from half its sources and silently erase whatever a live collection note had recorded — the
+  // withdrawal of one claim wiping another that still stands.
+  it("keeps damage recorded on a live collection note when a report is withdrawn", async () => {
+    findReceipt.mockResolvedValue(
+      returnRow({
+        code: "HDM-0001",
+        direction: "damage",
+        lines: [
+          { id: "rl1", purchaseOrderRentalLineId: LINE_ID, itemName: "Fibre Tester", receivedQuantity: 1, damagedQuantity: 1, assetTags: [], orderedQuantity: 3, previouslyReceived: 3, notes: null, baseUnit: "Each" },
+        ],
+      }),
+    );
+    reverseReturning(returnRow({ direction: "damage", reversedAt: new Date() }));
+    // 3 damaged across every live note — 1 on this report, 2 on a collection note that still stands.
+    damagedTotals.mockResolvedValue(new Map([[LINE_ID, 3]]));
+    await reverseRentalReceipt(RECEIPT_ID, { reason: "reported twice" }, ACTOR);
+    const updates = await updatesOf();
+    expect(updates).toEqual([{ id: LINE_ID, data: { damagedQuantity: 2 } }]);
+  });
+
+  // A collection note now MOVES the damaged tally, so reversing one has to give it back. Left out,
+  // the withdrawn note's damage stays counted forever and blocks the units behind it from ever being
+  // reported — the cap is against units never recorded damaged.
+  it("gives back the damage a reversed collection note recorded", async () => {
+    findReceipt.mockResolvedValue(
+      returnRow({
+        lines: [
+          { id: "rl1", purchaseOrderRentalLineId: LINE_ID, itemName: "Fibre Tester", receivedQuantity: 3, damagedQuantity: 1, assetTags: [], orderedQuantity: 3, previouslyReceived: 0, notes: null, baseUnit: "Each" },
+        ],
+      }),
+    );
+    receivedTotals.mockResolvedValue(new Map([[LINE_ID, 3]]));
+    damagedTotals.mockResolvedValue(new Map([[LINE_ID, 1]]));
+    await reverseRentalReceipt(RECEIPT_ID, { reason: "collected the wrong order" }, ACTOR);
+    const updates = await updatesOf();
+    expect(updates[0]!.data).toMatchObject({ damagedQuantity: 0 });
   });
 });
 
@@ -1031,5 +1172,86 @@ describe("id-or-code resolution on every read", () => {
     // Resolved to the ROW's id before the ownership comparison — comparing the attachment's
     // rentalReceiptId against the raw "HDN-0001" param would reject a photo that does belong to it.
     expect(vi.mocked(receiptRepo.deleteAttachment)).toHaveBeenCalledWith("att1");
+  });
+});
+
+// ── A hire closed short takes no more movements ────────────────────────────────────────────────
+//
+// Closing short records a DECISION — with a reason — that the outstanding units are not arriving.
+// Letting a later movement write over it would erase that decision silently, so each path refuses and
+// says what to do instead. Reopening a short close is not modelled, exactly as it is not for a
+// customer stock assignment.
+describe("movements against a hire that was closed short", () => {
+  it("a delivery is refused, pointing at the record that says they are not coming", async () => {
+    findPo.mockResolvedValue(
+      po({ rentalItems: [hire({ receivedQuantity: 1, hireStatus: "on_hire", shortClosedAt: new Date(), fullyReceived: true })] }),
+    );
+    await expect(
+      createRentalReceipt(
+        { purchaseOrderId: PO_ID, deliveryDate: new Date("2026-09-10"), lines: [{ purchaseOrderRentalLineId: LINE_ID, receivedQuantity: 1 }] } as never,
+        ACTOR,
+      ),
+    ).rejects.toThrow(/closed short/i);
+    expect(createWithCode).not.toHaveBeenCalled();
+  });
+
+  // A CANCELLED hire never received anything, so there is nothing to hand back or to have damaged.
+  it("a return is refused against a cancelled hire", async () => {
+    findPo.mockResolvedValue(po({ status: "fully_received", rentalItems: [hire({ hireStatus: "cancelled" })] }));
+    await expect(
+      createRentalReturn(
+        { purchaseOrderId: PO_ID, returnDate: new Date("2026-09-10"), lines: [{ purchaseOrderRentalLineId: LINE_ID, returnedQuantity: 1 }] } as never,
+        ACTOR,
+      ),
+    ).rejects.toThrow(/nothing was ever delivered/i);
+    expect(createWithCode).not.toHaveBeenCalled();
+  });
+
+  it("a damage report is refused against a cancelled hire", async () => {
+    findPo.mockResolvedValue(po({ status: "fully_received", rentalItems: [hire({ hireStatus: "cancelled" })] }));
+    await expect(
+      reportHireDamage(
+        { purchaseOrderId: PO_ID, deliveryDate: new Date("2026-09-10"), lines: [{ purchaseOrderRentalLineId: LINE_ID, damagedQuantity: 1 }] } as never,
+        ACTOR,
+      ),
+    ).rejects.toThrow(/nothing was ever delivered/i);
+    expect(createWithCode).not.toHaveBeenCalled();
+  });
+
+  // The held units of a PART-delivered hire still go back normally — a short close stops the ones
+  // that never arrived, not the ones sitting in the yard. And because it set `fullyReceived`, the
+  // return path can finally CLOSE the line, which is the deadlock it was written to break.
+  it("still accepts the return of units a part-delivered short-closed hire is holding, and closes it", async () => {
+    findPo.mockResolvedValue(
+      po({
+        status: "partially_received",
+        rentalItems: [hire({ quantity: 5, receivedQuantity: 2, fullyReceived: true, hireStatus: "on_hire" })],
+      }),
+    );
+    await createRentalReturn(
+      { purchaseOrderId: PO_ID, returnDate: new Date("2026-09-10"), lines: [{ purchaseOrderRentalLineId: LINE_ID, returnedQuantity: 2 }] } as never,
+      ACTOR,
+    );
+    const hireUpdates = createWithCode.mock.calls[0]![2] as { data: Record<string, unknown> }[];
+    expect(hireUpdates[0]!.data).toMatchObject({ returnedQuantity: 2, fullyReturned: true, hireStatus: "returned" });
+  });
+
+  // `closes` is derived from `fullyReceived`, so that column has to be pinned alongside the total the
+  // guard already carries. A short close landing in the window flips it true, and a return that then
+  // commits its stale `closes: false` leaves the line at `on_hire` with everything already back —
+  // refused by the return path, refused by mark-returned, and with Close short hidden on the board.
+  it("pins the return to the fullyReceived its closing decision was made against", async () => {
+    findPo.mockResolvedValue(
+      po({
+        status: "partially_received",
+        rentalItems: [hire({ quantity: 5, receivedQuantity: 2, fullyReceived: false, hireStatus: "on_hire" })],
+      }),
+    );
+    await createRentalReturn(
+      { purchaseOrderId: PO_ID, returnDate: new Date("2026-09-10"), lines: [{ purchaseOrderRentalLineId: LINE_ID, returnedQuantity: 2 }] } as never,
+      ACTOR,
+    );
+    const hireUpdates = createWithCode.mock.calls[0]![2] as { expect: Record<string, unknown> }[];
+    expect(hireUpdates[0]!.expect).toMatchObject({ returnedQuantity: 0, fullyReceived: false });
   });
 });

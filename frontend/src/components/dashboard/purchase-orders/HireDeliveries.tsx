@@ -15,6 +15,7 @@ import { Modal } from "@/components/ui/Modal";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { formatMoney } from "./poStatus";
 import type { RentalReceipt } from "@/types/rental";
+import { canMoveHires, canSettleHires, noteCanBeReversed } from "@/components/dashboard/rentals/hireActions";
 import { legOf } from "@/components/dashboard/rentals/hireMovementLeg";
 
 // Everything that physically happened to the hired kit on this order — what arrived, what went back,
@@ -36,12 +37,32 @@ const dateOnly = (iso: string) =>
 export function HireDeliveries({
   purchaseOrderId,
   poStatus,
+  deliveryLockedHireLineIds,
+  netOrderedByHireLine,
   onChanged,
   onCount,
 }: {
   purchaseOrderId: string;
   /** A closed or cancelled order takes no more movements — reversals included. */
   poStatus: string;
+  /**
+   * The hire lines that will no longer take a DELIVERY reversal, by id.
+   *
+   * Passed in rather than re-fetched: the order's own read already has them, and the only question
+   * asked of them here is whether a delivery note can still be given back. See
+   * `hireRefusesDeliveryReversal` for the two ways a hire says no; gating on the ORDER's status alone
+   * left the button offering a reversal the server always refuses.
+   */
+  deliveryLockedHireLineIds: ReadonlySet<string>;
+  /**
+   * What each hire line will EVER hold, by id — the denominator its notes print against.
+   *
+   * A receipt line stores `orderedQuantity` as a SNAPSHOT taken when the note was written, and a
+   * short close afterwards makes that snapshot describe units nobody is waiting for: a collection
+   * note read "3 of 5" on a hire that will only ever hold 4. The live figure comes from the order,
+   * which this panel's host already has.
+   */
+  netOrderedByHireLine: ReadonlyMap<string, number>;
   onChanged: () => void;
   /** Reported up so the section heading can show how many movements it is heading. */
   onCount?: (n: number) => void;
@@ -55,8 +76,10 @@ export function HireDeliveries({
   // the order can no longer service — a live hire on a closed order, chased by the deadline badges,
   // refused by Return hire. The service refuses it; this stops the button offering it.
   const terminal = poStatus === "closed" || poStatus === "cancelled";
-  const canReverse = can("rentals.hire.manage") && !terminal;
-  const canCurate = can("rentals.hire.receive") || can("rentals.hire.manage");
+  // Reversing a note and setting its damage charge are both CORRECTIONS to a committed record —
+  // `settle`, which the warehouse manager who wrote the note holds, scoped to their own sites.
+  const canReverse = canSettleHires(can) && !terminal;
+  const canCurate = canMoveHires(can);
 
   const [receipts, setReceipts] = React.useState<RentalReceipt[] | null>(null);
   const [error, setError] = React.useState<string | null>(null);
@@ -267,7 +290,9 @@ export function HireDeliveries({
                     .join(" · ")}
                 </p>
               </div>
-              {canReverse && !r.reversedAt && (
+              {canReverse &&
+                !r.reversedAt &&
+                noteCanBeReversed(r.direction ?? "in", r.lines.map((l) => l.purchaseOrderRentalLineId), deliveryLockedHireLineIds) && (
                 <button
                   type="button"
                   onClick={() => {
@@ -285,8 +310,12 @@ export function HireDeliveries({
               {r.lines.map((l) => (
                 <li key={l.id} className="text-xs text-[var(--muted)]">
                   <span className="font-semibold text-[var(--ink)]">{l.itemName}</span> — {l.receivedQuantity}
-                  {/* A damage report is not "n of the order" — the ordered figure means nothing to it. */}
-                  {r.direction !== "damage" && ` of ${l.orderedQuantity}`}
+                  {/* A damage report is not "n of the order" — the ordered figure means nothing to it.
+                      The others count against what the hire will EVER hold, taken LIVE from the order
+                      rather than from this line's `orderedQuantity` snapshot: a short close after the
+                      note was written makes that snapshot include units nobody is waiting for. */}
+                  {r.direction !== "damage" &&
+                    ` of ${netOrderedByHireLine.get(l.purchaseOrderRentalLineId) ?? l.orderedQuantity}`}
                   {r.direction !== "damage" && l.previouslyReceived > 0 && ` (${l.previouslyReceived} before this)`}
                   {r.direction !== "damage" && l.damagedQuantity > 0 && (
                     <span className="text-[var(--neg)]"> · {l.damagedQuantity} {leg.quantityLabel}</span>

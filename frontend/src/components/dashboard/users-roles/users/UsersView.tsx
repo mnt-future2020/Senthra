@@ -23,7 +23,7 @@ import { formatDate } from "@/lib/formatDate";
 import * as roleService from "@/services/role.service";
 import * as userService from "@/services/user.service";
 import type { Role } from "@/types/role";
-import type { User, UserStatus } from "@/types/user";
+import type { DirectoryUser, UserStatus } from "@/types/user";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { Avatar } from "@/components/ui/Avatar";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
@@ -68,7 +68,7 @@ function RowActions({
   onResend,
   onDelete,
 }: {
-  user: User;
+  user: DirectoryUser;
   canEdit: boolean;
   canDelete: boolean;
   onView: () => void;
@@ -262,7 +262,7 @@ export function UsersView() {
   // Seed from the SWR caches so a remount (e.g. returning right after creating a
   // user) renders the previous data instantly; the effects below revalidate.
   const cachedInitial = userService.getCachedUsers({ page: 1, pageSize: PAGE_SIZE });
-  const [users, setUsers] = React.useState<User[]>(cachedInitial?.users ?? []);
+  const [users, setUsers] = React.useState<DirectoryUser[]>(cachedInitial?.users ?? []);
   const [roles, setRoles] = React.useState<Role[]>(() => roleService.getCachedRoles() ?? []);
   const [total, setTotal] = React.useState(cachedInitial?.total ?? 0);
   const [totalPages, setTotalPages] = React.useState(cachedInitial?.totalPages ?? 1);
@@ -270,7 +270,7 @@ export function UsersView() {
   const [error, setError] = React.useState<string | null>(null);
   const [refreshKey, setRefreshKey] = React.useState(0);
 
-  const [confirm, setConfirm] = React.useState<{ open: boolean; user: User | null }>({
+  const [confirm, setConfirm] = React.useState<{ open: boolean; user: DirectoryUser | null }>({
     open: false,
     user: null,
   });
@@ -355,7 +355,7 @@ export function UsersView() {
 
   const refresh = () => setRefreshKey((k) => k + 1);
 
-  const toggleStatus = async (user: User) => {
+  const toggleStatus = async (user: DirectoryUser) => {
     const next: UserStatus = user.status === "active" ? "suspended" : "active";
     try {
       await userService.setUserStatus(user.id, next);
@@ -366,7 +366,7 @@ export function UsersView() {
     }
   };
 
-  const resend = async (user: User) => {
+  const resend = async (user: DirectoryUser) => {
     try {
       const { temporaryPassword } = await userService.resendInvite(user.id);
       setTempPw({ open: true, email: user.email, password: temporaryPassword, isResend: true });

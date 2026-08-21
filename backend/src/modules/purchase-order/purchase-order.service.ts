@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 
 import { daysBetween, toCalendarDay } from "../../utils/calendar-day.js";
 import { parseFilterDate } from "../../utils/filter-date.js";
-import { computeNotifyOnDate } from "./rentalHire.predicate.js";
+import { computeNotifyOnDate, isTerminalHireStatus } from "./rentalHire.predicate.js";
 import { emitHireUpdated } from "./rentalHire.realtime.js";
 import { resolveDeliveryLocation, resolveReturnLocation, type ReturnContext } from "./rentalReturn.js";
 import { extensionChargePence, type RatePeriod } from "../../utils/rental-pricing.js";
@@ -42,6 +42,7 @@ import type {
   PoAttachmentInput,
   PoSupplierAcceptInput,
   UpdatePurchaseOrderInput,
+  CloseHireShortInput,
   ExtendHireInput,
 } from "./purchase-order.validation.js";
 import { incotermLabel } from "./purchase-order.validation.js";
@@ -139,8 +140,13 @@ export interface PublicPoRentalLine {
   hireStatus: string;
   /** How many units have actually turned up, summed from this line's hire deliveries. */
   receivedQuantity: number;
-  /** Every ordered unit is here — what takes the line off the receiving queue. */
+  /** Nothing more is expected — every unit arrived, or the rest was closed short. */
   fullyReceived: boolean;
+  /** Ordered units recorded as never arriving, and why. `received + cancelled = ordered`. */
+  cancelledQuantity: number;
+  shortClosedAt: string | null;
+  shortClosedBy: string | null;
+  shortCloseReason: string | null;
   /** How many have gone BACK, and whether everything we hold has. The return form caps on these. */
   returnedQuantity: number;
   fullyReturned: boolean;
@@ -440,6 +446,10 @@ function toPublic(po: PurchaseOrderWithRelations): PublicPurchaseOrder {
       hireStatus: r.hireStatus,
       receivedQuantity: r.receivedQuantity ?? 0,
       fullyReceived: r.fullyReceived ?? false,
+      cancelledQuantity: r.cancelledQuantity ?? 0,
+      shortClosedAt: iso(r.shortClosedAt),
+      shortClosedBy: r.shortClosedBy,
+      shortCloseReason: r.shortCloseReason,
       returnedQuantity: r.returnedQuantity ?? 0,
       fullyReturned: r.fullyReturned ?? false,
       damagedQuantity: r.damagedQuantity ?? 0,
@@ -1400,6 +1410,26 @@ export async function updateConfirmedDeliveryDate(
 export async function cancelPurchaseOrder(id: string, reason: string | undefined, actor?: AuditActor): Promise<PublicPurchaseOrder> {
   const po = await loadOrThrow(id, actor);
   assertTransition(po.status, "cancelled");
+  // Hired kit we are STILL HOLDING blocks a cancellation, the same way it blocks a close — and for a
+  // sharper reason. Cancelling is a one-way door with no way back through it: every hire predicate
+  // excludes a cancelled order (rentalHire.predicate's LIVE_ORDER), and the return and damage paths
+  // only accept an order in the receiving window, so the handover could never be recorded at all. The
+  // supplier's equipment would sit in the yard on no list, on no badge and on no report.
+  //
+  // Asked on the QUANTITIES rather than on `hireStatus`, because the status cannot answer this: a
+  // part-delivered line whose delivered units have all gone back is still `on_hire`, and it holds
+  // nothing. What matters is whether any of the supplier's kit is physically here.
+  //
+  // Hires that never arrived are deliberately NOT blocked: cancelling the order is the right way to
+  // end those, and they leave every queue with it.
+  const held = po.rentalItems.filter((r) => (r.receivedQuantity ?? 0) > (r.returnedQuantity ?? 0));
+  if (held.length > 0) {
+    const line = held[0]!;
+    throw conflict(
+      `${(line.receivedQuantity ?? 0) - (line.returnedQuantity ?? 0)} ${line.itemName} are still on hire here. ` +
+        `Record the return before cancelling this purchase order.`,
+    );
+  }
   const updated = await poRepo.update(id, { status: "cancelled", cancelledAt: new Date(), cancelReason: trimToNull(reason) });
   recordStatus(actor, id, updated.code, "purchase_order.cancelled");
   emitPoUpdated(updated);
@@ -1417,7 +1447,7 @@ export async function closePurchaseOrder(id: string, actor?: AuditActor): Promis
   // billing for it and it still has to go back. Closing would also be a one-way door: the return and
   // damage paths refuse a closed order, so the handover could never be recorded and the deadline
   // badges would keep counting a hire nobody could clear.
-  const stillOut = po.rentalItems.filter((r) => r.hireStatus !== "returned");
+  const stillOut = po.rentalItems.filter((r) => !isTerminalHireStatus(r.hireStatus));
   if (stillOut.length > 0) {
     throw conflict(
       `${stillOut[0]!.itemName} is still on hire. Record its return before closing this purchase order.`,
@@ -1631,12 +1661,34 @@ export async function requireReceivablePurchaseOrder(id: string): Promise<Purcha
 // Takes LINES, not a purchase order, and knows nothing about what kind of line they are — which is
 // what lets hire lines join the same arithmetic without Goods In ever hearing about them. Goods In
 // keeps passing its own items; `recomputeRentalReceiptStatus` below loads BOTH kinds itself.
-export function recomputeReceiptStatus(items: { quantity: number; receivedQuantity: number }[]): "sent" | "partially_received" | "fully_received" {
+export function recomputeReceiptStatus(
+  items: {
+    quantity: number;
+    /** What physically TURNED UP. Answers "has anything arrived". */
+    receivedQuantity: number;
+    /**
+     * What is no longer OUTSTANDING — arrived, or formally written off. Defaults to `receivedQuantity`,
+     * which is the whole story for goods; only a hire can settle a unit without receiving it.
+     *
+     * TWO figures because the status asks two questions, and folding them into one broke the second:
+     * counting written-off units as received made "has anything arrived" true with an empty yard, so a
+     * hire-only order whose kit never came reported itself FULLY RECEIVED — and `ALLOWED_TRANSITIONS`
+     * has no path from there, or from `partially_received`, back to `cancelled`. Closing a hire short
+     * permanently removed the buyer's ability to cancel the order, which is the honest exit when
+     * nothing ever turned up.
+     */
+    settledQuantity?: number;
+  }[],
+): "sent" | "partially_received" | "fully_received" {
+  // NOTHING has physically turned up. The order has not entered the receiving flow at all, whatever
+  // its lines have settled — and it must stay cancellable, which no received status is. Asked FIRST,
+  // because a write-off settles every unit on a line without a single one arriving, and that alone
+  // would otherwise read as "fully received" on an order with an empty yard.
   const anyReceived = items.some((i) => i.receivedQuantity > 0);
-  const allReceived = items.length > 0 && items.every((i) => i.receivedQuantity >= i.quantity);
-  if (allReceived) return "fully_received";
-  if (anyReceived) return "partially_received";
-  return "sent";
+  if (!anyReceived) return "sent";
+  const nothingOutstanding =
+    items.length > 0 && items.every((i) => (i.settledQuantity ?? i.receivedQuantity) >= i.quantity);
+  return nothingOutstanding ? "fully_received" : "partially_received";
 }
 
 /**
@@ -1673,7 +1725,21 @@ export async function recomputeRentalReceiptStatus(
 
   const lines = [
     ...po.items.map((l) => ({ quantity: l.quantity, receivedQuantity: l.receivedQuantity })),
-    ...po.rentalItems.map((l) => ({ quantity: l.quantity, receivedQuantity: l.receivedQuantity ?? 0 })),
+    // A hire's WRITTEN-OFF units are no longer OUTSTANDING — that is precisely what closing short
+    // decided — but they never ARRIVED, and the status asks both questions. So they go in
+    // `settledQuantity` and stay out of `receivedQuantity`.
+    //
+    // Outstanding, because counting `receivedQuantity` alone left a short-closed order stuck at
+    // `partially_received` for good: closable, but never `fully_received`, so never in "Received —
+    // ready to close", the chip that is the canonical worklist for closing orders.
+    //
+    // Not arrived, because the reverse mistake is worse: an order whose hire never came would report
+    // itself received, and no received status has a path back to `cancelled`.
+    ...po.rentalItems.map((l) => ({
+      quantity: l.quantity,
+      receivedQuantity: l.receivedQuantity ?? 0,
+      settledQuantity: (l.receivedQuantity ?? 0) + (l.cancelledQuantity ?? 0),
+    })),
   ];
   const computed = recomputeReceiptStatus(lines);
 
@@ -1878,61 +1944,120 @@ async function loadRentalLine(poId: string, lineId: string) {
 }
 
 /**
- * Mark a hire returned.
+ * Close a hire SHORT — the outstanding units are never arriving.
  *
- * This is what takes it off the deadline badge. Without a terminal state every hire that ever
- * ended would stay overdue forever and the red count would only grow — see the schema note on
- * `hireStatus`.
+ * The supplier cannot supply them, the site no longer needs them, the job was descoped. Without this
+ * there was no exit at all for such a line, and two permanent dead-ends followed from that:
+ *
+ *   • Nothing ever delivered. Return and mark-returned both refuse a hire that was never received, so
+ *     the line sat on the warehouse's intake queue and the "not yet received" badge forever — and its
+ *     order could never close, because the close guard demands every hire be finished.
+ *   • Part delivered, the delivered units handed back. `createRentalReturn` correctly leaves that line
+ *     `on_hire` (its undelivered units are still owed), and mark-returned refuses a line with
+ *     collection records. Same dead-end, reached the other way.
+ *
+ * Deliberately NOT a quantity edit. `quantity` is what the supplier was sent and agreed to, and
+ * rewriting a committed order's figures is what a PO amendment is for; the shortfall is recorded
+ * BESIDE the order in `cancelledQuantity`, exactly as an extension's charge is. The two then add up:
+ * received + cancelled = ordered.
+ *
+ * Where it leaves the hire depends on what actually happened to it, because those are different facts
+ * and the finance register tells them apart:
+ *   • nothing ever arrived  → `cancelled`. The hire never happened, so it is not hire spend.
+ *   • something arrived and is all back → `returned`. It happened; the shortfall is the cancelled qty.
+ *   • something arrived and is still here → stays `on_hire`. The kit still has to go back, and the
+ *     normal return path closes it — which now works, because `fullyReceived` is true from here.
+ *
+ * Mirrors customer.service.ts `closeAssignmentShort`, down to the required reason: this write is the
+ * only record that the shortfall was a decision rather than an oversight.
  */
-export async function markHireReturned(
+export async function closeHireShort(
   poId: string,
   lineId: string,
+  input: CloseHireShortInput,
   actor?: AuditActor,
 ): Promise<PublicPurchaseOrder> {
   const po = await loadOrThrow(poId, actor);
   const line = await loadRentalLine(po.id, lineId);
-  if (line.hireStatus === "returned") throw conflict("That hire has already been returned.");
-  // Nothing can go back that never arrived. The honest answer to "we never took delivery" is to
-  // cancel the hire, which this module does not model yet — so it says so rather than stamping a
-  // return date onto kit that was never in our hands.
-  if (line.hireStatus === "awaiting_delivery") {
-    throw conflict("That hire hasn't been received yet — mark it received before returning it.");
-  }
-  // Units already back means a RETURN NOTE put them there, and from here the two writers must not
-  // mix. This path writes `returnedQuantity` with no note behind it; reversing any existing note
-  // recomputes that column purely from the notes that survive — so a 2-unit note reversed after this
-  // closed a 5-unit hire would silently erase all five and reopen the hire as if nothing went back.
-  //
-  // A line that has never had a note is safe: this write also closes the hire, and a closed hire
-  // takes no further notes, so nothing is ever left to reverse.
-  if ((line.returnedQuantity ?? 0) > 0) {
+  if (isTerminalHireStatus(line.hireStatus)) throw conflict("That hire is already finished.");
+  // Nothing outstanding means nothing to close short — the hire either ran as ordered or is already
+  // being closed by the return path. Refusing keeps `cancelledQuantity` meaning what it says instead
+  // of letting a no-op stamp a reason onto a line that was never short.
+  const outstanding = line.quantity - (line.receivedQuantity ?? 0);
+  if (outstanding <= 0) {
     throw conflict(
-      "This hire already has collection records. Record the remaining units with Return hire, so the quantities and the records agree.",
+      `All ${line.quantity} ${line.itemName} have been delivered — there is nothing outstanding to close short.`,
     );
   }
 
-  await poRepo.updateRentalLine(lineId, {
-    hireStatus: "returned",
-    returnedAt: new Date(),
-    returnedBy: actor?.email ?? null,
-    // The QUANTITIES have to move with the status, or the two ways a hire ends disagree: this path
-    // would leave a closed hire reading "3 of 3 still out" on every surface that counts units, and the
-    // warehouse pane would keep listing equipment nobody has.
-    //
-    // This is the path for a hire that simply ended — the supplier collected from site, an engineer
-    // handed it back. The one that needs proof (a date, a collector, a condition, a photograph) is
-    // POST /rental-receipts/returns, which writes an HRN and reaches the same state with evidence.
-    returnedQuantity: line.receivedQuantity,
-    fullyReturned: true,
+  const received = line.receivedQuantity ?? 0;
+  const returned = line.returnedQuantity ?? 0;
+  const stillHeld = received - returned;
+  const now = new Date();
+  const actorEmail = actor?.email ?? null;
+
+  // GUARDED on the quantity the shortfall was computed from. A delivery landing between the read
+  // above and this write would leave `cancelledQuantity` describing a line that no longer exists —
+  // `received + cancelled` would stop adding up to `ordered`, silently. Same contract the hire-note
+  // writes use; whoever loses the race gets an instruction rather than a wrong number.
+  // BOTH quantities, because both decide this write. `receivedQuantity` gives the shortfall;
+  // `returnedQuantity` chooses the outcome — a return landing in the window turns "still holding kit,
+  // stay on hire" into "everything is back, close it", and pinning only the first lets the stale
+  // branch win. That leaves the line `on_hire` with received === returned and `fullyReceived` true:
+  // the return path refuses it (nothing still out), mark-returned refuses it (collection records),
+  // and the board hides Close short (`fullyReceived`) — the exact dead-end this endpoint removes.
+  const applied = await poRepo.updateRentalLineIf(lineId, { receivedQuantity: received, returnedQuantity: returned }, {
+    cancelledQuantity: outstanding,
+    shortClosedAt: now,
+    shortClosedBy: actorEmail,
+    shortCloseReason: input.reason,
+    // Nothing more is expected — which is the question the receiving queue actually asks. See the
+    // field's note in schema.prisma.
+    fullyReceived: true,
+    ...(received === 0
+      ? // Never arrived: terminal, and NOT "returned" — there is nothing to have returned, and the
+        // finished-hire register would otherwise report a hire that never happened as hire spend.
+        { hireStatus: "cancelled", returnedAt: now, returnedBy: actorEmail, fullyReturned: true }
+      : stillHeld === 0
+        ? // Everything that arrived is already back, and nothing more is coming: the hire is over.
+          // `createRentalReturn` could not close it before because `fullyReceived` was false.
+          { hireStatus: "returned", returnedAt: now, returnedBy: actorEmail, fullyReturned: true }
+        : // Kit still in our hands. It has to go back, and the return path closes the line when it
+          // does — no state change here beyond taking the undelivered units off the intake queue.
+          {}),
   });
+  if (!applied) {
+    throw conflict(
+      "Someone recorded another movement on this hire a moment ago. Reload and check what is outstanding before closing it short.",
+    );
+  }
+
+  // The order's own status moves with it: those units are no longer outstanding, so an order whose
+  // only shortfall was this one is now fully accounted for. Without this the status catches up only
+  // when some UNRELATED movement happens to run the recompute — or never, which is the ordinary case
+  // for the last hire on an order.
+  await recomputeRentalReceiptStatus(po.id, actor);
   emitHireUpdated(po.id, po.code);
   audit.record({
     actor,
-    action: "purchase_order.rental_returned",
+    action: "purchase_order.rental_closed_short",
     targetType: "purchase_order",
     targetId: po.id,
     targetLabel: po.code,
-    metadata: { item: line.itemName, hireEndDate: line.hireEndDate.toISOString() },
+    // The shortfall and the reason are the two things anyone asking "where did the rest go?" needs,
+    // and `changes[]` is what the order's own Audit Trail tab renders.
+    metadata: {
+      item: line.itemName,
+      cancelledQuantity: outstanding,
+      reason: input.reason,
+      changes: [
+        {
+          label:
+            `${line.itemName}: ${outstanding} of ${line.quantity} closed short ` +
+            `(${received} received${stillHeld > 0 ? `, ${stillHeld} still to come back` : ""}) — ${input.reason}`,
+        },
+      ],
+    },
   });
   return getPurchaseOrder(po.id, actor);
 }
@@ -1953,6 +2078,9 @@ export async function extendHire(
   const po = await loadOrThrow(poId, actor);
   const line = await loadRentalLine(po.id, lineId);
   if (line.hireStatus === "returned") throw conflict("That hire has been returned and can no longer be extended.");
+  // A hire nothing ever arrived against has no period left to extend — extending it would re-arm a
+  // reminder for equipment that is never coming.
+  if (line.hireStatus === "cancelled") throw conflict("That hire was cancelled and can no longer be extended.");
 
   // A calendar day like every other hire date, so a time-of-day cannot shift the reminder by a
   // fraction of a day or slip past the "after the start date" check.
@@ -2100,6 +2228,9 @@ export interface PublicOnHireLine {
   /** Ordered vs actually arrived — a part delivery is ordinary, and the row has to show it. */
   receivedQuantity: number;
   fullyReceived: boolean;
+  /** Ordered units recorded as never arriving, and why — the row shows "2 of 5 · 3 cancelled". */
+  cancelledQuantity: number;
+  shortCloseReason: string | null;
   /** What has gone back, and whether everything we hold has — the row's Return action caps on these. */
   returnedQuantity: number;
   fullyReturned: boolean;
@@ -2277,6 +2408,8 @@ export async function listOnHire(
       // Negative once the hire has run out — the on-hire row's "3 days left" / "2 days over".
       daysRemaining: daysBetween(todayStart, r.hireEndDate),
       fullyReceived: r.fullyReceived ?? false,
+      cancelledQuantity: r.cancelledQuantity ?? 0,
+      shortCloseReason: r.shortCloseReason,
       returnedQuantity: r.returnedQuantity ?? 0,
       fullyReturned: r.fullyReturned ?? false,
       damagedQuantity: r.damagedQuantity ?? 0,
@@ -2503,6 +2636,15 @@ export async function exportOnHireCsv(
       "Rate", "Rate Basis", "Unit Price", "Line Total", "Extension Charge",
       "Delivered", "Collected", "Days On Hire",
       "Received Qty", "Returned Qty", "Damaged Qty", "Damage Charge",
+      // `Cancelled Qty` and its reason close the same hole the on-hire row's badge does: a line
+      // ordering 5, receiving 2 and sitting off the receiving queue reads as broken arithmetic until
+      // the file says the other three were written off, and why. A period report reconciled against a
+      // supplier's invoice needs that more than the screen does.
+      //
+      // APPENDED, not slotted in beside `Received Qty` where it reads better — same rule the block
+      // above follows. A column inserted mid-file shifts every one after it, and the spreadsheets
+      // this export feeds reference cells by position.
+      "Cancelled Qty", "Short Close Reason",
     ],
     rows.map((r) => [
       r.purchaseOrderCode,
@@ -2517,8 +2659,8 @@ export async function exportOnHireCsv(
       // finished hire that is a countdown to a deadline nobody is waiting for any more: a returned
       // row arriving as "Days Remaining -1" reads as overdue, which is the one thing it is not. The
       // live rows they exist for are unaffected.
-      r.hireStatus === "returned" ? "" : r.daysRemaining,
-      r.hireStatus === "returned" ? "" : day(r.notifyOnDate),
+      isTerminalHireStatus(r.hireStatus) ? "" : r.daysRemaining,
+      isTerminalHireStatus(r.hireStatus) ? "" : day(r.notifyOnDate),
       // The RESOLVED outbound leg, matching the screen: the line's own text was empty on every hire
       // going to its delivery warehouse, which reads as "nowhere" in a spreadsheet.
       r.deliveryLocation.address?.replace(/\r?\n/g, ", ") ?? "",
@@ -2545,6 +2687,11 @@ export async function exportOnHireCsv(
       // Blank while nothing is quoted. A hire with damaged units and an empty cell here is the row
       // somebody has to chase — 0.00 would close that question without anyone deciding to.
       r.damageCharge == null ? "" : r.damageCharge.toFixed(2),
+      // Written off, and why. `Quantity` minus `Received Qty` minus `Cancelled Qty` is zero on every
+      // finished hire, which is the check a reconciler runs down the column. Newlines flattened like
+      // every other free-text cell — a raw one would split the row in the spreadsheet.
+      r.cancelledQuantity,
+      r.shortCloseReason?.replace(/\r?\n/g, " ") ?? "",
     ]),
   );
   audit.record({ actor, action: "rental_hire.exported", targetType: "purchase_order", targetLabel: `${rows.length} hires` });
