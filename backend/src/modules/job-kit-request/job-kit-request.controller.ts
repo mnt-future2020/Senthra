@@ -55,14 +55,19 @@ export const itemSearch = asyncHandler(async (req, res) => {
   res.json({ items: await kitRequestService.searchItems(queryStr(req.query.q) ?? "", queryStr(req.query.jobId)) });
 });
 
-// GET /job-kit-requests/item-availability?jobId=&irm=a,b&cse=c,d
+// GET /job-kit-requests/item-availability?jobId=&irm=a,b&cse=c,d&rental=e,f
 // The SAME numbers the composer's search shows, for items it didn't come from: the job's already-
 // planned kit lines and anything sitting in the cart. Without it those rows offered a bare quantity
 // box with nothing to check it against — the engineer could ask for 50 of an item with 2 free.
 export const itemAvailability = asyncHandler(async (req, res) => {
   const ids = (v: string | undefined) => (v ? v.split(",").map((x) => x.trim()).filter(Boolean).slice(0, 100) : []);
   const jobId = queryStr(req.query.jobId);
-  const avail = await kitRequestService.itemAvailabilityFor(jobId, ids(queryStr(req.query.irm)), ids(queryStr(req.query.cse)));
+  const avail = await kitRequestService.itemAvailabilityFor(
+    jobId,
+    ids(queryStr(req.query.irm)),
+    ids(queryStr(req.query.cse)),
+    ids(queryStr(req.query.rental)),
+  );
   res.json(avail);
 });
 

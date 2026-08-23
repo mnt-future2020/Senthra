@@ -25,6 +25,9 @@ router.post("/jobs/:id/start", requirePermission("engineer.jobs.start"), writeLi
 router.post("/jobs/:id/complete", requirePermission("engineer.jobs.complete"), writeLimiter, validateBody(completeJobSchema), engineerController.completeOwnJob);
 router.get("/customer-stock", requirePermission("engineer.inventory.view"), engineerController.getOwnCustomerStock);
 router.get("/misc-stock", requirePermission("engineer.inventory.view"), engineerController.getOwnMiscStock);
+// Hired kit in the engineer's van. Same permission as the other held-stock reads — it is the same
+// question ("what am I carrying?") about a different pool, not a rentals-module capability.
+router.get("/rentals", requirePermission("engineer.inventory.view"), engineerController.getOwnRentals);
 router.get("/movements", requirePermission("engineer.inventory.view"), engineerController.getOwnMovements);
 
 export default router;

@@ -7,6 +7,8 @@ import * as kitRequestService from "@/services/jobKitRequest.service";
 import type { ApproveKitRequestPayload, KitRequest, LineSourceType } from "@/services/jobKitRequest.service";
 import { listWarehouseOptions } from "@/services/warehouse.service";
 import { listItemWarehouseStock } from "@/services/inventory.service";
+import { getRentalItemAvailability } from "@/services/rental.service";
+import { getJobsDemand } from "@/services/goodsManagement.service";
 import { subscribe } from "@/lib/socket";
 import { useDashboard } from "@/hooks/useDashboard";
 import { Select } from "@/components/ui/Select";
@@ -192,8 +194,57 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
       const defaults: Record<string, string> = {};
       const noStock = new Set<string>();
       const failedCheck = new Set<string>();
-      await Promise.all(
-        request.lines
+      // Planned demand from every other active job, so a rental depot's `free` means the same thing
+      // the IRM dropdown's does. `listItemWarehouseStock` nets this off server-side and hands the IRM
+      // branch a finished figure; `getRentalItemAvailability` is the gross twin of `getAvailability`
+      // and does not, so the netting has to happen here or the two halves of ONE dialog would print
+      // "free" to two different definitions — and only the rental half would disagree with the number
+      // approve() enforces. No excludeJobId: approve() checks against undiminished open demand, and
+      // this request has no kit lines of its own yet to exclude.
+      // Advisory, like every other lookup here — on failure the gross figure stands and the server
+      // still refuses authoritatively.
+      const rentalLines = request.lines.filter((l) => l.source === "rental" && l.rentalItemId);
+      const rentalDemand = new Map<string, number>();
+      if (rentalLines.length > 0) {
+        try {
+          for (const d of await getJobsDemand()) {
+            if (!d.rentalItemId || !d.warehouseId) continue;
+            const k = `${d.rentalItemId}|${d.warehouseId}`;
+            rentalDemand.set(k, (rentalDemand.get(k) ?? 0) + d.demand);
+          }
+        } catch { /* no inventory.view → fall back to the gross figure below */ }
+      }
+      await Promise.all([
+        // Hired kit resolves its depots from the LIVE HIRES of the catalogue item — a rental has no
+        // stock balance to read, so `listItemWarehouseStock` has nothing to say about it. Same shape
+        // of option, same `free` semantics (net of other jobs' planned demand), so every downstream
+        // guard — shortAt, maxApprovable, lineReady — works on a rental line unchanged.
+        ...rentalLines
+          .map(async (l) => {
+            try {
+              const rows = await getRentalItemAvailability(l.rentalItemId!);
+              const depots = rows
+                .map((r) => ({ ...r, free: Math.max(0, r.available - (rentalDemand.get(`${l.rentalItemId}|${r.warehouseId}`) ?? 0)) }))
+                .filter((r) => r.free > 0)
+                .sort((a, b) => b.free - a.free)
+                .map((r) => ({ value: r.warehouseId, free: r.free, label: `${r.warehouseName ?? "Depot"}${r.warehouseCode ? ` (${r.warehouseCode})` : ""} · ${r.free} free on hire` }));
+              if (depots.length) {
+                opts[l.id] = depots;
+                defaults[l.id] = depots[0].value;
+              } else {
+                // Nothing on hire anywhere with a spare unit. Unlike IRM there is no van fallback, so
+                // this line genuinely cannot be sourced — offering depots would invite the reviewer to
+                // nominate one holding none of it.
+                opts[l.id] = [];
+                noStock.add(l.id);
+              }
+            } catch {
+              // Couldn't check ≠ there is none — same distinction the IRM branch draws.
+              opts[l.id] = fallback;
+              failedCheck.add(l.id);
+            }
+          }),
+        ...request.lines
           .filter((l) => l.source === "irm" && l.irmItemId)
           .map(async (l) => {
             let stocked: Opt[] = [];
@@ -233,7 +284,7 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
               noStock.add(l.id);
             }
           }),
-      );
+      ]);
       if (!active) return;
       setWhOptions(opts);
       setUnstocked(noStock);
@@ -284,7 +335,10 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
         ? { name: l.warehouseName ?? "That warehouse", free: l.availableQty }
         : null;
     }
-    if (l.source !== "irm") return null;
+    // Rental joins irm here rather than returning null: it now HAS depot options with a `free` figure,
+    // so it can and must be shortfall-checked. Left out, a reviewer could approve more testers than
+    // the depot has hired and only find out at the scan.
+    if (l.source !== "irm" && l.source !== "rental") return null;
     const opt = (whOptions[l.id] ?? []).find((o) => o.value === lineWh[l.id]);
     if (!opt || opt.free === undefined) return null; // unknown stock (lookup failed) — never guess
     return warehousePortion(l) > opt.free ? { name: opt.label.split(" · ")[0], free: opt.free } : null;
@@ -298,9 +352,11 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
     // off the entry. It was previously uncapped, which made it the one source you could over-approve
     // against while the IRM lines beside it were guarded.
     if (l.source === "customer_stock") return l.availableQty ?? null;
-    if (l.source !== "irm") return null;
+    if (l.source !== "irm" && l.source !== "rental") return null;
     const opt = (whOptions[l.id] ?? []).find((o) => o.value === lineWh[l.id]);
     if (!opt || opt.free === undefined) return null;
+    // vanOf is 0 for a rental — it can never be split with a van — so this reduces to the depot's own
+    // free count, which is exactly the ceiling approve() enforces server-side.
     return vanOf(l) + opt.free;
   };
 
@@ -313,7 +369,10 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
       return !isSplit(l) || l.source !== "irm" || !!lineWh[l.id];
     }
     if (shortAt(l)) return false;
-    return l.source !== "irm" || !!lineWh[l.id]; // customer stock issues from where it's stored
+    // A rental needs a depot for the same reason an IRM line does — it is collected from one. Without
+    // this arm the Approve button went live with `warehouseId: undefined`, and the request either
+    // failed server-side or grew a kit line the engineer could not collect from anywhere.
+    return (l.source !== "irm" && l.source !== "rental") || !!lineWh[l.id]; // customer stock issues from where it's stored
   };
   // Excluding EVERYTHING is a decline wearing an approval's clothes — it would mark the request
   // approved while giving the engineer nothing, and the reason belongs in the decline note.
@@ -333,7 +392,11 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
               // line keeps the exact payload older servers already understand.
               const approvedQty = approvedOf(l) < l.qty ? approvedOf(l) : undefined; // includes 0 = excluded
               if (srcOf(l.id) !== "engineer") {
-                return { requestLineId: l.id, sourceType: "warehouse" as const, warehouseId: l.source === "irm" ? lineWh[l.id] : undefined, approvedQty };
+                // Rental sends its depot exactly as irm sends its warehouse. Omitted, approve() has
+                // nowhere to collect the hire from and refuses — and before it did, the kit line grew
+                // with no pickup location at all.
+                const needsDepot = l.source === "irm" || l.source === "rental";
+                return { requestLineId: l.id, sourceType: "warehouse" as const, warehouseId: needsDepot ? lineWh[l.id] : undefined, approvedQty };
               }
               return {
                 requestLineId: l.id,
@@ -492,15 +555,18 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
                       </p>
                     )}
 
-                    {/* Source switch — only where a van is genuinely an option for THIS item. */}
-                    {!excluded(l) && l.source !== "misc" && vans.length > 0 && (
+                    {/* Source switch — only where a van is genuinely an option for THIS item.
+                        Rental is excluded unconditionally, not by trusting the holders endpoint to
+                        return nothing: hired kit is never transferable engineer-to-engineer, and
+                        offering the choice at all would invite an approval the server refuses. */}
+                    {!excluded(l) && l.source !== "misc" && l.source !== "rental" && vans.length > 0 && (
                       <div className="mb-2 grid grid-cols-2 gap-2">
                         <ModeButton active={src === "warehouse"} onClick={() => setLineSrc((p) => ({ ...p, [l.id]: "warehouse" }))} title="Warehouse" hint="Collect from stock" />
                         <ModeButton active={src === "engineer"} onClick={() => setLineSrc((p) => ({ ...p, [l.id]: "engineer" }))} title="Engineer" hint="From another van" />
                       </div>
                     )}
 
-                    {excluded(l) ? null : l.source !== "misc" && src === "engineer" ? (
+                    {excluded(l) ? null : l.source !== "misc" && l.source !== "rental" && src === "engineer" ? (
                       <>
                         <Select value={lineEng[l.id] ?? ""} onChange={(v) => setLineEng((p) => ({ ...p, [l.id]: v }))} options={vans} placeholder="— Select engineer —" ariaLabel={`Source engineer for ${l.itemName}`} />
                         {/* The SPLIT. A van rarely covers the whole line on its own — 5 requested with
@@ -582,6 +648,44 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
                             <p className="mt-1.5 text-[11px] text-[var(--faint)]">No engineer holds enough of this item — warehouse only.</p>
                           )}
                           {holdersFailed && <p className="mt-1.5 text-[11px] text-amber-600">Couldn&apos;t check engineer vans — warehouse issue only.</p>}
+                        </>
+                      )
+                    ) : l.source === "rental" ? (
+                      // Hired kit is collected from the DEPOT whose live hire has the spare unit. The
+                      // picker looks and behaves like the IRM one — same option shape, same `free`
+                      // figure — because the decision is the same decision. What differs is that there
+                      // is no van fallback to fall back on, so "none on hire" is a dead end here in a
+                      // way it never is for IRM.
+                      unstocked.has(l.id) ? (
+                        <p className="text-[11px] font-semibold text-[var(--neg)]">
+                          No depot has this on hire with a spare unit. It can&apos;t be transferred from a van —
+                          hired equipment goes back to its provider from the depot that took delivery. Raise a purchase
+                          request to hire another, or decline this request.
+                        </p>
+                      ) : (
+                        <>
+                          <Select
+                            value={lineWh[l.id] ?? ""}
+                            onChange={(v) => {
+                              setLineWh((p) => ({ ...p, [l.id]: v }));
+                              // Same clamp as the IRM picker: switching to a smaller depot has to bring
+                              // the approved quantity down with it, or the cap is bypassed by the order
+                              // of clicks.
+                              const opt = (whOptions[l.id] ?? []).find((o) => o.value === v);
+                              if (opt?.free === undefined) return;
+                              const ceiling = Math.min(l.qty, opt.free);
+                              setLineQty((p) => ({ ...p, [l.id]: Math.min(p[l.id] ?? l.qty, ceiling) }));
+                            }}
+                            options={whOptions[l.id] ?? []}
+                            placeholder="— Pick depot —"
+                            ariaLabel={`Depot for ${l.itemName}`}
+                          />
+                          {stockCheckFailed.has(l.id) && (
+                            <p className="mt-1.5 text-[11px] text-amber-600">Couldn&apos;t check what&apos;s on hire — pick the depot you know holds it.</p>
+                          )}
+                          <p className="mt-1.5 text-[11px] text-[var(--faint)]">
+                            Rental item — collected from the depot holding it, never from an engineer&apos;s van.
+                          </p>
                         </>
                       )
                     ) : l.source === "customer_stock" ? (

@@ -17,7 +17,9 @@ const HEADERS = ["Item", "Source", "In stock", "Planned", "Free"];
 
 // Item names run long here; the other four are counts.
 const TABLE_MIN_WIDTH = tableMinWidth(["wide", "normal", "narrow", "narrow", "narrow"]);
-const SOURCE_LABEL: Record<WarehouseDemandRow["source"], string> = { irm: "IRM item", customer: "Customer stock" };
+// "Hired" rather than "Rental item": on a demand board the question is where the units come from,
+// and hired units come from a live hire at this depot — not from stock we own.
+const SOURCE_LABEL: Record<WarehouseDemandRow["source"], string> = { irm: "IRM item", customer: "Customer stock", rental: "Hired" };
 
 export function DemandTab({ warehouseId }: { warehouseId: string }) {
   const [rows, setRows] = React.useState<WarehouseDemandRow[] | null>(null);

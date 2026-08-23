@@ -12,6 +12,7 @@ import type { PoLineRow, PurchaseOrderWithRelations } from "./purchase-order.rep
 import * as poEmail from "./purchase-order.email.js";
 import * as prfRepo from "#modules/purchase-request/purchase-request.repository.js";
 import * as jobRepo from "#modules/job/job.repository.js";
+import * as rentalCustodyRepo from "#modules/engineer-rental/engineer-rental.repository.js";
 import * as userRepo from "#modules/user/user.repository.js";
 import * as documentService from "#modules/document/document.service.js";
 import * as supplierService from "#modules/supplier/supplier.service.js";
@@ -2154,6 +2155,9 @@ export async function extendHire(
       ratePence: line.ratePence,
       createdBy: actor?.email ?? null,
     },
+    // The engineer holding this kit is working to the OLD date until this runs. In the same
+    // transaction, so the deadline on the order and the deadline in the van can never disagree.
+    (tx) => rentalCustodyRepo.refreshHoldingDeadlinesForHireTx(tx, line.id, hireEndDate).then(() => undefined),
   );
   emitHireUpdated(po.id, po.code);
   audit.record({

@@ -30,12 +30,24 @@ interface PlannedOption {
   key: string;
   source: KitRequestLinePayload["source"];
   irmItemId?: string;
+  rentalItemId?: string;
   customerStockEntryId?: string;
   itemName: string;
 }
 
 function optionKey(opt: KitItemOption): string {
-  return opt.source === "irm" ? `irm:${opt.irmItemId}` : `cse:${opt.customerStockEntryId}`;
+  // Three-way. The binary form treated everything that was not IRM as customer stock, so a rental
+  // option keyed `cse:undefined` — colliding with every other rental in the list.
+  if (opt.source === "irm") return `irm:${opt.irmItemId}`;
+  if (opt.source === "rental") return `rental:${opt.rentalItemId}`;
+  return `cse:${opt.customerStockEntryId}`;
+}
+
+function rentalDetail(opt: Extract<KitItemOption, { source: "rental" }>): string {
+  if (opt.depots.length === 0) return `Rental · ${opt.code} · none on hire`;
+  const [first, ...rest] = opt.depots;
+  const where = `${first.warehouseName ?? "Depot"}${rest.length ? ` +${rest.length} more` : ""}`;
+  return `Rental · ${opt.code} · ${where} · ${opt.quantityOnHand} free on hire`;
 }
 
 function customerStockDetail(opt: Extract<KitItemOption, { source: "customer_stock" }>): string {
@@ -46,6 +58,8 @@ function customerStockDetail(opt: Extract<KitItemOption, { source: "customer_sto
 
 const OUT_OF_STOCK = "Out of stock — no warehouse or engineer has this";
 const OUT_OF_STOCK_CONSIGNMENT = "Out of stock — none of this customer's stock left here";
+// A hire is not "out of stock", it is NOT CURRENTLY HIRED — and the fix is a purchase request.
+const OUT_OF_STOCK_RENTAL = "None on hire — ask the planner to hire another";
 
 function availabilityParts(warehouse: number, van: number): string {
   const parts: string[] = [];
@@ -72,6 +86,14 @@ function capQty(qty: number, free: number | null, min = 0): number {
 
 /** Search-row gate: figures come on the item-search response itself. */
 function kitItemAvailability(opt: KitItemOption): { requestable: boolean; label: string } {
+  if (opt.source === "rental") {
+    // Depot-only. Falling through to the IRM branch below would give the right NUMBER (its van figure
+    // is structurally 0) and the wrong SENTENCE: "no warehouse or engineer has this" points an
+    // engineer at a source hired kit can never come from.
+    if ((opt.quantityOnHand ?? 0) <= 0) return { requestable: false, label: OUT_OF_STOCK_RENTAL };
+    // The row's own sub-line already reads "Rental · RNT-#### · <depot> · N free on hire".
+    return { requestable: true, label: "" };
+  }
   if (opt.source === "customer_stock") {
     if ((opt.qty ?? 0) <= 0) return { requestable: false, label: OUT_OF_STOCK_CONSIGNMENT };
     // The row's own sub-line already reads "<warehouse> · N in stock".
@@ -131,14 +153,26 @@ export default function NewKitRequestScreen() {
       const key =
         line.lineType === "irm" && line.irmItemId
           ? `irm:${line.irmItemId}`
-          : line.lineType === "customer_stock" && line.customerStockEntryId
-            ? `cse:${line.customerStockEntryId}`
-            : `misc:${line.itemName.toLowerCase()}`;
+          : line.lineType === "rental" && line.rentalItemId
+            ? `rental:${line.rentalItemId}`
+            : line.lineType === "customer_stock" && line.customerStockEntryId
+              ? `cse:${line.customerStockEntryId}`
+              : `misc:${line.itemName.toLowerCase()}`;
       if (!seen.has(key)) {
         seen.set(key, {
           key,
-          source: line.lineType === "customer_stock" ? "customer_stock" : line.lineType === "irm" ? "irm" : "misc",
+          // Chained ternary ending in "misc" — a rental line landed in that else and was offered to
+          // the planner as free text with its id dropped.
+          source:
+            line.lineType === "customer_stock"
+              ? "customer_stock"
+              : line.lineType === "irm"
+                ? "irm"
+                : line.lineType === "rental"
+                  ? "rental"
+                  : "misc",
           irmItemId: line.irmItemId ?? undefined,
+          rentalItemId: line.rentalItemId ?? undefined,
           customerStockEntryId: line.customerStockEntryId ?? undefined,
           itemName: line.itemName,
         });
@@ -177,30 +211,33 @@ export default function NewKitRequestScreen() {
 
   // Live availability for planned + cart rows, refetched when the item SET
   // changes (not quantities). Advisory only — a failure just hides the lines.
-  const [avail, setAvail] = useState<KitAvailabilityMap>({ irm: {}, cse: {} });
+  const [avail, setAvail] = useState<KitAvailabilityMap>({ irm: {}, cse: {}, rental: {} });
   const availSeq = useRef(0);
   const availKey = useMemo(() => {
     const irm = new Set<string>();
     const cse = new Set<string>();
+    const rental = new Set<string>();
     for (const p of plannedOptions) {
       if (p.source === "irm" && p.irmItemId) irm.add(p.irmItemId);
+      if (p.source === "rental" && p.rentalItemId) rental.add(p.rentalItemId);
       if (p.source === "customer_stock" && p.customerStockEntryId) cse.add(p.customerStockEntryId);
     }
     for (const l of lines) {
       if (l.source === "irm" && l.irmItemId) irm.add(l.irmItemId);
+      if (l.source === "rental" && l.rentalItemId) rental.add(l.rentalItemId);
       if (l.source === "customer_stock" && l.customerStockEntryId) cse.add(l.customerStockEntryId);
     }
-    return JSON.stringify({ irm: [...irm].sort(), cse: [...cse].sort() });
+    return JSON.stringify({ irm: [...irm].sort(), cse: [...cse].sort(), rental: [...rental].sort() });
   }, [plannedOptions, lines]);
   useEffect(() => {
-    const ids = JSON.parse(availKey) as { irm: string[]; cse: string[] };
+    const ids = JSON.parse(availKey) as { irm: string[]; cse: string[]; rental: string[] };
     const seq = ++availSeq.current;
-    kitItemAvailabilityFor(jobId, ids.irm, ids.cse)
+    kitItemAvailabilityFor(jobId, ids.irm, ids.cse, ids.rental)
       .then((m) => {
         if (seq === availSeq.current) setAvail(m);
       })
       .catch(() => {
-        if (seq === availSeq.current) setAvail({ irm: {}, cse: {} });
+        if (seq === availSeq.current) setAvail({ irm: {}, cse: {}, rental: {} });
       });
   }, [availKey, jobId]);
 
@@ -208,10 +245,16 @@ export default function NewKitRequestScreen() {
     source: KitRequestLinePayload["source"],
     irmItemId?: string,
     cseId?: string,
+    rentalItemId?: string,
   ): { warehouse: number; van: number } | null => {
     if (source === "irm" && irmItemId) {
       const a = avail.irm[irmItemId];
       return a ? { warehouse: a.quantityOnHand, van: a.heldByEngineers } : null;
+    }
+    if (source === "rental" && rentalItemId) {
+      const a = avail.rental[rentalItemId];
+      // van is structurally 0 — hired kit never comes off a colleague's van.
+      return a ? { warehouse: a.quantityOnHand, van: 0 } : null;
     }
     if (source === "customer_stock" && cseId) {
       const a = avail.cse[cseId];
@@ -219,8 +262,8 @@ export default function NewKitRequestScreen() {
     }
     return null;
   };
-  const freeFor = (source: KitRequestLinePayload["source"], irmItemId?: string, cseId?: string): number | null => {
-    const stock = stockFor(source, irmItemId, cseId);
+  const freeFor = (source: KitRequestLinePayload["source"], irmItemId?: string, cseId?: string, rentalItemId?: string): number | null => {
+    const stock = stockFor(source, irmItemId, cseId, rentalItemId);
     return stock ? stock.warehouse + stock.van : null;
   };
 
@@ -241,10 +284,18 @@ export default function NewKitRequestScreen() {
           key,
           source: opt.source,
           irmItemId: opt.source === "irm" ? opt.irmItemId : undefined,
+          rentalItemId: opt.source === "rental" ? opt.rentalItemId : undefined,
           customerStockEntryId: opt.source === "customer_stock" ? opt.customerStockEntryId : undefined,
           itemName: opt.name,
           qty: 1,
-          detail: opt.source === "irm" ? `IRM · ${opt.code}${opt.sku ? ` · ${opt.sku}` : ""}` : customerStockDetail(opt),
+          // Three-way. The binary form sent every non-IRM option through customerStockDetail, which
+          // reads fields a rental option does not have.
+          detail:
+            opt.source === "irm"
+              ? `IRM · ${opt.code}${opt.sku ? ` · ${opt.sku}` : ""}`
+              : opt.source === "rental"
+                ? rentalDetail(opt)
+                : customerStockDetail(opt),
         },
       ]);
     }
@@ -272,11 +323,15 @@ export default function NewKitRequestScreen() {
     // the web's buildLines semantics.
     const merged = new Map<string, KitRequestLinePayload>();
     for (const p of plannedOptions) {
-      const qty = capQty(extras[p.key] ?? 0, freeFor(p.source, p.irmItemId, p.customerStockEntryId), 0);
+      const qty = capQty(extras[p.key] ?? 0, freeFor(p.source, p.irmItemId, p.customerStockEntryId, p.rentalItemId), 0);
       if (qty > 0) {
         merged.set(p.key, {
           source: p.source,
           irmItemId: p.irmItemId,
+          // Carried explicitly. The payload literal named exactly three identity fields, so a rental
+          // line went to the server with its source set but no id — which the API refuses, and which
+          // the engineer could not have diagnosed from the screen.
+          rentalItemId: p.rentalItemId,
           customerStockEntryId: p.customerStockEntryId,
           itemName: p.itemName,
           qty,
@@ -286,7 +341,7 @@ export default function NewKitRequestScreen() {
     for (const l of lines) {
       // A cart row with nothing free drops out (capQty → 0) rather than
       // shipping the floor of 1 alongside "None free to request".
-      const qty = capQty(l.qty, freeFor(l.source, l.irmItemId, l.customerStockEntryId), 1);
+      const qty = capQty(l.qty, freeFor(l.source, l.irmItemId, l.customerStockEntryId, l.rentalItemId), 1);
       if (qty <= 0) continue;
       const existing = merged.get(l.key);
       if (existing) existing.qty += qty;
@@ -294,6 +349,7 @@ export default function NewKitRequestScreen() {
         merged.set(l.key, {
           source: l.source,
           irmItemId: l.irmItemId,
+          rentalItemId: l.rentalItemId,
           customerStockEntryId: l.customerStockEntryId,
           itemName: l.itemName,
           qty,
@@ -341,7 +397,7 @@ export default function NewKitRequestScreen() {
         <>
           <SectionTitle>More of a planned item</SectionTitle>
           {plannedOptions.map((p) => {
-            const stock = stockFor(p.source, p.irmItemId, p.customerStockEntryId);
+            const stock = stockFor(p.source, p.irmItemId, p.customerStockEntryId, p.rentalItemId);
             const free = stock ? stock.warehouse + stock.van : null;
             // Clamped at read time so the number on screen IS the payload number.
             const shown = capQty(extras[p.key] ?? 0, free, 0);
@@ -398,7 +454,9 @@ export default function NewKitRequestScreen() {
             <Text style={s.meta}>
               {opt.source === "irm"
                 ? `IRM · ${opt.code}${opt.sku ? ` · ${opt.sku}` : ""}`
-                : customerStockDetail(opt)}
+                : opt.source === "rental"
+                  ? rentalDetail(opt)
+                  : customerStockDetail(opt)}
             </Text>
             {availInfo.label ? (
               <Text style={availInfo.requestable ? s.availMuted : s.availDanger}>{availInfo.label}</Text>
@@ -419,8 +477,8 @@ export default function NewKitRequestScreen() {
         <EmptyState title="Nothing added yet" subtitle="Top up a planned item or search above." />
       ) : (
         lines.map((line) => {
-          const stock = stockFor(line.source, line.irmItemId, line.customerStockEntryId);
-          const free = freeFor(line.source, line.irmItemId, line.customerStockEntryId);
+          const stock = stockFor(line.source, line.irmItemId, line.customerStockEntryId, line.rentalItemId);
+          const free = freeFor(line.source, line.irmItemId, line.customerStockEntryId, line.rentalItemId);
           // Clamped at read time so the number on screen IS the payload number —
           // a row with nothing free shows 0 and drops out of the request.
           const shown = capQty(line.qty, free, 1);

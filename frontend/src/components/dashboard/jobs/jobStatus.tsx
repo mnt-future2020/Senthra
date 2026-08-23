@@ -77,10 +77,11 @@ export const JOB_TYPE_LABELS: Record<JobType, string> = {
   other: "Other",
 };
 
-export const JOB_LINE_TYPES: JobLineType[] = ["customer_stock", "irm", "misc"];
+export const JOB_LINE_TYPES: JobLineType[] = ["customer_stock", "irm", "rental", "misc"];
 export const JOB_LINE_TYPE_LABELS: Record<JobLineType, string> = {
   customer_stock: "Customer stock",
   irm: "IRM item",
+  rental: "Rental item",
   misc: "Miscellaneous",
 };
 

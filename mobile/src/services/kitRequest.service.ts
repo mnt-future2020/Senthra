@@ -55,17 +55,23 @@ export function searchKitItems(q: string, jobId?: string): Promise<KitItemOption
 export interface KitAvailabilityMap {
   irm: Record<string, { quantityOnHand: number; heldByEngineers: number }>;
   cse: Record<string, { qty: number }>;
+  /** Free-on-hire per rental item, with the depots holding it. */
+  rental: Record<
+    string,
+    { quantityOnHand: number; depots: { warehouseId: string; warehouseName: string | null; available: number }[] }
+  >;
 }
 
 export function kitItemAvailabilityFor(
   jobId: string,
   irmItemIds: string[],
   cseIds: string[],
+  rentalItemIds: string[] = [],
 ): Promise<KitAvailabilityMap> {
-  if (irmItemIds.length === 0 && cseIds.length === 0) {
-    return Promise.resolve({ irm: {}, cse: {} });
+  if (irmItemIds.length === 0 && cseIds.length === 0 && rentalItemIds.length === 0) {
+    return Promise.resolve({ irm: {}, cse: {}, rental: {} });
   }
   return api<KitAvailabilityMap>(
-    `/job-kit-requests/item-availability${qs({ jobId, irm: irmItemIds.join(","), cse: cseIds.join(",") })}`,
+    `/job-kit-requests/item-availability${qs({ jobId, irm: irmItemIds.join(","), cse: cseIds.join(","), rental: rentalItemIds.join(",") })}`,
   );
 }

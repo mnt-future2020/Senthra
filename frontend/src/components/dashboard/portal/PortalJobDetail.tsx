@@ -154,6 +154,8 @@ export function PortalJobDetail({ id }: { id: string }) {
                   // by reconcile. These three would sit at 0 / 0 / issued forever, so the office
                   // page dashes them out and this does the same rather than reporting units owed.
                   const isMisc = l.lineType === "misc";
+                  // A hire is never consumed, so "Used" has no meaning on a rental line — see JobDetail.
+                  const isRental = l.lineType === "rental";
                   return (
                     <tr key={l.id} className="border-b border-[var(--border)] last:border-0">
                       <td className="cell-y px-4 text-[var(--muted)]">
@@ -170,7 +172,7 @@ export function PortalJobDetail({ id }: { id: string }) {
                       <td className="cell-y px-4 text-[var(--muted)]">{l.warehouseName ?? "—"}</td>
                       <td className="cell-y px-4 text-right font-semibold text-[var(--ink)]">{l.qty}</td>
                       <td className="cell-y px-4 text-right text-[var(--ink)]">{l.issued}</td>
-                      <td className="cell-y px-4 text-right text-[var(--ink)]">{isMisc ? "—" : l.used}</td>
+                      <td className="cell-y px-4 text-right text-[var(--ink)]">{isMisc || isRental ? "—" : l.used}</td>
                       <td className="cell-y px-4 text-right text-[var(--ink)]">{isMisc ? "—" : l.returned}</td>
                       <td className="cell-y px-4 text-right font-bold text-[var(--ink)]">{isMisc ? "—" : l.remaining}</td>
                     </tr>

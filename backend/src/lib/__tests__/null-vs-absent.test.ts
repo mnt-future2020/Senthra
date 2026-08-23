@@ -36,6 +36,11 @@ const REVIEWED: Record<string, string> = {
   customerStockEntryId: "write-only",
   customerName: "write-only",
   irmItemId: "write-only",
+  // Written on every movement line, alongside irmItemId/customerStockEntryId above: a line names at
+  // most one source pool, so the other pools' ids are explicitly null rather than absent. Never a
+  // filter — "which hire did this move" is asked by id, not by null.
+  rentalItemId: "write-only",
+  purchaseOrderRentalLineId: "write-only",
   code: "write-only",
   sku: "write-only",
   uom: "write-only",

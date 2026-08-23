@@ -134,6 +134,10 @@ function JobView({ initial }: { initial: Job }) {
               ) : (
                 job.kitLines.map((l) => {
                   const isMisc = l.lineType === "misc";
+                  // A hire is never consumed — it is equipment we do not own and every unit goes back
+                  // to the provider — so "Used" has no meaning on a rental line. Rendering 0 there
+                  // would read as "nothing used yet", implying the number could still move.
+                  const isRental = l.lineType === "rental";
                   return (
                   <tr key={l.id} className="border-b border-[var(--border)] last:border-0">
                     <td className="cell-y px-4 text-[var(--muted)]">{JOB_LINE_TYPE_LABELS[l.lineType as JobLineType] ?? l.lineType}</td>
@@ -202,7 +206,7 @@ function JobView({ initial }: { initial: Job }) {
                         out of the engineer's Complete form, skipped by reconcile. These three would sit
                         at 0 / 0 / issued forever, so a reconciled job would still claim units owed.
                         Same em dash the Goods Management queue and the engineer job pack use. */}
-                    <td className="cell-y px-4 text-right text-[var(--ink)]">{isMisc ? "—" : l.used}</td>
+                    <td className="cell-y px-4 text-right text-[var(--ink)]">{isMisc || isRental ? "—" : l.used}</td>
                     <td className="cell-y px-4 text-right text-[var(--ink)]">
                       <div className="flex flex-col items-end gap-1">
                         <span>{isMisc ? "—" : l.returned}</span>

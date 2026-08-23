@@ -516,6 +516,26 @@ describe("createRentalReturn", () => {
     await expect(createRentalReturn(returnBody(), ACTOR)).rejects.toThrow(/can no longer be returned/i);
   });
 
+  // Units in an engineer's van are not on the shelf for the provider to collect. Without this guard
+  // the hire goes terminal — off the deadline badge that was the only thing chasing it — while the
+  // kit is physically on a job, and it then goes missing quietly.
+  it("refuses to hand back units that are out with an engineer", async () => {
+    findPo.mockResolvedValue(po({ rentalItems: [onHire({ issuedQuantity: 2 })] }));
+    await expect(createRentalReturn(returnBody(), ACTOR)).rejects.toThrow(/out with an engineer on a job/i);
+  });
+
+  it("still allows handing back the portion sitting at the warehouse", async () => {
+    findPo.mockResolvedValue(po({ rentalItems: [onHire({ issuedQuantity: 2 })] }));
+    await createRentalReturn(returnBody({ lines: [{ purchaseOrderRentalLineId: LINE_ID, returnedQuantity: 1 }] }), ACTOR);
+    expect(createWithCode).toHaveBeenCalled();
+  });
+
+  it("is unaffected when nothing is out with an engineer", async () => {
+    findPo.mockResolvedValue(po({ rentalItems: [onHire({ issuedQuantity: 0 })] }));
+    await createRentalReturn(returnBody(), ACTOR);
+    expect(createWithCode).toHaveBeenCalled();
+  });
+
   it("writes an OUT note, not a delivery", async () => {
     await createRentalReturn(returnBody(), ACTOR);
     const [header] = createWithCode.mock.calls[0]!;

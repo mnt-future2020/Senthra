@@ -1,16 +1,21 @@
 import { z } from "zod";
 
 // Validation for the Field-Engineer "additional kit request" flow (FE raises → PM approves/declines).
-// A line names one source pool (irm / customer_stock / misc) + qty; the request grows the job's kit on
-// approval and opens fulfilment (warehouse issue OR a job-scoped engineer transfer).
+// A line names one source pool (irm / customer_stock / rental / misc) + qty; the request grows the
+// job's kit on approval and opens fulfilment (warehouse issue OR a job-scoped engineer transfer).
+//
+// RENTAL is warehouse-only, and that is a property of the pool rather than a UI choice: hired kit is
+// not transferable engineer-to-engineer, so the only place a request for one can be fulfilled from is
+// a depot holding a live hire with spare units. approve() enforces it — see the refusal there.
 
 const objectId = z.string().regex(/^[a-f0-9]{24}$/i, "Must be a valid ObjectId.");
 
 const requestLineSchema = z
   .object({
-    source: z.enum(["irm", "customer_stock", "misc"]),
+    source: z.enum(["irm", "customer_stock", "rental", "misc"]),
     irmItemId: objectId.optional(),
     customerStockEntryId: objectId.optional(),
+    rentalItemId: objectId.optional(),
     itemName: z.string().trim().min(1, "Item name is required.").max(300),
     qty: z
       .number()
@@ -23,10 +28,16 @@ const requestLineSchema = z
     if (l.source === "irm") {
       if (!l.irmItemId) ctx.addIssue({ code: "custom", path: ["irmItemId"], message: "Select an IRM item." });
       if (l.customerStockEntryId) ctx.addIssue({ code: "custom", path: ["customerStockEntryId"], message: "IRM lines can't reference customer stock." });
+      if (l.rentalItemId) ctx.addIssue({ code: "custom", path: ["rentalItemId"], message: "IRM lines can't reference a rental item." });
     } else if (l.source === "customer_stock") {
       if (!l.customerStockEntryId) ctx.addIssue({ code: "custom", path: ["customerStockEntryId"], message: "Select a customer stock item." });
       if (l.irmItemId) ctx.addIssue({ code: "custom", path: ["irmItemId"], message: "Customer-stock lines can't reference IRM." });
-    } else if (l.irmItemId || l.customerStockEntryId) {
+      if (l.rentalItemId) ctx.addIssue({ code: "custom", path: ["rentalItemId"], message: "Customer-stock lines can't reference a rental item." });
+    } else if (l.source === "rental") {
+      if (!l.rentalItemId) ctx.addIssue({ code: "custom", path: ["rentalItemId"], message: "Select a rental item." });
+      if (l.irmItemId) ctx.addIssue({ code: "custom", path: ["irmItemId"], message: "Rental lines can't reference IRM." });
+      if (l.customerStockEntryId) ctx.addIssue({ code: "custom", path: ["customerStockEntryId"], message: "Rental lines can't reference customer stock." });
+    } else if (l.irmItemId || l.customerStockEntryId || l.rentalItemId) {
       ctx.addIssue({ code: "custom", path: ["source"], message: "Misc lines can't reference a source item." });
     }
   });
@@ -46,7 +57,15 @@ export const createKitRequestSchema = z.object({
       const seen = new Set<string>();
       lines.forEach((l, i) => {
         const key =
-          l.source === "irm" ? `irm:${l.irmItemId}` : l.source === "customer_stock" ? `cse:${l.customerStockEntryId}` : `misc:${l.itemName.trim().toLowerCase()}`;
+          l.source === "irm"
+            ? `irm:${l.irmItemId}`
+            : l.source === "customer_stock"
+              ? `cse:${l.customerStockEntryId}`
+              : l.source === "rental"
+                ? `rental:${l.rentalItemId}`
+                // Misc keys on the NAME, so a rental line reaching this arm would dedupe against a
+                // free-text item of the same name — and the composer labels both with the item name.
+                : `misc:${l.itemName.trim().toLowerCase()}`;
         if (seen.has(key)) ctx.addIssue({ code: "custom", path: [i], message: "This item appears twice — combine the quantities into one line." });
         else seen.add(key);
       });

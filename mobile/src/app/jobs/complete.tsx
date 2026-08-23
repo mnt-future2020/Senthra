@@ -23,7 +23,17 @@ export default function CompleteJobScreen() {
 
   const { data: job, loading, refreshing, refresh } = useLoad(useCallback(() => getOwnJob(id), [id]));
 
-  const stockLines = useMemo(() => (job?.kitLines ?? []).filter((l) => l.lineType !== "misc"), [job]);
+  // ALLOWLIST, deliberately — not `!== "misc"`.
+  //
+  // Only IRM and customer stock can be declared "used" on site. Hired kit never can: it is equipment
+  // we do not own and every unit goes back to the provider, so the API's usedLines source enum admits
+  // only these two. With the old exclude-misc filter a rental line landed here, was labelled
+  // "Customer stock" by the ternary below and posted `source: "customer"` with no entry id — a payload
+  // the server refuses, leaving the engineer unable to complete the job at all.
+  const stockLines = useMemo(
+    () => (job?.kitLines ?? []).filter((l) => l.lineType === "irm" || l.lineType === "customer_stock"),
+    [job],
+  );
 
   const qtyFor = (lineId: string) => used[lineId] ?? 0;
 

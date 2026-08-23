@@ -9,6 +9,7 @@ import type {
   PagedHireMovements,
   RentalCategory,
   RentalItem,
+  RentalItemAvailability,
   RecordDamageChargePayload,
   RentalReceipt,
   RentalReceiptPayload,
@@ -65,6 +66,17 @@ export function listRentalItems(params: RentalListParams = {}): Promise<PagedRen
 
 export async function getRentalItem(idOrCode: string): Promise<RentalItem> {
   return (await api<{ rentalItem: RentalItem }>(`/rental-items/${idOrCode}`)).rentalItem;
+}
+
+/**
+ * Where this hired item can be collected right now, and how many are free at each depot.
+ *
+ * The job form's pickup picker reads it. Depots with nothing free are omitted server-side, so an
+ * empty array means "hired nowhere that still has one spare" — which is a real answer the form shows,
+ * not an error.
+ */
+export async function getRentalItemAvailability(id: string): Promise<RentalItemAvailability[]> {
+  return (await api<{ warehouses: RentalItemAvailability[] }>(`/rental-items/${id}/availability`)).warehouses;
 }
 
 /**

@@ -13,7 +13,7 @@ const objectId = (label: string) => z.string({ error: `Select ${label}.` }).rege
 const optionalObjectId = (label: string) => z.preprocess(emptyToUndef, z.string().regex(OBJECT_ID_RE, `Select ${label}.`).optional());
 
 export const MOVEMENT_DIRECTIONS = ["issue", "return"] as const; // consume is engineer-only (job module)
-export const LINE_SOURCES = ["irm", "customer", "misc"] as const; // misc = free-text kit line, no stock/barcode
+export const LINE_SOURCES = ["irm", "customer", "rental", "misc"] as const; // misc = free-text kit line, no stock/barcode
 export const LINE_CONDITIONS = ["good", "damaged"] as const;
 
 export const scanLookupSchema = z.object({
@@ -29,6 +29,12 @@ const movementLineSchema = z
     source: z.enum(LINE_SOURCES, { error: "Pick a source." }),
     irmItemId: optionalObjectId("an IRM item"),
     customerStockEntryId: optionalObjectId("a customer stock item"),
+    rentalItemId: optionalObjectId("a rental item"),
+    // WHICH HIRE these units come off. Server-resolved on a scan (the allocator picks the hire whose
+    // deadline is soonest) and echoed back by the client on post, so the units committed are the ones
+    // the scan previewed. Never invented by the client: an id naming a hire at another warehouse, or
+    // one with nothing left on it, is refused in the service.
+    purchaseOrderRentalLineId: optionalObjectId("a hire"),
     jobKitLineId: optionalObjectId("a kit line"),
     qty: z.coerce.number({ error: "Quantity is required." }).int("Whole number.").min(1, "At least 1.").max(10_000_000),
     condition: z.enum(LINE_CONDITIONS).optional(), // returns only; defaults to "good" server-side
@@ -40,6 +46,22 @@ const movementLineSchema = z
   .superRefine((l, ctx) => {
     if (l.source === "irm" && !l.irmItemId) ctx.addIssue({ code: "custom", path: ["irmItemId"], message: "Select an IRM item." });
     if (l.source === "customer" && !l.customerStockEntryId) ctx.addIssue({ code: "custom", path: ["customerStockEntryId"], message: "Select a customer stock item." });
+    if (l.source === "rental") {
+      if (!l.rentalItemId) ctx.addIssue({ code: "custom", path: ["rentalItemId"], message: "Select a rental item." });
+      // The hire is REQUIRED on a rental line, unlike every other id here, because a hire is what
+      // carries the deadline and the provider we owe the kit back to. A movement that recorded only
+      // the catalogue item would move units belonging to no particular hire, and the return could
+      // then credit the wrong one — leaving a hire that was handed back sitting on the overdue badge
+      // while a hire still in a van reads as settled.
+      if (!l.purchaseOrderRentalLineId) ctx.addIssue({ code: "custom", path: ["purchaseOrderRentalLineId"], message: "Select which hire these units come from." });
+      // The KIT LINE is required too, and rental is the only stock source where it has to be. Every
+      // tally that decides whether a hire is still out — the queue, the job pack, the reconcile guard
+      // — is keyed by jobKitLineId, so a movement stored with a null one is invisible to all of them:
+      // the units come back physically, the line still reads as outstanding forever, and the job can
+      // never reconcile. IRM survives that mistake because it can be written off as lost; a hire
+      // cannot, by design, so for rental it is unrecoverable. The scan always supplies it.
+      if (!l.jobKitLineId) ctx.addIssue({ code: "custom", path: ["jobKitLineId"], message: "Select which kit line these units come off." });
+    }
     // misc lines reference only their kit line (no barcode/stock) — issued by count, not scan.
     if (l.source === "misc" && !l.jobKitLineId) ctx.addIssue({ code: "custom", path: ["jobKitLineId"], message: "Select a misc kit line." });
     if (l.condition === "damaged") {

@@ -10,6 +10,7 @@ import { listEngineerOptions, listWarehouseOptions, type WarehouseOption } from 
 import { listIrmItems } from "@/services/irm.service";
 import { getAvailability, listItemWarehouseStock } from "@/services/inventory.service";
 import { getJobsDemand } from "@/services/goodsManagement.service";
+import { getRentalItemAvailability, listRentalItems } from "@/services/rental.service";
 import { listSuppliers } from "@/services/supplier.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useAuth } from "@/hooks/useAuth";
@@ -57,6 +58,7 @@ type KitLine = {
   // item selection while the line still has no warehouse (hence no concrete entry id) yet.
   customerStockItemKey: string;
   irmItemId: string;
+  rentalItemId: string;
   itemName: string;
   seCode: string;
   description: string;
@@ -85,6 +87,7 @@ const newKitLine = (): KitLine => ({
   customerStockEntryId: "",
   customerStockItemKey: "",
   irmItemId: "",
+  rentalItemId: "",
   itemName: "",
   seCode: "",
   description: "",
@@ -164,6 +167,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
           customerStockEntryId: l.customerStockEntryId ?? "",
           customerStockItemKey: l.lineType === "customer_stock" ? stockItemKey(l.seCode, l.itemName) : "",
           irmItemId: l.irmItemId ?? "",
+          rentalItemId: l.rentalItemId ?? "",
           itemName: l.itemName,
           seCode: l.seCode ?? "",
           description: l.description ?? "",
@@ -202,6 +206,14 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
   // NOT fall back to every warehouse — they'd be misleading); only "error" (lookup failed / no
   // inventory permission) falls back to the full warehouse list so the pick is never hard-blocked.
   const [irmItemWarehouses, setIrmItemWarehouses] = React.useState<Record<string, IrmWarehouseLookup>>({});
+  const [rentalItems, setRentalItems] = React.useState<Opt[]>([]);
+  // The rental twin of irmItemWarehouses. A hired item has no stock level of its own, so "where can
+  // this be collected" is answered by its live hires — the server sums them per depot and omits any
+  // depot with nothing free, so a "ready" empty list means "hired nowhere with a spare unit".
+  const [rentalItemWarehouses, setRentalItemWarehouses] = React.useState<Record<string, IrmWarehouseLookup>>({});
+  // Free units per rental item × warehouse, from the same fetch — the planner's qty cap, so the form
+  // cannot promise an engineer a tester that is already out on another job.
+  const [rentalAvail, setRentalAvail] = React.useState<Map<string, number>>(new Map());
 
   const [dirty, setDirty] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
@@ -219,6 +231,9 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
     listEngineerOptions().then((us) => active && setEngineers(us.map((u) => ({ id: u.id, name: u.name, jobTitle: u.jobTitle }))), () => {});
     listSuppliers({ status: "active", pageSize: 200 }).then((r) => active && setSuppliers(r.suppliers.map((s) => ({ value: s.id, label: `${s.code} — ${s.name}` }))), () => {});
     listIrmItems({ status: "active", pageSize: 200 }).then((r) => active && setIrmItems(r.items.map((i) => ({ value: i.id, label: `${i.code} — ${i.name}` }))), () => {});
+    // Same idiom as the IRM list above. The label carries the RNT-#### because that is what is printed
+    // on the equipment's label and what the warehouse scans.
+    listRentalItems({ status: "active", pageSize: 200 }).then((r) => active && setRentalItems(r.items.map((i) => ({ value: i.id, label: `${i.code} — ${i.name}` }))), () => {});
     listWarehouseOptions().then((ws) => active && setWarehouses(ws), () => {});
     return () => { active = false; };
   }, []);
@@ -284,7 +299,13 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
         if (!active) return;
         const m = new Map<string, number>();
         for (const d of rows) {
-          const k = d.irmItemId ? `irm|${d.irmItemId}|${d.warehouseId}` : d.customerStockEntryId ? `cse|${d.customerStockEntryId}` : null;
+          const k = d.irmItemId
+            ? `irm|${d.irmItemId}|${d.warehouseId}`
+            : d.rentalItemId
+              ? `rental|${d.rentalItemId}|${d.warehouseId}`
+              : d.customerStockEntryId
+                ? `cse|${d.customerStockEntryId}`
+                : null;
           if (k) m.set(k, (m.get(k) ?? 0) + d.demand);
         }
         setDemand(m);
@@ -348,7 +369,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
 
   const onPickLineType = (key: string, lineType: JobLineType) => {
     // Reset the item-identity + warehouse fields when the line type changes.
-    setLine(key, { lineType, customerStockEntryId: "", customerStockItemKey: "", irmItemId: "", itemName: "", seCode: "", warehouseId: "", warehouseName: "", available: null, loadingAvail: false });
+    setLine(key, { lineType, customerStockEntryId: "", customerStockItemKey: "", irmItemId: "", rentalItemId: "", itemName: "", seCode: "", warehouseId: "", warehouseName: "", available: null, loadingAvail: false });
     touch();
     clearError("kitLines");
   };
@@ -385,6 +406,8 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
   // pick that would duplicate another line's item+warehouse; submit-time validation backs them up.
   const irmDuplicate = (selfKey: string, irmItemId: string, warehouseId: string) =>
     kitLines.some((l) => l._key !== selfKey && l.lineType === "irm" && l.irmItemId === irmItemId && l.warehouseId === warehouseId);
+  const rentalDuplicate = (selfKey: string, rentalItemId: string, warehouseId: string) =>
+    kitLines.some((l) => l._key !== selfKey && l.lineType === "rental" && l.rentalItemId === rentalItemId && l.warehouseId === warehouseId);
   const customerDuplicate = (selfKey: string, entryId: string) =>
     kitLines.some((l) => l._key !== selfKey && l.lineType === "customer_stock" && l.customerStockEntryId === entryId);
   const DUPLICATE_MSG = "That item is already on the kit list for this warehouse — increase its quantity instead.";
@@ -460,6 +483,46 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
     );
   }, []);
 
+  // Depots holding a hired item, cached by item id and fetched once — same shape and same failure
+  // policy as loadIrmItemWarehouses above, so the two pickers behave identically.
+  const rentalWhLoaded = React.useRef<Set<string>>(new Set());
+  const loadRentalItemWarehouses = React.useCallback((itemId: string) => {
+    if (!itemId || rentalWhLoaded.current.has(itemId)) return;
+    rentalWhLoaded.current.add(itemId);
+    setRentalItemWarehouses((prev) => (prev[itemId]?.status === "ready" ? prev : { ...prev, [itemId]: { status: "loading", options: prev[itemId]?.options ?? [] } }));
+    getRentalItemAvailability(itemId).then(
+      (rows) => {
+        const options: Opt[] = rows.map((r) => ({
+          value: r.warehouseId,
+          // "on hire here", not "available" — the figure is GROSS, exactly like the IRM picker's
+          // "N in stock" beside it. Other jobs' planned demand is netted off separately by
+          // `freeStock` below, so a label promising "available" would name a number this form then
+          // caps under, on the same dropdown where its neighbour is honest about being a raw count.
+          label: `${r.warehouseName ?? "Warehouse"}${r.warehouseCode ? ` (${r.warehouseCode})` : ""} · ${r.available} on hire here`,
+        }));
+        setRentalItemWarehouses((prev) => ({ ...prev, [itemId]: { status: "ready", options } }));
+        setRentalAvail((prev) => {
+          const next = new Map(prev);
+          for (const r of rows) next.set(`${itemId}|${r.warehouseId}`, r.available);
+          return next;
+        });
+      },
+      () => {
+        rentalWhLoaded.current.delete(itemId); // allow a later retry
+        setRentalItemWarehouses((prev) => ({ ...prev, [itemId]: { status: "error", options: [] } }));
+      },
+    );
+  }, []);
+
+  const onPickRentalItem = (key: string, itemId: string) => {
+    const i = rentalItems.find((x) => x.value === itemId) ?? null;
+    // New item ⇒ the old depot may not hold it; clear it so the user re-picks a valid collection point.
+    setLine(key, { rentalItemId: itemId, itemName: i?.label ?? "", warehouseId: "", warehouseName: "", available: null, loadingAvail: false });
+    loadRentalItemWarehouses(itemId);
+    touch();
+    clearError("kitLines");
+  };
+
   const onPickIrmItem = (key: string, itemId: string) => {
     const i = irmItems.find((x) => x.value === itemId) ?? null;
     // New item ⇒ the old warehouse may not stock it; clear it so the user re-picks a valid site.
@@ -476,13 +539,25 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
     for (const l of kitLines) if (l.lineType === "irm" && l.irmItemId) loadIrmItemWarehouses(l.irmItemId);
   }, [kitLines, loadIrmItemWarehouses]);
 
+  // Same preload for hired lines, so an edit opens with the real collection points already narrowed.
+  React.useEffect(() => {
+    for (const l of kitLines) if (l.lineType === "rental" && l.rentalItemId) loadRentalItemWarehouses(l.rentalItemId);
+  }, [kitLines, loadRentalItemWarehouses]);
+
   const onPickLineWarehouse = (key: string, warehouseId: string) => {
     const w = warehouses.find((x) => x.id === warehouseId) ?? null;
     const line = kitLines.find((x) => x._key === key);
     if (line?.irmItemId && irmDuplicate(key, line.irmItemId, warehouseId)) { pushToast(DUPLICATE_MSG, "alert"); return; }
+    if (line?.rentalItemId && rentalDuplicate(key, line.rentalItemId, warehouseId)) { pushToast(DUPLICATE_MSG, "alert"); return; }
     // Bare name to match the server snapshot + detail tables (the code lives in the picker label).
     setLine(key, { warehouseId, warehouseName: w ? w.name : "" });
-    loadAvailability(key, line?.irmItemId ?? "", warehouseId);
+    // A hire's free count came back with the depot list, so there is nothing further to fetch —
+    // unlike IRM, whose availability is a second per-pair lookup.
+    if (line?.lineType === "rental") {
+      setLine(key, { available: rentalAvail.get(`${line.rentalItemId}|${warehouseId}`) ?? null, loadingAvail: false });
+    } else {
+      loadAvailability(key, line?.irmItemId ?? "", warehouseId);
+    }
     touch();
     clearError("kitLines");
   };
@@ -559,6 +634,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
   // (on-hand − that demand). null free = availability not loaded yet (no cap can be applied).
   const demandKey = (l: KitLine): string | null =>
     l.lineType === "irm" ? (l.irmItemId && l.warehouseId ? `irm|${l.irmItemId}|${l.warehouseId}` : null)
+    : l.lineType === "rental" ? (l.rentalItemId && l.warehouseId ? `rental|${l.rentalItemId}|${l.warehouseId}` : null)
     : l.lineType === "customer_stock" ? (l.customerStockEntryId ? `cse|${l.customerStockEntryId}` : null)
     : null;
   const lineDemand = (l: KitLine): number => { const k = demandKey(l); return k ? demand.get(k) ?? 0 : 0; };
@@ -575,6 +651,8 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
     if (num(l.qty) < 1) return false;
     if (l.lineType === "misc") return Boolean(l.itemName.trim());
     if (l.lineType === "customer_stock") return Boolean(l.customerStockEntryId);
+    // Hired kit is collected from a depot like IRM stock, so it needs the item AND the pickup point.
+    if (l.lineType === "rental") return Boolean(l.rentalItemId && l.warehouseId);
     return Boolean(l.irmItemId && l.warehouseId); // irm needs the item AND a pickup warehouse
   };
 
@@ -613,7 +691,11 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
         const seen = new Set<string>();
         for (const l of active) {
           if (l.lineType === "misc") continue;
-          const k = l.lineType === "irm" ? `irm:${l.irmItemId}:${l.warehouseId}` : `cse:${l.customerStockEntryId}`;
+          const k = l.lineType === "irm"
+            ? `irm:${l.irmItemId}:${l.warehouseId}`
+            : l.lineType === "rental"
+              ? `rental:${l.rentalItemId}:${l.warehouseId}`
+              : `cse:${l.customerStockEntryId}`;
           if (seen.has(k)) { e.kitLines = `"${l.itemName || l.seCode || "An item"}" is listed twice for the same warehouse — combine it into one line and raise the quantity.`; break; }
           seen.add(k);
         }
@@ -674,8 +756,10 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
         description: l.description.trim() || undefined,
         customerStockEntryId: l.lineType === "customer_stock" ? l.customerStockEntryId : undefined,
         irmItemId: l.lineType === "irm" ? l.irmItemId : undefined,
-        // customer_stock warehouse is derived server-side from the entry; irm sends the chosen warehouse.
-        warehouseId: l.lineType === "irm" ? l.warehouseId || undefined : undefined,
+        rentalItemId: l.lineType === "rental" ? l.rentalItemId : undefined,
+        // customer_stock warehouse is derived server-side from the entry; irm and rental send the
+        // chosen collection point.
+        warehouseId: l.lineType === "irm" || l.lineType === "rental" ? l.warehouseId || undefined : undefined,
         qty: num(l.qty),
         // Kit lines stay `|| undefined`: a line is REPLACED wholesale on save, never patched, so an
         // omitted key already means "this line has no note" rather than "leave the old note alone".
@@ -972,6 +1056,17 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
                   const sel = allWhOptions.find((o) => o.value === l.warehouseId);
                   if (sel) irmWhOptions = [...irmWhOptions, sel];
                 }
+                // The rental twin of the three values above. "Ready and empty" means the item is on
+                // no live hire with a spare unit — a real answer, and NOT the same as the lookup
+                // failing, which falls back to the full depot list so the pick is never hard-blocked.
+                const rentalLookup = l.lineType === "rental" && l.rentalItemId ? rentalItemWarehouses[l.rentalItemId] : undefined;
+                const rentalNotHired = rentalLookup?.status === "ready" && rentalLookup.options.length === 0 && !l.warehouseId;
+                const rentalWhLoading = rentalLookup?.status === "loading" && !l.warehouseId;
+                let rentalWhOptions = rentalLookup?.status === "ready" ? rentalLookup.options : allWhOptions;
+                if (l.warehouseId && !rentalWhOptions.some((opt) => opt.value === l.warehouseId)) {
+                  const sel = allWhOptions.find((opt) => opt.value === l.warehouseId);
+                  if (sel) rentalWhOptions = [...rentalWhOptions, sel];
+                }
                 return (
                 <div key={l._key} className="@container rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/30 p-3">
                   <div className="grid grid-cols-1 gap-3 @sm:grid-cols-12">
@@ -989,12 +1084,14 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
                         )
                       ) : l.lineType === "irm" ? (
                         <Select value={l.irmItemId} onChange={(v) => onPickIrmItem(l._key, v)} options={irmItems} placeholder="— Select IRM item —" disabled={locked} ariaLabel="IRM item" />
+                      ) : l.lineType === "rental" ? (
+                        <Select value={l.rentalItemId} onChange={(v) => onPickRentalItem(l._key, v)} options={rentalItems} placeholder="— Select rental item —" disabled={locked} ariaLabel="Rental item" />
                       ) : (
                         <input className={inputCls} value={l.itemName} onChange={(e) => { setLine(l._key, { itemName: e.target.value }); touch(); clearError("kitLines"); }} maxLength={200} placeholder="Item name" disabled={locked} />
                       )}
                     </div>
                     <div className="min-w-0 @sm:col-span-8 @3xl:col-span-3">
-                      <label className={labelCls}>Warehouse{l.lineType === "irm" ? <RequiredMark /> : null}</label>
+                      <label className={labelCls}>Warehouse{l.lineType === "irm" || l.lineType === "rental" ? <RequiredMark /> : null}</label>
                       {l.lineType === "irm" ? (
                         !l.irmItemId ? (
                           <div className="flex h-[42px] items-center rounded-xl border border-dashed border-[var(--border)] px-3 text-[11px] text-[var(--faint)]">Pick an item first</div>
@@ -1004,6 +1101,16 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
                           <div className="flex h-[42px] items-center rounded-xl border border-dashed border-[var(--neg)]/40 px-3 text-[11px] text-[var(--neg)]" title="This item has no on-hand stock in any warehouse.">Not stocked anywhere</div>
                         ) : (
                           <Select value={l.warehouseId} onChange={(v) => onPickLineWarehouse(l._key, v)} options={irmWhOptions} placeholder="— Pick warehouse —" disabled={locked} ariaLabel="Pickup warehouse" />
+                        )
+                      ) : l.lineType === "rental" ? (
+                        !l.rentalItemId ? (
+                          <div className="flex h-[42px] items-center rounded-xl border border-dashed border-[var(--border)] px-3 text-[11px] text-[var(--faint)]">Pick an item first</div>
+                        ) : rentalWhLoading ? (
+                          <div className="flex h-[42px] items-center rounded-xl border border-dashed border-[var(--border)] px-3 text-[11px] text-[var(--faint)]">Checking hires…</div>
+                        ) : rentalNotHired ? (
+                          <div className="flex h-[42px] items-center rounded-xl border border-dashed border-[var(--neg)]/40 px-3 text-[11px] text-[var(--neg)]" title="No live hire of this rental item has a spare unit at any depot. Raise a purchase request to hire one.">None on hire</div>
+                        ) : (
+                          <Select value={l.warehouseId} onChange={(v) => onPickLineWarehouse(l._key, v)} options={rentalWhOptions} placeholder="— Pick warehouse —" disabled={locked} ariaLabel="Pickup warehouse" />
                         )
                       ) : l.lineType === "customer_stock" ? (
                         !l.customerStockItemKey ? (

@@ -28,12 +28,13 @@ export interface PagedJobs {
 
 // One kit-list line in a job payload.
 export interface JobKitLinePayload {
-  lineType: "customer_stock" | "irm" | "misc";
+  lineType: "customer_stock" | "irm" | "rental" | "misc";
   itemName: string;
   seCode?: string;
   description?: string;
   customerStockEntryId?: string;
   irmItemId?: string;
+  rentalItemId?: string;
   warehouseId?: string; // irm: pickup warehouse (customer_stock derives it server-side from the entry)
   qty: number | string;
   notes?: string;

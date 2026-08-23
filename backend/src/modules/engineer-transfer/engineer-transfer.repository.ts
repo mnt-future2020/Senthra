@@ -637,6 +637,11 @@ async function completeTransferOnce(transferId: string, opts: CompleteOptions): 
         source: l.ownership === "company" ? "irm" : "customer",
         irmItemId: l.ownership === "company" ? l.irmItemId : null,
         customerStockEntryId: l.ownership === "customer" ? l.customerStockEntryId : null,
+        // Always null: hired kit is not transferable engineer-to-engineer. A transfer moves stock
+        // between two vans with no warehouse involved, and a hire's custody is anchored to the
+        // warehouse that lent it and the provider that will collect it from there.
+        rentalItemId: null,
+        purchaseOrderRentalLineId: null,
         itemName: l.itemName,
         sku: l.sku,
         uom: l.uom,

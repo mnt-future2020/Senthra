@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createJobSchema, updateJobSchema } from "./job.validation.js";
+import { completeJobSchema, createJobSchema, updateJobSchema } from "./job.validation.js";
 
 const A = "a".repeat(24), B = "b".repeat(24), C = "c".repeat(24), D = "d".repeat(24), E = "e".repeat(24), WH = "f".repeat(24), WH2 = "1".repeat(24);
 
@@ -14,6 +14,7 @@ function base(kitLines: unknown[]) {
 const irm = (irmItemId: string, qty = 5, warehouseId: string = WH) => ({ lineType: "irm", itemName: "CAT6", irmItemId, warehouseId, qty });
 const cse = (customerStockEntryId: string, qty = 1) => ({ lineType: "customer_stock", itemName: "SFP", customerStockEntryId, qty });
 const misc = (itemName: string, qty = 1) => ({ lineType: "misc", itemName, qty });
+const rental = (rentalItemId: string, qty = 1, warehouseId: string = WH) => ({ lineType: "rental", itemName: "Fibre Tester", rentalItemId, warehouseId, qty });
 
 describe("createJobSchema kit-line dedupe", () => {
   it("rejects the same IRM item twice for the same warehouse", () => {
@@ -30,6 +31,50 @@ describe("createJobSchema kit-line dedupe", () => {
   });
   it("allows distinct IRM items", () => {
     expect(createJobSchema.safeParse(base([irm(D), irm(E)])).success).toBe(true);
+  });
+  it("rejects the same rental item twice for the same warehouse", () => {
+    expect(createJobSchema.safeParse(base([rental(D), rental(D)])).success).toBe(false);
+  });
+  it("allows the same rental item at two different warehouses (split pickup)", () => {
+    expect(createJobSchema.safeParse(base([rental(D, 1, WH), rental(D, 1, WH2)])).success).toBe(true);
+  });
+  it("does not confuse a rental item with an IRM item of the same id", () => {
+    // Different pools; the same 24-hex id in each is two unrelated records, not a duplicate.
+    expect(createJobSchema.safeParse(base([irm(D), rental(D)])).success).toBe(true);
+  });
+});
+
+// A rental line names the CATALOGUE item and the depot to collect it from. Which HIRE the units come
+// off is decided at the scan, not here — a PM planning a job in advance may have no purchase order
+// yet, and pinning one at plan time would make that job un-writable.
+describe("createJobSchema rental kit lines", () => {
+  it("accepts a rental item with a pickup warehouse", () => {
+    expect(createJobSchema.safeParse(base([rental(D)])).success).toBe(true);
+  });
+  it("requires a rental item id", () => {
+    const r = createJobSchema.safeParse(base([{ lineType: "rental", itemName: "Fibre Tester", warehouseId: WH, qty: 1 }]));
+    expect(r.success).toBe(false);
+    expect(JSON.stringify(r.error?.issues)).toMatch(/Select a rental item/i);
+  });
+  it("requires a pickup warehouse — hired kit is collected from somewhere", () => {
+    const r = createJobSchema.safeParse(base([{ lineType: "rental", itemName: "Fibre Tester", rentalItemId: D, qty: 1 }]));
+    expect(r.success).toBe(false);
+    expect(JSON.stringify(r.error?.issues)).toMatch(/warehouse to collect from/i);
+  });
+  it("refuses a rental line that also carries an IRM id", () => {
+    // A line carrying two source ids is ambiguous to every reader downstream, and which one wins
+    // would be whichever branch a given consumer happened to test first.
+    const r = createJobSchema.safeParse(base([{ ...rental(D), irmItemId: E }]));
+    expect(r.success).toBe(false);
+    expect(JSON.stringify(r.error?.issues)).toMatch(/can't reference IRM/i);
+  });
+  it("refuses an IRM line that carries a rental id", () => {
+    const r = createJobSchema.safeParse(base([{ ...irm(D), rentalItemId: E }]));
+    expect(r.success).toBe(false);
+    expect(JSON.stringify(r.error?.issues)).toMatch(/can't reference a rental item/i);
+  });
+  it("refuses a misc line that carries a rental id", () => {
+    expect(createJobSchema.safeParse(base([{ lineType: "misc", itemName: "labour", rentalItemId: D, qty: 1 }])).success).toBe(false);
   });
 });
 
@@ -251,5 +296,21 @@ describe("attachments are http(s) links, not just well-formed URLs", () => {
   // its first element.
   it("REJECTS the whole array when a single entry is bad", () => {
     expect(withAttachments(["https://docs.test/a.pdf", "javascript:alert(1)"]).success).toBe(false);
+  });
+});
+
+// A hire cannot be USED UP — that is the point of hiring it. The engineer's completion declares what
+// was consumed on site, and hired equipment is never an answer to that question: every unit has to go
+// back to the provider. Enforcing it at the edge (rather than by convention downstream) is what makes
+// a rental line stay outstanding until it is scanned back, which is what keeps the job in
+// `awaiting_return` and the hire on its deadline badge.
+describe("completeJobSchema — a rental is never consumable", () => {
+  it("refuses a used line sourced from a rental", () => {
+    const r = completeJobSchema.safeParse({ usedLines: [{ source: "rental", rentalItemId: D, qty: 1 }] });
+    expect(r.success).toBe(false);
+  });
+  it("still accepts IRM and customer used lines", () => {
+    expect(completeJobSchema.safeParse({ usedLines: [{ source: "irm", irmItemId: D, qty: 2 }] }).success).toBe(true);
+    expect(completeJobSchema.safeParse({ usedLines: [{ source: "customer", customerStockEntryId: D, qty: 2 }] }).success).toBe(true);
   });
 });

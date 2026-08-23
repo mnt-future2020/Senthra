@@ -16,6 +16,7 @@ vi.mock("./user-warehouse.repository.js", () => ({
 vi.mock("#modules/warehouse/warehouse.repository.js", () => ({ findActiveByIds: vi.fn() }));
 vi.mock("#modules/role/role.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/engineer-stock/engineer-stock.repository.js", () => ({ countEngineerHeldStock: vi.fn() }));
+vi.mock("#modules/engineer-rental/engineer-rental.repository.js", () => ({ countHeldRentalsForEngineer: vi.fn(async () => 0) }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 // Sign-in artefact cleanup on delete / deactivate. Mocked so these stay pure unit tests — and so the
 // calls themselves are assertable (see the "sign-in artefact cleanup" block below).
@@ -29,6 +30,7 @@ import * as userWarehouseRepo from "./user-warehouse.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as roleRepo from "#modules/role/role.repository.js";
 import * as engineerStockRepo from "#modules/engineer-stock/engineer-stock.repository.js";
+import * as rentalCustodyRepo from "#modules/engineer-rental/engineer-rental.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import * as sessionService from "#modules/auth/session.service.js";
 import * as notificationService from "#modules/notification/notification.service.js";
@@ -70,6 +72,7 @@ function userRow(over: Record<string, unknown> = {}) {
 const mockFindById = userRepo.findById as ReturnType<typeof vi.fn>;
 const mockUpdate = userRepo.update as ReturnType<typeof vi.fn>;
 const mockHeld = engineerStockRepo.countEngineerHeldStock as ReturnType<typeof vi.fn>;
+const mockHeldHires = rentalCustodyRepo.countHeldRentalsForEngineer as ReturnType<typeof vi.fn>;
 const mockAudit = audit.record as ReturnType<typeof vi.fn>;
 const mockRoleFindById = roleRepo.findById as ReturnType<typeof vi.fn>;
 const mockFindActiveByIds = warehouseRepo.findActiveByIds as ReturnType<typeof vi.fn>;
@@ -146,6 +149,23 @@ describe("updateUser — date-pair check across a partial patch", () => {
 });
 
 describe("setUserStatus — held-stock deactivation guard", () => {
+  // Two independent questions now (van stock, hired kit), so each test starts from a clean answer for
+  // the one it is not about.
+  beforeEach(() => {
+    mockHeld.mockResolvedValue(0);
+    mockHeldHires.mockResolvedValue(0);
+  });
+
+  // Hired equipment is refused with its OWN message, because the consequence differs in kind:
+  // stranded van stock is our asset in a van; stranded hired kit belongs to a provider who keeps
+  // billing for it, and it cannot be transferred to a colleague to clear.
+  it("blocks deactivation when the user still holds rental items", async () => {
+    mockFindById.mockResolvedValue(userRow({ status: "active" }));
+    mockHeldHires.mockResolvedValue(1);
+    await expect(setUserStatus(USER_ID, "inactive")).rejects.toThrow(/still holds rental items/i);
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
   it("blocks deactivation when the user still holds field stock", async () => {
     mockFindById.mockResolvedValue(userRow({ status: "active" }));
     mockHeld.mockResolvedValue(2);

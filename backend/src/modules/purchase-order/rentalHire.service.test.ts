@@ -820,3 +820,34 @@ describe("extendHire refuses a cancelled hire", () => {
     ).rejects.toThrow(/cancelled and can no longer be extended/i);
   });
 });
+
+// ── The engineer holding the kit is working to this date too ───────────────────────────────────
+describe("extendHire — the new deadline reaches the van", () => {
+  it("refreshes the custody snapshot of every engineer still holding the hire", async () => {
+    findRentalLine.mockResolvedValue(line());
+    await extendHire(PO_ID, "l1", { hireEndDate: "2026-10-31" }, ACTOR);
+
+    // Passed as the 4th argument to extendRentalLine — i.e. run INSIDE the extend transaction, not
+    // after it. An engineer's copy of the deadline that could survive a rolled-back extension is a
+    // date nobody agreed to.
+    const alsoInTx = extendRentalLine.mock.calls[0]![3];
+    expect(alsoInTx).toBeTypeOf("function");
+
+    const tx = { engineerRentalHolding: { updateMany: vi.fn(async () => ({ count: 2 })) } };
+    await alsoInTx!(tx as never);
+    expect(tx.engineerRentalHolding.updateMany).toHaveBeenCalledWith({
+      where: { purchaseOrderRentalLineId: "l1", quantityOnHand: { gt: 0 } },
+      data: { hireEndDate: new Date("2026-10-31T00:00:00.000Z") },
+    });
+  });
+
+  it("leaves a drained holding alone — it is history, not a live obligation", async () => {
+    findRentalLine.mockResolvedValue(line());
+    await extendHire(PO_ID, "l1", { hireEndDate: "2026-10-31" }, ACTOR);
+    const updateMany = vi.fn(async (_args: { where: { quantityOnHand?: unknown } }) => ({ count: 0 }));
+    await extendRentalLine.mock.calls[0]![3]!({ engineerRentalHolding: { updateMany } } as never);
+    // The `quantityOnHand > 0` filter is the whole guarantee: rewriting a returned holding's deadline
+    // would say somebody is working to a date for kit they already handed back.
+    expect(updateMany.mock.calls[0]![0].where.quantityOnHand).toEqual({ gt: 0 });
+  });
+});

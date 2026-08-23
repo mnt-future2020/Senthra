@@ -34,5 +34,18 @@ export function outstandingKitWarning(kitLines: JobKitLine[], engineerName: stri
   if (units === 0) return null;
   const who = engineerName?.trim() || "The engineer";
   const what = `${units} unit${units === 1 ? "" : "s"}${items > 1 ? ` across ${items} items` : ""}`;
+  // "or written off" is true of owned stock and FALSE of a hire: hired equipment is the provider's,
+  // so an unreturned unit is a liability to settle with them, not a loss we can absorb. The reconcile
+  // refuses to write one off, so offering it here as an option would describe an escape that does not
+  // exist — and the sentence exists precisely to tell a planner what settling this job will take.
+  const hired = kitLines.filter((l) => l.lineType === "rental" && l.remaining > 0);
+  if (hired.length > 0) {
+    const hiredUnits = hired.reduce((n, l) => n + l.remaining, 0);
+    return (
+      `${who} is still holding ${what}, including ${hiredUnits} rental unit${hiredUnits === 1 ? "" : "s"}. ` +
+      `Cancelling doesn't return them. Rental items must be scanned back to the warehouse — they can't be written off, ` +
+      `because they aren't ours to lose.`
+    );
+  }
   return `${who} is still holding ${what}. Cancelling doesn't return them — they must be scanned back in or written off.`;
 }

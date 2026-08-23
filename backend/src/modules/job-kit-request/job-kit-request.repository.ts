@@ -25,6 +25,7 @@ export interface CreateKitRequestLineData {
   source: string;
   irmItemId?: string | null;
   customerStockEntryId?: string | null;
+  rentalItemId?: string | null;
   itemName: string;
   sku?: string | null;
   uom?: string | null;

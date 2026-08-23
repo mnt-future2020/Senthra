@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { ArrowLeftRight, CheckCircle2, ExternalLink, FileText, Image as ImageIcon, Link as LinkIcon, MapPin, PackagePlus, Truck, XCircle, PlayCircle, ClipboardCheck } from "lucide-react";
+import { ArrowLeftRight, CalendarClock, CheckCircle2, ExternalLink, FileText, Image as ImageIcon, Link as LinkIcon, MapPin, PackagePlus, Truck, XCircle, PlayCircle, ClipboardCheck } from "lucide-react";
 
 import * as engineerService from "@/services/engineer.service";
 import { isStaleStateError } from "@/lib/api";
@@ -17,6 +17,7 @@ import { crossWarehouseReturnNote, kitLineSourceSplit } from "@/components/dashb
 import { outstandingKit } from "@/components/dashboard/jobs/outstandingKit";
 import { parseJobAttachment } from "@/components/dashboard/jobs/jobAttachment";
 import { Notice } from "@/components/ui/Notice";
+import { formatCalendarDay } from "@/lib/formatDate";
 import { FormError, FormPageSkeleton } from "@/components/ui/FormScaffold";
 import type { Job, JobKitLine, JobKitWarehouse } from "@/types/job";
 import { WarehousePickupModal } from "./WarehousePickupModal";
@@ -32,6 +33,7 @@ const KIT_HEADERS = ["Item", "SE code", "Type", "Warehouse", "Planned", "Issued"
 const LINE_TYPE_LABEL: Record<JobKitLine["lineType"], string> = {
   customer_stock: "Customer stock",
   irm: "IRM",
+  rental: "Rental",
   misc: "Misc",
 };
 
@@ -167,6 +169,12 @@ export function EngineerJobDetail({ id }: { id: string }) {
   };
 
   // Build the used-qty form rows from the current job's kit lines (IRM + customer_stock only).
+  //
+  // The filter is an ALLOWLIST and must stay one. Hired kit is never "used": it is equipment we do
+  // not own and every unit goes back to the provider, so a rental line has no used quantity to
+  // declare — the API refuses `source: "rental"` outright. Inverting this to `!== "misc"` would put
+  // hired items on the form and build a payload the server rejects, with no way for the engineer to
+  // finish the job.
   const openCompleteForm = (currentJob: Job) => {
     const rows: UsedRow[] = currentJob.kitLines
       .filter((l) => l.lineType === "irm" || l.lineType === "customer_stock")
@@ -226,10 +234,24 @@ export function EngineerJobDetail({ id }: { id: string }) {
   // "Request items" trigger sits in the header (and the card), gated additionally by kitLocked.
   const showKitCard = (job.status === "accepted" || job.status === "in_progress") && can("engineer.jobs.request_kit");
   const canRequestKit = showKitCard && !kitLocked;
-  // Can't start until the kit is COLLECTED: every stock-tracked line (IRM / customer stock) must be
-  // fully issued by the warehouse. Misc/free-text lines aren't warehouse stock, so they don't block.
-  const stockLines = job.kitLines.filter((l) => l.lineType === "irm" || l.lineType === "customer_stock");
+  // Can't start until the kit is COLLECTED: every stock-tracked line (IRM / customer stock / RENTAL)
+  // must be fully issued by the warehouse. Misc/free-text lines aren't warehouse stock, so they
+  // don't block.
+  //
+  // `rental` belongs here because the SERVER gates on it (job.service.ts startJobForEngineer names
+  // all three). Leaving it out did not let anyone start early — it just meant the button looked
+  // enabled and the request came back 409 into a generic toast, with nothing on screen saying the
+  // hired tester was the thing still sitting at the depot. Mobile already had all three.
+  const stockLines = job.kitLines.filter(
+    (l) => l.lineType === "irm" || l.lineType === "customer_stock" || l.lineType === "rental",
+  );
   const goodsCollected = stockLines.length === 0 || stockLines.every((l) => l.issued >= l.qty);
+  // Hired kit still in the van. Drives the reminder above the Complete form and the confirmation the
+  // engineer taps through — a hire is the one thing on this list that must physically go back.
+  // Hired kit whose deadline has ALREADY passed and which is still out. Only the overdue ones: a
+  // hire that is simply still with the engineer is normal and its date is already on its kit row.
+  const hiresOverdue = job.kitLines.filter((l) => l.lineType === "rental" && l.remaining > 0 && l.hireOverdue);
+  const hiresOverdueUnits = hiresOverdue.reduce((n, l) => n + l.remaining, 0);
   // Site address for display + a text-based Google Maps directions link (same approach as the pickup
   // warehouse below — the app stores no map coordinates, so the postcode + street text drives the search).
   const siteAddressParts = [job.addressLine1, job.addressLine2, job.city, job.county, job.postcode, job.country].filter(Boolean) as string[];
@@ -326,6 +348,29 @@ export function EngineerJobDetail({ id }: { id: string }) {
             still held (return it to the warehouse). You can&apos;t declare more than you&apos;re holding.
           </p>
 
+          {/* OVERDUE hires only — nothing at all while a hire is simply still out.
+              The kit list above already carries every hire's return date, which is the standing
+              reminder; repeating the whole list here restated what the engineer had just scrolled
+              past, and gating the button on a tick made them dismiss it rather than read it.
+              What survives is the case the date alone cannot cover: the deadline has ALREADY passed
+              and the kit has still not gone back. That is not a reminder, it is a hire billing us for
+              days nobody agreed to, and it is worth one line on the way out. Still never blocks —
+              see the note on the confirm button. */}
+          {hiresOverdue.length > 0 && (
+            <div className="mb-4">
+              <Notice
+                msg={{
+                  type: "warn",
+                  text:
+                    `${hiresOverdue.map((l) => `${l.remaining} × ${l.itemName}`).join(", ")} ` +
+                    `${hiresOverdueUnits === 1 ? "is" : "are"} past the hire return date. ` +
+                    `Get ${hiresOverdueUnits === 1 ? "it" : "them"} back to the warehouse — or ask the warehouse to extend the hire if you still need ${hiresOverdueUnits === 1 ? "it" : "them"}.`,
+                }}
+                size="sm"
+              />
+            </div>
+          )}
+
           {usedRows.length > 0 && (
             <div className="mb-4 overflow-x-auto rounded-xl border border-[var(--border)]">
               <table className="w-full text-sm" style={{ minWidth: 560 }}>
@@ -391,6 +436,12 @@ export function EngineerJobDetail({ id }: { id: string }) {
             <button
               type="button"
               onClick={onComplete}
+              // Never blocked by outstanding hires. An engineer finishing at 18:00 with the depot
+              // shut could only obey such a block by leaving the job open overnight — which breaks
+              // the start gate, the due-date reports and the overdue chase list — or by lying about
+              // what they hold. The containment that matters is downstream and unconditional: the
+              // job cannot leave `awaiting_return`, the reconcile refuses hired kit, and the supplier
+              // hand-back refuses units still in a van.
               disabled={completing}
               className="flex items-center gap-1.5 rounded-xl bg-[var(--pos)] px-3.5 py-2 text-xs font-extrabold text-white hover:opacity-90 disabled:opacity-60"
             >
@@ -543,6 +594,8 @@ export function EngineerJobDetail({ id }: { id: string }) {
           <TableCard headers={KIT_HEADERS} minWidth={1040}>
             {job.kitLines.map((line) => {
               const isMisc = line.lineType === "misc";
+              // A hire is never consumed, so "Used" has no meaning on a rental line — see JobDetail.
+              const isRental = line.lineType === "rental";
               return (
               <tr key={line.id} className="border-b border-[var(--border)] last:border-0">
                 <td className="cell-y px-4 font-semibold text-[var(--ink)]">
@@ -550,8 +603,34 @@ export function EngineerJobDetail({ id }: { id: string }) {
                   {line.description ? (
                     <span className="block text-xs font-normal text-[var(--muted)]">{line.description}</span>
                   ) : null}
+                  {/* The RETURN DEADLINE, on the row the engineer is actually looking at.
+                      A hire is the only thing on this list with a date attached: it bills every day
+                      and belongs to the provider, so the warehouse has to have it back to send it on.
+                      The engineer holding the case is the person who acts on this, and until now they
+                      were the one person in the system who could not see it — the date lived on the
+                      purchase order, which they have no access to.
+                      No PO code: the order is the office's handle on the hire, not theirs. */}
+                  {line.hireEndDate && (
+                    <span
+                      className={`mt-0.5 flex items-center gap-1 text-xs font-semibold ${
+                        line.hireOverdue ? "text-[var(--neg)]" : "text-[var(--muted)]"
+                      }`}
+                    >
+                      <CalendarClock className="h-3.5 w-3.5 shrink-0" />
+                      {line.hireOverdue ? (
+                        <>Was due back {formatCalendarDay(line.hireEndDate)} — overdue</>
+                      ) : (
+                        <>Return by {formatCalendarDay(line.hireEndDate)}</>
+                      )}
+                    </span>
+                  )}
                 </td>
-                <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">{line.seCode ?? "—"}</td>
+                {/* A rental line has no customer SE code, but it does have the RNT-#### printed on the
+                    case — which is what the engineer matches against the sticker and the warehouse
+                    types into the scan box. It was already in the payload and rendered nowhere. */}
+                <td className="cell-y px-4 font-mono text-xs text-[var(--muted)]">
+                  {line.seCode ?? (isRental ? line.rentalItemCode : null) ?? "—"}
+                </td>
                 <td className="cell-y px-4 text-[var(--muted)]">{LINE_TYPE_LABEL[line.lineType] ?? line.lineType}</td>
                 {/* Where this stock actually comes FROM. A van-sourced line still stores a warehouse
                     (leftovers are returned there), so showing that warehouse as the pickup location
@@ -637,7 +716,7 @@ export function EngineerJobDetail({ id }: { id: string }) {
                     the Goods Management queue shows for misc. */}
                 <td className="cell-y px-4 font-bold text-[var(--ink)]">{line.qty}</td>
                 <td className="cell-y px-4 text-[var(--ink)]">{line.issued}</td>
-                <td className="cell-y px-4 text-[var(--ink)]">{isMisc ? "—" : line.used}</td>
+                <td className="cell-y px-4 text-[var(--ink)]">{isMisc || isRental ? "—" : line.used}</td>
                 <td className="cell-y px-4 text-[var(--ink)]">
                   <div className="flex flex-col items-start gap-1">
                     <span>{isMisc ? "—" : line.returned}</span>

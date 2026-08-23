@@ -858,6 +858,214 @@ export function findRentalLine(lineId: string) {
   return prisma.purchaseOrderRentalLine.findUnique({ where: { id: lineId } });
 }
 
+// --- hires as a source of kit for JOBS -------------------------------------------------------
+//
+// A hire that has been delivered is equipment sitting at a warehouse, and a job can send an engineer
+// to collect it. These are the reads and writes that path needs.
+//
+// "Available at the warehouse" is `receivedQuantity − returnedQuantity − issuedQuantity`:
+//   receivedQuantity  what the provider actually delivered to us
+//   returnedQuantity  what has gone BACK to the provider (gone; not ours to lend out)
+//   issuedQuantity    what is out with an engineer right now (ours, but not in the building)
+// All three are maintained columns on the row, so the sum is arithmetic on one document rather than
+// a re-tally of the movement ledger — see the `issuedQuantity` comment in schema.prisma.
+
+/** A delivered hire with the numbers the job path needs, plus its order's delivery warehouse. */
+export interface HireStockRow {
+  id: string;
+  rentalItemId: string;
+  itemName: string;
+  baseUnit: string | null;
+  quantity: number;
+  receivedQuantity: number;
+  returnedQuantity: number;
+  issuedQuantity: number;
+  hireEndDate: Date;
+  hireStatus: string;
+  purchaseOrderId: string;
+  poCode: string | null;
+  warehouseId: string;
+  warehouseName: string | null;
+  warehouseCode: string | null;
+  /**
+   * Whether the hire's ORDER is still live — not cancelled and not soft-deleted.
+   *
+   * Carried on the row so a caller that resolves ONE hire by id gets the same guarantee the list query
+   * gets from `onHireWhere()`. The list can filter; a lookup by a client-supplied id cannot, and
+   * without this `postIssue` would happily lend kit against an order the supplier-return path can no
+   * longer even load — leaving the units permanently unsettleable.
+   */
+  orderLive: boolean;
+}
+
+const HIRE_STOCK_SELECT = {
+  id: true,
+  rentalItemId: true,
+  itemName: true,
+  baseUnit: true,
+  quantity: true,
+  receivedQuantity: true,
+  returnedQuantity: true,
+  issuedQuantity: true,
+  hireEndDate: true,
+  hireStatus: true,
+  purchaseOrderId: true,
+  // The hire's warehouse comes from its ORDER — a hire has none of its own, which is exactly why this
+  // join exists. Name and code ride along so a picker can label the depot without a second query.
+  purchaseOrder: { select: { code: true, warehouseId: true, status: true, deletedAt: true, warehouse: { select: { name: true, code: true } } } },
+} satisfies Prisma.PurchaseOrderRentalLineSelect;
+
+type HireStockQueryRow = Prisma.PurchaseOrderRentalLineGetPayload<{ select: typeof HIRE_STOCK_SELECT }>;
+
+function mapHireStock(r: HireStockQueryRow): HireStockRow {
+  return {
+    id: r.id,
+    rentalItemId: r.rentalItemId,
+    itemName: r.itemName,
+    baseUnit: r.baseUnit,
+    quantity: r.quantity,
+    receivedQuantity: r.receivedQuantity,
+    returnedQuantity: r.returnedQuantity,
+    issuedQuantity: r.issuedQuantity,
+    hireEndDate: r.hireEndDate,
+    hireStatus: r.hireStatus,
+    purchaseOrderId: r.purchaseOrderId,
+    poCode: r.purchaseOrder?.code ?? null,
+    warehouseId: r.purchaseOrder.warehouseId,
+    warehouseName: r.purchaseOrder.warehouse?.name ?? null,
+    warehouseCode: r.purchaseOrder.warehouse?.code ?? null,
+    orderLive: r.purchaseOrder.status !== "cancelled" && !r.purchaseOrder.deletedAt,
+  };
+}
+
+/**
+ * Every LIVE hire of the given catalogue items, soonest deadline first.
+ *
+ * "Live" is `onHireWhere()` from rentalHire.predicate.ts, NOT a hand-written `hireStatus: "on_hire"`.
+ * That distinction is load-bearing and this function shipped without it: the predicate also requires
+ * the hire's ORDER to be live, and on this database 15 of 31 `on_hire` lines hang off a SOFT-DELETED
+ * purchase order. Matching on the status alone offered every one of them as collectable kit — which
+ * is where a phantom "60 available" came from — and a unit issued against a deleted order can never
+ * be settled, because the supplier-return path loads the order and refuses ("Purchase order not
+ * found"). The badge and the sweep already exclude those rows, so the scan panel was the one reader
+ * disagreeing with the rest of the module.
+ *
+ * That is exactly the drift the spec's "ONE predicate, two readers" rule exists to prevent, so this
+ * composes the shared predicate instead of restating it. The warehouse is the ORDER's delivery
+ * warehouse — a hire has no warehouse of its own, which is why the join exists.
+ *
+ * Sorted by `hireEndDate` ascending so a caller allocating units across hires drains the one due back
+ * FIRST. That is not a display preference: sending out the tester with three weeks left while the one
+ * due Friday sits on the shelf is how a hire goes overdue with kit nobody was using.
+ */
+export async function findLiveHiresByRentalItems(rentalItemIds: string[], warehouseIds?: string[]): Promise<HireStockRow[]> {
+  if (rentalItemIds.length === 0) return [];
+  const rows = await prisma.purchaseOrderRentalLine.findMany({
+    // `atWarehouses` merges the warehouse scope INTO the predicate's own purchaseOrder clause. Spread
+    // as a sibling instead, the second `purchaseOrder` key would overwrite the first and silently drop
+    // the live-order guard this call exists to apply.
+    where: {
+      ...atWarehouses(onHireWhere(), warehouseIds && warehouseIds.length > 0 ? warehouseIds : undefined),
+      rentalItemId: { in: rentalItemIds },
+    },
+    select: HIRE_STOCK_SELECT,
+    orderBy: { hireEndDate: "asc" },
+  });
+  return rows.map(mapHireStock);
+}
+
+/** One hire, with the same numbers — the scan resolves a specific unit to exactly one of these. */
+export async function findHireStockById(lineId: string): Promise<HireStockRow | null> {
+  const row = await prisma.purchaseOrderRentalLine.findUnique({ where: { id: lineId }, select: HIRE_STOCK_SELECT });
+  return row ? mapHireStock(row) : null;
+}
+
+/** The tx-aware twin, for the re-check inside the posting transaction. */
+export async function findHireStockByIdTx(tx: Prisma.TransactionClient, lineId: string): Promise<HireStockRow | null> {
+  const row = await tx.purchaseOrderRentalLine.findUnique({ where: { id: lineId }, select: HIRE_STOCK_SELECT });
+  return row ? mapHireStock(row) : null;
+}
+
+/**
+ * Move a hire's `issuedQuantity` by `delta` (+ out to an engineer, − back to the warehouse), and
+ * refuse the move if it would break the arithmetic.
+ *
+ * CONDITIONAL, not a bare increment, and that is the whole point: the guard columns are in the same
+ * `where` as the update, so the availability check and the decrement are ONE atomic operation on one
+ * document. Two warehouses scanning the last tester at the same instant both read "1 available"; only
+ * one of them satisfies the `where`, and the other gets `false` and a 409 telling it to refresh.
+ * Reading first and then incrementing would let both succeed and leave the hire issued twice over.
+ *
+ * On the way OUT (`delta > 0`) the bound is `issuedQuantity <= received − returned − delta`, i.e.
+ * never lend more than is actually in the building. On the way BACK (`delta < 0`) the bound is
+ * `issuedQuantity >= −delta`, i.e. never credit a return of units that were never issued.
+ */
+/**
+ * Record that an engineer brought units of this hire back damaged.
+ *
+ * Writes `fieldDamageQty` / `fieldDamageReportedAt` and NOTHING else — in particular not
+ * `damagedQuantity`, which is recomputed as an absolute from the live damage notes and would erase
+ * this the next time one was voided. See the column comments in schema.prisma.
+ *
+ * A plain increment rather than a conditional write: it moves no availability and gates no decision,
+ * so there is no arithmetic for a concurrent write to break. It is a flag with a count on it.
+ */
+export async function flagHireDamagedTx(tx: Prisma.TransactionClient, lineId: string, qty: number): Promise<void> {
+  if (qty <= 0) return;
+  await tx.purchaseOrderRentalLine.update({
+    where: { id: lineId },
+    data: { fieldDamageQty: { increment: qty }, fieldDamageReportedAt: new Date() },
+  });
+}
+
+export async function adjustHireIssuedQtyTx(tx: Prisma.TransactionClient, lineId: string, delta: number): Promise<boolean> {
+  if (delta === 0) return true;
+  const line = await tx.purchaseOrderRentalLine.findUnique({
+    where: { id: lineId },
+    select: { receivedQuantity: true, returnedQuantity: true },
+  });
+  if (!line) return false;
+  const heldByCompany = line.receivedQuantity - line.returnedQuantity;
+
+  // ── ABSENT IS NOT ZERO ────────────────────────────────────────────────────────────────────────
+  //
+  // `issuedQuantity` carries `@default(0)`, but a Prisma default is applied by the CLIENT on create —
+  // it is not a stored value, and `prisma db push` never writes one into rows that already exist. In
+  // MongoDB a range comparison does not match a document that LACKS the field, so a bare
+  // `{ issuedQuantity: { lte: n } }` matched nothing on every hire raised before this column existed:
+  // the guard returned false for all of them and the warehouse was told "those units are no longer
+  // available — stock changed" about hires with everything still on the shelf.
+  //
+  // `NOT: { gt: ceiling }` is the fix and it is not a stylistic variant of `lte`. `$gt` does not match
+  // a missing field, so negating it matches BOTH a stored value within the ceiling AND a missing one —
+  // which is exactly the reading a missing counter deserves: nothing has been issued. `lte` excludes
+  // the missing row; `NOT gt` includes it. (Prisma has no `isSet` for a required scalar, so this is
+  // also the only way to say it through the typed API.)
+  //
+  // It is correct only because the pre-check below has already refused any request bigger than the
+  // hire physically holds — so `ceiling` is never negative here, and "missing" can never slip a row
+  // past a bound it should have failed.
+  if (delta > 0 && delta > heldByCompany) return false;
+  const ceiling = heldByCompany - delta;
+
+  const res = await tx.purchaseOrderRentalLine.updateMany({
+    where: {
+      id: lineId,
+      // Re-assert the numbers the ceiling was computed from, so a delivery or a supplier-return
+      // landing in the gap invalidates this write instead of silently shifting the ceiling under it.
+      receivedQuantity: line.receivedQuantity,
+      returnedQuantity: line.returnedQuantity,
+      ...(delta > 0
+        ? { NOT: { issuedQuantity: { gt: ceiling } } }
+        // The other direction needs the OPPOSITE treatment: `gte` excludes a missing field, and that
+        // is right — crediting back units a row never recorded issuing is exactly what to refuse.
+        : { issuedQuantity: { gte: -delta } }),
+    },
+    data: { issuedQuantity: { increment: delta } },
+  });
+  return res.count === 1;
+}
+
 export function updateRentalLine(lineId: string, data: Prisma.PurchaseOrderRentalLineUpdateInput) {
   return prisma.purchaseOrderRentalLine.update({ where: { id: lineId }, data });
 }
@@ -897,10 +1105,17 @@ export async function extendRentalLine(
   lineId: string,
   data: Prisma.PurchaseOrderRentalLineUpdateInput,
   extension: Prisma.HireExtensionUncheckedCreateInput,
+  // Anything else that must move with the new deadline, run in THIS transaction. Today that is the
+  // engineer-custody snapshot (see refreshHoldingDeadlinesForHireTx): the person holding the kit is
+  // working to this date, so their copy of it cannot be updated separately and cannot survive a
+  // rollback of the extension it came from. A callback rather than a direct call because the write
+  // belongs to another module's repository, and repositories do not reach across domains.
+  alsoInTx?: (tx: Prisma.TransactionClient) => Promise<void>,
 ): Promise<void> {
   await withTransaction(async (tx) => {
     await tx.purchaseOrderRentalLine.update({ where: { id: lineId }, data });
     await tx.hireExtension.create({ data: extension });
+    if (alsoInTx) await alsoInTx(tx);
   });
 }
 

@@ -184,7 +184,7 @@ export interface MovementPage {
 
 // ── Jobs ──────────────────────────────────────────────────────────────────────
 
-export type JobLineType = "customer_stock" | "irm" | "misc";
+export type JobLineType = "customer_stock" | "irm" | "rental" | "misc";
 
 export interface JobKitWarehouse {
   id: string;
@@ -215,6 +215,14 @@ export interface JobKitLine {
   description: string | null;
   customerStockEntryId: string | null;
   irmItemId: string | null;
+  /**
+   * The CATALOGUE item on a `rental` line, and the RNT-#### its label is printed from.
+   *
+   * Both are sent by /engineer/jobs/:id and were being silently dropped here — so a planned rental
+   * line had no id to key on, which is why the kit-request composer could not offer one.
+   */
+  rentalItemId: string | null;
+  rentalItemCode: string | null;
   warehouseId: string | null;
   warehouseName: string | null;
   warehouseCode: string | null;
@@ -561,13 +569,14 @@ export interface WarehouseLite {
 // ── Job kit requests ──────────────────────────────────────────────────────────
 
 export type KitRequestStatus = "pending" | "approved" | "declined" | "cancelled";
-export type KitRequestSource = "irm" | "customer_stock" | "misc";
+export type KitRequestSource = "irm" | "customer_stock" | "rental" | "misc";
 export type FulfillmentMode = "warehouse_issue" | "engineer_transfer" | "mixed";
 
 export interface KitRequestLine {
   id: string;
   source: KitRequestSource;
   irmItemId: string | null;
+  rentalItemId: string | null;
   customerStockEntryId: string | null;
   itemName: string;
   sku: string | null;
@@ -619,6 +628,8 @@ export interface PagedKitRequests {
 export interface KitRequestLinePayload {
   source: KitRequestSource;
   irmItemId?: string;
+  /** The CATALOGUE item asked for on a `rental` line — never a particular hire. */
+  rentalItemId?: string;
   customerStockEntryId?: string;
   itemName: string;
   qty: number;
@@ -657,4 +668,25 @@ export interface KitItemCustomerStockOption {
   serialNumber: string | null;
 }
 
-export type KitItemOption = KitItemIrmOption | KitItemCustomerStockOption;
+export interface KitItemRentalOption {
+  source: "rental";
+  rentalItemId: string;
+  /** RNT-#### — the printed label's code, and what the warehouse scans. */
+  code: string;
+  name: string;
+  /** Always null: a rental master carries no SKU by design; its `code` is the identifier. */
+  sku: null;
+  uom: string | null;
+  /** Free units across every LIVE hire of this item, at every depot. */
+  quantityOnHand: number;
+  /**
+   * ALWAYS 0, and present rather than omitted so the composer can render "none on a van" instead of
+   * treating an absent field as unknown. Hired kit is never transferable engineer-to-engineer:
+   * custody is anchored to the depot that took delivery and the provider collects it from there.
+   */
+  heldByEngineers: 0;
+  /** Which depots hold those units, fullest first. */
+  depots: { warehouseId: string; warehouseName: string | null; available: number }[];
+}
+
+export type KitItemOption = KitItemIrmOption | KitItemRentalOption | KitItemCustomerStockOption;

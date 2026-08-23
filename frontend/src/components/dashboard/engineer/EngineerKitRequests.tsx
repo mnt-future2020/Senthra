@@ -5,7 +5,7 @@ import Link from "next/link";
 import { Check, ChevronRight, Loader2, PackagePlus, Plus, Search, Trash2 } from "lucide-react";
 
 import * as kitRequestService from "@/services/jobKitRequest.service";
-import type { KitItemCustomerStockOption, KitItemOption, KitRequest, KitRequestLinePayload } from "@/services/jobKitRequest.service";
+import type { KitItemCustomerStockOption, KitItemOption, KitItemRentalOption, KitRequest, KitRequestLinePayload } from "@/services/jobKitRequest.service";
 import { subscribe } from "@/lib/socket";
 import { useDashboard } from "@/hooks/useDashboard";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
@@ -61,6 +61,12 @@ function kitLineOutcome(l: KitRequest["lines"][number]): { qty: number; excluded
 function KitSourceBadge({ source }: { source: KitRequest["lines"][number]["source"] }) {
   if (source === "customer_stock") {
     return <span className="shrink-0 rounded border border-[var(--accent)]/30 bg-[var(--accent-10)] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-[var(--accent)]">Customer stock</span>;
+  }
+  if (source === "rental") {
+    // Hired kit needs its own chip, not the IRM blank: it is the one pool that is collected from a
+    // specific depot's live hire, can never come off a van, and has to go back to a provider. A
+    // reviewer sourcing the request has to see that before they pick where it comes from.
+    return <span className="shrink-0 rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-amber-600">Rental</span>;
   }
   if (source === "misc") {
     return <span className="shrink-0 rounded border border-[var(--border)] bg-[var(--surface)] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-[var(--faint)]">Misc</span>;
@@ -305,19 +311,25 @@ export function EngineerKitRequests({ job, locked, open, onOpenChange }: { job: 
 
 interface PlannedOption {
   key: string;
-  source: "irm" | "customer_stock" | "misc";
+  source: "irm" | "customer_stock" | "rental" | "misc";
   irmItemId: string | null;
+  rentalItemId: string | null;
   customerStockEntryId: string | null;
   itemName: string;
   qty: number;
 }
 interface CartItem {
-  key: string; // dedup key: `irm:<id>`, `cse:<id>` (customer stock), or `misc:<name>` (typed custom item)
-  source: "irm" | "customer_stock" | "misc";
+  // dedup key: `irm:<id>`, `rental:<id>`, `cse:<id>` (customer stock), or `misc:<name>` (typed custom)
+  key: string;
+  source: "irm" | "customer_stock" | "rental" | "misc";
   irmItemId: string | null;
+  // The CATALOGUE item, never a hire — and deliberately no depot either. The engineer asks for "a
+  // fibre tester"; WHICH depot's live hire supplies it is the reviewer's call at approve, exactly as
+  // the pickup warehouse for an IRM line is.
+  rentalItemId: string | null;
   customerStockEntryId: string | null;
   name: string;
-  code: string | null; // IRM code or the customer-stock warehouse label; null for misc
+  code: string | null; // IRM/RNT code or the customer-stock warehouse label; null for misc
   qty: number;
 }
 
@@ -329,14 +341,43 @@ function customerStockLabel(it: KitItemCustomerStockOption): string {
   return `${where} · ${it.qty} in stock${it.serialNumber ? ` · SN ${it.serialNumber}` : ""}`;
 }
 
+/** One-line label for a rental option: "RNT-0007 · Leeds +1 more · 4 free on hire". */
+function rentalLabel(it: KitItemRentalOption): string {
+  if (it.depots.length === 0) return `${it.code} · none on hire`;
+  const [first, ...rest] = it.depots;
+  const where = `${first.warehouseName ?? "Depot"}${rest.length ? ` +${rest.length} more` : ""}`;
+  return `${it.code} · ${where} · ${it.quantityOnHand} free on hire`;
+}
+
 function plannedOptionsFrom(job: Job): PlannedOption[] {
   const seen = new Set<string>();
   const out: PlannedOption[] = [];
   for (const l of job.kitLines) {
-    const key = l.lineType === "irm" ? `irm:${l.irmItemId}` : l.lineType === "customer_stock" ? `cse:${l.customerStockEntryId}` : `misc:${l.itemName.trim().toLowerCase()}`;
+    // Rental IS offerable here. It was skipped in the first pass on the belief that a hire could only
+    // ever be ordered from a provider — which stopped being true once rentals became collectable from
+    // a depot holding one. "I need another tester" is an ordinary request the planner can fulfil.
+    //
+    // The key must be keyed on the rental id and NOT fall through to the misc arm: misc keys on the
+    // NAME, so a hired line would dedupe against a free-text item that happened to share it.
+    const key =
+      l.lineType === "irm"
+        ? `irm:${l.irmItemId}`
+        : l.lineType === "rental"
+          ? `rental:${l.rentalItemId}`
+          : l.lineType === "customer_stock"
+            ? `cse:${l.customerStockEntryId}`
+            : `misc:${l.itemName.trim().toLowerCase()}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ key, source: l.lineType, irmItemId: l.irmItemId, customerStockEntryId: l.customerStockEntryId, itemName: l.itemName, qty: 0 });
+    out.push({
+      key,
+      source: l.lineType,
+      irmItemId: l.irmItemId,
+      rentalItemId: l.rentalItemId,
+      customerStockEntryId: l.customerStockEntryId,
+      itemName: l.itemName,
+      qty: 0,
+    });
   }
   return out;
 }
@@ -359,7 +400,7 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
   // guess). So a quantity typed in the moment before the numbers landed went in uncapped, and the cap
   // only ran again on the next keystroke — which is how a row reading "None free to request" could
   // still be submitted with 1.
-  const [availState, setAvailState] = React.useState<{ key: string; data: kitRequestService.KitAvailabilityMap }>({ key: "", data: { irm: {}, cse: {} } });
+  const [availState, setAvailState] = React.useState<{ key: string; data: kitRequestService.KitAvailabilityMap }>({ key: "", data: { irm: {}, cse: {}, rental: {} } });
   const [reason, setReason] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
   const [msg, setMsg] = React.useState<Msg>(null);
@@ -376,20 +417,21 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
   const availKey = React.useMemo(() => {
     const irm = [...planned.filter((p) => p.source === "irm" && p.irmItemId).map((p) => p.irmItemId!), ...cart.filter((c) => c.source === "irm" && c.irmItemId).map((c) => c.irmItemId!)];
     const cse = [...planned.filter((p) => p.source === "customer_stock" && p.customerStockEntryId).map((p) => p.customerStockEntryId!), ...cart.filter((c) => c.source === "customer_stock" && c.customerStockEntryId).map((c) => c.customerStockEntryId!)];
-    return JSON.stringify({ irm: [...new Set(irm)].sort(), cse: [...new Set(cse)].sort() });
+    const rental = [...planned.filter((p) => p.source === "rental" && p.rentalItemId).map((p) => p.rentalItemId!), ...cart.filter((c) => c.source === "rental" && c.rentalItemId).map((c) => c.rentalItemId!)];
+    return JSON.stringify({ irm: [...new Set(irm)].sort(), cse: [...new Set(cse)].sort(), rental: [...new Set(rental)].sort() });
   }, [planned, cart]);
 
   React.useEffect(() => {
     let active = true;
     const key = availKey;
-    const { irm, cse } = JSON.parse(key) as { irm: string[]; cse: string[] };
+    const { irm, cse, rental } = JSON.parse(key) as { irm: string[]; cse: string[]; rental: string[] };
     kitRequestService
-      .kitItemAvailabilityFor(job.id, irm, cse)
+      .kitItemAvailabilityFor(job.id, irm, cse, rental)
       .then((a) => { if (active) setAvailState({ key, data: a }); })
       // Advisory only — losing it must never block the request. The steppers simply go uncapped, and
       // approve() still re-checks before any stock moves. Tagged with the key either way, so a failed
       // lookup settles into "known-unknown" rather than looking like it is still loading forever.
-      .catch(() => { if (active) setAvailState({ key, data: { irm: {}, cse: {} } }); });
+      .catch(() => { if (active) setAvailState({ key, data: { irm: {}, cse: {}, rental: {} } }); });
     return () => { active = false; };
   }, [availKey, job.id]);
 
@@ -402,10 +444,16 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
   // showing only the sum is what made this modal read "1995 free to request" for an item the
   // field-stock composer showed as "1992 in stock", with nothing explaining the difference.
   // `null` = unknown (misc lines, or the lookup failed) — never cap on a guess.
-  const stockFor = (source: string, irmItemId: string | null, cseId: string | null): { warehouse: number; van: number } | null => {
+  const stockFor = (source: string, irmItemId: string | null, cseId: string | null, rentalItemId?: string | null): { warehouse: number; van: number } | null => {
     if (source === "irm" && irmItemId) {
       const a = avail.irm[irmItemId];
       return a ? { warehouse: a.quantityOnHand, van: a.heldByEngineers } : null;
+    }
+    if (source === "rental" && rentalItemId) {
+      const a = avail.rental[rentalItemId];
+      // van is structurally 0: hired kit is never transferable between engineers, so the split reads
+      // "N free on hire, none on a van" rather than leaving the second figure unknown.
+      return a ? { warehouse: a.quantityOnHand, van: 0 } : null;
     }
     if (source === "customer_stock" && cseId) {
       // Consignment has no van figure by design — see the note on qty in jobKitRequest.service.
@@ -414,8 +462,8 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
     }
     return null;
   };
-  const freeFor = (source: string, irmItemId: string | null, cseId: string | null): number | null => {
-    const s = stockFor(source, irmItemId, cseId);
+  const freeFor = (source: string, irmItemId: string | null, cseId: string | null, rentalItemId?: string | null): number | null => {
+    const s = stockFor(source, irmItemId, cseId, rentalItemId);
     return s ? s.warehouse + s.van : null;
   };
 
@@ -425,22 +473,23 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
   // late. Deriving it means the box and the payload are clamped by construction: a value the screen
   // calls impossible can never be shown, and never submitted. The edge cases (unknown figure, and a
   // figure of zero against a row whose minimum is 1) live in capQty with their own tests.
-  const cappedQty = (qty: number, source: string, irmItemId: string | null, cseId: string | null, min = 0): number =>
-    capQty(qty, freeFor(source, irmItemId, cseId), min);
+  const cappedQty = (qty: number, source: string, irmItemId: string | null, cseId: string | null, min = 0, rentalItemId?: string | null): number =>
+    capQty(qty, freeFor(source, irmItemId, cseId, rentalItemId), min);
 
   // A row is only held while ITS OWN figure is outstanding. `availLoading` alone would disable every
   // quantity box on the whole request each time the item set changes — and it changes on every cart
   // add/remove, so adding a second item froze the first item's stepper too. Rows we already have an
   // answer for keep working through the refetch; rows with no figure AT ALL (misc, or a lookup that
   // failed and settled) were never capped in the first place and stay editable.
-  const qtyPending = (source: string, irmItemId: string | null, cseId: string | null): boolean =>
-    availLoading && freeFor(source, irmItemId, cseId) === null && source !== "misc";
+  const qtyPending = (source: string, irmItemId: string | null, cseId: string | null, rentalItemId?: string | null): boolean =>
+    availLoading && freeFor(source, irmItemId, cseId, rentalItemId) === null && source !== "misc";
 
   const excludeKeys = React.useMemo(
     () =>
       new Set<string>([
         ...planned.filter((p) => p.source === "irm" && p.irmItemId).map((p) => `irm:${p.irmItemId}`),
         ...planned.filter((p) => p.source === "customer_stock" && p.customerStockEntryId).map((p) => `cse:${p.customerStockEntryId}`),
+        ...planned.filter((p) => p.source === "rental" && p.rentalItemId).map((p) => `rental:${p.rentalItemId}`),
         ...cart.map((c) => c.key),
       ]),
     [planned, cart],
@@ -451,10 +500,17 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
     setCart((c) => {
       if (it.source === "irm") {
         const key = `irm:${it.irmItemId}`;
-        return c.some((x) => x.key === key) ? c : [...c, { key, source: "irm" as const, irmItemId: it.irmItemId, customerStockEntryId: null, name: it.name, code: it.code, qty: 1 }];
+        return c.some((x) => x.key === key) ? c : [...c, { key, source: "irm" as const, irmItemId: it.irmItemId, rentalItemId: null, customerStockEntryId: null, name: it.name, code: it.code, qty: 1 }];
+      }
+      // Explicit arm, not a fallthrough. This function ended in a bare customer-stock `return`, so a
+      // rental option became a customer_stock row keyed `cse:undefined` — which then submitted as a
+      // misc line with the item id gone.
+      if (it.source === "rental") {
+        const key = `rental:${it.rentalItemId}`;
+        return c.some((x) => x.key === key) ? c : [...c, { key, source: "rental" as const, irmItemId: null, rentalItemId: it.rentalItemId, customerStockEntryId: null, name: it.name, code: rentalLabel(it), qty: 1 }];
       }
       const key = `cse:${it.customerStockEntryId}`;
-      return c.some((x) => x.key === key) ? c : [...c, { key, source: "customer_stock" as const, irmItemId: null, customerStockEntryId: it.customerStockEntryId, name: it.name, code: customerStockLabel(it), qty: 1 }];
+      return c.some((x) => x.key === key) ? c : [...c, { key, source: "customer_stock" as const, irmItemId: null, rentalItemId: null, customerStockEntryId: it.customerStockEntryId, name: it.name, code: customerStockLabel(it), qty: 1 }];
     });
   const addCustom = (name: string) => {
     const n = name.trim();
@@ -466,7 +522,7 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
       setMsg({ type: "error", text: `“${n}” is already listed above under “More of a planned item” — set its extra quantity there.` });
       return;
     }
-    setCart((c) => (c.some((x) => x.key === key) ? c : [...c, { key, source: "misc" as const, irmItemId: null, customerStockEntryId: null, name: n, code: null, qty: 1 }]));
+    setCart((c) => (c.some((x) => x.key === key) ? c : [...c, { key, source: "misc" as const, irmItemId: null, rentalItemId: null, customerStockEntryId: null, name: n, code: null, qty: 1 }]));
   };
   const setCartQty = (key: string, qty: number) => setCart((c) => c.map((x) => (x.key === key ? { ...x, qty } : x)));
   const removeCart = (key: string) => setCart((c) => c.filter((x) => x.key !== key));
@@ -474,6 +530,8 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
   // Merge planned + cart into request lines, deduped/summed by identity (backend rejects dup items).
   const buildLines = (): KitRequestLinePayload[] => {
     const byKey = new Map<string, KitRequestLinePayload>();
+    // Rows we could not classify — see the final `else` in the cart loop below.
+    const unresolved: string[] = [];
     const push = (key: string, line: KitRequestLinePayload) => {
       const existing = byKey.get(key);
       if (existing) existing.qty += line.qty;
@@ -483,18 +541,29 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
     // let a value typed before the figures landed reach the server — the row said "None free to
     // request" and the request still carried 1. A line clamped to 0 drops out below.
     for (const p of planned) {
-      const qty = cappedQty(p.qty, p.source, p.irmItemId, p.customerStockEntryId);
+      const qty = cappedQty(p.qty, p.source, p.irmItemId, p.customerStockEntryId, 0, p.rentalItemId);
       if (qty <= 0) continue;
       if (p.source === "irm" && p.irmItemId) push(`irm:${p.irmItemId}`, { source: "irm", irmItemId: p.irmItemId, itemName: p.itemName, qty });
+      else if (p.source === "rental" && p.rentalItemId) push(`rental:${p.rentalItemId}`, { source: "rental", rentalItemId: p.rentalItemId, itemName: p.itemName, qty });
       else if (p.source === "customer_stock" && p.customerStockEntryId) push(`cse:${p.customerStockEntryId}`, { source: "customer_stock", customerStockEntryId: p.customerStockEntryId, itemName: p.itemName, qty });
       else if (p.source === "misc") push(`misc:${p.itemName.trim().toLowerCase()}`, { source: "misc", itemName: p.itemName, qty });
     }
     for (const c of cart) {
-      const qty = cappedQty(c.qty, c.source, c.irmItemId, c.customerStockEntryId);
+      const qty = cappedQty(c.qty, c.source, c.irmItemId, c.customerStockEntryId, 0, c.rentalItemId);
       if (qty <= 0) continue;
       if (c.source === "irm" && c.irmItemId) push(c.key, { source: "irm", irmItemId: c.irmItemId, itemName: c.name, qty });
+      else if (c.source === "rental" && c.rentalItemId) push(c.key, { source: "rental", rentalItemId: c.rentalItemId, itemName: c.name, qty });
       else if (c.source === "customer_stock" && c.customerStockEntryId) push(c.key, { source: "customer_stock", customerStockEntryId: c.customerStockEntryId, itemName: c.name, qty });
-      else push(c.key, { source: "misc", itemName: c.name, qty });
+      // The final `else` is MISC, and only rows that are genuinely misc may reach it. It used to be a
+      // bare catch-all, so any row that was not irm/customer_stock — a rental, or an irm row that had
+      // somehow lost its id — was submitted as free text: item id gone, no custody, and the API
+      // accepted it without complaint. Now anything unrecognised is dropped and reported, because a
+      // request that silently becomes something else is worse than one that refuses to send.
+      else if (c.source === "misc") push(c.key, { source: "misc", itemName: c.name, qty });
+      else unresolved.push(c.name);
+    }
+    if (unresolved.length > 0) {
+      throw new Error(`Couldn't work out where to source: ${unresolved.join(", ")}. Remove ${unresolved.length === 1 ? "it" : "them"} and search again.`);
     }
     return [...byKey.values()];
   };
@@ -509,7 +578,16 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
   // puts the cursor where the fix has to be typed, and `inputCls` already renders the red
   // aria-invalid ring — so the error is visible, announced, and actionable in one move.
   const onSubmit = async () => {
-    const lines = buildLines();
+    let lines: KitRequestLinePayload[];
+    try {
+      lines = buildLines();
+    } catch (err) {
+      // buildLines throws only for a row it could not classify. Reported in the notice like any other
+      // cart-wide problem rather than thrown on: the engineer needs to know WHICH row to remove.
+      setMsg({ type: "error", text: err instanceof Error ? err.message : "Couldn't build the request." });
+      noticeRef.current?.scrollIntoView({ block: "nearest" });
+      return;
+    }
     if (lines.length === 0) {
       // Not a field error — it's about the cart as a whole, so it stays in the notice. The notice is
       // scrolled into view because it sits at the bottom of the scrolling body.
@@ -567,12 +645,12 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
                 </thead>
                 <tbody>
                   {planned.map((p) => {
-                    const free = freeFor(p.source, p.irmItemId, p.customerStockEntryId);
+                    const free = freeFor(p.source, p.irmItemId, p.customerStockEntryId, p.rentalItemId);
                     return (
                       <tr key={p.key} className="border-b border-[var(--border)] last:border-0">
                         <td className="px-3 py-2">
                           <span className="font-semibold text-[var(--ink)]">{p.itemName}</span>
-                          <AvailabilityLine stock={stockFor(p.source, p.irmItemId, p.customerStockEntryId)} want={cappedQty(p.qty, p.source, p.irmItemId, p.customerStockEntryId)} />
+                          <AvailabilityLine stock={stockFor(p.source, p.irmItemId, p.customerStockEntryId, p.rentalItemId)} want={cappedQty(p.qty, p.source, p.irmItemId, p.customerStockEntryId, 0, p.rentalItemId)} />
                         </td>
                         <td className="px-3 py-2">
                           {/* Capped at what could actually be sourced, so the box can't promise more
@@ -583,8 +661,8 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
                             min={0}
                             max={free ?? undefined}
                             step={1}
-                            value={cappedQty(p.qty, p.source, p.irmItemId, p.customerStockEntryId)}
-                            disabled={qtyPending(p.source, p.irmItemId, p.customerStockEntryId)}
+                            value={cappedQty(p.qty, p.source, p.irmItemId, p.customerStockEntryId, 0, p.rentalItemId)}
+                            disabled={qtyPending(p.source, p.irmItemId, p.customerStockEntryId, p.rentalItemId)}
                             aria-label={`Extra quantity for ${p.itemName}`}
                             onChange={(e) => {
                               const raw = Math.max(0, Math.floor(Number(e.target.value) || 0));
@@ -619,7 +697,7 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
                 </thead>
                 <tbody>
                   {cart.map((c) => {
-                    const cartFree = freeFor(c.source, c.irmItemId, c.customerStockEntryId);
+                    const cartFree = freeFor(c.source, c.irmItemId, c.customerStockEntryId, c.rentalItemId);
                     return (
                     <tr key={c.key} className="border-b border-[var(--border)] last:border-0">
                       <td className="px-3 py-2">
@@ -629,7 +707,7 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
                           {c.source === "customer_stock" && <span className="rounded border border-[var(--accent)]/30 bg-[var(--accent-10)] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-[var(--accent)]">Customer stock</span>}
                         </div>
                         {c.code && <div className={c.source === "customer_stock" ? "text-[10px] text-[var(--muted)]" : "font-mono text-[10px] text-[var(--muted)]"}>{c.code}</div>}
-                        <AvailabilityLine stock={stockFor(c.source, c.irmItemId, c.customerStockEntryId)} want={cappedQty(c.qty, c.source, c.irmItemId, c.customerStockEntryId, 1)} />
+                        <AvailabilityLine stock={stockFor(c.source, c.irmItemId, c.customerStockEntryId, c.rentalItemId)} want={cappedQty(c.qty, c.source, c.irmItemId, c.customerStockEntryId, 1, c.rentalItemId)} />
                       </td>
                       <td className="px-3 py-2">
                         <input
@@ -641,8 +719,8 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
                           min={cartFree === 0 ? 0 : 1}
                           max={cartFree ?? undefined}
                           step={1}
-                          value={cappedQty(c.qty, c.source, c.irmItemId, c.customerStockEntryId, 1)}
-                          disabled={qtyPending(c.source, c.irmItemId, c.customerStockEntryId)}
+                          value={cappedQty(c.qty, c.source, c.irmItemId, c.customerStockEntryId, 1, c.rentalItemId)}
+                          disabled={qtyPending(c.source, c.irmItemId, c.customerStockEntryId, c.rentalItemId)}
                           aria-label={`Quantity for ${c.name}`}
                           onChange={(e) => {
                             const raw = Math.max(1, Math.floor(Number(e.target.value) || 1));
@@ -768,12 +846,16 @@ function KitItemSearch({ jobId, excludeKeys, onAddItem, onAddCustom }: { jobId: 
       </div>
 
       {touched && !loading && failed && <p className="text-xs font-semibold text-[var(--neg)]">Couldn’t run the search just now. Check your connection and try again.</p>}
-      {touched && !loading && !failed && results.length === 0 && <p className="text-xs text-[var(--muted)]">No matching catalogue or customer-stock item.</p>}
+      {touched && !loading && !failed && results.length === 0 && <p className="text-xs text-[var(--muted)]">No matching catalogue, rental or customer-stock item.</p>}
 
       {results.length > 0 && (
         <div className="max-h-56 space-y-1.5 overflow-auto">
           {results.map((it) => {
-            const key = it.source === "irm" ? `irm:${it.irmItemId}` : `cse:${it.customerStockEntryId}`;
+            // Three-way. The old two-way form treated everything that was not IRM as customer stock,
+            // so a rental option keyed `cse:undefined` — colliding with every other rental in the
+            // list and with any customer row whose id was missing.
+            const key =
+              it.source === "irm" ? `irm:${it.irmItemId}` : it.source === "rental" ? `rental:${it.rentalItemId}` : `cse:${it.customerStockEntryId}`;
             const added = excludeKeys.has(key);
             // An item no warehouse and no van holds can't be approved from any source, so it is
             // offered but not selectable — see kitItemAvailability. Shown rather than filtered out:
@@ -783,7 +865,7 @@ function KitItemSearch({ jobId, excludeKeys, onAddItem, onAddCustom }: { jobId: 
             const avail = kitItemAvailability(it);
             const locked = added || !avail.requestable;
             // Sub-line: IRM shows its catalogue code (mono); customer stock shows warehouse · qty · serial.
-            const sub = it.source === "irm" ? it.code : customerStockLabel(it);
+            const sub = it.source === "irm" ? it.code : it.source === "rental" ? rentalLabel(it) : customerStockLabel(it);
             return (
               <button
                 key={key}
@@ -797,8 +879,9 @@ function KitItemSearch({ jobId, excludeKeys, onAddItem, onAddCustom }: { jobId: 
                   <span className="flex items-center gap-2">
                     <span className="truncate text-sm font-semibold text-[var(--ink)]">{it.name}</span>
                     {it.source === "customer_stock" && <span className="shrink-0 rounded border border-[var(--accent)]/30 bg-[var(--accent-10)] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-[var(--accent)]">Customer stock</span>}
+                    {it.source === "rental" && <span className="shrink-0 rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-amber-600">Rental</span>}
                   </span>
-                  {sub && <span className={`block truncate text-[11px] text-[var(--muted)] ${it.source === "irm" ? "font-mono" : ""}`}>{sub}</span>}
+                  {sub && <span className={`block truncate text-[11px] text-[var(--muted)] ${it.source === "irm" || it.source === "rental" ? "font-mono" : ""}`}>{sub}</span>}
                   {avail.label && (
                     <span className={`block truncate text-[11px] font-semibold ${avail.requestable ? "text-[var(--muted)]" : "text-[var(--neg)]"}`}>
                       {avail.label}

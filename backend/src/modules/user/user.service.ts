@@ -17,6 +17,7 @@ import * as userWarehouseRepo from "./user-warehouse.repository.js";
 import type { AssignedWarehouse } from "./user-warehouse.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as engineerStockRepo from "#modules/engineer-stock/engineer-stock.repository.js";
+import * as rentalCustodyRepo from "#modules/engineer-rental/engineer-rental.repository.js";
 import { generateTempPassword } from "../../utils/generate-password.js";
 import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
 import { paginate } from "../../utils/pagination.js";
@@ -764,6 +765,16 @@ async function assertNotHoldingStock(userId: string): Promise<void> {
   if (held > 0) {
     throw conflict("This staff member still holds stock. Return or transfer their stock before deactivating.");
   }
+  // HIRED equipment, checked separately and refused with its own message — because the consequence is
+  // different in kind. Stranded van stock is our own asset sitting in a van; stranded hired kit belongs
+  // to a provider who keeps billing for it and will charge us for the loss, and unlike van stock it
+  // cannot be transferred to another engineer to clear. There is exactly one way out: scan it back.
+  const hires = await rentalCustodyRepo.countHeldRentalsForEngineer(userId);
+  if (hires > 0) {
+    throw conflict(
+      "This staff member still holds rental items. Hired equipment has to be scanned back to the warehouse before deactivating them — it belongs to the provider and can't be transferred to another engineer.",
+    );
+  }
 }
 
 // Moving a stock-holding engineer OFF a field-operations role strands their van stock in exactly the
@@ -781,6 +792,14 @@ async function assertRoleChangeKeepsStockHoldable(
   if (held > 0) {
     throw conflict(
       "This staff member still holds field stock. Return or transfer their stock before moving them off a field-operations role.",
+    );
+  }
+  // Same hazard as deactivating: every route that could move a hire back (the job return scan) refuses
+  // a role that can't hold stock, so moving them off strands the provider's equipment.
+  const hires = await rentalCustodyRepo.countHeldRentalsForEngineer(user.id);
+  if (hires > 0) {
+    throw conflict(
+      "This staff member still holds rental items. Scan the hired equipment back to the warehouse before moving them off a field-operations role.",
     );
   }
 }

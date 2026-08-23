@@ -613,6 +613,9 @@ model RentalItem {
   // Rental lines referencing this item (back-relations; no DB column).
   prfRentalLines PurchaseRequestRentalLine[]
   poRentalLines  PurchaseOrderRentalLine[]
+  // Jobs planning this hire, and the scans that moved it (back-relations; no DB column).
+  jobKitLines           JobKitLine[]
+  jobStockMovementLines JobStockMovementLine[]
 
   deletedAt DateTime? // soft delete — excluded from listings; history stays intact
   createdBy String? // staff email that created the item
@@ -1091,10 +1094,50 @@ model PurchaseOrderRentalLine {
   // what was reported, and the screens clamp it to what is still held — a hire cannot hold more
   // damaged units than it holds units.
   damagedQuantity Int @default(0)
+
+  // Units an ENGINEER brought back damaged from a job — reported at the return scan with a photo and
+  // a reason on the movement line, and NOT yet settled into a damage note.
+  //
+  // Its own column rather than folding into `damagedQuantity` above, and the reason is mechanical:
+  // that column is recomputed as an ABSOLUTE from the live damage-note lines whenever one is voided
+  // (rental-receipt.repository `receivedTotalsByLine`). An increment written here from a job scan
+  // would survive exactly until the next void and then vanish, taking the evidence trail's headline
+  // number with it.
+  //
+  // It is also a different FACT. `damagedQuantity` is what the provider has been told about and is
+  // charging us for; this is what the field has reported and the office has not yet acted on. The gap
+  // between the two IS the PM's to-do list, which is the point of recording it separately: the
+  // engineer who saw the damage is not the person who negotiates the charge, and the photograph is
+  // worth most on the day it was taken.
+  fieldDamageQty        Int       @default(0)
+  fieldDamageReportedAt DateTime?
+
+  // Units of this hire currently OUT WITH AN ENGINEER — issued to a job and not yet scanned back.
+  //
+  // Maintained, not derived, and in the same transaction as the movement that moves it — exactly like
+  // `receivedQuantity` above and for the same reason. The question it answers is asked on the hot
+  // path: what is still available at the warehouse to issue is
+  // `receivedQuantity − returnedQuantity − issuedQuantity`, a comparison across COLUMNS that a
+  // Prisma/MongoDB `where` cannot express, and re-summing the movement ledger to answer it would put
+  // a join across every job on every hire behind one scan.
+  //
+  // Being on the row is also what makes the availability check ATOMIC: the issue transaction reads
+  // and writes this single document, so two warehouses scanning the last tester at the same moment
+  // cannot both succeed.
+  //
+  // It never decrements `receivedQuantity` — the kit is still ours to give back, it is just not in
+  // the building. Returning it to the SUPPLIER is `returnedQuantity`, a different leg entirely.
+  issuedQuantity Int @default(0)
+
   // Every physical delivery against this line, each with its own date, condition and evidence. A
   // running total alone cannot answer "which units arrived on the 18th, and which of those were
   // already damaged" — and that question is what a damage dispute at return turns on.
   receipts RentalReceiptLine[]
+
+  // Job scans that moved this hire, and the engineers currently holding it (back-relations; no DB
+  // column).
+  jobStockMovementLines JobStockMovementLine[]
+  engineerHoldings      EngineerRentalHolding[]
 
   // Every EXTENSION of this hire, one row each — the breakdown of the running total above. Same
   // reason `receipts` exists beside `receivedQuantity`: a total cannot say when, by how much, or how
@@ -1746,10 +1789,24 @@ model JobStockMovementLine {
   movementId String           @db.ObjectId
   movement   JobStockMovement @relation(fields: [movementId], references: [id])
 
-  source    String // irm | customer
+  source    String // irm | customer | rental
   irmItemId String?  @db.ObjectId
   irmItem   IrmItem? @relation(fields: [irmItemId], references: [id])
   customerStockEntryId String? @db.ObjectId // loose socket (no relation), mirroring JobKitLine
+
+  // ── Rental lines ────────────────────────────────────────────────────────────────────────────
+  // A hire is NOT fungible the way IRM stock is: two testers of the same catalogue item can sit on
+  // two different orders, from two different providers, with two different return deadlines. So a
+  // rental movement records BOTH — the catalogue item (what it is, for the screens) and the hire the
+  // units physically came off (which deadline they belong to, and who we owe them back to).
+  //
+  // Without the hire id the module's own reason for existing breaks: the deadline badge could say
+  // "3 testers due back Friday" and nothing anywhere could say that one of them is in an engineer's
+  // van. The catalogue id alone cannot answer it — it does not know which order the unit came from.
+  rentalItemId              String?     @db.ObjectId
+  rentalItem                RentalItem? @relation(fields: [rentalItemId], references: [id])
+  purchaseOrderRentalLineId String?                  @db.ObjectId
+  purchaseOrderRentalLine   PurchaseOrderRentalLine? @relation(fields: [purchaseOrderRentalLineId], references: [id])
 
   itemName String // snapshot
   sku      String? // snapshot
@@ -1767,6 +1824,10 @@ model JobStockMovementLine {
 
   @@index([movementId])
   @@index([irmItemId])
+  // "Where are the units of this hire right now" — the query the on-hire screen and the return
+  // scan both run. Without it every read of one hire's whereabouts scans every movement line
+  // ever written.
+  @@index([purchaseOrderRentalLineId])
 }
 
 // Engineer-held CUSTOMER consignment stock — the customer-side twin of EngineerStockBalance.
@@ -1787,6 +1848,68 @@ model EngineerCustomerStockHolding {
   @@unique([customerStockEntryId, engineerId])
   @@index([engineerId])
   @@index([customerId])
+}
+
+// Engineer-held HIRED equipment — the rental-side twin of EngineerStockBalance.
+//
+// Keyed on the HIRE (PurchaseOrderRentalLine), not the catalogue item, and that is the whole point:
+// the rental module exists to chase deadlines, and "this hire is due back Friday" is only actionable
+// beside "and Dave has it". Keyed on the catalogue item instead, two testers from two orders would
+// collapse into one number that belongs to neither deadline.
+//
+// This is NOT an inventory balance and never becomes one. The rental design forbids a hire reaching
+// InventoryBalance, the reorder engine or Goods In, and none of that changes here: this table answers
+// CUSTODY (who is holding kit we do not own), which is a different question from stock on hand. The
+// reorder engine reads InventoryBalance and never this.
+model EngineerRentalHolding {
+  id                        String                  @id @default(auto()) @map("_id") @db.ObjectId
+  purchaseOrderRentalLineId String                  @db.ObjectId
+  purchaseOrderRentalLine   PurchaseOrderRentalLine @relation(fields: [purchaseOrderRentalLineId], references: [id])
+  engineerId                String                  @db.ObjectId
+  engineer                  User                    @relation("EngineerRentalOwner", fields: [engineerId], references: [id])
+
+  // Snapshots — so the engineer's "what am I holding" list renders without loading the order chain,
+  // and still reads correctly after the catalogue item is renamed or retired.
+  rentalItemId String? @db.ObjectId // for filtering by catalogue item
+  itemName     String // snapshot
+  poCode       String? // snapshot, e.g. PO-0042 — which order this hire sits on
+  hireEndDate  DateTime? // snapshot of the deadline at issue time, for the engineer's own list
+
+  quantityOnHand Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([purchaseOrderRentalLineId, engineerId])
+  @@index([engineerId])
+  @@index([rentalItemId])
+}
+
+// Immutable, append-only engineer rental-custody ledger — the rental-side twin of
+// EngineerStockTransaction. Every change to an EngineerRentalHolding is exactly one row here.
+model EngineerRentalTransaction {
+  id                        String @id @default(auto()) @map("_id") @db.ObjectId
+  purchaseOrderRentalLineId String @db.ObjectId
+  engineerId                String @db.ObjectId
+  engineer                  User   @relation("EngineerRentalTxnOwner", fields: [engineerId], references: [id])
+
+  quantityDelta Int // + issue to engineer | − return to warehouse
+  // job_issue | job_return — deliberately NO job_consume. A hire cannot be used up: it is equipment
+  // we do not own and every unit has to go back. The consume path refuses rental lines outright, so a
+  // rental line's units stay outstanding until they are scanned back, which is exactly what keeps the
+  // job in `awaiting_return` and the hire on its deadline badge.
+  type          String
+  sourceType    String // goods_management
+  sourceId      String   @db.ObjectId
+  sourceCode    String? // snapshot, e.g. GM-0001
+  balanceAfter  Int
+  notes         String?
+  createdBy     String?
+  createdAt     DateTime @default(now())
+
+  @@index([purchaseOrderRentalLineId, engineerId])
+  @@index([sourceType, sourceId])
+  @@index([createdAt])
 }
 
 // Immutable, append-only engineer customer-stock ledger.
@@ -1955,9 +2078,14 @@ model JobKitRequestLine {
   requestId String        @db.ObjectId
   request   JobKitRequest @relation(fields: [requestId], references: [id])
 
-  source               String  // irm | customer_stock | misc
+  source               String  // irm | customer_stock | rental | misc
   irmItemId            String? @db.ObjectId // when irm (loose socket)
   customerStockEntryId String? @db.ObjectId // when customer_stock (loose socket)
+  // When `rental` — the CATALOGUE item asked for, never a particular hire. A loose socket like its
+  // neighbours. Which hire the units actually come off is decided at the Goods-Management scan, long
+  // after this request is approved, for the same reason a job kit line does not pin one: at request
+  // time nobody knows which of the testers on order the warehouse will reach for.
+  rentalItemId         String? @db.ObjectId // when rental (loose socket)
 
   itemName String  // snapshot
   sku      String? // snapshot
@@ -2342,6 +2470,9 @@ model User {
   // Goods Management (back-relations; no DB column).
   jobStockMovements              JobStockMovement[]              @relation("JobStockMovementEngineer")
   engineerCustomerStockHoldings  EngineerCustomerStockHolding[]  @relation("EngineerCustomerStockOwner")
+  // Hired equipment this engineer is currently holding (back-relations; no DB column).
+  engineerRentalHoldings         EngineerRentalHolding[]         @relation("EngineerRentalOwner")
+  engineerRentalTransactions     EngineerRentalTransaction[]     @relation("EngineerRentalTxnOwner")
   // Non-job van stock requests raised by this engineer (back-relation; no DB column).
   vanStockRequests               VanStockRequest[]               @relation("VanStockRequestEngineer")
 
@@ -2804,16 +2935,16 @@ model Job {
 }
 
 // A kit line on a Job — what the engineer needs to take/use. lineType selects the source
-// pool: customer-owned consignment stock, the company IRM catalogue, or a free-text MISC item
-// (services / patch cords / charges). Only the matching id is set per line (app-enforced).
-// lineType is a String (NOT a Prisma enum) per the house convention. irmItemId is a real
-// relation; customerStockEntryId is a loose socket (no relation).
+// pool: customer-owned consignment stock, the company IRM catalogue, a HIRED item from the rental
+// catalogue, or a free-text MISC item (services / patch cords / charges). Only the matching id is
+// set per line (app-enforced). lineType is a String (NOT a Prisma enum) per the house convention.
+// irmItemId and rentalItemId are real relations; customerStockEntryId is a loose socket (no relation).
 model JobKitLine {
   id    String @id @default(auto()) @map("_id") @db.ObjectId
   jobId String @db.ObjectId
   job   Job    @relation(fields: [jobId], references: [id])
 
-  lineType    String  // customer_stock | irm | misc
+  lineType    String  // customer_stock | irm | rental | misc
   seCode      String? // optional scheme/equipment code snapshot (the customer SKU / SE Code)
   itemName    String
   description String?
@@ -2822,6 +2953,14 @@ model JobKitLine {
   customerStockEntryId String? @db.ObjectId // loose socket (no relation) — customer consignment line
   irmItemId            String?  @db.ObjectId
   irmItem              IrmItem? @relation(fields: [irmItemId], references: [id])
+  // A `rental` line names the CATALOGUE item, not a particular hire — the same reason an `irm` line
+  // names the item and not a stock lot. At planning time nobody knows which of the two testers on
+  // order the warehouse will hand over; that is decided at the scan, and the movement line records
+  // WHICH hire the units came off (JobStockMovementLine.purchaseOrderRentalLineId). Pinning a hire
+  // here instead would make the plan un-writable until a purchase order existed, and wrong the moment
+  // the warehouse reached for the other one.
+  rentalItemId String?     @db.ObjectId
+  rentalItem   RentalItem? @relation(fields: [rentalItemId], references: [id])
 
   // Pickup warehouse — WHERE the engineer collects this item. For customer_stock it's the entry's
   // own warehouse (derived server-side); for irm the PM picks it. misc lines have none. A real
@@ -2849,6 +2988,7 @@ model JobKitLine {
 
   @@index([jobId])
   @@index([irmItemId])
+  @@index([rentalItemId])
   @@index([warehouseId])
   @@index([hasVanSource])
 }

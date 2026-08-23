@@ -14,6 +14,23 @@ vi.mock("#modules/irm/irm.service.js", () => ({ requireActiveIrmItem: vi.fn(), f
 vi.mock("#modules/inventory/inventory.repository.js", () => ({ findBalancePair: vi.fn(), findBalancesByItemsAndWarehouses: vi.fn(), findBalancePairTx: vi.fn(), upsertBalanceTx: vi.fn(), insertTransactionTx: vi.fn() }));
 vi.mock("#modules/inventory/inventory.service.js", () => ({ applyOutbound: vi.fn(), applyInbound: vi.fn() }));
 vi.mock("#modules/engineer-stock/engineer-stock.repository.js", () => ({ upsertEngineerBalanceTx: vi.fn(), insertEngineerTxnTx: vi.fn(), findEngineerBalanceTx: vi.fn(), findEngineerBalance: vi.fn(), findEngineerBalances: vi.fn(), findBalanceQuantitiesByEngineers: vi.fn() }));
+vi.mock("#modules/engineer-rental/engineer-rental.repository.js", () => ({
+  upsertRentalHoldingTx: vi.fn(),
+  insertRentalTxnTx: vi.fn(),
+  findRentalHoldingTx: vi.fn(),
+  findRentalHolding: vi.fn(),
+  findRentalHoldingsByEngineer: vi.fn(async () => []),
+  findRentalHoldingsByHireLines: vi.fn(async () => []),
+  findRentalHoldingQuantitiesByEngineers: vi.fn(async () => []),
+}));
+vi.mock("#modules/rental-item/rental-item.repository.js", () => ({ findById: vi.fn(), findActiveByCode: vi.fn(async () => null) }));
+vi.mock("#modules/purchase-order/purchase-order.repository.js", () => ({
+  findLiveHiresByRentalItems: vi.fn(async () => []),
+  findHireStockById: vi.fn(),
+  findHireStockByIdTx: vi.fn(),
+  adjustHireIssuedQtyTx: vi.fn(async () => true),
+  flagHireDamagedTx: vi.fn(),
+}));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 // The overdue window comes from Settings now, so the service reaches for it whenever a caller doesn't
 // pass an explicit `days`. Mocked to the shipped default so these tests stay about goods logic.
