@@ -13,12 +13,12 @@ vi.mock("#modules/engineer-transfer/engineer-transfer.service.js", () => ({
   assertTransferEngineers: vi.fn(),
 }));
 vi.mock("#modules/irm/irm.repository.js", () => ({}));
-vi.mock("#modules/goods-management/goods-management.repository.js", () => ({ findCustomerHoldingsByEngineer: vi.fn(), findCustomerStockEntriesByIds: vi.fn(), findCustomerEntryWarehousesByIds: vi.fn() }));
+vi.mock("#modules/goods-management/goods-management.repository.js", () => ({ findCustomerHoldingsByEngineer: vi.fn(), findCustomerStockEntriesByIds: vi.fn(), findCustomerEntryWarehousesByIds: vi.fn(async () => new Map()) }));
 vi.mock("#modules/goods-management/goods-management.service.js", () => ({ jobCommittedByEngineer: vi.fn() }));
 vi.mock("#modules/goods-management/demand.js", () => ({ getOpenDemand: vi.fn() }));
 vi.mock("#modules/engineer-stock/engineer-stock.repository.js", () => ({ findEngineerBalances: vi.fn() }));
 vi.mock("#modules/inventory/inventory.repository.js", () => ({ findAllBalances: vi.fn(), findBalancesByItemsAndWarehouses: vi.fn() }));
-vi.mock("#modules/warehouse/warehouse.repository.js", () => ({ findMany: vi.fn() }));
+vi.mock("#modules/warehouse/warehouse.repository.js", () => ({ findMany: vi.fn(), findLabelsByIds: vi.fn(async () => new Map()) }));
 vi.mock("#modules/engineer-transfer/engineer-transfer.repository.js", () => ({
   findHoldersForIrm: vi.fn(),
   findHoldersForCustomer: vi.fn(),

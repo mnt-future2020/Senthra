@@ -25,6 +25,11 @@ import {
 import * as gmService from "@/services/goodsManagement.service";
 import { WriteOffLostModal, type WriteOffTarget } from "./WriteOffLostModal";
 import { useDashboard } from "@/hooks/useDashboard";
+// The shared calendar-day formatter, NOT a private copy. A hire date is a calendar day stored at UTC
+// midnight, so it has to be rendered in UTC or every viewer behind it sees the day before — and on a
+// return deadline that is the one number that must not be wrong. That rule now lives in one place,
+// with its own tests, rather than being restated wherever a hire date happens to be printed.
+import { formatCalendarDay } from "@/lib/formatDate";
 import { readFileAsDataUrl, shrinkImage } from "@/lib/image";
 import { ScannerInput } from "./ScannerInput";
 import { defaultScanDirection, scanDirections } from "./scanDirections";
@@ -326,6 +331,10 @@ export function JobScanPanel({
           source: l.match.source,
           irmItemId: l.match.irmItemId,
           customerStockEntryId: l.match.customerStockEntryId,
+          rentalItemId: l.match.rentalItemId,
+          // Echoed back exactly as the scan resolved it: the server picked the hire whose deadline is
+          // soonest, and posting without it would leave the units belonging to no particular hire.
+          purchaseOrderRentalLineId: l.match.purchaseOrderRentalLineId,
           jobKitLineId: l.match.jobKitLineId,
           qty: l.qty,
         }));
@@ -337,6 +346,8 @@ export function JobScanPanel({
             source: l.match.source,
             irmItemId: l.match.irmItemId,
             customerStockEntryId: l.match.customerStockEntryId,
+            rentalItemId: l.match.rentalItemId,
+            purchaseOrderRentalLineId: l.match.purchaseOrderRentalLineId,
             jobKitLineId: l.match.jobKitLineId,
           };
           if (l.goodQty > 0) {
@@ -530,6 +541,32 @@ export function JobScanPanel({
                         </>
                       )}
                     </p>
+                    {/* Which hire is being handed over, and when it has to come back.
+                        A rental is the only thing on a kit list with a deadline attached, and the
+                        person physically passing the case across the counter is the last one who can
+                        still pick a different unit — so the order and the date belong here, not only
+                        on the hire register nobody has open at that moment. */}
+                    {line.match.source === "rental" && line.match.hire && (
+                      <p
+                        className={`mt-0.5 text-[11px] ${
+                          line.match.hire.overdue ? "font-semibold text-[var(--neg)]" : "text-[var(--muted)]"
+                        }`}
+                      >
+                        Hire {line.match.hire.poCode ?? "—"}
+                        {line.match.hire.hireEndDate ? (
+                          <>
+                            {/* Overdue is called out rather than blocked: the allocator hands out the
+                                soonest-expiring hire first, so this is the unit that most needs to go
+                                back — and the counter is the last place anyone can notice. */}
+                            {line.match.hire.overdue ? " · WAS DUE BACK " : " · back by "}
+                            <span className={line.match.hire.overdue ? "font-bold" : "font-semibold text-[var(--ink)]"}>
+                              {formatCalendarDay(line.match.hire.hireEndDate)}
+                            </span>
+                            {line.match.hire.overdue ? " — already overdue for return to the provider" : null}
+                          </>
+                        ) : null}
+                      </p>
+                    )}
                   </div>
 
                   {/* Issue: single qty stepper in the header. Return: steppers move below. */}

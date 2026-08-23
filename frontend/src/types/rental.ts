@@ -39,6 +39,21 @@ export interface RentalItem {
   updatedAt: string;
 }
 
+/**
+ * One depot currently holding a hired item, and how many units are free to take.
+ *
+ * A RentalItem carries no quantity of its own — deliberately — so "where can the engineer collect
+ * this" is answered by the live hires, whose warehouse is their purchase order's delivery warehouse.
+ */
+export interface RentalItemAvailability {
+  warehouseId: string;
+  warehouseName: string | null;
+  warehouseCode: string | null;
+  available: number;
+  /** The soonest deadline among the hires stocking this depot. */
+  nextDueBack: string | null;
+}
+
 /** A hired line on a purchase request — where the period and delivery address are captured. */
 export interface PrfRentalLine {
   id: string;

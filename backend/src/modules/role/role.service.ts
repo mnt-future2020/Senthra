@@ -3,6 +3,7 @@ import type { Prisma, Role } from "@prisma/client";
 import * as roleRepo from "./role.repository.js";
 import * as userRepo from "#modules/user/user.repository.js";
 import * as engineerStockRepo from "#modules/engineer-stock/engineer-stock.repository.js";
+import * as rentalCustodyRepo from "#modules/engineer-rental/engineer-rental.repository.js";
 import * as vanStockRequestRepo from "#modules/van-stock-request/van-stock-request.repository.js";
 import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
 import { slugify } from "../../utils/slugify.js";
@@ -39,16 +40,25 @@ async function assertNoHolderHasStock(roleId: string, roleName: string): Promise
   // LIVE holders would let the exact hazard through — delete the holder, then revoke the capability
   // and the guard reports safe while the stock becomes unreachable.
   const holders = await userRepo.findIdsByRole(roleId, { includeDeleted: true });
-  const [held, openRequests] = await Promise.all([
+  const [held, openRequests, heldHires] = await Promise.all([
     engineerStockRepo.countHeldStockForEngineers(holders),
     // A zero balance isn't enough. An approved-but-unscanned restock still credits the engineer's
     // van when the warehouse scans it out, and neither approve nor fulfil re-checks the role — so
     // revoking with one open would strand stock a moment after the guard said it was safe.
     vanStockRequestRepo.countOpenForEngineers(holders),
+    // Hired equipment, counted alongside — the role-level mirror of the per-user guard in
+    // user.service. Revoking the capability blocks the return scan, which is the ONLY way a hire can
+    // come back: unlike van stock it cannot be transferred to a colleague to clear.
+    rentalCustodyRepo.countHeldRentalsForEngineers(holders),
   ]);
   if (held > 0) {
     throw conflict(
       `Users with the "${roleName}" role still hold field stock. Return or transfer their stock before turning off the field-operations capability.`,
+    );
+  }
+  if (heldHires > 0) {
+    throw conflict(
+      `Users with the "${roleName}" role still hold rental items. Hired equipment has to be scanned back to the warehouse before turning off the field-operations capability — it belongs to the provider and can't be transferred to another engineer.`,
     );
   }
   if (openRequests > 0) {

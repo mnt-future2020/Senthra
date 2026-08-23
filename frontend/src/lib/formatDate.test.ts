@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatDate, formatDateTime } from "./formatDate";
+import { formatCalendarDay, formatDate, formatDateTime } from "./formatDate";
 
 // This module exists because the same six-line formatter had been copy-pasted into thirteen files
 // under three different names (fmtDate / formatDate / formatDay), and five of those copies had
@@ -50,5 +50,23 @@ describe("formatDateTime — the same date, plus the time of day", () => {
 
   it.each([[null], [undefined], [""], ["not-a-date"]])("returns an em dash for %p", (bad) => {
     expect(formatDateTime(bad as string | null | undefined)).toBe("—");
+  });
+});
+
+describe("formatCalendarDay", () => {
+  it("renders a calendar day in UTC, not the viewer's zone", () => {
+    // The whole reason this exists. A hire deadline is stored as UTC midnight; formatDate would show
+    // 30 September to anyone behind UTC, naming the wrong day on the one field that names a day.
+    expect(formatCalendarDay("2026-10-01T00:00:00.000Z")).toBe("01 Oct 2026");
+  });
+
+  it("matches formatDate's shape so the two can sit in one table", () => {
+    expect(formatCalendarDay("2026-08-03T12:00:00.000Z")).toBe("03 Aug 2026");
+  });
+
+  it("returns the em dash for null, undefined and unparseable input", () => {
+    expect(formatCalendarDay(null)).toBe("—");
+    expect(formatCalendarDay(undefined)).toBe("—");
+    expect(formatCalendarDay("not a date")).toBe("—");
   });
 });

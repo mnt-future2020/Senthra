@@ -34,6 +34,7 @@ import * as goodsManagementRepo from "./goods-management.repository.js";
 
 export interface DemandEntry {
   irmItemId: string | null;
+  rentalItemId: string | null;
   customerStockEntryId: string | null;
   warehouseId: string | null;
   itemName: string;
@@ -73,11 +74,20 @@ export async function getOpenDemand(excludeJobId?: string): Promise<Map<string, 
       // Key by item + warehouse for BOTH sources (customer stock too) so the per-warehouse demand
       // board attributes each line to its own warehouse — never collapses two warehouses' demand onto
       // whichever kit line happened to land in the map first.
-      const key = kl.irmItemId ? `irm|${kl.irmItemId}|${kl.warehouseId}` : `cse|${kl.customerStockEntryId}|${kl.warehouseId}`;
+      // THREE pools, not two. The old two-arm ternary keyed anything without an IRM id as
+      // `cse|<id>|<wh>`, so every rental line in the system collapsed onto the single key
+      // `cse|null|<warehouse>` — one bucket per warehouse, shared by every hired item AND by any
+      // customer line whose entry id was missing, with all their demand summed into it.
+      const key = kl.irmItemId
+        ? `irm|${kl.irmItemId}|${kl.warehouseId}`
+        : kl.rentalItemId
+          ? `rental|${kl.rentalItemId}|${kl.warehouseId}`
+          : `cse|${kl.customerStockEntryId}|${kl.warehouseId}`;
       const e = out.get(key);
       if (e) e.demand += demand;
       else out.set(key, {
         irmItemId: kl.irmItemId ?? null,
+        rentalItemId: kl.rentalItemId ?? null,
         customerStockEntryId: kl.customerStockEntryId ?? null,
         warehouseId: kl.warehouseId ?? null,
         itemName: kl.itemName,

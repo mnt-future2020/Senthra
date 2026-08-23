@@ -6,10 +6,12 @@ import { withTransaction } from "../../lib/prisma.js";
 import * as customerRepo from "#modules/customer/customer.repository.js";
 import * as supplierRepo from "#modules/supplier/supplier.repository.js";
 import * as irmRepo from "#modules/irm/irm.repository.js";
+import * as rentalItemRepo from "#modules/rental-item/rental-item.repository.js";
 import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as prfRepo from "#modules/purchase-request/purchase-request.repository.js";
 import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
+import { totalAvailable } from "#modules/purchase-order/rentalHire.allocation.js";
 import * as userRepo from "#modules/user/user.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import * as attachmentService from "#modules/attachment/attachment.service.js";
@@ -81,6 +83,11 @@ export interface PublicJobKitLine {
   description: string | null;
   customerStockEntryId: string | null;
   irmItemId: string | null;
+  rentalItemId: string | null;
+  // The RNT-#### on the printed label, for a `rental` line. Carried because it is what the warehouse
+  // types into the scan box and what the engineer matches against the sticker on the case — the
+  // line's own `itemName` snapshot cannot be scanned.
+  rentalItemCode: string | null;
   warehouseId: string | null;
   warehouseName: string | null;
   warehouseCode: string | null;
@@ -107,6 +114,21 @@ export interface PublicJobKitLine {
   used: number;
   returned: number;
   remaining: number;
+  // ── Hire deadline — RENTAL lines only, and only while units are still out ──────────────────
+  //
+  // When this hired kit has to be back at the warehouse, so the warehouse can hand it to the
+  // provider. Null on every other line type, and null once the line is fully returned.
+  //
+  // This is the fact that makes a rental line unlike every other kind on this list. An IRM item in a
+  // van is ours and costs nothing to hold; a hire keeps billing every day and belongs to someone
+  // else, so "when does this go back" is the only question about it — and until now the engineer
+  // holding the case was the one person in the system who could not see the answer.
+  //
+  // Deliberately NOT accompanied by the PO code: the purchase order is the office's handle on the
+  // hire, not the engineer's. They need the date and the depot, and nothing else.
+  hireEndDate: string | null;
+  // Server-resolved against the company timezone (never a browser clock) — see KitLineTally.
+  hireOverdue: boolean;
   // Van hand-overs feeding this line. Non-empty ⇒ some/all of this stock comes from another
   // engineer, NOT the warehouse above (which is only the return location for a van-sourced line).
   // Populated on the job detail; empty on list responses.
@@ -268,6 +290,8 @@ function toPublic(j: JobWithRelations | JobListRow): PublicJob {
       description: l.description,
       customerStockEntryId: l.customerStockEntryId,
       irmItemId: l.irmItemId,
+      rentalItemId: l.rentalItemId,
+      rentalItemCode: l.rentalItem?.code ?? null,
       warehouseId: l.warehouseId,
       warehouseName: l.warehouseName,
       warehouseCode: l.warehouseCode,
@@ -291,6 +315,8 @@ function toPublic(j: JobWithRelations | JobListRow): PublicJob {
       used: 0,
       returned: 0,
       remaining: 0,
+      hireEndDate: null, // overwritten by withGoodsTallies (rental lines with units still out)
+      hireOverdue: false,
       vanSources: [], // overwritten by withGoodsTallies on the job detail
     })),
     assignedAt: iso(j.assignedAt),
@@ -356,8 +382,8 @@ async function requireSupplier(supplierId: string) {
 
 // Validate each kit line's source + pickup warehouse, and build the persisted rows with warehouse
 // snapshots. customer_stock: the warehouse is DERIVED from the chosen entry (authoritative — that's
-// where the stock physically is) and seCode falls back to the entry's SKU. irm: the PM-chosen
-// warehouse is validated + snapshotted. misc: no source, no warehouse. Mirrors requireSite/
+// where the stock physically is) and seCode falls back to the entry's SKU. irm and rental: the
+// PM-chosen warehouse is validated + snapshotted. misc: no source, no warehouse. Mirrors requireSite/
 // requireSupplier — throws badRequest on a missing/foreign reference (defence-in-depth beyond the
 // zod lineType⇄id/warehouse guarantees).
 async function resolveKitLineRows(lines: JobKitLineInput[], customerId: string): Promise<JobKitLineRow[]> {
@@ -370,6 +396,7 @@ async function resolveKitLineRows(lines: JobKitLineInput[], customerId: string):
       description: trimToNull(l.description),
       customerStockEntryId: null,
       irmItemId: null,
+      rentalItemId: null,
       warehouseId: null,
       warehouseName: null,
       warehouseCode: null,
@@ -400,6 +427,23 @@ async function resolveKitLineRows(lines: JobKitLineInput[], customerId: string):
         row.warehouseName = wh.name;
         row.warehouseCode = wh.code;
       }
+    } else if (l.lineType === "rental" && l.rentalItemId) {
+      const item = await rentalItemRepo.findById(l.rentalItemId);
+      if (!item) throw badRequest(`Rental item "${l.itemName}" no longer exists.`);
+      // A retired hire item may still be OUT on live hires, so it stays readable everywhere — but it
+      // must not be planned onto new work. Same rule the PRF conversion applies via
+      // requireActiveRentalItems, enforced here for the same reason: the kit list is a commitment to
+      // collect something, and a catalogue entry nobody is hiring any more cannot be collected.
+      if (item.status !== "active" || item.deletedAt) throw badRequest(`Rental item "${l.itemName}" is no longer active.`);
+      row.rentalItemId = item.id;
+      if (l.warehouseId) {
+        const wh = await warehouseRepo.findById(l.warehouseId);
+        if (!wh) throw badRequest(`The pickup warehouse for "${l.itemName}" no longer exists.`);
+        if (wh.status !== "active") throw badRequest(`The pickup warehouse for "${l.itemName}" is not active.`);
+        row.warehouseId = wh.id;
+        row.warehouseName = wh.name;
+        row.warehouseCode = wh.code;
+      }
     }
     rows.push(row);
   }
@@ -410,7 +454,7 @@ async function resolveKitLineRows(lines: JobKitLineInput[], customerId: string):
 // customer stock. Infinity for misc / unresolved lines (no stock limit). The form already caps planned
 // qty at this (minus other jobs' demand), so this server-side guard never blocks a real form submit —
 // it just stops a direct API call from promising more stock than physically exists.
-type AvailabilityLine = { irmItemId: string | null; warehouseId: string | null; customerStockEntryId: string | null };
+type AvailabilityLine = { irmItemId: string | null; warehouseId: string | null; customerStockEntryId: string | null; rentalItemId?: string | null };
 
 /**
  * Availability for a whole kit list in TWO queries, whatever its length.
@@ -426,16 +470,31 @@ async function availabilityReader(lines: readonly AvailabilityLine[]): Promise<(
   const irmItemIds = [...new Set(lines.map((l) => l.irmItemId).filter((v): v is string => !!v))];
   const warehouseIds = [...new Set(lines.map((l) => l.warehouseId).filter((v): v is string => !!v))];
   const cseIds = [...new Set(lines.map((l) => l.customerStockEntryId).filter((v): v is string => !!v))];
+  const rentalItemIds = [...new Set(lines.map((l) => l.rentalItemId ?? null).filter((v): v is string => !!v))];
 
-  const [balances, entries] = await Promise.all([
+  const [balances, entries, hires] = await Promise.all([
     inventoryRepo.findBalancesByItemsAndWarehouses(irmItemIds, warehouseIds),
     customerRepo.findStockEntryQuantitiesByIds(cseIds),
+    // A hire has no stock level of its own — deliberately (see the RentalItem schema comment). What a
+    // job can plan against is the LIVE HIRES of that item delivered to that warehouse, so the pool is
+    // assembled from the hire rows rather than read from a balance table that does not exist.
+    poRepo.findLiveHiresByRentalItems(rentalItemIds, warehouseIds),
   ]);
   const freeByPair = new Map(balances.map((b) => [`${b.irmItemId}|${b.warehouseId}`, b.quantityOnHand - b.quantityReserved]));
   const qtyByEntry = new Map(entries.map((e) => [e.id, e.quantity]));
+  // Hires grouped item×warehouse — the same key shape the IRM pair uses, so the reader below reads
+  // the same way for both.
+  const hiresByPair = new Map<string, typeof hires>();
+  for (const h of hires) {
+    const key = `${h.rentalItemId}|${h.warehouseId}`;
+    const bucket = hiresByPair.get(key);
+    if (bucket) bucket.push(h);
+    else hiresByPair.set(key, [h]);
+  }
 
   return (line) => {
     if (line.irmItemId && line.warehouseId) return freeByPair.get(`${line.irmItemId}|${line.warehouseId}`) ?? 0;
+    if (line.rentalItemId && line.warehouseId) return totalAvailable(hiresByPair.get(`${line.rentalItemId}|${line.warehouseId}`) ?? []);
     if (line.customerStockEntryId) return qtyByEntry.get(line.customerStockEntryId) ?? 0;
     return Infinity; // misc — free text, nothing to run out of
   };
@@ -605,6 +664,8 @@ async function withGoodsTallies(pub: PublicJob): Promise<PublicJob> {
       kl.used = t.used;
       kl.returned = t.returned;
       kl.remaining = t.remaining;
+      kl.hireEndDate = iso(t.hireEndDate);
+      kl.hireOverdue = t.hireOverdue;
     }
     kl.vanSources = vanSources.get(kl.id) ?? [];
   }
@@ -706,6 +767,7 @@ export async function createJob(input: CreateJobInput, actor?: AuditActor): Prom
 function kitLineSignature(l: {
   lineType: string;
   irmItemId: string | null;
+  rentalItemId?: string | null;
   customerStockEntryId: string | null;
   warehouseId: string | null;
   qty: number;
@@ -717,6 +779,7 @@ function kitLineSignature(l: {
   return [
     l.lineType,
     l.irmItemId ?? "",
+    l.rentalItemId ?? "",
     l.customerStockEntryId ?? "",
     l.warehouseId ?? "",
     l.qty,
@@ -742,11 +805,17 @@ export function kitLinesChanged(
 }
 
 // Identity of a kit line = the item it represents (NOT its quantity). Used to match an incoming kit
-// list against the stored one so a line's quantity can be edited in place (keeping its id). irm and
-// customer lines are unique by item (+warehouse) — guaranteed by validation; misc has no id, so it's
-// matched greedily by name.
-function kitLineIdentity(l: { irmItemId: string | null; customerStockEntryId: string | null; warehouseId: string | null; itemName: string }): string {
+// list against the stored one so a line's quantity can be edited in place (keeping its id). irm,
+// rental and customer lines are unique by item (+warehouse) — guaranteed by validation; misc has no
+// id, so it's matched greedily by name.
+//
+// The rental arm must come BEFORE the misc fallback and be keyed distinctly: without it a rental line
+// falls through to `misc|${itemName}`, where it collides with a genuine misc line of the same name —
+// and the diff then "matches" a hired tester against a free-text charge, editing one into the other
+// in place and keeping the wrong id.
+function kitLineIdentity(l: { irmItemId: string | null; rentalItemId?: string | null; customerStockEntryId: string | null; warehouseId: string | null; itemName: string }): string {
   if (l.irmItemId) return `irm|${l.irmItemId}|${l.warehouseId ?? ""}`;
+  if (l.rentalItemId) return `rental|${l.rentalItemId}|${l.warehouseId ?? ""}`;
   if (l.customerStockEntryId) return `customer|${l.customerStockEntryId}|${l.warehouseId ?? ""}`;
   return `misc|${l.itemName}`;
 }
@@ -1015,24 +1084,31 @@ export async function updateJob(id: string, input: UpdateJobInput, actor?: Audit
 // completion). Returns the updated job + the resulting jobKitLineId per input line (in order), which
 // the caller threads into the transfer lines so completion can attribute the qty to the right line.
 export interface KitAppendLine {
-  source: "irm" | "customer_stock" | "misc";
+  source: "irm" | "customer_stock" | "rental" | "misc";
   irmItemId: string | null;
+  rentalItemId?: string | null;
   customerStockEntryId: string | null;
   itemName: string;
   qty: number;
-  warehouseId: string | null; // required for irm lines (the PM-chosen pickup/home warehouse)
+  warehouseId: string | null; // required for irm AND rental lines (the PM-chosen pickup/home warehouse)
 }
 export interface KitAppendResult {
   job: PublicJob;
   jobKitLineIds: (string | null)[];
 }
 
-type MatchableKitLine = { id: string; lineType: string; itemName: string; irmItemId: string | null; customerStockEntryId: string | null; warehouseId: string | null; qty: number; seCode: string | null; description: string | null; notes: string | null };
+type MatchableKitLine = { id: string; lineType: string; itemName: string; irmItemId: string | null; rentalItemId?: string | null; customerStockEntryId: string | null; warehouseId: string | null; qty: number; seCode: string | null; description: string | null; notes: string | null };
 
-// Find the existing kit line a resolved row would MERGE INTO: same IRM item + warehouse, same
-// customer-stock entry, or a misc line with the same name. Undefined ⇒ it becomes a new line.
+// Find the existing kit line a resolved row would MERGE INTO: same IRM item + warehouse, same rental
+// item + warehouse, same customer-stock entry, or a misc line with the same name. Undefined ⇒ it
+// becomes a new line.
+//
+// The rental arm must sit ABOVE the misc fallback, and be keyed on item + warehouse like IRM. Without
+// it a rental row fell through to the name match and merged into a MISC line that happened to share
+// its name — turning an approved hire request into extra quantity on a free-text charge line.
 function findMatchingKitLine(lines: MatchableKitLine[], row: JobKitLineRow): MatchableKitLine | undefined {
   if (row.irmItemId) return lines.find((k) => k.irmItemId === row.irmItemId && k.warehouseId === row.warehouseId);
+  if (row.rentalItemId) return lines.find((k) => k.rentalItemId === row.rentalItemId && k.warehouseId === row.warehouseId);
   if (row.customerStockEntryId) return lines.find((k) => k.customerStockEntryId === row.customerStockEntryId);
   return lines.find((k) => k.lineType === "misc" && k.itemName.trim().toLowerCase() === row.itemName.trim().toLowerCase());
 }
@@ -1064,13 +1140,18 @@ export async function appendKitFromRequest(
     description: undefined,
     customerStockEntryId: l.customerStockEntryId ?? undefined,
     irmItemId: l.irmItemId ?? undefined,
+    rentalItemId: l.rentalItemId ?? undefined,
     warehouseId: l.warehouseId ?? undefined,
     notes: undefined,
   }));
   const rows = await resolveKitLineRows(asInputs, existing.customerId);
-  // Defence-in-depth (we bypass the zod kit-line refinement): an IRM line must have a pickup warehouse.
+  // Defence-in-depth (we bypass the zod kit-line refinement): a line collected FROM A DEPOT must name
+  // one. Rental belongs here beside irm — a hire is collected from the warehouse that took delivery,
+  // and a rental kit line with no warehouse sends the engineer to collect it from nowhere.
   for (const row of rows) {
-    if (row.lineType === "irm" && !row.warehouseId) throw badRequest(`Choose a pickup warehouse for "${row.itemName}".`);
+    if ((row.lineType === "irm" || row.lineType === "rental") && !row.warehouseId) {
+      throw badRequest(`Choose a pickup warehouse for "${row.itemName}".`);
+    }
   }
 
   const existingLines = (existing.kitLines ?? []) as MatchableKitLine[];
@@ -1431,10 +1512,17 @@ export async function startJobForEngineer(jobId: string, engineerId: string, act
   if (job.assignedEngineerId !== engineerId) throw forbidden("This job isn't assigned to you.");
   assertTransition(job.status, "in_progress");
 
-  // Engineer can't start until they've COLLECTED the kit — every stock-tracked line (IRM / customer
-  // stock) must be fully issued to them by the warehouse first. Misc/free-text lines aren't warehouse
-  // stock, so they don't block; a job with no stock lines starts freely.
-  const stockLines = (job.kitLines ?? []).filter((l) => l.lineType === "irm" || l.lineType === "customer_stock");
+  // Engineer can't start until they've COLLECTED the kit — every collectable line (IRM / customer
+  // stock / rental) must be fully issued to them by the warehouse first. Misc/free-text lines aren't
+  // warehouse stock, so they don't block; a job with no collectable lines starts freely.
+  //
+  // Rental belongs here for the same reason the other two do, and the allowlist is why it has to be
+  // said explicitly: this filter names the types that DO gate, so a new type left out of it silently
+  // stops gating. An engineer arriving on site without the hired tester the job is built around is
+  // exactly the trip this check exists to prevent.
+  const stockLines = (job.kitLines ?? []).filter(
+    (l) => l.lineType === "irm" || l.lineType === "customer_stock" || l.lineType === "rental",
+  );
   if (stockLines.length > 0) {
     const tallies = await goodsManagementService.getJobKitTallies(jobId);
     const allCollected = stockLines.every((l) => (tallies[l.id]?.issued ?? 0) >= l.qty);
@@ -1480,7 +1568,34 @@ export async function completeJobForEngineer(jobId: string, engineerId: string, 
   const pub = await withGoodsTallies(toPublic(updated!));
   emitToUser(engineerId, "job:updated", pub);
   emitJobsRoom("job:updated", pub);
-  audit.record({ actor, action: "job.completed", targetType: "job", targetId: jobId, targetLabel: job.jobNumber });
+  // Hired kit still in the van at the moment the job closed, counted from the POST-consume tallies
+  // this response was just built from — the server's own figure, and the only record of it.
+  //
+  // Worth stamping on the audit event because a hire that runs over gets billed for the extra days,
+  // and the question afterwards is when it was last accounted for. The completion is the moment the
+  // job stops being anybody's active work while the kit is still out, so it is the useful marker.
+  // Recorded silently: the engineer is never asked to confirm anything here (see the Complete form —
+  // the return date lives on the kit row, and completion is never gated on it).
+  const hiresOut = pub.kitLines.filter((l) => l.lineType === "rental" && l.remaining > 0);
+  audit.record({
+    actor,
+    action: "job.completed",
+    targetType: "job",
+    targetId: jobId,
+    targetLabel: job.jobNumber,
+    ...(hiresOut.length > 0 && {
+      metadata: {
+        hiredItemsStillOut: hiresOut.reduce((n, l) => n + l.remaining, 0),
+        // Item and quantity only — deliberately NOT the deadline. `hireEndDate` on a kit line is the
+        // EARLIEST deadline across every hire of that catalogue item the engineer holds, including
+        // ones belonging to other jobs (see rentalHeldByItem: custody is keyed by hire, the display
+        // figure is collapsed by item). That is fine for a badge, which only ever errs early — but an
+        // audit record is immutable and would be stating a date that may belong to a different hire.
+        // The hire's own deadline lives on the purchase order, which is where an investigation looks.
+        hiredItems: hiresOut.map((l) => ({ itemName: l.itemName, qty: l.remaining })),
+      },
+    }),
+  });
   return pub;
 }
 

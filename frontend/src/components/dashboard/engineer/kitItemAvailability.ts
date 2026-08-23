@@ -33,6 +33,18 @@ export function availabilityParts(warehouse: number, van: number): string {
 }
 
 export function kitItemAvailability(item: KitItemOption): KitItemAvailability {
+  if (item.source === "rental") {
+    // Depot-only, like consignment but for a different reason: custody of a hire is anchored to the
+    // depot that took delivery and the provider collects it from there, so it is never transferable
+    // engineer-to-engineer. Falling through to the IRM branch below would have produced the right
+    // NUMBER (its van figure is structurally 0) and the wrong SENTENCE — "no warehouse or engineer
+    // has this" points an engineer at a source that can never exist for hired kit.
+    const free = item.quantityOnHand ?? 0;
+    if (free <= 0) return { total: 0, requestable: false, label: OUT_OF_STOCK_RENTAL };
+    // The sub-line already reads "RNT-#### · <depot> · N free on hire", so repeating the figure here
+    // would print it twice — same reason the consignment branch stays silent.
+    return { total: free, requestable: true, label: "" };
+  }
   if (item.source === "customer_stock") {
     // Warehouse-only, unlike IRM. A field stock request carries no customerStockEntryId, so
     // consignment never reaches an engineer as free van stock — the only writes to
@@ -70,3 +82,6 @@ export function kitItemAvailability(item: KitItemOption): KitItemAvailability {
 // off its own shelf — see the note in the customer_stock branch above.
 const OUT_OF_STOCK = "Out of stock — no warehouse or engineer has this";
 const OUT_OF_STOCK_CONSIGNMENT = "Out of stock — none of this customer's stock left here";
+// A hire is not "out of stock", it is NOT CURRENTLY HIRED — and the fix is a purchase request, not a
+// wait. Naming an engineer here would point at a source hired kit can never come from.
+const OUT_OF_STOCK_RENTAL = "None on hire — raise a purchase request to hire one";

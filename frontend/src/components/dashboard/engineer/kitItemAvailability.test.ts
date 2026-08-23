@@ -26,6 +26,48 @@ const customerStock = (qty: number): KitItemOption => ({
   serialNumber: null,
 });
 
+const rental = (quantityOnHand: number, depots: { warehouseId: string; warehouseName: string | null; available: number }[] = []): KitItemOption => ({
+  source: "rental",
+  rentalItemId: "d".repeat(24),
+  code: "RNT-0007",
+  name: "Fibre Tester",
+  sku: null,
+  uom: "Each",
+  quantityOnHand,
+  heldByEngineers: 0,
+  depots,
+});
+
+// Hired kit is depot-only, and for a different reason than consignment: custody of a hire is anchored
+// to the depot that took delivery and the provider collects it from there, so it is never
+// transferable engineer-to-engineer.
+describe("kitItemAvailability — rental", () => {
+  it("counts what is free on hire and allows the request", () => {
+    const a = kitItemAvailability(rental(4, [{ warehouseId: "w1", warehouseName: "Leeds", available: 4 }]));
+    expect(a).toMatchObject({ total: 4, requestable: true });
+    // Silent: the search sub-line already prints "RNT-0007 · Leeds · 4 free on hire", so a label here
+    // would print the figure twice — same rule the consignment branch follows.
+    expect(a.label).toBe("");
+  });
+
+  it("blocks the request when nothing is on hire, and says what to do instead", () => {
+    const a = kitItemAvailability(rental(0));
+    expect(a.requestable).toBe(false);
+    // NOT "no warehouse or engineer has this" — an engineer can never hold a spare hire, so naming
+    // one would point at a source that cannot exist. The real fix is a purchase request.
+    expect(a.label).toMatch(/none on hire/i);
+    expect(a.label).toMatch(/purchase request/i);
+    expect(a.label).not.toMatch(/engineer/i);
+  });
+
+  it("never advertises van stock, even if a payload claimed some", () => {
+    // heldByEngineers is structurally 0 on the wire; this pins that the branch ignores the field
+    // rather than summing it the way the IRM branch does.
+    const a = kitItemAvailability({ ...rental(2), heldByEngineers: 9 } as unknown as KitItemOption);
+    expect(a.total).toBe(2);
+  });
+});
+
 // An engineer could add any active catalogue item to a kit request, including ones that existed in no
 // warehouse and on no van. The planner then opened the approve dialog with nothing to pick for that
 // line and no way to submit — the request just sat pending. Requestability is decided HERE, on the

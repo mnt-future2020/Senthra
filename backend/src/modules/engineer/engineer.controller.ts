@@ -89,3 +89,8 @@ export const getOwnMovements = asyncHandler(async (req, res) => {
     ),
   );
 });
+
+// GET /engineer/rentals — hired kit the engineer is currently holding, soonest deadline first.
+export const getOwnRentals = asyncHandler(async (req, res) => {
+  res.json({ rentals: await engineerService.getOwnRentals(ownId(req)) });
+});

@@ -7,6 +7,7 @@ import * as kitRequestService from "#modules/job-kit-request/job-kit-request.ser
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import * as engineerRepo from "./engineer.repository.js";
 import * as goodsManagementRepo from "#modules/goods-management/goods-management.repository.js";
+import * as rentalCustodyRepo from "#modules/engineer-rental/engineer-rental.repository.js";
 import type { MovementFilters } from "#modules/inventory/movement.service.js";
 import * as movementService from "#modules/inventory/movement.service.js";
 import type { MovementCursor } from "#modules/inventory/movement.js";
@@ -57,6 +58,10 @@ export interface EngineerOverview {
   // shows (a Customer-stock card + the misc count in the Stock card's hint).
   customerStock: { lines: number; totalQuantity: number };
   misc: { lines: number; totalQuantity: number };
+  // HIRED kit in the van. Its own card rather than a line on the stock one, because the number that
+  // matters here is not how much is held but how much is LATE: hired kit bills by the day and is owed
+  // to someone else, so `overdue` and `dueSoon` are the figures the badge is built from.
+  rentals: { lines: number; totalQuantity: number; overdue: number; dueSoon: number };
   // The engineer's live workload — the numbers a field engineer actually plans their day around.
   jobs: {
     toAccept: number; // assigned, awaiting the engineer's accept/reject
@@ -129,7 +134,7 @@ const NEXT_JOBS_LIMIT = 5;
 // nature (the unbounded history is completed/cancelled). Replaces three paged withRelations fetches
 // that hydrated up to 300 jobs with every kit line + warehouse address just to show 4 counts + 5 rows.
 export async function getOwnOverview(engineerId: string): Promise<EngineerOverview> {
-  const [stock, recentActivity, active, pendingIncoming, toCollect, kitPending, toSign, customer, misc] = await Promise.all([
+  const [stock, recentActivity, active, pendingIncoming, toCollect, kitPending, toSign, customer, misc, rentals] = await Promise.all([
     getOwnStock(engineerId),
     getOwnActivity(engineerId, 8),
     jobService.listActiveJobsForEngineer(engineerId),
@@ -145,6 +150,8 @@ export async function getOwnOverview(engineerId: string): Promise<EngineerOvervi
     // reads them in the same round-trip instead of two extra client calls).
     getOwnCustomerStock(engineerId),
     getOwnMiscStock(engineerId),
+    // Hired kit the engineer is carrying — same round-trip as the other two held pools.
+    getOwnRentals(engineerId),
   ]);
 
   // Status counts + due maths over the active set (assigned + accepted + in_progress).
@@ -193,6 +200,14 @@ export async function getOwnOverview(engineerId: string): Promise<EngineerOvervi
     stock: { lines: stock.length, totalQuantity: stock.reduce((sum, i) => sum + i.quantityOnHand, 0) },
     customerStock: { lines: customer.length, totalQuantity: customer.reduce((sum, h) => sum + h.quantityOnHand, 0) },
     misc: { lines: misc.length, totalQuantity: misc.reduce((sum, m) => sum + m.quantityOnHand, 0) },
+    rentals: {
+      lines: rentals.length,
+      totalQuantity: rentals.reduce((sum, r) => sum + r.quantityOnHand, 0),
+      overdue: rentals.filter((r) => r.overdue).length,
+      // "Soon" is a week: long enough that an engineer can plan a depot trip around it, short enough
+      // that it still reads as urgent. Matches the dueThisWeek window used for jobs just below.
+      dueSoon: rentals.filter((r) => !r.overdue && r.dueInDays !== null && r.dueInDays <= 7).length,
+    },
     jobs: { toAccept, accepted, inProgress, overdue, dueThisWeek, next },
     transfers: { incomingPending: pendingIncoming.total, toSign },
     vanStock: { toCollect },
@@ -256,6 +271,49 @@ export async function getOwnCustomerStock(engineerId: string): Promise<CustomerH
     itemName: h.itemName,
     quantityOnHand: h.quantityOnHand,
   }));
+}
+
+// --- Engineer held HIRED kit (rental custody) -------------------------------------------------
+//
+// The one pool on this portal that is not ours. Everything else an engineer holds — van stock,
+// customer consignment, misc — either gets used up or goes back at leisure; a hire is billed by the
+// day and belongs to a third party, so the only question about it is WHEN IT GOES BACK. That is why
+// this list exists at all, why it is sorted by deadline, and why `dueInDays` is computed rather than
+// left to the client to work out from a date string.
+//
+// No PO code and no money. The purchase order is the office's handle on a hire; the engineer needs
+// the item, the date, and which depot it came from.
+
+export interface RentalHoldingItem {
+  id: string;
+  rentalItemId: string | null;
+  itemName: string;
+  quantityOnHand: number;
+  hireEndDate: string | null;
+  /** Whole days from today (company time) until the deadline. Negative ⇒ already overdue. */
+  dueInDays: number | null;
+  overdue: boolean;
+}
+
+export async function getOwnRentals(engineerId: string): Promise<RentalHoldingItem[]> {
+  const rows = await rentalCustodyRepo.findRentalHoldingsByEngineer(engineerId);
+  if (rows.length === 0) return [];
+  // Company time, not the server's and never the browser's — the same day-boundary the scan panel,
+  // the overdue badge and the engineer's job list all resolve against. Hire dates are calendar days
+  // stored at UTC midnight, so both sides of this comparison are the same kind of thing.
+  const todayStart = startOfDayIn(await getCompanyTimezone(), new Date()).getTime();
+  return rows.map((h) => {
+    const due = h.hireEndDate?.getTime() ?? null;
+    return {
+      id: h.id,
+      rentalItemId: h.rentalItemId,
+      itemName: h.itemName,
+      quantityOnHand: h.quantityOnHand,
+      hireEndDate: h.hireEndDate?.toISOString() ?? null,
+      dueInDays: due === null ? null : Math.round((due - todayStart) / 86_400_000),
+      overdue: due !== null && due < todayStart,
+    };
+  });
 }
 
 export interface MiscHeldItem {

@@ -14,6 +14,7 @@ vi.mock("#modules/user/user.repository.js", () => ({
   countByRoleMap: vi.fn().mockResolvedValue({}),
   findIdsByRole: vi.fn().mockResolvedValue([]),
 }));
+vi.mock("#modules/engineer-rental/engineer-rental.repository.js", () => ({ countHeldRentalsForEngineers: vi.fn(async () => 0) }));
 vi.mock("#modules/engineer-stock/engineer-stock.repository.js", () => ({
   countHeldStockForEngineers: vi.fn().mockResolvedValue(0),
 }));
@@ -25,6 +26,7 @@ vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 import * as roleRepo from "./role.repository.js";
 import * as userRepo from "#modules/user/user.repository.js";
 import * as engineerStockRepo from "#modules/engineer-stock/engineer-stock.repository.js";
+import * as rentalCustodyRepo from "#modules/engineer-rental/engineer-rental.repository.js";
 import * as vanStockRequestRepo from "#modules/van-stock-request/van-stock-request.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import { createRole, updateRole } from "./role.service.js";
@@ -191,6 +193,15 @@ describe("role capabilities — Engineer Portal keys are stripped from non-field
 describe("revoking the field capability — stranded-stock guard", () => {
   // Mirrors the per-user deactivation guard: every route that could move van stock back refuses a
   // role that can't hold stock, so revoking while a holder still has stock would strand it.
+  //
+  // The guard now asks two independent questions (van stock, hired kit). Each test sets the one it is
+  // about, so the other must start from a known clean answer — otherwise a value set by one case
+  // leaks into the next and every later test fails on the wrong guard.
+  beforeEach(() => {
+    vi.mocked(engineerStockRepo.countHeldStockForEngineers).mockResolvedValue(0);
+    vi.mocked(rentalCustodyRepo.countHeldRentalsForEngineers).mockResolvedValue(0);
+  });
+
   it("blocks the revoke when a holder still has stock on the van", async () => {
     vi.mocked(roleRepo.findById).mockResolvedValue(roleRow({ canHoldStock: true }) as never);
     vi.mocked(userRepo.findIdsByRole).mockResolvedValue(["u1", "u2"]);
@@ -200,6 +211,18 @@ describe("revoking the field capability — stranded-stock guard", () => {
       /still hold field stock/i,
     );
     expect(roleRepo.update).not.toHaveBeenCalled();
+  });
+
+  // Hired equipment is a HARDER case than van stock, and it gets its own message. Revoking the
+  // capability blocks the job return scan, which is the only way a hire can come back — unlike van
+  // stock it cannot be transferred to a colleague to clear.
+  it("blocks the revoke when a holder still has rental items", async () => {
+    vi.mocked(roleRepo.findById).mockResolvedValue(roleRow({ canHoldStock: true }) as never);
+    vi.mocked(userRepo.findIdsByRole).mockResolvedValue(["u1"]);
+    vi.mocked(engineerStockRepo.countHeldStockForEngineers).mockResolvedValue(0);
+    vi.mocked(rentalCustodyRepo.countHeldRentalsForEngineers).mockResolvedValue(1);
+
+    await expect(updateRole(ROLE_ID, { canHoldStock: false }, SUPER_ADMIN)).rejects.toThrow(/still hold rental items/i);
   });
 
   it("allows the revoke once no holder has stock", async () => {

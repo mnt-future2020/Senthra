@@ -4,6 +4,9 @@ import * as jobRepo from "#modules/job/job.repository.js";
 import * as jobService from "#modules/job/job.service.js";
 import * as transferService from "#modules/engineer-transfer/engineer-transfer.service.js";
 import * as irmRepo from "#modules/irm/irm.repository.js";
+import * as rentalItemRepo from "#modules/rental-item/rental-item.repository.js";
+import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
+import { hireAvailable } from "#modules/purchase-order/rentalHire.allocation.js";
 import * as goodsManagementRepo from "#modules/goods-management/goods-management.repository.js";
 import * as goodsManagementService from "#modules/goods-management/goods-management.service.js";
 // From the LEAF module, not the service re-export: demand.ts imports repositories only, so pulling it
@@ -26,6 +29,8 @@ export interface PublicKitRequestLine {
   id: string;
   source: string;
   irmItemId: string | null;
+  /** The CATALOGUE item asked for on a `rental` line — never a particular hire. */
+  rentalItemId: string | null;
   customerStockEntryId: string | null;
   itemName: string;
   sku: string | null;
@@ -86,9 +91,9 @@ function iso(d: Date | null | undefined): string | null {
   return d ? d.toISOString() : null;
 }
 
-// whByEntry: customerStockEntryId → its warehouse label, resolved by the caller in one batched query
-// (see resolveLineWarehouses) so toPublic stays synchronous and free of per-line DB hits. Absent map =
-// no customer-stock warehouse labels (fine for responses that don't drive the approve modal).
+// whByEntry: request-LINE id → its pickup location label, resolved by the caller in one batched query
+// per pool (see resolveLineWarehouses) so toPublic stays synchronous and free of per-line DB hits.
+// Absent map = no location labels (fine for responses that don't drive the approve modal).
 function toPublic(
   r: KitRequestWithLines,
   whByEntry?: Map<string, { name: string | null; code: string | null; available: number }>,
@@ -114,11 +119,14 @@ function toPublic(
     createdAt: r.createdAt.toISOString(),
     updatedAt: r.updatedAt.toISOString(),
     lines: r.lines.map((l) => {
-      const wh = l.source === "customer_stock" && l.customerStockEntryId ? whByEntry?.get(l.customerStockEntryId) : undefined;
+      // Keyed by LINE id — see resolveLineWarehouses. Two pools resolve a location by different
+      // means, and an entry-keyed map could only ever describe one of them.
+      const wh = whByEntry?.get(l.id);
       return {
         id: l.id,
         source: l.source,
         irmItemId: l.irmItemId,
+        rentalItemId: l.rentalItemId,
         customerStockEntryId: l.customerStockEntryId,
         itemName: l.itemName,
         sku: l.sku,
@@ -137,17 +145,40 @@ function toPublic(
   };
 }
 
-// Batch-resolve the warehouse each customer_stock line's entry is stored in — one query for all lines
-// across all given requests (no N+1). Returns entryId → { name, code }. IRM/misc lines are ignored.
+// Batch-resolve the pickup location each line will be collected from — one query per pool for all
+// lines across all given requests (no N+1).
+//
+// Keyed by LINE ID rather than by entry id, because two pools answer the question differently: a
+// customer_stock line is located by its entry (which IS its warehouse), while an approved rental line
+// is located by the depot the reviewer chose (`sourceWarehouseId`). Keying by entry could only ever
+// describe the first. IRM/misc lines have no location to resolve here — IRM's is on the kit line the
+// approval grows, and misc has none.
 async function resolveLineWarehouses(
   requests: KitRequestWithLines[],
 ): Promise<Map<string, { name: string | null; code: string | null; available: number }>> {
+  const allLines = requests.flatMap((r) => r.lines);
   const entryIds = [
-    ...new Set(
-      requests.flatMap((r) => r.lines.filter((l) => l.source === "customer_stock" && l.customerStockEntryId).map((l) => l.customerStockEntryId as string)),
-    ),
+    ...new Set(allLines.filter((l) => l.source === "customer_stock" && l.customerStockEntryId).map((l) => l.customerStockEntryId as string)),
   ];
-  if (entryIds.length === 0) return new Map();
+  const rentalWhIds = [
+    ...new Set(allLines.filter((l) => l.source === "rental" && l.sourceWarehouseId).map((l) => l.sourceWarehouseId as string)),
+  ];
+
+  const out = new Map<string, { name: string | null; code: string | null; available: number }>();
+
+  // Approved rental lines: label the depot they were sourced from. `available` stays 0 — the figure
+  // that mattered was the depot's free-on-hire AT REVIEW TIME, and re-deriving it here would show a
+  // number that has moved on since the decision was made.
+  if (rentalWhIds.length > 0) {
+    const labels = await warehouseRepo.findLabelsByIds(rentalWhIds);
+    for (const l of allLines) {
+      if (l.source !== "rental" || !l.sourceWarehouseId) continue;
+      const w = labels.get(l.sourceWarehouseId);
+      if (w) out.set(l.id, { name: w.name, code: w.code, available: 0 });
+    }
+  }
+
+  if (entryIds.length === 0) return out;
   // Netted against other jobs' planned demand, exactly like every other availability figure in the
   // app — the raw entry quantity would offer units already committed elsewhere.
   const [entries, demand] = await Promise.all([
@@ -159,9 +190,15 @@ async function resolveLineWarehouses(
     if (!d.customerStockEntryId) continue;
     planned.set(d.customerStockEntryId, (planned.get(d.customerStockEntryId) ?? 0) + d.demand);
   }
-  const out = new Map<string, { name: string | null; code: string | null; available: number }>();
+  // Customer-stock lines are keyed by LINE id too, so the one map has a single key space.
+  const byEntry = new Map<string, { name: string | null; code: string | null; available: number }>();
   for (const [id, e] of entries) {
-    out.set(id, { name: e.name, code: e.code, available: Math.max(0, e.quantity - (planned.get(id) ?? 0)) });
+    byEntry.set(id, { name: e.name, code: e.code, available: Math.max(0, e.quantity - (planned.get(id) ?? 0)) });
+  }
+  for (const l of allLines) {
+    if (l.source !== "customer_stock" || !l.customerStockEntryId) continue;
+    const w = byEntry.get(l.customerStockEntryId);
+    if (w) out.set(l.id, w);
   }
   return out;
 }
@@ -210,6 +247,16 @@ export async function create(input: CreateKitRequestInput, actor: AuditActor): P
         if (!entry) throw badRequest(`The customer stock item for "${l.itemName}" no longer exists.`);
         if (entry.customerId !== job.customerId) throw badRequest(`"${entry.itemName}" doesn't belong to this job's customer.`);
         return { source: "customer_stock", customerStockEntryId: entry.id, itemName: entry.itemName, sku: entry.sku ?? entry.barcode ?? null, uom: entry.uom ?? null, qty: l.qty };
+      }
+      if (l.source === "rental") {
+        const item = await rentalItemRepo.findById(l.rentalItemId!);
+        if (!item) throw badRequest(`The rental item for "${l.itemName}" no longer exists.`);
+        // Same rule the job kit line applies: a retired hire item stays readable everywhere (live
+        // hires still reference it) but must not be planned onto new work.
+        if (item.status !== "active") throw badRequest(`"${item.name}" is not active.`);
+        // No SKU on a rental master by design; the snapshot carries the code instead, which is what
+        // the label is printed from and what the warehouse scans.
+        return { source: "rental", rentalItemId: item.id, itemName: item.name, sku: item.code, uom: item.baseUnit ?? null, qty: l.qty };
       }
       return { source: "misc", itemName: l.itemName.trim(), qty: l.qty };
     }),
@@ -260,7 +307,11 @@ async function findHolderShortages(
   const customerHeld = new Map(customerHoldings.map((h) => [h.customerStockEntryId, h.quantityOnHand]));
   const out: string[] = [];
   for (const l of stockLines) {
-    const held = l.source === "irm" ? irmHeld.get(l.irmItemId!) ?? 0 : customerHeld.get(l.customerStockEntryId!) ?? 0;
+    // Rental can never reach here — approve() refuses `sourceType: "engineer"` on a hired line before
+    // any holder is checked. Pinned to 0 anyway rather than left to the customer branch, where it
+    // would look up `customerHeld.get(undefined)` and report a shortage for the wrong reason.
+    const held =
+      l.source === "rental" ? 0 : l.source === "irm" ? irmHeld.get(l.irmItemId!) ?? 0 : customerHeld.get(l.customerStockEntryId!) ?? 0;
     const need = vanQtyByLine?.get(l.id) ?? approvedQtyByLine?.get(l.id) ?? l.qty;
     if (held < need) out.push(`${l.itemName} (needs ${need}, holds ${held})`);
   }
@@ -354,7 +405,11 @@ export async function approve(id: string, input: ApproveKitRequestInput, actor: 
   if (!job.assignedEngineerId) throw conflict("This job has no assigned engineer to receive the kit.");
 
   const irmLines = req.lines.filter((l) => l.source === "irm");
+  const rentalLines = req.lines.filter((l) => l.source === "rental");
   const stockLines = req.lines.filter((l) => l.source !== "misc");
+  // Every pool that is collected FROM A DEPOT and therefore needs the reviewer to pick one. Customer
+  // stock is excluded because its entry already IS a location; misc has none.
+  const depotLines = [...irmLines, ...rentalLines];
 
   // Resolve every line's SOURCE and its pickup/home warehouse BEFORE we claim + grow, so any problem
   // leaves the request pending and nothing is half-applied.
@@ -399,6 +454,13 @@ export async function approve(id: string, input: ApproveKitRequestInput, actor: 
         // The UI no longer offers this for consignment, but "the client stopped sending it" is not a
         // guarantee — a stale tab or a direct call would otherwise open a transfer that strips
         // another job's committed stock.
+        if (line.source === "rental") {
+          // Not a UI restriction — a property of the pool. Custody of a hire is anchored to the depot
+          // that took delivery and the provider collects it from there, so it is never transferable
+          // engineer-to-engineer. A stale tab or a direct call would otherwise open a transfer of
+          // equipment we do not own, against a hire that could then never be handed back.
+          throw badRequest(`"${line.itemName}" is a rental item — hired equipment is collected from the depot holding it, not transferred from a van.`);
+        }
         if (line.source !== "irm") {
           throw badRequest(`"${line.itemName}" is customer stock — it can only be issued from the warehouse it's stored at, not from a van.`);
         }
@@ -419,7 +481,10 @@ export async function approve(id: string, input: ApproveKitRequestInput, actor: 
           vanQtyByLine.set(lineId, s.engineerQty);
           if (s.warehouseId) whByLine.set(lineId, s.warehouseId);
         }
-      } else if (line.source === "irm") {
+      } else if (line.source === "irm" || line.source === "rental") {
+        // Rental belongs in this arm, not the customer-stock fallthrough below. Left out, a rental line
+        // took the "derived downstream" path — but nothing derives a depot for a hire, so the kit line
+        // was grown with no warehouse and the engineer was told to collect it from nowhere.
         if (!s.warehouseId) throw badRequest(`Choose a pickup warehouse for "${line.itemName}".`);
         whByLine.set(lineId, s.warehouseId);
       }
@@ -429,7 +494,7 @@ export async function approve(id: string, input: ApproveKitRequestInput, actor: 
     // Legacy shorthand: every IRM item issued from a warehouse the PM picked PER LINE (different items
     // can come from different warehouses). Customer-stock derives from the entry; misc needs none.
     const picked = new Map((input.lineWarehouses ?? []).map((w) => [w.requestLineId, w.warehouseId]));
-    for (const l of irmLines) {
+    for (const l of depotLines) {
       const wh = picked.get(l.id);
       if (!wh) throw badRequest(`Choose a pickup warehouse for "${l.itemName}".`);
       whByLine.set(l.id, wh);
@@ -442,6 +507,10 @@ export async function approve(id: string, input: ApproveKitRequestInput, actor: 
     // path refuses it (see above); this shorthand assigned the engineer to EVERY non-misc line and
     // walked straight past that, opening a transfer that strips stock another job has already been
     // issued. Same rule, same wording — the shape of the request must not change the answer.
+    const hired = stockLines.find((l) => l.source === "rental");
+    if (hired) {
+      throw badRequest(`"${hired.itemName}" is a rental item — hired equipment is collected from the depot holding it, not transferred from a van.`);
+    }
     const consignment = stockLines.find((l) => l.source !== "irm");
     if (consignment) {
       throw badRequest(`"${consignment.itemName}" is customer stock — it can only be issued from the warehouse it's stored at, not from a van.`);
@@ -491,6 +560,35 @@ export async function approve(id: string, input: ApproveKitRequestInput, actor: 
         const free = freeByKey.get(`${w.whId}:${w.itemId}`) ?? 0;
         if (w.qty > free) {
           throw badRequest(`"${w.name}" — that warehouse has only ${free} free, but ${w.qty} would be issued from it. Lower the quantity, take more from a van, or pick another warehouse.`);
+        }
+      }
+    }
+  }
+
+  // The same check for HIRED KIT. A rental has no stock balance, so the depot's capacity is assembled
+  // from its LIVE HIRES (`received − returned − issued`) and netted against other jobs' planned demand
+  // — the identical figure the composer and the goods scan show. Without it a planner could approve
+  // more testers than the depot has hired, and the shortfall would only surface at the scan, after the
+  // engineer had already been told the kit was coming.
+  {
+    const wantByDepot = new Map<string, { itemId: string; whId: string; qty: number; name: string }>();
+    for (const l of rentalLines) {
+      if (approvedQtyByLine.get(l.id) === 0) continue; // excluded — nothing to supply
+      const whId = whByLine.get(l.id);
+      if (!whId || !l.rentalItemId) continue;
+      const approved = approvedQtyByLine.get(l.id) ?? l.qty;
+      if (approved > 0) wantByDepot.set(l.id, { itemId: l.rentalItemId, whId, qty: approved, name: l.itemName });
+    }
+    if (wantByDepot.size > 0) {
+      const items = [...new Set([...wantByDepot.values()].map((w) => w.itemId))];
+      const avail = await itemAvailability([], [], undefined, items);
+      for (const w of wantByDepot.values()) {
+        const depot = avail.rental.get(w.itemId)?.depots.find((d) => d.warehouseId === w.whId);
+        const free = depot?.available ?? 0;
+        if (w.qty > free) {
+          throw badRequest(
+            `"${w.name}" — that depot has only ${free} free on hire, but ${w.qty} would be issued from it. Lower the quantity, pick another depot, or raise a purchase request to hire more.`,
+          );
         }
       }
     }
@@ -596,13 +694,16 @@ export async function approve(id: string, input: ApproveKitRequestInput, actor: 
       // line after an exclusion onto its neighbour's kit line — silently attributing a transfer to the
       // wrong item. Derive both from `includedLines` and they cannot drift.
       const appendLines: jobService.KitAppendLine[] = includedLines.map((l) => ({
-        source: l.source as "irm" | "customer_stock" | "misc",
+        source: l.source as "irm" | "customer_stock" | "rental" | "misc",
         irmItemId: l.irmItemId,
+        rentalItemId: l.rentalItemId,
         customerStockEntryId: l.customerStockEntryId,
         itemName: l.itemName,
         // The reviewer's trim, falling back to what was requested.
         qty: approvedQtyByLine.get(l.id) ?? l.qty,
-        warehouseId: l.source === "irm" ? whByLine.get(l.id) ?? null : null,
+        // Rental sits beside irm here: both are collected from a depot the reviewer picked. Customer
+        // stock derives its own from the entry, and misc has none.
+        warehouseId: l.source === "irm" || l.source === "rental" ? whByLine.get(l.id) ?? null : null,
       }));
       // stampTx runs inside the grow's transaction → grow + stamp are atomic.
       const grown = await jobService.appendKitFromRequest(job.id, appendLines, actor, (tx, ids) =>
@@ -685,7 +786,10 @@ export async function approve(id: string, input: ApproveKitRequestInput, actor: 
     audit.record({ actor, action: "job_kit_request.approved", targetType: "job", targetId: job.id, targetLabel: req.code, metadata: { fulfillmentMode: resolvedMode, transferIds, jobNumber: job.jobNumber } });
     emitUpdate(req.requestedByEngineerId, job.id, { id, code: req.code, status: "approved" });
     notify(req.requestedByEngineerId, { title: "Kit request approved", body: `Your kit request ${req.code} for ${job.jobNumber} was approved.`, data: { type: "job", jobId: job.id } });
-    return toPublic(finalized);
+    // Resolve the pickup labels for the response too. The approve reply is what the review card
+    // re-renders from, so without this an approved rental line came back with no depot name — the one
+    // moment a reviewer most wants to see WHERE they just sent the engineer.
+    return toPublic(finalized, await resolveLineWarehouses([finalized]));
   } catch (e) {
     // Roll the status back to pending so the PM can retry. The grow + transfer are checkpointed on the
     // request (stamped line ids / transferId), so the retry RESUMES from the failed step, never repeating
@@ -818,6 +922,32 @@ export type KitItemOption =
       heldByEngineers: number;
     }
   | {
+      source: "rental";
+      rentalItemId: string;
+      code: string;
+      name: string;
+      sku: null;
+      uom: string | null;
+      /**
+       * Free units across every LIVE hire of this item, at every depot — `received − returned − issued`
+       * summed. A rental item carries no stock level of its own, deliberately, so this is assembled
+       * from the hires rather than read from a balance table that does not exist.
+       */
+      quantityOnHand: number;
+      /**
+       * ALWAYS 0, and structurally so rather than by omission — the composer renders one availability
+       * row for every option and a missing field would read as "unknown" instead of "none".
+       *
+       * Hired kit is not transferable engineer-to-engineer: custody is anchored to a specific hire at
+       * the depot that took delivery, and the provider collects it from there. So a colleague's van is
+       * never a source for one, and offering a number here would advertise stock no approval could
+       * actually draw on.
+       */
+      heldByEngineers: 0;
+      /** Where those units actually are, soonest-expiring depot first — shown under the option. */
+      depots: { warehouseId: string; warehouseName: string | null; available: number }[];
+    }
+  | {
       source: "customer_stock";
       customerStockEntryId: string;
       name: string;
@@ -847,23 +977,35 @@ export type KitItemOption =
 export interface KitAvailability {
   irm: Map<string, { quantityOnHand: number; heldByEngineers: number }>;
   cse: Map<string, { qty: number }>;
+  /** Per rental item: total free units, and which depots they sit at. */
+  rental: Map<string, { quantityOnHand: number; depots: { warehouseId: string; warehouseName: string | null; available: number }[] }>;
 }
 
-export async function itemAvailability(irmItemIds: string[], cseIds: string[], ownEngineerId?: string): Promise<KitAvailability> {
+export async function itemAvailability(
+  irmItemIds: string[],
+  cseIds: string[],
+  ownEngineerId?: string,
+  rentalItemIds: string[] = [],
+): Promise<KitAvailability> {
   const irm = new Map<string, { quantityOnHand: number; heldByEngineers: number }>();
   const cse = new Map<string, { qty: number }>();
-  if (irmItemIds.length === 0 && cseIds.length === 0) return { irm, cse };
+  const rental = new Map<string, { quantityOnHand: number; depots: { warehouseId: string; warehouseName: string | null; available: number }[] }>();
+  if (irmItemIds.length === 0 && cseIds.length === 0 && rentalItemIds.length === 0) return { irm, cse, rental };
 
-  const [whRows, demand, vanRows, cseRows] = await Promise.all([
+  const [whRows, demand, vanRows, cseRows, hireRows] = await Promise.all([
     irmItemIds.length
       ? (async () => {
           const warehouses = await warehouseRepo.findMany({ status: "active" }, 0, 200);
           return inventoryRepo.findBalancesByItemsAndWarehouses(irmItemIds, warehouses.map((w) => w.id));
         })().catch(() => [])
       : Promise.resolve([]),
-    getOpenDemand().catch(() => new Map<string, { irmItemId: string | null; customerStockEntryId: string | null; warehouseId: string | null; demand: number }>()),
+    getOpenDemand().catch(() => new Map<string, { irmItemId: string | null; rentalItemId: string | null; customerStockEntryId: string | null; warehouseId: string | null; demand: number }>()),
     irmItemIds.length ? engineerStockRepo.findBalancesByItems(irmItemIds, ownEngineerId).catch(() => []) : Promise.resolve([]),
     cseIds.length ? goodsManagementRepo.findCustomerStockEntriesByIds(cseIds).catch(() => []) : Promise.resolve([]),
+    // A hire has no stock row, so "how many can we lend" is assembled from the LIVE hires themselves.
+    // `findLiveHiresByRentalItems` composes the module's shared `onHireWhere()` predicate, so this
+    // agrees with the badge, the on-hire list and the goods scan rather than restating a weaker rule.
+    rentalItemIds.length ? poRepo.findLiveHiresByRentalItems(rentalItemIds).catch(() => []) : Promise.resolve([]),
   ]);
 
   // Demand, split by pool. IRM is keyed per warehouse so one over-committed site can't eat stock
@@ -914,14 +1056,53 @@ export async function itemAvailability(irmItemIds: string[], cseIds: string[], o
     if (e) e.qty = Math.max(0, r.quantity - (cseDemand.get(r.id) ?? 0));
   }
 
-  return { irm, cse };
+  // ── Hired kit ────────────────────────────────────────────────────────────────────────────────
+  //
+  // Netted against planned demand exactly like the other two pools, and per DEPOT rather than in
+  // total: a kit line homes at one warehouse, so units standing at a site another job has already
+  // committed them at are not free for this one. Summing first and netting after would offer a total
+  // no single depot could actually supply.
+  for (const id of rentalItemIds) rental.set(id, { quantityOnHand: 0, depots: [] });
+  const rentalDemand = new Map<string, number>();
+  for (const d of demand.values()) {
+    if (!d.rentalItemId || !d.warehouseId) continue;
+    const k = `${d.warehouseId}:${d.rentalItemId}`;
+    rentalDemand.set(k, (rentalDemand.get(k) ?? 0) + d.demand);
+  }
+  const byItemDepot = new Map<string, { warehouseId: string; warehouseName: string | null; gross: number }>();
+  for (const h of hireRows) {
+    const k = `${h.rentalItemId}|${h.warehouseId}`;
+    const row = byItemDepot.get(k);
+    if (row) row.gross += hireAvailable(h);
+    else byItemDepot.set(k, { warehouseId: h.warehouseId, warehouseName: h.warehouseName, gross: hireAvailable(h) });
+  }
+  for (const [k, row] of byItemDepot) {
+    const rentalItemId = k.slice(0, k.indexOf("|"));
+    const free = Math.max(0, row.gross - (rentalDemand.get(`${row.warehouseId}:${rentalItemId}`) ?? 0));
+    if (free <= 0) continue;
+    const e = rental.get(rentalItemId);
+    if (!e) continue;
+    e.quantityOnHand += free;
+    e.depots.push({ warehouseId: row.warehouseId, warehouseName: row.warehouseName, available: free });
+  }
+  // Fullest depot first — the one a reviewer will pick, and the one most likely to cover the line.
+  for (const e of rental.values()) e.depots.sort((a, b) => b.available - a.available);
+
+  return { irm, cse, rental };
 }
 
 export async function searchItems(q: string, jobId?: string): Promise<KitItemOption[]> {
   const term = (q ?? "").trim();
   if (term.length < 1) return [];
 
-  const irmRows = await irmRepo.findMany({ search: term, status: "active" }, 0, 20, "name");
+  const [irmRows, rentalPage] = await Promise.all([
+    irmRepo.findMany({ search: term, status: "active" }, 0, 20, "name"),
+    // Hired kit is offered here for the same reason IRM is: a depot holding a live hire with spare
+    // units can supply it, and asking for one mid-job is an ordinary request. What a rental can NOT be
+    // fulfilled from is a colleague's van — see the `heldByEngineers: 0` note on KitItemOption.
+    rentalItemRepo.findMany({ search: term, status: "active", page: 1, pageSize: 20 }).catch(() => ({ items: [], total: 0 })),
+  ]);
+  const rentalRows = rentalPage.items;
 
   // Customer stock only when we can resolve the job's customer. If the job is missing/soft-deleted, stay
   // resilient and return IRM only rather than failing the whole search.
@@ -938,7 +1119,12 @@ export async function searchItems(q: string, jobId?: string): Promise<KitItemOpt
   // has nothing to pick, its button stays disabled, and the request sits pending forever (JKR-0026).
   // Returned WITH zeroes rather than hidden, so the composer can render it disabled and say why —
   // an item that silently vanishes from a search just gets retyped.
-  const avail = await itemAvailability(irmRows.map((r) => r.id), cseRows.map((r) => r.id), ownEngineerId);
+  const avail = await itemAvailability(
+    irmRows.map((r) => r.id),
+    cseRows.map((r) => r.id),
+    ownEngineerId,
+    rentalRows.map((r) => r.id),
+  );
 
   const irmOptions: KitItemOption[] = irmRows.map((r) => ({
     source: "irm",
@@ -949,6 +1135,19 @@ export async function searchItems(q: string, jobId?: string): Promise<KitItemOpt
     uom: r.baseUnit ?? null,
     quantityOnHand: avail.irm.get(r.id)?.quantityOnHand ?? 0,
     heldByEngineers: avail.irm.get(r.id)?.heldByEngineers ?? 0,
+  }));
+
+  const rentalOptions: KitItemOption[] = rentalRows.map((r) => ({
+    source: "rental",
+    rentalItemId: r.id,
+    code: r.code,
+    name: r.name,
+    // A rental master carries no SKU by design — its printed label is Code128 of `code`.
+    sku: null,
+    uom: r.baseUnit ?? null,
+    quantityOnHand: avail.rental.get(r.id)?.quantityOnHand ?? 0,
+    heldByEngineers: 0,
+    depots: avail.rental.get(r.id)?.depots ?? [],
   }));
 
   const customerOptions: KitItemOption[] = cseRows.map((r) => ({
@@ -963,7 +1162,7 @@ export async function searchItems(q: string, jobId?: string): Promise<KitItemOpt
     serialNumber: r.serialNumber,
   }));
 
-  return [...irmOptions, ...customerOptions];
+  return [...irmOptions, ...rentalOptions, ...customerOptions];
 }
 
 // Availability for a KNOWN set of items — the composer's planned-item rows and its cart, which come
@@ -974,8 +1173,13 @@ export async function itemAvailabilityFor(
   jobId: string | undefined,
   irmItemIds: string[],
   cseIds: string[],
-): Promise<{ irm: Record<string, { quantityOnHand: number; heldByEngineers: number }>; cse: Record<string, { qty: number }> }> {
+  rentalItemIds: string[] = [],
+): Promise<{
+  irm: Record<string, { quantityOnHand: number; heldByEngineers: number }>;
+  cse: Record<string, { qty: number }>;
+  rental: Record<string, { quantityOnHand: number; depots: { warehouseId: string; warehouseName: string | null; available: number }[] }>;
+}> {
   const ownEngineerId = jobId ? (await jobRepo.findById(jobId))?.assignedEngineerId ?? undefined : undefined;
-  const a = await itemAvailability(irmItemIds, cseIds, ownEngineerId);
-  return { irm: Object.fromEntries(a.irm), cse: Object.fromEntries(a.cse) };
+  const a = await itemAvailability(irmItemIds, cseIds, ownEngineerId, rentalItemIds);
+  return { irm: Object.fromEntries(a.irm), cse: Object.fromEntries(a.cse), rental: Object.fromEntries(a.rental) };
 }

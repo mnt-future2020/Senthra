@@ -20,6 +20,9 @@ const engineerSelect = { id: true, firstName: true, lastName: true, email: true 
 // goods-management.service. Deliberately NOT `barcode` too: that is the manufacturer's EAN, which
 // nothing here reads, so fetching it would load a column on every job query for no consumer.
 const irmItemSelect = { id: true, code: true, name: true } satisfies Prisma.IrmItemSelect;
+// Same three columns, same reason, for a hired kit line. `code` is the RNT-#### the engineer sees on
+// the printed label, which is what makes a rental line scannable at all.
+const rentalItemSelect = { id: true, code: true, name: true } satisfies Prisma.RentalItemSelect;
 // Per-kit-line pickup warehouse with its LIVE address — surfaced to the engineer (who has no
 // warehouse-module access) so they know exactly where to collect each item.
 const kitWarehouseSelect = {
@@ -41,7 +44,10 @@ const withRelations = {
   site: { select: siteSelect },
   supplier: { select: supplierSelect },
   assignedEngineer: { select: engineerSelect },
-  kitLines: { orderBy: { createdAt: "asc" }, include: { irmItem: { select: irmItemSelect }, warehouse: { select: kitWarehouseSelect } } },
+  kitLines: {
+    orderBy: { createdAt: "asc" },
+    include: { irmItem: { select: irmItemSelect }, rentalItem: { select: rentalItemSelect }, warehouse: { select: kitWarehouseSelect } },
+  },
   attachmentRows: { orderBy: { createdAt: "asc" } },
 } satisfies Prisma.JobInclude;
 
@@ -72,6 +78,7 @@ export interface JobKitLineRow {
   description: string | null;
   customerStockEntryId: string | null;
   irmItemId: string | null;
+  rentalItemId: string | null;
   warehouseId: string | null;
   warehouseName: string | null;
   warehouseCode: string | null;
@@ -87,6 +94,7 @@ function lineCreateData(l: JobKitLineRow): Prisma.JobKitLineUncheckedCreateWitho
     description: l.description,
     customerStockEntryId: l.customerStockEntryId,
     irmItemId: l.irmItemId,
+    rentalItemId: l.rentalItemId,
     warehouseId: l.warehouseId,
     warehouseName: l.warehouseName,
     warehouseCode: l.warehouseCode,
@@ -192,6 +200,7 @@ const goodsQueueSelect = {
       qty: true,
       itemName: true,
       irmItemId: true,
+      rentalItemId: true,
       customerStockEntryId: true,
       warehouseId: true,
       warehouseName: true,
@@ -202,6 +211,8 @@ const goodsQueueSelect = {
       // id + name for the detail views: reusing that shared slice here would mean widening it for a
       // detail view silently widens every queue load too.
       irmItem: { select: { code: true } },
+      // Same narrow slice, same reason: a rental line is scanned by its RNT-#### label code.
+      rentalItem: { select: { code: true } },
     },
   },
 } satisfies Prisma.JobSelect;
@@ -276,6 +287,7 @@ export interface ActiveKitLinesForDemand {
     lineType: string;
     qty: number;
     irmItemId: string | null;
+    rentalItemId: string | null;
     customerStockEntryId: string | null;
     warehouseId: string | null;
     itemName: string;
@@ -298,7 +310,7 @@ export function findActiveWithKitLines(excludeJobId?: string): Promise<ActiveKit
         // would inherit that silently.
         orderBy: { createdAt: "asc" },
         select: {
-          id: true, lineType: true, qty: true, irmItemId: true,
+          id: true, lineType: true, qty: true, irmItemId: true, rentalItemId: true,
           customerStockEntryId: true, warehouseId: true, itemName: true, warehouseName: true,
         },
       },
@@ -445,7 +457,7 @@ export function findActiveByEngineerWithKitLines(engineerId: string): Promise<En
     // Kit lines keep withRelations' ordering for the same reason as findActiveWithKitLines above: the
     // committed tally only sums, but a kit-line read that quietly orders differently from every other
     // one is a trap for whoever extends it.
-    select: { id: true, kitLines: { orderBy: { createdAt: "asc" }, select: { id: true, lineType: true, irmItemId: true } } },
+    select: { id: true, kitLines: { orderBy: { createdAt: "asc" }, select: { id: true, lineType: true, irmItemId: true, rentalItemId: true } } },
     orderBy: { createdAt: "asc" },
   });
 }
@@ -611,6 +623,7 @@ const portalKitLineSelect = {
   warehouseName: true,
   qty: true,
   irmItemId: true,
+  rentalItemId: true,
   customerStockEntryId: true,
 } satisfies Prisma.JobKitLineSelect;
 

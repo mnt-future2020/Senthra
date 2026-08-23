@@ -25,6 +25,11 @@ export const listRentalItems = asyncHandler(async (req, res) => {
   );
 });
 
+// GET /rental-items/:id/availability — where this hire can be collected, and how many are free.
+export const getRentalItemAvailability = asyncHandler(async (req, res) => {
+  res.json({ warehouses: await rentalItemService.getRentalItemAvailability(param(req, "id")) });
+});
+
 // GET /rental-items/:id  (id or code)
 export const getRentalItem = asyncHandler(async (req, res) => {
   res.json({ rentalItem: await rentalItemService.getRentalItem(param(req, "id")) });

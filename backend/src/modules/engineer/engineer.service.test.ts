@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Pure unit test — every repository/service the engineer surface reads through is mocked, so no DB and
 // none of their heavy import graphs. Confirms mapping, scoping (the passed engineerId is always the
@@ -18,6 +18,7 @@ vi.mock("#modules/goods-management/goods-management.repository.js", () => ({
   findCustomerNamesByIds: vi.fn(),
   findMiscIssueLinesByEngineer: vi.fn(),
 }));
+vi.mock("#modules/engineer-rental/engineer-rental.repository.js", () => ({ findRentalHoldingsByEngineer: vi.fn() }));
 vi.mock("#modules/inventory/movement.service.js", () => ({ listEngineerMovements: vi.fn() }));
 // The overview's "today" boundary is resolved in the COMPANY timezone, which reads Settings → Prisma.
 // Stubbed so this stays a unit test rather than one that quietly needs a live MongoDB.
@@ -29,6 +30,7 @@ import * as engineerTransferService from "#modules/engineer-transfer/engineer-tr
 import * as vanStockRequestService from "#modules/van-stock-request/van-stock-request.service.js";
 import * as kitRequestService from "#modules/job-kit-request/job-kit-request.service.js";
 import * as goodsManagementRepo from "#modules/goods-management/goods-management.repository.js";
+import * as rentalCustodyRepo from "#modules/engineer-rental/engineer-rental.repository.js";
 import * as movementService from "#modules/inventory/movement.service.js";
 import {
   getOwnActivity,
@@ -36,6 +38,7 @@ import {
   getOwnMiscStock,
   getOwnMovements,
   getOwnOverview,
+  getOwnRentals,
   getOwnStock,
 } from "./engineer.service.js";
 
@@ -51,6 +54,7 @@ const mockCustHoldings = goodsManagementRepo.findCustomerHoldingsByEngineer as R
 const mockCustNames = goodsManagementRepo.findCustomerNamesByIds as ReturnType<typeof vi.fn>;
 const mockMiscLines = goodsManagementRepo.findMiscIssueLinesByEngineer as ReturnType<typeof vi.fn>;
 const mockMovements = movementService.listEngineerMovements as ReturnType<typeof vi.fn>;
+const mockRentals = rentalCustodyRepo.findRentalHoldingsByEngineer as ReturnType<typeof vi.fn>;
 
 const job = (over: Record<string, unknown> = {}) => ({
   id: "j1",
@@ -91,6 +95,7 @@ beforeEach(() => {
   mockKitListMine.mockResolvedValue({ requests: [], total: 0, page: 1, pageSize: 1, totalPages: 1 });
   mockCustHoldings.mockResolvedValue([]);
   mockMiscLines.mockResolvedValue([]);
+  mockRentals.mockResolvedValue([]);
 });
 
 describe("getOwnStock", () => {
@@ -144,6 +149,7 @@ describe("getOwnOverview", () => {
       stock: { lines: 0, totalQuantity: 0 },
       customerStock: { lines: 0, totalQuantity: 0 },
       misc: { lines: 0, totalQuantity: 0 },
+      rentals: { lines: 0, totalQuantity: 0, overdue: 0, dueSoon: 0 },
       jobs: { toAccept: 0, accepted: 0, inProgress: 0, overdue: 0, dueThisWeek: 0, next: [] },
       transfers: { incomingPending: 0, toSign: 0 },
       vanStock: { toCollect: 0 },
@@ -238,5 +244,75 @@ describe("getOwnMiscStock", () => {
       { itemName: "Cable ties", quantityOnHand: 5 },
       { itemName: "Labels", quantityOnHand: 1 },
     ]);
+  });
+});
+
+// ── Hired kit the engineer is carrying ─────────────────────────────────────────────────────────
+//
+// The deadline is the whole point of this list, so these tests are about the deadline arithmetic and
+// not the mapping. Company timezone is stubbed to Europe/London above; the dates below are far
+// enough from any boundary that the result does not depend on when the suite runs.
+describe("getOwnRentals", () => {
+  const REAL_NOW = Date.now;
+  afterEach(() => { Date.now = REAL_NOW; vi.useRealTimers(); });
+
+  const at = (iso: string) => { vi.useFakeTimers(); vi.setSystemTime(new Date(iso)); };
+  const holding = (over: Record<string, unknown> = {}) => ({
+    id: "h1", rentalItemId: "r1", itemName: "Fibre Tester", quantityOnHand: 1,
+    hireEndDate: new Date("2026-09-14T00:00:00Z"), ...over,
+  });
+
+  it("counts the days left and does not call a hire due later today overdue", async () => {
+    at("2026-09-10T09:30:00Z");
+    mockRentals.mockResolvedValue([holding()]);
+    const [r] = await getOwnRentals(ENG);
+    expect(r).toMatchObject({ itemName: "Fibre Tester", dueInDays: 4, overdue: false });
+  });
+
+  it("is due in 0 days — not overdue — on the deadline day itself", async () => {
+    // The engineer has all of the last day to get it back; calling it overdue at 00:01 would put a
+    // red badge on kit that is not late yet.
+    at("2026-09-14T16:00:00Z");
+    mockRentals.mockResolvedValue([holding()]);
+    const [r] = await getOwnRentals(ENG);
+    expect(r).toMatchObject({ dueInDays: 0, overdue: false });
+  });
+
+  it("goes overdue with a negative day count once the deadline has passed", async () => {
+    at("2026-09-17T08:00:00Z");
+    mockRentals.mockResolvedValue([holding()]);
+    const [r] = await getOwnRentals(ENG);
+    expect(r).toMatchObject({ dueInDays: -3, overdue: true });
+  });
+
+  it("tolerates a holding with no deadline snapshot rather than inventing one", async () => {
+    at("2026-09-10T09:30:00Z");
+    mockRentals.mockResolvedValue([holding({ hireEndDate: null })]);
+    const [r] = await getOwnRentals(ENG);
+    expect(r).toMatchObject({ hireEndDate: null, dueInDays: null, overdue: false });
+  });
+
+  it("skips the timezone read entirely when nothing is held", async () => {
+    mockRentals.mockResolvedValue([]);
+    expect(await getOwnRentals(ENG)).toEqual([]);
+  });
+});
+
+describe("getOwnOverview — the hired-kit badge", () => {
+  it("counts overdue and due-soon separately, never double-counting", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-10T09:00:00Z"));
+    mockBalances.mockResolvedValue([]);
+    mockTxns.mockResolvedValue([]);
+    mockRentals.mockResolvedValue([
+      { id: "h1", rentalItemId: "r1", itemName: "Late tester", quantityOnHand: 1, hireEndDate: new Date("2026-09-01T00:00:00Z") },
+      { id: "h2", rentalItemId: "r2", itemName: "Due Friday", quantityOnHand: 2, hireEndDate: new Date("2026-09-14T00:00:00Z") },
+      { id: "h3", rentalItemId: "r3", itemName: "Due next month", quantityOnHand: 4, hireEndDate: new Date("2026-10-20T00:00:00Z") },
+    ]);
+    const ov = await getOwnOverview(ENG);
+    // An overdue hire is NOT also "due soon" — the two badges would otherwise both light for one item
+    // and the engineer would think two things were wrong.
+    expect(ov.rentals).toEqual({ lines: 3, totalQuantity: 7, overdue: 1, dueSoon: 1 });
+    vi.useRealTimers();
   });
 });

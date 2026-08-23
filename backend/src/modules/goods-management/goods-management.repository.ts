@@ -18,6 +18,11 @@ export interface MovementLineRow {
   source: string;
   irmItemId: string | null;
   customerStockEntryId: string | null;
+  // Rental lines carry BOTH: the catalogue item (what it is) and the hire the units came off (whose
+  // deadline they belong to). Declared here and not merely spread through, so a misspelt key is a
+  // compile error rather than a column that silently never gets written.
+  rentalItemId: string | null;
+  purchaseOrderRentalLineId: string | null;
   itemName: string;
   sku: string | null;
   uom: string | null;

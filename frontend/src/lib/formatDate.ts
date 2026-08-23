@@ -45,3 +45,17 @@ export function formatDateTime(iso: string | null | undefined): string {
   const d = parse(iso);
   return d ? d.toLocaleString("en-GB", TIME_OPTS) : EMPTY;
 }
+
+/**
+ * "03 Aug 2026" for a CALENDAR DAY — pinned to UTC.
+ *
+ * The variant the note at the top of this file warns is needed. A calendar day (a hire deadline, a
+ * `<input type="date">` value) is stored as UTC midnight, so `formatDate` above renders it as the day
+ * BEFORE for any viewer behind UTC. On a hire return deadline that is the one number that must not be
+ * wrong: it is the difference between an engineer thinking they have until Friday and the provider
+ * billing for the weekend.
+ */
+export function formatCalendarDay(iso: string | null | undefined): string {
+  const d = parse(iso);
+  return d ? d.toLocaleDateString("en-GB", { ...DATE_OPTS, timeZone: "UTC" }) : EMPTY;
+}

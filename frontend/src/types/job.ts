@@ -11,7 +11,7 @@ export type JobStatus =
   | "rejected"
   | "cancelled";
 
-export type JobLineType = "customer_stock" | "irm" | "misc";
+export type JobLineType = "customer_stock" | "irm" | "rental" | "misc";
 
 export type JobPriority = "low" | "normal" | "high" | "urgent";
 
@@ -32,6 +32,10 @@ export interface JobKitLine {
   description: string | null;
   customerStockEntryId: string | null;
   irmItemId: string | null;
+  rentalItemId: string | null;
+  // The RNT-#### on the printed label — what the warehouse scans and what the engineer matches
+  // against the sticker on the case. The line's own `itemName` snapshot is not scannable.
+  rentalItemCode: string | null;
   warehouseId: string | null;
   warehouseName: string | null;
   warehouseCode: string | null;
@@ -44,6 +48,17 @@ export interface JobKitLine {
   used: number;
   returned: number;
   remaining: number;
+  // When this HIRED kit has to be back at its warehouse, so the warehouse can return it to the
+  // provider. RENTAL lines only, and only while units are still out — null on every other line type
+  // and once the line is fully returned. ISO date.
+  //
+  // The one thing that makes a rental line unlike the rest of this list: an IRM item sitting in a van
+  // costs nothing, a hire bills every day and belongs to somebody else.
+  hireEndDate: string | null;
+  // Resolved by the SERVER against the company timezone. Never recompute this from `hireEndDate` in
+  // the browser — a device in another zone (or with a wrong clock) would disagree with the warehouse
+  // about which day it is, on the one field whose whole job is naming a day.
+  hireOverdue: boolean;
   // Hand-overs of this line's stock from another engineer's van. Non-empty ⇒ it does NOT come from
   // the warehouse above — that's only where leftovers are returned to. Populated on the job detail.
   vanSources: KitLineVanSource[];

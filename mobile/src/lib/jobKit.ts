@@ -7,6 +7,7 @@ import type { JobKitLine, KitRequestLine } from "../types";
 export const LINE_TYPE_LABEL: Record<string, string> = {
   customer_stock: "Customer stock",
   irm: "IRM",
+  rental: "Rental",
   misc: "Misc",
 };
 

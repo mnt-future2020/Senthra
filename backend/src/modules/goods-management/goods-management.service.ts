@@ -10,6 +10,10 @@ import * as irmService from "#modules/irm/irm.service.js";
 import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
 import * as inventoryService from "#modules/inventory/inventory.service.js";
 import * as engineerStockRepo from "#modules/engineer-stock/engineer-stock.repository.js";
+import * as rentalCustodyRepo from "#modules/engineer-rental/engineer-rental.repository.js";
+import * as rentalItemRepo from "#modules/rental-item/rental-item.repository.js";
+import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
+import { allocateFromHires, hireAvailable, totalAvailable } from "#modules/purchase-order/rentalHire.allocation.js";
 import * as transferRepo from "#modules/engineer-transfer/engineer-transfer.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
@@ -29,9 +33,31 @@ function emitGoodsRoom(event: string, payload: unknown): void {
 }
 
 export interface ScanMatch {
-  source: "irm" | "customer";
+  source: "irm" | "customer" | "rental";
   irmItemId?: string;
   customerStockEntryId?: string;
+  rentalItemId?: string;
+  /**
+   * For a rental: WHICH HIRE the scan resolved to, and what the panel must send back on post.
+   *
+   * Chosen server-side by the allocator (earliest deadline first) rather than offered as a choice,
+   * so the units committed are the ones the preview showed. `hire` carries the human context the
+   * warehouse needs to see before handing kit over — which order it belongs to and when it is due
+   * back — because a rental is the one thing on a kit list with a date attached to it.
+   */
+  purchaseOrderRentalLineId?: string;
+  /**
+   * The hire being handed over. `overdue` is the one thing here that is a judgement rather than a
+   * fact off the row: the hire was due back before today, in COMPANY time, and issuing it puts it
+   * further past its return date.
+   *
+   * Surfaced, not blocked. The allocator picks the soonest deadline first, so an overdue hire is
+   * picked FIRST — which is right (it is the one to get back into circulation), but it means the
+   * warehouse would otherwise hand out the most-overdue unit with nothing on screen saying so. The
+   * job may genuinely need the tester today and the return trip is a separate logistics problem, so
+   * refusing would strand real work; the person at the counter is simply the last one who can notice.
+   */
+  hire?: { poCode: string | null; hireEndDate: string | null; itemName: string; overdue: boolean } | null;
   jobKitLineId?: string;
   itemName: string;
   uom?: string | null;
@@ -94,6 +120,24 @@ export interface KitLineTally {
   used: number; // consumed/used on site (incl. lost write-offs)
   returned: number;
   remaining: number; // still held by the engineer = issued − used − returned
+  // ── Hire deadline (RENTAL lines only; null on every other line type) ────────────────────────
+  //
+  // The date the engineer holding this kit has to get it back to the warehouse by, so the warehouse
+  // can return it to the provider. It is the ONE fact that makes a rental line different from an IRM
+  // one: an IRM cable in a van costs nothing and can be written off, a hire keeps billing and is owed
+  // to somebody else.
+  //
+  // Sourced from the engineer's own EngineerRentalHolding snapshot, which getJobKitTallies already
+  // loads to compute `remaining` — so this costs no extra query. Where an engineer holds the same
+  // catalogue item on SEVERAL hires, this is the EARLIEST of their deadlines: that is the one that
+  // bites first, and the row shows one date.
+  //
+  // Null on a rental line whose units are all back (nothing held ⇒ no deadline to meet).
+  hireEndDate: Date | null;
+  // Resolved SERVER-side against the company timezone, never from a client clock — the same rule the
+  // scan panel follows. A browser in another zone would otherwise disagree with the warehouse about
+  // which day it is, on the one field whose whole purpose is naming a day.
+  hireOverdue: boolean;
 }
 
 /**
@@ -105,7 +149,61 @@ export interface KitLineTally {
  */
 export interface KitTallyJob {
   assignedEngineerId: string | null;
-  kitLines: { id: string; lineType: string; irmItemId: string | null; customerStockEntryId: string | null }[];
+  kitLines: { id: string; lineType: string; irmItemId: string | null; rentalItemId: string | null; customerStockEntryId: string | null }[];
+}
+
+/**
+ * What one engineer is holding on hire, summed to the CATALOGUE item.
+ *
+ * Custody is stored per HIRE (two testers on two orders are two rows), but a kit line names the
+ * catalogue item, so the tally that caps a line's "remaining" has to be per item. Summing is right:
+ * the engineer is holding two testers either way, and which hire each came off is the return scan's
+ * question, not this one's.
+ */
+/**
+ * Free hired units per `${rentalItemId}|${warehouseId}`, summed from the LIVE HIRES of those items.
+ *
+ * The rental analogue of `inventoryRepo.findBalancesByItemsAndWarehouses`, and the reason it has to be
+ * computed rather than read: a hire has no stock balance row, deliberately. What a depot can hand out
+ * is `received − returned − issued` totalled across every live hire delivered there.
+ *
+ * One query for the whole page, matching how every other lookup on this path is batched.
+ */
+async function rentalPoolByItemAndWarehouse(rentalItemIds: string[], warehouseIds: string[]): Promise<Map<string, number>> {
+  const pool = new Map<string, number>();
+  if (rentalItemIds.length === 0) return pool;
+  for (const h of await poRepo.findLiveHiresByRentalItems(rentalItemIds, warehouseIds)) {
+    const key = `${h.rentalItemId}|${h.warehouseId}`;
+    pool.set(key, (pool.get(key) ?? 0) + hireAvailable(h));
+  }
+  return pool;
+}
+
+/**
+ * What one engineer is holding on hire, per CATALOGUE item: how many, and the soonest deadline
+ * among the hires those units sit on.
+ *
+ * Both facts come off the same rows, so the deadline rides along for free — the alternative was a
+ * second pass over the holdings (or worse, a per-line lookup) on a path that already renders the
+ * whole job pack. The repository filters `quantityOnHand > 0` and orders by `hireEndDate asc`, so
+ * "soonest" is simply the first one seen; the explicit min below does not rely on that ordering,
+ * because a caller reading the earliest deadline should not silently depend on a repository's
+ * `orderBy` staying put.
+ */
+type RentalHeld = { qty: number; hireEndDate: Date | null };
+async function rentalHeldByItem(engineerId: string): Promise<Map<string, RentalHeld>> {
+  const held = new Map<string, RentalHeld>();
+  for (const h of await rentalCustodyRepo.findRentalHoldingsByEngineer(engineerId)) {
+    if (!h.rentalItemId) continue;
+    const cur = held.get(h.rentalItemId);
+    const soonest =
+      !cur?.hireEndDate ? h.hireEndDate
+      : !h.hireEndDate ? cur.hireEndDate
+      : h.hireEndDate < cur.hireEndDate ? h.hireEndDate
+      : cur.hireEndDate;
+    held.set(h.rentalItemId, { qty: (cur?.qty ?? 0) + h.quantityOnHand, hireEndDate: soonest });
+  }
+  return held;
 }
 
 // Per-kit-line goods tallies for a single job, keyed by jobKitLineId. Used on the job-detail "job
@@ -132,10 +230,16 @@ export async function getJobKitTallies(jobId: string, prefetched?: KitTallyJob):
   const engId = job?.assignedEngineerId ?? null;
   const irmHeld = new Map<string, number>();
   const cseHeld = new Map<string, number>();
+  let rentalHeld = new Map<string, RentalHeld>();
   if (engId) {
     for (const b of await engineerStockRepo.findEngineerBalances(engId)) irmHeld.set(b.irmItemId, b.quantityOnHand);
     for (const h of await goodsManagementRepo.findCustomerHoldingsByEngineer(engId)) cseHeld.set(h.customerStockEntryId, h.quantityOnHand);
+    rentalHeld = await rentalHeldByItem(engId);
   }
+  // Resolved ONCE for the whole job, and only when a rental line is actually present — this function
+  // runs on the queue, the job pack and the start gate, and getCompanyTimezone is a settings read.
+  const hasRental = (job?.kitLines ?? []).some((kl) => kl.lineType === "rental");
+  const todayStart = hasRental ? startOfDayIn(await getCompanyTimezone(), new Date()) : null;
 
   // Distribute each item's real held across its kit lines (capped at each line's raw remaining), so the
   // per-line "remaining" sums to the engineer's true holding. Misc lines aren't engineer-tracked, so
@@ -143,21 +247,43 @@ export async function getJobKitTallies(jobId: string, prefetched?: KitTallyJob):
   const out: Record<string, KitLineTally> = {};
   const groups = new Map<string, KitTallyJob["kitLines"]>();
   for (const kl of job?.kitLines ?? []) {
-    const key = kl.irmItemId ? `irm:${kl.irmItemId}` : kl.customerStockEntryId ? `cse:${kl.customerStockEntryId}` : `misc:${kl.id}`;
+    const key = kl.irmItemId
+      ? `irm:${kl.irmItemId}`
+      : kl.rentalItemId
+        ? `rental:${kl.rentalItemId}`
+        : kl.customerStockEntryId
+          ? `cse:${kl.customerStockEntryId}`
+          : `misc:${kl.id}`;
     const g = groups.get(key);
     if (g) g.push(kl);
     else groups.set(key, [kl]);
   }
   for (const group of groups.values()) {
+    const rental = group[0].rentalItemId ? rentalHeld.get(group[0].rentalItemId) : undefined;
     let remainingHeld = group[0].lineType === "misc"
       ? Number.MAX_SAFE_INTEGER // misc isn't engineer-tracked → keep its raw remaining
-      : group[0].irmItemId ? irmHeld.get(group[0].irmItemId) ?? 0 : cseHeld.get(group[0].customerStockEntryId!) ?? 0;
+      : group[0].irmItemId
+        ? irmHeld.get(group[0].irmItemId) ?? 0
+        : group[0].rentalItemId
+          ? rental?.qty ?? 0
+          : cseHeld.get(group[0].customerStockEntryId!) ?? 0;
     for (const kl of group) {
       const e = acc[kl.id] ?? { issued: 0, returned: 0, consumed: 0 };
       const rawRemaining = Math.max(0, e.issued - e.returned - e.consumed);
       const remaining = Math.min(rawRemaining, remainingHeld);
       remainingHeld -= remaining;
-      out[kl.id] = { issued: e.issued, used: e.consumed, returned: e.returned, remaining };
+      // The deadline rides on the HOLDING, so it appears only while units are actually out. A rental
+      // line that has been fully returned shows no date: there is nothing left to bring back, and a
+      // date still sitting there would read as an outstanding obligation.
+      const hireEndDate = kl.lineType === "rental" && remaining > 0 ? rental?.hireEndDate ?? null : null;
+      out[kl.id] = {
+        issued: e.issued,
+        used: e.consumed,
+        returned: e.returned,
+        remaining,
+        hireEndDate,
+        hireOverdue: !!(hireEndDate && todayStart && hireEndDate.getTime() < todayStart.getTime()),
+      };
     }
   }
   return out;
@@ -224,7 +350,7 @@ export { getOpenDemand } from "./demand.js";
 export type { DemandEntry } from "./demand.js";
 
 export interface WarehouseDemandRow {
-  source: "irm" | "customer";
+  source: "irm" | "customer" | "rental";
   itemName: string;
   inStock: number; // current free warehouse stock (on-hand − reserved / customer entry qty)
   planned: number; // open demand across active jobs
@@ -240,17 +366,30 @@ export async function getWarehouseDemand(warehouseId: string): Promise<Warehouse
 
   const irmIds = demand.filter((d) => d.irmItemId).map((d) => d.irmItemId!);
   const cseIds = demand.filter((d) => d.customerStockEntryId).map((d) => d.customerStockEntryId!);
-  const balByItem = new Map(
-    (await inventoryRepo.findBalancesByItemsAndWarehouses(irmIds, [warehouseId])).map((b) => [b.irmItemId, b]),
-  );
-  const cseQty = new Map((await goodsManagementRepo.findCustomerStockEntriesByIds(cseIds)).map((e) => [e.id, e.quantity]));
+  // THREE pools, matching the three getOpenDemand emits. Without the rental arm a hired item found no
+  // stock lookup at all: it has no irmItemId, so it fell to `cseQty.get(null)` → 0, was labelled
+  // `customer`, and came out as `free = −demand`. This list sorts most-negative first, so every hire
+  // planned from this warehouse pinned to the TOP of the board as a shortfall that did not exist.
+  const rentalIds = demand.filter((d) => d.rentalItemId).map((d) => d.rentalItemId!);
+  const [balances, cseEntries, rentalPool] = await Promise.all([
+    inventoryRepo.findBalancesByItemsAndWarehouses(irmIds, [warehouseId]),
+    goodsManagementRepo.findCustomerStockEntriesByIds(cseIds),
+    // Same helper the planner's availability check uses, so the two figures always agree:
+    // received − returned − issued, over the live hires delivered to THIS warehouse.
+    rentalPoolByItemAndWarehouse(rentalIds, [warehouseId]),
+  ]);
+  const balByItem = new Map(balances.map((b) => [b.irmItemId, b]));
+  const cseQty = new Map(cseEntries.map((e) => [e.id, e.quantity]));
 
   return demand
     .map((d) => {
       const inStock = d.irmItemId
         ? (balByItem.get(d.irmItemId)?.quantityOnHand ?? 0) - (balByItem.get(d.irmItemId)?.quantityReserved ?? 0)
-        : cseQty.get(d.customerStockEntryId!) ?? 0;
-      return { source: d.irmItemId ? ("irm" as const) : ("customer" as const), itemName: d.itemName, inStock, planned: d.demand, free: inStock - d.demand };
+        : d.rentalItemId
+          ? rentalPool.get(`${d.rentalItemId}|${warehouseId}`) ?? 0
+          : cseQty.get(d.customerStockEntryId!) ?? 0;
+      const source = d.irmItemId ? ("irm" as const) : d.rentalItemId ? ("rental" as const) : ("customer" as const);
+      return { source, itemName: d.itemName, inStock, planned: d.demand, free: inStock - d.demand };
     })
     .sort((a, b) => a.free - b.free); // shortfalls (most negative free) first
 }
@@ -398,7 +537,134 @@ export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Pr
     };
   }
 
-  // 2) Customer stock entry lookup by barcode.
+  // 2) Rental catalogue lookup by the RNT-#### on the printed label.
+  //
+  // Sits between IRM and customer stock because the code spaces cannot collide — an IRM scan matches
+  // `code`/`barcode`/`sku`, all IRM-owned, and a rental label is only ever `Code128(RentalItem.code)`.
+  // Ordering is therefore about cost, not correctness.
+  const rentalItem = await rentalItemRepo.findActiveByCode(code);
+  if (rentalItem) {
+    // Same warehouse rule as IRM: a job may list the same hired model at more than one depot, so the
+    // line is matched on item AND warehouse. Unlike IRM there is no van-return widening — hired kit is
+    // not transferable between engineers in this phase, so there is no away-from-home leg to allow.
+    const kit = (job.kitLines ?? []).find(
+      (k) => k.lineType === "rental" && k.rentalItemId === rentalItem.id && k.warehouseId === input.warehouseId,
+    );
+    if (!kit) {
+      const onJobElsewhere = (job.kitLines ?? []).some((k) => k.lineType === "rental" && k.rentalItemId === rentalItem.id);
+      throw badRequest(onJobElsewhere
+        ? `${rentalItem.name} is on this job but assigned to a different warehouse — issue it from there.`
+        : `${rentalItem.name} is not on this job's kit list.`);
+    }
+    assertWarehouseAccess(actor, input.warehouseId);
+    const already = issuedForKitLine(movements, kit.id);
+    const split = kitLineSplit(movements, kit.id);
+    const lineOutstanding = Math.max(0, split.issued - split.used - split.returned);
+
+    // The live hires of this item sitting at THIS warehouse, soonest deadline first.
+    const hires = await poRepo.findLiveHiresByRentalItems([rentalItem.id], [input.warehouseId]);
+
+    if (input.direction === "return") {
+      // A return has to credit the hire the units actually came off, and the movement ledger is the
+      // only thing that knows which. Resolve it from what this engineer is still holding rather than
+      // from the allocator: allocation answers "which hire should we lend", and a return is the
+      // opposite question.
+      const held = job.assignedEngineerId
+        ? await rentalCustodyRepo.findRentalHoldingsByEngineer(job.assignedEngineerId)
+        : [];
+      // Soonest deadline first again — returning against the most urgent hire first is what gets it
+      // off the overdue badge. An UNDATED holding sorts last, not first: `?? 0` put it at the epoch,
+      // so a hire with no deadline snapshot beat every real one and was always the hire picked.
+      const forThisItem = held
+        .filter((h) => h.rentalItemId === rentalItem.id && h.quantityOnHand > 0)
+        .sort((a, b) => (a.hireEndDate?.getTime() ?? Infinity) - (b.hireEndDate?.getTime() ?? Infinity));
+      // …but only among the hires DELIVERED HERE. EngineerRentalHolding carries no warehouse (see the
+      // model), so this filter is item-only and an engineer can hold the same tester on hires from two
+      // depots — an ordinary state, since each was issued against its own kit line. Picking purely by
+      // deadline then bound the scan to the OTHER depot's hire, and postReturn refuses exactly that
+      // ("that hire belongs to a different warehouse") with no second option to scan. `hires` is
+      // already this warehouse's live set, fetched above.
+      //
+      // The fallback keeps the deliberate no-`orderLive` rule on this leg: kit already in someone's
+      // hands has to be able to come back whatever happened to the paperwork, and such a hire may no
+      // longer appear in `hires`. Better to bind it and let postReturn adjudicate than to refuse the
+      // scan outright.
+      const liveHere = new Set(hires.map((h) => h.id));
+      const target = forThisItem.find((h) => liveHere.has(h.purchaseOrderRentalLineId)) ?? forThisItem[0] ?? null;
+      if (!target) throw badRequest(`${rentalItem.name} isn't currently out with this engineer.`);
+      // Capped at the hire this scan BINDS TO, not at everything the engineer holds of this item.
+      // The two are different numbers whenever the same tester is out on more than one hire, and
+      // `purchaseOrderRentalLineId` above commits this scan to exactly one of them: offering the
+      // global figure let the warehouse type 5, and postReturn then 409'd at 3 with no explanation
+      // of why — the remaining 2 belong to a different PO and need their own scan.
+      const heldOnThisHire = target.quantityOnHand;
+      const returnTodayStart = startOfDayIn(await getCompanyTimezone(), new Date());
+      return {
+        source: "rental",
+        rentalItemId: rentalItem.id,
+        purchaseOrderRentalLineId: target.purchaseOrderRentalLineId,
+        hire: {
+          poCode: target.poCode,
+          hireEndDate: target.hireEndDate?.toISOString() ?? null,
+          itemName: target.itemName,
+          // On a RETURN an overdue hire is not a warning, it is the good news — the kit is coming
+          // back. Reported anyway so the panel can say which hire it clears.
+          overdue: target.hireEndDate ? target.hireEndDate.getTime() < returnTodayStart.getTime() : false,
+        },
+        jobKitLineId: kit.id,
+        itemName: rentalItem.name,
+        uom: rentalItem.baseUnit,
+        plannedQty: kit.qty,
+        alreadyIssued: already,
+        remainingIssuable: 0,
+        heldByEngineer: Math.min(lineOutstanding, heldOnThisHire),
+        available: totalAvailable(hires),
+      };
+    }
+
+    const pick = allocateFromHires(hires, 1);
+    const target = pick?.[0]?.hire ?? null;
+    // "Today" in COMPANY time, resolved the way every other day-boundary in this codebase is — never
+    // from a client clock. Hire dates are calendar days stored at UTC midnight, and startOfDayIn
+    // answers "which calendar date is it now" expressed the same way, so the two compare directly.
+    const todayStart = startOfDayIn(await getCompanyTimezone(), new Date());
+    if (!target) {
+      throw conflict(
+        `No ${rentalItem.name} is available at this warehouse — every hired unit is already out or has gone back to the provider.`,
+      );
+    }
+    return {
+      source: "rental",
+      rentalItemId: rentalItem.id,
+      purchaseOrderRentalLineId: target.id,
+      hire: {
+        poCode: target.poCode,
+        hireEndDate: target.hireEndDate.toISOString(),
+        itemName: target.itemName,
+        overdue: target.hireEndDate.getTime() < todayStart.getTime(),
+      },
+      jobKitLineId: kit.id,
+      itemName: rentalItem.name,
+      uom: rentalItem.baseUnit,
+      plannedQty: kit.qty,
+      alreadyIssued: already,
+      // Capped at the hire THIS SCAN BOUND TO, not at the depot's cross-hire pool.
+      //
+      // `target` is one hire (`allocateFromHires(hires, 1)`) and postIssue commits against that single
+      // row, so a ceiling sized by the total let the warehouse type a quantity no ONE hire could
+      // cover: three planned against hires of 2 and 1 accepted 3, then 409'd with "those units are no
+      // longer available on this hire" — which re-scanning could never clear, because the next scan
+      // bound the same hire and offered the same 3. Two hires are two scans, of 2 and of 1, which is
+      // what the allocator's no-partial-allocation rule already implies.
+      remainingIssuable: Math.min(Math.max(0, kit.qty - already), hireAvailable(target)),
+      heldByEngineer: 0,
+      // The bound hire's own figure, for the same reason: the panel prints this immediately beside the
+      // stepper, so a cross-hire total here would advertise headroom the stepper does not have.
+      available: hireAvailable(target),
+    };
+  }
+
+  // 3) Customer stock entry lookup by barcode.
   const entry = await goodsManagementRepo.findCustomerStockEntryByBarcode(code);
   if (entry) {
     const kit = (job.kitLines ?? []).find((k) => k.lineType === "customer_stock" && k.customerStockEntryId === entry.id && k.warehouseId === input.warehouseId);
@@ -513,6 +779,9 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
     warehouseId: string | null; // null for misc lines (no stock / no warehouse)
     customerId?: string | null;
     customerName?: string | null;
+    // Rental only — the hire these units come off, resolved before the transaction opens and
+    // re-checked inside it. `hireSnapshot` is what the engineer's holdings row is stamped with.
+    hire?: { id: string; poCode: string | null; hireEndDate: Date; rentalItemId: string } | null;
   };
   const resolved: Resolved[] = [];
   for (const line of input.lines) {
@@ -538,6 +807,39 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
         throw conflict(`${irm.name} is serial/batch-tracked and can't be moved here.`);
       }
       resolved.push({ line, kit, itemName: irm.name, uom: irm.baseUnit, warehouseId: kit.warehouseId! });
+    } else if (line.source === "rental") {
+      const item = await rentalItemRepo.findById(line.rentalItemId!);
+      if (!item) throw badRequest("Rental item not found.");
+      // The kit line is resolved by CLIENT-SUPPLIED id alone (see the top of this loop), so it has to
+      // be checked against the source the same way the misc arm below checks its own. Without this a
+      // rental issue could be filed against an IRM line of the same job at the same warehouse: the
+      // three hire guards underneath all compare the hire to `item` and `kit.warehouseId`, and none of
+      // them notices that `kit` is not a rental line at all. The custody write would then be capped by
+      // — and reported against — a line that plans a different item entirely.
+      if (kit.lineType !== "rental" || kit.rentalItemId !== item.id) {
+        throw badRequest(`${item.name} isn't the hired item planned on that kit line.`);
+      }
+      const hire = await poRepo.findHireStockById(line.purchaseOrderRentalLineId!);
+      if (!hire) throw badRequest("That hire no longer exists.");
+      // Three ways a client-supplied hire id can be wrong, each with its own message because each has
+      // a different fix. The scan resolves all three correctly; these guard a hand-built request and a
+      // stale panel whose preview was overtaken.
+      if (hire.rentalItemId !== item.id) throw badRequest("That hire is for a different rental item.");
+      if (hire.warehouseId !== kit.warehouseId) throw badRequest(`${item.name}: that hire was delivered to a different warehouse.`);
+      if (hire.hireStatus !== "on_hire") throw conflict(`${item.name}: that hire isn't live — it hasn't been received yet, or it has already gone back.`);
+      // Defence in depth against a hand-built request: the scan only ever offers hires on a live
+      // order, but this resolves one by a CLIENT-SUPPLIED id and so cannot rely on that filter.
+      // Lending against a cancelled or deleted order strands the units — the supplier-return path
+      // loads the order and refuses, so they could never be handed back.
+      if (!hire.orderLive) throw conflict(`${item.name}: that hire's purchase order has been cancelled or removed — it can't be issued.`);
+      resolved.push({
+        line,
+        kit,
+        itemName: item.name,
+        uom: item.baseUnit,
+        warehouseId: kit.warehouseId!,
+        hire: { id: hire.id, poCode: hire.poCode, hireEndDate: hire.hireEndDate, rentalItemId: hire.rentalItemId },
+      });
     } else if (line.source === "customer") {
       const entry = await goodsManagementRepo.findCustomerStockEntryById(line.customerStockEntryId!);
       if (!entry) throw badRequest("Customer stock item not found.");
@@ -571,6 +873,8 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
     source: r.line.source,
     irmItemId: r.line.source === "irm" ? r.line.irmItemId! : null,
     customerStockEntryId: r.line.source === "customer" ? r.line.customerStockEntryId! : null,
+    rentalItemId: r.line.source === "rental" ? r.line.rentalItemId! : null,
+    purchaseOrderRentalLineId: r.line.source === "rental" ? r.hire!.id : null,
     itemName: r.itemName,
     sku: null,
     uom: r.uom,
@@ -626,6 +930,39 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
             sourceId: movementId,
             sourceCode: code,
             balanceAfter: eng.quantityOnHand,
+            createdBy: actorEmail,
+          });
+        } else if (r.line.source === "rental") {
+          // The PAPERWORK re-check, which the quantity guard below cannot make. adjustHireIssuedQtyTx
+          // is atomic about how MANY, but it reads only the counters: an order cancelled between the
+          // resolve above and this commit still satisfies it. Units lent against a dead order are
+          // stranded — the supplier-return path loads the order and refuses, so they could never be
+          // handed back. Cheap to ask here; impossible to undo if we don't.
+          const liveHire = await poRepo.findHireStockByIdTx(tx, r.hire!.id);
+          if (!liveHire || !liveHire.orderLive || liveHire.hireStatus !== "on_hire") {
+            throw conflict(`${r.itemName}: that hire is no longer live — its order was cancelled, or it has already gone back. Refresh and scan again.`);
+          }
+          // The availability check and the commitment are ONE conditional write on the hire row — see
+          // adjustHireIssuedQtyTx. Two warehouses scanning the last tester at the same instant both
+          // read "1 available" before the transaction; only one satisfies the guard, and the other
+          // rolls back here rather than lending a unit that does not exist.
+          const ok = await poRepo.adjustHireIssuedQtyTx(tx, r.hire!.id, r.line.qty);
+          if (!ok) throw conflict(`${r.itemName}: those units are no longer available on this hire — stock changed. Refresh and scan again.`);
+          const held = await rentalCustodyRepo.upsertRentalHoldingTx(tx, r.hire!.id, job.assignedEngineerId!, r.line.qty, {
+            rentalItemId: r.hire!.rentalItemId,
+            itemName: r.itemName,
+            poCode: r.hire!.poCode,
+            hireEndDate: r.hire!.hireEndDate,
+          });
+          await rentalCustodyRepo.insertRentalTxnTx(tx, {
+            purchaseOrderRentalLineId: r.hire!.id,
+            engineerId: job.assignedEngineerId!,
+            quantityDelta: r.line.qty,
+            type: "job_issue",
+            sourceType: "goods_management",
+            sourceId: movementId,
+            sourceCode: code,
+            balanceAfter: held.quantityOnHand,
             createdBy: actorEmail,
           });
         } else if (r.line.source === "customer") {
@@ -685,6 +1022,7 @@ export interface QueueKitLine {
   id: string; // kit line id
   lineType: string;
   irmItemId: string | null;
+  rentalItemId: string | null;
   customerStockEntryId: string | null;
   itemName: string;
   /**
@@ -893,8 +1231,13 @@ export function scanCodeFor(
   line: { lineType: string; customerStockEntryId: string | null },
   irmItem: { code: string } | null | undefined,
   customerBarcodes: Map<string, string | null>,
+  rentalItem?: { code: string } | null,
 ): string | null {
   if (line.lineType === "irm") return irmItem?.code?.trim() || null;
+  // A rental item's printed label IS Code128 of its own code, so the code is the scan token. Without
+  // this the queue offered no scan chip for a hired line and the warehouse had to go and read the
+  // sticker off the case — the one thing the chip exists to save.
+  if (line.lineType === "rental") return rentalItem?.code?.trim() || null;
   if (line.lineType === "customer_stock" && line.customerStockEntryId) {
     return customerBarcodes.get(line.customerStockEntryId)?.trim() || null;
   }
@@ -940,9 +1283,11 @@ function buildKitLineRow(
     warehouseName: string | null;
     warehouseCode: string | null;
     qty: number;
+    rentalItemId?: string | null;
     // Present on the Prisma row via the job include; declared optional so the single-job detail and
     // the queue can both pass their rows without a cast.
     irmItem?: { code: string } | null;
+    rentalItem?: { code: string } | null;
   },
   movements: readonly MovementTally[],
   balByKey: Map<string, Awaited<ReturnType<typeof inventoryRepo.findBalancesByItemsAndWarehouses>>[number]>,
@@ -950,11 +1295,19 @@ function buildKitLineRow(
   cseBarcode: Map<string, string | null>,
   engineerHeld: number,
   vanQty: number, // qty on this line handed over from a van (completed transfers only)
+  // Free hired units per `${rentalItemId}|${warehouseId}`, summed from that item's LIVE HIRES at the
+  // depot. A hire has no stock balance of its own, so this is the rental analogue of balByKey.
+  rentalAvailByKey: Map<string, number> = new Map(),
 ): QueueKitLine {
   let available = 0;
   if (kl.lineType === "irm" && kl.irmItemId && kl.warehouseId) {
     const bal = balByKey.get(`${kl.irmItemId}|${kl.warehouseId}`);
     available = (bal?.quantityOnHand ?? 0) - (bal?.quantityReserved ?? 0);
+  } else if (kl.lineType === "rental" && kl.rentalItemId && kl.warehouseId) {
+    // Left at 0 before this arm existed, so the queue told the warehouse a hired item was unavailable
+    // while sixty units sat on the shelf — and the scan panel, which reads the hires directly, said
+    // the opposite. Two screens disagreeing about the same number is worse than either being wrong.
+    available = rentalAvailByKey.get(`${kl.rentalItemId}|${kl.warehouseId}`) ?? 0;
   } else if (kl.lineType === "customer_stock" && kl.customerStockEntryId) {
     available = cseQty.get(kl.customerStockEntryId) ?? 0; // qty only — no cost/value exposed
   }
@@ -963,9 +1316,10 @@ function buildKitLineRow(
     id: kl.id,
     lineType: kl.lineType,
     irmItemId: kl.irmItemId,
+    rentalItemId: kl.rentalItemId ?? null,
     customerStockEntryId: kl.customerStockEntryId,
-    itemName: stripCodePrefix(kl.itemName, kl.irmItem?.code),
-    scanCode: scanCodeFor(kl, kl.irmItem, cseBarcode),
+    itemName: stripCodePrefix(kl.itemName, kl.irmItem?.code ?? kl.rentalItem?.code),
+    scanCode: scanCodeFor(kl, kl.irmItem, cseBarcode, kl.rentalItem),
     warehouseId: kl.warehouseId,
     warehouseName: kl.warehouseName,
     warehouseCode: kl.warehouseCode,
@@ -1130,10 +1484,14 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
   const irmItemIds = new Set<string>();
   const whIds = new Set<string>();
   const cseIds = new Set<string>();
+  const rentalItemIds = new Set<string>();
   for (const j of pageJobs) {
     for (const kl of j.kitLines ?? []) {
       if (kl.lineType === "irm" && kl.irmItemId && kl.warehouseId) {
         irmItemIds.add(kl.irmItemId);
+        whIds.add(kl.warehouseId);
+      } else if (kl.lineType === "rental" && kl.rentalItemId && kl.warehouseId) {
+        rentalItemIds.add(kl.rentalItemId);
         whIds.add(kl.warehouseId);
       } else if (kl.lineType === "customer_stock" && kl.customerStockEntryId) {
         cseIds.add(kl.customerStockEntryId);
@@ -1143,6 +1501,7 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
   const balByKey = new Map(
     (await inventoryRepo.findBalancesByItemsAndWarehouses([...irmItemIds], [...whIds])).map((b) => [`${b.irmItemId}|${b.warehouseId}`, b]),
   );
+  const rentalAvailByKey = await rentalPoolByItemAndWarehouse([...rentalItemIds], [...whIds]);
   // One query, two lookups: quantity for the Available column, barcode for the scan-code chip.
   const cseRows = await goodsManagementRepo.findCustomerStockEntriesByIds([...cseIds]);
   const cseQty = new Map(cseRows.map((e) => [e.id, e.quantity]));
@@ -1164,6 +1523,13 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
   ]);
   for (const b of engBalances) engHeld.set(`${b.engineerId}|${b.irmItemId}`, b.quantityOnHand);
   for (const h of engCustomerHoldings) engHeld.set(`${h.engineerId}|${h.customerStockEntryId}`, h.quantityOnHand);
+  // Hired custody is stored per HIRE; the queue asks per catalogue item, so it is summed on the way in
+  // — the same reduction rentalHeldByItem does for the single-job path.
+  for (const r of await rentalCustodyRepo.findRentalHoldingQuantitiesByEngineers(pageEngineerIds)) {
+    if (!r.rentalItemId) continue;
+    const key = `${r.engineerId}|${r.rentalItemId}`;
+    engHeld.set(key, (engHeld.get(key) ?? 0) + r.quantityOnHand);
+  }
 
   // Van-supplied qty per kit line for the PAGE (one lean query) — decides which lines stay actionable
   // away from their nominal home warehouse.
@@ -1171,12 +1537,14 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
 
   const rows: QueueRow[] = pageJobs.map((job) => {
     const movements = movementsByJob.get(job.id) ?? [];
-    const heldOf = (kl: { irmItemId: string | null; customerStockEntryId: string | null }) => {
+    const heldOf = (kl: { irmItemId: string | null; rentalItemId?: string | null; customerStockEntryId: string | null }) => {
       if (!job.assignedEngineerId) return 0;
-      const itemId = kl.irmItemId ?? kl.customerStockEntryId;
+      // Rental sits between the other two: without it a hired line reported "held 0", so the return
+      // scan offered nothing to hand back on a line the engineer was demonstrably carrying.
+      const itemId = kl.irmItemId ?? kl.rentalItemId ?? kl.customerStockEntryId;
       return itemId ? engHeld.get(`${job.assignedEngineerId}|${itemId}`) ?? 0 : 0;
     };
-    const kitLines: QueueKitLine[] = (job.kitLines ?? []).map((kl) => buildKitLineRow(kl, movements, balByKey, cseQty, cseBarcode, heldOf(kl), vanQtyByLine.get(kl.id) ?? 0));
+    const kitLines: QueueKitLine[] = (job.kitLines ?? []).map((kl) => buildKitLineRow(kl, movements, balByKey, cseQty, cseBarcode, heldOf(kl), vanQtyByLine.get(kl.id) ?? 0, rentalAvailByKey));
     return {
       jobId: job.id,
       jobNumber: job.jobNumber,
@@ -1218,9 +1586,13 @@ export async function getJobGoods(jobId: string, actor?: AuditActor): Promise<Jo
   const irmItemIds = new Set<string>();
   const whIds = new Set<string>();
   const cseIds = new Set<string>();
+  const rentalItemIds = new Set<string>();
   for (const kl of job.kitLines ?? []) {
     if (kl.lineType === "irm" && kl.irmItemId && kl.warehouseId) {
       irmItemIds.add(kl.irmItemId);
+      whIds.add(kl.warehouseId);
+    } else if (kl.lineType === "rental" && kl.rentalItemId && kl.warehouseId) {
+      rentalItemIds.add(kl.rentalItemId);
       whIds.add(kl.warehouseId);
     } else if (kl.lineType === "customer_stock" && kl.customerStockEntryId) {
       cseIds.add(kl.customerStockEntryId);
@@ -1229,6 +1601,7 @@ export async function getJobGoods(jobId: string, actor?: AuditActor): Promise<Jo
   const balByKey = new Map(
     (await inventoryRepo.findBalancesByItemsAndWarehouses([...irmItemIds], [...whIds])).map((b) => [`${b.irmItemId}|${b.warehouseId}`, b]),
   );
+  const rentalAvailByKey = await rentalPoolByItemAndWarehouse([...rentalItemIds], [...whIds]);
   // One query, two lookups: quantity for the Available column, barcode for the scan-code chip.
   const cseRows = await goodsManagementRepo.findCustomerStockEntriesByIds([...cseIds]);
   const cseQty = new Map(cseRows.map((e) => [e.id, e.quantity]));
@@ -1238,15 +1611,16 @@ export async function getJobGoods(jobId: string, actor?: AuditActor): Promise<Jo
   if (job.assignedEngineerId) {
     for (const b of await engineerStockRepo.findEngineerBalances(job.assignedEngineerId)) engHeld.set(b.irmItemId, b.quantityOnHand);
     for (const h of await goodsManagementRepo.findCustomerHoldingsByEngineer(job.assignedEngineerId)) engHeld.set(h.customerStockEntryId, h.quantityOnHand);
+    for (const [rentalItemId, h] of await rentalHeldByItem(job.assignedEngineerId)) engHeld.set(rentalItemId, h.qty);
   }
 
-  const heldOf = (kl: { irmItemId: string | null; customerStockEntryId: string | null }) => {
+  const heldOf = (kl: { irmItemId: string | null; rentalItemId?: string | null; customerStockEntryId: string | null }) => {
     if (!job.assignedEngineerId) return 0;
-    const itemId = kl.irmItemId ?? kl.customerStockEntryId;
+    const itemId = kl.irmItemId ?? kl.rentalItemId ?? kl.customerStockEntryId;
     return itemId ? engHeld.get(itemId) ?? 0 : 0;
   };
   const vanQtyByLine = await completedVanQtyByKitLine((job.kitLines ?? []).map((k) => k.id));
-  const lines: QueueKitLine[] = (job.kitLines ?? []).map((kl) => buildKitLineRow(kl, movements, balByKey, cseQty, cseBarcode, heldOf(kl), vanQtyByLine.get(kl.id) ?? 0));
+  const lines: QueueKitLine[] = (job.kitLines ?? []).map((kl) => buildKitLineRow(kl, movements, balByKey, cseQty, cseBarcode, heldOf(kl), vanQtyByLine.get(kl.id) ?? 0, rentalAvailByKey));
 
   return {
     job: {
@@ -1303,7 +1677,18 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
     condition: "good" | "damaged";
     awayReturn?: boolean; // van portion returned away from the kit line's home warehouse
     kitHomeWarehouseId?: string | null; // the kit line's own home (sizes the away-from-home budget)
+    hireId?: string | null; // rental only — the hire being credited back
+    // The kit line THE SERVER matched — what the movement is filed against AND what its per-line
+    // return budget is charged to. Both, or neither: the client also sends a jobKitLineId and
+    // validation requires one, but presence is not consistency. A well-formed id naming a DIFFERENT
+    // line of this job passes validation, and filing the movement against one line while charging the
+    // cap to another means a return can be credited twice — once to each line's budget. postIssue
+    // writes its own resolved id for exactly this reason; every arm below now does the same.
+    kitLineId?: string;
   };
+  // The one id both the ledger row and the budget below may use. Nothing downstream may reach past
+  // this to `line.jobKitLineId` — that is the client's claim, and the two diverging is the bug.
+  const kitLineIdOf = (r: Resolved): string | null => r.kitLineId ?? r.line.jobKitLineId ?? null;
   const resolved: Resolved[] = [];
 
   for (const line of input.lines) {
@@ -1353,6 +1738,58 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
         // The resolved line's own home — sizes the away-from-home budget (counts returns made at any
         // warehouse other than this). Same as input.warehouseId for a home return.
         kitHomeWarehouseId: kit.warehouseId,
+        // Server-resolved, like the rental arm. `kit` is matched on item + warehouse, and job
+        // validation makes that pair unique per job, so this is the only line the return CAN belong
+        // to — whatever id the client sent alongside it.
+        kitLineId: kit.id,
+      });
+    } else if (line.source === "rental") {
+      if (!line.rentalItemId) throw badRequest("Rental return line is missing rentalItemId.");
+      if (!line.purchaseOrderRentalLineId) throw badRequest("Rental return line is missing the hire it came from.");
+      // Hired kit goes back where it was collected. There is no away-from-home leg: a hire is not
+      // transferable between engineers in this phase, so nothing can arrive at a warehouse that did
+      // not lend it, and the hire's own delivery warehouse is the one the provider will collect from.
+      const kit = (job.kitLines ?? []).find(
+        (k) => k.lineType === "rental" && k.rentalItemId === line.rentalItemId && k.warehouseId === input.warehouseId,
+      );
+      if (!kit?.warehouseId) {
+        // Name the item, and say WHICH of the two things is wrong — the same pair scanLookup
+        // distinguishes on the way in. "That hired item isn't on this job's kit list at this
+        // warehouse" was one sentence for two different problems, on a panel that may hold several
+        // hires, and it named none of them.
+        const onJobElsewhere = (job.kitLines ?? []).find((k) => k.lineType === "rental" && k.rentalItemId === line.rentalItemId);
+        // Not on the job at all ⇒ there is no kit-line snapshot to read the name from, so look it up.
+        // One extra query on an error path, to avoid the "that hired item" that started this.
+        const named = onJobElsewhere?.itemName ?? (await rentalItemRepo.findById(line.rentalItemId))?.name;
+        throw badRequest(
+          onJobElsewhere
+            ? `${named} is on this job but was collected from a different warehouse — return it there.`
+            : `${named ?? "That hired item"} isn't on this job's kit list.`,
+        );
+      }
+      const hire = await poRepo.findHireStockById(line.purchaseOrderRentalLineId);
+      if (!hire) throw badRequest("That hire no longer exists.");
+      // The hire id is CLIENT-SUPPLIED, and `kit` above was matched on the ITEM — so nothing yet ties
+      // the two together. postIssue guards identity on both axes (item and warehouse); this leg
+      // guarded only the warehouse, which let an engineer holding two different hired items at one
+      // depot have the WRONG hire's custody drained and its units released back to the provider's
+      // count. The `orderLive` guard stays deliberately absent here (see the note below) — identity
+      // does not: getting the paperwork wrong is not the same as the paperwork having moved on.
+      if (hire.rentalItemId !== line.rentalItemId) {
+        throw badRequest(`${kit.itemName}: that hire is for a different rental item.`);
+      }
+      if (hire.warehouseId !== kit.warehouseId) throw badRequest(`${kit.itemName}: that hire belongs to a different warehouse.`);
+      // NOTE: no `orderLive` guard on the RETURN leg, deliberately. Kit already in an engineer's hands
+      // has to be able to come back whatever happened to the paperwork behind it — refusing here would
+      // strand it in the van with no way to record its return.
+      assertWarehouseAccess(actor, input.warehouseId);
+      resolved.push({
+        line, itemName: kit.itemName, uom: null, sku: null, warehouseId: kit.warehouseId,
+        warehouseName: kit.warehouseName ?? null, warehouseCode: kit.warehouseCode ?? null,
+        customerId: null, condition,
+        hireId: hire.id,
+        kitHomeWarehouseId: kit.warehouseId,
+        kitLineId: kit.id,
       });
     } else {
       if (!line.customerStockEntryId) throw badRequest("Customer return line is missing customerStockEntryId.");
@@ -1406,12 +1843,14 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
     source: r.line.source,
     irmItemId: r.line.source === "irm" ? (r.line.irmItemId ?? null) : null,
     customerStockEntryId: r.line.source === "customer" ? (r.line.customerStockEntryId ?? null) : null,
+    rentalItemId: r.line.source === "rental" ? (r.line.rentalItemId ?? null) : null,
+    purchaseOrderRentalLineId: r.line.source === "rental" ? (r.hireId ?? null) : null,
     itemName: r.itemName,
     sku: r.sku,
     uom: r.uom,
     qty: r.line.qty,
     condition: r.condition,
-    jobKitLineId: r.line.jobKitLineId ?? null,
+    jobKitLineId: kitLineIdOf(r),
     scannedCode: r.line.scannedCode ?? null,
     damagePhotoUrl: r.condition === "damaged" ? (r.line.damagePhotoUrl ?? null) : null,
     damageReason: r.condition === "damaged" ? (r.line.damageReason ?? null) : null,
@@ -1425,11 +1864,14 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
   // multiple lines (e.g. good + damaged split) against the same kit line in one request.
   const returnMovements = await loadMovements();
   const awayVanQty = await completedVanQtyByKitLine(
-    resolved.filter((r) => r.awayReturn && r.line.jobKitLineId).map((r) => r.line.jobKitLineId!),
+    resolved.flatMap((r) => (r.awayReturn ? [kitLineIdOf(r)] : [])).filter((id): id is string => !!id),
   );
   const outstandingByLine = new Map<string, number>();
   for (const r of resolved) {
-    const klId = r.line.jobKitLineId;
+    // The SERVER's id, the same one the ledger row above was filed under. Keyed off the client's
+    // instead, a line could be filed against A while its budget was drawn from B — so a second
+    // return naming B would find B's budget untouched and over-credit the job.
+    const klId = kitLineIdOf(r);
     if (!klId || outstandingByLine.has(klId)) continue;
     if (r.awayReturn) {
       outstandingByLine.set(klId, vanReturnableAwayFromHome(returnMovements, klId, r.kitHomeWarehouseId ?? null, awayVanQty.get(klId) ?? 0));
@@ -1462,14 +1904,15 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
 
         // Per-warehouse cap: can't return more than the kit line still has out here — the whole line
         // at its home warehouse, or just the van portion away from home.
-        if (line.jobKitLineId) {
-          const remaining = outstandingByLine.get(line.jobKitLineId) ?? 0;
+        const budgetLineId = kitLineIdOf(r);
+        if (budgetLineId) {
+          const remaining = outstandingByLine.get(budgetLineId) ?? 0;
           if (qty > remaining) {
             throw conflict(r.awayReturn
               ? `Only ${remaining} of ${r.itemName} came from a van and can be returned away from its home warehouse — the rest must go back there.`
               : `Only ${remaining} of ${r.itemName} can be returned at this warehouse — that's all that's still out from here.`);
           }
-          outstandingByLine.set(line.jobKitLineId, remaining - qty);
+          outstandingByLine.set(budgetLineId, remaining - qty);
         }
 
         if (line.source === "irm") {
@@ -1532,6 +1975,52 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
               balanceAfter: dmgBal.quantity,
               createdBy: actorEmail,
             });
+          }
+        } else if (line.source === "rental") {
+          const hireId = r.hireId!;
+          // Pre-check: engineer must actually be holding this hire.
+          const held = await rentalCustodyRepo.findRentalHoldingTx(tx, hireId, job.assignedEngineerId!);
+          if (!held || held.quantityOnHand < qty) {
+            throw conflict(`Engineer doesn't hold ${qty} of this hire. Held: ${held?.quantityOnHand ?? 0}.`);
+          }
+          const back = await rentalCustodyRepo.upsertRentalHoldingTx(tx, hireId, job.assignedEngineerId!, -qty, {
+            rentalItemId: held.rentalItemId,
+            itemName: held.itemName,
+            poCode: held.poCode,
+            hireEndDate: held.hireEndDate,
+          });
+          await rentalCustodyRepo.insertRentalTxnTx(tx, {
+            purchaseOrderRentalLineId: hireId,
+            engineerId: job.assignedEngineerId!,
+            quantityDelta: -qty,
+            type: "job_return",
+            sourceType: "goods_management",
+            sourceId: movementId,
+            sourceCode: code,
+            balanceAfter: back.quantityOnHand,
+            notes: condition === "damaged" ? (line.damageReason ?? "Returned damaged") : null,
+            createdBy: actorEmail,
+          });
+          // Release the units back into the hire's warehouse pool. This is the mirror of the issue's
+          // conditional increment and it must not be skipped when the kit came back damaged: a damaged
+          // tester is still physically on our shelf, still ours to give back to the provider, and still
+          // counting against the hire's deadline. Leaving it "issued" would make the hire un-returnable
+          // and park it on the overdue badge forever.
+          const released = await poRepo.adjustHireIssuedQtyTx(tx, hireId, -qty);
+          if (!released) throw conflict(`${r.itemName}: this hire's numbers moved while the return was posting. Refresh and scan again.`);
+
+          // DAMAGE IS EVIDENCE, NOT A QUANTITY MOVE — and deliberately NOT DamagedStockBalance.
+          //
+          // That pool is for stock WE own, where a damaged unit is our loss to write off or reclaim.
+          // A hire is the provider's equipment: the damage is a LIABILITY to them, settled through the
+          // hire's own damage note (HDM) with their charge on it. Posting it to the damaged pool as
+          // well would double-count one event against a charge the supplier bills once.
+          //
+          // So the photo and reason ride on the movement line (captured at the moment it is seen,
+          // which is what makes them evidence rather than recollection), and the hire is flagged so
+          // the PM sees it on the on-hire screen and raises the damage note with the real figure.
+          if (condition === "damaged") {
+            await poRepo.flagHireDamagedTx(tx, hireId, qty);
           }
         } else {
           const customerStockEntryId = line.customerStockEntryId!;
@@ -1638,6 +2127,23 @@ function resolveUsedKitLine(job: JobWithRelations, used: ConsumeUsedLine): JobWi
         : kl.lineType === "customer_stock" && kl.customerStockEntryId === used.customerStockEntryId,
   );
   if (!kitLine) throw badRequest("A declared 'used' item isn't on this job's kit list (or its line was edited) — refresh the job and try again.");
+  // The id branch above matches on id ALONE, so it will happily hand back a `rental` (or `misc`) line
+  // for a payload that declared `source: "irm"`. `completeJobSchema` bars rental from the SOURCE enum
+  // but cannot see which line an id points at, so this is the only place the invariant can be checked.
+  //
+  // It is not theoretical. A consume booked against a rental line drains an unrelated IRM item AND
+  // credits `used` to the hire, whose remaining then falls to 0 — so the line reads fully accounted
+  // for, reconcile lets the job through, and the hire is still in a van with EngineerRentalHolding
+  // still saying so. That is exactly the "a hire is never consumed" rule the schema, the enum and the
+  // reconcile guard are all built around; this closes the last door into it.
+  const expected = used.source === "irm" ? "irm" : "customer_stock";
+  if (kitLine.lineType !== expected) {
+    throw badRequest(
+      kitLine.lineType === "rental"
+        ? `${kitLine.itemName} is a hired item — it can't be declared as used. Hired kit is returned to the warehouse, never consumed.`
+        : `A declared 'used' item doesn't match its kit line type — refresh the job and try again.`,
+    );
+  }
   return kitLine;
 }
 
@@ -1659,6 +2165,11 @@ export async function recordConsumeAndComplete(
         source: used.source === "irm" ? "irm" : "customer",
         irmItemId: used.source === "irm" ? used.irmItemId ?? null : null,
         customerStockEntryId: used.source === "irm" ? null : used.customerStockEntryId ?? null,
+        // Always null — a hire is never consumed. `completeJobSchema.usedLines[].source` admits only
+        // "irm" and "customer", so a rental cannot reach this path at all; the nulls state the
+        // invariant at the one place a future edit would be tempted to break it.
+        rentalItemId: null,
+        purchaseOrderRentalLineId: null,
         itemName: kitLine.itemName,
         sku: null,
         uom: null,
@@ -2166,14 +2677,14 @@ interface UnaccountedItem {
   itemName: string;
   itemCode: string | null;
   qty: number;
-  source: "irm" | "customer";
+  source: "irm" | "customer" | "rental";
   irmItemId: string | null;
   customerStockEntryId: string | null;
   warehouseId: string | null;
   customerId: string | null;
 }
 
-type TallyEntry = { jobKitLineId: string; itemName: string; itemCode: string | null; source: "irm" | "customer"; irmItemId: string | null; customerStockEntryId: string | null; warehouseId: string | null; issued: number; consumed: number; returnedGood: number; returnedDamaged: number };
+type TallyEntry = { jobKitLineId: string; itemName: string; itemCode: string | null; source: "irm" | "customer" | "rental"; irmItemId: string | null; rentalItemId: string | null; customerStockEntryId: string | null; warehouseId: string | null; issued: number; consumed: number; returnedGood: number; returnedDamaged: number };
 
 // Tally goods for reconciliation, keyed by the job's CURRENT, stock-tracked kit lines (jobKitLineId).
 // Keying by kit line — not by item id — keeps this consistent with the held / queue / job-pack views
@@ -2194,9 +2705,14 @@ function computeTallies(
       // the kit line and is NOT reliably unique — the catalogue holds e.g. IRM-0002 "Cat6 U/UTP Cable
       // 305m Box" and IRM-0004 "CAT6 U/UTP Cable, 305m box", which read as the same thing. Writing off
       // the wrong one is irreversible, so the code travels with the row.
-      itemCode: kl.irmItem?.code ?? kl.seCode ?? null,
-      source: kl.irmItemId ? "irm" : "customer",
+      itemCode: kl.irmItem?.code ?? kl.rentalItem?.code ?? kl.seCode ?? null,
+      // Three-way, NOT the old `irmItemId ? "irm" : "customer"` ternary. That binary treated anything
+      // without an IRM id as customer stock, so a rental line reconciled as a customer consignment —
+      // draining a holding that does not exist and offering hired equipment for write-off as our own
+      // loss. A rental is neither of the other two and has to say so.
+      source: kl.rentalItemId ? "rental" : kl.irmItemId ? "irm" : "customer",
       irmItemId: kl.irmItemId ?? null,
+      rentalItemId: kl.rentalItemId ?? null,
       customerStockEntryId: kl.customerStockEntryId ?? null,
       warehouseId: kl.warehouseId ?? null,
       issued: 0,
@@ -2282,16 +2798,29 @@ export async function closeReconcile(
   const engId = job.assignedEngineerId;
   const irmHeld = new Map<string, number>();
   const cseHeld = new Map<string, number>();
+  let rentalHeld = new Map<string, RentalHeld>();
   if (engId) {
     for (const b of await engineerStockRepo.findEngineerBalances(engId)) irmHeld.set(b.irmItemId, b.quantityOnHand);
     for (const h of await goodsManagementRepo.findCustomerHoldingsByEngineer(engId)) cseHeld.set(h.customerStockEntryId, h.quantityOnHand);
+    rentalHeld = await rentalHeldByItem(engId);
   }
 
   // Group the tallies by item (the engineer holding is global per item, not per kit line) and spread
   // each item's real held across its lines, capped at each line's raw remaining.
   const talliesByItem = new Map<string, TallyEntry[]>();
   for (const t of tallies.values()) {
-    const key = t.source === "irm" ? `irm:${t.irmItemId}` : `cse:${t.customerStockEntryId}`;
+    // The rental arm is LOAD-BEARING, not symmetry for its own sake. Without it every rental tally
+    // fell to `cse:undefined` — one bucket for every hire on the job — and the cap below then read
+    // `held` from the FIRST item only. Two hires out, the first one already back, and the whole
+    // bucket capped to 0: `unaccountedItems` came out empty and the guard at the end of this function
+    // (the one that refuses to reconcile with hired kit still out) never fired. Keyed the same way as
+    // getJobKitTallies groups them, so the two cannot drift.
+    const key =
+      t.source === "irm"
+        ? `irm:${t.irmItemId}`
+        : t.source === "rental"
+          ? `rental:${t.rentalItemId}`
+          : `cse:${t.customerStockEntryId}`;
     const g = talliesByItem.get(key);
     if (g) g.push(t);
     else talliesByItem.set(key, [t]);
@@ -2304,22 +2833,53 @@ export async function closeReconcile(
   // carry `jobKitLineId: null` anyway, and `warehouseId`/`customerId` on this shape are unread.
   const unaccountedItems: UnaccountedItem[] = [];
   for (const group of talliesByItem.values()) {
-    const held = group[0].source === "irm" ? irmHeld.get(group[0].irmItemId!) ?? 0 : cseHeld.get(group[0].customerStockEntryId!) ?? 0;
+    const first = group[0];
+    const held =
+      first.source === "irm"
+        ? irmHeld.get(first.irmItemId!) ?? 0
+        : first.source === "rental"
+          ? rentalHeld.get(first.rentalItemId!)?.qty ?? 0
+          : cseHeld.get(first.customerStockEntryId!) ?? 0;
     const rawRemaining = group.reduce((n, t) => n + Math.max(0, t.issued - t.consumed - t.returnedGood - t.returnedDamaged), 0);
     const qty = Math.min(rawRemaining, held); // never more than the engineer truly holds
     if (qty > 0) {
-      const t = group[0];
       unaccountedItems.push({
-        itemName: t.itemName,
-        itemCode: t.itemCode,
+        itemName: first.itemName,
+        itemCode: first.itemCode,
         qty,
-        source: t.source,
-        irmItemId: t.irmItemId,
-        customerStockEntryId: t.customerStockEntryId,
-        warehouseId: t.warehouseId,
+        source: first.source,
+        irmItemId: first.irmItemId,
+        customerStockEntryId: first.customerStockEntryId,
+        warehouseId: first.warehouseId,
         customerId: null,
       });
     }
+  }
+
+  // HIRED KIT IS NEVER WRITTEN OFF AS LOST — the reconcile refuses instead, whatever the client asked.
+  //
+  // "Write off as lost" books a permanent loss of something WE own. Hired equipment is the provider's:
+  // an unreturned unit is not a loss to absorb, it is a liability to settle — they will keep billing
+  // for it and then charge us for the replacement. Booking it as our own shrinkage would state
+  // something untrue in the stock ledger AND take the hire off the deadline badge that is still the
+  // only thing chasing it.
+  //
+  // Refusing here rather than filtering the rows out is deliberate: a silent filter would let the job
+  // reconcile with hired kit still in a van and nothing on screen saying so.
+  const outstandingRentals = unaccountedItems.filter((u) => u.source === "rental");
+  if (outstandingRentals.length > 0) {
+    const names = outstandingRentals.map((u) => `${u.qty} × ${u.itemName}`).join(", ");
+    throw conflict(
+      `This job can't be reconciled while rental items are still out: ${names}. ` +
+        `Rental items have to be scanned back to the warehouse — they can't be written off as lost, because they aren't ours to lose. ` +
+        // Deliberately does NOT offer an alternative any more. It used to say "record that against the
+        // hire on the purchase order", and no such path exists: the only writers of an
+        // EngineerRentalHolding are the job issue and the job return scans, closeHireShort covers
+        // UNDELIVERED units and never touches custody, and damage is reported on the return scan
+        // itself. Naming a door that isn't there sends a warehouse manager looking for a screen they
+        // will not find, on the one message meant to tell them what to do next.
+        `Damage is recorded on the return scan, so bring it in either way.`,
+    );
   }
 
   const actorEmail = actor?.email ?? null;
@@ -2351,6 +2911,10 @@ export async function closeReconcile(
     source: u.source,
     irmItemId: u.irmItemId,
     customerStockEntryId: u.customerStockEntryId,
+    // Always null, and unreachable: the guard above throws before this point if any unaccounted row
+    // is a rental, because hired equipment is never written off as our own loss.
+    rentalItemId: null,
+    purchaseOrderRentalLineId: null,
     itemName: u.itemName,
     sku: null,
     uom: null,

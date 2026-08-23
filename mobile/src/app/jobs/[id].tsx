@@ -98,7 +98,10 @@ function KitLineCard({
           Remaining would sit at 0/0/issued forever. An em dash says the column
           doesn't apply (web parity). */}
       <Text style={s.lineTallies}>
-        Issued {line.issued} · Used {line.lineType === "misc" ? "—" : line.used} · Returned{" "}
+        Issued {line.issued} · Used{" "}
+        {/* A hire is never consumed — every unit goes back to the provider — so "Used" has no
+            meaning on a rental line, exactly as it has none on a free-text misc line. */}
+        {line.lineType === "misc" || line.lineType === "rental" ? "—" : line.used} · Returned{" "}
         {line.lineType === "misc" ? "—" : line.returned} · On van{" "}
         {line.lineType === "misc" ? "—" : line.remaining}
       </Text>
@@ -153,6 +156,13 @@ function KitRequestLines({ lines }: { lines: KitRequestLine[] }) {
                     <Text style={[s.krPillText, { color: colors.accent }]}>Customer stock</Text>
                   </View>
                 ) : null}
+                {/* Rental needs its own pill, not the IRM blank: it is the one pool collected from a
+                    specific depot's live hire, never off a van, and owed back to a provider. */}
+                {l.source === "rental" ? (
+                  <View style={[s.krPill, { backgroundColor: colors.warnSoft }]}>
+                    <Text style={[s.krPillText, { color: colors.warn }]}>Rental</Text>
+                  </View>
+                ) : null}
                 {l.source === "misc" ? (
                   <View style={[s.krPill, { backgroundColor: colors.mutedSoft }]}>
                     <Text style={[s.krPillText, { color: colors.muted }]}>Misc</Text>
@@ -164,7 +174,9 @@ function KitRequestLines({ lines }: { lines: KitRequestLine[] }) {
                   </View>
                 ) : null}
               </View>
-              {l.source === "customer_stock" && l.warehouseName ? (
+              {/* The depot a rental was sourced from reads the same way as a consignment's location —
+                  both answer "where does the engineer collect this". */}
+              {(l.source === "customer_stock" || l.source === "rental") && l.warehouseName ? (
                 <Text style={s.krWarehouse}>
                   {l.warehouseName}
                   {l.warehouseCode ? ` (${l.warehouseCode})` : ""}

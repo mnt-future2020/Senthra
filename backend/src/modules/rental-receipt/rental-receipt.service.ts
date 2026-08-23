@@ -676,6 +676,26 @@ export async function createRentalReturn(
         `${hire.itemName}: only ${stillOut} still out (received ${here}, already returned ${already}).`,
       );
     }
+    // Units in an ENGINEER'S VAN are not on the shelf for the provider to collect.
+    //
+    // Without this the warehouse can hand back a hire while some of it is physically on a job, and
+    // the damage is not just a wrong number: `fullyReturned`/`hireStatus` go terminal, the hire drops
+    // off the deadline badge that was the only thing chasing it, and an EngineerRentalHolding row is
+    // left pointing at a hire the record says is finished. The kit then goes missing quietly, which is
+    // the exact failure the rental module exists to prevent.
+    //
+    // `issuedQuantity` is a maintained column on the hire row (see schema.prisma), moved in the same
+    // transaction as every job issue and return, so this reads one document and cannot disagree with
+    // the custody ledger it summarises.
+    const withEngineers = hire.issuedQuantity ?? 0;
+    const onShelf = stillOut - withEngineers;
+    if (withEngineers > 0 && l.returnedQuantity > onShelf) {
+      throw conflict(
+        `${hire.itemName}: only ${Math.max(0, onShelf)} of the ${stillOut} still out ${onShelf === 1 ? "is" : "are"} at the warehouse — ` +
+          `${withEngineers} ${withEngineers === 1 ? "is" : "are"} out with an engineer on a job. ` +
+          `Rental items have to be scanned back in before the provider collects them.`,
+      );
+    }
     const damaged = l.damagedQuantity ?? 0;
     if (damaged > l.returnedQuantity) {
       throw badRequest(`${hire.itemName}: damaged can't be more than the quantity returned.`);

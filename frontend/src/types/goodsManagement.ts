@@ -6,7 +6,7 @@
 // ── Enums / union types ──────────────────────────────────────────────────────
 
 export type MovementDirection = "issue" | "return" | "consume";
-export type LineSource = "irm" | "customer" | "misc"; // misc = free-text kit line (no stock/barcode)
+export type LineSource = "irm" | "customer" | "rental" | "misc"; // misc = free-text kit line (no stock/barcode)
 export type LineCondition = "good" | "damaged";
 
 export type GoodsStatus =
@@ -30,6 +30,14 @@ export interface ScanMatch {
   source: LineSource;
   irmItemId?: string;
   customerStockEntryId?: string;
+  rentalItemId?: string;
+  /**
+   * For a rental: WHICH HIRE the scan resolved to, chosen server-side (soonest deadline first) and
+   * echoed back on post, so the units committed are the ones this preview showed.
+   */
+  purchaseOrderRentalLineId?: string;
+  /** The hire's human context — which order it sits on and when it has to go back. */
+  hire?: { poCode: string | null; hireEndDate: string | null; itemName: string; overdue: boolean } | null;
   jobKitLineId?: string;
   itemName: string;
   uom?: string | null;
@@ -81,6 +89,7 @@ export interface JobStockSummary {
 // Open demand = stock active jobs have planned but not yet issued (per item+warehouse / entry).
 export interface DemandEntry {
   irmItemId: string | null;
+  rentalItemId: string | null;
   customerStockEntryId: string | null;
   warehouseId: string | null;
   itemName: string;
@@ -90,7 +99,9 @@ export interface DemandEntry {
 
 // One row of a warehouse demand board: current stock vs total planned across jobs.
 export interface WarehouseDemandRow {
-  source: "irm" | "customer";
+  // Hired items appear here too. They were previously mislabelled `customer` with inStock 0, which
+  // sorted every live hire to the top of the board as a shortfall that did not exist.
+  source: "irm" | "customer" | "rental";
   itemName: string;
   inStock: number;
   planned: number;
@@ -101,7 +112,7 @@ export interface WarehouseDemandRow {
 
 export interface QueueKitLine {
   id: string; // kit line id
-  lineType: "irm" | "customer_stock" | "misc";
+  lineType: "irm" | "customer_stock" | "rental" | "misc";
   irmItemId: string | null;
   customerStockEntryId: string | null;
   itemName: string;
@@ -325,6 +336,8 @@ export interface MovementLinePayload {
   source: LineSource;
   irmItemId?: string;
   customerStockEntryId?: string;
+  rentalItemId?: string;
+  purchaseOrderRentalLineId?: string;
   jobKitLineId?: string;
   qty: number;
   condition?: LineCondition;

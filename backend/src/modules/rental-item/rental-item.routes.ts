@@ -15,11 +15,21 @@ const router = Router();
 router.use(requireAuth);
 
 // The PRF form's rental-line picker reads this list, so a requester who may raise a purchase
-// request needs it too — otherwise the picker is empty and no rental can ever be requested.
+// request needs it too — otherwise the picker is empty and no rental can ever be requested. The same
+// applies to the JOB form's kit-line picker: a planner holding jobs.create/edit but not rentals.view
+// would see an empty dropdown and no way to put hired kit on a job.
 router.get(
   "/",
-  requireAnyPermission("rentals.view", "purchase_requests.create", "purchase_requests.edit"),
+  requireAnyPermission("rentals.view", "purchase_requests.create", "purchase_requests.edit", "jobs.create", "jobs.edit"),
   rentalItemController.listRentalItems,
+);
+// Where this hired item can be collected from RIGHT NOW, and how many are free at each depot —
+// summed from its live hires. The job form's pickup-warehouse picker reads it, so it carries the same
+// permission set as the list above for the same reason.
+router.get(
+  "/:id/availability",
+  requireAnyPermission("rentals.view", "jobs.create", "jobs.edit"),
+  rentalItemController.getRentalItemAvailability,
 );
 // Declared before "/:id" so Express does not read "export" as a rental-item id.
 router.get("/export", requirePermission("rentals.export"), exportLimiter, rentalItemController.exportRentalItemsCsv);

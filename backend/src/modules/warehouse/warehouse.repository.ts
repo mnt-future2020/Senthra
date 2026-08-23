@@ -56,6 +56,18 @@ function warehouseOrderBy(sort?: string): Prisma.WarehouseOrderByWithRelationInp
   }
 }
 
+/**
+ * Name + code for a set of warehouses, in one query.
+ *
+ * A label lookup, not a listing: callers rendering "collect from X" need the two display columns and
+ * nothing else, and going through `findMany` would page and sort a full row for each.
+ */
+export async function findLabelsByIds(ids: string[]): Promise<Map<string, { name: string; code: string }>> {
+  if (ids.length === 0) return new Map();
+  const rows = await prisma.warehouse.findMany({ where: { id: { in: ids } }, select: { id: true, name: true, code: true } });
+  return new Map(rows.map((w) => [w.id, { name: w.name, code: w.code }]));
+}
+
 export function findMany(
   filters: WarehouseListFilters = {},
   skip = 0,

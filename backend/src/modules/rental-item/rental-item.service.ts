@@ -8,6 +8,9 @@ import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { requireActiveRentalCategory } from "#modules/rental-category/rental-category.service.js";
 import { getRentalCodePrefix } from "#modules/settings/settings.service.js";
+import * as rentalCustodyRepo from "#modules/engineer-rental/engineer-rental.repository.js";
+import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
+import { hireAvailable } from "#modules/purchase-order/rentalHire.allocation.js";
 import type { CreateRentalItemInput, UpdateRentalItemInput } from "./rental-item.validation.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
@@ -198,6 +201,11 @@ type DependencyChecker = { label: string; count: (itemId: string) => Promise<num
 const DELETE_DEPENDENCY_CHECKERS: DependencyChecker[] = [
   { label: "purchase requests", count: (id) => rentalRepo.countByPrfLines(id) },
   { label: "purchase orders", count: (id) => rentalRepo.countByPoLines(id) },
+  // Both added when hired kit became plannable on jobs. Without them a rental item could be retired
+  // out from under live work: a job's kit list left naming a catalogue entry no picker shows any
+  // more, or — worse — an engineer still physically carrying one.
+  { label: "job kit lists", count: (id) => rentalRepo.countByJobKitLines(id) },
+  { label: "engineer-held hires", count: (id) => rentalCustodyRepo.countHeldRentalsByRentalItem(id) },
 ];
 
 export async function deleteRentalItem(id: string, actor?: AuditActor): Promise<void> {
@@ -282,4 +290,51 @@ export async function exportRentalItemsCsv(
     targetLabel: `${rows.length} items`,
   });
   return { csv, capped: total > rows.length };
+}
+
+/** One depot that currently holds this hired item, and how many units are free to take. */
+export interface RentalItemWarehouseAvailability {
+  warehouseId: string;
+  warehouseName: string | null;
+  warehouseCode: string | null;
+  available: number;
+  /** The soonest deadline among the hires stocking this depot — what a planner needs to see. */
+  nextDueBack: string | null;
+}
+
+/**
+ * Where a hired item can be collected right now, and how many are free at each depot.
+ *
+ * The rental twin of the inventory module's per-warehouse stock read, and it exists for the same
+ * reason: the job form asks "which depot do I send the engineer to", and for a hire that question has
+ * no answer in the catalogue — a RentalItem deliberately carries no quantity at all. The answer lives
+ * on the live hires, whose warehouse is their ORDER's delivery warehouse.
+ *
+ * Depots with nothing free are omitted rather than listed as zero: this feeds a picker, and an option
+ * that cannot be chosen is noise.
+ */
+export async function getRentalItemAvailability(idOrCode: string): Promise<RentalItemWarehouseAvailability[]> {
+  const item = await getRentalItem(idOrCode);
+  const hires = await poRepo.findLiveHiresByRentalItems([item.id]);
+
+  const byWarehouse = new Map<string, RentalItemWarehouseAvailability>();
+  for (const h of hires) {
+    const free = hireAvailable(h);
+    if (free <= 0) continue;
+    const due = h.hireEndDate.toISOString();
+    const row = byWarehouse.get(h.warehouseId);
+    if (row) {
+      row.available += free;
+      if (!row.nextDueBack || due < row.nextDueBack) row.nextDueBack = due;
+    } else {
+      byWarehouse.set(h.warehouseId, {
+        warehouseId: h.warehouseId,
+        warehouseName: h.warehouseName,
+        warehouseCode: h.warehouseCode,
+        available: free,
+        nextDueBack: due,
+      });
+    }
+  }
+  return [...byWarehouse.values()].sort((a, b) => (b.available - a.available) || (a.warehouseName ?? "").localeCompare(b.warehouseName ?? ""));
 }

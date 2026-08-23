@@ -4,7 +4,7 @@ import { api, LONG_WRITE_TIMEOUT } from "@/lib/api";
 // requests; PMs/planners review the queue and approve (grow kit + open fulfilment) or decline.
 
 export type KitRequestStatus = "pending" | "approved" | "declined" | "cancelled";
-export type KitRequestSource = "irm" | "customer_stock" | "misc";
+export type KitRequestSource = "irm" | "customer_stock" | "rental" | "misc";
 // "mixed" is a RESULT, never a choice: it's what the server records when the PM sourced different
 // lines from different places. The picker itself works per line (see LineSourcePayload).
 export type FulfillmentMode = "warehouse_issue" | "engineer_transfer" | "mixed";
@@ -14,6 +14,8 @@ export interface KitRequestLine {
   id: string;
   source: KitRequestSource;
   irmItemId: string | null;
+  /** The CATALOGUE item asked for on a `rental` line — never a particular hire. */
+  rentalItemId: string | null;
   customerStockEntryId: string | null;
   itemName: string;
   sku: string | null;
@@ -71,6 +73,7 @@ export interface PagedKitRequests {
 export interface KitRequestLinePayload {
   source: KitRequestSource;
   irmItemId?: string;
+  rentalItemId?: string;
   customerStockEntryId?: string;
   itemName: string;
   qty: number;
@@ -212,7 +215,27 @@ export interface KitItemCustomerStockOption {
   warehouseCode: string | null;
   serialNumber: string | null;
 }
-export type KitItemOption = KitItemIrmOption | KitItemCustomerStockOption;
+export interface KitItemRentalOption {
+  source: "rental";
+  rentalItemId: string;
+  /** RNT-#### — the printed label's code, and what the warehouse scans. */
+  code: string;
+  name: string;
+  /** Always null: a rental master carries no SKU by design; its `code` is the identifier. */
+  sku: null;
+  uom: string | null;
+  /** Free units across every LIVE hire of this item, at every depot — `received − returned − issued`. */
+  quantityOnHand: number;
+  /**
+   * ALWAYS 0, and present rather than omitted so the composer renders "none on a van" instead of
+   * reading an absent field as unknown. Hired kit is not transferable engineer-to-engineer: custody
+   * is anchored to the depot that took delivery and the provider collects it from there.
+   */
+  heldByEngineers: 0;
+  /** Which depots hold those units, fullest first — what the reviewer picks between on approve. */
+  depots: { warehouseId: string; warehouseName: string | null; available: number }[];
+}
+export type KitItemOption = KitItemIrmOption | KitItemRentalOption | KitItemCustomerStockOption;
 
 // jobId scopes the customer-stock half to that job's customer; omit it for IRM-only search.
 export function searchKitItems(q: string, jobId?: string): Promise<KitItemOption[]> {
@@ -241,10 +264,19 @@ export function declineKitRequest(id: string, decisionNote?: string): Promise<Ki
 export interface KitAvailabilityMap {
   irm: Record<string, { quantityOnHand: number; heldByEngineers: number }>;
   cse: Record<string, { qty: number }>;
+  /** Free-on-hire per rental item, with the depots holding it. */
+  rental: Record<string, { quantityOnHand: number; depots: { warehouseId: string; warehouseName: string | null; available: number }[] }>;
 }
 
-export function kitItemAvailabilityFor(jobId: string, irmItemIds: string[], cseIds: string[]): Promise<KitAvailabilityMap> {
-  if (irmItemIds.length === 0 && cseIds.length === 0) return Promise.resolve({ irm: {}, cse: {} });
-  const q = qs({ jobId, irm: irmItemIds.join(","), cse: cseIds.join(",") });
+export function kitItemAvailabilityFor(
+  jobId: string,
+  irmItemIds: string[],
+  cseIds: string[],
+  rentalItemIds: string[] = [],
+): Promise<KitAvailabilityMap> {
+  if (irmItemIds.length === 0 && cseIds.length === 0 && rentalItemIds.length === 0) {
+    return Promise.resolve({ irm: {}, cse: {}, rental: {} });
+  }
+  const q = qs({ jobId, irm: irmItemIds.join(","), cse: cseIds.join(","), rental: rentalItemIds.join(",") });
   return api<KitAvailabilityMap>(`/job-kit-requests/item-availability${q}`);
 }

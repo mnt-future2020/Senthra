@@ -53,3 +53,24 @@ describe("outstandingKitWarning — the line the cancel dialog shows", () => {
     expect(outstandingKitWarning([], "Shahul FE")).toBeNull();
   });
 });
+
+// Hired kit is the provider's. An unreturned unit is a liability to settle with them, not a loss we
+// can absorb — and the reconcile refuses to write one off — so the sentence must not offer it.
+describe("outstandingKitWarning — rental items", () => {
+  it("names the rental units and drops the write-off escape", () => {
+    const msg = outstandingKitWarning([line({ lineType: "rental", remaining: 2 })], "Dave");
+    expect(msg).toMatch(/2 rental units/);
+    expect(msg).toMatch(/can't be written off/);
+    expect(msg).not.toMatch(/scanned back in or written off/);
+  });
+
+  it("still offers the write-off wording when no rental is out", () => {
+    const msg = outstandingKitWarning([line({ lineType: "irm", remaining: 2 })], "Dave");
+    expect(msg).toMatch(/scanned back in or written off/);
+  });
+
+  it("counts a rental line toward the outstanding total", () => {
+    // A hire must come back, so it can never be "nothing to settle".
+    expect(outstandingKit([line({ lineType: "rental", remaining: 1 })])).toEqual({ units: 1, items: 1 });
+  });
+});

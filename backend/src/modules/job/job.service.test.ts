@@ -56,10 +56,11 @@ vi.mock("#modules/customer/customer.repository.js", () => ({
   findStockEntryQuantitiesByIds: vi.fn(async () => []),
 }));
 vi.mock("#modules/supplier/supplier.repository.js", () => ({ findById: vi.fn() }));
+vi.mock("#modules/rental-item/rental-item.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/irm/irm.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/warehouse/warehouse.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/purchase-request/purchase-request.repository.js", () => ({ countByJob: vi.fn(async () => 0) }));
-vi.mock("#modules/purchase-order/purchase-order.repository.js", () => ({ countByJob: vi.fn(async () => 0) }));
+vi.mock("#modules/purchase-order/purchase-order.repository.js", () => ({ countByJob: vi.fn(async () => 0), findLiveHiresByRentalItems: vi.fn(async () => []) }));
 vi.mock("#modules/inventory/inventory.repository.js", () => ({ findBalancePair: vi.fn(), findBalancesByItemsAndWarehouses: vi.fn(async () => []) }));
 vi.mock("#modules/user/user.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/engineer-transfer/engineer-transfer.repository.js", () => ({ findVanSourcesByKitLines: vi.fn() }));

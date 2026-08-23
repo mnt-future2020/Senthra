@@ -57,6 +57,28 @@ export function findByCode(code: string): Promise<RentalItemWithCategory | null>
   return prisma.rentalItem.findFirst({ where: { code, ...LIVE }, include: withCategory });
 }
 
+/**
+ * Resolve a SCANNED label to a live, active catalogue item.
+ *
+ * `code` is the only thing a rental label can carry: the printed barcode is `Code128(code)`, rendered
+ * on read from the item's own RNT-#### (see `renderBarcode`), and this master has no free-text
+ * barcode column and no SKU by design. So there is exactly one field to match, and it is already
+ * `@unique` — no ambiguity to resolve, unlike the IRM scan's three-way `OR`.
+ *
+ * Case-insensitive because a scanner or a hand-typed entry can arrive lowercased, and `code` is
+ * allocated uppercase. `findByCode` above stays exact — it backs `getRentalItem`'s id-or-code route
+ * param, where a loose match would let two different URLs address one record.
+ *
+ * ACTIVE-only, matching the IRM scan: a retired item may still be out on live hires and stays
+ * readable everywhere, but it must not be issuable onto new work.
+ */
+export function findActiveByCode(code: string): Promise<RentalItemWithCategory | null> {
+  return prisma.rentalItem.findFirst({
+    where: { code: { equals: code, mode: "insensitive" }, status: "active", ...LIVE },
+    include: withCategory,
+  });
+}
+
 /** Live, ACTIVE items among the given ids — the conversion guard's lookup. */
 export function findActiveByIds(ids: string[]): Promise<RentalItem[]> {
   if (ids.length === 0) return Promise.resolve([]);
@@ -76,6 +98,19 @@ export function softDelete(id: string, actorEmail: string | null): Promise<Renta
 
 export function countByPrfLines(rentalItemId: string): Promise<number> {
   return prisma.purchaseRequestRentalLine.count({ where: { rentalItemId } });
+}
+
+/**
+ * Live job kit lines planning this rental item — a delete guard, like the PRF/PO counts beside it.
+ *
+ * Missing until now, and the gap was not cosmetic: a rental item could be retired while a job's kit
+ * list still named it, leaving a line pointing at a catalogue entry no picker would ever show again.
+ * The engineer would arrive to collect something the system could no longer describe.
+ *
+ * Soft-deleted jobs are excluded — their kit lines are history, not a commitment anyone will act on.
+ */
+export function countByJobKitLines(rentalItemId: string): Promise<number> {
+  return prisma.jobKitLine.count({ where: { rentalItemId, job: { is: { deletedAt: null } } } });
 }
 
 export function countByPoLines(rentalItemId: string): Promise<number> {

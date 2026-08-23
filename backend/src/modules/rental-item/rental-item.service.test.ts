@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("#modules/engineer-rental/engineer-rental.repository.js", () => ({ countHeldRentalsByRentalItem: vi.fn(async () => 0) }));
 vi.mock("./rental-item.repository.js", () => ({
   findMany: vi.fn(),
   findById: vi.fn(),
@@ -10,6 +11,7 @@ vi.mock("./rental-item.repository.js", () => ({
   softDelete: vi.fn(),
   countByPrfLines: vi.fn(),
   countByPoLines: vi.fn(),
+  countByJobKitLines: vi.fn(async () => 0),
 }));
 vi.mock("#modules/rental-category/rental-category.service.js", () => ({
   requireActiveRentalCategory: vi.fn(),
@@ -18,6 +20,7 @@ vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 vi.mock("#modules/settings/settings.service.js", () => ({ getRentalCodePrefix: vi.fn() }));
 
 import * as rentalRepo from "./rental-item.repository.js";
+import * as rentalCustodyRepo from "#modules/engineer-rental/engineer-rental.repository.js";
 import { requireActiveRentalCategory } from "#modules/rental-category/rental-category.service.js";
 import { getRentalCodePrefix } from "#modules/settings/settings.service.js";
 import {
@@ -38,6 +41,8 @@ const update = vi.mocked(rentalRepo.update);
 const softDelete = vi.mocked(rentalRepo.softDelete);
 const countByPrfLines = vi.mocked(rentalRepo.countByPrfLines);
 const countByPoLines = vi.mocked(rentalRepo.countByPoLines);
+const countByJobKitLines = vi.mocked(rentalRepo.countByJobKitLines);
+const countHeldRentals = vi.mocked(rentalCustodyRepo.countHeldRentalsByRentalItem);
 const findActiveByIds = vi.mocked(rentalRepo.findActiveByIds);
 const requireCategory = vi.mocked(requireActiveRentalCategory);
 const rentalCodePrefix = vi.mocked(getRentalCodePrefix);
@@ -127,9 +132,31 @@ describe("deleteRentalItem", () => {
     expect(softDelete).not.toHaveBeenCalled();
   });
 
+  // Both guards below arrived with hired kit on jobs. Without them a rental item could be retired out
+  // from under live work — a kit list left naming a catalogue entry no picker shows any more, or an
+  // engineer still physically carrying one.
+  it("refuses an item still on a live job's kit list", async () => {
+    countByPrfLines.mockResolvedValue(0);
+    countByPoLines.mockResolvedValue(0);
+    countByJobKitLines.mockResolvedValue(1);
+    await expect(deleteRentalItem("r1", ACTOR)).rejects.toThrow(/in use by existing job kit lists/i);
+    expect(softDelete).not.toHaveBeenCalled();
+  });
+
+  it("refuses an item an engineer is still holding", async () => {
+    countByPrfLines.mockResolvedValue(0);
+    countByPoLines.mockResolvedValue(0);
+    countByJobKitLines.mockResolvedValue(0);
+    countHeldRentals.mockResolvedValue(1);
+    await expect(deleteRentalItem("r1", ACTOR)).rejects.toThrow(/engineer-held hires/i);
+    expect(softDelete).not.toHaveBeenCalled();
+  });
+
   it("soft-deletes when nothing references it", async () => {
     countByPrfLines.mockResolvedValue(0);
     countByPoLines.mockResolvedValue(0);
+    countByJobKitLines.mockResolvedValue(0);
+    countHeldRentals.mockResolvedValue(0);
     await deleteRentalItem("r1", ACTOR);
     expect(softDelete).toHaveBeenCalledWith("r1", ACTOR.email);
   });

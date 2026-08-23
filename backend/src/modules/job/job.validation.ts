@@ -13,7 +13,7 @@ import { dataUriBytes, detectAttachmentType } from "../../utils/data-uri.js";
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 
 export const JOB_STATUSES = ["draft", "assigned", "accepted", "in_progress", "completed", "rejected", "cancelled"] as const;
-export const JOB_LINE_TYPES = ["customer_stock", "irm", "misc"] as const;
+export const JOB_LINE_TYPES = ["customer_stock", "irm", "rental", "misc"] as const;
 export const JOB_PRIORITIES = ["low", "normal", "high", "urgent"] as const;
 export const JOB_TYPES = ["installation", "survey", "maintenance", "decommission", "other"] as const;
 export const INSTALLER_TYPES = ["internal", "external"] as const;
@@ -80,25 +80,41 @@ const kitLineSchema = z
     description: z.string().trim().max(2000).optional(),
     customerStockEntryId: optionalObjectId("a customer stock item"),
     irmItemId: optionalObjectId("an IRM item"),
-    // Pickup warehouse — REQUIRED for irm lines (the PM chooses where to collect); for customer_stock
-    // it's derived server-side from the chosen entry (sent or not, it's overridden); misc has none.
+    rentalItemId: optionalObjectId("a rental item"),
+    // Pickup warehouse — REQUIRED for irm and rental lines (the PM chooses where to collect); for
+    // customer_stock it's derived server-side from the chosen entry (sent or not, it's overridden);
+    // misc has none.
     warehouseId: optionalObjectId("a warehouse"),
     qty: z.coerce.number({ error: "Quantity is required." }).int("Quantity must be a whole number.").min(1, "Quantity must be at least 1.").max(10_000_000),
     notes: z.string().trim().max(2000).optional(),
   })
   // lineType ⇄ source-id consistency is a VALIDATION GUARANTEE (not just a service-layer cleanup):
   // customer_stock ⇒ customerStockEntryId required + no irmItemId; irm ⇒ irmItemId required + no
-  // customerStockEntryId; misc ⇒ neither. Keeps lineType meaningful for every downstream consumer.
+  // customerStockEntryId; rental ⇒ rentalItemId required + neither of the other two; misc ⇒ none.
+  // Keeps lineType meaningful for every downstream consumer.
+  //
+  // Each branch forbids the ids belonging to the OTHER pools explicitly rather than trusting the
+  // matching-id check alone: a line carrying two source ids is ambiguous to every reader downstream,
+  // and the one that wins would be whichever branch a given consumer happened to test first.
   .superRefine((l, ctx) => {
     if (l.lineType === "irm") {
       if (!l.irmItemId) ctx.addIssue({ code: "custom", path: ["irmItemId"], message: "Select an IRM item." });
       if (l.customerStockEntryId) ctx.addIssue({ code: "custom", path: ["customerStockEntryId"], message: "IRM lines can't reference customer stock." });
+      if (l.rentalItemId) ctx.addIssue({ code: "custom", path: ["rentalItemId"], message: "IRM lines can't reference a rental item." });
       if (!l.warehouseId) ctx.addIssue({ code: "custom", path: ["warehouseId"], message: "Select the warehouse to collect from." });
     } else if (l.lineType === "customer_stock") {
       if (!l.customerStockEntryId) ctx.addIssue({ code: "custom", path: ["customerStockEntryId"], message: "Select a customer stock item." });
       if (l.irmItemId) ctx.addIssue({ code: "custom", path: ["irmItemId"], message: "Customer-stock lines can't reference IRM." });
+      if (l.rentalItemId) ctx.addIssue({ code: "custom", path: ["rentalItemId"], message: "Customer-stock lines can't reference a rental item." });
+    } else if (l.lineType === "rental") {
+      if (!l.rentalItemId) ctx.addIssue({ code: "custom", path: ["rentalItemId"], message: "Select a rental item." });
+      if (l.irmItemId) ctx.addIssue({ code: "custom", path: ["irmItemId"], message: "Rental lines can't reference IRM." });
+      if (l.customerStockEntryId) ctx.addIssue({ code: "custom", path: ["customerStockEntryId"], message: "Rental lines can't reference customer stock." });
+      // Same rule as irm: hired kit is collected FROM somewhere, and the engineer needs to be told
+      // where. It is the warehouse the hire was delivered to.
+      if (!l.warehouseId) ctx.addIssue({ code: "custom", path: ["warehouseId"], message: "Select the warehouse to collect from." });
     } else {
-      if (l.customerStockEntryId || l.irmItemId) ctx.addIssue({ code: "custom", path: ["lineType"], message: "Misc lines can't reference a source item." });
+      if (l.customerStockEntryId || l.irmItemId || l.rentalItemId) ctx.addIssue({ code: "custom", path: ["lineType"], message: "Misc lines can't reference a source item." });
       if (l.warehouseId) ctx.addIssue({ code: "custom", path: ["warehouseId"], message: "Misc lines have no warehouse." });
     }
   });
@@ -114,6 +130,7 @@ const kitLinesField = z
   .superRefine((lines, ctx) => {
     const seenIrm = new Set<string>();
     const seenCse = new Set<string>();
+    const seenRental = new Set<string>();
     lines.forEach((l, i) => {
       if (l.lineType === "irm" && l.irmItemId) {
         // Key on item + warehouse: the same IRM item may legitimately appear once PER warehouse
@@ -122,6 +139,15 @@ const kitLinesField = z
         if (seenIrm.has(key)) {
           ctx.addIssue({ code: "custom", path: [i, "irmItemId"], message: "This IRM item is already on the kit list for this warehouse — increase its quantity instead." });
         } else seenIrm.add(key);
+      } else if (l.lineType === "rental" && l.rentalItemId) {
+        // Same item+warehouse key as irm, and for the same reason — a job may collect the same hired
+        // model from two depots. Note this keys on the CATALOGUE item, not a hire: which hire the
+        // units come off is decided at the scan, so two kit lines for one item at one warehouse are
+        // a duplicate no matter how many separate hires are running.
+        const key = `${l.rentalItemId}@${l.warehouseId ?? ""}`;
+        if (seenRental.has(key)) {
+          ctx.addIssue({ code: "custom", path: [i, "rentalItemId"], message: "This rental item is already on the kit list for this warehouse — increase its quantity instead." });
+        } else seenRental.add(key);
       } else if (l.lineType === "customer_stock" && l.customerStockEntryId) {
         if (seenCse.has(l.customerStockEntryId)) {
           ctx.addIssue({ code: "custom", path: [i, "customerStockEntryId"], message: "This customer stock item is already on the kit list — increase its quantity instead." });
@@ -231,6 +257,12 @@ export const completeJobSchema = z.object({
     .array(
       z
         .object({
+          // NO "rental" here, and the omission is deliberate — see EngineerRentalTransaction.type in
+          // schema.prisma. A hire cannot be consumed: it is equipment we do not own and every unit
+          // has to go back to the provider. Leaving rental out of this enum is what makes that a
+          // guarantee rather than a convention — a client declaring a hired tester "used" is refused
+          // at the edge, so a rental line's units stay outstanding until they are scanned back, which
+          // is what keeps the job in `awaiting_return` and the hire on its deadline badge.
           source: z.enum(["irm", "customer"]),
           irmItemId: optionalObjectId("an IRM item"),
           customerStockEntryId: optionalObjectId("a customer stock item"),
