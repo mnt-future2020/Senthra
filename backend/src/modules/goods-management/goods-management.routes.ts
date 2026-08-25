@@ -1,10 +1,10 @@
 import { Router } from "express";
 
 import * as controller from "./goods-management.controller.js";
-import { requireAnyPermission, requireAuth, requirePermission } from "../../middleware/auth.middleware.js";
+import { requireAuth, requirePermission } from "../../middleware/auth.middleware.js";
 import { writeLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
-import { closeReconcileSchema, postMovementSchema, reportDamageSchema, restoreDamagedSchema, scanLookupSchema, uploadDamagePhotoSchema } from "./goods-management.validation.js";
+import { closeReconcileSchema, postMovementSchema, reportDamageSchema, restoreDamagedSchema, scanLookupSchema } from "./goods-management.validation.js";
 
 const router = Router();
 router.use(requireAuth);
@@ -33,6 +33,5 @@ router.get("/overdue", requirePermission("goods_management.view"), controller.li
 // and the warehouse damage report (inventory.adjust). Both make a photo mandatory, so a holder of
 // either key must be able to reach this — gating on the return key alone left anyone who could
 // report warehouse damage unable to attach the photo their own submission requires.
-router.post("/damage-photo", requireAnyPermission("goods_management.receive_return", "inventory.adjust"), writeLimiter, validateBody(uploadDamagePhotoSchema), controller.uploadDamagePhoto);
 
 export default router;

@@ -176,7 +176,8 @@ describe("attention catalog integrity", () => {
     // every live hire.
     // `late` is the narrower half of `awaiting` — nothing arrived AND the hire has started — and is
     // the one the "Hires not yet received" badge counts.
-    "/dashboard/inventory?status": ["all", "awaiting", "late", "expiring", "overdue"],
+    // `custody` is the settle worklist — hires carrying unsettled damage or loss.
+    "/dashboard/inventory?status": ["all", "awaiting", "late", "expiring", "overdue", "custody"],
   };
 
   it("passes filter VALUES the destination screen knows", () => {

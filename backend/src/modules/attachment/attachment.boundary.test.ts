@@ -101,7 +101,6 @@ describe("deterministic and evidence assets have no deletion path", () => {
   // to clean and would only put a delete next to an asset that must survive.
   const IMAGE_UPLOAD_SITES = [
     "modules/settings/settings.service.ts", // logo / favicon — publicId is the literal type
-    "modules/goods-management/goods-management.service.ts", // damage photos — audit evidence
     "modules/engineer-transfer/engineer-transfer.service.ts", // acknowledgement signature
     "modules/van-stock-request/van-stock-request.service.ts",
   ];
@@ -161,12 +160,14 @@ describe("upload ids cannot collide", () => {
   // Every non-deterministic upload site names its asset with randomUUID. The deterministic ones
   // (branding `type`, `signature-${userId}`) are absent on purpose — they REPLACE, and a fresh id
   // each time would leak the old asset instead of overwriting it.
+  //
+  // `goods-management` and `job` USED to be here. Both uploaded base64 through a route of their own,
+  // and both now go through the signed direct-upload path with everything else — so neither names a
+  // Cloudinary asset any more, and asserting they do would only pin a dead import in place.
   it("the sites that must not collide all use randomUUID", () => {
     const rel = [
       "modules/engineer-transfer/engineer-transfer.service.ts",
       "modules/van-stock-request/van-stock-request.service.ts",
-      "modules/goods-management/goods-management.service.ts",
-      "modules/job/job.service.ts",
     ];
     for (const r of rel) {
       const f = files.find((x) => x.rel === r);

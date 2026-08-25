@@ -20,6 +20,7 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { Pagination } from "@/components/ui/Pagination";
 import { WorkspaceToolbar } from "@/components/ui/WorkspaceToolbar";
 import { WriteOffLostModal, type WriteOffTarget } from "./WriteOffLostModal";
+import { hireList } from "./hireOutstanding";
 import type { OverdueRow } from "@/types/goodsManagement";
 import { formatDate as fmtDate } from "@/lib/formatDate";
 
@@ -146,7 +147,27 @@ export function OverdueHoldingsView({ warehouseId }: { warehouseId?: string }) {
     try {
       // `fromOverdue` marks this as THIS tab's escape hatch — the one place allowed to close a job the
       // engineer never completed. The scan panel deliberately cannot; see CloseReconcilePayload.
-      const { unaccounted } = await gmService.closeReconcile(row.jobId, { fromOverdue: true });
+      const { unaccounted, rentalOutstanding } = await gmService.closeReconcile(row.jobId, { fromOverdue: true });
+      // Hired kit first, before any success is claimed. It never reaches `unaccounted` — a hire is the
+      // provider's equipment, never our write-off — so an empty list here is not proof the job closed.
+      // Reloading on that assumption left this tab reporting a reconcile that had not happened.
+      if (rentalOutstanding.length > 0) {
+        pushToast(
+          `Job ${row.jobNumber} still has hired kit out: ${hireList(rentalOutstanding)}. It has to be scanned back or declared lost before the job can close.`,
+          "alert",
+        );
+        // …and the write-off still goes ahead if there is one, because the two lists are different
+        // ownership domains and neither waits on the other — the same independence `closeReconcile`
+        // itself is built on. Returning here threw the shortfall on OUR items away and sent the
+        // operator back to a list that would show the job again with nothing booked. The modal's
+        // own success path already says the job stayed open if a hire is still out.
+        if (unaccounted.length > 0) {
+          setWriteOffTarget({ jobId: row.jobId, jobNumber: row.jobNumber, unaccounted, fromOverdue: true });
+          return;
+        }
+        reload();
+        return;
+      }
       if (unaccounted.length === 0) {
         pushToast(`Job ${row.jobNumber} reconciled — nothing was outstanding.`, "success");
         reload();
@@ -317,8 +338,16 @@ export function OverdueHoldingsView({ warehouseId }: { warehouseId?: string }) {
       <WriteOffLostModal
         target={writeOffTarget}
         onClose={() => setWriteOffTarget(null)}
-        onWrittenOff={() => {
-          pushToast(`Job ${writeOffTarget?.jobNumber} reconciled — stock written off as lost.`, "success");
+        onWrittenOff={(result) => {
+          // Same split as the scan panel: the stock was written off either way, but the JOB only closed
+          // if no hired kit is still out. Saying "reconciled" regardless is what put a green line on a
+          // job this very tab would show again on the next refresh.
+          pushToast(
+            result.rentalOutstanding.length > 0
+              ? `Stock written off. Job ${writeOffTarget?.jobNumber} still has hired kit out: ${hireList(result.rentalOutstanding)}.`
+              : `Job ${writeOffTarget?.jobNumber} reconciled — stock written off as lost.`,
+            result.rentalOutstanding.length > 0 ? "alert" : "success",
+          );
           reload();
         }}
       />

@@ -141,6 +141,23 @@ export interface PoRentalLine extends Omit<PrfRentalLine, "rentalItem"> {
   fullyReturned: boolean;
   /** Reported damaged while with us — clamped by every reader to what is still held. */
   damagedQuantity: number;
+  /**
+   * The two custody facts the order page could not previously show.
+   *
+   * `lostQuantity` is units that are gone. Without it this page reads "100 ordered · on hire · £300"
+   * with nothing anywhere saying one of them will never come back — which is precisely the page an
+   * accountant opens. `damagedHeldQuantity` is what is broken and STILL HERE, as against
+   * `damagedQuantity`, which is the provider-facing lifetime total and counts units already handed back.
+   */
+  lostQuantity: number;
+  damagedHeldQuantity: number;
+  /**
+   * Units out with an ENGINEER right now — ours to answer for, but not in the building.
+   *
+   * Here so the page can tell whether a delivery may still be unwound: a unit in a van has its arrival
+   * on the record, so the note that delivered it can no longer be given back.
+   */
+  issuedQuantity: number;
   /** Stamped when the warehouse confirmed the kit arrived; null while awaiting delivery. */
   receivedAt: string | null;
   receivedBy: string | null;
@@ -183,8 +200,43 @@ export interface OnHireLine {
   shortCloseReason: string | null;
   returnedQuantity: number;
   fullyReturned: boolean;
+  /**
+   * Units out with an ENGINEER on a job right now — ours to answer for, but not in the building.
+   *
+   * `received − returned` is what we owe the provider; subtract this and you have what is actually on
+   * the shelf for a collecting driver. The warehouse pane shows the split, because one number made a
+   * row read "3 held" when only 2 could be handed over.
+   */
+  issuedQuantity: number;
+  /**
+   * How many units of this hire could go out on a NEW job today — decided by the SERVER, using the
+   * same rule the scan and the kit-request composer work from.
+   *
+   * Not the same as what is on the shelf: a hire whose period has ended, or one on an order the
+   * supplier was never sent, can have units standing in the yard that nobody may issue. Never derived
+   * on the client — the row does not carry the purchase order's status, so a screen cannot decide this
+   * correctly, and a second implementation is how a pane comes to promise stock the scan then refuses.
+   */
+  availableToIssue: number;
   /** Reported damaged while with us — what the warehouse's rental pane filters on. */
   damagedQuantity: number;
+  /**
+   * Units currently unresolved-LOST — declared gone and not since recovered.
+   *
+   * They leave `heldOnHire`: we cannot hand back what we do not have, and a pane counting them as held
+   * would offer a collecting driver equipment that is not in the building.
+   */
+  lostQuantity: number;
+  /**
+   * Units on the shelf currently held DAMAGED — what must not go out to a new job again.
+   *
+   * NOT the same number as `damagedQuantity`, and the difference matters on screen: that one is the
+   * provider-facing lifetime total from their damage notes, including units already handed back; this
+   * is what is broken and still here.
+   */
+  damagedHeldQuantity: number;
+  /** Who is holding this hire's issued units right now — what "Declare lost" names the write-off against. */
+  holders: { engineerId: string; engineerName: string; quantity: number }[];
   notifyOnDate: string;
   /** Which deadline window the SERVER put this hire in — the same clock the badges use. */
   window: "ok" | "expiring" | "overdue";
@@ -200,6 +252,12 @@ export interface OnHireLine {
   returnAddress: string | null;
   /** BOTH legs, resolved server-side so a screen can never disagree with the order document. */
   deliveryLocation: { label: string; address: string | null };
+  /**
+   * True when `deliveryLocation` fell through to the delivery WAREHOUSE — no line address, no order
+   * override. Lets a warehouse-scoped pane say "this warehouse" instead of printing its own name on
+   * every row and burying the hires that genuinely go elsewhere.
+   */
+  deliveryAtWarehouse: boolean;
   returnLocation: { label: string; address: string | null };
   /** Cumulative extension charges on this hire. NOT part of the order's totals. */
   extensionCharge: number;
@@ -234,7 +292,7 @@ export interface OnHireLine {
 // `returned` is the odd one out and belongs here anyway: every other value narrows the LIVE hires and
 // it selects the finished ones — the same rows at the end of the same life, and the only place a
 // completed hire can be found. Every other rental surface is live-only by design.
-export type OnHireFilter = "all" | "expiring" | "overdue" | "awaiting" | "late" | "returned" | "cancelled";
+export type OnHireFilter = "all" | "expiring" | "overdue" | "awaiting" | "late" | "custody" | "returned" | "cancelled";
 
 // ── Hire deliveries ─────────────────────────────────────────────────────────────────────────────
 //
@@ -268,7 +326,15 @@ export interface RentalReceiptLine {
 }
 
 /** Which way the equipment moved — or, for `damage`, that it did not move at all. */
-export type ReceiptDirection = "in" | "out" | "damage";
+/**
+ * What a hire note records.
+ *
+ * `loss` settles what the provider charges for equipment that never came back. It is NOT a movement —
+ * the units left when the loss was declared — which is why it is a direction of its own rather than a
+ * flavour of `damage`: a lost unit is barred from the damage note's cap outright, and folding the money
+ * for one into the document for the other would tell the supplier a missing tester was merely broken.
+ */
+export type ReceiptDirection = "in" | "out" | "damage" | "loss";
 
 export interface RentalReceipt {
   id: string;
@@ -396,4 +462,70 @@ export interface RentalReceiptPayload {
     assetTags?: string[];
     notes?: string;
   }[];
+}
+
+/**
+ * Hired equipment that left normal usable custody — returned broken, or never returned at all.
+ *
+ * The read shape of the record every rental write has been producing since damage and loss became
+ * events rather than counters. It exists because the counters alone could not answer the questions
+ * anyone actually asks of them: which job, which engineer, what happened, and has the provider been
+ * charged for it yet.
+ */
+export interface HireCustodyExit {
+  id: string;
+  purchaseOrderRentalLineId: string;
+  purchaseOrderId: string;
+  poCode: string | null;
+  warehouseId: string;
+  kind: "damage" | "loss";
+  qty: number;
+  /** What it was — snapshotted, so the row shows an ITEM where every other damaged row shows one. */
+  itemName: string;
+  /** damage: held_damaged | returned_to_supplier | withdrawn — loss: lost | recovered. */
+  custodyState: string;
+  /** unsettled | settled | dismissed. Moves independently of custody — a credit note finds nothing. */
+  settlementState: string;
+  reason: string;
+  notes: string | null;
+  photoUrl: string | null;
+  jobId: string | null;
+  jobNumber: string | null;
+  engineerId: string | null;
+  engineerName: string | null;
+  declaredBy: string | null;
+  declaredAt: string;
+  settledByReceiptId: string | null;
+  settledAt: string | null;
+  recoveredBy: string | null;
+  recoveredAt: string | null;
+  recoveryNotes: string | null;
+  /**
+   * The note this was settled on, identified — so a row can read "£90 · HLS-0002" without fetching it.
+   *
+   * `settledCharge` is null when the note carries no figure: nothing has been quoted yet, which is a
+   * different fact from a charge of zero and must not be shown as one.
+   */
+  settledByCode: string | null;
+  settledCharge: number | null;
+  /**
+   * The NOTE this record was raised from, when that note is a warehouse damage report.
+   *
+   * Two different undos hang off a record: withdrawing the REPORT says the damage never happened,
+   * withdrawing the CHARGE says the money was wrong while the tester stays broken. Each reverses a
+   * different note. Null for damage found on a job — its source is a movement on the return, not a
+   * note anybody can reverse.
+   */
+  sourceReceiptId: string | null;
+  sourceCode: string | null;
+  /**
+   * Files on the note this record is tied to — the photographs a WAREHOUSE report carries.
+   *
+   * Damage found on a job keeps its picture on the record itself (`photoUrl`); damage found here is
+   * filed on a form and its pictures are attachments to the note that form creates. Both are the same
+   * evidence to whoever argues the charge, so the record carries both.
+   */
+  attachments: { id: string; url: string; fileName: string; fileType: string; fileSizeBytes: number }[];
+  /** The note those files belong to — what a removal has to be addressed to. */
+  attachmentsReceiptId: string | null;
 }

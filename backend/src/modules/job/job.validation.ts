@@ -2,7 +2,6 @@ import { z } from "zod";
 
 import { postcodeField as ukPostcode } from "../../utils/postcode.js";
 import { isHttpUrl } from "../../utils/http-url.js";
-import { dataUriBytes, detectAttachmentType } from "../../utils/data-uri.js";
 
 // Job (field-work) validation. Job number / status / snapshots / timestamps are SYSTEM-owned and
 // never accepted from the client. lineType/priority/installerType/jobType are validated here (the
@@ -295,21 +294,4 @@ export type CompleteJobInput = z.infer<typeof completeJobSchema>;
 // size. Deliberately not copied: a declared type is a label, and this is the endpoint deciding what
 // actually reaches storage.
 
-export const MAX_JOB_ATTACHMENT_BYTES = 10 * 1024 * 1024;
-
-export const uploadAttachmentSchema = z.object({
-  data: z
-    .string({ error: "Upload a valid file." })
-    .trim()
-    .min(1, "File data is required.")
-    .startsWith("data:", "Upload a valid file.")
-    // The file's OWN LEADING BYTES, not the media type in front of them. That media type is text the
-    // caller wrote — reading it only moves the claim, it never settles it — and it is also the thing
-    // a browser gets wrong: no MIME registered for `.docx` and the URI arrives as
-    // `application/octet-stream` for a perfectly good document. Signatures answer both.
-    .refine((v) => detectAttachmentType(v) !== null, "Unsupported file type. Use PDF, DOCX, PNG or JPG.")
-    .refine((v) => dataUriBytes(v) <= MAX_JOB_ATTACHMENT_BYTES, "File must be 10 MB or smaller."),
-  fileName: z.string().trim().max(300).optional(),
-});
-export type UploadAttachmentInput = z.infer<typeof uploadAttachmentSchema>;
 

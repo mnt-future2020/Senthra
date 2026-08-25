@@ -9,7 +9,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // equipment somebody else owns.
 
 vi.mock("../../lib/prisma.js", () => ({ withTransaction: (fn: (tx: unknown) => unknown) => fn({}) }));
-vi.mock("../../lib/realtime.js", () => ({ emitAttentionChanged: vi.fn(), emitToUser: vi.fn(), emitToRoom: vi.fn(), OFFICE_JOBS_ROOM: "jobs:office" }));
+vi.mock("../../lib/realtime.js", () => ({ emitAttentionChanged: vi.fn(), emitToUser: vi.fn(), emitToRoom: vi.fn(), OFFICE_JOBS_ROOM: "jobs:office", RENTAL_WATCHERS_ROOM: "rentals:watchers" }));
 vi.mock("./goods-management.repository.js", () => ({
   createMovementWithCode: vi.fn(), findMovementsByJob: vi.fn(), findMovementsByJobs: vi.fn(), findIssuedQtyByKitLine: vi.fn(),
   getSummary: vi.fn(), getSummariesByJobs: vi.fn(), upsertSummaryTx: vi.fn(),
@@ -33,8 +33,16 @@ vi.mock("#modules/engineer-rental/engineer-rental.repository.js", () => ({
 }));
 vi.mock("#modules/rental-item/rental-item.repository.js", () => ({ findById: vi.fn(), findActiveByCode: vi.fn(async () => null) }));
 vi.mock("#modules/purchase-order/purchase-order.repository.js", () => ({
-  findLiveHiresByRentalItems: vi.fn(async () => []), findHireStockById: vi.fn(), findHireStockByIdTx: vi.fn(),
-  adjustHireIssuedQtyTx: vi.fn(async () => true), flagHireDamagedTx: vi.fn(),
+  findLiveHiresByRentalItems: vi.fn(async () => []), findIssuableHiresByRentalItems: vi.fn(async () => []),
+  findHireStockById: vi.fn(), findHireStockByIdTx: vi.fn(),
+  adjustHireIssuedQtyTx: vi.fn(async () => true),
+}));
+vi.mock("#modules/purchase-order/hireCustodyExit.repository.js", () => ({
+  createExitTx: vi.fn(async () => ({ id: "e1" })),
+  CUSTODY_HELD_DAMAGED: "held_damaged",
+  CUSTODY_LOST: "lost",
+  CUSTODY_RECOVERED: "recovered",
+  SETTLE_UNSETTLED: "unsettled",
 }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
 vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn(), getOverdueAfterDays: vi.fn(async () => 14), getCompanyTimezone: vi.fn(async () => "Europe/London") }));
@@ -46,11 +54,15 @@ import * as repo from "./goods-management.repository.js";
 import * as jobRepo from "#modules/job/job.repository.js";
 import * as rentalItemRepo from "#modules/rental-item/rental-item.repository.js";
 import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
+import * as custodyExitRepo from "#modules/purchase-order/hireCustodyExit.repository.js";
 import * as rentalCustodyRepo from "#modules/engineer-rental/engineer-rental.repository.js";
 import * as inventoryService from "#modules/inventory/inventory.service.js";
 import * as engineerStockRepo from "#modules/engineer-stock/engineer-stock.repository.js";
+import * as realtime from "../../lib/realtime.js";
+import * as audit from "#modules/audit/audit.service.js";
 import * as inventoryRepo from "#modules/inventory/inventory.repository.js";
 import * as transferRepo from "#modules/engineer-transfer/engineer-transfer.repository.js";
+import * as irmService from "#modules/irm/irm.service.js";
 import { closeReconcile, getJobGoods, getJobKitTallies, getWarehouseDemand, postIssue, postReturn, recordConsumeAndComplete, scanLookup } from "./goods-management.service.js";
 
 const JOB_ID = "a".repeat(24);
@@ -59,15 +71,32 @@ const ENG_ID = "c".repeat(24);
 const RENTAL_ID = "d".repeat(24);
 const HIRE_ID = "e".repeat(24);
 const HIRE_2_ID = "f".repeat(24);
+const IRM_ID = "2".repeat(24);
+const PO_ID = "9".repeat(24);
 
 const mockJob = vi.mocked(jobRepo.findById);
 const mockRentalByCode = vi.mocked(rentalItemRepo.findActiveByCode);
 const mockRentalById = vi.mocked(rentalItemRepo.findById);
 const mockLiveHires = vi.mocked(poRepo.findLiveHiresByRentalItems);
+const mockIssuableHires = vi.mocked(poRepo.findIssuableHiresByRentalItems);
+
+/**
+ * Put the same rows behind BOTH hire lookups.
+ *
+ * The service asks a different question on each leg — `findIssuableHiresByRentalItems` on the way out
+ * (hire period still running) and `findLiveHiresByRentalItems` on the way back (everything we hold,
+ * expired included) — and the real narrowing is done by the predicate inside those queries, not here.
+ * So for a test whose point is merely "these candidates exist", both should answer the same. The tests
+ * that exist to prove the ASYMMETRY set the two apart deliberately, and say so.
+ */
+const setHires = (rows: unknown[]) => {
+  mockLiveHires.mockResolvedValue(rows as never);
+  mockIssuableHires.mockResolvedValue(rows as never);
+};
 const mockHireById = vi.mocked(poRepo.findHireStockById);
 const mockHireByIdTx = vi.mocked(poRepo.findHireStockByIdTx);
 const mockAdjustIssued = vi.mocked(poRepo.adjustHireIssuedQtyTx);
-const mockFlagDamaged = vi.mocked(poRepo.flagHireDamagedTx);
+const mockCustodyExit = vi.mocked(custodyExitRepo.createExitTx);
 const mockUpsertHolding = vi.mocked(rentalCustodyRepo.upsertRentalHoldingTx);
 const mockFindHoldingTx = vi.mocked(rentalCustodyRepo.findRentalHoldingTx);
 const mockHoldingsByEngineer = vi.mocked(rentalCustodyRepo.findRentalHoldingsByEngineer);
@@ -86,6 +115,8 @@ const hire = (over: Record<string, unknown> = {}) => ({
   receivedQuantity: 3,
   returnedQuantity: 0,
   issuedQuantity: 0,
+  lostQuantity: 0,
+  fieldDamageQty: 0,
   hireEndDate: new Date("2026-09-14T00:00:00Z"),
   hireStatus: "on_hire",
   purchaseOrderId: "9".repeat(24),
@@ -104,7 +135,7 @@ beforeEach(() => {
   mockJob.mockResolvedValue({ id: JOB_ID, jobNumber: "JOB-2026-0117", status: "accepted", assignedEngineerId: ENG_ID, assignedEngineerName: "Dave", assignedEngineerEmail: "dave@x.co", kitLines: [rentalKitLine] } as never);
   mockRentalByCode.mockResolvedValue(RENTAL_ITEM as never);
   mockRentalById.mockResolvedValue(RENTAL_ITEM as never);
-  mockLiveHires.mockResolvedValue([hire()] as never);
+  setHires([hire()]);
   mockHireById.mockResolvedValue(hire() as never);
   // postIssue re-reads the hire INSIDE the transaction to catch an order cancelled mid-scan, so
   // the tx twin needs the same default as its pre-transaction counterpart above.
@@ -125,7 +156,7 @@ describe("scanLookup — a rental label resolves to a specific hire", () => {
     // nobody was using.
     const sept = hire({ id: HIRE_ID, poCode: "PO-0042", hireEndDate: new Date("2026-09-14T00:00:00Z") });
     const oct = hire({ id: HIRE_2_ID, poCode: "PO-0051", hireEndDate: new Date("2026-10-30T00:00:00Z") });
-    mockLiveHires.mockResolvedValue([oct, sept] as never); // deliberately out of order
+    setHires([oct, sept]); // deliberately out of order
 
     const m = await scanLookup({ jobId: JOB_ID, direction: "issue", warehouseId: WH_ID, code: "RNT-0007" });
 
@@ -144,7 +175,7 @@ describe("scanLookup — a rental label resolves to a specific hire", () => {
     mockJob.mockResolvedValue({ id: JOB_ID, jobNumber: "JOB-2026-0117", status: "accepted", assignedEngineerId: ENG_ID, assignedEngineerName: "Dave", assignedEngineerEmail: "dave@x.co", kitLines: [{ ...rentalKitLine, qty: 3 }] } as never);
     const two = hire({ id: HIRE_ID, quantity: 2, receivedQuantity: 2, hireEndDate: new Date("2026-09-14T00:00:00Z") });
     const one = hire({ id: HIRE_2_ID, quantity: 1, receivedQuantity: 1, poCode: "PO-0051", hireEndDate: new Date("2026-10-30T00:00:00Z") });
-    mockLiveHires.mockResolvedValue([two, one] as never);
+    setHires([two, one]);
 
     const m = await scanLookup({ jobId: JOB_ID, direction: "issue", warehouseId: WH_ID, code: "RNT-0007" });
 
@@ -154,9 +185,9 @@ describe("scanLookup — a rental label resolves to a specific hire", () => {
   });
 
   it("refuses when every hired unit is already out or gone back", async () => {
-    mockLiveHires.mockResolvedValue([hire({ issuedQuantity: 3 })] as never);
+    setHires([hire({ issuedQuantity: 3 })]);
     await expect(scanLookup({ jobId: JOB_ID, direction: "issue", warehouseId: WH_ID, code: "RNT-0007" }))
-      .rejects.toThrow(/No Fibre Tester is available at this warehouse/i);
+      .rejects.toThrow(/No Fibre Tester is available to issue at this warehouse/i);
   });
 
   it("refuses a rental that is not on the job's kit list", async () => {
@@ -212,24 +243,201 @@ describe("scanLookup — a rental label resolves to a specific hire", () => {
     const m = await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: WH_ID, code: "RNT-0007" });
     expect(m.heldByEngineer).toBe(1);
   });
-});
 
-describe("scanLookup — an overdue hire is flagged, not blocked", () => {
-  it("marks a hire whose return date has passed", async () => {
-    // Company timezone is Europe/London in the harness; the hire ended well before any plausible
-    // "today", so this does not depend on when the suite runs.
-    mockLiveHires.mockResolvedValue([hire({ hireEndDate: new Date("2020-01-01T00:00:00Z") })] as never);
-    const m = await scanLookup({ jobId: JOB_ID, direction: "issue", warehouseId: WH_ID, code: "RNT-0007" });
-    expect(m.hire?.overdue).toBe(true);
-    // Flagged, NOT refused — the job may genuinely need it today, and the return trip is a separate
-    // logistics problem. Blocking here would strand real work.
-    expect(m.remainingIssuable).toBeGreaterThan(0);
+  // The bound hire is ONE of possibly several, and the scan has to say so. A kit line issued 2 off two
+  // different orders showed "Held: 1" against the first of them and nothing at all about the second —
+  // so a warehouse looking at "issued 2" could stage only 1, with no way to tell whether the missing
+  // unit was a bug, a loss, or simply behind another PO. It was the third, and only a re-scan AFTER
+  // posting revealed it.
+  it("on a RETURN, reports EVERY hire this line can be returned against, not just the bound one", async () => {
+    const sept = hire({ id: HIRE_ID, poCode: "PO-0042", hireEndDate: new Date("2026-09-14T00:00:00Z") });
+    const oct = hire({ id: HIRE_2_ID, poCode: "PO-0051", hireEndDate: new Date("2026-10-30T00:00:00Z") });
+    setHires([oct, sept]); // both live at THIS warehouse, deliberately out of order
+    mockMoves.mockResolvedValue([
+      { status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 2, condition: "good" }] },
+    ] as never);
+    mockHoldingsByEngineer.mockResolvedValue([
+      { purchaseOrderRentalLineId: HIRE_2_ID, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0051", hireEndDate: new Date("2026-10-30T00:00:00Z"), quantityOnHand: 1 },
+      { purchaseOrderRentalLineId: HIRE_ID, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0042", hireEndDate: new Date("2026-09-14T00:00:00Z"), quantityOnHand: 1 },
+    ] as never);
+
+    const m = await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: WH_ID, code: "RNT-0007" });
+
+    // The binding is unchanged — soonest deadline still leads, and `heldByEngineer` still describes
+    // THAT hire alone, because that is what a post against it may carry.
+    expect(m.purchaseOrderRentalLineId).toBe(HIRE_ID);
+    expect(m.heldByEngineer).toBe(1);
+    // …and the second hire is now visible in the same answer, so one scan can stage the whole 2.
+    expect(m.hires).toEqual([
+      { purchaseOrderRentalLineId: HIRE_ID, poCode: "PO-0042", hireEndDate: "2026-09-14T00:00:00.000Z", overdue: false, qty: 1 },
+      { purchaseOrderRentalLineId: HIRE_2_ID, poCode: "PO-0051", hireEndDate: "2026-10-30T00:00:00.000Z", overdue: false, qty: 1 },
+    ]);
   });
 
-  it("does not flag a hire that is still within its period", async () => {
-    mockLiveHires.mockResolvedValue([hire({ hireEndDate: new Date("2099-01-01T00:00:00Z") })] as never);
+  it("lists the local hires and drops a holding belonging to another depot", async () => {
+    // The mixed case, which neither the all-live nor the no-live fixture reaches: an engineer can hold
+    // the same tester on a hire delivered HERE and one delivered elsewhere. Only the local one may be
+    // staged — postReturn refuses the other with "that hire belongs to a different warehouse" — and the
+    // local one must still be offered rather than the whole scan falling back to a single row.
+    setHires([hire({ id: HIRE_ID, hireEndDate: new Date("2026-09-14T00:00:00Z") })]); // only HIRE_ID is live here
+    mockMoves.mockResolvedValue([
+      { status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 2, condition: "good" }] },
+    ] as never);
+    mockHoldingsByEngineer.mockResolvedValue([
+      // Sorts FIRST by deadline, so a naive "soonest wins" would bind the foreign depot's hire.
+      { purchaseOrderRentalLineId: HIRE_2_ID, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0051", hireEndDate: new Date("2026-08-01T00:00:00Z"), quantityOnHand: 1 },
+      { purchaseOrderRentalLineId: HIRE_ID, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0042", hireEndDate: new Date("2026-09-14T00:00:00Z"), quantityOnHand: 1 },
+    ] as never);
+
+    const m = await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: WH_ID, code: "RNT-0007" });
+    expect(m.purchaseOrderRentalLineId).toBe(HIRE_ID);
+    expect(m.hires?.map((h) => h.purchaseOrderRentalLineId)).toEqual([HIRE_ID]);
+  });
+
+  it("flags an overdue hire inside the breakdown, not only on the bound one", async () => {
+    setHires([
+      hire({ id: HIRE_ID, hireEndDate: new Date("2020-01-01T00:00:00Z") }),
+      hire({ id: HIRE_2_ID, poCode: "PO-0051", hireEndDate: new Date("2026-10-30T00:00:00Z") }),
+    ]);
+    mockMoves.mockResolvedValue([
+      { status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 2, condition: "good" }] },
+    ] as never);
+    mockHoldingsByEngineer.mockResolvedValue([
+      { purchaseOrderRentalLineId: HIRE_ID, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0042", hireEndDate: new Date("2020-01-01T00:00:00Z"), quantityOnHand: 1 },
+      { purchaseOrderRentalLineId: HIRE_2_ID, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0051", hireEndDate: new Date("2026-10-30T00:00:00Z"), quantityOnHand: 1 },
+    ] as never);
+
+    const m = await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: WH_ID, code: "RNT-0007" });
+    expect(m.hires?.map((h) => h.overdue)).toEqual([true, false]);
+  });
+
+  it("never lets the hires it lists add up to more than the line still has out", async () => {
+    // Two hires holding 3 each, but this line only ever had 4 out and 1 is already back. The list has
+    // to spend that budget in deadline order — 3 on the soonest, 0 on the next — or the panel could
+    // stage 6 units against a line that owes 3, and postReturn would refuse the surplus at the till.
+    setHires([hire({ id: HIRE_ID, hireEndDate: new Date("2026-09-14T00:00:00Z") }), hire({ id: HIRE_2_ID, poCode: "PO-0051", hireEndDate: new Date("2026-10-30T00:00:00Z") })]);
+    mockMoves.mockResolvedValue([
+      { status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 4, condition: "good" }] },
+      { status: "posted", direction: "return", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 1, condition: "good" }] },
+    ] as never);
+    mockHoldingsByEngineer.mockResolvedValue([
+      { purchaseOrderRentalLineId: HIRE_ID, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0042", hireEndDate: new Date("2026-09-14T00:00:00Z"), quantityOnHand: 3 },
+      { purchaseOrderRentalLineId: HIRE_2_ID, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0051", hireEndDate: new Date("2026-10-30T00:00:00Z"), quantityOnHand: 3 },
+    ] as never);
+
+    const m = await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: WH_ID, code: "RNT-0007" });
+
+    expect(m.hires?.map((h) => h.qty)).toEqual([3]); // 3 spends the budget; PO-0051 drops out
+    expect(m.heldByEngineer).toBe(3);
+  });
+
+  // The no-live-hire fallback stays a SINGLE hire on purpose — see the note in scanLookup. A holding
+  // whose hire is not live at this depot may well belong to another one, and postReturn refuses those;
+  // staging a card per hire from that set would offer rows that can only fail on Post.
+  it("falls back to one hire when none of the holdings is live at this warehouse", async () => {
+    setHires([]); // nothing live here
+    mockMoves.mockResolvedValue([
+      { status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 2, condition: "good" }] },
+    ] as never);
+    mockHoldingsByEngineer.mockResolvedValue([
+      { purchaseOrderRentalLineId: HIRE_ID, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0042", hireEndDate: new Date("2026-09-14T00:00:00Z"), quantityOnHand: 1 },
+      { purchaseOrderRentalLineId: HIRE_2_ID, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0051", hireEndDate: new Date("2026-10-30T00:00:00Z"), quantityOnHand: 1 },
+    ] as never);
+
+    const m = await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: WH_ID, code: "RNT-0007" });
+
+    expect(m.purchaseOrderRentalLineId).toBe(HIRE_ID);
+    expect(m.hires).toEqual([
+      { purchaseOrderRentalLineId: HIRE_ID, poCode: "PO-0042", hireEndDate: "2026-09-14T00:00:00.000Z", overdue: false, qty: 1 },
+    ]);
+  });
+
+  // The ISSUE leg answers the same question in reverse: which hires would this line be drawn from, and
+  // how much off each. It used to bind ONE and cap the stepper there, so 12 units spread over four
+  // hires meant four scan→type→Post cycles — the warehouse doing the allocator's arithmetic by hand,
+  // with a 409 waiting whenever they got it wrong. The split comes from allocateFromHires, the same
+  // function the post commits through, so the preview and the commitment cannot disagree.
+  it("on an ISSUE, reports every hire the line would be drawn from, earliest deadline first", async () => {
+    mockJob.mockResolvedValue({ id: JOB_ID, jobNumber: "JOB-2026-0117", status: "accepted", assignedEngineerId: ENG_ID, assignedEngineerName: "Dave", assignedEngineerEmail: "dave@x.co", kitLines: [{ ...rentalKitLine, qty: 5 }] } as never);
+    const sept = hire({ id: HIRE_ID, quantity: 2, receivedQuantity: 2, hireEndDate: new Date("2026-09-14T00:00:00Z") });
+    const oct = hire({ id: HIRE_2_ID, quantity: 4, receivedQuantity: 4, poCode: "PO-0051", hireEndDate: new Date("2026-10-30T00:00:00Z") });
+    setHires([oct, sept]); // deliberately out of order
+
+    const m = await scanLookup({ jobId: JOB_ID, direction: "issue", warehouseId: WH_ID, code: "RNT-0007" });
+
+    expect(m.purchaseOrderRentalLineId).toBe(HIRE_ID); // binding unchanged — soonest deadline leads
+    expect(m.remainingIssuable).toBe(2); // and the head's stepper still caps at ITS hire
+    expect(m.hires).toEqual([
+      { purchaseOrderRentalLineId: HIRE_ID, poCode: "PO-0042", hireEndDate: "2026-09-14T00:00:00.000Z", overdue: false, qty: 2, available: 2 },
+      // 3 of the October hire's 4, because the LINE only needs 5 — `available` still reports its real 4.
+      { purchaseOrderRentalLineId: HIRE_2_ID, poCode: "PO-0051", hireEndDate: "2026-10-30T00:00:00.000Z", overdue: false, qty: 3, available: 4 },
+    ]);
+  });
+
+  it("stops the issue spread at what the depot can actually lend", async () => {
+    // Planned 5, but only 3 units exist across both hires. A best-effort spread is right here: the
+    // panel shows what can go out today and the kit line keeps the shortfall, which is exactly what a
+    // partly-issued line means. (allocateFromHires alone returns null for an uncoverable qty — that
+    // rule is about a POST, where issuing 3 of the 5 someone asked for silently would be wrong.)
+    mockJob.mockResolvedValue({ id: JOB_ID, jobNumber: "JOB-2026-0117", status: "accepted", assignedEngineerId: ENG_ID, assignedEngineerName: "Dave", assignedEngineerEmail: "dave@x.co", kitLines: [{ ...rentalKitLine, qty: 5 }] } as never);
+    setHires([
+      hire({ id: HIRE_ID, quantity: 2, receivedQuantity: 2, hireEndDate: new Date("2026-09-14T00:00:00Z") }),
+      hire({ id: HIRE_2_ID, quantity: 1, receivedQuantity: 1, poCode: "PO-0051", hireEndDate: new Date("2026-10-30T00:00:00Z") }),
+    ]);
+
+    const m = await scanLookup({ jobId: JOB_ID, direction: "issue", warehouseId: WH_ID, code: "RNT-0007" });
+    expect(m.hires?.map((h) => h.qty)).toEqual([2, 1]);
+  });
+
+  it("offers nothing to issue once the line is fully issued", async () => {
+    // The line is met, so there is no spread — but the scan still resolves, because "already fully
+    // issued" is a different message from "this depot has none", and the panel picks it off the cap.
+    mockMoves.mockResolvedValue([
+      { status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 2, condition: "good" }] },
+    ] as never);
+    setHires([hire({ id: HIRE_ID }), hire({ id: HIRE_2_ID, poCode: "PO-0051", hireEndDate: new Date("2026-10-30T00:00:00Z") })]);
+
+    const m = await scanLookup({ jobId: JOB_ID, direction: "issue", warehouseId: WH_ID, code: "RNT-0007" });
+    expect(m.remainingIssuable).toBe(0);
+    expect(m.hires).toEqual([]);
+  });
+});
+
+// An EXPIRED hire is not offered to a new job, and this reversed a previous decision in this file —
+// the old rule was "flagged, not blocked", on the reasoning that the job may genuinely need the kit
+// today and the return trip is a separate logistics problem. It is not separate: the unit the provider
+// is waiting to collect walks out of the building, and we are already being billed for the breach.
+// The escape hatch is to EXTEND the hire, which is one action on the order and makes the same unit
+// issuable again immediately (see extendHire, which moves the deadline on the engineer's holdings in
+// the same transaction).
+describe("scanLookup — an expired hire is not available to issue", () => {
+  it("refuses the scan when every candidate hire has expired", async () => {
+    // The issuable query is what the predicate narrows in production; here the mock stands in for
+    // that narrowing returning nothing, while the live-hire query still holds the row — exactly the
+    // state an expired hire is in.
+    mockIssuableHires.mockResolvedValue([] as never);
+    mockLiveHires.mockResolvedValue([hire({ hireEndDate: new Date("2020-01-01T00:00:00Z") })] as never);
+    await expect(
+      scanLookup({ jobId: JOB_ID, direction: "issue", warehouseId: WH_ID, code: "RNT-0007" }),
+    ).rejects.toThrow(/period has ended|Extend the hire/i);
+  });
+
+  it("reads the ISSUABLE set on the way out, not the live set", async () => {
+    mockIssuableHires.mockResolvedValue([] as never);
+    mockLiveHires.mockResolvedValue([hire()] as never);
+    await expect(
+      scanLookup({ jobId: JOB_ID, direction: "issue", warehouseId: WH_ID, code: "RNT-0007" }),
+    ).rejects.toThrow();
+    // The point of the assertion: had the issue leg still asked the live query, that mock would have
+    // supplied a perfectly good hire and the scan would have succeeded.
+    expect(mockIssuableHires).toHaveBeenCalled();
+  });
+
+  it("still offers a hire that is within its period", async () => {
+    setHires([hire({ hireEndDate: new Date("2099-01-01T00:00:00Z") })]);
     const m = await scanLookup({ jobId: JOB_ID, direction: "issue", warehouseId: WH_ID, code: "RNT-0007" });
     expect(m.hire?.overdue).toBe(false);
+    expect(m.remainingIssuable).toBeGreaterThan(0);
   });
 });
 
@@ -243,7 +451,10 @@ describe("postIssue — a hire goes out as CUSTODY, never as stock", () => {
   it("moves the hire's issued count and opens an engineer custody row", async () => {
     await postIssue(JOB_ID, issueInput);
 
-    expect(mockAdjustIssued).toHaveBeenCalledWith(expect.anything(), HIRE_ID, 2);
+    // The 4th argument is the request-level company-local "today" — present on the way OUT so the
+    // hire window is re-asserted inside the same conditional write. The RETURN assertions below pass
+    // only three arguments on purpose: an expired hire must always be returnable.
+    expect(mockAdjustIssued).toHaveBeenCalledWith(expect.anything(), HIRE_ID, 2, expect.any(Date));
     expect(mockUpsertHolding).toHaveBeenCalledWith(expect.anything(), HIRE_ID, ENG_ID, 2, expect.objectContaining({ itemName: "Fibre Tester", poCode: "PO-0042" }));
     expect(vi.mocked(rentalCustodyRepo.insertRentalTxnTx)).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ type: "job_issue", quantityDelta: 2, balanceAfter: 2 }));
   });
@@ -263,6 +474,129 @@ describe("postIssue — a hire goes out as CUSTODY, never as stock", () => {
     await postIssue(JOB_ID, issueInput);
     const lines = mockCreate.mock.calls[0][1];
     expect(lines[0]).toMatchObject({ source: "rental", rentalItemId: RENTAL_ID, purchaseOrderRentalLineId: HIRE_ID, irmItemId: null, customerStockEntryId: null });
+  });
+
+  // The kit line's plan is a budget for the WHOLE request, not a per-line ceiling each line gets its
+  // own copy of. Checked line by line against one movement snapshot, two lines of 2 against a line
+  // planning 3 both read "3 remaining" and both passed — 4 units issued against a plan of 3, with the
+  // engineer holding one nobody ordered. Unreachable while the panel could only ever send one line per
+  // kit line; issuing across several hires in one post is exactly what makes it reachable.
+  it("spends the kit line's plan ONCE across every line in the same post", async () => {
+    mockJob.mockResolvedValue({ id: JOB_ID, jobNumber: "JOB-2026-0117", status: "accepted", assignedEngineerId: ENG_ID, assignedEngineerName: "Dave", assignedEngineerEmail: "dave@x.co", kitLines: [{ ...rentalKitLine, qty: 3 }] } as never);
+    mockHireById.mockImplementation((async (id: string) => hire({ id })) as never);
+
+    await expect(
+      postIssue(JOB_ID, {
+        direction: "issue",
+        warehouseId: WH_ID,
+        lines: [
+          { source: "rental", rentalItemId: RENTAL_ID, purchaseOrderRentalLineId: HIRE_ID, jobKitLineId: "k1", qty: 2 },
+          { source: "rental", rentalItemId: RENTAL_ID, purchaseOrderRentalLineId: HIRE_2_ID, jobKitLineId: "k1", qty: 2 },
+        ],
+      }),
+    ).rejects.toThrow(/only 1 remaining on the kit list/i);
+    expect(mockAdjustIssued).not.toHaveBeenCalled(); // refused before the transaction opened
+  });
+
+  it("issues one kit line across two hires in a single post", async () => {
+    // The other side of the same budget: 2 + 1 against a plan of 3 is exactly right, and both hires
+    // are drawn down in one movement rather than one post each.
+    mockJob.mockResolvedValue({ id: JOB_ID, jobNumber: "JOB-2026-0117", status: "accepted", assignedEngineerId: ENG_ID, assignedEngineerName: "Dave", assignedEngineerEmail: "dave@x.co", kitLines: [{ ...rentalKitLine, qty: 3 }] } as never);
+    mockHireById.mockImplementation((async (id: string) => hire({ id })) as never);
+    mockHireByIdTx.mockImplementation((async (_tx: unknown, id: string) => hire({ id })) as never);
+
+    await postIssue(JOB_ID, {
+      direction: "issue",
+      warehouseId: WH_ID,
+      lines: [
+        { source: "rental", rentalItemId: RENTAL_ID, purchaseOrderRentalLineId: HIRE_ID, jobKitLineId: "k1", qty: 2 },
+        { source: "rental", rentalItemId: RENTAL_ID, purchaseOrderRentalLineId: HIRE_2_ID, jobKitLineId: "k1", qty: 1 },
+      ],
+    });
+
+    expect(mockAdjustIssued).toHaveBeenCalledWith(expect.anything(), HIRE_ID, 2, expect.any(Date));
+    expect(mockAdjustIssued).toHaveBeenCalledWith(expect.anything(), HIRE_2_ID, 1, expect.any(Date));
+    // Each hire gets its OWN custody row — the engineer owes two different orders.
+    expect(mockUpsertHolding).toHaveBeenCalledWith(expect.anything(), HIRE_ID, ENG_ID, 2, expect.anything());
+    expect(mockUpsertHolding).toHaveBeenCalledWith(expect.anything(), HIRE_2_ID, ENG_ID, 1, expect.anything());
+  });
+
+  // Two DIFFERENT kit lines must keep two different budgets. Without this, a budget map keyed on
+  // anything but the kit line (or on nothing at all) passes every other test in this file.
+  it("keeps a separate plan budget per kit line", async () => {
+    mockJob.mockResolvedValue({ id: JOB_ID, jobNumber: "JOB-2026-0117", status: "accepted", assignedEngineerId: ENG_ID, assignedEngineerName: "Dave", assignedEngineerEmail: "dave@x.co", kitLines: [
+      { ...rentalKitLine, id: "k1", qty: 1 },
+      { ...rentalKitLine, id: "k2", qty: 1 },
+    ] } as never);
+    mockHireById.mockImplementation((async (id: string) => hire({ id })) as never);
+    mockHireByIdTx.mockImplementation((async (_tx: unknown, id: string) => hire({ id })) as never);
+
+    await postIssue(JOB_ID, {
+      direction: "issue",
+      warehouseId: WH_ID,
+      lines: [
+        { source: "rental", rentalItemId: RENTAL_ID, purchaseOrderRentalLineId: HIRE_ID, jobKitLineId: "k1", qty: 1 },
+        { source: "rental", rentalItemId: RENTAL_ID, purchaseOrderRentalLineId: HIRE_2_ID, jobKitLineId: "k2", qty: 1 },
+      ],
+    });
+
+    // Both land: k1 spent its own 1, k2 spent its own. A shared budget would have refused the second.
+    expect(mockAdjustIssued).toHaveBeenCalledTimes(2);
+  });
+
+  it("names the van reservation when it is what leaves no room", async () => {
+    // The `vanReserved > 0` arm of the budget message — a colleague's pending transfer is already
+    // bringing the planned unit, so the warehouse must be told WHY the line looks empty rather than
+    // just that it is. Untested anywhere before, and the budget rewrite runs straight through it.
+    // ...Once, deliberately: vi.clearAllMocks() keeps implementations, so a plain mockResolvedValue
+    // here would leave a phantom van transfer on k1 for every test after this one.
+    vi.mocked(transferRepo.findVanSourcesByKitLines).mockResolvedValueOnce(
+      new Map([["k1", [{ status: "pending", quantity: 2 }]]]) as never,
+    );
+    mockJob.mockResolvedValue({ id: JOB_ID, jobNumber: "JOB-2026-0117", status: "accepted", assignedEngineerId: ENG_ID, assignedEngineerName: "Dave", assignedEngineerEmail: "dave@x.co", kitLines: [{ ...rentalKitLine, qty: 2 }] } as never);
+
+    await expect(postIssue(JOB_ID, issueInput)).rejects.toThrow(
+      /only 0 left to issue here — 2 of the 2 planned are coming from another engineer's van/i,
+    );
+  });
+
+  // Every hire movement moves a queue, and an ISSUE moves the same ones a return does: the order's own
+  // page, the warehouse's on-hire pane, the deadline badges. postReturn has always said so; this leg
+  // said nothing, so a scan-out left every one of them stale until somebody reloaded. One post can now
+  // draw off several hires, so that was N stale panes per action, not one.
+  it("tells the hire panes when kit goes OUT, once per order", async () => {
+    mockJob.mockResolvedValue({ id: JOB_ID, jobNumber: "JOB-2026-0117", status: "accepted", assignedEngineerId: ENG_ID, assignedEngineerName: "Dave", assignedEngineerEmail: "dave@x.co", kitLines: [{ ...rentalKitLine, qty: 3 }] } as never);
+    // Two hires on ONE order, plus one on another — two refreshes, not three.
+    mockHireById.mockImplementation((async (id: string) => hire({ id, purchaseOrderId: id === HIRE_2_ID ? "8".repeat(24) : PO_ID, poCode: id === HIRE_2_ID ? "PO-0051" : "PO-0042" })) as never);
+    mockHireByIdTx.mockImplementation((async (_tx: unknown, id: string) => hire({ id, purchaseOrderId: id === HIRE_2_ID ? "8".repeat(24) : PO_ID })) as never);
+
+    await postIssue(JOB_ID, {
+      direction: "issue",
+      warehouseId: WH_ID,
+      lines: [
+        { source: "rental", rentalItemId: RENTAL_ID, purchaseOrderRentalLineId: HIRE_ID, jobKitLineId: "k1", qty: 1 },
+        { source: "rental", rentalItemId: RENTAL_ID, purchaseOrderRentalLineId: HIRE_2_ID, jobKitLineId: "k1", qty: 1 },
+      ],
+    });
+
+    const rooms = vi.mocked(realtime.emitToRoom).mock.calls.filter((c) => c[1] === "rental_hire:updated");
+    expect(rooms.map((c) => (c[2] as { purchaseOrderId: string }).purchaseOrderId).sort()).toEqual([PO_ID, "8".repeat(24)].sort());
+  });
+
+  it("refuses an IRM line filed against a rental kit line", async () => {
+    // The kit line comes from the CLIENT. The rental arm has always checked that the line it names is
+    // actually this hired item's line; the IRM arm checked nothing, so a hand-built request could spend
+    // a hire line's budget with an IRM movement and have every tally read it as the hired kit going out.
+    mockJob.mockResolvedValue({ id: JOB_ID, jobNumber: "JOB-2026-0117", status: "accepted", assignedEngineerId: ENG_ID, assignedEngineerName: "Dave", assignedEngineerEmail: "dave@x.co", kitLines: [rentalKitLine] } as never);
+    vi.mocked(irmService.requireActiveIrmItem).mockResolvedValue({ id: IRM_ID, name: "Cat6 Cable", baseUnit: "Each", trackSerialNumbers: false, trackBatchNumbers: false } as never);
+
+    await expect(
+      postIssue(JOB_ID, {
+        direction: "issue",
+        warehouseId: WH_ID,
+        lines: [{ source: "irm", irmItemId: IRM_ID, jobKitLineId: "k1", qty: 1 }],
+      }),
+    ).rejects.toThrow(/isn't the item planned on that kit line/i);
   });
 
   it("rolls back when the units went while the scan was open", async () => {
@@ -304,6 +638,124 @@ describe("postIssue — a hire goes out as CUSTODY, never as stock", () => {
     await expect(postIssue(JOB_ID, issueInput)).rejects.toThrow(/no longer live/i);
     expect(mockAdjustIssued).not.toHaveBeenCalled();
   });
+
+  // ── THE STALE-TAB CASE ────────────────────────────────────────────────────────────────────────
+  //
+  // The read-side filter cannot close this on its own: the scan preview and this post are two
+  // requests, and a browser tab can sit open across the deadline. So the post has to re-decide, and
+  // this is the test that says it does — the availability answer the client is holding is irrelevant.
+  it("refuses a hire whose period ended while the tab sat open", async () => {
+    mockHireByIdTx.mockResolvedValue(hire({ hireEndDate: new Date("2020-01-01T00:00:00Z") }) as never);
+    await expect(postIssue(JOB_ID, issueInput)).rejects.toThrow(/can no longer be issued|Extend the hire/i);
+    // Refused BEFORE any counter moved, so a rejected post leaves the hire exactly as it was.
+    expect(mockAdjustIssued).not.toHaveBeenCalled();
+  });
+
+  // The message has to name the real reason. A generic "stock changed" 409 sends the warehouse hunting
+  // for a quantity problem that does not exist, and the actual fix — extend the hire — is one action
+  // on the order that nobody would think to look for.
+  it("names the deadline and the way out, rather than blaming stock levels", async () => {
+    mockHireByIdTx.mockResolvedValue(hire({ hireEndDate: new Date("2026-08-16T00:00:00Z") }) as never);
+    await expect(postIssue(JOB_ID, issueInput)).rejects.toThrow(/2026-08-16/);
+    await expect(postIssue(JOB_ID, issueInput)).rejects.toThrow(/Extend the hire/i);
+  });
+
+  // Belt to that braces: even if the read-side check above were somehow passed, the window is also
+  // asserted inside the conditional write. This pins that the date actually reaches it.
+  it("hands the request-level date to the atomic write so the DB re-asserts the window", async () => {
+    await postIssue(JOB_ID, issueInput);
+    const dateArg = mockAdjustIssued.mock.calls[0]![3];
+    expect(dateArg).toBeInstanceOf(Date);
+    // A calendar day at UTC midnight — the convention every hire date in this codebase uses, so the
+    // comparison against `hireEndDate` is exact.
+    expect((dateArg as Date).toISOString()).toMatch(/T00:00:00\.000Z$/);
+  });
+
+  // A hire ending TODAY is still valid — a hire runs THROUGH its end date. Getting this boundary wrong
+  // would silently shorten every hire in the system by a day.
+  it("allows a hire that ends today", async () => {
+    // Today's date IN THE COMPANY TIMEZONE (the harness mocks it to Europe/London), derived the same
+    // way startOfDayIn derives it. Using the UTC date here instead would make this test fail for the
+    // one hour a day when London is a day ahead of UTC — green all afternoon, red at 00:30 BST.
+    const londonToday = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Europe/London",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date());
+    mockHireByIdTx.mockResolvedValue(hire({ hireEndDate: new Date(`${londonToday}T00:00:00.000Z`) }) as never);
+    await expect(postIssue(JOB_ID, issueInput)).resolves.toBeDefined();
+  });
+});
+
+// The agreement between the preview and the commitment is the whole point of the multi-hire spread,
+// and asserting it by reasoning about two separate fixtures is not the same as asserting it. These
+// feed a real scanLookup result STRAIGHT into the post, exactly as the panel does.
+describe("scan → post round trip", () => {
+  it("issues every hire the scan offered, in one movement", async () => {
+    mockJob.mockResolvedValue({ id: JOB_ID, jobNumber: "JOB-2026-0117", status: "accepted", assignedEngineerId: ENG_ID, assignedEngineerName: "Dave", assignedEngineerEmail: "dave@x.co", kitLines: [{ ...rentalKitLine, qty: 5 }] } as never);
+    setHires([
+      hire({ id: HIRE_ID, quantity: 2, receivedQuantity: 2, hireEndDate: new Date("2026-09-14T00:00:00Z") }),
+      hire({ id: HIRE_2_ID, quantity: 4, receivedQuantity: 4, poCode: "PO-0051", hireEndDate: new Date("2026-10-30T00:00:00Z") }),
+    ]);
+    mockHireById.mockImplementation((async (id: string) => hire({ id, quantity: 4, receivedQuantity: 4 })) as never);
+    mockHireByIdTx.mockImplementation((async (_tx: unknown, id: string) => hire({ id, quantity: 4, receivedQuantity: 4 })) as never);
+
+    const m = await scanLookup({ jobId: JOB_ID, direction: "issue", warehouseId: WH_ID, code: "RNT-0007" });
+
+    // Exactly what JobScanPanel builds from a fanned-out scan: one line per offered hire, at its cap.
+    await postIssue(JOB_ID, {
+      direction: "issue",
+      warehouseId: WH_ID,
+      lines: (m.hires ?? []).map((h) => ({
+        source: "rental" as const,
+        rentalItemId: RENTAL_ID,
+        purchaseOrderRentalLineId: h.purchaseOrderRentalLineId,
+        jobKitLineId: m.jobKitLineId!,
+        qty: h.qty,
+      })),
+    });
+
+    expect(mockAdjustIssued).toHaveBeenCalledWith(expect.anything(), HIRE_ID, 2, expect.any(Date));
+    expect(mockAdjustIssued).toHaveBeenCalledWith(expect.anything(), HIRE_2_ID, 3, expect.any(Date));
+  });
+
+  it("returns every hire the scan offered, in one movement", async () => {
+    setHires([
+      hire({ id: HIRE_ID, hireEndDate: new Date("2026-09-14T00:00:00Z") }),
+      hire({ id: HIRE_2_ID, poCode: "PO-0051", hireEndDate: new Date("2026-10-30T00:00:00Z") }),
+    ]);
+    mockMoves.mockResolvedValue([
+      { status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 2, condition: "good" }] },
+    ] as never);
+    mockHoldingsByEngineer.mockResolvedValue([
+      { purchaseOrderRentalLineId: HIRE_ID, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0042", hireEndDate: new Date("2026-09-14T00:00:00Z"), quantityOnHand: 1 },
+      { purchaseOrderRentalLineId: HIRE_2_ID, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0051", hireEndDate: new Date("2026-10-30T00:00:00Z"), quantityOnHand: 1 },
+    ] as never);
+    mockHireById.mockImplementation((async (id: string) => hire({ id, issuedQuantity: 1 })) as never);
+    mockHireByIdTx.mockImplementation((async (_tx: unknown, id: string) => hire({ id, issuedQuantity: 1 })) as never);
+    mockFindHoldingTx.mockResolvedValue({ quantityOnHand: 1, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0042", hireEndDate: new Date("2026-09-14T00:00:00Z") } as never);
+    mockUpsertHolding.mockResolvedValue({ quantityOnHand: 0, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0042", hireEndDate: new Date("2026-09-14T00:00:00Z") } as never);
+
+    const m = await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: WH_ID, code: "RNT-0007" });
+
+    await postReturn(JOB_ID, {
+      direction: "return",
+      warehouseId: WH_ID,
+      lines: (m.hires ?? []).map((h) => ({
+        source: "rental" as const,
+        rentalItemId: RENTAL_ID,
+        purchaseOrderRentalLineId: h.purchaseOrderRentalLineId,
+        jobKitLineId: m.jobKitLineId!,
+        qty: h.qty,
+      })),
+    });
+
+    // Both hires credited — the kit line's budget covered the pair, which is the surplus the old
+    // single-hire cap could never have let the panel stage in the first place.
+    expect(mockAdjustIssued).toHaveBeenCalledWith(expect.anything(), HIRE_ID, -1);
+    expect(mockAdjustIssued).toHaveBeenCalledWith(expect.anything(), HIRE_2_ID, -1);
+  });
 });
 
 describe("postReturn — hired kit comes back to the shelf", () => {
@@ -317,6 +769,40 @@ describe("postReturn — hired kit comes back to the shelf", () => {
     mockUpsertHolding.mockResolvedValue({ quantityOnHand: 0, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0042", hireEndDate: new Date("2026-09-14T00:00:00Z") } as never);
   });
 
+  // A damaged return opens a custody exit keyed [sourceType, sourceId, hire, kind], and the movement is
+  // the sourceId — so TWO damaged lines on the SAME hire in one post collide, and createExitTx treats
+  // the collision as an idempotent retry and returns the first row. The second line's units would be
+  // drained from custody and released back to the shelf by adjustHireIssuedQtyTx, with no exit holding
+  // them: a damaged tester becomes issuable to the next job. The panel makes one card per hire so it
+  // cannot send this, but a client-upheld invariant is not an invariant — and multi-hire posts are new.
+  it("refuses two damaged lines against the same hire in one post", async () => {
+    await expect(
+      postReturn(JOB_ID, {
+        direction: "return",
+        warehouseId: WH_ID,
+        lines: [
+          returnLine({ qty: 1, condition: "damaged", damagePhotoUrl: "https://res.cloudinary.com/x/a.jpg", damageReason: "Cracked screen" }),
+          returnLine({ qty: 1, condition: "damaged", damagePhotoUrl: "https://res.cloudinary.com/x/b.jpg", damageReason: "Snapped lead" }),
+        ],
+      }),
+    ).rejects.toThrow(/one damaged line per hire/i);
+    expect(mockCustodyExit).not.toHaveBeenCalled();
+  });
+
+  it("still allows a good line and a damaged line against the same hire", async () => {
+    // The ordinary split — two lines, one hire, two conditions. Only ONE of them creates an exit, so
+    // there is nothing to collide.
+    await postReturn(JOB_ID, {
+      direction: "return",
+      warehouseId: WH_ID,
+      lines: [
+        returnLine({ qty: 1 }),
+        returnLine({ qty: 1, condition: "damaged", damagePhotoUrl: "https://res.cloudinary.com/x/a.jpg", damageReason: "Cracked screen" }),
+      ],
+    });
+    expect(mockCustodyExit).toHaveBeenCalledTimes(1);
+  });
+
   it("drains custody and releases the units back into the hire's pool", async () => {
     await postReturn(JOB_ID, { direction: "return", warehouseId: WH_ID, lines: [returnLine()] });
 
@@ -325,12 +811,32 @@ describe("postReturn — hired kit comes back to the shelf", () => {
     expect(vi.mocked(rentalCustodyRepo.insertRentalTxnTx)).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ type: "job_return", quantityDelta: -2 }));
   });
 
+  // ── THE ASYMMETRY ─────────────────────────────────────────────────────────────────────────────
+  //
+  // An EXPIRED hire is refused on the way out and must always be accepted on the way back. It is the
+  // one that most needs to come back, and gating the return would strand overdue kit in a van with
+  // nothing to scan it against — leaving it on the overdue badge forever with no way to clear it.
+  it("takes back a hire whose period has long since ended", async () => {
+    const expired = new Date("2020-01-01T00:00:00Z");
+    mockFindHoldingTx.mockResolvedValue({ quantityOnHand: 2, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0042", hireEndDate: expired } as never);
+    mockHireByIdTx.mockResolvedValue(hire({ hireEndDate: expired, issuedQuantity: 2 }) as never);
+
+    await expect(postReturn(JOB_ID, { direction: "return", warehouseId: WH_ID, lines: [returnLine()] })).resolves.toBeDefined();
+    // Three arguments, not four: no date is passed on a return, so the window clause is never built.
+    expect(mockAdjustIssued).toHaveBeenCalledWith(expect.anything(), HIRE_ID, -2);
+  });
+
+  it("never sends a hire-window date on the return leg", async () => {
+    await postReturn(JOB_ID, { direction: "return", warehouseId: WH_ID, lines: [returnLine()] });
+    for (const call of mockAdjustIssued.mock.calls) expect(call[3]).toBeUndefined();
+  });
+
   it("does NOT touch the hire's supplier-facing returnedQuantity", async () => {
     await postReturn(JOB_ID, { direction: "return", warehouseId: WH_ID, lines: [returnLine()] });
     // Engineer→warehouse and warehouse→provider are two different events. Only the second one ends
     // the hire; conflating them would mark a hire collected while it sat on our own shelf.
     for (const call of mockAdjustIssued.mock.calls) expect(call[2]).toBeLessThan(0);
-    expect(mockFlagDamaged).not.toHaveBeenCalled();
+    expect(mockCustodyExit).not.toHaveBeenCalled();
   });
 
   it("damaged kit still comes back, and flags the hire instead of the damaged pool", async () => {
@@ -343,8 +849,12 @@ describe("postReturn — hired kit comes back to the shelf", () => {
     // The unit is physically back on our shelf and still owed to the provider, so the custody move
     // happens either way — skipping it would strand the hire as permanently "issued".
     expect(mockAdjustIssued).toHaveBeenCalledWith(expect.anything(), HIRE_ID, -2);
-    // Flagged on the hire for the PM to raise the damage note with the provider's real charge...
-    expect(mockFlagDamaged).toHaveBeenCalledWith(expect.anything(), HIRE_ID, 2);
+    // ...and a damage custody exit is opened, which is what takes the unit out of the ISSUABLE pool
+    // while leaving it held and supplier-returnable, and what the PM later settles into a damage note.
+    expect(mockCustodyExit).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ purchaseOrderRentalLineId: HIRE_ID, kind: "damage", qty: 2, custodyState: "held_damaged", reason: "Screen cracked on site" }),
+    );
     // ...and NEVER into the damaged pool, which is for stock we own and would double-count a charge
     // the provider bills once.
     expect(repo.upsertDamagedBalanceTx).not.toHaveBeenCalled();
@@ -399,7 +909,7 @@ describe("goods queue — a rental line reads the same as the scan", () => {
   });
 
   it("offers the RNT code as the scan token, strips it from the name, and reports the hire pool", async () => {
-    mockLiveHires.mockResolvedValue([hire({ receivedQuantity: 3 }), hire({ id: HIRE_2_ID, receivedQuantity: 2 })] as never);
+    setHires([hire({ receivedQuantity: 3 }), hire({ id: HIRE_2_ID, receivedQuantity: 2 })]);
     const detail = await getJobGoods(JOB_ID);
     const line = detail.lines[0]!;
     expect(line.scanCode).toBe("RNT-0007");
@@ -422,11 +932,15 @@ describe("goods queue — a rental line reads the same as the scan", () => {
 
 // ── The two doors into "a hire was never returned, but the job says it was" ────────────────────
 //
-// Both are about the SAME invariant — hired kit leaves a job by being scanned back and by no other
-// route — and both were open. Neither is reachable through the happy path, which is exactly why they
+// Both are about the SAME invariant — hired kit leaves a job by being scanned back, declared lost, and
+// by no other route. Neither shape is reachable through the happy path, which is exactly why they
 // survived: the schema bars a rental consume, the validation enum bars `source: "rental"`, and the
-// reconcile refuses hired kit. Each of these got past all three.
-describe("closeReconcile — the hired-kit guard cannot be slipped past", () => {
+// reconcile never writes hired kit off. Each of these got past all three.
+//
+// The guard no longer THROWS — a hire outstanding must not veto an unrelated company-stock write-off —
+// so what these now pin is the rule that replaced it: the job does not reach its terminal, locking
+// state while hired kit is still out, and the response says which hires are holding it open.
+describe("closeReconcile — hired kit holds the job open without blocking the rest", () => {
   const TESTER_2_ID = "1".repeat(24);
   const secondRentalLine = { ...rentalKitLine, id: "k2", rentalItemId: TESTER_2_ID, itemName: "OTDR", qty: 1 };
 
@@ -439,7 +953,7 @@ describe("closeReconcile — the hired-kit guard cannot be slipped past", () => 
     } as never);
   });
 
-  it("refuses when a SECOND hired item is still out and the first is already back", async () => {
+  it("keeps the job out of its terminal state when a SECOND hired item is still out", async () => {
     // The shape that used to slip through. Both hires are on one job; the Fibre Tester has been
     // returned in full (engineer holds none), the OTDR has not. Every rental tally keyed to the same
     // bucket, `held` was read from the FIRST entry only — which is 0 — so the whole bucket capped to
@@ -456,8 +970,12 @@ describe("closeReconcile — the hired-kit guard cannot be slipped past", () => 
       { purchaseOrderRentalLineId: HIRE_2_ID, rentalItemId: TESTER_2_ID, itemName: "OTDR", poCode: "PO-0051", hireEndDate: new Date("2026-10-30T00:00:00Z"), quantityOnHand: 1 },
     ] as never);
 
-    await expect(closeReconcile(JOB_ID, { writeOffLost: true }))
-      .rejects.toThrow(/can't be reconciled while rental items are still out[\s\S]*OTDR/i);
+    const res = await closeReconcile(JOB_ID, { writeOffLost: true });
+    // Named, so the screen can say what is still owed rather than silently doing nothing...
+    expect(res.rentalOutstanding).toEqual([expect.objectContaining({ itemName: "OTDR", qty: 1 })]);
+    // ...and NOT locked. `reconciled` refuses every later scan, so closing here would strand the OTDR
+    // in the van with no way left to book it back in.
+    expect(vi.mocked(repo.upsertSummaryTx)).toHaveBeenCalledWith(expect.anything(), JOB_ID, { goodsStatus: "awaiting_return" });
   });
 
   it("names each outstanding hire separately instead of collapsing them into one", async () => {
@@ -474,10 +992,176 @@ describe("closeReconcile — the hired-kit guard cannot be slipped past", () => 
 
     // Both must be named — the old single bucket reported one row, titled with whichever item
     // happened to be first, carrying the other's quantity.
-    const err = await closeReconcile(JOB_ID, { writeOffLost: true }).catch((e: Error) => e);
-    expect(err).toBeInstanceOf(Error);
-    expect((err as Error).message).toMatch(/2 × Fibre Tester/);
-    expect((err as Error).message).toMatch(/1 × OTDR/);
+    const res = await closeReconcile(JOB_ID, { writeOffLost: true });
+    expect(res.rentalOutstanding).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ itemName: "Fibre Tester", qty: 2 }),
+        expect.objectContaining({ itemName: "OTDR", qty: 1 }),
+      ]),
+    );
+    expect(res.rentalOutstanding).toHaveLength(2);
+  });
+
+  it("names the exact HIRE the outstanding units sit on, so the screen can offer the action", async () => {
+    // The reconcile screen offers company shortfall a Write off button on the spot. Hired kit got a
+    // toast telling the operator to declare it lost, with the only button that does that four clicks
+    // away on the warehouse's hire pane. The list has to carry the hire, its order and the engineer, or
+    // the panel can only restate the problem.
+    mockMoves.mockResolvedValue([
+      { status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 2, condition: "good", purchaseOrderRentalLineId: HIRE_ID }] },
+    ] as never);
+    mockHoldingsByEngineer.mockResolvedValue([
+      {
+        purchaseOrderRentalLineId: HIRE_ID, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0042",
+        hireEndDate: new Date("2026-09-14T00:00:00Z"), quantityOnHand: 2,
+        purchaseOrderRentalLine: { purchaseOrderId: PO_ID },
+      },
+    ] as never);
+
+    const res = await closeReconcile(JOB_ID, {});
+    expect(res.rentalOutstanding).toEqual([
+      expect.objectContaining({
+        itemName: "Fibre Tester",
+        qty: 2,
+        // The person it would be declared against — a loss writes off somebody else's equipment and
+        // the name belongs on the record, so the server states it rather than the client guessing.
+        engineerId: ENG_ID,
+        engineerName: "Dave",
+        hires: [{ purchaseOrderRentalLineId: HIRE_ID, purchaseOrderId: PO_ID, poCode: "PO-0042", qty: 2 }],
+      }),
+    ]);
+  });
+
+  it("still lists kit it cannot trace to a hire, just without the action", async () => {
+    // A movement line written before hires carried an id. Dropping the row would hide equipment that is
+    // genuinely still out; listing it with no hire is the honest degradation, and the guard that keeps
+    // the job open reads the per-ITEM tally so it is unaffected either way.
+    mockMoves.mockResolvedValue([
+      { status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 2, condition: "good" }] },
+    ] as never);
+    mockHoldingsByEngineer.mockResolvedValue([
+      { purchaseOrderRentalLineId: HIRE_ID, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0042", hireEndDate: new Date("2026-09-14T00:00:00Z"), quantityOnHand: 2 },
+    ] as never);
+
+    const res = await closeReconcile(JOB_ID, {});
+    expect(res.rentalOutstanding).toHaveLength(1);
+    expect(res.rentalOutstanding[0]!.qty).toBe(2);
+    expect(res.rentalOutstanding[0]!.hires).toEqual([]);
+    // …and it still holds the job open, which is the whole point of the guard.
+    expect(vi.mocked(repo.upsertSummaryTx)).toHaveBeenCalledWith(expect.anything(), JOB_ID, { goodsStatus: "awaiting_return" });
+  });
+
+  it("does NOT record a reconcile in the audit log for a job it left open", async () => {
+    // THE WORST OF THE THREE. The job correctly stayed `awaiting_return` — and the audit log said
+    // `goods_management.reconciled` anyway. The trail is the artefact somebody checks months later,
+    // and it was claiming a job closed that never did.
+    mockMoves.mockResolvedValue([
+      { status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 2, condition: "good" }] },
+    ] as never);
+    mockHoldingsByEngineer.mockResolvedValue([
+      { purchaseOrderRentalLineId: HIRE_ID, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0042", hireEndDate: new Date("2026-09-14T00:00:00Z"), quantityOnHand: 2 },
+    ] as never);
+
+    await closeReconcile(JOB_ID, { writeOffLost: true });
+
+    const actions = vi.mocked(audit.record).mock.calls.map((c) => (c[0] as { action: string }).action);
+    expect(actions).not.toContain("goods_management.reconciled");
+    expect(actions).toContain("goods_management.reconcile_deferred");
+    // The line has to name what stopped it, or it explains nothing to whoever reads it later.
+    const deferred = vi.mocked(audit.record).mock.calls.find((c) => (c[0] as { action: string }).action === "goods_management.reconcile_deferred");
+    expect((deferred![0] as { targetLabel: string }).targetLabel).toMatch(/2 × Fibre Tester/);
+  });
+
+  it("tells the engineer's screen the job was DEFERRED, not reconciled", async () => {
+    // An engineer's kit list locks itself on a reconcile event. Sending one while their van still holds
+    // a hired tester would hide the one row they still have to act on.
+    mockMoves.mockResolvedValue([
+      { status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 2, condition: "good" }] },
+    ] as never);
+    mockHoldingsByEngineer.mockResolvedValue([
+      { purchaseOrderRentalLineId: HIRE_ID, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0042", hireEndDate: new Date("2026-09-14T00:00:00Z"), quantityOnHand: 2 },
+    ] as never);
+
+    await closeReconcile(JOB_ID, { writeOffLost: true });
+    expect(vi.mocked(realtime.emitToUser)).toHaveBeenCalledWith(ENG_ID, "goods:returned", { jobId: JOB_ID, direction: "reconcile_deferred" });
+  });
+
+  it("records a real reconcile once the hired kit is back", async () => {
+    // The other side of the same rule — the deferred action must not become the new default.
+    mockMoves.mockResolvedValue([
+      { status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 2, condition: "good" }] },
+      { status: "posted", direction: "return", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 2, condition: "good" }] },
+    ] as never);
+    mockHoldingsByEngineer.mockResolvedValue([] as never);
+
+    const res = await closeReconcile(JOB_ID, {});
+    expect(res.rentalOutstanding).toEqual([]);
+    const actions = vi.mocked(audit.record).mock.calls.map((c) => (c[0] as { action: string }).action);
+    expect(actions).toContain("goods_management.reconciled");
+    expect(vi.mocked(repo.upsertSummaryTx)).toHaveBeenCalledWith(expect.anything(), JOB_ID, { goodsStatus: "reconciled" });
+    expect(vi.mocked(realtime.emitToUser)).toHaveBeenCalledWith(ENG_ID, "goods:returned", { jobId: JOB_ID, direction: "reconcile" });
+  });
+
+  it("writes off unaccounted COMPANY stock even while a hire is still out", async () => {
+    // The defect the throw caused. Two different pools, two different owners, two different decisions —
+    // and an outstanding hire used to refuse the whole reconcile, so the company shortfall could not be
+    // booked either and the screen showed an error where the unaccounted list belonged.
+    mockJob.mockResolvedValue({
+      id: JOB_ID, jobNumber: "JOB-2026-0117", status: "completed", assignedEngineerId: ENG_ID,
+      assignedEngineerName: "Dave", assignedEngineerEmail: "dave@x.co",
+      kitLines: [rentalKitLine, { id: "k3", lineType: "irm", irmItemId: IRM_ID, rentalItemId: null, customerStockEntryId: null, warehouseId: WH_ID, itemName: "Cat6 Box", qty: 1 }],
+    } as never);
+    mockMoves.mockResolvedValue([
+      { status: "posted", direction: "issue", warehouseId: WH_ID, items: [
+        { jobKitLineId: "k1", qty: 2, condition: "good" },
+        { jobKitLineId: "k3", qty: 1, condition: "good" },
+      ] },
+    ] as never);
+    mockHoldingsByEngineer.mockResolvedValue([
+      { purchaseOrderRentalLineId: HIRE_ID, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0042", hireEndDate: new Date("2026-09-14T00:00:00Z"), quantityOnHand: 2 },
+    ] as never);
+    vi.mocked(engineerStockRepo.findEngineerBalances).mockResolvedValue([{ irmItemId: IRM_ID, quantityOnHand: 1 }] as never);
+
+    const res = await closeReconcile(JOB_ID, { writeOffLost: true, writeOffReason: "not_returned" });
+
+    // The company box was written off — one movement, and it names the IRM item, never the hire.
+    expect(mockCreate).toHaveBeenCalled();
+    const lines = mockCreate.mock.calls.at(-1)?.[1] as { source: string; itemName: string }[];
+    expect(lines.map((l) => l.source)).toEqual(["irm"]);
+    // The hire is untouched by the write-off and still holds the job open.
+    expect(res.rentalOutstanding).toEqual([expect.objectContaining({ itemName: "Fibre Tester", qty: 2 })]);
+
+    // …AND THE WRITE-OFF IS ON THE RECORD. It was the same independence one step further on: the
+    // outcome entry used to be a single ternary asking `!canGoTerminal` FIRST, so a deferring hire
+    // swallowed the write-off line entirely. Units left the ledger and the only entry written said
+    // `reconcile_deferred` — no quantity, no reason. Nothing would ever say it either, because the
+    // next run finds the holdings already drained and records a plain `reconciled`.
+    const actions = vi.mocked(audit.record).mock.calls.map((c) => (c[0] as { action: string }).action);
+    expect(actions).toContain("goods_management.written_off_lost");
+    expect(actions).toContain("goods_management.reconcile_deferred");
+    expect(actions).not.toContain("goods_management.reconciled");
+    const wrote = vi.mocked(audit.record).mock.calls.find((c) => (c[0] as { action: string }).action === "goods_management.written_off_lost");
+    expect((wrote![0] as { targetLabel: string }).targetLabel).toMatch(/1 unit written off as lost: not_returned/);
+  });
+
+  it("still says only 'written off' on a clean close, not two lines for one run", async () => {
+    // The other side of splitting them: a job that DID close after a write-off is fully described by
+    // the write-off entry, and a second line saying the same run finished is noise in the trail.
+    mockJob.mockResolvedValue({
+      id: JOB_ID, jobNumber: "JOB-2026-0117", status: "completed", assignedEngineerId: ENG_ID,
+      assignedEngineerName: "Dave", assignedEngineerEmail: "dave@x.co",
+      kitLines: [{ id: "k3", lineType: "irm", irmItemId: IRM_ID, rentalItemId: null, customerStockEntryId: null, warehouseId: WH_ID, itemName: "Cat6 Box", qty: 1 }],
+    } as never);
+    mockMoves.mockResolvedValue([
+      { status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k3", qty: 1, condition: "good" }] },
+    ] as never);
+    mockHoldingsByEngineer.mockResolvedValue([] as never);
+    vi.mocked(engineerStockRepo.findEngineerBalances).mockResolvedValue([{ irmItemId: IRM_ID, quantityOnHand: 1 }] as never);
+
+    await closeReconcile(JOB_ID, { writeOffLost: true, writeOffReason: "not_returned" });
+
+    const actions = vi.mocked(audit.record).mock.calls.map((c) => (c[0] as { action: string }).action);
+    expect(actions).toEqual(["goods_management.written_off_lost"]);
   });
 });
 
@@ -511,13 +1195,17 @@ describe("recordConsumeAndComplete — a hire can never be declared used", () =>
 // getJobKitTallies is the ONLY producer of hireEndDate/hireOverdue, and three surfaces consume it:
 // the engineer's kit row, the office job pack, and the completion audit record. None of it is typed
 // distinctly from the tallies beside it, so a wrong predicate here fails silently everywhere.
-describe("getJobKitTallies — the hire deadline rides on the custody snapshot", () => {
+//
+// The date comes from THIS JOB'S movements intersected with the engineer's live holdings. Both halves
+// appear in every fixture below — a movement that does not name its hire contributes no deadline,
+// which is the correct reading and the reason these fixtures carry `purchaseOrderRentalLineId`.
+describe("getJobKitTallies — the hire deadline is this job's, not the engineer's", () => {
   const DEADLINE = new Date("2026-09-14T00:00:00Z");
   const holding = (over: Record<string, unknown> = {}) => ({
     purchaseOrderRentalLineId: HIRE_ID, rentalItemId: RENTAL_ID, itemName: "Fibre Tester",
     poCode: "PO-0042", hireEndDate: DEADLINE, quantityOnHand: 2, ...over,
   });
-  const issuedTwo = [{ status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 2, condition: "good" }] }];
+  const issuedTwo = [{ status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 2, condition: "good", purchaseOrderRentalLineId: HIRE_ID }] }];
 
   it("reports the deadline while units are still out", async () => {
     mockMoves.mockResolvedValue(issuedTwo as never);
@@ -531,11 +1219,11 @@ describe("getJobKitTallies — the hire deadline rides on the custody snapshot",
     // settled line reads as something outstanding.
     mockMoves.mockResolvedValue([
       ...issuedTwo,
-      { status: "posted", direction: "return", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 2, condition: "good" }] },
+      { status: "posted", direction: "return", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 2, condition: "good", purchaseOrderRentalLineId: HIRE_ID }] },
     ] as never);
     mockHoldingsByEngineer.mockResolvedValue([] as never);
     const t = await getJobKitTallies(JOB_ID);
-    expect(t.k1).toMatchObject({ remaining: 0, hireEndDate: null, hireOverdue: false });
+    expect(t.k1).toMatchObject({ remaining: 0, hireEndDate: null, hireOverdue: false, hires: [] });
   });
 
   it("flags a deadline that has already passed", async () => {
@@ -545,16 +1233,62 @@ describe("getJobKitTallies — the hire deadline rides on the custody snapshot",
     expect(t.k1.hireOverdue).toBe(true);
   });
 
-  it("takes the SOONEST deadline when the engineer holds the item on two hires", async () => {
+  it("takes the SOONEST deadline when THIS JOB drew the item off two hires", async () => {
     // One row, one date — and it has to be the one that bites first. Erring early is safe here;
-    // erring late would tell someone they had until the 30th on kit due back on the 14th.
-    mockMoves.mockResolvedValue(issuedTwo as never);
+    // erring late would tell someone they had until the 30th on kit due back on the 14th. The others
+    // are not dropped: `hires` carries them so the row can offer the breakdown.
+    mockMoves.mockResolvedValue([
+      { status: "posted", direction: "issue", warehouseId: WH_ID, items: [
+        { jobKitLineId: "k1", qty: 1, condition: "good", purchaseOrderRentalLineId: HIRE_2_ID },
+        { jobKitLineId: "k1", qty: 1, condition: "good", purchaseOrderRentalLineId: HIRE_ID },
+      ] },
+    ] as never);
     mockHoldingsByEngineer.mockResolvedValue([
       holding({ purchaseOrderRentalLineId: HIRE_2_ID, hireEndDate: new Date("2026-10-30T00:00:00Z"), quantityOnHand: 1 }),
       holding({ quantityOnHand: 1 }),
     ] as never);
     const t = await getJobKitTallies(JOB_ID);
     expect(t.k1.hireEndDate).toEqual(DEADLINE);
+    expect(t.k1.hires.map((h) => h.purchaseOrderRentalLineId)).toEqual([HIRE_ID, HIRE_2_ID]);
+  });
+
+  // `hireOverdue` describes the LINE — the soonest of its hires. Consumers that need to say how MANY
+  // units are actually late cannot get there from it: a line holding 1 unit on an overdue hire and 2
+  // on next month's is `hireOverdue: true` with `remaining: 3`, and the engineer's job page read that
+  // as "3 are past their return date, bring them all back". Two of them were not due for weeks.
+  it("marks overdue PER HIRE, not just for the line", async () => {
+    mockMoves.mockResolvedValue([
+      { status: "posted", direction: "issue", warehouseId: WH_ID, items: [
+        { jobKitLineId: "k1", qty: 1, condition: "good", purchaseOrderRentalLineId: HIRE_ID },
+        { jobKitLineId: "k1", qty: 2, condition: "good", purchaseOrderRentalLineId: HIRE_2_ID },
+      ] },
+    ] as never);
+    mockHoldingsByEngineer.mockResolvedValue([
+      holding({ hireEndDate: new Date("2020-01-01T00:00:00Z"), quantityOnHand: 1 }), // long gone
+      holding({ purchaseOrderRentalLineId: HIRE_2_ID, hireEndDate: new Date("2026-12-31T00:00:00Z"), quantityOnHand: 2 }),
+    ] as never);
+
+    const t = await getJobKitTallies(JOB_ID);
+    expect(t.k1.hireOverdue).toBe(true); // the line as a whole still has something late
+    expect(t.k1.hires.map((h) => [h.qty, h.overdue])).toEqual([
+      [1, true],
+      [2, false],
+    ]);
+  });
+
+  it("never borrows a deadline from a hire this job never issued", async () => {
+    // THE BUG THIS REPLACES. The engineer is holding the same catalogue item off two orders — one for
+    // this job, one for another — and the old per-item aggregate took the earliest of BOTH. This job's
+    // row showed a date, and an overdue flag, about units it never received.
+    mockMoves.mockResolvedValue(issuedTwo as never);
+    mockHoldingsByEngineer.mockResolvedValue([
+      holding({ purchaseOrderRentalLineId: HIRE_2_ID, poCode: "PO-0099", hireEndDate: new Date("2020-01-01T00:00:00Z"), quantityOnHand: 1 }),
+      holding({ quantityOnHand: 2 }),
+    ] as never);
+    const t = await getJobKitTallies(JOB_ID);
+    expect(t.k1.hireEndDate).toEqual(DEADLINE);
+    expect(t.k1.hireOverdue).toBe(false);
+    expect(t.k1.hires).toHaveLength(1);
   });
 
   it("leaves a non-rental line's hire fields null", async () => {
@@ -588,20 +1322,20 @@ describe("getWarehouseDemand — a hired item is not a shortfall", () => {
 
   it("counts the hires available at this depot as stock, and labels the row rental", async () => {
     // 3 delivered here, none out, none back ⇒ 3 available against a demand of 2.
-    mockLiveHires.mockResolvedValue([hire()] as never);
+    setHires([hire()]);
     const [row] = await getWarehouseDemand(WH_ID);
     expect(row).toEqual({ source: "rental", itemName: "Fibre Tester", inStock: 3, planned: 2, free: 1 });
   });
 
   it("nets units already out with an engineer out of the depot pool", async () => {
     // Same hire, but 2 of the 3 are in a van — only 1 is actually on the shelf to give out.
-    mockLiveHires.mockResolvedValue([hire({ issuedQuantity: 2 })] as never);
+    setHires([hire({ issuedQuantity: 2 })]);
     const [row] = await getWarehouseDemand(WH_ID);
     expect(row).toMatchObject({ inStock: 1, planned: 2, free: -1 });
   });
 
   it("still reports a genuine shortfall when nothing is on hire here", async () => {
-    mockLiveHires.mockResolvedValue([] as never);
+    setHires([]);
     const [row] = await getWarehouseDemand(WH_ID);
     expect(row).toMatchObject({ source: "rental", inStock: 0, free: -2 });
   });
@@ -618,7 +1352,7 @@ describe("scanLookup — a return binds a hire from THIS depot", () => {
   it("skips a sooner-expiring hire that was delivered somewhere else", async () => {
     mockMoves.mockResolvedValue([{ status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 1, condition: "good" }] }] as never);
     // Only HIRE_ID is live at this warehouse; HIRE_2_ID belongs to the other depot and expires sooner.
-    mockLiveHires.mockResolvedValue([hire({ id: HIRE_ID, hireEndDate: new Date("2026-10-30T00:00:00Z") })] as never);
+    setHires([hire({ id: HIRE_ID, hireEndDate: new Date("2026-10-30T00:00:00Z") })]);
     mockHoldingsByEngineer.mockResolvedValue([
       { purchaseOrderRentalLineId: HIRE_2_ID, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0051", hireEndDate: new Date("2026-09-14T00:00:00Z"), quantityOnHand: 1 },
       { purchaseOrderRentalLineId: HIRE_ID, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0042", hireEndDate: new Date("2026-10-30T00:00:00Z"), quantityOnHand: 1 },
@@ -634,7 +1368,7 @@ describe("scanLookup — a return binds a hire from THIS depot", () => {
     // Nothing live here — the fallback keeps the deliberate no-orderLive rule on the return leg.
     // Refusing the scan would strand the units in the van with no way to record their return.
     mockMoves.mockResolvedValue([{ status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 1, condition: "good" }] }] as never);
-    mockLiveHires.mockResolvedValue([] as never);
+    setHires([]);
     mockHoldingsByEngineer.mockResolvedValue([
       { purchaseOrderRentalLineId: HIRE_ID, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0042", hireEndDate: new Date("2026-09-14T00:00:00Z"), quantityOnHand: 1 },
     ] as never);
@@ -647,7 +1381,7 @@ describe("scanLookup — a return binds a hire from THIS depot", () => {
     // `?? 0` sorted an undated holding to the epoch, so it beat every real deadline and was always
     // the hire picked. Undated now sorts last.
     mockMoves.mockResolvedValue([{ status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "k1", qty: 1, condition: "good" }] }] as never);
-    mockLiveHires.mockResolvedValue([hire({ id: HIRE_ID }), hire({ id: HIRE_2_ID })] as never);
+    setHires([hire({ id: HIRE_ID }), hire({ id: HIRE_2_ID })]);
     mockHoldingsByEngineer.mockResolvedValue([
       { purchaseOrderRentalLineId: HIRE_2_ID, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0051", hireEndDate: null, quantityOnHand: 1 },
       { purchaseOrderRentalLineId: HIRE_ID, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0042", hireEndDate: new Date("2026-09-14T00:00:00Z"), quantityOnHand: 1 },

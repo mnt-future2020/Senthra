@@ -113,7 +113,11 @@ export function postReturn(jobId: string, payload: Omit<PostMovementPayload, "di
 
 /**
  * Reconcile a job's stock. If `writeOffLost` is true, any unaccounted units are written off.
- * Returns the updated summary and an array of unaccounted items (empty when fully balanced).
+ *
+ * Returns the updated summary, the unaccounted items (empty when fully balanced) AND the hired kit
+ * still out. SUCCESS IS NOT PROOF THE JOB CLOSED: a hire is the provider's equipment and is never
+ * written off as our loss, so it never reaches `unaccounted` — it holds the job at `awaiting_return`
+ * instead, and `rentalOutstanding` is the only thing that says so. Check it before reporting success.
  */
 /**
  * Close & reconcile a job. Called with no payload it PREVIEWS: anything the engineer still holds comes
@@ -183,17 +187,6 @@ export function reportDamage(payload: ReportDamagePayload): Promise<ReportDamage
 
 // ── Damage-photo upload ───────────────────────────────────────────────────────
 
-/**
- * Upload a damage photo data URI to the backend (which relays it to Cloudinary).
- * Returns the resulting hosted URL — store this in the movement line's damagePhotoUrl field.
- */
-export function uploadDamagePhoto(dataUri: string): Promise<string> {
-  return api<{ url: string }>("/goods-management/damage-photo", {
-    method: "POST",
-    body: { image: dataUri },
-    timeout: LONG_WRITE_TIMEOUT, // Cloudinary relay
-  }).then((r) => r.url);
-}
 
 // ── Overdue holdings ──────────────────────────────────────────────────────────
 

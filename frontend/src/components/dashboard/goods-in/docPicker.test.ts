@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isImageType, resolveDocType, stageFiles } from "./docPicker";
+import { isImageType, resolveDocType, stageFiles, UNTYPED_IMAGE } from "./docPicker";
 
 const allowedFrom = (accept: string) =>
   new Set(accept.split(",").map((e) => e.trim().replace(/^\./, "").toLowerCase()));
@@ -99,5 +99,28 @@ describe("stageFiles", () => {
       return 100;
     });
     expect(seen).toEqual([{ bytes: 5000, count: 2 }]);
+  });
+});
+
+describe("a photograph whose format was never recorded", () => {
+  // Damage evidence is kept as a bare Cloudinary URL — no file row, and the URL carries no
+  // extension — so there is nothing to resolve a format from. It still has to render as a picture:
+  // the whole point of the record is that somebody looks at the damage.
+  it("previews rather than falling back to a file icon", () => {
+    expect(isImageType(UNTYPED_IMAGE)).toBe(true);
+  });
+
+  // The regression this replaced passed a MIME type, which no caller of this set ever uses. It
+  // failed the gate silently — a file icon in place of the photo, and no error anywhere.
+  it("does not accept a MIME type, which is not what this set holds", () => {
+    expect(isImageType("image/jpeg")).toBe(false);
+    expect(isImageType("image/png")).toBe(false);
+  });
+
+  it("is not something the picker can ever produce for a real file", () => {
+    const allowed = allowedFrom(".png,.jpg,.jpeg,.gif,.webp");
+    for (const name of ["a.png", "a.jpg", "a.jpeg", "a.gif", "a.webp"]) {
+      expect(resolveDocType(name, allowed)).not.toBe(UNTYPED_IMAGE);
+    }
   });
 });

@@ -59,6 +59,26 @@ export interface JobKitLine {
   // the browser — a device in another zone (or with a wrong clock) would disagree with the warehouse
   // about which day it is, on the one field whose whole job is naming a day.
   hireOverdue: boolean;
+  /**
+   * The hires THIS job still has units out on, earliest deadline first — the breakdown behind
+   * `hireEndDate`.
+   *
+   * A rental line can legitimately draw the same catalogue item off two orders with two different
+   * return dates. The row shows the one that bites first; this is what lets it admit there is another
+   * behind it rather than dropping that deadline silently.
+   */
+  hires: {
+    poCode: string | null;
+    hireEndDate: string | null;
+    qty: number;
+    /**
+     * Late as of the server's company-local today — PER HIRE, which `hireOverdue` above cannot say.
+     * That flag describes the LINE (its soonest hire), so counting late UNITS off it counts the whole
+     * line: 1 unit a month overdue beside 2 not due until December read as "3 past their return date".
+     * Server-resolved for the same reason `hireOverdue` is — never recompute it from a browser clock.
+     */
+    overdue: boolean;
+  }[];
   // Hand-overs of this line's stock from another engineer's van. Non-empty ⇒ it does NOT come from
   // the warehouse above — that's only where leftovers are returned to. Populated on the job detail.
   vanSources: KitLineVanSource[];

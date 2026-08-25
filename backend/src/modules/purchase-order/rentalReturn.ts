@@ -61,6 +61,26 @@ export function isReturnMode(value: string): value is ReturnMode {
 }
 
 /**
+ * Does `resolveDeliveryLocation` fall through to the WAREHOUSE — i.e. neither address is set?
+ *
+ * Deliberately next to the chain it mirrors, because it is the same rule read from the other end and
+ * two copies in two files would drift the first time a fourth fallback appeared.
+ *
+ * It exists for the warehouse's own on-hire pane. That pane is already scoped to one depot, so a
+ * delivery column that resolves to the warehouse prints the name of the page you are standing on,
+ * once per row — noise that buries the rows that DO go somewhere else (a hire delivered straight to
+ * site). Knowing which arm fired lets the pane say "this warehouse" quietly and give the real
+ * addresses the attention they are there for.
+ *
+ * A boolean rather than a `kind` on `ReturnLocation`: that type is shared with the return leg, whose
+ * arms are different ones, and widening it would invite callers to switch on a discriminator that
+ * means different things on each leg.
+ */
+export function deliversToWarehouse(ctx: Pick<ReturnContext, "deliveryAddress" | "orderDeliveryAddress">): boolean {
+  return !ctx.deliveryAddress?.trim() && !ctx.orderDeliveryAddress?.trim();
+}
+
+/**
  * Resolve a hire's collection point.
  *
  * `delivery` walks the outbound leg's chain THROUGH `resolveDeliveryLocation`, so "same as delivery"

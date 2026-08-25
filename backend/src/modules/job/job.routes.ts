@@ -1,10 +1,10 @@
 import { Router } from "express";
 
 import * as jobController from "./job.controller.js";
-import { requireAnyPermission, requireAuth, requireCustomer, requirePermission } from "../../middleware/auth.middleware.js";
+import { requireAuth, requireCustomer, requirePermission } from "../../middleware/auth.middleware.js";
 import { writeLimiter, exportLimiter } from "../../middleware/rateLimit.middleware.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
-import { assignJobSchema, cancelJobSchema, createJobSchema, updateJobSchema, uploadAttachmentSchema } from "./job.validation.js";
+import { assignJobSchema, cancelJobSchema, createJobSchema, updateJobSchema } from "./job.validation.js";
 
 const router = Router();
 
@@ -16,10 +16,6 @@ router.get("/export.csv", requirePermission("jobs.export"), exportLimiter, jobCo
 router.get("/:idOrCode", requirePermission("jobs.view"), jobController.getJob);
 
 router.post("/", requirePermission("jobs.create"), writeLimiter, validateBody(createJobSchema), jobController.createJob);
-// create OR edit: the upload button renders in BOTH modes of JobForm, so gating this on jobs.create
-// alone 403s an edit-only role the moment they attach a file to an existing job. Same rule as the
-// PRF/PO attachment endpoints, which sit behind their module's `edit`.
-router.post("/attachment", requireAnyPermission("jobs.create", "jobs.edit"), writeLimiter, validateBody(uploadAttachmentSchema), jobController.uploadAttachment);
 router.patch("/:id", requirePermission("jobs.edit"), writeLimiter, validateBody(updateJobSchema), jobController.updateJob);
 router.delete("/:id", requirePermission("jobs.delete"), writeLimiter, jobController.deleteJob);
 

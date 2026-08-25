@@ -29,6 +29,17 @@ import { uploadDirect } from "@/lib/upload";
 import type { PurchaseOrder } from "@/types/purchase-order";
 import type { PoRentalLine, ReceiptCondition, ReceiptDirection } from "@/types/rental";
 
+/**
+ * The three legs THIS FORM serves — a note that MOVES something, or reports a fault on kit somebody
+ * can look at.
+ *
+ * Narrower than `ReceiptDirection` on purpose. A loss settlement is also a hire note, but it moves no
+ * equipment and reports nothing: it agrees the money for units that left when the loss was declared,
+ * and it is entered in a dialog on the record itself. Typing this map to the full union would force a
+ * `loss` arm into every table below whose only honest content is "not applicable".
+ */
+type MovementLeg = Extract<ReceiptDirection, "in" | "out" | "damage">;
+
 // Recording a MOVEMENT of hired kit — the rental counterpart of a goods receipt, and deliberately not
 // one. A GRN's completion writes an inventory balance and a stock movement; hired equipment stays the
 // supplier's, so this records custody instead: how much moved, in what condition, carrying which of the
@@ -43,7 +54,7 @@ import type { PoRentalLine, ReceiptCondition, ReceiptDirection } from "@/types/r
 // there is nothing here to defer — a mistake is voided afterwards, which keeps the quantities a hire
 // moved on as the sum of records nobody rewrote.
 
-const CONDITIONS: Record<ReceiptDirection, { value: ReceiptCondition; label: string }[]> = {
+const CONDITIONS: Record<MovementLeg, { value: ReceiptCondition; label: string }[]> = {
   in: [
     { value: "good", label: "Good — no damage on arrival" },
     { value: "damaged", label: "Damaged — see notes" },
@@ -117,7 +128,7 @@ interface Mode {
   damagedColumn: boolean;
 }
 
-const MODES: Record<ReceiptDirection, Mode> = {
+const MODES: Record<MovementLeg, Mode> = {
   in: {
     title: "Receive hired equipment",
     submitLabel: "Record delivery",
@@ -271,7 +282,7 @@ type LineState = {
  * can this movement touch" is the rule the SERVER re-checks — and the two disagreeing is how a form
  * offers somebody a number the save then refuses.
  */
-function readLine(direction: ReceiptDirection, r: PoRentalLine): LineState | null {
+function readLine(direction: MovementLeg, r: PoRentalLine): LineState | null {
   const received = r.receivedQuantity ?? 0;
   const returned = r.returnedQuantity ?? 0;
 
@@ -339,7 +350,7 @@ function readLine(direction: ReceiptDirection, r: PoRentalLine): LineState | nul
   };
 }
 
-export function HireMovementForm({ poId, direction }: { poId: string; direction: ReceiptDirection }) {
+export function HireMovementForm({ poId, direction }: { poId: string; direction: MovementLeg }) {
   const router = useRouter();
   const { pushToast } = useDashboard();
   // The server stamps `receivedBy` from the session. Shown so the person signing for somebody else's

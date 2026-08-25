@@ -7,12 +7,14 @@ import {
   atWarehouses,
   awaitingDeliveryWhere,
   expiringSoonWhere,
+  issuableWhere,
   onHireWhere,
   overdueDeliveryWhere,
   overdueWhere,
   cancelledWhere,
   returnedWhere,
   TERMINAL_HIRE_STATUSES,
+  unsettledCustodyWhere,
 } from "./rentalHire.predicate.js";
 
 // Data-access layer for Purchase Orders. The ONLY place Prisma is touched for POs. Soft-deleted
@@ -880,6 +882,10 @@ export interface HireStockRow {
   receivedQuantity: number;
   returnedQuantity: number;
   issuedQuantity: number;
+  /** Units currently unresolved-lost — see the column note. Part of the custody arithmetic, not a report count. */
+  lostQuantity: number;
+  /** Cached count of OPEN damage custody exits: units on the shelf that must not be issued again. */
+  fieldDamageQty: number;
   hireEndDate: Date;
   hireStatus: string;
   purchaseOrderId: string;
@@ -907,6 +913,8 @@ const HIRE_STOCK_SELECT = {
   receivedQuantity: true,
   returnedQuantity: true,
   issuedQuantity: true,
+  lostQuantity: true,
+  fieldDamageQty: true,
   hireEndDate: true,
   hireStatus: true,
   purchaseOrderId: true,
@@ -927,6 +935,8 @@ function mapHireStock(r: HireStockQueryRow): HireStockRow {
     receivedQuantity: r.receivedQuantity,
     returnedQuantity: r.returnedQuantity,
     issuedQuantity: r.issuedQuantity,
+    lostQuantity: r.lostQuantity,
+    fieldDamageQty: r.fieldDamageQty,
     hireEndDate: r.hireEndDate,
     hireStatus: r.hireStatus,
     purchaseOrderId: r.purchaseOrderId,
@@ -974,6 +984,38 @@ export async function findLiveHiresByRentalItems(rentalItemIds: string[], wareho
   return rows.map(mapHireStock);
 }
 
+/**
+ * The hires of these items we may ISSUE to a new job — the availability twin of
+ * `findLiveHiresByRentalItems`, and a SEPARATE function rather than a flag on it.
+ *
+ * Two callers, two questions. "What are we still holding" (the on-hire board, the overdue badge, the
+ * reminder sweep, the return scan) must keep seeing an expired hire — it is the row somebody has to
+ * chase, and the return leg has to be able to bind it. "What can go out on a job today" must not.
+ * Composing `issuableWhere` here keeps that distinction in the predicate module where the rest of the
+ * hire rules live, so a reader of either function can see which question it answers.
+ *
+ * `todayStart` is company-timezone start-of-day, resolved ONCE by the caller — see `issuableWhere`.
+ * `warehouseIds` is optional and behaves exactly as it does on the sibling: absent = every depot
+ * (which the kit-request composer and the rental-item picker both want, so they can offer a choice of
+ * depots), an empty array = a real scope of none.
+ */
+export async function findIssuableHiresByRentalItems(
+  rentalItemIds: string[],
+  todayStart: Date,
+  warehouseIds?: string[],
+): Promise<HireStockRow[]> {
+  if (rentalItemIds.length === 0) return [];
+  const rows = await prisma.purchaseOrderRentalLine.findMany({
+    where: {
+      ...atWarehouses(issuableWhere(todayStart), warehouseIds && warehouseIds.length > 0 ? warehouseIds : undefined),
+      rentalItemId: { in: rentalItemIds },
+    },
+    select: HIRE_STOCK_SELECT,
+    orderBy: { hireEndDate: "asc" },
+  });
+  return rows.map(mapHireStock);
+}
+
 /** One hire, with the same numbers — the scan resolves a specific unit to exactly one of these. */
 export async function findHireStockById(lineId: string): Promise<HireStockRow | null> {
   const row = await prisma.purchaseOrderRentalLine.findUnique({ where: { id: lineId }, select: HIRE_STOCK_SELECT });
@@ -1000,32 +1042,28 @@ export async function findHireStockByIdTx(tx: Prisma.TransactionClient, lineId: 
  * never lend more than is actually in the building. On the way BACK (`delta < 0`) the bound is
  * `issuedQuantity >= −delta`, i.e. never credit a return of units that were never issued.
  */
-/**
- * Record that an engineer brought units of this hire back damaged.
- *
- * Writes `fieldDamageQty` / `fieldDamageReportedAt` and NOTHING else — in particular not
- * `damagedQuantity`, which is recomputed as an absolute from the live damage notes and would erase
- * this the next time one was voided. See the column comments in schema.prisma.
- *
- * A plain increment rather than a conditional write: it moves no availability and gates no decision,
- * so there is no arithmetic for a concurrent write to break. It is a flag with a count on it.
- */
-export async function flagHireDamagedTx(tx: Prisma.TransactionClient, lineId: string, qty: number): Promise<void> {
-  if (qty <= 0) return;
-  await tx.purchaseOrderRentalLine.update({
-    where: { id: lineId },
-    data: { fieldDamageQty: { increment: qty }, fieldDamageReportedAt: new Date() },
-  });
-}
-
-export async function adjustHireIssuedQtyTx(tx: Prisma.TransactionClient, lineId: string, delta: number): Promise<boolean> {
+export async function adjustHireIssuedQtyTx(
+  tx: Prisma.TransactionClient,
+  lineId: string,
+  delta: number,
+  // Company-timezone start of today, resolved ONCE for the request. Supplied on the way OUT to assert
+  // the hire period inside this same conditional write; omitted on the way BACK, where it must never
+  // be asserted. See the `issuableAsOf` note below.
+  issuableAsOf?: Date,
+): Promise<boolean> {
   if (delta === 0) return true;
   const line = await tx.purchaseOrderRentalLine.findUnique({
     where: { id: lineId },
-    select: { receivedQuantity: true, returnedQuantity: true },
+    select: { receivedQuantity: true, returnedQuantity: true, lostQuantity: true, fieldDamageQty: true },
   });
   if (!line) return false;
-  const heldByCompany = line.receivedQuantity - line.returnedQuantity;
+  // The custody arithmetic, asserted where it is committed. `lost` leaves because those units are not
+  // in the building; open field damage leaves because a broken tester must never be handed to the next
+  // engineer — but it is netted only against what can be ISSUED, never against what we hold, so the
+  // same unit still goes back to the provider on a collection note. See rentalHire.allocation.ts.
+  const heldByCompany = line.receivedQuantity - line.returnedQuantity - (line.lostQuantity ?? 0);
+  const damagedOnShelf = Math.min(Math.max(0, heldByCompany), line.fieldDamageQty ?? 0);
+  const issuableBase = heldByCompany - damagedOnShelf;
 
   // ── ABSENT IS NOT ZERO ────────────────────────────────────────────────────────────────────────
   //
@@ -1045,8 +1083,10 @@ export async function adjustHireIssuedQtyTx(tx: Prisma.TransactionClient, lineId
   // It is correct only because the pre-check below has already refused any request bigger than the
   // hire physically holds — so `ceiling` is never negative here, and "missing" can never slip a row
   // past a bound it should have failed.
-  if (delta > 0 && delta > heldByCompany) return false;
-  const ceiling = heldByCompany - delta;
+  // Out: bounded by what may be ISSUED. Back: bounded by what we hold — a damaged or partly-lost hire
+  // must still be able to take its units back, and netting damage off the return would strand them.
+  if (delta > 0 && delta > issuableBase) return false;
+  const ceiling = (delta > 0 ? issuableBase : heldByCompany) - delta;
 
   const res = await tx.purchaseOrderRentalLine.updateMany({
     where: {
@@ -1055,6 +1095,38 @@ export async function adjustHireIssuedQtyTx(tx: Prisma.TransactionClient, lineId
       // landing in the gap invalidates this write instead of silently shifting the ceiling under it.
       receivedQuantity: line.receivedQuantity,
       returnedQuantity: line.returnedQuantity,
+      // The two newer terms of the same ceiling, re-asserted for the identical reason: a loss declared
+      // or a damage reported in the gap between the read above and this write must invalidate the write
+      // rather than silently shift the bound under it.
+      //
+      // Each sits in its own `AND` arm because both need the ABSENT-IS-NOT-ZERO treatment and two bare
+      // `OR` keys at this level would overwrite one another. A row that has never stored the field
+      // reads as zero above, so a zero assertion has to match the missing document too — which is what
+      // the `isSet: false` arm says. (The backfill script writes real zeroes; this survives a row that
+      // somehow escaped it.)
+      // Zero is expressed as `NOT gt 0` rather than `= 0`, which is the SAME trick the issued-quantity
+      // bound below uses and for the same reason: `$gt` does not match a missing field, so negating it
+      // matches a stored zero AND a row that never stored the column at all. (Prisma exposes no
+      // `isSet` for a required scalar, so this is also the only way to say it through the typed API.)
+      // A non-zero assertion is a plain equality — a missing field cannot equal a positive number, and
+      // should not.
+      AND: [
+        line.lostQuantity === 0 ? { NOT: { lostQuantity: { gt: 0 } } } : { lostQuantity: line.lostQuantity },
+        line.fieldDamageQty === 0 ? { NOT: { fieldDamageQty: { gt: 0 } } } : { fieldDamageQty: line.fieldDamageQty },
+      ],
+      // ── THE HIRE PERIOD, ASSERTED IN THE SAME WRITE ─────────────────────────────────────────────
+      //
+      // On the way OUT only. A read-side availability filter cannot close this on its own: the scan
+      // preview and the post are two requests, and between them sits a browser tab that may have been
+      // open since before the deadline passed. Putting the window in this `where` means the check and
+      // the commitment are ONE operation, so a stale tab's post fails the same way an over-quantity
+      // post does — and the caller already turns `false` into a 409 telling the user to refresh.
+      //
+      // On the way BACK (`delta < 0`) this is deliberately absent, and that asymmetry is the rule, not
+      // an oversight: an EXPIRED hire is exactly the one most needing to come back. Asserting the
+      // window on a return would strand overdue kit in a van with no way to book it in — the precise
+      // failure the return leg's missing `orderLive` filter also exists to avoid.
+      ...(delta > 0 && issuableAsOf ? { hireEndDate: { gte: issuableAsOf } } : {}),
       ...(delta > 0
         ? { NOT: { issuedQuantity: { gt: ceiling } } }
         // The other direction needs the OPPOSITE treatment: `gte` excludes a missing field, and that
@@ -1187,6 +1259,20 @@ export function countOverdueDeliveryHires(todayStart: Date): Promise<number> {
 }
 
 /**
+ * Hires carrying damage or loss the office has not settled — what `rentals.custody_to_settle` counts.
+ *
+ * Counts HIRE LINES through the same predicate `?status=custody` lists them with, which is the whole
+ * point of it living here beside its siblings. The badge used to count EXIT ROWS instead
+ * (`custodyExitRepo.countOpenAll`), and that disagreed with its own list on two axes at once: two open
+ * exits on one hire counted twice and listed once, and an exit on a CANCELLED order — a state this
+ * module now permits a hire to reach with custody still open — was counted by a badge whose list
+ * (LIVE_ORDER) could never show it. A badge with no row behind it cannot be cleared by any action.
+ */
+export function countUnsettledCustodyHires(): Promise<number> {
+  return prisma.purchaseOrderRentalLine.count({ where: unsettledCustodyWhere() });
+}
+
+/**
  * Hires still awaiting delivery at these warehouses — the warehouse floor's receiving queue.
  *
  * DELIBERATELY not `overdueDeliveryWhere`: that one asks "should this already be here?", which is
@@ -1228,7 +1314,7 @@ export async function countAwaitingHireDeliveriesByWarehouse(
 // `returned` is the ODD ONE OUT and belongs here anyway: every other entry narrows the LIVE hires,
 // and it selects the finished ones. A register of its own would need a second copy of every column,
 // filter and export this list already has — and the row is the same row, at the end of the same life.
-export const ON_HIRE_STATUSES = ["all", "expiring", "overdue", "awaiting", "late", "returned", "cancelled"] as const;
+export const ON_HIRE_STATUSES = ["all", "expiring", "overdue", "awaiting", "late", "returned", "cancelled", "custody"] as const;
 export type OnHireStatus = (typeof ON_HIRE_STATUSES)[number];
 
 // The two pills that select rows OUTSIDE the live set — read, not worked, and so sorted as history.
@@ -1258,6 +1344,13 @@ export function onHireFilter(status: OnHireStatus, todayStart: Date): Prisma.Pur
   // happened is not hire spend. It still needs a home, or a short close would create a record found
   // on no screen.
   if (status === "cancelled") return cancelledWhere();
+  // Hires with damage or loss the office has not settled with the provider — the settle worklist, and
+  // what the `rentals.custody_to_settle` badge opens.
+  //
+  // Asked of the EXIT ROWS through the relation, never of the cached counters: `fieldDamageQty` and
+  // `lostQuantity` answer "what is damaged and still here" and "what is gone", which is a different
+  // question from "what does the provider still owe us an answer on". See unsettledCustodyWhere.
+  if (status === "custody") return unsettledCustodyWhere();
   return onHireWhere();
 }
 
@@ -1321,7 +1414,7 @@ export async function listOnHire(args: {
         // by the SAME function the order document uses (rentalReturn.ts) rather than a second guess.
         purchaseOrder: {
           select: {
-            id: true, code: true, status: true, supplierName: true, warehouseId: true, deliveryAddress: true,
+            id: true, code: true, status: true, supplierName: true, warehouseId: true, deliveryAddress: true, deletedAt: true,
             warehouse: { select: { name: true, addressLine1: true, addressLine2: true, city: true, county: true, postcode: true, country: true } },
           },
         },

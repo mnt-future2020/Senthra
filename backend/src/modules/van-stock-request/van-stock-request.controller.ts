@@ -130,7 +130,3 @@ export const uploadAttachment = asyncHandler(async (req, res) => {
   res.json(await vsrService.uploadImage((req.body as UploadImageInput).image, "attachment"));
 });
 
-// POST /van-stock-requests/damage-photo  (returns a URL for a damaged return line)
-export const uploadDamagePhoto = asyncHandler(async (req, res) => {
-  res.json(await vsrService.uploadImage((req.body as UploadImageInput).image, "damage"));
-});

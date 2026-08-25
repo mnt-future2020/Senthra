@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 
 import {
   createPurchaseOrderSchema,
-  poAttachmentSchema,
   poCancelSchema,
   poRejectSchema,
   poSupplierAcceptSchema,
@@ -26,15 +25,6 @@ const valid = (over: Record<string, unknown> = {}) => ({
 // Fixtures carry REAL leading bytes. They used to be `base64,AAAA` with a declared size of 2 KB —
 // which the schema accepted, because it read the declaration and never the payload. That is the
 // assumption these tests were quietly encoding, so the fixtures had to change with the rule.
-const fileOf = (signature: number[], bytes: number) => {
-  const head = Buffer.from(signature);
-  return Buffer.concat([head, Buffer.alloc(Math.max(0, bytes - head.length), 0x41)]);
-};
-const PDF_SIG = [0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34]; // %PDF-1.4
-const EXE_SIG = [0x4d, 0x5a, 0x90, 0x00]; // a Windows executable
-const dataUri = (mediaType: string, signature: number[], bytes: number) =>
-  `data:${mediaType};base64,${fileOf(signature, bytes).toString("base64")}`;
-const pdf = (bytes: number) => dataUri("application/pdf", PDF_SIG, bytes);
 
 describe("createPurchaseOrderSchema — required fields", () => {
   it("accepts a valid order", () => {
@@ -183,29 +173,9 @@ describe("workflow + attachment bodies", () => {
     expect(poCancelSchema.safeParse({ reason: "No longer needed" }).success).toBe(true);
   });
 
-  it("attachment rejects an unsupported file type", () => {
-    expect(
-      poAttachmentSchema.safeParse({ fileName: "x.exe", fileType: "exe", fileSizeBytes: 100, data: "data:..." }).success,
-    ).toBe(false);
-  });
-
-  it("attachment rejects a file over 10 MB", () => {
-    expect(
-      poAttachmentSchema.safeParse({ fileName: "x.pdf", fileType: "pdf", fileSizeBytes: 11 * 1024 * 1024, data: pdf(11 * 1024 * 1024) }).success,
-    ).toBe(false);
-  });
-
-  it("attachment accepts a valid PDF", () => {
-    expect(
-      poAttachmentSchema.safeParse({ label: "Quote", fileName: "quote.pdf", fileType: "pdf", fileSizeBytes: 2048, data: pdf(2048) }).success,
-    ).toBe(true);
-  });
-
-  // A PO attachment can be REMOVED, and removal now deletes the Cloudinary file — so what gets
-  // stored under a trusted label matters more here than anywhere.
-  it("attachment rejects a declared size or type the payload contradicts", () => {
-    const base = { label: "Quote", fileName: "quote.pdf", fileType: "pdf", fileSizeBytes: 2048, data: pdf(2048) };
-    expect(poAttachmentSchema.safeParse({ ...base, fileSizeBytes: 40 * 1024 }).success).toBe(false);
-    expect(poAttachmentSchema.safeParse({ ...base, data: dataUri("application/pdf", EXE_SIG, 2048) }).success).toBe(false);
-  });
+  // The four `poAttachmentSchema` cases that stood here went with the schema. They guarded a base64
+  // JSON body that no longer exists: the file now goes browser → Cloudinary under a signature, and the
+  // same three rules — declared type is one we accept, declared size is under 10 MB, and the BYTES are
+  // what the label claims — are enforced by `upload.catalog.ts` and covered by `upload.service.test.ts`
+  // (see "rejects a PDF label on ZIP bytes"). Restating them here would test nothing that runs.
 });

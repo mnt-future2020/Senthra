@@ -224,6 +224,26 @@ export const ATTENTION_ITEMS: AttentionItemMeta[] = [
   // `?status=awaiting` — the whole receiving queue — so the badge read one number and opened a longer
   // list, which is the same broken promise the registry records for `?status=sent` and `?status=draft`.
   { key: "rentals.awaiting_delivery", label: "Hires not yet received", perms: ["rentals.view"], tone: "attention", nav: ATTENTION_NAV.inventory, href: "/dashboard/inventory?tab=rental&rental=on-hire&status=late" },
+  // Damage found on the provider's equipment that nobody has yet put to the provider, and equipment
+  // declared gone that nobody has yet been charged for. Both are money owed on somebody else's asset,
+  // and until these existed the only trace of either was a number on a pane nobody had reason to open.
+  //
+  // `hire.settle` rather than `rentals.view`: this counts work, and the work is a commercial
+  // conversation with the supplier. Someone who can only look at hires cannot clear it, and a badge
+  // that cannot be cleared by the person seeing it is noise.
+  //
+  // ONE key covering damage, loss AND a credit owed back to us — not three. They are the same queue — equipment of the provider's
+  // that something happened to and nobody has yet agreed the money on — worked from the same board by
+  // the same person, and the catalogue's own rule is that two counts must not share a destination.
+  // Splitting them would put two badges on one screen where the difference is a column.
+  //
+  // `hire.settle` rather than `rentals.view`: this counts WORK, and the work is a commercial
+  // conversation with the supplier. A badge nobody seeing it can clear is noise.
+  //
+  // `attention`, not critical. It is money owed on somebody else's asset, which is serious and not an
+  // emergency — the red on this module belongs to `rentals.overdue`, where equipment is still out and
+  // still billing.
+  { key: "rentals.custody_to_settle", label: "Hire damage & loss to settle", perms: ["rentals.hire.settle", "rentals.hire.manage"], tone: "attention", nav: ATTENTION_NAV.inventory, href: "/dashboard/inventory?tab=rental&rental=on-hire&status=custody" },
 
   // Purchase Orders
   // ?status=awaiting_approval and ?status=awaiting_send are DERIVED pseudo-statuses sharing the exact
@@ -370,19 +390,28 @@ export const ATTENTION_SOURCES: AttentionSource[] = [
   },
   {
     id: "rentals",
-    keys: ["rentals.expiring_soon", "rentals.overdue", "rentals.awaiting_delivery"],
+    keys: ["rentals.expiring_soon", "rentals.overdue", "rentals.awaiting_delivery", "rentals.custody_to_settle"],
     // Company-wide, not warehouse-scoped: a hire is delivered to a site or a warehouse, and the
     // person who must chase its return is the PM on the order, not whoever holds that warehouse.
     run: async ({ dayStart }) => {
-      const [expiring, overdue, awaiting] = await Promise.all([
+      const [expiring, overdue, awaiting, custody] = await Promise.all([
         poRepo.countExpiringHires(dayStart),
         poRepo.countOverdueHires(dayStart),
         poRepo.countOverdueDeliveryHires(dayStart),
+        // Company-wide like the three above, and for the same reason: the person who settles a charge
+        // is the PM on the order, not whoever happens to hold the depot it was found at.
+        //
+        // Counts HIRE LINES through `unsettledCustodyWhere`, the predicate `?status=custody` lists
+        // with — not the exit ROWS. Counting rows disagreed with the list twice over: a hire with two
+        // open exits counted 2 and listed 1, and an exit left open on a cancelled order counted
+        // forever against a list that (LIVE_ORDER) can never show it.
+        poRepo.countUnsettledCustodyHires(),
       ]);
       return {
         "rentals.expiring_soon": expiring,
         "rentals.overdue": overdue,
         "rentals.awaiting_delivery": awaiting,
+        "rentals.custody_to_settle": custody,
       };
     },
   },

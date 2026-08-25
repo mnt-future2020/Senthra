@@ -2,8 +2,7 @@ import type { AuditActor } from "#modules/audit/audit.service.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import { parseFilterDate, startOfDayIn } from "../../utils/filter-date.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
-import { uploadToCloudinary } from "../../lib/cloudinary.js";
-import { getCloudinaryCreds, getCompanyTimezone, getOverdueAfterDays } from "#modules/settings/settings.service.js";
+import { getCompanyTimezone, getOverdueAfterDays } from "#modules/settings/settings.service.js";
 import * as jobRepo from "#modules/job/job.repository.js";
 import type { JobWithRelations } from "#modules/job/job.repository.js";
 import * as irmService from "#modules/irm/irm.service.js";
@@ -12,8 +11,10 @@ import * as inventoryService from "#modules/inventory/inventory.service.js";
 import * as engineerStockRepo from "#modules/engineer-stock/engineer-stock.repository.js";
 import * as rentalCustodyRepo from "#modules/engineer-rental/engineer-rental.repository.js";
 import * as rentalItemRepo from "#modules/rental-item/rental-item.repository.js";
+import * as custodyExitRepo from "#modules/purchase-order/hireCustodyExit.repository.js";
+import { emitHireUpdated } from "#modules/purchase-order/rentalHire.realtime.js";
 import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
-import { allocateFromHires, hireAvailable, totalAvailable } from "#modules/purchase-order/rentalHire.allocation.js";
+import { allocateFromHires, hireIssuable, totalAvailable } from "#modules/purchase-order/rentalHire.allocation.js";
 import * as transferRepo from "#modules/engineer-transfer/engineer-transfer.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
@@ -23,13 +24,32 @@ import type { CloseReconcileInput, PostMovementInput, ReportDamageInput, Restore
 import { withTransaction } from "../../lib/prisma.js";
 import { notify } from "#modules/notification/notification.service.js";
 import { emitAttentionChanged, emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
-import { randomUUID } from "node:crypto";
 
 // Issue / return / reconcile each move a goods attention queue (to-issue, awaiting-return, overdue
 // holdings), so the office event and the attention signal fire together — see emitJobsRoom.
 function emitGoodsRoom(event: string, payload: unknown): void {
   emitToRoom(OFFICE_JOBS_ROOM, event, payload);
   emitAttentionChanged("goods_management");
+}
+
+/** One hire a scan touches, and this hire's share of the units the scan may move. */
+export interface ScanHire {
+  purchaseOrderRentalLineId: string;
+  poCode: string | null;
+  hireEndDate: string | null;
+  overdue: boolean;
+  /**
+   * ISSUE: units to take off this hire. RETURN: units that may go back on it. Either way it is the
+   * cap for a movement line naming this hire, already spent against what the KIT LINE needs or owes —
+   * so the entries sum to at most that, and a panel may stage every one of them.
+   */
+  qty: number;
+  /**
+   * ISSUE only: this hire's own issuable stock, which is a different question from `qty` — a hire
+   * holding 4 against a line that needs 3 lends 3 and still HAS 4. The panel prints it as "Available",
+   * so conflating the two would have the depot's stock shrink to whatever this job happened to ask for.
+   */
+  available?: number;
 }
 
 export interface ScanMatch {
@@ -58,6 +78,27 @@ export interface ScanMatch {
    * refusing would strand real work; the person at the counter is simply the last one who can notice.
    */
   hire?: { poCode: string | null; hireEndDate: string | null; itemName: string; overdue: boolean } | null;
+  /**
+   * RENTALS ONLY, BOTH LEGS — every hire this scan touches, earliest deadline first, with the bound
+   * one (`hire` above) at the head. Absent on every non-rental source.
+   *
+   * A movement line is committed against ONE hire, and that is not negotiable: the units came off a
+   * specific order. But a kit line can legitimately draw the same catalogue item off several orders,
+   * and reporting only the bound one made the rest invisible:
+   *
+   *   RETURN — a line reading "issued 2" offered "Held: 1", and the second unit surfaced only if
+   *   somebody thought to scan again AFTER posting.
+   *   ISSUE  — a line for 12 spread over four orders took four scan→type→Post cycles, each capped at
+   *   a number the warehouse discovered by being refused.
+   *
+   * This is the panel's licence to stage a row per hire from one scan, on either leg.
+   *
+   * The quantities are already spent in order against what the KIT LINE needs (issue) or still has
+   * out (return), so they sum to at most that — a panel may stage all of them without the post
+   * refusing the surplus at the till. See `ScanHire.qty` and `ScanHire.available`, which are two
+   * different numbers on the issue leg.
+   */
+  hires?: ScanHire[];
   jobKitLineId?: string;
   itemName: string;
   uom?: string | null;
@@ -127,13 +168,38 @@ export interface KitLineTally {
   // one: an IRM cable in a van costs nothing and can be written off, a hire keeps billing and is owed
   // to somebody else.
   //
-  // Sourced from the engineer's own EngineerRentalHolding snapshot, which getJobKitTallies already
-  // loads to compute `remaining` — so this costs no extra query. Where an engineer holds the same
-  // catalogue item on SEVERAL hires, this is the EARLIEST of their deadlines: that is the one that
-  // bites first, and the row shows one date.
+  // Resolved from THIS JOB'S OWN MOVEMENTS intersected with the engineer's live holdings — never from
+  // an engineer-wide aggregate. That distinction is the whole point. A hire's deadline belongs to the
+  // hire, and an engineer can be holding the same catalogue item off two different orders with two
+  // different dates. Reading the earliest across everything they hold put ANOTHER job's deadline —
+  // and another job's overdue flag — on this job's row, about units this job never received.
+  //
+  // Where THIS job legitimately drew one item off several hires, this is the earliest of those: it is
+  // the one that bites first, and `hires` below carries the rest so the row can offer the breakdown
+  // instead of hiding it.
   //
   // Null on a rental line whose units are all back (nothing held ⇒ no deadline to meet).
   hireEndDate: Date | null;
+  /**
+   * Every hire THIS job still has units out on, earliest deadline first.
+   *
+   * Empty on non-rental lines and on a rental line that is fully back. Present so a row showing one
+   * date can say honestly that there is another behind it — the previous single-date row simply
+   * dropped the second hire, and its deadline with it.
+   */
+  hires: {
+    purchaseOrderRentalLineId: string;
+    poCode: string | null;
+    hireEndDate: Date | null;
+    qty: number;
+    /**
+     * Late as of THIS request's company-local today — per hire, which `hireOverdue` beside it cannot
+     * say. That flag describes the LINE (its soonest hire), so a consumer counting late UNITS off it
+     * counts the whole line: 1 unit a month overdue beside 2 not due until December read as "3 past
+     * their return date, bring them all back". Only a per-hire flag can answer "how many".
+     */
+    overdue: boolean;
+  }[];
   // Resolved SERVER-side against the company timezone, never from a client clock — the same rule the
   // scan panel follows. A browser in another zone would otherwise disagree with the warehouse about
   // which day it is, on the one field whose whole purpose is naming a day.
@@ -169,12 +235,33 @@ export interface KitTallyJob {
  *
  * One query for the whole page, matching how every other lookup on this path is batched.
  */
-async function rentalPoolByItemAndWarehouse(rentalItemIds: string[], warehouseIds: string[]): Promise<Map<string, number>> {
+/**
+ * Start of TODAY in the company timezone — the one date every hire-window comparison in a request is
+ * judged against.
+ *
+ * A named helper rather than the `startOfDayIn(await getCompanyTimezone(), new Date())` pair written
+ * out at each site, because "resolve it once per request" is a correctness rule here, not tidiness: a
+ * multi-line scan posted at 23:59:59.9 that re-derived the date per line could judge line one against
+ * yesterday and line two against today, and issue half a hire it had just refused. Callers resolve
+ * this once and pass the value down.
+ */
+async function companyTodayStart(): Promise<Date> {
+  return startOfDayIn(await getCompanyTimezone(), new Date());
+}
+
+async function rentalPoolByItemAndWarehouse(
+  rentalItemIds: string[],
+  warehouseIds: string[],
+  // Company-timezone start of today, resolved once by the caller. Present because this pool answers
+  // "what can this depot hand out", so an EXPIRED hire does not belong in it however many units of it
+  // are physically on the shelf — see `issuableWhere`.
+  todayStart: Date,
+): Promise<Map<string, number>> {
   const pool = new Map<string, number>();
   if (rentalItemIds.length === 0) return pool;
-  for (const h of await poRepo.findLiveHiresByRentalItems(rentalItemIds, warehouseIds)) {
+  for (const h of await poRepo.findIssuableHiresByRentalItems(rentalItemIds, todayStart, warehouseIds)) {
     const key = `${h.rentalItemId}|${h.warehouseId}`;
-    pool.set(key, (pool.get(key) ?? 0) + hireAvailable(h));
+    pool.set(key, (pool.get(key) ?? 0) + hireIssuable(h));
   }
   return pool;
 }
@@ -192,8 +279,13 @@ async function rentalPoolByItemAndWarehouse(rentalItemIds: string[], warehouseId
  */
 type RentalHeld = { qty: number; hireEndDate: Date | null };
 async function rentalHeldByItem(engineerId: string): Promise<Map<string, RentalHeld>> {
+  return rentalHeldFrom(await rentalCustodyRepo.findRentalHoldingsByEngineer(engineerId));
+}
+
+/** The per-item roll-up, split out so a caller that already loaded the holdings does not re-query. */
+function rentalHeldFrom(rows: { rentalItemId: string | null; quantityOnHand: number; hireEndDate: Date | null }[]): Map<string, RentalHeld> {
   const held = new Map<string, RentalHeld>();
-  for (const h of await rentalCustodyRepo.findRentalHoldingsByEngineer(engineerId)) {
+  for (const h of rows) {
     if (!h.rentalItemId) continue;
     const cur = held.get(h.rentalItemId);
     const soonest =
@@ -204,6 +296,87 @@ async function rentalHeldByItem(engineerId: string): Promise<Map<string, RentalH
     held.set(h.rentalItemId, { qty: (cur?.qty ?? 0) + h.quantityOnHand, hireEndDate: soonest });
   }
   return held;
+}
+
+/** One hire, and what THIS job still has out on it. */
+export interface JobHireOutstanding {
+  purchaseOrderRentalLineId: string;
+  /** The ORDER a hire action is addressed to — declaring units lost posts against it, not the holding. */
+  purchaseOrderId: string;
+  poCode: string | null;
+  itemName: string;
+  hireEndDate: Date | null;
+  qty: number;
+}
+
+/**
+ * WHICH HIRES a given job still has units out on, and how many — the movements ∩ holdings intersect.
+ *
+ * Both halves are load-bearing and neither works alone.
+ *
+ * The MOVEMENTS say which hires this job drew from and how much of each is unreturned: every rental
+ * movement line carries `purchaseOrderRentalLineId`, so "issued off hire A, returned to hire A" nets
+ * per hire without guessing. That is what scopes the answer to this job — an engineer-wide read cannot,
+ * and putting another job's hire on this job's row is exactly the bug this replaces.
+ *
+ * The HOLDINGS say what the engineer is really carrying, and carry the deadline snapshot. They are
+ * still needed because a return is resolved against the ENGINEER's holding rather than against a job:
+ * units issued on job A can be scanned back while job B's panel is open, and the movement ledger for
+ * job A would still read "outstanding". Clamping to the live holding is what stops a row insisting on
+ * units that are already home.
+ *
+ * Returned earliest-deadline first, which is the order every hire surface in this codebase reads in.
+ */
+export function jobHiresOutstanding(
+  movements: { status: string; direction: string; items: { purchaseOrderRentalLineId?: string | null; qty: number }[] }[],
+  holdings: {
+    purchaseOrderRentalLineId: string;
+    rentalItemId: string | null;
+    itemName: string;
+    poCode: string | null;
+    hireEndDate: Date | null;
+    quantityOnHand: number;
+    purchaseOrderRentalLine?: { purchaseOrderId: string };
+  }[],
+  kitLineIds?: Set<string>,
+): Map<string, JobHireOutstanding[]> {
+  const netByHire = new Map<string, number>();
+  for (const m of movements) {
+    if (m.status !== "posted") continue;
+    const sign = m.direction === "issue" ? 1 : m.direction === "return" ? -1 : 0;
+    if (sign === 0) continue;
+    for (const l of m.items) {
+      if (!l.purchaseOrderRentalLineId) continue;
+      if (kitLineIds && !kitLineIds.has((l as { jobKitLineId?: string | null }).jobKitLineId ?? "")) continue;
+      netByHire.set(l.purchaseOrderRentalLineId, (netByHire.get(l.purchaseOrderRentalLineId) ?? 0) + sign * l.qty);
+    }
+  }
+
+  const byItem = new Map<string, JobHireOutstanding[]>();
+  for (const h of holdings) {
+    if (!h.rentalItemId) continue;
+    const onJob = netByHire.get(h.purchaseOrderRentalLineId) ?? 0;
+    // The lower of the two: what this job has not brought back, and what the engineer actually holds.
+    const qty = Math.min(Math.max(0, onJob), h.quantityOnHand);
+    if (qty <= 0) continue;
+    const row = {
+      purchaseOrderRentalLineId: h.purchaseOrderRentalLineId,
+      // Empty only when a caller passed holdings loaded without the relation — the screens that act on
+      // a hire always have it, and a row without it simply cannot offer the action.
+      purchaseOrderId: h.purchaseOrderRentalLine?.purchaseOrderId ?? "",
+      poCode: h.poCode,
+      itemName: h.itemName,
+      hireEndDate: h.hireEndDate,
+      qty,
+    };
+    const list = byItem.get(h.rentalItemId);
+    if (list) list.push(row);
+    else byItem.set(h.rentalItemId, [row]);
+  }
+  for (const list of byItem.values()) {
+    list.sort((a, b) => (a.hireEndDate?.getTime() ?? Infinity) - (b.hireEndDate?.getTime() ?? Infinity));
+  }
+  return byItem;
 }
 
 // Per-kit-line goods tallies for a single job, keyed by jobKitLineId. Used on the job-detail "job
@@ -230,11 +403,19 @@ export async function getJobKitTallies(jobId: string, prefetched?: KitTallyJob):
   const engId = job?.assignedEngineerId ?? null;
   const irmHeld = new Map<string, number>();
   const cseHeld = new Map<string, number>();
+  // Per CATALOGUE ITEM across everything the engineer holds — the cap for `remaining`, which is
+  // deliberately a global figure (a unit returned at another warehouse, or under another job, is
+  // genuinely no longer held).
   let rentalHeld = new Map<string, RentalHeld>();
+  // Per catalogue item, but scoped to THIS JOB's own hires — what the deadline is read from. See
+  // jobHiresOutstanding for why the two are different questions.
+  let jobHires = new Map<string, JobHireOutstanding[]>();
   if (engId) {
     for (const b of await engineerStockRepo.findEngineerBalances(engId)) irmHeld.set(b.irmItemId, b.quantityOnHand);
     for (const h of await goodsManagementRepo.findCustomerHoldingsByEngineer(engId)) cseHeld.set(h.customerStockEntryId, h.quantityOnHand);
-    rentalHeld = await rentalHeldByItem(engId);
+    const holdings = await rentalCustodyRepo.findRentalHoldingsByEngineer(engId);
+    rentalHeld = rentalHeldFrom(holdings);
+    jobHires = jobHiresOutstanding(movements as never, holdings);
   }
   // Resolved ONCE for the whole job, and only when a rental line is actually present — this function
   // runs on the queue, the job pack and the start gate, and getCompanyTimezone is a settings read.
@@ -272,16 +453,27 @@ export async function getJobKitTallies(jobId: string, prefetched?: KitTallyJob):
       const rawRemaining = Math.max(0, e.issued - e.returned - e.consumed);
       const remaining = Math.min(rawRemaining, remainingHeld);
       remainingHeld -= remaining;
-      // The deadline rides on the HOLDING, so it appears only while units are actually out. A rental
-      // line that has been fully returned shows no date: there is nothing left to bring back, and a
+      // The deadline rides on THIS JOB'S hires, so it appears only while this job's units are actually
+      // out. A rental line fully returned shows no date: there is nothing left to bring back, and a
       // date still sitting there would read as an outstanding obligation.
-      const hireEndDate = kl.lineType === "rental" && remaining > 0 ? rental?.hireEndDate ?? null : null;
+      //
+      // `hires` is already earliest-first, so the head of it IS the deadline that bites first — and the
+      // tail is what the row needs to admit that a second hire is behind the one it shows.
+      const lineHires = (kl.lineType === "rental" && remaining > 0 && kl.rentalItemId ? jobHires.get(kl.rentalItemId) ?? [] : []).map((h) => ({
+        ...h,
+        // Judged HERE rather than inside jobHiresOutstanding, which stays a pure movements∩holdings
+        // intersection with no clock in it. Same `todayStart` as `hireOverdue` below, so the two can
+        // never disagree about which day it is.
+        overdue: !!(h.hireEndDate && todayStart && h.hireEndDate.getTime() < todayStart.getTime()),
+      }));
+      const hireEndDate = lineHires[0]?.hireEndDate ?? null;
       out[kl.id] = {
         issued: e.issued,
         used: e.consumed,
         returned: e.returned,
         remaining,
         hireEndDate,
+        hires: lineHires,
         hireOverdue: !!(hireEndDate && todayStart && hireEndDate.getTime() < todayStart.getTime()),
       };
     }
@@ -375,8 +567,8 @@ export async function getWarehouseDemand(warehouseId: string): Promise<Warehouse
     inventoryRepo.findBalancesByItemsAndWarehouses(irmIds, [warehouseId]),
     goodsManagementRepo.findCustomerStockEntriesByIds(cseIds),
     // Same helper the planner's availability check uses, so the two figures always agree:
-    // received − returned − issued, over the live hires delivered to THIS warehouse.
-    rentalPoolByItemAndWarehouse(rentalIds, [warehouseId]),
+    // received − returned − issued, over the ISSUABLE hires delivered to THIS warehouse.
+    rentalPoolByItemAndWarehouse(rentalIds, [warehouseId], await companyTodayStart()),
   ]);
   const balByItem = new Map(balances.map((b) => [b.irmItemId, b]));
   const cseQty = new Map(cseEntries.map((e) => [e.id, e.quantity]));
@@ -561,8 +753,24 @@ export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Pr
     const split = kitLineSplit(movements, kit.id);
     const lineOutstanding = Math.max(0, split.issued - split.used - split.returned);
 
-    // The live hires of this item sitting at THIS warehouse, soonest deadline first.
-    const hires = await poRepo.findLiveHiresByRentalItems([rentalItem.id], [input.warehouseId]);
+    // "Today" in COMPANY time, resolved ONCE for this scan and used by both legs below — never from a
+    // client clock. Hire dates are calendar days stored at UTC midnight and startOfDayIn answers
+    // "which calendar date is it now" in the same form, so the two compare directly.
+    const todayStart = await companyTodayStart();
+
+    // The hires of this item at THIS warehouse, soonest deadline first — and WHICH SET depends on the
+    // leg, because the two legs ask opposite questions.
+    //
+    // Issue: only hires we may still lend (`findIssuableHiresByRentalItems`), so an expired hire is
+    // not offered however many units of it are on the shelf.
+    //
+    // Return: every live hire (`findLiveHiresByRentalItems`), expired ones very much included. An
+    // expired hire is exactly what a return needs to bind to, and narrowing this leg would leave
+    // overdue kit in a van with nothing to scan it against.
+    const hires =
+      input.direction === "return"
+        ? await poRepo.findLiveHiresByRentalItems([rentalItem.id], [input.warehouseId])
+        : await poRepo.findIssuableHiresByRentalItems([rentalItem.id], todayStart, [input.warehouseId]);
 
     if (input.direction === "return") {
       // A return has to credit the hire the units actually came off, and the movement ledger is the
@@ -590,15 +798,45 @@ export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Pr
       // longer appear in `hires`. Better to bind it and let postReturn adjudicate than to refuse the
       // scan outright.
       const liveHere = new Set(hires.map((h) => h.id));
-      const target = forThisItem.find((h) => liveHere.has(h.purchaseOrderRentalLineId)) ?? forThisItem[0] ?? null;
+      const here = forThisItem.filter((h) => liveHere.has(h.purchaseOrderRentalLineId));
+      // Every live-here hire is offerable; the fallback deliberately offers exactly ONE. A holding
+      // whose hire is not live at this depot may well belong to another one, and postReturn refuses
+      // precisely that — so listing the whole set here would stage rows that can only fail on Post,
+      // which is worse than the single row that at least stands a chance of being the right one.
+      const candidates = here.length > 0 ? here : forThisItem.slice(0, 1);
+      const target = candidates[0] ?? null;
       if (!target) throw badRequest(`${rentalItem.name} isn't currently out with this engineer.`);
-      // Capped at the hire this scan BINDS TO, not at everything the engineer holds of this item.
-      // The two are different numbers whenever the same tester is out on more than one hire, and
-      // `purchaseOrderRentalLineId` above commits this scan to exactly one of them: offering the
-      // global figure let the warehouse type 5, and postReturn then 409'd at 3 with no explanation
-      // of why — the remaining 2 belong to a different PO and need their own scan.
-      const heldOnThisHire = target.quantityOnHand;
-      const returnTodayStart = startOfDayIn(await getCompanyTimezone(), new Date());
+
+      // Spend the kit line's outstanding units across those hires, soonest deadline first.
+      //
+      // Each entry is capped at the hire it names, never at everything the engineer holds of this
+      // item: `purchaseOrderRentalLineId` commits a post to exactly one of them, so offering the
+      // global figure against one hire let the warehouse type 5 and postReturn then 409'd at 3 with
+      // no explanation — the remaining 2 belong to a different PO.
+      //
+      // And the SUM is capped at the line, which is the other half of the same rule. Two hires
+      // holding 3 each against a line that owes 3 must offer 3, not 6; the running budget is what
+      // makes a panel free to stage every row it is given without the till refusing the surplus.
+      let budget = lineOutstanding;
+      const bindable: ScanHire[] = [];
+      for (const h of candidates) {
+        const qty = Math.min(h.quantityOnHand, budget);
+        if (qty <= 0) break; // holdings are already `quantityOnHand > 0`, so this is the budget running out
+        budget -= qty;
+        bindable.push({
+          purchaseOrderRentalLineId: h.purchaseOrderRentalLineId,
+          poCode: h.poCode,
+          hireEndDate: h.hireEndDate?.toISOString() ?? null,
+          // Same `todayStart` as the bound hire below and as the issue leg — one scan cannot straddle
+          // two dates, however many hires it reports.
+          overdue: h.hireEndDate ? h.hireEndDate.getTime() < todayStart.getTime() : false,
+          qty,
+        });
+      }
+      // The head of the list IS the bound hire, so the legacy scalar keeps saying exactly what it
+      // always said: what may go back on `purchaseOrderRentalLineId`. Zero when the line has nothing
+      // outstanding, which is what `Math.min(lineOutstanding, …)` used to produce.
+      const heldOnThisHire = bindable[0]?.qty ?? 0;
       return {
         source: "rental",
         rentalItemId: rentalItem.id,
@@ -608,31 +846,49 @@ export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Pr
           hireEndDate: target.hireEndDate?.toISOString() ?? null,
           itemName: target.itemName,
           // On a RETURN an overdue hire is not a warning, it is the good news — the kit is coming
-          // back. Reported anyway so the panel can say which hire it clears.
-          overdue: target.hireEndDate ? target.hireEndDate.getTime() < returnTodayStart.getTime() : false,
+          // back. Reported anyway so the panel can say which hire it clears. Judged against the SAME
+          // `todayStart` the issue leg uses, so one scan cannot straddle two dates.
+          overdue: target.hireEndDate ? target.hireEndDate.getTime() < todayStart.getTime() : false,
         },
+        hires: bindable,
         jobKitLineId: kit.id,
         itemName: rentalItem.name,
         uom: rentalItem.baseUnit,
         plannedQty: kit.qty,
         alreadyIssued: already,
         remainingIssuable: 0,
-        heldByEngineer: Math.min(lineOutstanding, heldOnThisHire),
+        heldByEngineer: heldOnThisHire,
         available: totalAvailable(hires),
       };
     }
 
+    // `hires` is already narrowed to what may be lent today, so the allocator keeps its existing
+    // contract — callers hand it eligible candidates and it does not re-filter — and its
+    // earliest-deadline-first ordering now drains the soonest VALID deadline rather than reaching for
+    // an expired hire first (which is what it used to do, the expired row sorting ahead of every
+    // other by construction).
     const pick = allocateFromHires(hires, 1);
     const target = pick?.[0]?.hire ?? null;
-    // "Today" in COMPANY time, resolved the way every other day-boundary in this codebase is — never
-    // from a client clock. Hire dates are calendar days stored at UTC midnight, and startOfDayIn
-    // answers "which calendar date is it now" expressed the same way, so the two compare directly.
-    const todayStart = startOfDayIn(await getCompanyTimezone(), new Date());
     if (!target) {
       throw conflict(
-        `No ${rentalItem.name} is available at this warehouse — every hired unit is already out or has gone back to the provider.`,
+        `No ${rentalItem.name} is available to issue at this warehouse — every hired unit is already out, has gone back to the provider, or sits on a hire whose period has ended. Extend the hire to use it again.`,
       );
     }
+
+    // WHICH HIRES this line would be drawn from, and how much off each — the issue-leg twin of the
+    // return's `hires`, and the answer to the same complaint. Binding one hire per scan meant a line
+    // for 12 spread over four orders took four scan→type→Post cycles, each capped at a number the
+    // warehouse had to discover by being refused. The line's own need is what gets spread, so the
+    // entries sum to at most it.
+    //
+    // Spread by allocateFromHires — the SAME function postIssue commits through, which is the whole
+    // reason that module exists: a preview that allocated differently from the post would show one
+    // tester and hand over another. Asking it for no more than the depot can cover keeps its
+    // no-partial-allocation rule intact (that rule is about a POST, where quietly issuing 3 of the 5
+    // someone asked for would be wrong); a SCAN showing what can go out today is exactly what a
+    // partly-issued kit line means.
+    const need = Math.max(0, kit.qty - already);
+    const spread = allocateFromHires(hires, Math.min(need, totalAvailable(hires))) ?? [];
     return {
       source: "rental",
       rentalItemId: rentalItem.id,
@@ -643,6 +899,14 @@ export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Pr
         itemName: target.itemName,
         overdue: target.hireEndDate.getTime() < todayStart.getTime(),
       },
+      hires: spread.map((a) => ({
+        purchaseOrderRentalLineId: a.hire.id,
+        poCode: a.hire.poCode,
+        hireEndDate: a.hire.hireEndDate.toISOString(),
+        overdue: a.hire.hireEndDate.getTime() < todayStart.getTime(),
+        qty: a.qty,
+        available: hireIssuable(a.hire),
+      })),
       jobKitLineId: kit.id,
       itemName: rentalItem.name,
       uom: rentalItem.baseUnit,
@@ -656,11 +920,11 @@ export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Pr
       // longer available on this hire" — which re-scanning could never clear, because the next scan
       // bound the same hire and offered the same 3. Two hires are two scans, of 2 and of 1, which is
       // what the allocator's no-partial-allocation rule already implies.
-      remainingIssuable: Math.min(Math.max(0, kit.qty - already), hireAvailable(target)),
+      remainingIssuable: Math.min(Math.max(0, kit.qty - already), hireIssuable(target)),
       heldByEngineer: 0,
       // The bound hire's own figure, for the same reason: the panel prints this immediately beside the
       // stepper, so a cross-hire total here would advertise headroom the stepper does not have.
-      available: hireAvailable(target),
+      available: hireIssuable(target),
     };
   }
 
@@ -700,21 +964,6 @@ export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Pr
 // The caller (JobScanPanel) stores this URL in the movement line's damagePhotoUrl field, so no raw
 // data URI ever reaches the movement-post endpoint (which validates max 2000 chars — a Cloudinary
 // URL is always shorter).
-export async function uploadDamagePhoto(image: string): Promise<{ url: string }> {
-  const creds = await getCloudinaryCreds();
-  if (!creds) {
-    throw badRequest(
-      "Cloudinary isn't configured. Add your Cloudinary credentials in Settings → Integrations (or set CLOUDINARY_* in the backend env).",
-    );
-  }
-  // A distinct asset per photo — damage evidence backs supplier and insurance claims, so an upload
-  // that quietly replaced an earlier one would destroy the proof. `uploadToCloudinary` overwrites on a
-  // repeated publicId, and the previous timestamp-plus-Math.random() id could repeat: same
-  // millisecond, same 6 characters. randomUUID cannot.
-  const publicId = `damage-${randomUUID()}`;
-  const { url } = await uploadToCloudinary(image, publicId, creds, "senthra/damage-photos");
-  return { url };
-}
 
 export { warehouseScopeFilter }; // re-export for the queue task
 
@@ -728,7 +977,26 @@ export interface PublicMovement {
   engineerId: string;
   engineerName: string;
   warehouseId: string | null;
-  lines: { source: string; irmItemId: string | null; customerStockEntryId: string | null; itemName: string; qty: number; condition: string }[];
+  lines: {
+    source: string;
+    irmItemId: string | null;
+    customerStockEntryId: string | null;
+    itemName: string;
+    qty: number;
+    condition: string;
+    /**
+     * THE EVIDENCE, on the way back out.
+     *
+     * The return scan requires a photograph and a reason before it will accept a damaged unit, writes
+     * both to the line — and then no read shape carried them, so the one artefact worth most on the day
+     * it was taken could not be looked at afterwards by anybody. A `condition: "damaged"` with nothing
+     * behind it is a claim; with the picture and the words it is a record.
+     *
+     * Null on every good line, and on a damaged line from before this was captured.
+     */
+    damagePhotoUrl: string | null;
+    damageReason: string | null;
+  }[];
 }
 
 function toPublic(m: goodsManagementRepo.JobStockMovementWithRelations): PublicMovement {
@@ -748,6 +1016,8 @@ function toPublic(m: goodsManagementRepo.JobStockMovementWithRelations): PublicM
       itemName: l.itemName,
       qty: l.qty,
       condition: l.condition,
+      damagePhotoUrl: l.damagePhotoUrl ?? null,
+      damageReason: l.damageReason ?? null,
     })),
   };
 }
@@ -769,6 +1039,10 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
   const summary = await goodsManagementRepo.getSummary(job.id);
   if (summary?.goodsStatus === "reconciled") throw conflict("This job has already been reconciled and is locked.");
   const movements = await goodsManagementRepo.findMovementsByJob(job.id);
+  // ONE date for the whole post, resolved before the resolve loop and reused inside the transaction.
+  // A multi-line issue straddling midnight must judge every line against the same calendar day —
+  // see companyTodayStart.
+  const todayStart = await companyTodayStart();
 
   // Resolve + validate every line against the kit list BEFORE opening the tx.
   type Resolved = {
@@ -781,30 +1055,52 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
     customerName?: string | null;
     // Rental only — the hire these units come off, resolved before the transaction opens and
     // re-checked inside it. `hireSnapshot` is what the engineer's holdings row is stamped with.
-    hire?: { id: string; poCode: string | null; hireEndDate: Date; rentalItemId: string } | null;
+    // `purchaseOrderId` rides along for the realtime refresh at the end — the ORDER is what a hire
+    // pane is addressed by, and re-reading the row after the transaction just to learn it would be a
+    // query per line for a fire-and-forget emit.
+    hire?: { id: string; purchaseOrderId: string; poCode: string | null; hireEndDate: Date; rentalItemId: string } | null;
   };
   const resolved: Resolved[] = [];
+  // The kit line's plan, spent ONCE across the whole request — a RUNNING budget, not a ceiling each
+  // line re-reads. Every line used to check its own qty against the same movement snapshot, so two
+  // lines of 2 against a line planning 3 both read "3 remaining" and both passed: 4 units issued
+  // against a plan of 3, and an engineer holding one nobody ordered. It was unreachable while the panel
+  // could only send one line per kit line, and issuing across several hires in one post is exactly what
+  // makes it reachable. postReturn has carried the same running budget for the same reason.
+  const budgets = new Map<string, { remaining: number; vanReserved: number }>();
   for (const line of input.lines) {
     if (!line.jobKitLineId) throw badRequest("Each issued line must reference a kit line.");
     const kit = (job.kitLines ?? []).find((k) => k.id === line.jobKitLineId);
     if (!kit) throw badRequest("Kit line not found on this job.");
-    const already = issuedForKitLine(movements, kit.id);
-    // The authoritative cap. Reserves what a pending van transfer is bringing, so a warehouse can't
-    // hand over units a colleague is already committed to — which would leave the engineer holding
-    // more than the line plans for, with nothing downstream objecting.
-    const vanReserved = (await pendingVanQtyByKitLine([kit.id])).get(kit.id) ?? 0;
-    const issuable = Math.max(0, kit.qty - already - vanReserved);
-    if (line.qty > issuable) {
+    let budget = budgets.get(kit.id);
+    if (!budget) {
+      const already = issuedForKitLine(movements, kit.id);
+      // The authoritative cap. Reserves what a pending van transfer is bringing, so a warehouse can't
+      // hand over units a colleague is already committed to — which would leave the engineer holding
+      // more than the line plans for, with nothing downstream objecting.
+      const vanReserved = (await pendingVanQtyByKitLine([kit.id])).get(kit.id) ?? 0;
+      budget = { remaining: Math.max(0, kit.qty - already - vanReserved), vanReserved };
+      budgets.set(kit.id, budget);
+    }
+    if (line.qty > budget.remaining) {
       throw conflict(
-        vanReserved > 0
-          ? `${kit.itemName}: only ${issuable} left to issue here — ${vanReserved} of the ${kit.qty} planned are coming from another engineer's van.`
-          : `${kit.itemName}: only ${issuable} remaining on the kit list.`,
+        budget.vanReserved > 0
+          ? `${kit.itemName}: only ${budget.remaining} left to issue here — ${budget.vanReserved} of the ${kit.qty} planned are coming from another engineer's van.`
+          : `${kit.itemName}: only ${budget.remaining} remaining on the kit list.`,
       );
     }
+    budget.remaining -= line.qty;
     if (line.source === "irm") {
       const irm = await irmService.requireActiveIrmItem(line.irmItemId!);
       if (irm.trackSerialNumbers || irm.trackBatchNumbers) {
         throw conflict(`${irm.name} is serial/batch-tracked and can't be moved here.`);
+      }
+      // The kit line arrived as a CLIENT-SUPPLIED id and nothing above ties it to this item — the same
+      // hole the rental arm below closes, and it was open here. A hand-built request could file an IRM
+      // movement against a rental (or another item's) kit line: the warehouse check passes, the line's
+      // plan budget is spent, and every tally downstream reads it as that OTHER item going out.
+      if (kit.lineType !== "irm" || kit.irmItemId !== irm.id) {
+        throw badRequest(`${irm.name} isn't the item planned on that kit line.`);
       }
       resolved.push({ line, kit, itemName: irm.name, uom: irm.baseUnit, warehouseId: kit.warehouseId! });
     } else if (line.source === "rental") {
@@ -838,11 +1134,15 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
         itemName: item.name,
         uom: item.baseUnit,
         warehouseId: kit.warehouseId!,
-        hire: { id: hire.id, poCode: hire.poCode, hireEndDate: hire.hireEndDate, rentalItemId: hire.rentalItemId },
+        hire: { id: hire.id, purchaseOrderId: hire.purchaseOrderId, poCode: hire.poCode, hireEndDate: hire.hireEndDate, rentalItemId: hire.rentalItemId },
       });
     } else if (line.source === "customer") {
       const entry = await goodsManagementRepo.findCustomerStockEntryById(line.customerStockEntryId!);
       if (!entry) throw badRequest("Customer stock item not found.");
+      // Same identity guard as the IRM and rental arms — see the note there.
+      if (kit.lineType !== "customer_stock" || kit.customerStockEntryId !== entry.id) {
+        throw badRequest(`${entry.itemName} isn't the item planned on that kit line.`);
+      }
       resolved.push({ line, kit, itemName: entry.itemName, uom: entry.uom, warehouseId: entry.warehouseId!, customerId: entry.customerId, customerName: entry.customer?.name ?? null });
     } else {
       // misc — free-text kit line, no stock / no warehouse. Issued by count (handed over), no ledger.
@@ -942,12 +1242,25 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
           if (!liveHire || !liveHire.orderLive || liveHire.hireStatus !== "on_hire") {
             throw conflict(`${r.itemName}: that hire is no longer live — its order was cancelled, or it has already gone back. Refresh and scan again.`);
           }
+          // The HIRE PERIOD re-check, reported separately from the atomic guard below purely so the
+          // message can name the real reason. The authoritative check is the `hireEndDate` clause
+          // inside adjustHireIssuedQtyTx's conditional write — this one cannot be relied on alone (it
+          // is a read, and the deadline could not move between the two anyway, but a plain 409 saying
+          // "stock changed" would send the warehouse hunting for a quantity problem that isn't there).
+          if (liveHire.hireEndDate.getTime() < todayStart.getTime()) {
+            throw conflict(
+              `${r.itemName}: that hire ended ${liveHire.hireEndDate.toISOString().slice(0, 10)} and can no longer be issued to a job. Extend the hire, or return the kit to the provider.`,
+            );
+          }
           // The availability check and the commitment are ONE conditional write on the hire row — see
           // adjustHireIssuedQtyTx. Two warehouses scanning the last tester at the same instant both
           // read "1 available" before the transaction; only one satisfies the guard, and the other
           // rolls back here rather than lending a unit that does not exist.
-          const ok = await poRepo.adjustHireIssuedQtyTx(tx, r.hire!.id, r.line.qty);
-          if (!ok) throw conflict(`${r.itemName}: those units are no longer available on this hire — stock changed. Refresh and scan again.`);
+          // `todayStart` re-asserts the hire window INSIDE the conditional write, which is what makes a
+          // stale tab's post fail rather than succeed against a hire that expired while the tab sat
+          // open. The read-side check above cannot do that on its own.
+          const ok = await poRepo.adjustHireIssuedQtyTx(tx, r.hire!.id, r.line.qty, todayStart);
+          if (!ok) throw conflict(`${r.itemName}: those units are no longer available on this hire — its period may have ended, or the stock changed. Refresh and scan again.`);
           const held = await rentalCustodyRepo.upsertRentalHoldingTx(tx, r.hire!.id, job.assignedEngineerId!, r.line.qty, {
             rentalItemId: r.hire!.rentalItemId,
             itemName: r.itemName,
@@ -1012,6 +1325,13 @@ export async function postIssue(jobId: string, input: PostMovementInput, actor?:
   // needs to know their kit is ready and where to get it.
   notify(job.assignedEngineerId!, { title: "Kit ready to collect", body: `Your kit for ${job.jobNumber} is ready at the warehouse — come and collect it.`, data: { type: "job", jobId: job.id } });
   emitGoodsRoom("goods:updated", issuePayload);
+  // The HIRE panes too, when hired kit went out — the mirror of the same call in postReturn, which
+  // this leg was simply missing. An issue moves `issuedQuantity` and therefore what the order page,
+  // the warehouse's on-hire pane and the deadline badges all show, and none of them were being told.
+  // Deduped by ORDER: one post can draw off several hires of the same PO, and that is one refresh.
+  const issuedHires = new Map<string, string>();
+  for (const r of resolved) if (r.hire) issuedHires.set(r.hire.purchaseOrderId, r.hire.poCode ?? "");
+  for (const [poId, poCode] of issuedHires) emitHireUpdated(poId, poCode);
 
   return toPublic(created);
 }
@@ -1501,7 +1821,7 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
   const balByKey = new Map(
     (await inventoryRepo.findBalancesByItemsAndWarehouses([...irmItemIds], [...whIds])).map((b) => [`${b.irmItemId}|${b.warehouseId}`, b]),
   );
-  const rentalAvailByKey = await rentalPoolByItemAndWarehouse([...rentalItemIds], [...whIds]);
+  const rentalAvailByKey = await rentalPoolByItemAndWarehouse([...rentalItemIds], [...whIds], await companyTodayStart());
   // One query, two lookups: quantity for the Available column, barcode for the scan-code chip.
   const cseRows = await goodsManagementRepo.findCustomerStockEntriesByIds([...cseIds]);
   const cseQty = new Map(cseRows.map((e) => [e.id, e.quantity]));
@@ -1601,7 +1921,7 @@ export async function getJobGoods(jobId: string, actor?: AuditActor): Promise<Jo
   const balByKey = new Map(
     (await inventoryRepo.findBalancesByItemsAndWarehouses([...irmItemIds], [...whIds])).map((b) => [`${b.irmItemId}|${b.warehouseId}`, b]),
   );
-  const rentalAvailByKey = await rentalPoolByItemAndWarehouse([...rentalItemIds], [...whIds]);
+  const rentalAvailByKey = await rentalPoolByItemAndWarehouse([...rentalItemIds], [...whIds], await companyTodayStart());
   // One query, two lookups: quantity for the Available column, barcode for the scan-code chip.
   const cseRows = await goodsManagementRepo.findCustomerStockEntriesByIds([...cseIds]);
   const cseQty = new Map(cseRows.map((e) => [e.id, e.quantity]));
@@ -1678,6 +1998,9 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
     awayReturn?: boolean; // van portion returned away from the kit line's home warehouse
     kitHomeWarehouseId?: string | null; // the kit line's own home (sizes the away-from-home budget)
     hireId?: string | null; // rental only — the hire being credited back
+    hirePurchaseOrderId?: string | null;
+    hirePoCode?: string | null;
+    hireWarehouseId?: string | null;
     // The kit line THE SERVER matched — what the movement is filed against AND what its per-line
     // return budget is charged to. Both, or neither: the client also sends a jobKitLineId and
     // validation requires one, but presence is not consistency. A well-formed id naming a DIFFERENT
@@ -1689,6 +2012,8 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
   // The one id both the ledger row and the budget below may use. Nothing downstream may reach past
   // this to `line.jobKitLineId` — that is the client's claim, and the two diverging is the bug.
   const kitLineIdOf = (r: Resolved): string | null => r.kitLineId ?? r.line.jobKitLineId ?? null;
+  // Hires that already carry a damaged line in THIS request — see the guard in the rental arm below.
+  const damagedHires = new Set<string>();
   const resolved: Resolved[] = [];
 
   for (const line of input.lines) {
@@ -1779,6 +2104,22 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
         throw badRequest(`${kit.itemName}: that hire is for a different rental item.`);
       }
       if (hire.warehouseId !== kit.warehouseId) throw badRequest(`${kit.itemName}: that hire belongs to a different warehouse.`);
+      // ONE damaged line per hire per movement, enforced here instead of assumed.
+      //
+      // A damaged return opens a custody exit keyed [sourceType, sourceId, hire, kind] with the
+      // MOVEMENT as sourceId, so a second damaged line on the same hire collides — and createExitTx
+      // reads a collision as an idempotent retry and hands back the first row. The second line's units
+      // would still be drained from custody and released to the shelf by adjustHireIssuedQtyTx, with no
+      // exit holding them down: a damaged tester quietly becomes issuable to the next job.
+      //
+      // The panel makes one card per hire so it cannot send this, but that made the invariant the
+      // CLIENT's to keep, and posts carrying several hires at once are new. Refusing is right rather
+      // than merging: two damage reports are two reasons and two photographs, and picking one of each
+      // to keep is not a decision this layer can make.
+      if (condition === "damaged" && damagedHires.has(hire.id)) {
+        throw badRequest(`${kit.itemName}: only one damaged line per hire in a single return — combine them into one line with the qty and a single reason.`);
+      }
+      if (condition === "damaged") damagedHires.add(hire.id);
       // NOTE: no `orderLive` guard on the RETURN leg, deliberately. Kit already in an engineer's hands
       // has to be able to come back whatever happened to the paperwork behind it — refusing here would
       // strand it in the van with no way to record its return.
@@ -1788,6 +2129,11 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
         warehouseName: kit.warehouseName ?? null, warehouseCode: kit.warehouseCode ?? null,
         customerId: null, condition,
         hireId: hire.id,
+        // Carried off the same resolved hire so the damage arm below does not re-read the row it
+        // already has. A custody exit is filed against the ORDER's depot, not the scanning one.
+        hirePurchaseOrderId: hire.purchaseOrderId,
+        hirePoCode: hire.poCode,
+        hireWarehouseId: hire.warehouseId,
         kitHomeWarehouseId: kit.warehouseId,
         kitLineId: kit.id,
       });
@@ -1838,6 +2184,13 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
   }
   const engineerName = job.assignedEngineerName ?? "";
   const engineerEmail = job.assignedEngineerEmail ?? null;
+
+  // Which ORDERS this return touches, so their panes can be told once it has landed. Deduped by id:
+  // one return can credit several hires on the same order, and that is one refresh, not four.
+  const hiresTouched = new Map<string, string>();
+  for (const r of resolved) {
+    if (r.line.source === "rental" && r.hirePurchaseOrderId) hiresTouched.set(r.hirePurchaseOrderId, r.hirePoCode ?? "");
+  }
 
   const movementLines: goodsManagementRepo.MovementLineRow[] = resolved.map((r) => ({
     source: r.line.source,
@@ -2017,10 +2370,37 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
           // well would double-count one event against a charge the supplier bills once.
           //
           // So the photo and reason ride on the movement line (captured at the moment it is seen,
-          // which is what makes them evidence rather than recollection), and the hire is flagged so
-          // the PM sees it on the on-hire screen and raises the damage note with the real figure.
+          // which is what makes them evidence rather than recollection), AND a custody-exit row is
+          // opened against the hire. That row is what takes the unit out of the issuable pool: the
+          // tester is still on our shelf and still going back to the provider, but it must never be
+          // handed to the next engineer. The office settles it into a damage note later, and the gap
+          // between the two is the PM's worklist.
           if (condition === "damaged") {
-            await poRepo.flagHireDamagedTx(tx, hireId, qty);
+            await custodyExitRepo.createExitTx(tx, {
+              purchaseOrderRentalLineId: hireId,
+              purchaseOrderId: r.hirePurchaseOrderId!,
+              poCode: r.hirePoCode ?? null,
+              // The hire's own depot, not the scanning warehouse. The damage belongs to the order it
+              // came off — that is the warehouse whose settle worklist owns it, and the scope every
+              // rental permission check on it resolves against.
+              warehouseId: r.hireWarehouseId!,
+              kind: "damage",
+              qty,
+              itemName: r.itemName,
+              custodyState: custodyExitRepo.CUSTODY_HELD_DAMAGED,
+              reason: line.damageReason ?? "Returned damaged from a job",
+              notes: line.notes ?? null,
+              photoUrl: line.damagePhotoUrl ?? null,
+              jobId: job.id,
+              jobNumber: job.jobNumber ?? null,
+              engineerId: job.assignedEngineerId ?? null,
+              engineerName: job.assignedEngineerName ?? null,
+              declaredBy: actorEmail,
+              // One movement can carry a good line and a damaged line for the same kit line, but only
+              // one damaged line per hire — so the movement is a stable idempotency key for a retry.
+              sourceType: "goods_management_return",
+              sourceId: movementId,
+            });
           }
         } else {
           const customerStockEntryId = line.customerStockEntryId!;
@@ -2091,6 +2471,11 @@ export async function postReturn(jobId: string, input: PostMovementInput, actor?
   // Realtime: notify the engineer + all office staff.
   const returnPayload = { jobId: job.id, movementId: created.id, code: created.code, direction: "return" };
   emitToUser(job.assignedEngineerId!, "goods:returned", returnPayload);
+  // The HIRE panes too, when hired kit moved. A return changes `issuedQuantity`, the damaged count and
+  // what may be issued — every number the warehouse's on-hire pane and the order page show — and none
+  // of them were being told, so they sat stale until someone reloaded. Deduped by order: one return
+  // can credit several hires on the same order, and that is one refresh, not four.
+  for (const [poId, poCode] of hiresTouched) emitHireUpdated(poId, poCode);
   emitGoodsRoom("goods:updated", returnPayload);
 
   return toPublic(created);
@@ -2679,9 +3064,36 @@ interface UnaccountedItem {
   qty: number;
   source: "irm" | "customer" | "rental";
   irmItemId: string | null;
+  /** Rental lines only — the key the per-hire detail is looked up by. */
+  rentalItemId: string | null;
   customerStockEntryId: string | null;
   warehouseId: string | null;
   customerId: string | null;
+}
+
+/**
+ * Hired kit a job still has out, as the reconcile screen needs it.
+ *
+ * `hires` is what turns a message into an action: it names the exact hire and the order it sits on, so
+ * the screen can offer Declare lost where the operator already is, exactly as an unaccounted COMPANY
+ * item is offered a write-off. Empty when the outstanding units cannot be traced to a hire — a movement
+ * line written before hire ids existed — and the row is still listed, just without the button.
+ */
+export interface RentalOutstandingRow {
+  itemName: string;
+  itemCode: string | null;
+  qty: number;
+  /**
+   * Who is holding them — this job's own engineer, always.
+   *
+   * On the payload rather than left to the client to thread through, because a loss is declared AGAINST
+   * A NAMED PERSON: it writes off somebody else's equipment and the name belongs on the record. There
+   * is no ambiguity to resolve — units out on this job are out with the engineer assigned to it — so
+   * the server states it once instead of every screen re-deriving it.
+   */
+  engineerId: string | null;
+  engineerName: string | null;
+  hires: { purchaseOrderRentalLineId: string; purchaseOrderId: string; poCode: string | null; qty: number }[];
 }
 
 type TallyEntry = { jobKitLineId: string; itemName: string; itemCode: string | null; source: "irm" | "customer" | "rental"; irmItemId: string | null; rentalItemId: string | null; customerStockEntryId: string | null; warehouseId: string | null; issued: number; consumed: number; returnedGood: number; returnedDamaged: number };
@@ -2744,7 +3156,12 @@ export async function closeReconcile(
   jobId: string,
   input: CloseReconcileInput,
   actor?: AuditActor,
-): Promise<{ summary: { goodsStatus: string; workSummary: string | null; lastMovementAt: Date | null }; unaccounted: { itemName: string; itemCode: string | null; qty: number }[] }> {
+): Promise<{
+  summary: { goodsStatus: string; workSummary: string | null; lastMovementAt: Date | null };
+  unaccounted: { itemName: string; itemCode: string | null; qty: number }[];
+  /** Hired kit still out. Non-empty ⇒ the job stayed `awaiting_return` however the write-off went. */
+  rentalOutstanding: RentalOutstandingRow[];
+}> {
   const job = await loadJobOrThrow(jobId);
   const existingSummary = await goodsManagementRepo.getSummary(job.id);
 
@@ -2799,10 +3216,15 @@ export async function closeReconcile(
   const irmHeld = new Map<string, number>();
   const cseHeld = new Map<string, number>();
   let rentalHeld = new Map<string, RentalHeld>();
+  // Per-hire detail for the rental leg, from the same holdings read — which hire, on which order, so the
+  // screen can offer the action instead of only naming the problem.
+  let jobHires = new Map<string, JobHireOutstanding[]>();
   if (engId) {
     for (const b of await engineerStockRepo.findEngineerBalances(engId)) irmHeld.set(b.irmItemId, b.quantityOnHand);
     for (const h of await goodsManagementRepo.findCustomerHoldingsByEngineer(engId)) cseHeld.set(h.customerStockEntryId, h.quantityOnHand);
-    rentalHeld = await rentalHeldByItem(engId);
+    const holdings = await rentalCustodyRepo.findRentalHoldingsByEngineer(engId);
+    rentalHeld = rentalHeldFrom(holdings);
+    jobHires = jobHiresOutstanding(movements as never, holdings);
   }
 
   // Group the tallies by item (the engineer holding is global per item, not per kit line) and spread
@@ -2849,6 +3271,7 @@ export async function closeReconcile(
         qty,
         source: first.source,
         irmItemId: first.irmItemId,
+        rentalItemId: first.rentalItemId,
         customerStockEntryId: first.customerStockEntryId,
         warehouseId: first.warehouseId,
         customerId: null,
@@ -2856,41 +3279,76 @@ export async function closeReconcile(
     }
   }
 
-  // HIRED KIT IS NEVER WRITTEN OFF AS LOST — the reconcile refuses instead, whatever the client asked.
+  // HIRED KIT IS NEVER WRITTEN OFF AS LOST — but it no longer stops the rest of the job either.
   //
   // "Write off as lost" books a permanent loss of something WE own. Hired equipment is the provider's:
   // an unreturned unit is not a loss to absorb, it is a liability to settle — they will keep billing
   // for it and then charge us for the replacement. Booking it as our own shrinkage would state
   // something untrue in the stock ledger AND take the hire off the deadline badge that is still the
-  // only thing chasing it.
+  // only thing chasing it. So a rental row is never written off here, and it is filtered out of the
+  // list below rather than offered.
   //
-  // Refusing here rather than filtering the rows out is deliberate: a silent filter would let the job
-  // reconcile with hired kit still in a van and nothing on screen saying so.
-  const outstandingRentals = unaccountedItems.filter((u) => u.source === "rental");
-  if (outstandingRentals.length > 0) {
-    const names = outstandingRentals.map((u) => `${u.qty} × ${u.itemName}`).join(", ");
-    throw conflict(
-      `This job can't be reconciled while rental items are still out: ${names}. ` +
-        `Rental items have to be scanned back to the warehouse — they can't be written off as lost, because they aren't ours to lose. ` +
-        // Deliberately does NOT offer an alternative any more. It used to say "record that against the
-        // hire on the purchase order", and no such path exists: the only writers of an
-        // EngineerRentalHolding are the job issue and the job return scans, closeHireShort covers
-        // UNDELIVERED units and never touches custody, and damage is reported on the return scan
-        // itself. Naming a door that isn't there sends a warehouse manager looking for a screen they
-        // will not find, on the one message meant to tell them what to do next.
-        `Damage is recorded on the return scan, so bring it in either way.`,
-    );
-  }
+  // What it USED to do was throw, and that was the defect. Two unrelated things were tied together:
+  // an outstanding hire refused the whole reconcile, so a shortfall on a COMPANY item — a different
+  // pool, a different owner, a different decision — could not be booked either, and the screen showed
+  // only an error where the unaccounted list should have been. Ownership domains reconcile
+  // independently; one domain's unfinished business is not another's.
+  //
+  // The hire still holds the job open, which is a different rule and lives further down: the job's
+  // TERMINAL state waits for it, because reconciling locks the job against any further scan and a
+  // hire still in a van has to be able to come back. See `rentalOutstanding` at the summary write.
+  //
+  // The list is built from the per-ITEM tally, deliberately, because that is what `canGoTerminal` is
+  // decided on and it needs no hire id to be correct — a movement line written before hires carried
+  // one still counts toward "something is out". The per-HIRE detail is then attached where it can be
+  // resolved, so the screen can offer Declare lost on the exact hire; a row that cannot be matched
+  // still appears, just without the action. Degrading that way keeps a legacy line visible instead of
+  // silently dropping it out of the guard.
+  const rentalOutstanding: RentalOutstandingRow[] = unaccountedItems
+    .filter((u) => u.source === "rental")
+    .map((u) => {
+      const hires = (u.rentalItemId ? jobHires.get(u.rentalItemId) : undefined) ?? [];
+      return {
+        itemName: u.itemName,
+        itemCode: u.itemCode,
+        qty: u.qty,
+        engineerId: job.assignedEngineerId ?? null,
+        engineerName: job.assignedEngineerName ?? null,
+        hires: hires.map((h) => ({
+          purchaseOrderRentalLineId: h.purchaseOrderRentalLineId,
+          purchaseOrderId: h.purchaseOrderId,
+          poCode: h.poCode,
+          qty: h.qty,
+        })),
+      };
+    });
+  const writeOffCandidates = unaccountedItems.filter((u) => u.source !== "rental");
 
   const actorEmail = actor?.email ?? null;
 
-  if (unaccountedItems.length > 0 && !input.writeOffLost) {
-    // Return unaccounted list, do not reconcile.
+  // THE TERMINAL STATE IS NOT THE SAME DECISION AS THE WRITE-OFF.
+  //
+  // `reconciled` LOCKS the job: `postIssue` and `postReturn` both refuse one, by design — a closed job
+  // must not keep moving stock. That makes it the wrong state for a job whose hired kit is still in a
+  // van, because the only way those units can ever come home is the return scan the lock would forbid.
+  // Reconciling here would trade one dead end for a worse one.
+  //
+  // So the write-off runs (above), and the job simply stays where it was: `awaiting_return`, which is
+  // exactly what it means. No new status — the existing machine already has the word for "we are still
+  // waiting on something". The hire is resolved by scanning it back or declaring it lost, and the next
+  // reconcile finds nothing outstanding and closes.
+  const canGoTerminal = rentalOutstanding.length === 0;
+  const finalStatus = canGoTerminal ? "reconciled" : "awaiting_return";
+
+  if (writeOffCandidates.length > 0 && !input.writeOffLost) {
+    // Company/customer units are unaccounted for and the caller has not confirmed writing them off.
+    // Hand the list back and change nothing — the confirmation screen is built from it.
     return {
       summary: existingSummary
         ? { goodsStatus: existingSummary.goodsStatus, workSummary: existingSummary.workSummary, lastMovementAt: existingSummary.lastMovementAt }
         : { goodsStatus: "awaiting_return", workSummary: null, lastMovementAt: null },
-      unaccounted: unaccountedItems.map((u) => ({ itemName: u.itemName, itemCode: u.itemCode, qty: u.qty })),
+      unaccounted: writeOffCandidates.map((u) => ({ itemName: u.itemName, itemCode: u.itemCode, qty: u.qty })),
+      rentalOutstanding,
     };
   }
 
@@ -2899,15 +3357,15 @@ export async function closeReconcile(
   // One reason string, written to every ledger row this write-off produces and quoted in the audit
   // entry, so the stock trail and the audit log tell the same story. Empty when nothing is being
   // written off (a clean reconcile has no reason to give).
-  const wroteOffAnything = unaccountedItems.length > 0 && input.writeOffLost === true;
+  const wroteOffAnything = writeOffCandidates.length > 0 && input.writeOffLost === true;
   const writeOffNote = wroteOffAnything
     ? [input.writeOffReason, input.writeOffNotes?.trim()].filter(Boolean).join(" — ")
     : null;
-  const writeOffUnits = wroteOffAnything ? unaccountedItems.reduce((n, u) => n + u.qty, 0) : 0;
+  const writeOffUnits = wroteOffAnything ? writeOffCandidates.reduce((n, u) => n + u.qty, 0) : 0;
 
   // Build lost movement lines for unaccounted items.
   // condition: "lost" distinguishes these write-off consume lines from normal consumes in the audit ledger.
-  const lostLines: goodsManagementRepo.MovementLineRow[] = unaccountedItems.map((u) => ({
+  const lostLines: goodsManagementRepo.MovementLineRow[] = writeOffCandidates.map((u) => ({
     source: u.source,
     irmItemId: u.irmItemId,
     customerStockEntryId: u.customerStockEntryId,
@@ -2946,7 +3404,7 @@ export async function closeReconcile(
       },
       lostLines,
       async (tx, movementId, code) => {
-        for (const u of unaccountedItems) {
+        for (const u of writeOffCandidates) {
           if (u.source === "irm") {
             const held = await engineerStockRepo.findEngineerBalanceTx(tx, u.irmItemId!, job.assignedEngineerId!);
             const heldQty = held?.quantityOnHand ?? 0;
@@ -2997,35 +3455,76 @@ export async function closeReconcile(
             }
           }
         }
-        await goodsManagementRepo.upsertSummaryTx(tx, job.id, { goodsStatus: "reconciled" });
+        await goodsManagementRepo.upsertSummaryTx(tx, job.id, { goodsStatus: finalStatus });
       },
     );
   } else {
-    // Balanced (no unaccounted) — just update the summary.
+    // Balanced (nothing to write off) — just update the summary.
     await withTransaction(async (tx) => {
-      await goodsManagementRepo.upsertSummaryTx(tx, job.id, { goodsStatus: "reconciled" });
+      await goodsManagementRepo.upsertSummaryTx(tx, job.id, { goodsStatus: finalStatus });
     });
   }
+
+  // ── WHAT THIS RUN ACTUALLY DID, SAID ONCE AND SAID HONESTLY ──────────────────────────────────
+  //
+  // Three things are decided here and all three read `canGoTerminal`, because they are three ways of
+  // announcing the SAME outcome and any of them disagreeing is a lie somebody will act on.
+  //
+  // "Reconciled" is a claim about the job being FINISHED, and it must never be made when the job is
+  // still `awaiting_return`. It was: a hire outstanding left the job open (correctly) while the audit
+  // log recorded `goods_management.reconciled` anyway, the engineer's screen was pushed a reconcile
+  // event, and the operator was shown a success toast and sent back to the queue. The one artefact
+  // anyone checks months later — the audit trail — said a job closed that never did.
+  //
+  // A run that only ended up deferred is still worth recording: it is a person deciding to close a job
+  // and being told they cannot yet, which is exactly the trail that explains why a job sat open. So it
+  // gets its OWN action rather than silence, and the label names what stopped it.
+  const deferredLabel = rentalOutstanding.map((u) => `${u.qty} × ${u.itemName}`).join(", ");
 
   // A write-off gets its OWN action, not the same "reconciled" line as a clean close. Both used to
   // record `goods_management.reconciled` with just the job number, so the audit log could not tell a
   // job that balanced from one where units were booked as lost — you had to go digging in the engineer
   // ledger to find out. The label carries the quantity and the reason, which is what anyone auditing
   // shrinkage actually needs.
-  audit.record(
-    wroteOffAnything
-      ? {
-          actor,
-          action: "goods_management.written_off_lost",
-          targetType: "job",
-          targetId: job.id,
-          targetLabel: `${job.jobNumber ?? job.id} — ${writeOffUnits} unit${writeOffUnits === 1 ? "" : "s"} written off as lost: ${writeOffNote}`,
-        }
-      : { actor, action: "goods_management.reconciled", targetType: "job", targetId: job.id, targetLabel: job.jobNumber ?? job.id },
-  );
+  //
+  // RECORDED ON ITS OWN, not as one arm of the outcome ternary, because the write-off and the close are
+  // two independent facts about this run — the same independence the reconcile itself is built on. As
+  // an arm it was reachable only when `canGoTerminal`, so a deferring hire SWALLOWED it: the stock was
+  // written off exactly as it is below, and the only entry written said `reconcile_deferred`. Nothing
+  // recorded the quantity or the reason, and nothing ever would — the next run finds the holdings
+  // already drained, so `writeOffCandidates` is empty and it records a plain `reconciled`. Units left
+  // the ledger with no audit line anywhere naming them.
+  if (wroteOffAnything) {
+    audit.record({
+      actor,
+      action: "goods_management.written_off_lost",
+      targetType: "job",
+      targetId: job.id,
+      targetLabel: `${job.jobNumber ?? job.id} — ${writeOffUnits} unit${writeOffUnits === 1 ? "" : "s"} written off as lost: ${writeOffNote}`,
+    });
+  }
+
+  // …and separately, what happened to the JOB. A clean close still says so; a close that wrote units
+  // off is already fully described by the entry above and does not get a second line saying the same
+  // run finished.
+  if (!canGoTerminal) {
+    audit.record({
+      actor,
+      action: "goods_management.reconcile_deferred",
+      targetType: "job",
+      targetId: job.id,
+      targetLabel: `${job.jobNumber ?? job.id} — still on hire: ${deferredLabel}`,
+    });
+  } else if (!wroteOffAnything) {
+    audit.record({ actor, action: "goods_management.reconciled", targetType: "job", targetId: job.id, targetLabel: job.jobNumber ?? job.id });
+  }
 
   // Realtime: notify the engineer + all office staff.
-  const reconcilePayload = { jobId: job.id, direction: "reconcile" };
+  //
+  // `direction` carries the outcome so a listener does not have to infer it. An engineer whose screen
+  // is told "reconcile" locks its kit list; telling it that while their van still holds a hired tester
+  // would hide the one row they still have to act on.
+  const reconcilePayload = { jobId: job.id, direction: canGoTerminal ? "reconcile" : "reconcile_deferred" };
   emitToUser(job.assignedEngineerId!, "goods:returned", reconcilePayload);
   emitGoodsRoom("goods:updated", reconcilePayload);
 
@@ -3033,8 +3532,12 @@ export async function closeReconcile(
   return {
     summary: updatedSummary
       ? { goodsStatus: updatedSummary.goodsStatus, workSummary: updatedSummary.workSummary, lastMovementAt: updatedSummary.lastMovementAt }
-      : { goodsStatus: "reconciled", workSummary: null, lastMovementAt: null },
+      : { goodsStatus: finalStatus, workSummary: null, lastMovementAt: null },
     unaccounted: [],
+    // What is still holding the job open, named. Silently leaving it un-reconciled would send the user
+    // back to a screen that looks unchanged with no clue why — the failure the old hard throw was at
+    // least loud about, and the one thing worth keeping from it.
+    rentalOutstanding,
   };
 }
 

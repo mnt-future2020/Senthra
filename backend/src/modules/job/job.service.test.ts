@@ -13,6 +13,7 @@ vi.mock("./job.repository.js", () => ({
   update: vi.fn(),
   createWithCode: vi.fn(),
   mergeKitLines: vi.fn(),
+  mergeKitLinesTx: vi.fn(),
   findMany: vi.fn(),
   count: vi.fn(),
   findByNumber: vi.fn(),
@@ -29,6 +30,9 @@ vi.mock("#modules/upload/upload.service.js", () => ({
 }));
 vi.mock("#modules/attachment/attachment.service.js", () => ({ releaseAsset: vi.fn() }));
 
+vi.mock("#modules/goods-management/goods-management.repository.js", () => ({
+  reopenIssuanceForAddedKitTx: vi.fn(async () => 0),
+}));
 vi.mock("#modules/goods-management/goods-management.service.js", () => ({
   recordConsumeAndComplete: vi.fn(),
   openReturnsOnCancel: vi.fn(),
@@ -60,7 +64,7 @@ vi.mock("#modules/rental-item/rental-item.repository.js", () => ({ findById: vi.
 vi.mock("#modules/irm/irm.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/warehouse/warehouse.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/purchase-request/purchase-request.repository.js", () => ({ countByJob: vi.fn(async () => 0) }));
-vi.mock("#modules/purchase-order/purchase-order.repository.js", () => ({ countByJob: vi.fn(async () => 0), findLiveHiresByRentalItems: vi.fn(async () => []) }));
+vi.mock("#modules/purchase-order/purchase-order.repository.js", () => ({ countByJob: vi.fn(async () => 0), findLiveHiresByRentalItems: vi.fn(async () => []), findIssuableHiresByRentalItems: vi.fn(async () => []) }));
 vi.mock("#modules/inventory/inventory.repository.js", () => ({ findBalancePair: vi.fn(), findBalancesByItemsAndWarehouses: vi.fn(async () => []) }));
 vi.mock("#modules/user/user.repository.js", () => ({ findById: vi.fn() }));
 vi.mock("#modules/engineer-transfer/engineer-transfer.repository.js", () => ({ findVanSourcesByKitLines: vi.fn() }));
@@ -263,7 +267,10 @@ describe("completeJobForEngineer", () => {
 });
 
 // ── updateJob: issued kit-line edit rules ──────────────────────────────────────────────────────
-const mockMergeKitLines = jobRepo.mergeKitLines as ReturnType<typeof vi.fn>;
+// editJob now merges INSIDE a transaction (so the kit change and any goods-status transition commit
+// together), so the mock under test is the tx-aware twin. Argument positions shift by one — `tx` is
+// first — which is why the `changes` assertions below read `calls[0][2]`.
+const mockMergeKitLines = jobRepo.mergeKitLinesTx as ReturnType<typeof vi.fn>;
 const mockUpdate = jobRepo.update as ReturnType<typeof vi.fn>;
 const mockGetGoodsStatus = goodsManagementService.getGoodsStatus as ReturnType<typeof vi.fn>;
 const mockGetJobKitTallies = goodsManagementService.getJobKitTallies as ReturnType<typeof vi.fn>;
@@ -307,7 +314,7 @@ describe("updateJob (issued kit-line edit rules)", () => {
     mockMergeKitLines.mockResolvedValue({ ...jobWithMisc, kitLines: [{ ...jobWithMisc.kitLines[0], qty: 5 }] });
     await updateJob(JOB_ID, { kitLines: [{ lineType: "misc", itemName: "cable", qty: 5 }] } as never, { email: "a@x.com" } as never);
     expect(mockMergeKitLines).toHaveBeenCalledTimes(1);
-    const changes = mockMergeKitLines.mock.calls[0][1];
+    const changes = mockMergeKitLines.mock.calls[0][2];
     expect(changes.updates).toEqual([expect.objectContaining({ id: "k1", qty: 5 })]);
     expect(changes.deleteIds).toEqual([]);
   });
@@ -323,7 +330,7 @@ describe("updateJob (issued kit-line edit rules)", () => {
       { email: "a@x.com" } as never,
     );
     expect(mockMergeKitLines).toHaveBeenCalledTimes(1);
-    const changes = mockMergeKitLines.mock.calls[0][1];
+    const changes = mockMergeKitLines.mock.calls[0][2];
     expect(changes.creates).toHaveLength(1);
     expect(changes.creates[0].itemName).toBe("widget");
     expect(changes.deleteIds).toEqual([]);
