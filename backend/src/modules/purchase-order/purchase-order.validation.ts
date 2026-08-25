@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { attachmentTypeMatches, dataUriBytes } from "../../utils/data-uri.js";
 
 // Purchase Order validation. PROCUREMENT WORKFLOW ONLY. Codes/status/totals are SYSTEM-owned
 // and never accepted from the client. Editable only in `draft` (enforced in the service).
@@ -249,8 +248,6 @@ export const poDeliveryDateSchema = z.object({
 });
 export type PoDeliveryDateInput = z.infer<typeof poDeliveryDateSchema>;
 
-// --- attachment upload (data URI from the form) -----------------------------
-const TEN_MB = 10 * 1024 * 1024;
 
 /**
  * How many USER documents one purchase order may carry.
@@ -276,46 +273,6 @@ export const PO_ATTACHMENT_MAX_COUNT = 20;
  * record for exactly the reason the count cap already guards against.
  */
 export const PO_ATTACHMENT_MAX_TOTAL_BYTES = 80 * 1024 * 1024;
-// The declared `fileType` and `fileSizeBytes` above are the CALLER'S CLAIMS about a payload the
-// server used to never open — so "pdf, 40 KB" would carry anything, at any size. Both are now
-// settled against `data` itself:
-//
-//   size  measured from the payload, so the per-file ceiling above is real. It also makes the
-//         PO total a cap that holds, since that total is summed from stored sizes.
-//   type  read from the file's leading bytes (%PDF-, PK, PNG, JPEG), not from the URI's media type
-//         — that media type is text the caller wrote, so checking it only relocates the claim.
-//
-// Refined on the OBJECT rather than the `data` field because both checks compare two fields. Each
-// reports against the field the user can act on.
-export const poAttachmentSchema = z.object({
-  label: z.string().trim().max(80).optional(),
-  fileName: z.string().trim().min(1, "File name is required.").max(200),
-  fileType: z.enum(PO_ATTACHMENT_TYPES, { error: "Unsupported file type. Use PDF, DOCX, PNG or JPG." }),
-  fileSizeBytes: z.coerce.number().int().min(1).max(TEN_MB, "File must be 10 MB or smaller."),
-  data: z.string().startsWith("data:", "Upload a valid file."),
-})
-  .superRefine((v, ctx) => {
-    const actual = dataUriBytes(v.data);
-    if (actual === 0) {
-      ctx.addIssue({ code: "custom", path: ["data"], message: "Upload a valid file." });
-      return;
-    }
-    if (actual > TEN_MB) {
-      ctx.addIssue({ code: "custom", path: ["data"], message: "File must be 10 MB or smaller." });
-    } else if (actual !== v.fileSizeBytes) {
-      // A mismatch means the two halves of one upload disagree — a broken client, or a declaration
-      // aimed at slipping past the ceiling. Neither is worth storing under a size nobody can trust.
-      ctx.addIssue({ code: "custom", path: ["fileSizeBytes"], message: "File size doesn't match the uploaded file." });
-    }
-    if (!attachmentTypeMatches(v.data, v.fileType)) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["fileType"],
-        message: "That file isn't a valid PDF, DOCX, PNG or JPG.",
-      });
-    }
-  });
-export type PoAttachmentInput = z.infer<typeof poAttachmentSchema>;
 
 // ── Rental hire actions ───────────────────────────────────────────────────────────────────────
 // `hireStatus` is never client-settable as a free string — "return" is its own endpoint, so the
@@ -351,3 +308,40 @@ export const closeHireShortSchema = z.object({
     .max(500, "Keep the reason under 500 characters."),
 });
 export type CloseHireShortInput = z.infer<typeof closeHireShortSchema>;
+
+/**
+ * Declaring hired equipment lost.
+ *
+ * The reason enum is the SAME list company-owned stock is written off against
+ * (goods-management.validation `WRITE_OFF_REASONS`), retyped here rather than imported because the
+ * purchase-order module does not depend on goods-management and the reverse import would close a
+ * cycle. Kept identical deliberately: "the van was broken into" is the same fact whoever owned what
+ * was inside it, and two divergent lists would make the two write-off reports impossible to compare.
+ */
+export const HIRE_LOSS_REASONS = ["not_returned", "lost_in_transit", "engineer_left", "site_theft", "other"] as const;
+
+export const declareHireLostSchema = z
+  .object({
+    engineerId: z.string().regex(OBJECT_ID_RE, "Choose which engineer was holding the equipment."),
+    quantity: z.coerce.number().int().min(1, "Enter how many units are lost."),
+    reason: z.enum(HIRE_LOSS_REASONS, { error: "Select why this hired equipment is being declared lost." }),
+    notes: z.string().trim().max(2000).optional(),
+    jobId: z.string().regex(OBJECT_ID_RE).optional(),
+    jobNumber: z.string().trim().max(60).optional(),
+    engineerName: z.string().trim().max(200).optional(),
+  })
+  .superRefine((v, ctx) => {
+    // Same contract every other "other" in this codebase carries: the enum stops being an answer the
+    // moment it is the catch-all, so the words become the record.
+    if (v.reason === "other" && !v.notes?.trim()) {
+      ctx.addIssue({ code: "custom", path: ["notes"], message: "Describe what happened when choosing Other." });
+    }
+  });
+export type DeclareHireLostBody = z.infer<typeof declareHireLostSchema>;
+
+/** Booking previously-lost equipment back in. Quantity so a partial find is recordable as one. */
+export const recoverHireLossSchema = z.object({
+  quantity: z.coerce.number().int().min(1, "Enter how many units have been found."),
+  notes: z.string().trim().max(2000).optional(),
+});
+export type RecoverHireLossBody = z.infer<typeof recoverHireLossSchema>;

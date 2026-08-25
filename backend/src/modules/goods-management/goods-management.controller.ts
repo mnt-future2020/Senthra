@@ -2,7 +2,7 @@ import * as service from "./goods-management.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
 import { param, queryInt, queryStr } from "../../utils/request.js";
-import type { CloseReconcileInput, PostMovementInput, ReportDamageInput, RestoreDamagedInput, ScanLookupInput, UploadDamagePhotoInput } from "./goods-management.validation.js";
+import type { CloseReconcileInput, PostMovementInput, ReportDamageInput, RestoreDamagedInput, ScanLookupInput } from "./goods-management.validation.js";
 import { badRequest } from "../../utils/http-error.js";
 
 export const scanLookup = asyncHandler(async (req, res) => {
@@ -118,12 +118,6 @@ export const listOverdue = asyncHandler(async (req, res) => {
   );
 });
 
-// POST /goods-management/damage-photo — upload a damage photo data URI to Cloudinary; returns { url }.
-export const uploadDamagePhoto = asyncHandler(async (req, res) => {
-  const { image } = req.body as UploadDamagePhotoInput;
-  const result = await service.uploadDamagePhoto(image);
-  res.json(result);
-});
 
 // POST /goods-management/damaged/report — move units from usable stock into the damaged pool.
 export const reportDamage = asyncHandler(async (req, res) => {

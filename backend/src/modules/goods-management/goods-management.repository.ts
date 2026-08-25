@@ -205,6 +205,54 @@ export async function recomputeGoodsStatus(jobId: string): Promise<void> {
   }
 }
 
+/**
+ * New UNISSUED kit has just been added to a job whose goods were already `issued` or
+ * `awaiting_return` — put the summary back into a state that says "a warehouse still owes this job
+ * stock".
+ *
+ * Why this exists. `getOpenDemand` skips any job at `issued` / `awaiting_return` / `reconciled`, on
+ * the entirely correct premise that those states mean "no future warehouse draw left". Growing the kit
+ * falsifies that premise: an approved additional-kit request (or an edit that adds a line) creates a
+ * planned quantity nobody has issued, on a job every demand consumer has stopped counting. The units
+ * then exist on the kit list and in NO availability figure — not the reorder workbench, not the
+ * warehouse Demand board, not the caps the kit-request approve dialog enforces, not van-stock
+ * allocation. Every one of those under-states demand and over-offers stock.
+ *
+ * Fixed HERE, at the transition, rather than by loosening that skip. The skip is right; what was wrong
+ * was leaving the status behind when the facts moved. Loosening it would drag every genuinely finished
+ * `awaiting_return` job back into demand and re-create the double-subtraction the demand contract
+ * exists to prevent.
+ *
+ * `partially_issued` specifically, not `not_issued`: stock HAS been issued against this job, and
+ * `not_issued` would tell the queue and the edit-job locks otherwise.
+ *
+ * NOT a variant of `recomputeGoodsStatus`, deliberately. That one refuses to regress
+ * `awaiting_return` — correctly, because it runs after a LATE-COMPLETING transfer and must not undo a
+ * return flow with stale news. This is the opposite kind of event: not late news about old movements,
+ * but a new obligation created right now. Hence a separate, narrowly-scoped function whose name says
+ * which event it serves.
+ *
+ * `reconciled` is absent and stays terminal — both kit-growth paths already refuse a reconciled job
+ * before reaching here, so a reconciled ledger can never be re-opened by this.
+ *
+ * One conditional `updateMany`, evaluated atomically by Mongo, so it cannot race a return posting at
+ * the same instant into a lost update. Runs inside the caller's transaction, alongside the kit merge
+ * itself, so the kit and the status can never diverge. Returns how many rows moved (0 = the job was
+ * already in a state that counts as demand, which is not a failure).
+ *
+ * CONSEQUENCE, intended: Close & Reconcile requires exactly `awaiting_return`, so a job moved out of
+ * it here cannot be reconciled until the newly added kit is issued (or removed). That is the correct
+ * business state — a job with kit still owed to it is not finished — and it is the reason this is a
+ * deliberate transition rather than a quiet demand tweak.
+ */
+export async function reopenIssuanceForAddedKitTx(tx: Prisma.TransactionClient, jobId: string): Promise<number> {
+  const res = await tx.jobStockSummary.updateMany({
+    where: { jobId, goodsStatus: { in: ["issued", "awaiting_return"] } },
+    data: { goodsStatus: "partially_issued" },
+  });
+  return res.count;
+}
+
 // Cancelling a job is the moment its kit has to start coming back, so move the summary into the state
 // the return/reconcile flows unlock from. Narrow on purpose:
 //   - `not_issued` (or no summary at all) means nothing ever left a warehouse — there is nothing to

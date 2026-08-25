@@ -1109,8 +1109,32 @@ model PurchaseOrderRentalLine {
   // between the two IS the PM's to-do list, which is the point of recording it separately: the
   // engineer who saw the damage is not the person who negotiates the charge, and the photograph is
   // worth most on the day it was taken.
+  // NOW A CACHED COUNTER, not an independent fact: the number of units this hire currently holds on
+  // OPEN damage custody exits (HireCustodyExit, kind `damage`, custodyState `held_damaged`). Recomputed
+  // as an ABSOLUTE from those rows by every writer that moves one, exactly as `damagedQuantity` is
+  // recomputed from live note lines.
+  //
+  // It stays a column rather than becoming a count-the-rows query because `adjustHireIssuedQtyTx` reads
+  // it inside its conditional `where`, and that guard is only atomic while it touches ONE document.
+  // Counting exit rows in there would turn the availability check and the commitment back into two
+  // operations, which is the race the conditional exists to close.
   fieldDamageQty        Int       @default(0)
   fieldDamageReportedAt DateTime?
+
+  // Units of this hire that are NOT coming back to us and never went back to the provider — the
+  // engineer lost them, the van was broken into, the site was cleared.
+  //
+  // CURRENT unresolved loss, not "ever lost": a unit later recovered decrements this, and the history
+  // of both events lives on the HireCustodyExit rows and in the audit log rather than in this number.
+  // That is what lets it sit in the custody arithmetic as a plain bucket —
+  // `received = returned + lost + issued + onShelf` — where every physical unit is counted in exactly
+  // one place and no formula can deduct it twice.
+  //
+  // It is what makes a hire whose kit is genuinely gone FINISHABLE. Before it existed the return path
+  // refused (the units are not on the shelf), close-short refused (they were delivered), and the order
+  // could be neither closed nor cancelled — so the hire sat on the overdue badge for ever with no
+  // action anywhere that could clear it.
+  lostQuantity Int @default(0)
 
   // Units of this hire currently OUT WITH AN ENGINEER — issued to a job and not yet scanned back.
   //
@@ -1138,6 +1162,10 @@ model PurchaseOrderRentalLine {
   // column).
   jobStockMovementLines JobStockMovementLine[]
   engineerHoldings      EngineerRentalHolding[]
+
+  // Every unit of this hire that came back broken or never came back — the rows behind
+  // `fieldDamageQty` and `lostQuantity`. See the HireCustodyExit model.
+  custodyExits HireCustodyExit[]
 
   // Every EXTENSION of this hire, one row each — the breakdown of the running total above. Same
   // reason `receipts` exists beside `receivedQuantity`: a total cannot say when, by how much, or how
@@ -1575,6 +1603,106 @@ model RentalReceiptAttachment {
 
   @@index([rentalReceiptId])
   @@index([resourceType, publicId])
+}
+
+// Hired equipment that has LEFT NORMAL USABLE CUSTODY for a named reason — it came back broken, or it
+// never came back at all. One row per event, with the evidence attached to it.
+//
+// ONE model for both because they are the same shape of fact: a quantity of a specific hire, the job
+// and engineer it happened on, who said so and when, and whether the office has settled it with the
+// provider yet. What they are NOT is the same lifecycle, which is why `custodyState` and
+// `settlementState` are two separate columns — see each below.
+//
+// Rows, not counters, and that is the whole reason this model exists. A counter on the hire line can
+// carry a total but not an event: it cannot hold this damage report's photograph next to that one's,
+// it cannot be dismissed, and it cannot be linked to the note that settled it — so reversing that note
+// has nothing to reopen. It is the same split `DamagedStockBalance` / `DamagedStockTransaction` already
+// makes for owned stock, for the same reasons.
+model HireCustodyExit {
+  id                        String                  @id @default(auto()) @map("_id") @db.ObjectId
+  purchaseOrderRentalLineId String                  @db.ObjectId
+  purchaseOrderRentalLine   PurchaseOrderRentalLine @relation(fields: [purchaseOrderRentalLineId], references: [id])
+  // Denormalised from the hire's order so the warehouse-scoped reads and the RBAC check do not have to
+  // join two levels up on every row. Snapshots, like every other denormalised field here.
+  purchaseOrderId String  @db.ObjectId
+  poCode          String?
+  warehouseId     String  @db.ObjectId
+
+  kind String // damage | loss
+  qty  Int
+
+  // WHAT it was, snapshotted like every other denormalised field on this row.
+  //
+  // Absent at first, and its absence was visible on screen: the damaged-stock list shows an item name
+  // in its Item column, and a row that could not supply one had to print the EVENT there instead
+  // ("Damaged on hire") beside owned rows printing an item. Two different facts in one column, which
+  // reads as a bug even when the numbers are right.
+  //
+  // A snapshot rather than a join, for the reason every other snapshot here exists: the row has to
+  // stay readable after the catalogue item is renamed or retired, and the panes that list these render
+  // a page at a time.
+  itemName String
+
+  // WHERE THE UNITS PHYSICALLY ARE. Moves only when equipment moves.
+  //   damage: held_damaged → returned_to_supplier   (a damaged unit is still ours to hand back)
+  //   loss:   lost         → recovered              (it turned up)
+  // `lostQuantity` on the hire line is the count of `lost` rows; `fieldDamageQty` the count of
+  // `held_damaged` ones. Both are recomputed from these rows, never incremented blind.
+  custodyState String
+
+  // WHETHER THE PROVIDER HAS BEEN SETTLED WITH. Moves only when paperwork moves.
+  //   unsettled → settled (a damage/loss note carries the charge) → unsettled (that note reversed)
+  //   unsettled → dismissed (looked at, nothing owed — fair wear, reported in error)
+  //
+  // Deliberately NOT folded into `custodyState` as one "reversed" value. Reversing a supplier note
+  // undoes a CHARGE; recovering a unit undoes a LOSS. Collapsing them would mean a credit note quietly
+  // put a still-missing tester back into the issuable pool.
+  settlementState String
+
+  // Loss uses the write-off reason enum shared with owned stock (not_returned, lost_in_transit,
+  // engineer_left, site_theft, other); damage carries the engineer's own words.
+  reason   String
+  notes    String?
+  photoUrl String?
+
+  // Where it happened. Null on a damage report raised at the warehouse rather than off a job.
+  jobId          String? @db.ObjectId
+  jobNumber      String?
+  engineerId     String? @db.ObjectId
+  engineerName   String?
+  movementLineId String? @db.ObjectId
+
+  declaredBy String?
+  declaredAt DateTime @default(now())
+
+  // The note that settled it, and when. Cleared when that note is reversed, which returns the row to
+  // `unsettled` — the work is owed again.
+  settledByReceiptId String?   @db.ObjectId
+  settledAt          DateTime?
+
+  recoveredBy    String?
+  recoveredAt    DateTime?
+  recoveryNotes  String?
+
+  // IDEMPOTENCY. `sourceType` + `sourceId` name the ONE write that created this row — the return
+  // movement, the damage note, the loss declaration's movement. A retried request resolves to the same
+  // pair and the unique index below refuses the duplicate, so a double-submit cannot report the same
+  // damage twice or lose the same tester twice.
+  sourceType String // goods_management_return | warehouse_damage_note | reconcile_loss
+  sourceId   String @db.ObjectId
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Both fields are ALWAYS set — deliberately, because MongoDB indexes a missing field as a value and
+  // a nullable component would let two rows collide on `null` and defeat the guard entirely.
+  @@unique([sourceType, sourceId, purchaseOrderRentalLineId, kind])
+  // The hot read: "what is open on this hire" — the availability recompute and the hire's own panel.
+  @@index([purchaseOrderRentalLineId, kind, custodyState])
+  // The worklists: what a warehouse still owes the provider an answer on.
+  @@index([warehouseId, settlementState])
+  @@index([purchaseOrderId])
+  @@index([jobId])
 }
 
 // ── INVENTORY PRIMITIVES ───────────────────────────────────────────────────────────────

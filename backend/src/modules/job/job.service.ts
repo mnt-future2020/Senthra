@@ -25,13 +25,15 @@ import { conflict, forbidden, notFound, badRequest } from "../../utils/http-erro
 import { startOfDayIn } from "../../utils/filter-date.js";
 import { jobOverdue } from "./job-overdue.js";
 import { safeHttpUrls } from "../../utils/http-url.js";
-import { uploadFileToCloudinary } from "../../lib/cloudinary.js";
-import { getCloudinaryCreds, getCompanyTimezone, getRegionalSettings } from "#modules/settings/settings.service.js";
+import { getCompanyTimezone, getRegionalSettings } from "#modules/settings/settings.service.js";
 import { formatDate } from "#modules/document/document.formatter.js";
 import { EXPORT_MAX, EXPORT_PAGING, toCsv } from "../../utils/csv.js";
 import { paginate } from "../../utils/pagination.js";
 import type { CreateJobInput, JobKitLineInput, UpdateJobInput, CompleteJobInput } from "./job.validation.js";
 import * as goodsManagementService from "#modules/goods-management/goods-management.service.js";
+// The repository directly, alongside the service: `reopenIssuanceForAddedKitTx` has to run INSIDE the
+// kit-merge transaction, and a service call cannot join a transaction the caller already owns.
+import * as goodsManagementRepo from "#modules/goods-management/goods-management.repository.js";
 import * as kitRequestRepo from "#modules/job-kit-request/job-kit-request.repository.js";
 import * as transferRepo from "#modules/engineer-transfer/engineer-transfer.repository.js";
 import * as transferService from "#modules/engineer-transfer/engineer-transfer.service.js";
@@ -127,6 +129,7 @@ export interface PublicJobKitLine {
   // Deliberately NOT accompanied by the PO code: the purchase order is the office's handle on the
   // hire, not the engineer's. They need the date and the depot, and nothing else.
   hireEndDate: string | null;
+  hires: { poCode: string | null; hireEndDate: string | null; qty: number; overdue: boolean }[];
   // Server-resolved against the company timezone (never a browser clock) — see KitLineTally.
   hireOverdue: boolean;
   // Van hand-overs feeding this line. Non-empty ⇒ some/all of this stock comes from another
@@ -316,6 +319,7 @@ function toPublic(j: JobWithRelations | JobListRow): PublicJob {
       returned: 0,
       remaining: 0,
       hireEndDate: null, // overwritten by withGoodsTallies (rental lines with units still out)
+      hires: [],
       hireOverdue: false,
       vanSources: [], // overwritten by withGoodsTallies on the job detail
     })),
@@ -476,9 +480,15 @@ async function availabilityReader(lines: readonly AvailabilityLine[]): Promise<(
     inventoryRepo.findBalancesByItemsAndWarehouses(irmItemIds, warehouseIds),
     customerRepo.findStockEntryQuantitiesByIds(cseIds),
     // A hire has no stock level of its own — deliberately (see the RentalItem schema comment). What a
-    // job can plan against is the LIVE HIRES of that item delivered to that warehouse, so the pool is
-    // assembled from the hire rows rather than read from a balance table that does not exist.
-    poRepo.findLiveHiresByRentalItems(rentalItemIds, warehouseIds),
+    // job can plan against is the ISSUABLE HIRES of that item delivered to that warehouse, so the pool
+    // is assembled from the hire rows rather than read from a balance table that does not exist.
+    //
+    // `findIssuableHiresByRentalItems`, not the `findLiveHires...` twin: this reader is the CAP on what
+    // a kit line may be planned or grown to ("only N more available to add at that warehouse"), so a
+    // hire whose period has ended must not count toward it. Planning a job against kit that is already
+    // due back at the provider only defers the refusal to the counter, after the engineer has been
+    // told it is coming.
+    poRepo.findIssuableHiresByRentalItems(rentalItemIds, startOfDayIn(await getCompanyTimezone(), new Date()), warehouseIds),
   ]);
   const freeByPair = new Map(balances.map((b) => [`${b.irmItemId}|${b.warehouseId}`, b.quantityOnHand - b.quantityReserved]));
   const qtyByEntry = new Map(entries.map((e) => [e.id, e.quantity]));
@@ -666,6 +676,12 @@ async function withGoodsTallies(pub: PublicJob): Promise<PublicJob> {
       kl.remaining = t.remaining;
       kl.hireEndDate = iso(t.hireEndDate);
       kl.hireOverdue = t.hireOverdue;
+      // The hires behind that one date. A rental line can legitimately draw off two orders with two
+      // deadlines; the row shows the earliest and this is what lets it say so instead of dropping the
+      // second one silently. Dates go out as ISO, like every other date on this shape.
+      // `?? []` because this maps a shape produced by another module: a tally arriving without the
+      // field must leave the row with an empty breakdown, not take the whole job detail down with it.
+      kl.hires = (t.hires ?? []).map((h) => ({ poCode: h.poCode, hireEndDate: iso(h.hireEndDate), qty: h.qty, overdue: h.overdue }));
     }
     kl.vanSources = vanSources.get(kl.id) ?? [];
   }
@@ -818,6 +834,21 @@ function kitLineIdentity(l: { irmItemId: string | null; rentalItemId?: string | 
   if (l.rentalItemId) return `rental|${l.rentalItemId}|${l.warehouseId ?? ""}`;
   if (l.customerStockEntryId) return `customer|${l.customerStockEntryId}|${l.warehouseId ?? ""}`;
   return `misc|${l.itemName}`;
+}
+
+/**
+ * Do these kit lines represent demand a WAREHOUSE will have to satisfy?
+ *
+ * `misc` is excluded for exactly the reason `getOpenDemand` excludes it — a free-text line is not
+ * stock-tracked, so nothing is ever drawn against it and adding one creates no obligation on any
+ * depot. Without this test, appending "site keys" to a finished job would drag it back out of
+ * `awaiting_return` and block its Close & Reconcile over an item no warehouse holds.
+ *
+ * Shared by both kit-growth paths (edit-job and the additional-kit approval) so the two cannot drift
+ * on what counts as new demand.
+ */
+export function addsStockTrackedDemand(lines: readonly { lineType: string }[]): boolean {
+  return lines.some((l) => l.lineType !== "misc");
 }
 
 type ExistingKitLine = NonNullable<JobWithRelations["kitLines"]>[number];
@@ -1012,15 +1043,30 @@ export async function updateJob(id: string, input: UpdateJobInput, actor?: Audit
           throw conflict(`"${reduced.itemName}" has already had stock issued (qty ${reduced.existingQty}) — its quantity can only be increased, not reduced. Return and reconcile the issued stock first if you need fewer.`);
         }
       }
-      result = await jobRepo.mergeKitLines(
-        id,
-        {
-          updates: diff.updates.map((u) => ({ id: u.id, qty: u.qty, seCode: u.seCode, description: u.description, notes: u.notes })),
-          creates: diff.creates,
-          deleteIds: diff.removed.map((r) => r.id),
-        },
-        headerPatch,
-      );
+      // ONE transaction covering the merge AND the goods-status transition it may require, for the
+      // same reason the additional-kit path does it that way: an edit that adds unissued kit to a job
+      // already at `issued` / `awaiting_return` creates demand no consumer would count until the
+      // status moves, and a status written outside the merge's transaction could survive a rolled-back
+      // merge (or be lost by one that committed). See `reopenIssuanceForAddedKitTx`.
+      //
+      // `growingLines` is reused rather than recomputed: it already holds exactly the existing lines
+      // whose quantity is INCREASING, which — with the creates — is precisely the set that can add
+      // demand. A pure reduction or a rename adds none and must leave the status alone.
+      const addsDemand = addsStockTrackedDemand([...diff.creates, ...growingLines]);
+      result = await withTransaction(async (tx) => {
+        const merged = await jobRepo.mergeKitLinesTx(
+          tx,
+          id,
+          {
+            updates: diff.updates.map((u) => ({ id: u.id, qty: u.qty, seCode: u.seCode, description: u.description, notes: u.notes })),
+            creates: diff.creates,
+            deleteIds: diff.removed.map((r) => r.id),
+          },
+          headerPatch,
+        );
+        if (addsDemand) await goodsManagementRepo.reopenIssuanceForAddedKitTx(tx, id);
+        return merged;
+      });
     }
   } else {
     result = await jobRepo.update(id, headerPatch);
@@ -1183,6 +1229,14 @@ export async function appendKitFromRequest(
       const merged = await jobRepo.mergeKitLinesTx(tx, jobId, { updates, creates, deleteIds: [] }, headerPatch);
       const mergedLines = (merged.kitLines ?? []) as MatchableKitLine[];
       const ids = rows.map((row, i) => rowTargets[i] ?? findMatchingKitLine(mergedLines, row)?.id ?? null);
+      // This grow has just created unissued demand, so a job already parked at `issued` /
+      // `awaiting_return` has to come back to a state the demand calculation counts — otherwise the
+      // units sit on the kit list and in no availability figure anywhere. See
+      // `reopenIssuanceForAddedKitTx`. In the SAME transaction as the merge, so the kit and the status
+      // cannot diverge. Every append here is an add or an increase (`row.qty > 0` by validation), and
+      // stock-tracked lines are the only ones that can carry demand — misc is excluded for the same
+      // reason getOpenDemand excludes it.
+      if (addsStockTrackedDemand(rows)) await goodsManagementRepo.reopenIssuanceForAddedKitTx(tx, jobId);
       if (stampTx) await stampTx(tx, ids);
       return { merged, ids };
     });
@@ -2039,46 +2093,4 @@ async function reconcileAttachments(
   }
 }
 
-/**
- * Upload a job attachment file (data URI) to Cloudinary and return its secure URL.
- *
- * The file lands in Cloudinary BEFORE the job is saved, which is the right way round — an upload
- * that only committed on save would lose the file on any validation error, the failure users
- * actually notice. Abandon the form and the asset stays there unreferenced.
- *
- * ## Why the identity is thrown away here, unlike PRF/PO/GRN
- *
- * Those three store `publicId` + `resourceType` on an attachment ROW, so removing one can address
- * and delete its file. A job's attachments are a bare `String[]` on the Job (plus an `#internal`
- * URL fragment marking staff-only ones), edited by replacing the whole array — there is no discrete
- * "this attachment was removed" event to hang a cleanup on, and no row to hold identity in. Adding
- * one means changing the field's shape, its validation, the forms and the portal payload: a module
- * redesign, not a cleanup fix, and deliberately out of scope.
- *
- * So this remains DEFERRED lifecycle debt, in two parts: job attachments are never deleted, and —
- * shared with every module — a file uploaded into an abandoned form is never reclaimed. Closing
- * either needs the PENDING → ATTACHED lifecycle and a scheduled sweep, neither of which exists.
- */
-export async function uploadAttachment(dataUri: string, fileName?: string): Promise<{ url: string }> {
-  if (!dataUri.startsWith("data:")) throw badRequest("Upload a valid file.");
-  const creds = await getCloudinaryCreds();
-  if (!creds) throw badRequest("Cloudinary isn't configured. Add your credentials in Settings → Integrations first.");
-
-  let baseName = "job-attach";
-  if (fileName && fileName.trim()) {
-    const nameWithoutExt = fileName.replace(/\.[^/.]+$/, "").trim();
-    const sanitized = nameWithoutExt.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
-    if (sanitized) baseName = sanitized.slice(0, 60);
-  }
-  // The FULL uuid, not a slice of it. `uploadFileToCloudinary` leaves `overwrite` unset, which
-  // Cloudinary defaults to true — so a publicId two uploads can agree on means the second silently
-  // destroys the first. Truncating to 8 hex characters left 32 bits, which two files sharing a name
-  // would collide on about once in four billion: unlikely rather than impossible, and there is nothing
-  // to gain by clipping it. The readable part is the name in front.
-  const publicId = `${baseName}-${crypto.randomUUID()}`;
-
-  // Only the URL is kept — `Job.attachments` is a `String[]` with nowhere to put the rest. See above.
-  const asset = await uploadFileToCloudinary(dataUri, publicId, creds, "senthra/jobs");
-  return { url: asset.url };
-}
 

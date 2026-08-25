@@ -250,8 +250,16 @@ export function EngineerJobDetail({ id }: { id: string }) {
   // engineer taps through — a hire is the one thing on this list that must physically go back.
   // Hired kit whose deadline has ALREADY passed and which is still out. Only the overdue ones: a
   // hire that is simply still with the engineer is normal and its date is already on its kit row.
-  const hiresOverdue = job.kitLines.filter((l) => l.lineType === "rental" && l.remaining > 0 && l.hireOverdue);
-  const hiresOverdueUnits = hiresOverdue.reduce((n, l) => n + l.remaining, 0);
+  //
+  // Counted PER HIRE, not per line. `hireOverdue` is a line-level flag resolved from the line's
+  // SOONEST hire, and `remaining` is the whole line's outstanding — so a line holding 1 unit on a hire
+  // that lapsed last month and 2 on one due in December used to tell the engineer that all THREE were
+  // past their return date and to bring them all in. Two of them were not due for weeks, and the trip
+  // to hand them back early is a real one. `hires[].overdue` is what makes the honest count possible.
+  const hiresOverdue = job.kitLines
+    .map((l) => ({ line: l, qty: l.hires.filter((h) => h.overdue).reduce((n, h) => n + h.qty, 0) }))
+    .filter((x) => x.line.lineType === "rental" && x.line.remaining > 0 && x.qty > 0);
+  const hiresOverdueUnits = hiresOverdue.reduce((n, x) => n + x.qty, 0);
   // Site address for display + a text-based Google Maps directions link (same approach as the pickup
   // warehouse below — the app stores no map coordinates, so the postcode + street text drives the search).
   const siteAddressParts = [job.addressLine1, job.addressLine2, job.city, job.county, job.postcode, job.country].filter(Boolean) as string[];
@@ -362,7 +370,7 @@ export function EngineerJobDetail({ id }: { id: string }) {
                 msg={{
                   type: "warn",
                   text:
-                    `${hiresOverdue.map((l) => `${l.remaining} × ${l.itemName}`).join(", ")} ` +
+                    `${hiresOverdue.map((x) => `${x.qty} × ${x.line.itemName}`).join(", ")} ` +
                     `${hiresOverdueUnits === 1 ? "is" : "are"} past the hire return date. ` +
                     `Get ${hiresOverdueUnits === 1 ? "it" : "them"} back to the warehouse — or ask the warehouse to extend the hire if you still need ${hiresOverdueUnits === 1 ? "it" : "them"}.`,
                 }}
@@ -622,6 +630,30 @@ export function EngineerJobDetail({ id }: { id: string }) {
                       ) : (
                         <>Return by {formatCalendarDay(line.hireEndDate)}</>
                       )}
+                    </span>
+                  )}
+                  {/* The date above is the EARLIEST of this line's hires. When there is more than one,
+                      saying so is the difference between a date and the whole answer — the engineer
+                      carrying two testers off two orders needs to know the second is not due back with
+                      the first.
+
+                      WRITTEN OUT, not hung off a `title`. This is a phone-first surface and a tooltip
+                      does not open on touch, so the one place that acknowledged the multi-hire case
+                      was the one place most of its readers could not reach. It is two short lines,
+                      only ever on a line that genuinely draws off several hires. */}
+                  {line.hires.length > 1 && (
+                    <span className="mt-0.5 flex flex-col gap-0.5">
+                      {line.hires.map((h, i) => (
+                        <span
+                          key={`${h.poCode ?? "hire"}-${h.hireEndDate ?? i}`}
+                          className={`text-[11px] ${h.overdue ? "font-semibold text-[var(--neg)]" : "text-[var(--muted)]"}`}
+                        >
+                          {h.qty} ×{" "}
+                          {h.overdue
+                            ? `was due ${formatCalendarDay(h.hireEndDate)} — overdue`
+                            : `due ${formatCalendarDay(h.hireEndDate)}`}
+                        </span>
+                      ))}
                     </span>
                   )}
                 </td>

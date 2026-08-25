@@ -125,6 +125,10 @@ describe("ON_HIRE_STATUSES — the vocabulary the endpoint accepts", () => {
       "all",
       "awaiting",
       "cancelled",
+      // The settle worklist — hires carrying damage or loss nobody has put to the provider yet. Like
+      // `returned` and `cancelled` it can select rows that are no longer out with us: a hire whose kit
+      // has all gone back still owes a charge for the one that came back broken.
+      "custody",
       "expiring",
       "late",
       "overdue",

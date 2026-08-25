@@ -3,9 +3,10 @@ import { randomUUID } from "node:crypto";
 
 import { daysBetween, toCalendarDay } from "../../utils/calendar-day.js";
 import { parseFilterDate } from "../../utils/filter-date.js";
-import { computeNotifyOnDate, isTerminalHireStatus } from "./rentalHire.predicate.js";
+import { computeNotifyOnDate, isIssuableHire, isTerminalHireStatus } from "./rentalHire.predicate.js";
+import { hireIssuable } from "./rentalHire.allocation.js";
 import { emitHireUpdated } from "./rentalHire.realtime.js";
-import { resolveDeliveryLocation, resolveReturnLocation, type ReturnContext } from "./rentalReturn.js";
+import { deliversToWarehouse, resolveDeliveryLocation, resolveReturnLocation, type ReturnContext } from "./rentalReturn.js";
 import { extensionChargePence, type RatePeriod } from "../../utils/rental-pricing.js";
 import * as poRepo from "./purchase-order.repository.js";
 import type { PoLineRow, PurchaseOrderWithRelations } from "./purchase-order.repository.js";
@@ -40,7 +41,6 @@ import type {
   CreatePurchaseOrderInput,
   CreatePurchaseOrdersSplitInput,
   POLineInput,
-  PoAttachmentInput,
   PoSupplierAcceptInput,
   UpdatePurchaseOrderInput,
   CloseHireShortInput,
@@ -153,6 +153,24 @@ export interface PublicPoRentalLine {
   fullyReturned: boolean;
   /** Units reported damaged while in our hands — clamped by every reader to what is still held. */
   damagedQuantity: number;
+  /**
+   * The two custody facts the order page could not previously show, and had to.
+   *
+   * `lostQuantity` is units that are gone: the order still reads "100 ordered · £300" and, without
+   * this, nothing on the page a buyer or an accountant opens says one of them will never come back.
+   * `damagedHeldQuantity` is what is broken and STILL HERE, as opposed to `damagedQuantity`, which is
+   * the provider-facing lifetime total from their notes and counts units already handed back.
+   */
+  lostQuantity: number;
+  damagedHeldQuantity: number;
+  /**
+   * Units out with an ENGINEER right now — ours to answer for, but not in the building.
+   *
+   * The fourth custody fact, and it reaches this page for the same reason the two above did: without
+   * it the order cannot say whether a delivery may still be unwound. A unit in a van is a unit whose
+   * arrival is on the record, so the note that delivered it can no longer be given back.
+   */
+  issuedQuantity: number;
   /** Stamped when the warehouse confirmed the kit arrived; null while awaiting delivery. */
   receivedAt: string | null;
   receivedBy: string | null;
@@ -454,6 +472,9 @@ function toPublic(po: PurchaseOrderWithRelations): PublicPurchaseOrder {
       returnedQuantity: r.returnedQuantity ?? 0,
       fullyReturned: r.fullyReturned ?? false,
       damagedQuantity: r.damagedQuantity ?? 0,
+      lostQuantity: r.lostQuantity ?? 0,
+      damagedHeldQuantity: r.fieldDamageQty ?? 0,
+      issuedQuantity: r.issuedQuantity ?? 0,
       receivedAt: iso(r.receivedAt),
       receivedBy: r.receivedBy,
       extensionChargePence: r.extensionChargePence,
@@ -1423,11 +1444,16 @@ export async function cancelPurchaseOrder(id: string, reason: string | undefined
   //
   // Hires that never arrived are deliberately NOT blocked: cancelling the order is the right way to
   // end those, and they leave every queue with it.
-  const held = po.rentalItems.filter((r) => (r.receivedQuantity ?? 0) > (r.returnedQuantity ?? 0));
+  // Netting LOST off too. The guard asks whether any of the supplier's kit is physically here; a unit
+  // declared lost is not, and leaving it in the sum would keep an order un-cancellable for ever over
+  // equipment that has already been accounted for — the same dead end the loss path exists to open.
+  const heldOf = (r: { receivedQuantity?: number | null; returnedQuantity?: number | null; lostQuantity?: number | null }) =>
+    (r.receivedQuantity ?? 0) - (r.returnedQuantity ?? 0) - (r.lostQuantity ?? 0);
+  const held = po.rentalItems.filter((r) => heldOf(r) > 0);
   if (held.length > 0) {
     const line = held[0]!;
     throw conflict(
-      `${(line.receivedQuantity ?? 0) - (line.returnedQuantity ?? 0)} ${line.itemName} are still on hire here. ` +
+      `${heldOf(line)} ${line.itemName} are still on hire here. ` +
         `Record the return before cancelling this purchase order.`,
     );
   }
@@ -1604,26 +1630,6 @@ export function recordAttachmentAudit(po: { id: string; code: string }, actor?: 
   audit.record({ actor, action: "purchase_order.attachment_added", targetType: "purchase_order", targetId: po.id, targetLabel: po.code });
 }
 
-export async function addAttachment(poId: string, input: PoAttachmentInput, actor?: AuditActor): Promise<PublicPurchaseOrder> {
-  // Before the upload, so a rejected attachment never reaches Cloudinary as an orphan.
-  await assertCanAttach(poId, input.fileSizeBytes, input.label, actor);
-  const creds = await getCloudinaryCreds();
-  if (!creds) throw badRequest("File uploads aren't configured. Add Cloudinary credentials in Settings first.");
-  const asset = await uploadFileToCloudinary(input.data, randomUUID(), creds);
-  return attachUploadedAsset(
-    poId,
-    {
-      label: input.label,
-      fileName: input.fileName,
-      fileType: input.fileType,
-      fileSizeBytes: input.fileSizeBytes,
-      url: asset.url,
-      publicId: asset.publicId,
-      resourceType: asset.resourceType,
-    },
-    actor,
-  );
-}
 
 export async function removeAttachment(poId: string, attachmentId: string, actor?: AuditActor): Promise<PublicPurchaseOrder> {
   const po = await loadOrThrow(poId, actor);
@@ -1993,7 +1999,8 @@ export async function closeHireShort(
 
   const received = line.receivedQuantity ?? 0;
   const returned = line.returnedQuantity ?? 0;
-  const stillHeld = received - returned;
+  // Lost units are not held, so they must not keep a short-closed hire alive waiting to come back.
+  const stillHeld = received - returned - (line.lostQuantity ?? 0);
   const now = new Date();
   const actorEmail = actor?.email ?? null;
 
@@ -2238,6 +2245,53 @@ export interface PublicOnHireLine {
   /** What has gone back, and whether everything we hold has — the row's Return action caps on these. */
   returnedQuantity: number;
   fullyReturned: boolean;
+  /**
+   * Units out with an ENGINEER on a job right now — ours to answer for, but not in the building.
+   *
+   * Carried onto the row so a warehouse can see WHERE what it holds actually is:
+   * `received − returned` is what we owe the provider, and subtracting this gives what is physically
+   * on the shelf. The two were one number on screen, which made a row read "3 held" while only 2
+   * could be handed to a collecting driver — and the person who then tried to return 3 got a 409
+   * explaining the difference, having had no way to know it beforehand.
+   *
+   * `createRentalReturn` already enforces exactly this split (see its `withEngineers`/`onShelf`
+   * guard); this is the same figure, shown before the refusal rather than after it.
+   */
+  issuedQuantity: number;
+  /**
+   * How many units of this hire could go out on a NEW job today — the figure the scan and the
+   * kit-request composer work from, carried onto the row so a screen cannot contradict them.
+   *
+   * NOT the same as what is physically on the shelf, and the gap is the whole reason this exists. A
+   * hire whose period has ended, or one on an order the supplier was never sent, can have units
+   * standing in the yard that nobody may issue. The warehouse's on-hire pane showed only the physical
+   * figure, so one depot read "23 here" for an item with SIX issuable units — and the person who
+   * promised a job ten of them found out at the scan.
+   *
+   * Decided by `isIssuableHire`, the row-level twin of the `issuableWhere` predicate the scan queries
+   * with; a test runs both over the same cases so they cannot drift. Zero — never null — when the hire
+   * is not issuable: the answer to "how many can I have" is a number, and a blank invites the reader
+   * to supply their own.
+   */
+  availableToIssue: number;
+  /**
+   * Units currently unresolved-LOST, and units on the shelf currently held DAMAGED.
+   *
+   * Both are on the row because both change what the other numbers mean, and a pane showing
+   * `receivedQuantity − returnedQuantity` without them overstates what the warehouse is holding and
+   * what it can hand a collecting driver. They are also the two figures a hire is chased on once the
+   * equipment stops behaving: what is broken, and what is gone.
+   */
+  lostQuantity: number;
+  damagedHeldQuantity: number;
+  /**
+   * Who is holding this hire's issued units right now, and how many each.
+   *
+   * On the row because the two actions that need it — declaring units lost, and chasing an overdue
+   * hire — both start from "who has it", and neither can ask that question of a number. Empty when
+   * nothing is out. Batched for the whole page in one query.
+   */
+  holders: { engineerId: string; engineerName: string; quantity: number }[];
   /** Reported damaged while with us. The warehouse's rental pane filters on it. */
   damagedQuantity: number;
   /**
@@ -2281,6 +2335,15 @@ export interface PublicOnHireLine {
   damageCharge: number | null;
   /** Where it GOES — the line's own address, the order's override, or the warehouse. */
   deliveryLocation: { label: string; address: string | null };
+  /**
+   * True when `deliveryLocation` resolved by falling through to the delivery WAREHOUSE — no line
+   * address, no order override.
+   *
+   * For the warehouse's own on-hire pane, which is already scoped to one depot: without this it
+   * printed that depot's name on every ordinary row, burying the few hires that genuinely go
+   * somewhere else. See `deliversToWarehouse`.
+   */
+  deliveryAtWarehouse: boolean;
   /** Where it is collected from — resolved by the same function the order document prints. */
   returnLocation: { label: string; address: string | null };
   hireStatus: string;
@@ -2391,6 +2454,15 @@ export async function listOnHire(
     // screen showed an empty-looking search.
     search: params.search?.trim() ? params.search.trim() : undefined,
   });
+  // Who is holding each row's issued units, batched for the whole page — a per-row lookup would be a
+  // round trip per row on a remote cluster, which is the reason the repository query is batched at all.
+  const holdersByLine = new Map<string, { engineerId: string; engineerName: string; quantity: number }[]>();
+  for (const h of await rentalCustodyRepo.findRentalHoldingsByHireLines(rows.map((r) => r.id))) {
+    const list = holdersByLine.get(h.purchaseOrderRentalLineId);
+    const entry = { engineerId: h.engineerId, engineerName: h.engineerName, quantity: h.quantityOnHand };
+    if (list) list.push(entry);
+    else holdersByLine.set(h.purchaseOrderRentalLineId, [entry]);
+  }
   // The physical window of every row on this page, in ONE batched query — see movementDatesByHireLine
   // for why the notes are the source and the hire line's own timestamps are not. Read through the
   // rental-receipt REPOSITORY rather than its service: that module's service imports this one, and a
@@ -2416,6 +2488,35 @@ export async function listOnHire(
       shortCloseReason: r.shortCloseReason,
       returnedQuantity: r.returnedQuantity ?? 0,
       fullyReturned: r.fullyReturned ?? false,
+      // Absent is zero: the column post-dates the first hires, and a Prisma default is applied on
+      // create, never backfilled — the same reading `adjustHireIssuedQtyTx` gives a missing counter.
+      issuedQuantity: r.issuedQuantity ?? 0,
+      lostQuantity: r.lostQuantity ?? 0,
+      holders: holdersByLine.get(r.id) ?? [],
+      // The hire's cached count of OPEN damage custody exits — what must not go out again, as opposed
+      // to `damagedQuantity`, which is the provider-facing lifetime total from their damage notes.
+      damagedHeldQuantity: r.fieldDamageQty ?? 0,
+      // Same arithmetic as the scan (`hireIssuable`), gated by the same rule (`isIssuableHire`), so
+      // the number a warehouse reads here is the number the scan will honour. Zeroed rather than
+      // hidden when the hire cannot be issued from — see the field's note.
+      availableToIssue: isIssuableHire(
+        {
+          hireStatus: r.hireStatus,
+          fullyReturned: r.fullyReturned,
+          hireEndDate: r.hireEndDate,
+          orderStatus: r.purchaseOrder.status,
+          orderDeleted: !!r.purchaseOrder.deletedAt,
+        },
+        todayStart,
+      )
+        ? hireIssuable({
+            receivedQuantity: r.receivedQuantity ?? 0,
+            returnedQuantity: r.returnedQuantity ?? 0,
+            issuedQuantity: r.issuedQuantity ?? 0,
+            lostQuantity: r.lostQuantity ?? 0,
+            fieldDamageQty: r.fieldDamageQty ?? 0,
+          })
+        : 0,
       damagedQuantity: r.damagedQuantity ?? 0,
       notifyOnDate: r.notifyOnDate.toISOString(),
       window:
@@ -2437,6 +2538,9 @@ export async function listOnHire(
       // definite, so the resolved leg travels alongside it.
       receivedQuantity: r.receivedQuantity ?? 0,
       deliveryLocation: resolveDeliveryLocation(onHireCtx(r)),
+      // Which ARM of that chain fired — the warehouse pane says "this warehouse" instead of repeating
+      // its own name once per row. Derived from the same context object, so it cannot disagree.
+      deliveryAtWarehouse: deliversToWarehouse(onHireCtx(r)),
       returnLocation: resolveReturnLocation(onHireCtx(r)),
       hireStatus: r.hireStatus,
       unitPrice: pounds(r.unitPricePence),

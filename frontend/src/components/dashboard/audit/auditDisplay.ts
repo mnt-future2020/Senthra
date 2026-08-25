@@ -57,6 +57,15 @@ const VERB_TONE: Record<string, ActionTone> = {
   issued: "update",
   return_posted: "update",
   reconciled: "neutral",
+  // An attempt that COULD NOT close the job — hired kit was still out with an engineer. Its own tone
+  // because it is not a close: reading it as neutral-terminal beside the real ones would put a line in
+  // the trail saying a job finished when the whole point of the entry is that it did not.
+  reconcile_deferred: "update",
+  // Hire custody. Declaring somebody else's equipment gone is the negative one; finding it again is
+  // the recovery, and it reads positive for the same reason `damaged_restored` does — the pair has to
+  // be legible as opposites rather than both falling through to the default grey.
+  declared_lost: "delete",
+  loss_recovered: "create",
   // Booking stock as lost is a write-off, not a tidy-up: it reads negative so it never blends into the
   // neutral "reconciled" lines it used to be recorded as.
   written_off_lost: "delete",

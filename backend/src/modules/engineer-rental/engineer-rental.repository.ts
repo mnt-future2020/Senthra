@@ -133,10 +133,17 @@ export async function refreshHoldingDeadlinesForHireTx(
  * Ordered by the DEADLINE, not by when it was collected: the only urgent question about hired kit is
  * which piece has to go back first.
  */
-export function findRentalHoldingsByEngineer(engineerId: string): Promise<EngineerRentalHolding[]> {
+export type RentalHoldingWithOrder = EngineerRentalHolding & { purchaseOrderRentalLine: { purchaseOrderId: string } };
+
+export function findRentalHoldingsByEngineer(engineerId: string): Promise<RentalHoldingWithOrder[]> {
   return prisma.engineerRentalHolding.findMany({
     where: { engineerId, quantityOnHand: { gt: 0 } },
     orderBy: [{ hireEndDate: "asc" }, { updatedAt: "desc" }],
+    // The ORDER id rides along. Everything else a screen needs about the hire is already snapshotted on
+    // the row (`itemName`, `poCode`, `hireEndDate`), but the id is what a hire ACTION has to be
+    // addressed to — declaring units lost posts to the order, not to the holding — and resolving it
+    // per row afterwards would be a round trip per row on a path that already renders a whole job pack.
+    include: { purchaseOrderRentalLine: { select: { purchaseOrderId: true } } },
   });
 }
 
@@ -146,14 +153,28 @@ export function findRentalHoldingsByEngineer(engineerId: string): Promise<Engine
  * Batched for the same reason `findBalanceQuantitiesByEngineers` is: the on-hire register renders a
  * page of hires at a time, and a per-row lookup is a round trip per row on a remote cluster.
  */
-export function findRentalHoldingsByHireLines(
+export async function findRentalHoldingsByHireLines(
   purchaseOrderRentalLineIds: string[],
-): Promise<{ purchaseOrderRentalLineId: string; engineerId: string; quantityOnHand: number }[]> {
-  if (purchaseOrderRentalLineIds.length === 0) return Promise.resolve([]);
-  return prisma.engineerRentalHolding.findMany({
+): Promise<{ purchaseOrderRentalLineId: string; engineerId: string; engineerName: string; quantityOnHand: number }[]> {
+  if (purchaseOrderRentalLineIds.length === 0) return [];
+  // The engineer's NAME comes along because every screen that asks who is holding a hire has to show a
+  // person, not an id — and resolving them one at a time is the round-trip-per-row this function was
+  // batched to avoid in the first place.
+  const rows = await prisma.engineerRentalHolding.findMany({
     where: { purchaseOrderRentalLineId: { in: purchaseOrderRentalLineIds }, quantityOnHand: { gt: 0 } },
-    select: { purchaseOrderRentalLineId: true, engineerId: true, quantityOnHand: true },
+    select: {
+      purchaseOrderRentalLineId: true,
+      engineerId: true,
+      quantityOnHand: true,
+      engineer: { select: { firstName: true, lastName: true } },
+    },
   });
+  return rows.map((r) => ({
+    purchaseOrderRentalLineId: r.purchaseOrderRentalLineId,
+    engineerId: r.engineerId,
+    engineerName: `${r.engineer?.firstName ?? ""} ${r.engineer?.lastName ?? ""}`.trim() || "Unknown engineer",
+    quantityOnHand: r.quantityOnHand,
+  }));
 }
 
 /** Hired quantities held across MANY engineers, for queue/dashboard roll-ups. One query. */

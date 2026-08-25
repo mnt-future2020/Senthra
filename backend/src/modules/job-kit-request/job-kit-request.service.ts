@@ -6,7 +6,7 @@ import * as transferService from "#modules/engineer-transfer/engineer-transfer.s
 import * as irmRepo from "#modules/irm/irm.repository.js";
 import * as rentalItemRepo from "#modules/rental-item/rental-item.repository.js";
 import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
-import { hireAvailable } from "#modules/purchase-order/rentalHire.allocation.js";
+import { hireIssuable } from "#modules/purchase-order/rentalHire.allocation.js";
 import * as goodsManagementRepo from "#modules/goods-management/goods-management.repository.js";
 import * as goodsManagementService from "#modules/goods-management/goods-management.service.js";
 // From the LEAF module, not the service re-export: demand.ts imports repositories only, so pulling it
@@ -18,6 +18,8 @@ import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as transferRepo from "#modules/engineer-transfer/engineer-transfer.repository.js";
 import { notify } from "#modules/notification/notification.service.js";
 import { emitAttentionChanged, emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
+import { getCompanyTimezone } from "#modules/settings/settings.service.js";
+import { startOfDayIn } from "../../utils/filter-date.js";
 import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
 import * as kitRequestRepo from "./job-kit-request.repository.js";
 import type { CreateKitRequestData, CreateKitRequestLineData, KitRequestWithLines } from "./job-kit-request.repository.js";
@@ -1002,10 +1004,24 @@ export async function itemAvailability(
     getOpenDemand().catch(() => new Map<string, { irmItemId: string | null; rentalItemId: string | null; customerStockEntryId: string | null; warehouseId: string | null; demand: number }>()),
     irmItemIds.length ? engineerStockRepo.findBalancesByItems(irmItemIds, ownEngineerId).catch(() => []) : Promise.resolve([]),
     cseIds.length ? goodsManagementRepo.findCustomerStockEntriesByIds(cseIds).catch(() => []) : Promise.resolve([]),
-    // A hire has no stock row, so "how many can we lend" is assembled from the LIVE hires themselves.
-    // `findLiveHiresByRentalItems` composes the module's shared `onHireWhere()` predicate, so this
-    // agrees with the badge, the on-hire list and the goods scan rather than restating a weaker rule.
-    rentalItemIds.length ? poRepo.findLiveHiresByRentalItems(rentalItemIds).catch(() => []) : Promise.resolve([]),
+    // A hire has no stock row, so "how many can we issue" is assembled from the hires themselves.
+    // `findIssuableHiresByRentalItems` composes the module's shared `issuableWhere()` predicate — NOT
+    // `onHireWhere()` — so an expired hire is excluded here even though the on-hire board, the overdue
+    // badge and the return scan all still see it. This function feeds both the engineer's composer and
+    // the reviewer's approve guard, so one predicate keeps offer and approval agreeing.
+    //
+    // Deliberately NOT warehouse-scoped: the result carries `depots[]` precisely so a reviewer can
+    // choose which depot supplies the line, and the approve guard then checks the chosen one. Adding a
+    // warehouse filter here would empty that picker.
+    // Wrapped in a thunk so the settings read for the timezone joins the SAME parallel batch rather
+    // than blocking in front of it — this runs on the engineer's composer, which refetches per
+    // keystroke-settled item set.
+    rentalItemIds.length
+      ? (async () =>
+          poRepo.findIssuableHiresByRentalItems(rentalItemIds, startOfDayIn(await getCompanyTimezone(), new Date())))().catch(
+          () => [],
+        )
+      : Promise.resolve([]),
   ]);
 
   // Demand, split by pool. IRM is keyed per warehouse so one over-committed site can't eat stock
@@ -1073,8 +1089,8 @@ export async function itemAvailability(
   for (const h of hireRows) {
     const k = `${h.rentalItemId}|${h.warehouseId}`;
     const row = byItemDepot.get(k);
-    if (row) row.gross += hireAvailable(h);
-    else byItemDepot.set(k, { warehouseId: h.warehouseId, warehouseName: h.warehouseName, gross: hireAvailable(h) });
+    if (row) row.gross += hireIssuable(h);
+    else byItemDepot.set(k, { warehouseId: h.warehouseId, warehouseName: h.warehouseName, gross: hireIssuable(h) });
   }
   for (const [k, row] of byItemDepot) {
     const rentalItemId = k.slice(0, k.indexOf("|"));

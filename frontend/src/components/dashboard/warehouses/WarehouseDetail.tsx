@@ -1021,7 +1021,10 @@ function StockTab({
         </div>
       ) : active === "damaged" ? (
         <div className="min-h-0 flex-1">
-          <DamagedStockView warehouseId={warehouseId} fill />
+          {/* The hire pool is one pill away, and this pane is where somebody looks first for a broken
+              tester an engineer brought back. Pointing at it costs nothing and stops an empty owned-
+              stock pool reading as "nothing is damaged here". */}
+          <DamagedStockView warehouseId={warehouseId} fill hiredEquipmentHref={`?tab=inventory&pool=rental`} />
         </div>
       ) : active === "rental" ? (
         // Keyed on the warehouse for the same reason the receiving pane is: the rows, error and page

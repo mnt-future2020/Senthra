@@ -3,7 +3,6 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { UPLOAD_BODY_PATHS } from "../app.js";
 
 // The global JSON body ceiling is 5mb, and base64 inflates a file by 4/3 — so the largest FILE that
 // fits a default request is ~3.7 MB. Any endpoint promising more than that needs its path in
@@ -49,10 +48,10 @@ const GLOBAL_FILE_CEILING = fileCeiling(GLOBAL_LIMIT_BYTES); // ~3.7 MB
  */
 const UPLOAD_SCHEMAS: { schema: string; route: string; advertised: number }[] = [
   // --- documents: file size capped directly ---
-  { schema: "uploadAttachmentSchema", route: "/jobs/attachment", advertised: 10 * 1024 * 1024 },
-  { schema: "poAttachmentSchema", route: "/purchase-orders/64b7f9c2e1a4d5f6a7b8c9d0/attachments", advertised: 10 * 1024 * 1024 },
+  // engineer-transfer has an `uploadAttachmentSchema` of its own. The JOB one of the same name went
+  // with its route; this one is live and is what the scan now finds.
+  { schema: "uploadAttachmentSchema", route: "/engineer-transfers/attachments", advertised: fileCeiling(2 * 1024 * 1024) },
   // --- images: the DATA URI's character count is capped, so the file is 3/4 of it ---
-  { schema: "uploadDamagePhotoSchema", route: "/goods-management/damage-photo", advertised: fileCeiling(15_000_000) },
   { schema: "uploadBrandingSchema", route: "/settings/branding", advertised: fileCeiling(3 * 1024 * 1024) },
   { schema: "uploadSignatureSchema", route: "/users/me/signature", advertised: fileCeiling(3 * 1024 * 1024) },
   { schema: "uploadImageSchema", route: "/van-stock-requests/attachments", advertised: fileCeiling(3 * 1024 * 1024) },
@@ -65,13 +64,6 @@ const UPLOAD_SCHEMAS: { schema: string; route: string; advertised: number }[] = 
   { schema: "updateMyProfileSchema", route: "/users/me", advertised: fileCeiling(3 * 1024 * 1024) },
 ];
 
-// `uploadAttachmentSchema` is declared in two modules (job, engineer-transfer) and they are separate
-// contracts under one name. The job one is the only one above the global ceiling; the other caps the
-// data URI at 3 MB and is covered by the entry above via the same name.
-//
-// job-kit-request declared a third until its evidence-photo feature was removed whole — the engineer
-// picks the item itself, so a photo said nothing the request did not already carry.
-const DUPLICATE_SCHEMA_NAMES = new Set(["uploadAttachmentSchema"]);
 
 const validationFiles = walk(SRC)
   .filter((p) => p.endsWith(".validation.ts"))
@@ -121,51 +113,27 @@ describe("upload body limits", () => {
 
   it("finds the schemas it is meant to be checking (the scan itself works)", () => {
     const discovered = discoverDataUriSchemas();
-    expect(discovered.length).toBeGreaterThanOrEqual(10);
-    expect(discovered).toContain("uploadDamagePhotoSchema");
-    expect(discovered).toContain("poAttachmentSchema");
+    // Was 10 before the three base64 upload routes were removed with their schemas.
+    expect(discovered.length).toBeGreaterThanOrEqual(8);
+    expect(discovered).toContain("uploadImageSchema");
+    expect(discovered).toContain("uploadSignatureSchema");
   });
 
-  const widened = UPLOAD_SCHEMAS.filter((u) => u.advertised > GLOBAL_FILE_CEILING);
-  const notWidened = UPLOAD_SCHEMAS.filter((u) => u.advertised <= GLOBAL_FILE_CEILING);
-
-  it.each(widened)("$route advertises more than the global ceiling, so it is widened", ({ route, advertised }) => {
-    expect(advertised, "advertised limit no longer exceeds the global ceiling").toBeGreaterThan(GLOBAL_FILE_CEILING);
-    expect(UPLOAD_BODY_PATHS.test(route), `${route} is missing from UPLOAD_BODY_PATHS`).toBe(true);
-  });
-
-  // The other half of the rule: the widened ceiling must not leak onto routes that do not need it. The
-  // global limit is also the limit on /auth/login, and a 15 MB body there is free work for an attacker.
-  it.each(notWidened)("$route fits the global ceiling and stays on the default parser", ({ route, advertised }) => {
+  /**
+   * NOTHING NEEDS A WIDENED BODY ANY MORE — and this is the test that says so out loud.
+   *
+   * Three routes once took a file as base64 inside a JSON body, and each needed its own 15 MB parser
+   * mounted ahead of the global one. All three are gone: the bytes now go browser → Cloudinary under a
+   * signature and this server only ever sees a URL. So `UPLOAD_BODY_PATHS` and the parser it drove
+   * were removed with them, and the global ceiling is the only ceiling — which matters because that
+   * ceiling is also /auth/login's, and a 15 MB body there is free work for an attacker.
+   *
+   * The guard did not disappear, it inverted. It used to check that a big schema HAD a widened path;
+   * it now checks that no schema is big enough to need one. Add a base64 upload above the ceiling and
+   * this fails, which is the moment to bring the route-level parser back rather than after somebody
+   * reports "request entity too large" from a route whose schema promised otherwise.
+   */
+  it.each(UPLOAD_SCHEMAS)("$route fits the global ceiling, so no route-level parser is needed", ({ advertised }) => {
     expect(advertised).toBeLessThanOrEqual(GLOBAL_FILE_CEILING);
-    expect(UPLOAD_BODY_PATHS.test(route), `${route} does not need widening`).toBe(false);
-  });
-
-  it("widens with enough headroom for the largest advertised file once base64-encoded", () => {
-    const widenedLimit = 15 * 1024 * 1024;
-    const largest = Math.max(...widened.map((u) => u.advertised));
-    expect(fileCeiling(widenedLimit)).toBeGreaterThanOrEqual(largest);
-  });
-
-  it.each([
-    "/auth/login",
-    "/jobs",
-    "/jobs/64b7f9c2e1a4d5f6a7b8c9d0",
-    "/purchase-orders",
-    "/goods-management",
-    "/goods-management/report-damage",
-    "/customers",
-  ])("%s keeps the 5mb ceiling", (route) => {
-    expect(UPLOAD_BODY_PATHS.test(route)).toBe(false);
-  });
-
-  // Deleting an attachment carries no body at all; only the POST needs widening.
-  it("does not widen an attachment DELETE sub-path", () => {
-    expect(UPLOAD_BODY_PATHS.test("/purchase-orders/64b7f9c2e1a4d5f6a7b8c9d0/attachments/att1")).toBe(false);
-  });
-
-  it("documents which schema names are shared across modules", () => {
-    // Kept as an explicit note: a shared name means the table's entry speaks for the STRICTEST of them.
-    expect(DUPLICATE_SCHEMA_NAMES.has("uploadAttachmentSchema")).toBe(true);
   });
 });

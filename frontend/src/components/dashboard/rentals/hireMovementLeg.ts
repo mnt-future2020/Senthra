@@ -47,6 +47,17 @@ export const LEG: Record<ReceiptDirection, Leg> = {
     tone: "bg-[var(--warn,#d97706)]/14 text-[var(--warn,#d97706)]",
     reversalNote: "No equipment moved, so none is given back — it withdraws the claim and the damaged count it added.",
   },
+  // Settling what the provider charges for equipment that never came back.
+  //
+  // Without its own entry this fell through to UNKNOWN_LEG and rendered as "Movement", described in the
+  // delivery's vocabulary — "1 of 100 (100 before this)" — which says a quantity moved. None did: the
+  // units left when the loss was DECLARED, and this document is only the money that followed.
+  loss: {
+    label: "Loss settlement",
+    quantityLabel: "declared lost",
+    tone: "bg-[var(--neg)]/12 text-[var(--neg)]",
+    reversalNote: "The units stay lost — only the charge is withdrawn. Equipment comes back by being found, never by a credit note.",
+  },
 };
 
 /** The leg a direction names, or the honest neutral row for one this build does not understand. */

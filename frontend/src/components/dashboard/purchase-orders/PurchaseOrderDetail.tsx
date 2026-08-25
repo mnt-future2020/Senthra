@@ -6,7 +6,8 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { AlertTriangle, CalendarClock, CheckCircle2, ChevronRight, ClipboardCheck, Download, FileText, Loader2, Package, PackageCheck, PackageX, Paperclip, Pencil, ScrollText, Send, Trash2, Upload, UserRound, XCircle } from "lucide-react";
 
 import { hireWindowState } from "@/components/dashboard/rentals/hireWindow";
-import { canMoveHires, damageableNow, hireKeepsOrderOpen, hireRefusesDeliveryReversal, hireTakesDelivery, netOrdered } from "@/components/dashboard/rentals/hireActions";
+import { canMoveHires, damageableNow, hireKeepsOrderOpen, hireTakesDelivery, netOrdered } from "@/components/dashboard/rentals/hireActions";
+import type { HireReversalFacts } from "@/components/dashboard/rentals/hireActions";
 import { HireDeadline, HireStatusBadge } from "@/components/dashboard/rentals/rentalHireStatus";
 import * as poService from "@/services/purchase-order.service";
 import * as auditService from "@/services/audit.service";
@@ -33,6 +34,7 @@ import { returnLegSummary } from "@/lib/rentalReturn";
 import { hireDeliveryWarning } from "@/lib/hireDelivery";
 import { Notice } from "@/components/ui/Notice";
 import { HireDeliveries, HireDeliveriesHeading } from "./HireDeliveries";
+import { HireCustodyTimeline } from "./HireCustodyTimeline";
 
 const EXT_TYPE: Record<string, string> = { pdf: "pdf", docx: "docx", png: "png", jpg: "jpg", jpeg: "jpg" };
 
@@ -784,11 +786,27 @@ function Overview({
   // The heading rendered a hardcoded 0, and its own `count > 0` test meant the number never
   // appeared at all.
   const [movementCount, setMovementCount] = React.useState(0);
-  // Which hires will no longer take a DELIVERY reversal — the one thing the movements panel needs the
+  // What each hire has HELD BACK from its deliveries — the one thing the movements panel needs the
   // order's own lines for. It knows only the ORDER's status, which says nothing about any individual
-  // hire, and the server refuses this on two counts (see hireRefusesDeliveryReversal).
-  const deliveryLockedHireLineIds = React.useMemo(
-    () => new Set(po.rentalItems.filter(hireRefusesDeliveryReversal).map((r) => r.id)),
+  // hire, and whether a delivery can still be unwound depends on what has happened to its units since
+  // (see deliveryReversalBlocker). A set of ids cannot carry that: the answer depends on how many
+  // units the NOTE delivered, so the facts travel and the panel does the arithmetic per note.
+  const hireReversalFacts = React.useMemo(
+    () =>
+      new Map<string, HireReversalFacts>(
+        po.rentalItems.map((r) => [
+          r.id,
+          {
+            hireStatus: r.hireStatus,
+            shortClosedAt: r.shortClosedAt,
+            receivedQuantity: r.receivedQuantity,
+            returnedQuantity: r.returnedQuantity,
+            issuedQuantity: r.issuedQuantity,
+            lostQuantity: r.lostQuantity,
+            damagedHeldQuantity: r.damagedHeldQuantity,
+          },
+        ]),
+      ),
     [po.rentalItems],
   );
   // What each hire will ever hold, LIVE. The notes below store an `orderedQuantity` snapshot from the
@@ -890,6 +908,22 @@ function Overview({
                       )}
                       {r.shortCloseReason && (
                         <div className="mt-0.5 max-w-[12rem] text-[11px] text-[var(--faint)]">{r.shortCloseReason}</div>
+                      )}
+                      {/* What happened to the units while we had them. Same reasoning as the cancelled
+                          line above, and the same reader: this page is the one reached from the
+                          supplier's invoice, and it read "100 · on hire · £300" while one unit was
+                          gone and another was broken. Neither is deducible from any other number here.
+                          The timeline below names who, when and why; this says there is something to
+                          look for. */}
+                      {(r.lostQuantity > 0 || r.damagedHeldQuantity > 0) && (
+                        <div className="mt-0.5 text-[11px] font-semibold text-[var(--neg)]">
+                          {[
+                            r.lostQuantity > 0 ? `${r.lostQuantity} lost` : null,
+                            r.damagedHeldQuantity > 0 ? `${r.damagedHeldQuantity} damaged here` : null,
+                          ]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </div>
                       )}
                     </td>
                     <td className="cell-y px-4 text-[var(--muted)]">
@@ -1005,7 +1039,12 @@ function Overview({
                 and neither adds anything to stock.
               </p>
             </div>
-            <HireDeliveries purchaseOrderId={po.id} poStatus={po.status} deliveryLockedHireLineIds={deliveryLockedHireLineIds} netOrderedByHireLine={netOrderedByHireLine} onChanged={() => onOrderChanged?.()} onCount={setMovementCount} />
+            <HireDeliveries purchaseOrderId={po.id} poStatus={po.status} hireReversalFacts={hireReversalFacts} netOrderedByHireLine={netOrderedByHireLine} onChanged={() => onOrderChanged?.()} onCount={setMovementCount} />
+            {/* Beside the notes, not inside them. A note is a document exchanged with the provider; this
+                is a record of what happened to their equipment — settled by different acts, reversed by
+                different ones, and merging them would put "1 declared lost" in a list whose Reverse
+                button means something else. Renders nothing when there is nothing to say. */}
+            <HireCustodyTimeline purchaseOrderId={po.id} onChanged={() => onOrderChanged?.()} />
           </div>
         </div>
       )}

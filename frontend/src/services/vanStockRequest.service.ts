@@ -249,10 +249,6 @@ export function getVanStockAvailability(irmItemIds: string[]): Promise<Warehouse
   return api<{ warehouses: WarehouseAvailability[] }>(`/van-stock-requests/availability?irmItemIds=${encodeURIComponent(irmItemIds.join(","))}`).then((r) => r.warehouses);
 }
 
-export function uploadVanStockAttachment(image: string): Promise<string> {
-  // Cloudinary relay — see LONG_WRITE_TIMEOUT.
-  return api<{ url: string }>("/van-stock-requests/attachments", { method: "POST", body: { image }, timeout: LONG_WRITE_TIMEOUT }).then((r) => r.url);
-}
 
 export function cancelVanStockRequest(id: string): Promise<VanStockRequest> {
   return api<{ request: VanStockRequest }>(`/van-stock-requests/${id}/cancel`, { method: "POST" }).then((r) => r.request);
@@ -311,7 +307,3 @@ export function createVanStockWalkIn(payload: { engineerId: string; warehouseId:
   return api<{ request: VanStockRequest }>("/van-stock-requests/walk-in", { method: "POST", body: payload }).then((r) => r.request);
 }
 
-export function uploadVanStockDamagePhoto(image: string): Promise<string> {
-  // Cloudinary relay — see LONG_WRITE_TIMEOUT. Photographed in the field, on a field connection.
-  return api<{ url: string }>("/van-stock-requests/damage-photo", { method: "POST", body: { image }, timeout: LONG_WRITE_TIMEOUT }).then((r) => r.url);
-}

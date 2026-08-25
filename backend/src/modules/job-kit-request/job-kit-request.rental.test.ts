@@ -14,7 +14,7 @@ vi.mock("#modules/job/job.service.js", () => ({ appendKitFromRequest: vi.fn() })
 vi.mock("#modules/engineer-transfer/engineer-transfer.service.js", () => ({ createJobTransfer: vi.fn(), assertTransferEngineers: vi.fn() }));
 vi.mock("#modules/irm/irm.repository.js", () => ({ findById: vi.fn(), findMany: vi.fn(async () => []) }));
 vi.mock("#modules/rental-item/rental-item.repository.js", () => ({ findById: vi.fn(), findMany: vi.fn(async () => ({ items: [], total: 0 })) }));
-vi.mock("#modules/purchase-order/purchase-order.repository.js", () => ({ findLiveHiresByRentalItems: vi.fn(async () => []) }));
+vi.mock("#modules/purchase-order/purchase-order.repository.js", () => ({ findLiveHiresByRentalItems: vi.fn(async () => []), findIssuableHiresByRentalItems: vi.fn(async () => []) }));
 vi.mock("#modules/goods-management/goods-management.repository.js", () => ({
   findCustomerHoldingsByEngineer: vi.fn(async () => []), findCustomerStockEntriesByIds: vi.fn(async () => []),
   findCustomerEntryWarehousesByIds: vi.fn(async () => new Map()), findCustomerStockEntryById: vi.fn(), searchActiveCustomerStock: vi.fn(async () => []),
@@ -25,7 +25,7 @@ vi.mock("#modules/engineer-stock/engineer-stock.repository.js", () => ({ findEng
 vi.mock("#modules/inventory/inventory.repository.js", () => ({ findAllBalances: vi.fn(async () => []), findBalancesByItemsAndWarehouses: vi.fn(async () => []) }));
 vi.mock("#modules/warehouse/warehouse.repository.js", () => ({ findMany: vi.fn(async () => []), findLabelsByIds: vi.fn(async () => new Map([["w1".padEnd(24, "0"), { name: "Leeds", code: "LDS" }]])) }));
 vi.mock("#modules/engineer-transfer/engineer-transfer.repository.js", () => ({ findHoldersForIrm: vi.fn(async () => []), findHoldersForCustomer: vi.fn(async () => []), findSourcesByIds: vi.fn(async () => []) }));
-vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn() }));
+vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn(), getCompanyTimezone: vi.fn(async () => "Europe/London") }));
 vi.mock("#modules/notification/notification.service.js", () => ({ notify: vi.fn() }));
 vi.mock("../../lib/cloudinary.js", () => ({ uploadToCloudinary: vi.fn() }));
 vi.mock("../../lib/realtime.js", () => ({ emitAttentionChanged: vi.fn(), emitToUser: vi.fn(), emitToRoom: vi.fn(), OFFICE_JOBS_ROOM: "office:jobs" }));
@@ -86,7 +86,7 @@ beforeEach(() => {
   vi.mocked(jobService.appendKitFromRequest).mockResolvedValue({ job: {}, jobKitLineIds: ["k1"] } as never);
   vi.mocked(rentalItemRepo.findById).mockResolvedValue(RENTAL_ITEM as never);
   vi.mocked(kitRequestRepo.createKitRequest).mockResolvedValue(request() as never);
-  vi.mocked(poRepo.findLiveHiresByRentalItems).mockResolvedValue([hire()] as never);
+  vi.mocked(poRepo.findIssuableHiresByRentalItems).mockResolvedValue([hire()] as never);
 });
 
 describe("create — requesting hired kit", () => {
@@ -158,7 +158,7 @@ describe("approve — a rental is warehouse-only", () => {
 
   it("counts units already out with an engineer against the depot", async () => {
     // received 3, one already in a van ⇒ 2 collectable, so approving 3 must fail.
-    vi.mocked(poRepo.findLiveHiresByRentalItems).mockResolvedValue([hire({ issuedQuantity: 1 })] as never);
+    vi.mocked(poRepo.findIssuableHiresByRentalItems).mockResolvedValue([hire({ issuedQuantity: 1 })] as never);
     vi.mocked(kitRequestRepo.findById).mockResolvedValue(request({ lines: [{ ...request().lines[0], qty: 3 }] }) as never);
     await expect(
       approve(REQ_ID, { lineSources: [{ requestLineId: L_RENTAL, sourceType: "warehouse", warehouseId: WH }] } as never, actor),
@@ -194,7 +194,7 @@ describe("getOne — an approved rental line names its depot", () => {
 describe("searchItems — hired kit in the composer", () => {
   it("offers rental items with their free-on-hire total and depots", async () => {
     vi.mocked(rentalItemRepo.findMany).mockResolvedValue({ items: [RENTAL_ITEM], total: 1 } as never);
-    vi.mocked(poRepo.findLiveHiresByRentalItems).mockResolvedValue([hire(), hire({ id: "h2", warehouseId: OTHER_WH, warehouseName: "York", receivedQuantity: 1 })] as never);
+    vi.mocked(poRepo.findIssuableHiresByRentalItems).mockResolvedValue([hire(), hire({ id: "h2", warehouseId: OTHER_WH, warehouseName: "York", receivedQuantity: 1 })] as never);
 
     const out = await searchItems("fibre", JOB_ID);
     const rental = out.find((o) => o.source === "rental");
@@ -208,7 +208,7 @@ describe("searchItems — hired kit in the composer", () => {
 
   it("still returns an item with nothing on hire, so the composer can say why", async () => {
     vi.mocked(rentalItemRepo.findMany).mockResolvedValue({ items: [RENTAL_ITEM], total: 1 } as never);
-    vi.mocked(poRepo.findLiveHiresByRentalItems).mockResolvedValue([] as never);
+    vi.mocked(poRepo.findIssuableHiresByRentalItems).mockResolvedValue([] as never);
     const out = await searchItems("fibre", JOB_ID);
     // Hidden, it would just get retyped. Returned with zeroes, the row can be disabled and explained.
     expect(out.find((o) => o.source === "rental")).toMatchObject({ quantityOnHand: 0, depots: [] });

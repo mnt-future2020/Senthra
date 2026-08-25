@@ -79,7 +79,20 @@ async function applyHireWrite(tx: Prisma.TransactionClient, u: HireLineWrite): P
 export function hireLinesForOrderTx(tx: Prisma.TransactionClient, purchaseOrderId: string) {
   return tx.purchaseOrderRentalLine.findMany({
     where: { purchaseOrderId },
-    select: { id: true, itemName: true, quantity: true, receivedQuantity: true, hireStatus: true, shortClosedAt: true },
+    // The custody counters come too: a delivery reversal has to know what has since HAPPENED to the
+    // units it delivered, and every one of those facts lives on this row (see hireUntouched).
+    select: {
+      id: true,
+      itemName: true,
+      quantity: true,
+      receivedQuantity: true,
+      returnedQuantity: true,
+      issuedQuantity: true,
+      lostQuantity: true,
+      fieldDamageQty: true,
+      hireStatus: true,
+      shortClosedAt: true,
+    },
   });
 }
 
@@ -115,6 +128,63 @@ export async function damagedTotalsByLine(
 
 /** A reversed note moved nothing — every total, list and count reads live rows only. */
 const LIVE = { OR: [{ reversedAt: null }, { reversedAt: { isSet: false } }] } satisfies Prisma.RentalReceiptWhereInput;
+
+/** A file on a note, as the shared attachment list needs it. */
+export interface NoteFile {
+  id: string;
+  url: string;
+  fileName: string;
+  fileType: string;
+  fileSizeBytes: number;
+}
+
+/**
+ * The CODE, the money and the EVIDENCE on a set of notes, in one query.
+ *
+ * For the custody records that name a note — as the document that settled them, or as the document
+ * they were raised from. A row wants to read "£90 · HLS-0002" without a round trip per row, and the
+ * record's detail wants the photographs, which for a warehouse-raised report live on the note as
+ * attachments rather than on the record itself.
+ *
+ * That last part is not a nicety. A damage report filed at the warehouse carries its pictures here and
+ * nowhere else; without this the only screen showing them was the movements list, and a fault's
+ * evidence must not depend on which panel a note happens to be listed in.
+ */
+export async function findSettlementSummaries(
+  ids: string[],
+): Promise<Map<string, { code: string; chargePence: number | null; attachments: NoteFile[] }>> {
+  if (ids.length === 0) return new Map();
+  const rows = await prisma.rentalReceipt.findMany({
+    where: { id: { in: ids } },
+    select: {
+      id: true,
+      code: true,
+      lines: { select: { damageChargePence: true } },
+      // The whole file, not just its address: the panes that show these render a THUMBNAIL and open it
+      // — a photograph is the thing somebody needs to look at, and a filename is not one — and the
+      // shared attachment list needs the type and size to do that.
+      attachments: {
+        select: { id: true, url: true, fileName: true, fileType: true, fileSizeBytes: true },
+        orderBy: { createdAt: "asc" },
+      },
+    },
+  });
+  return new Map(
+    rows.map((r) => {
+      // Null when NOTHING has been quoted on any line — which is a different fact from a zero charge
+      // and has to survive as one. `0` only where somebody actually agreed nothing is owed.
+      const quoted = r.lines.filter((l) => l.damageChargePence != null);
+      return [
+        r.id,
+        {
+          code: r.code,
+          chargePence: quoted.length === 0 ? null : quoted.reduce((n, l) => n + (l.damageChargePence ?? 0), 0),
+          attachments: r.attachments,
+        },
+      ];
+    }),
+  );
+}
 
 export function findById(id: string): Promise<RentalReceiptWithRelations | null> {
   return prisma.rentalReceipt.findUnique({ where: { id }, include: withRelations });
@@ -392,6 +462,13 @@ export async function createWithCode(
    * never disagree with the records it summarises — the reason these are stored at all.
    */
   hireUpdates: HireLineWrite[],
+  /**
+   * Anything else that must land with the note, given its id — today the damage custody exits, which
+   * are keyed on the document that justifies them and so cannot be built before it exists. A callback
+   * rather than a direct call because the write belongs to another module's repository, and
+   * repositories do not reach across domains. Same seam `extendRentalLine` already uses.
+   */
+  alsoInTx?: (tx: Prisma.TransactionClient, receiptId: string) => Promise<void>,
 ): Promise<RentalReceiptWithRelations> {
   for (let attempt = 0; attempt < 5; attempt++) {
     const seq = await nextSequence(header.direction);
@@ -405,6 +482,7 @@ export async function createWithCode(
         for (const u of hireUpdates) {
           await applyHireWrite(tx, u);
         }
+        if (alsoInTx) await alsoInTx(tx, receipt.id);
         const full = await tx.rentalReceipt.findUnique({ where: { id: receipt.id }, include: withRelations });
         if (!full) throw new Error("Rental receipt vanished inside its own transaction.");
         return full;
@@ -442,6 +520,15 @@ export async function reverseReceipt(
    * same transaction" literally true.
    */
   buildHireUpdates: (tx: Prisma.TransactionClient) => Promise<HireLineWrite[]>,
+  /**
+   * Work that must see the hire counters AFTER this reversal has moved them.
+   *
+   * `buildHireUpdates` runs before the writes by design — it derives absolute totals from the notes
+   * that still stand — so anything reading the LINE from in there would read the figures this
+   * reversal is about to replace. Today that is the damage-custody reconciliation, which partitions
+   * records by how much shelf is left and would otherwise partition against the old shelf.
+   */
+  afterHireWrites?: (tx: Prisma.TransactionClient) => Promise<void>,
 ): Promise<RentalReceiptWithRelations> {
   return withTransaction(async (tx) => {
     // BEFORE the reversal is stamped, deliberately: the totals read counts LIVE notes only, and this
@@ -452,6 +539,7 @@ export async function reverseReceipt(
     for (const u of hireUpdates) {
       await applyHireWrite(tx, u);
     }
+    if (afterHireWrites) await afterHireWrites(tx);
     const full = await tx.rentalReceipt.findUnique({ where: { id }, include: withRelations });
     if (!full) throw new Error("Rental receipt vanished inside its own transaction.");
     return full;

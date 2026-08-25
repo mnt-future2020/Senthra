@@ -1,5 +1,7 @@
 import type { Prisma } from "@prisma/client";
 
+import { OPEN_EXIT_WHERE } from "./hireCustodyExit.repository.js";
+
 import { addDays } from "../../utils/calendar-day.js";
 
 // ── The hire predicate — ONE definition, three readers ─────────────────────────────────────────
@@ -167,9 +169,126 @@ export function overdueWhere(todayStart: Date): Prisma.PurchaseOrderRentalLineWh
   return { ...LIVE_ORDER, ...STILL_OUT, hireEndDate: { lt: todayStart } };
 }
 
+/**
+ * Hires carrying damage or loss the office has not finished with — the settle worklist, and what the
+ * `rentals.custody_to_settle` badge opens.
+ *
+ * Asked of the EXIT ROWS through the relation, using the SAME `OPEN_EXIT_WHERE` the badge counts, so
+ * the two cannot disagree. They did: this filtered `fieldDamageQty`/`lostQuantity` — cached counters
+ * that answer "what is damaged and still HERE" and "what is gone" — while the badge asked about
+ * SETTLEMENT. Damage collected but never priced was counted and listed nowhere, leaving a badge with
+ * no rows behind it; a warehouse report born settled was listed forever and counted by nothing.
+ *
+ * The counters are still right for what they are for (availability, the order line's own badges).
+ * They simply cannot express this question, because "unsettled" is a fact about a row and not a
+ * quantity on the line — which is also why a recovered-and-charged loss, whose counters read zero,
+ * was reachable from no screen at all until this arm existed.
+ */
+export function unsettledCustodyWhere(): Prisma.PurchaseOrderRentalLineWhereInput {
+  return { ...LIVE_ORDER, custodyExits: { some: OPEN_EXIT_WHERE } };
+}
+
 /** Every live hire, whatever its window — the on-hire list's unfiltered view. */
 export function onHireWhere(): Prisma.PurchaseOrderRentalLineWhereInput {
   return { ...LIVE_ORDER, ...STILL_OUT };
+}
+
+/**
+ * The order states in which kit can legitimately be IN OUR HANDS — the paperwork half of
+ * "available to issue".
+ *
+ * Deliberately WIDER than ISSUED_ORDER by exactly one status, `fully_received`, and that difference
+ * is load-bearing: a fully-received order is the ordinary resting state of a hire that is sitting on
+ * the shelf waiting to go out, so narrowing this to the RECEIVING window would make every completely
+ * delivered hire un-issuable — the common case, broken. This is the same set, and the same reasoning,
+ * as `HOLDING_PO_STATUSES` in rental-receipt.service (where a return is allowed from), retyped here
+ * rather than imported because purchase-order.repository imports THIS module and the reverse import
+ * would close a cycle — the same trade-off ISSUED_ORDER above already makes.
+ *
+ * `closed` is absent because closing is refused while any hire is still out (see
+ * `closePurchaseOrder`), so a closed order has nothing left to lend. `draft` and the approval states
+ * are absent because the supplier was never sent the order: kit cannot have arrived against it, and
+ * the receive path refuses them outright. Excluding them here is DEFENCE IN DEPTH against rows that
+ * predate that guard — it stops such a row being offered, and repairs nothing. See the note on
+ * `issuableWhere`.
+ */
+export const HOLDING_ORDER_STATUSES = ["sent", "supplier_accepted", "partially_received", "fully_received"] as const;
+
+const HOLDING_ORDER = {
+  purchaseOrder: {
+    is: {
+      ...LIVE_ORDER.purchaseOrder.is,
+      status: { in: [...HOLDING_ORDER_STATUSES] },
+    },
+  },
+} satisfies Prisma.PurchaseOrderRentalLineWhereInput;
+
+/**
+ * A hire we may issue to a NEW job — "available to issue", which is NOT the same question as
+ * "on hire".
+ *
+ * Its own predicate rather than a flavour of `onHireWhere`, and the separation is the whole point.
+ * `onHireWhere` answers "what are we still holding": the on-hire board, the overdue badge, the
+ * reminder sweep and the return-chasing views all count from it, and every one of them MUST keep
+ * counting an expired hire — that is precisely the row somebody has to chase. Narrowing that
+ * predicate to hide expired hires would make the overdue badge uncountable and unclearable, which is
+ * the failure mode the module's own header warns about.
+ *
+ * What this adds on top of "still out" is the two things that gate LENDING:
+ *
+ *   1. `hireEndDate >= todayStart` — the hire period is still running. Sending kit out on a hire that
+ *      was due back last week commits us to a breach we have already been billed for, and the unit
+ *      the provider is waiting to collect walks out of the building instead. Compared with `gte` and
+ *      not `gt` so a hire ending TODAY is still issuable: a hire is valid THROUGH its end date, which
+ *      is exactly the boundary `overdueWhere` draws from the other side (`lt: todayStart`). The two
+ *      are complements by construction, so no hire can ever be both expired and not-yet-overdue.
+ *   2. `HOLDING_ORDER` — the order is one the kit could actually have arrived against.
+ *
+ * `todayStart` is the start of today IN THE COMPANY TIMEZONE, resolved by the caller through
+ * `startOfDayIn(...)` — never from a client clock, and resolved ONCE per request so that every line
+ * of a multi-line scan is judged against one date even if the request straddles midnight.
+ *
+ * Read-side use of this is not sufficient on its own: a stale tab holds an availability answer from
+ * before the deadline passed. The write path re-asserts the same window inside its conditional update
+ * (`adjustHireIssuedQtyTx`), so the two agree and neither can be talked past.
+ */
+export function issuableWhere(todayStart: Date): Prisma.PurchaseOrderRentalLineWhereInput {
+  return { ...HOLDING_ORDER, ...STILL_OUT, hireEndDate: { gte: todayStart } };
+}
+
+/**
+ * The same question asked of a ROW already in hand: may we issue off this hire today?
+ *
+ * `issuableWhere` selects rows in the database; this decides about one we have already loaded. Both
+ * exist because the two callers genuinely differ — the scan and the availability readers QUERY, while
+ * the warehouse's on-hire pane loads every live hire (expired and unsent ones included, because it is
+ * a chasing view) and then has to label each row. A list that could only be filtered would have to
+ * drop the very rows it exists to show.
+ *
+ * They are held together by `rentalHire.predicate.test.ts`, which runs one set of cases through both
+ * and asserts they agree. That test is the point of writing this here rather than inline in a mapper:
+ * a screen that decided "issuable" for itself is exactly how a pane comes to promise stock the scan
+ * then refuses, which is the bug this pair was written to end.
+ *
+ * Every clause of `issuableWhere` is re-asserted, none assumed. The on-hire list can be filtered to
+ * `returned` or `cancelled` hires, so "the query already guaranteed it" is untrue of this caller.
+ */
+export function isIssuableHire(
+  line: {
+    hireStatus: string;
+    fullyReturned: boolean | null;
+    hireEndDate: Date;
+    orderStatus: string | null;
+    orderDeleted: boolean;
+  },
+  todayStart: Date,
+): boolean {
+  if (line.hireStatus !== "on_hire" || line.fullyReturned) return false;
+  if (line.orderDeleted) return false;
+  if (!line.orderStatus || !(HOLDING_ORDER_STATUSES as readonly string[]).includes(line.orderStatus)) return false;
+  // `gte`: a hire is valid THROUGH its end date — the same boundary, from the same side, as the
+  // predicate's `hireEndDate: { gte: todayStart }`.
+  return line.hireEndDate.getTime() >= todayStart.getTime();
 }
 
 /**

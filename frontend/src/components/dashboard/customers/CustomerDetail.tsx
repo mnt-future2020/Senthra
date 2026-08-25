@@ -834,6 +834,7 @@ function StockEntriesTab({
   router: ReturnType<typeof useRouter>;
 }) {
   const { can } = useAuth();
+  const { pushToast } = useDashboard();
   // goods_management.view gates the damaged-stock section — this is the same permission
   // that controls the broader Goods Management feature access (warehouse damaged tab,
   // overdue view, etc.), so it is the correct gate here. The warehouse pill on stock
@@ -891,6 +892,27 @@ function StockEntriesTab({
   }, [customer.id, stockFilter]);
 
   React.useEffect(() => { load(); }, [load]);
+
+  /**
+   * Remove a stock entry that never held anything, or no longer does.
+   *
+   * `customer_stock.delete` has existed end to end since the module was written — route, permission,
+   * dependency checks, audit — and the two sibling sections in this same file both offer it. Only the
+   * stock table never grew the button, so a role could hold the key with nothing to use it on.
+   *
+   * The server decides. It refuses an entry still holding units, and refuses one anything else points
+   * at, with a sentence naming which — so a failure here is worth showing verbatim rather than
+   * flattening into "Delete failed".
+   */
+  const removeEntry = async (entry: CustomerStockEntry) => {
+    try {
+      await customerService.deleteStockEntry(entry.id);
+      pushToast(`"${entry.itemName}" removed.`, "success");
+      load();
+    } catch (e) {
+      pushToast(e instanceof Error ? e.message : "Could not remove that entry.", "alert");
+    }
+  };
 
   // Memoised derived values — client-side slice for the current page + totals.
   // Wrapping in useMemo prevents React Compiler from bailing on
@@ -1083,6 +1105,22 @@ function StockEntriesTab({
                                   >
                                     <Eye className="h-4 w-4" />
                                   </button>
+                                  {/* `stopPropagation` because the ROW navigates: without it, opening
+                                      the confirm also pushed the detail page underneath it, and the
+                                      dialog was answered on a screen the user had not asked for. */}
+                                  {stockCaps.delete && (
+                                    <span onClick={(ev) => ev.stopPropagation()}>
+                                      <DeleteConfirmButton
+                                        label={e.itemName}
+                                        onConfirm={() => removeEntry(e)}
+                                        disabledReason={
+                                          e.quantity > 0
+                                            ? `${e.quantity} unit${e.quantity === 1 ? "" : "s"} still in stock — move or dispatch the stock before deleting the entry.`
+                                            : undefined
+                                        }
+                                      />
+                                    </span>
+                                  )}
                                 </div>
                               </td>
                             </tr>
@@ -2027,9 +2065,20 @@ function AssignmentStatusBadge({ status }: { status: string }) {
 function DeleteConfirmButton({
   label,
   onConfirm,
+  /**
+   * Why this cannot be deleted right now — rendered as the button's tooltip, and its presence is what
+   * disables it.
+   *
+   * The alternative was to hide the button on the rows that would be refused. In a table that makes
+   * the control column flicker between rows and leaves the reader to work out the rule from which
+   * rows have a trash icon; disabled with the reason on it states the rule instead. The server checks
+   * it again either way — this only stops the click that could only ever fail.
+   */
+  disabledReason,
 }: {
   label: string;
   onConfirm: () => Promise<void>;
+  disabledReason?: string;
 }) {
   const [open, setOpen] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
@@ -2048,7 +2097,9 @@ function DeleteConfirmButton({
         type="button"
         onClick={() => setOpen(true)}
         aria-label="Remove"
-        className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--faint)] transition-colors hover:bg-[var(--neg)]/10 hover:text-[var(--neg)]"
+        disabled={Boolean(disabledReason)}
+        title={disabledReason}
+        className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--faint)] transition-colors hover:bg-[var(--neg)]/10 hover:text-[var(--neg)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-[var(--faint)]"
       >
         <Trash2 className="h-3.5 w-3.5" />
       </button>

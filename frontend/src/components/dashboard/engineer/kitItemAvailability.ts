@@ -32,6 +32,32 @@ export function availabilityParts(warehouse: number, van: number): string {
   return parts.join(" · ");
 }
 
+/**
+ * The same sentence for HIRED equipment, which is deliberately not the one above.
+ *
+ * "In stock" is untrue of a rental: it is not our stock, it is somebody else's equipment we are paying
+ * to hold, and the figure is bounded by a hire period rather than by what we own. An engineer reading
+ * "23 in stock" against a fibre tester has been told something false about what the company has —
+ * which is why this exists rather than the generic phrasing being reused with a different number.
+ *
+ * "Available to issue" is the accurate claim AND the narrower one: the server now excludes hires whose
+ * period has ended, so this figure is what could actually go out today, not what is on the shelf.
+ *
+ * The depot is named because a hire is collected from the depot that took delivery — it can never be
+ * transferred off a colleague's van — so "where" is not optional context for a rental the way it is for
+ * owned stock. Named depots are capped at one plus a count: the row is a sub-line under a quantity
+ * stepper, and an engineer with kit at five depots needs to know there is a choice, not read the list.
+ */
+export function rentalAvailabilityParts(
+  free: number,
+  depots: readonly { warehouseName: string | null }[] = [],
+): string {
+  if (free <= 0) return OUT_OF_STOCK_RENTAL;
+  const [first, ...rest] = depots;
+  const where = first ? `${first.warehouseName ?? "Depot"}${rest.length ? ` +${rest.length} more` : ""}` : "";
+  return `Available to issue: ${free}${where ? ` · ${where}` : ""}`;
+}
+
 export function kitItemAvailability(item: KitItemOption): KitItemAvailability {
   if (item.source === "rental") {
     // Depot-only, like consignment but for a different reason: custody of a hire is anchored to the

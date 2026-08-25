@@ -108,13 +108,6 @@ export interface PurchaseOrderSplitPayload {
   items: SplitPoLinePayload[];
 }
 
-export interface PoAttachmentPayload {
-  label?: string;
-  fileName: string;
-  fileType: string;
-  fileSizeBytes: number;
-  data: string; // data URI
-}
 
 function qs(params: PoListParams): string {
   const sp = new URLSearchParams();
@@ -181,6 +174,18 @@ const mutate = (p: Promise<{ purchaseOrder: PurchaseOrder }>): Promise<PurchaseO
     return r.purchaseOrder;
   });
 
+/**
+ * Create ONE purchase order, for one warehouse.
+ *
+ * NOT WIRED TO ANY SCREEN. Every create in the app goes through `createPurchaseOrdersSplit`, which
+ * takes a warehouse per line and produces one PO per warehouse group — put the same warehouse on
+ * every line and it does exactly what this does.
+ *
+ * Kept rather than removed, deliberately: unlike the base64 upload routes this replaced nothing and
+ * bypasses nothing — it is an ordinary guarded create with its own service tests, and it is the shape
+ * an import or admin tool would want. Do not wire a screen to it without checking it still matches
+ * what `createPurchaseOrdersSplit` does.
+ */
 export function createPurchaseOrder(payload: PurchaseOrderPayload): Promise<PurchaseOrder> {
   return mutate(api<{ purchaseOrder: PurchaseOrder }>("/purchase-orders", { method: "POST", body: payload }));
 }
@@ -279,10 +284,6 @@ export function getSupplierProcurementSummary(supplierId: string): Promise<Suppl
   return api<{ summary: SupplierProcurementSummary }>(`/purchase-orders/suppliers/${supplierId}/summary`).then((r) => r.summary);
 }
 
-// --- attachments ------------------------------------------------------------
-export function addAttachment(id: string, payload: PoAttachmentPayload): Promise<PurchaseOrder> {
-  return mutate(api<{ purchaseOrder: PurchaseOrder }>(`/purchase-orders/${id}/attachments`, { method: "POST", body: payload }));
-}
 export function removeAttachment(id: string, attachmentId: string): Promise<PurchaseOrder> {
   return mutate(api<{ purchaseOrder: PurchaseOrder }>(`/purchase-orders/${id}/attachments/${attachmentId}`, { method: "DELETE" }));
 }

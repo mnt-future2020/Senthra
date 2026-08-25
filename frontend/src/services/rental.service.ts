@@ -1,6 +1,7 @@
 import { api } from "@/lib/api";
 import { downloadCsv } from "@/lib/csvExport";
 import type {
+  HireCustodyExit,
   HireDamagePayload,
   HireMovementFilters,
   OnHireFilter,
@@ -175,6 +176,88 @@ export function closeHireShort(purchaseOrderId: string, lineId: string, reason: 
     method: "PATCH",
     body: { reason },
   });
+}
+
+/**
+ * Declare units of a hire lost while they were out with an engineer.
+ *
+ * The exit for equipment that is not coming back — a van broken into, a site cleared, someone who left
+ * holding a tester. Without it such a hire could never finish: the return path refuses units that are
+ * with an engineer, close-short only covers units that never arrived, and the job holding them could
+ * never reconcile.
+ *
+ * Custody ONLY. What the provider charges for the replacement is settled separately on their damage
+ * note — so declaring a loss never commits money, and reversing that charge later never puts a missing
+ * tester back on the shelf.
+ */
+export function declareHireLost(
+  purchaseOrderId: string,
+  lineId: string,
+  payload: { engineerId: string; quantity: number; reason: string; notes?: string; jobId?: string; jobNumber?: string; engineerName?: string },
+): Promise<{ exitId: string; lostQuantity: number; issuedQuantity: number }> {
+  return api(`/purchase-orders/${purchaseOrderId}/rental-lines/${lineId}/declare-lost`, { method: "POST", body: payload });
+}
+
+/**
+ * The equipment turned up — book it back onto the shelf.
+ *
+ * Its own call rather than a reversal of the declaration, because they are different events: this one
+ * moves physical custody and leaves every settlement exactly where it was. A partial find is recorded
+ * as one; the declaration keeps standing for whatever is still missing.
+ */
+export function recoverHireLoss(
+  purchaseOrderId: string,
+  exitId: string,
+  payload: { quantity: number; notes?: string },
+): Promise<{ exitId: string; lostQuantity: number; issuedQuantity: number }> {
+  return api(`/purchase-orders/${purchaseOrderId}/custody-exits/${exitId}/recover`, { method: "POST", body: payload });
+}
+
+/**
+ * Every custody exit on one order — its damage and loss timeline.
+ *
+ * Read on the order page beside the delivery and return notes, because those three together are the
+ * whole story of what happened to the provider's equipment while we had it, and until this existed the
+ * page could show only two of them.
+ */
+export function listOrderCustodyExits(purchaseOrderId: string): Promise<{ exits: HireCustodyExit[] }> {
+  return api(`/purchase-orders/${purchaseOrderId}/custody-exits`);
+}
+
+/**
+ * Open rental damage/loss — the damaged pane's rental rows.
+ *
+ * `warehouseId` is the pane's, and it matters: without it the server can only narrow to what the CALLER
+ * may see, which for an admin is every depot — so one warehouse's Damaged tab listed every other
+ * warehouse's hired damage beside its own owned stock.
+ */
+export function listOpenCustodyExits(
+  params: { warehouseId?: string; kind?: "damage" | "loss" } = {},
+): Promise<{ exits: HireCustodyExit[] }> {
+  const q = new URLSearchParams();
+  if (params.warehouseId) q.set("warehouseId", params.warehouseId);
+  if (params.kind) q.set("kind", params.kind);
+  const qs = q.toString();
+  return api(`/purchase-orders/rental-lines/custody-exits${qs ? `?${qs}` : ""}`);
+}
+
+/**
+ * Put one job-reported damage, or one declared loss, to the provider with what they are charging.
+ *
+ * ONE call, not a form. The report already exists — an engineer wrote it on the day, with a photograph
+ * — so the quantity, the words and the date come off that record and all this sends is the money. The
+ * provider's document is raised from it server-side.
+ */
+export function chargeCustodyExit(
+  exitId: string,
+  payload: { charge?: number | null; chargeRef?: string },
+): Promise<{ receipt: RentalReceipt }> {
+  return api(`/rental-receipts/custody-exits/${exitId}/charge`, { method: "POST", body: payload });
+}
+
+/** Every damage/loss event on one hire — the History drill-down for a rental damaged row. */
+export function listHireCustodyHistory(lineId: string): Promise<{ exits: HireCustodyExit[] }> {
+  return api(`/purchase-orders/rental-lines/${lineId}/custody-exits`);
 }
 
 /** Moves the end date. The server recomputes the reminder and clears the notification state. */

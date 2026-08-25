@@ -69,7 +69,7 @@ import * as attachmentService from "#modules/attachment/attachment.service.js";
 import { emitAttentionChanged, emitToRoom, PURCHASE_ORDER_WATCHERS_ROOM } from "../../lib/realtime.js";
 import {
   ISSUED_PO_ATTACHMENT_LABEL,
-  addAttachment,
+  attachUploadedAsset,
   applyGoodsReceipt,
   recordReceiptStatusChange,
   approvePurchaseOrder,
@@ -648,15 +648,22 @@ describe("attachments — terminal-state guard", () => {
   const mockAddAtt = poRepo.addAttachment as ReturnType<typeof vi.fn>;
   const mockFindAtt = poRepo.findAttachment as ReturnType<typeof vi.fn>;
   const mockRemoveAtt = poRepo.removeAttachment as ReturnType<typeof vi.fn>;
-  const mockCreds = getCloudinaryCreds as ReturnType<typeof vi.fn>;
-  const mockUpload = uploadFileToCloudinary as ReturnType<typeof vi.fn>;
-  const att = { label: "Quote", fileName: "q.pdf", fileType: "pdf", fileSizeBytes: 1000, data: "data:application/pdf;base64,AAAA" } as Parameters<typeof addAttachment>[1];
+  // AN ASSET THAT IS ALREADY IN CLOUDINARY — which is what the live path hands over. The signed
+  // upload puts the bytes there under a signature and calls this with the URL and identity it got
+  // back; there is no data URI anywhere in it any more.
+  const att = {
+    label: "Quote",
+    fileName: "q.pdf",
+    fileType: "pdf",
+    fileSizeBytes: 1000,
+    url: "https://cdn/q.pdf",
+    publicId: "senthra/purchase-orders/uuid.pdf",
+    resourceType: "raw",
+  } as Parameters<typeof attachUploadedAsset>[1];
 
   it("adds an attachment on a SENT (non-terminal) PO", async () => {
     mockFindById.mockResolvedValue(poRow({ status: "sent" }));
-    mockCreds.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
-    mockUpload.mockResolvedValue({ url: "https://cdn/q.pdf", publicId: "senthra/purchase-orders/uuid.pdf", resourceType: "raw" });
-    await addAttachment(PO_ID, att, { type: "admin", email: "x@x.com" });
+    await attachUploadedAsset(PO_ID, att, { type: "admin", email: "x@x.com" });
     expect(mockAddAtt).toHaveBeenCalledTimes(1);
     // The identity, not just the URL. A row that stores only a URL names a file nothing can ever
     // delete — the state every attachment table in this app was in before.
@@ -670,7 +677,7 @@ describe("attachments — terminal-state guard", () => {
 
   it("blocks adding an attachment on a CLOSED PO", async () => {
     mockFindById.mockResolvedValue(poRow({ status: "closed" }));
-    await expect(addAttachment(PO_ID, att)).rejects.toThrow(/closed or cancelled/i);
+    await expect(attachUploadedAsset(PO_ID, att)).rejects.toThrow(/closed or cancelled/i);
     expect(mockAddAtt).not.toHaveBeenCalled();
   });
 
@@ -1090,13 +1097,15 @@ describe("issued-PDF archive (document of record)", () => {
   it("a user attachment can't claim the reserved label", async () => {
     mockFindById.mockResolvedValue(poRow({ status: "sent" }));
     await expect(
-      addAttachment(PO_ID, {
+      attachUploadedAsset(PO_ID, {
         label: ISSUED_PO_ATTACHMENT_LABEL,
         fileName: "fake.pdf",
         fileType: "pdf",
         fileSizeBytes: 10,
-        data: "data:application/pdf;base64,AAAA",
-      } as Parameters<typeof addAttachment>[1]),
+        url: "https://cdn/fake.pdf",
+        publicId: "pfake",
+        resourceType: "raw",
+      } as Parameters<typeof attachUploadedAsset>[1]),
     ).rejects.toThrow(/reserved label/i);
   });
 });
@@ -1156,60 +1165,61 @@ describe("PO attachments — Cloudinary cleanup", () => {
 // Twenty, not the PRF's ten: conversion COPIES a full PRF's attachments onto the order, so an equal cap
 // would be exhausted the moment the PO existed — no room for the supplier's confirmation or the invoice.
 describe("PO attachments — count cap", () => {
-  const mockCreds2 = getCloudinaryCreds as ReturnType<typeof vi.fn>;
-  const mockUpload2 = uploadFileToCloudinary as ReturnType<typeof vi.fn>;
   const mockAddAtt2 = poRepo.addAttachment as ReturnType<typeof vi.fn>;
-  const att = { fileName: "inv.pdf", fileType: "pdf", fileSizeBytes: 9, data: "data:application/pdf;base64,AA" } as Parameters<typeof addAttachment>[1];
+  const att = {
+    fileName: "inv.pdf",
+    fileType: "pdf",
+    fileSizeBytes: 9,
+    url: "https://cdn/inv.pdf",
+    publicId: "pinv",
+    resourceType: "raw",
+  } as Parameters<typeof attachUploadedAsset>[1];
 
   const userAtt = (i: number) => ({ id: `u${i}`, label: null, fileName: `f${i}.pdf`, fileType: "pdf", fileSizeBytes: 10, url: `https://cdn/f${i}.pdf`, publicId: `p${i}`, resourceType: "raw", uploadedBy: "buyer@x.co", createdAt: new Date("2026-07-01T00:00:00Z") });
   const archive = { id: "sys", label: ISSUED_PO_ATTACHMENT_LABEL, fileName: "PO-0001.pdf", fileType: "pdf", fileSizeBytes: 10, url: "https://cdn/po.pdf", publicId: "psys", resourceType: "raw", uploadedBy: "system", createdAt: new Date("2026-07-01T00:00:00Z") };
   const withAtts = (atts: unknown[]) => poRow({ status: "sent", attachments: atts });
 
-  beforeEach(() => {
-    mockCreds2.mockResolvedValue({ cloudName: "c", apiKey: "k", apiSecret: "s" });
-    mockUpload2.mockResolvedValue({ url: "https://cdn/inv.pdf", publicId: "pinv", resourceType: "raw" });
-  });
-
   it("accepts the twentieth user document", async () => {
     mockFindById.mockResolvedValue(withAtts(Array.from({ length: 19 }, (_, i) => userAtt(i))));
-    await addAttachment(PO_ID, att, { type: "admin", email: "x@x.com" });
+    await attachUploadedAsset(PO_ID, att, { type: "admin", email: "x@x.com" });
     expect(mockAddAtt2).toHaveBeenCalledTimes(1);
   });
 
   it("refuses the twenty-first", async () => {
     mockFindById.mockResolvedValue(withAtts(Array.from({ length: 20 }, (_, i) => userAtt(i))));
-    await expect(addAttachment(PO_ID, att)).rejects.toThrow(/at most 20 documents/i);
+    await expect(attachUploadedAsset(PO_ID, att)).rejects.toThrow(/at most 20 documents/i);
   });
 
   // THE point of excluding the archive. A buyer who fills the cap must not be able to consume the slot
   // the system needs for the document of record — its write is fire-and-forget and fails SILENTLY.
   it("does not count the issued-PO archive against the cap", async () => {
     mockFindById.mockResolvedValue(withAtts([archive, ...Array.from({ length: 19 }, (_, i) => userAtt(i))]));
-    await addAttachment(PO_ID, att, { type: "admin", email: "x@x.com" });
+    await attachUploadedAsset(PO_ID, att, { type: "admin", email: "x@x.com" });
     expect(mockAddAtt2).toHaveBeenCalledTimes(1); // 20 rows on the record, 19 of them user documents
   });
 
-  // Refused before the upload, so a rejected attachment never lands in Cloudinary as an orphan.
-  it("never reaches Cloudinary when the cap is full", async () => {
+  // Refused before anything is written. The bytes are already in Cloudinary by the time this runs —
+  // the signed upload put them there — so what this proves now is that a refused attachment leaves no
+  // ROW behind it. The orphaned asset itself is the reaper's job (upload.reaper.ts).
+  it("writes no row when the cap is full", async () => {
     mockFindById.mockResolvedValue(withAtts(Array.from({ length: 20 }, (_, i) => userAtt(i))));
-    await expect(addAttachment(PO_ID, att)).rejects.toThrow();
-    expect(mockUpload2).not.toHaveBeenCalled();
+    await expect(attachUploadedAsset(PO_ID, att)).rejects.toThrow();
     expect(mockAddAtt2).not.toHaveBeenCalled();
   });
 
   it("refuses a document that would push the order past 80 MB", async () => {
     const big = (i: number) => ({ ...userAtt(i), fileSizeBytes: 15 * 1024 * 1024 });
     mockFindById.mockResolvedValue(withAtts(Array.from({ length: 5 }, (_, i) => big(i))));
-    const oneMore = { ...att, fileSizeBytes: 6 * 1024 * 1024 } as Parameters<typeof addAttachment>[1];
-    await expect(addAttachment(PO_ID, oneMore)).rejects.toThrow(/can't exceed 80 MB/i);
-    expect(mockUpload2).not.toHaveBeenCalled();
+    const oneMore = { ...att, fileSizeBytes: 6 * 1024 * 1024 } as Parameters<typeof attachUploadedAsset>[1];
+    await expect(attachUploadedAsset(PO_ID, oneMore)).rejects.toThrow(/can't exceed 80 MB/i);
+    expect(mockAddAtt2).not.toHaveBeenCalled();
   });
 
   // The archive is excluded from the BYTE total for the same reason as the count.
   it("does not count the archive's bytes against the total", async () => {
     const bigArchive = { ...archive, fileSizeBytes: 70 * 1024 * 1024 };
     mockFindById.mockResolvedValue(withAtts([bigArchive, userAtt(0)]));
-    await addAttachment(PO_ID, { ...att, fileSizeBytes: 5 * 1024 * 1024 } as Parameters<typeof addAttachment>[1], { type: "admin", email: "x@x.com" });
+    await attachUploadedAsset(PO_ID, { ...att, fileSizeBytes: 5 * 1024 * 1024 } as Parameters<typeof attachUploadedAsset>[1], { type: "admin", email: "x@x.com" });
     expect(mockAddAtt2).toHaveBeenCalledTimes(1);
   });
 

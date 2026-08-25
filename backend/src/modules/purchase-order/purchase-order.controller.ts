@@ -1,18 +1,19 @@
 import type { Request } from "express";
 
 import * as poService from "./purchase-order.service.js";
+import * as hireLossService from "./hireLoss.service.js";
 import * as documentService from "#modules/document/document.service.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
 import { sendCsv } from "../../utils/csv-response.js";
 import { param, queryInt, queryStr } from "../../utils/request.js";
+import type { DeclareHireLostBody, RecoverHireLossBody } from "./purchase-order.validation.js";
 import type {
   CreatePurchaseOrderInput,
   CreatePurchaseOrdersSplitInput,
   CloseHireShortInput,
   ExtendHireInput,
   PoAssignPmInput,
-  PoAttachmentInput,
   PoCancelInput,
   PoDeliveryDateInput,
   PoRejectInput,
@@ -159,11 +160,6 @@ export const updateConfirmedDeliveryDate = asyncHandler(async (req, res) => {
   res.json({ purchaseOrder: await poService.updateConfirmedDeliveryDate(param(req, "id"), confirmedDeliveryDate, reason, actorFrom(req)) });
 });
 
-// --- attachments ------------------------------------------------------------
-export const addAttachment = asyncHandler(async (req, res) => {
-  const purchaseOrder = await poService.addAttachment(param(req, "id"), req.body as PoAttachmentInput, actorFrom(req));
-  res.status(201).json({ purchaseOrder });
-});
 export const removeAttachment = asyncHandler(async (req, res) => {
   const purchaseOrder = await poService.removeAttachment(param(req, "id"), param(req, "attachmentId"), actorFrom(req));
   res.json({ purchaseOrder });
@@ -248,4 +244,53 @@ export const exportOnHireCsv = asyncHandler(async (req, res) => {
       actorFrom(req),
     ),
   );
+});
+
+// POST /purchase-orders/:id/rental-lines/:lineId/declare-lost
+export const declareHireLost = asyncHandler(async (req, res) => {
+  const body = req.body as DeclareHireLostBody;
+  const result = await hireLossService.declareHireLost(
+    { ...body, purchaseOrderRentalLineId: param(req, "lineId"), notes: body.notes ?? null },
+    actorFrom(req),
+  );
+  res.json(result);
+});
+
+// POST /purchase-orders/:id/custody-exits/:exitId/recover
+export const recoverHireLoss = asyncHandler(async (req, res) => {
+  const body = req.body as RecoverHireLossBody;
+  const result = await hireLossService.recoverHireLoss(
+    { exitId: param(req, "exitId"), quantity: body.quantity, notes: body.notes ?? null },
+    actorFrom(req),
+  );
+  res.json(result);
+});
+
+// GET /purchase-orders/:id/custody-exits
+export const listOrderCustodyExits = asyncHandler(async (req, res) => {
+  const exits = await hireLossService.listOrderCustodyExits(param(req, "id"), actorFrom(req));
+  res.json({ exits });
+});
+
+// GET /purchase-orders/rental-lines/custody-exits?kind=damage|loss
+// Open rental damage/loss across the caller's warehouses — the damaged pane's rental segment.
+export const listOpenCustodyExits = asyncHandler(async (req, res) => {
+  const kind = queryStr(req.query.kind);
+  const exits = await hireLossService.listOpenCustodyExits(
+    {
+      // The pane's warehouse, when there is one. Narrowing INSIDE the caller's permission scope — see
+      // the service for why the two are different questions.
+      warehouseId: queryStr(req.query.warehouseId),
+      kind: kind === "damage" || kind === "loss" ? kind : undefined,
+    },
+    actorFrom(req),
+  );
+  res.json({ exits });
+});
+
+// GET /purchase-orders/rental-lines/:lineId/custody-exits
+// Every damage/loss event on one hire — the damaged pane's History drill-down for a rental row.
+export const listHireCustodyHistory = asyncHandler(async (req, res) => {
+  const exits = await hireLossService.listHireCustodyHistory(param(req, "lineId"), actorFrom(req));
+  res.json({ exits });
 });

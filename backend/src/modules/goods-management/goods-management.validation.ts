@@ -79,21 +79,6 @@ export const postMovementSchema = z.object({
 });
 export type PostMovementInput = z.infer<typeof postMovementSchema>;
 
-// Damage-photo upload: the raw data URI from the client, uploaded server-side to Cloudinary.
-// ~15 MB cap (base64 inflates ~33%, so this allows ≈11 MB of binary data — more than enough
-// for a mobile photo taken at medium quality).
-const MAX_DAMAGE_PHOTO_CHARS = 15_000_000;
-export const uploadDamagePhotoSchema = z.object({
-  image: z
-    .string({ error: "Image is required." })
-    .max(MAX_DAMAGE_PHOTO_CHARS, "Image is too large (max ~10 MB).")
-    .regex(
-      /^data:image\/(png|jpe?g|gif|webp|svg\+xml|x-icon|vnd\.microsoft\.icon);base64,/i,
-      "Image must be a base64 data URI (PNG, JPG, GIF, WEBP, SVG or ICO).",
-    ),
-});
-export type UploadDamagePhotoInput = z.infer<typeof uploadDamagePhotoSchema>;
-
 // Why stock is being booked as lost. A fixed list rather than free text because these repeat and
 // because free text collects the word "lost" — which answers nothing six months later when someone
 // asks where the units went. Mirrors STOCK_ADJUST_DOWN_REASONS' shape (enum + optional notes).

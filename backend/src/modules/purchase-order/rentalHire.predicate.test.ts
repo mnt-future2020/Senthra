@@ -9,10 +9,14 @@ import {
   awaitingDeliveryWhere,
   computeNotifyOnDate,
   expiringSoonWhere,
+  isIssuableHire,
+  issuableWhere,
   onHireWhere,
   overdueDeliveryWhere,
   overdueWhere,
+  unsettledCustodyWhere,
 } from "./rentalHire.predicate.js";
+import { OPEN_EXIT_WHERE } from "./hireCustodyExit.repository.js";
 
 const day = (s: string) => new Date(`${s}T00:00:00.000Z`);
 
@@ -95,6 +99,146 @@ describe("the hire predicates", () => {
     const late = overdueWhere(todayStart) as { hireEndDate: { lt: Date } };
     expect(soon.hireEndDate.gte.getTime()).toBe(late.hireEndDate.lt.getTime());
   });
+});
+
+// ── "Available to issue" is NOT "on hire" ─────────────────────────────────────────────────────
+//
+// The whole point of this predicate existing separately. An expired hire has to stay in the on-hire
+// and overdue sets — it is the row somebody has to chase, and hiding it would make the overdue badge
+// uncountable — while being refused to a new job.
+describe("issuableWhere — available to issue", () => {
+  const todayStart = day("2026-09-28");
+
+  it("is still scoped to kit we are holding", () => {
+    expect(issuableWhere(todayStart)).toMatchObject({ hireStatus: "on_hire", fullyReturned: false });
+  });
+
+  // `gte`, not `gt`: a hire is valid THROUGH its end date. A hire ending today can still go out today.
+  it("keeps a hire that ends TODAY available", () => {
+    const w = issuableWhere(todayStart) as { hireEndDate: { gte: Date } };
+    expect(w.hireEndDate.gte).toEqual(todayStart);
+  });
+
+  // The complement of overdueWhere, by construction: one boundary, two sides, so no hire can ever be
+  // both "not overdue" and "not issuable" (or both at once).
+  it("is the exact complement of the overdue set", () => {
+    const issuable = issuableWhere(todayStart) as { hireEndDate: { gte: Date } };
+    const late = overdueWhere(todayStart) as { hireEndDate: { lt: Date } };
+    expect(issuable.hireEndDate.gte.getTime()).toBe(late.hireEndDate.lt.getTime());
+  });
+
+  it("does NOT narrow onHireWhere — the chasing views keep every live hire", () => {
+    expect(onHireWhere()).not.toHaveProperty("hireEndDate");
+  });
+
+  // Defence in depth against rows that predate the receive guard: a draft order was never sent, so
+  // kit cannot legitimately have arrived against it. `fully_received` is INCLUDED because that is the
+  // ordinary resting state of a hire sitting on the shelf waiting to go out — excluding it would make
+  // the common case un-issuable.
+  it("only counts orders the kit could have arrived against", () => {
+    const w = issuableWhere(todayStart) as { purchaseOrder: { is: { status: { in: string[] } } } };
+    expect(w.purchaseOrder.is.status.in).toEqual(["sent", "supplier_accepted", "partially_received", "fully_received"]);
+    for (const excluded of ["draft", "pending_approval", "approved", "pm_review", "closed", "cancelled"]) {
+      expect(w.purchaseOrder.is.status.in).not.toContain(excluded);
+    }
+  });
+
+  it("still excludes a cancelled or soft-deleted order", () => {
+    const w = issuableWhere(todayStart) as { purchaseOrder: { is: { OR: unknown[] } } };
+    expect(w.purchaseOrder.is.OR).toEqual([{ deletedAt: null }, { deletedAt: { isSet: false } }]);
+  });
+
+  // The warehouse helper rebuilds from the predicate's OWN order clause, so scoping must not silently
+  // widen the status set back to LIVE_ORDER's "anything but cancelled".
+  it("keeps its status narrowing when scoped to a depot", () => {
+    const scoped = atWarehouses(issuableWhere(todayStart), ["w1"]) as {
+      purchaseOrder: { is: { status: { in: string[] }; warehouseId: { in: string[] } } };
+    };
+    expect(scoped.purchaseOrder.is.warehouseId.in).toEqual(["w1"]);
+    expect(scoped.purchaseOrder.is.status.in).toContain("fully_received");
+    expect(scoped.purchaseOrder.is.status.in).not.toContain("draft");
+  });
+
+  // ── The row-level twin must answer identically ────────────────────────────────────────────────
+  //
+  // `issuableWhere` selects rows; `isIssuableHire` labels one already loaded. Two implementations of
+  // one rule is how a pane comes to promise stock the scan then refuses — so they are checked against
+  // each other over the whole cross-product rather than case by case.
+  describe("isIssuableHire — the same rule, asked of a row", () => {
+    const line = (over: Partial<Parameters<typeof isIssuableHire>[0]> = {}) => ({
+      hireStatus: "on_hire",
+      fullyReturned: false,
+      hireEndDate: day("2026-10-01"),
+      orderStatus: "sent",
+      orderDeleted: false,
+      ...over,
+    });
+
+    it("accepts a live hire inside its period on a sent order", () => {
+      expect(isIssuableHire(line(), todayStart)).toBe(true);
+    });
+
+    it("accepts a hire ending TODAY", () => {
+      expect(isIssuableHire(line({ hireEndDate: todayStart }), todayStart)).toBe(true);
+    });
+
+    it("refuses a hire that ended yesterday", () => {
+      expect(isIssuableHire(line({ hireEndDate: day("2026-09-27") }), todayStart)).toBe(false);
+    });
+
+    it("refuses an order the supplier was never sent", () => {
+      for (const orderStatus of ["draft", "pending_approval", "approved", "pm_review", "closed", "cancelled"]) {
+        expect(isIssuableHire(line({ orderStatus }), todayStart)).toBe(false);
+      }
+    });
+
+    it("accepts every status kit can legitimately have arrived against", () => {
+      for (const orderStatus of ["sent", "supplier_accepted", "partially_received", "fully_received"]) {
+        expect(isIssuableHire(line({ orderStatus }), todayStart)).toBe(true);
+      }
+    });
+
+    it("refuses a soft-deleted order, and one with no status at all", () => {
+      expect(isIssuableHire(line({ orderDeleted: true }), todayStart)).toBe(false);
+      expect(isIssuableHire(line({ orderStatus: null }), todayStart)).toBe(false);
+    });
+
+    // The on-hire list can be filtered to terminal hires, so this caller cannot assume the query
+    // already excluded them — every clause is re-asserted, none inherited.
+    it("refuses a hire that is finished, whatever its dates say", () => {
+      expect(isIssuableHire(line({ hireStatus: "returned" }), todayStart)).toBe(false);
+      expect(isIssuableHire(line({ hireStatus: "cancelled" }), todayStart)).toBe(false);
+      expect(isIssuableHire(line({ hireStatus: "awaiting_delivery" }), todayStart)).toBe(false);
+      expect(isIssuableHire(line({ fullyReturned: true }), todayStart)).toBe(false);
+    });
+
+    // THE agreement check. Every combination the predicate can distinguish, run through both, with
+    // the where-clause evaluated by hand from its own published shape.
+    it("agrees with issuableWhere across every combination", () => {
+      const w = issuableWhere(todayStart) as {
+        hireStatus: string;
+        fullyReturned: boolean;
+        hireEndDate: { gte: Date };
+        purchaseOrder: { is: { status: { in: string[] } } };
+      };
+      for (const hireStatus of ["on_hire", "returned", "cancelled", "awaiting_delivery"]) {
+        for (const fullyReturned of [false, true]) {
+          for (const orderStatus of ["sent", "fully_received", "draft", "closed", "cancelled"]) {
+            for (const hireEndDate of [day("2026-09-27"), todayStart, day("2026-10-01")]) {
+              const selectedByWhere =
+                hireStatus === w.hireStatus &&
+                fullyReturned === w.fullyReturned &&
+                hireEndDate.getTime() >= w.hireEndDate.gte.getTime() &&
+                w.purchaseOrder.is.status.in.includes(orderStatus);
+              expect(isIssuableHire({ hireStatus, fullyReturned, hireEndDate, orderStatus, orderDeleted: false }, todayStart))
+                .toBe(selectedByWhere);
+            }
+          }
+        }
+      }
+    });
+  });
+
 });
 
 describe("HIRE_STATUSES", () => {
@@ -344,5 +488,69 @@ describe("the three Inventory hire badges never count one line twice", () => {
     const chase = overdueDeliveryWhere(todayStart) as { hireStatus?: unknown };
     expect(chase.hireStatus).toBe("awaiting_delivery");
     expect((deadlineWhere as { hireStatus?: unknown }).hireStatus).toBe("on_hire");
+  });
+});
+
+/**
+ * THE SETTLE QUEUE RUNS IN BOTH DIRECTIONS.
+ *
+ * Two of its three arms are money WE owe: damage reported, units lost. The third is money owed BACK —
+ * a unit declared lost, charged for, and then found behind the racking. The equipment returns on its
+ * own (`recoverHireLoss` puts it on the shelf and clears `lostQuantity`) but the charge stands,
+ * settled, against kit we now have.
+ *
+ * That third arm cannot be a counter. `recovered` is a fact about a ROW; the moment it is recorded the
+ * line's own counters read zero, so a filter on `fieldDamageQty`/`lostQuantity` sees nothing and the
+ * record is chased by no screen at all — flagged on one purchase order and counted nowhere.
+ */
+describe("unsettledCustodyWhere asks the badge's own question", () => {
+  /**
+   * ONE PREDICATE, TWO READERS. The list and the `rentals.custody_to_settle` badge used to express
+   * "still work" differently — the list filtered the hire line's cached counters, the badge counted
+   * exit rows on settlement state — and they disagreed in both directions:
+   *
+   *   • damage collected but never priced was COUNTED and listed nowhere → a badge nobody could clear
+   *   • a warehouse report born settled was LISTED forever and counted by nothing
+   *
+   * The counters cannot express it: `fieldDamageQty` answers "what is damaged and still HERE", which
+   * is a different fact from "what is unsettled" — and a recovered-and-charged loss, whose counters
+   * all read zero, was reachable from no screen at all.
+   */
+  it("filters the hire lines through the exit rows, not the cached counters", () => {
+    expect(unsettledCustodyWhere()).toMatchObject({ custodyExits: { some: OPEN_EXIT_WHERE } });
+  });
+
+  it("names no counter, so the two can no longer drift apart", () => {
+    const w = JSON.stringify(unsettledCustodyWhere());
+    expect(w).not.toContain("fieldDamageQty");
+    expect(w).not.toContain("lostQuantity");
+  });
+
+  // Still scoped to live orders — a closed or cancelled order's money is settled, and its hires do not
+  // belong on a worklist whatever their records say.
+  it("stays inside the live-order scope", () => {
+    expect(Object.keys(unsettledCustodyWhere())).toContain("purchaseOrder");
+  });
+});
+
+/**
+ * What counts as work, stated once. Two arms running in opposite directions: money we owe and money
+ * owed back. A withdrawn report is in neither — the claim never happened.
+ */
+describe("OPEN_EXIT_WHERE", () => {
+  const arms = () => OPEN_EXIT_WHERE.OR as Record<string, unknown>[];
+
+  it("counts anything nobody has settled, except a recovery", () => {
+    expect(arms()[0]).toEqual({ settlementState: "unsettled", NOT: { custodyState: "recovered" } });
+  });
+
+  it("counts a loss that was charged for and then found", () => {
+    expect(arms()[1]).toEqual({ custodyState: "recovered", settlementState: "settled" });
+  });
+
+  // The `settled` half is what keeps an ordinary find off the list: nothing was agreed, so there is
+  // nothing to claim back.
+  it("is exactly two arms — no third meaning creeping in", () => {
+    expect(arms()).toHaveLength(2);
   });
 });

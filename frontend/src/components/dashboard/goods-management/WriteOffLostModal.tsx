@@ -20,7 +20,7 @@ import * as React from "react";
 import { Loader2, TriangleAlert } from "lucide-react";
 
 import * as gmService from "@/services/goodsManagement.service";
-import { WRITE_OFF_REASONS, type WriteOffReason } from "@/types/goodsManagement";
+import { WRITE_OFF_REASONS, type CloseReconcileResult, type WriteOffReason } from "@/types/goodsManagement";
 import { Modal } from "@/components/ui/Modal";
 import { Notice } from "@/components/ui/Notice";
 import { Select } from "@/components/ui/Select";
@@ -48,7 +48,15 @@ export function WriteOffLostModal({
 }: {
   target: WriteOffTarget | null;
   onClose: () => void;
-  onWrittenOff: () => void;
+  /**
+   * Fired once the write-off has landed, WITH the server's answer.
+   *
+   * The result is passed rather than assumed because "the stock was written off" and "the job closed"
+   * are two different outcomes: hired kit still out with the engineer holds the job open however the
+   * write-off went, and a host that reported success from the absence of an error put a green toast on
+   * a job that was still sitting in the queue.
+   */
+  onWrittenOff: (result: CloseReconcileResult) => void;
 }) {
   const [reason, setReason] = React.useState<WriteOffReason | "">("");
   const [notes, setNotes] = React.useState("");
@@ -76,13 +84,16 @@ export function WriteOffLostModal({
     setSaving(true);
     setMsg(null);
     try {
-      await gmService.closeReconcile(target.jobId, {
+      const result = await gmService.closeReconcile(target.jobId, {
         writeOffLost: true,
         writeOffReason: reason as WriteOffReason,
         writeOffNotes: notes.trim() || undefined,
         fromOverdue: target.fromOverdue,
       });
-      onWrittenOff();
+      // Handed UP rather than swallowed: writing the stock off and CLOSING the job are two outcomes,
+      // and hired kit still out gives the second one a different answer from the first. The host owns
+      // the message either way, so it needs the fact.
+      onWrittenOff(result);
       onClose();
     } catch (err) {
       setMsg({ type: "error", text: err instanceof Error ? err.message : "Could not write off the stock." });

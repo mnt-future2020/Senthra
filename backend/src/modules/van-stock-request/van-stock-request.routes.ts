@@ -46,7 +46,6 @@ router.get("/pending-count", requirePermission(REVIEW), ctrl.pendingCount);
 router.get("/", requirePermission(REVIEW), ctrl.listAll);
 router.post("/scan-lookup", requirePermission(REVIEW), writeLimiter, validateBody(scanLookupSchema), ctrl.scanLookup);
 router.post("/walk-in", requirePermission(REVIEW), writeLimiter, validateBody(walkInSchema), ctrl.walkIn);
-router.post("/damage-photo", requirePermission(REVIEW), writeLimiter, validateBody(uploadImageSchema), ctrl.uploadDamagePhoto);
 
 // ---- Single request (requester OR reviewer — service scopes) ------------------------------------
 router.get("/:id", requireAnyPermission(ENGINEER, REVIEW), ctrl.getOne);
