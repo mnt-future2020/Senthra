@@ -20,6 +20,7 @@ import {
   ErrorText,
   Input,
   Screen,
+  SearchInput,
   SectionTitle,
   Segmented,
   Select,
@@ -262,14 +263,13 @@ export default function NewVanStockScreen() {
 
       <SectionTitle>Add items</SectionTitle>
       <Text style={s.hint}>Search the catalogue for the stock you need.</Text>
-      <Input
+      <SearchInput
         placeholder="Search the item you need…"
         value={query}
         onChangeText={(v) => {
           setQuery(v);
           debouncedSearch(v);
         }}
-        autoCapitalize="none"
       />
       {searching ? <Text style={s.hint}>Searching…</Text> : null}
       {searchFailed ? (

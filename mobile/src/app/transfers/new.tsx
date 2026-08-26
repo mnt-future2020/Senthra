@@ -17,6 +17,7 @@ import {
   ErrorText,
   Input,
   Screen,
+  SearchInput,
   SectionTitle,
   Stepper,
 } from "@/components/ui";
@@ -188,14 +189,13 @@ export default function NewTransferScreen() {
         </Card>
       ) : null}
 
-      <Input
+      <SearchInput
         placeholder={lockedFromName ? `Search ${lockedFromName}'s stock…` : "Search the item you need…"}
         value={query}
         onChangeText={(v) => {
           setQuery(v);
           debouncedSearch(v);
         }}
-        autoCapitalize="none"
       />
       {searching ? <Text style={s.hint}>Searching…</Text> : null}
       {searchFailed ? (

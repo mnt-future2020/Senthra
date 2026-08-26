@@ -15,6 +15,7 @@ import {
   Input,
   ListSkeleton,
   Screen,
+  SearchInput,
   SectionTitle,
   Stepper,
 } from "@/components/ui";
@@ -424,14 +425,13 @@ export default function NewKitRequestScreen() {
       ) : null}
 
       <SectionTitle>Add another item</SectionTitle>
-      <Input
+      <SearchInput
         placeholder="Search the item you need…"
         value={query}
         onChangeText={(v) => {
           setQuery(v);
           debouncedSearch(v);
         }}
-        autoCapitalize="none"
       />
       {searching ? <Text style={s.hint}>Searching…</Text> : null}
       {searchFailed ? (

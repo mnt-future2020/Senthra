@@ -233,6 +233,17 @@ export interface JobKitLine {
   used: number;
   returned: number;
   remaining: number;
+  // When this HIRED kit has to be back at its warehouse, so the warehouse can return it to the
+  // provider. RENTAL lines only, and only while units are still out — null on every other line type
+  // and once the line is fully returned. ISO date.
+  //
+  // The one thing that makes a rental line unlike the rest of this list: an IRM item sitting in a van
+  // costs nothing, a hire bills every day and belongs to somebody else.
+  hireEndDate: string | null;
+  // Resolved by the SERVER against the company timezone. Never recompute this from `hireEndDate` on
+  // the device — a phone in another zone (or with a wrong clock) would disagree with the warehouse
+  // about which day it is, on the one field whose whole job is naming a day.
+  hireOverdue: boolean;
   vanSources: KitLineVanSource[];
 }
 
@@ -264,6 +275,17 @@ export interface Job {
   rack: string | null;
   shelf: string | null;
   completionDate: string | null;
+  /**
+   * Past its due date and still active — SERVER-DERIVED, never recomputed here.
+   *
+   * "Today" is the start of today in the COMPANY's timezone (a Settings value), which this device
+   * does not know. Deriving it from `new Date()` would mark a different set of rows than the "Jobs
+   * overdue" card counted, for any engineer not sitting in that timezone — and a handset is far more
+   * likely to be in the wrong one than an office browser. Populated on list reads; false on detail.
+   */
+  overdue: boolean;
+  /** Whole days past due when `overdue`, else null. Server-derived for the same reason. */
+  daysLate: number | null;
   priority: string;
   assignedEngineerId: string | null;
   assignedEngineerName: string | null;

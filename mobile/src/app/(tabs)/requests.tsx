@@ -18,14 +18,13 @@ import {
   Card,
   EmptyState,
   ErrorText,
-  FilterRow,
-  Input,
+  FilterGroup,
   ListFade,
   ListSkeleton,
   Pager,
   Screen,
+  SearchFilterBar,
   Segmented,
-  Select,
 } from "@/components/ui";
 import { colors } from "@/lib/theme";
 import { formatDateTime, timeAgo, titleCase } from "@/lib/format";
@@ -198,6 +197,11 @@ export default function RequestsScreen() {
         if (typeof view === "string") setTView(view);
         if (typeof status === "string") setTStatus(status);
         setTransferPage(1);
+      } else if (tabParam === "kit") {
+        // No filters to seed — the Kit tab has none — but arriving from the dashboard's
+        // "N kit requests awaiting the planner" row must land on page 1, not wherever this
+        // still-mounted tab was left, or the count and the first row won't agree.
+        setKitPage(1);
       }
     }, 0);
     return () => clearTimeout(t);
@@ -280,18 +284,22 @@ export default function RequestsScreen() {
               />
             </Card>
           ))}
-          <Input
+          <SearchFilterBar
             placeholder="Search code or reason…"
             value={tQ}
             onChangeText={(v) => {
               setTQ(v);
               setTransferPage(1);
             }}
-            autoCapitalize="none"
-            returnKeyType="search"
-          />
-          <FilterRow>
-            <Select
+            activeCount={(tStatus ? 1 : 0) + (tSort ? 1 : 0)}
+            onClear={() => {
+              setTStatus("");
+              setTSort("");
+              setTransferPage(1);
+            }}
+          >
+            <FilterGroup
+              label="Status"
               options={TRANSFER_STATUS_FILTERS}
               value={tStatus}
               onChange={(key) => {
@@ -299,7 +307,8 @@ export default function RequestsScreen() {
                 setTransferPage(1);
               }}
             />
-            <Select
+            <FilterGroup
+              label="Sort"
               options={SORT_OPTIONS}
               value={tSort}
               onChange={(key) => {
@@ -307,7 +316,7 @@ export default function RequestsScreen() {
                 setTransferPage(1);
               }}
             />
-          </FilterRow>
+          </SearchFilterBar>
           {/* A load failure gets its own state — never rendered as an empty inbox. */}
           {error ? (
             <ErrorText message={error} />
@@ -385,18 +394,24 @@ export default function RequestsScreen() {
             <Button title="Request stock" variant="secondary" small style={s.flex1} onPress={() => router.push("/van-stock/new")} />
             <Button title="Return stock" variant="secondary" small style={s.flex1} onPress={() => router.push("/van-stock/return")} />
           </View>
-          <Input
+          <SearchFilterBar
             placeholder="Search code, item or reason…"
             value={vQ}
             onChangeText={(v) => {
               setVQ(v);
               setVanPage(1);
             }}
-            autoCapitalize="none"
-            returnKeyType="search"
-          />
-          <FilterRow>
-            <Select
+            activeCount={(vStatus ? 1 : 0) + (vType ? 1 : 0) + (vOrigin ? 1 : 0) + (vSort ? 1 : 0)}
+            onClear={() => {
+              setVStatus("");
+              setVType("");
+              setVOrigin("");
+              setVSort("");
+              setVanPage(1);
+            }}
+          >
+            <FilterGroup
+              label="Status"
               options={VSR_STATUS_FILTERS}
               value={vStatus}
               onChange={(key) => {
@@ -404,7 +419,8 @@ export default function RequestsScreen() {
                 setVanPage(1);
               }}
             />
-            <Select
+            <FilterGroup
+              label="Type"
               options={VSR_TYPE_FILTERS}
               value={vType}
               onChange={(key) => {
@@ -412,9 +428,8 @@ export default function RequestsScreen() {
                 setVanPage(1);
               }}
             />
-          </FilterRow>
-          <FilterRow>
-            <Select
+            <FilterGroup
+              label="Origin"
               options={VSR_ORIGIN_FILTERS}
               value={vOrigin}
               onChange={(key) => {
@@ -422,7 +437,8 @@ export default function RequestsScreen() {
                 setVanPage(1);
               }}
             />
-            <Select
+            <FilterGroup
+              label="Sort"
               options={SORT_OPTIONS}
               value={vSort}
               onChange={(key) => {
@@ -430,7 +446,7 @@ export default function RequestsScreen() {
                 setVanPage(1);
               }}
             />
-          </FilterRow>
+          </SearchFilterBar>
           {vanError ? (
             <ErrorText message={vanError} />
           ) : (

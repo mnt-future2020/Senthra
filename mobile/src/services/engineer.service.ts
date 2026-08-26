@@ -31,6 +31,31 @@ export function getOwnMiscStock(): Promise<MiscHeldItem[]> {
   return api<{ misc: MiscHeldItem[] }>("/engineer/misc-stock").then((r) => r.misc ?? []);
 }
 
+/**
+ * HIRED kit the engineer is currently carrying, soonest deadline first.
+ *
+ * The one pool on this portal that isn't ours. Everything else an engineer holds either gets used up
+ * or goes back at leisure; a hire bills by the day and belongs to a third party, so the only real
+ * question is when it has to go back — which is why `dueInDays` and `overdue` are computed on the
+ * SERVER (company timezone) rather than derived here from the date. See lib/hireDeadline.ts.
+ *
+ * No PO code and no money: the purchase order is the office's handle on a hire, not the engineer's.
+ */
+export interface RentalHolding {
+  id: string;
+  rentalItemId: string | null;
+  itemName: string;
+  quantityOnHand: number;
+  hireEndDate: string | null;
+  /** Whole days until the deadline. Negative ⇒ already overdue. Null ⇒ no deadline on record. */
+  dueInDays: number | null;
+  overdue: boolean;
+}
+
+export function getOwnRentals(): Promise<RentalHolding[]> {
+  return api<{ rentals: RentalHolding[] }>("/engineer/rentals").then((r) => r.rentals ?? []);
+}
+
 export interface OwnJobsParams {
   status?: string;
   q?: string;

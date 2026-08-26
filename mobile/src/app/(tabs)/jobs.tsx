@@ -10,13 +10,12 @@ import {
   Card,
   EmptyState,
   ErrorText,
-  FilterRow,
-  Input,
+  FilterGroup,
   ListFade,
   ListSkeleton,
   Pager,
   Screen,
-  Select,
+  SearchFilterBar,
 } from "@/components/ui";
 import { colors } from "@/lib/theme";
 import { formatDate } from "@/lib/format";
@@ -90,21 +89,29 @@ export default function JobsScreen() {
     );
 
   const filtered = Boolean(status || query);
+  // What the trigger's badge counts. Sort is included even though it narrows nothing: once it is
+  // folded out of sight, a list ordered oldest-first with no visible reason is the same confusion the
+  // badge exists to prevent. Search is NOT counted — its box is right there with the text still in it.
+  const activeFilters = (status ? 1 : 0) + (sort ? 1 : 0);
 
   return (
     <Screen refreshing={refreshing} onRefresh={() => void refresh()}>
-      <Input
+      <SearchFilterBar
         placeholder="Search job no., name or customer…"
         value={q}
         onChangeText={(v) => {
           setQ(v);
           setPage(1);
         }}
-        autoCapitalize="none"
-        returnKeyType="search"
-      />
-      <FilterRow>
-        <Select
+        activeCount={activeFilters}
+        onClear={() => {
+          setStatus("");
+          setSort("");
+          setPage(1);
+        }}
+      >
+        <FilterGroup
+          label="Status"
           options={STATUS_FILTERS}
           value={status}
           onChange={(key) => {
@@ -112,7 +119,8 @@ export default function JobsScreen() {
             setPage(1);
           }}
         />
-        <Select
+        <FilterGroup
+          label="Sort"
           options={SORT_OPTIONS}
           value={sort}
           onChange={(key) => {
@@ -120,7 +128,7 @@ export default function JobsScreen() {
             setPage(1);
           }}
         />
-      </FilterRow>
+      </SearchFilterBar>
       <ErrorText message={error} />
 
       <ListFade dimmed={fetching}>
@@ -147,7 +155,14 @@ export default function JobsScreen() {
               </Text>
               <View style={s.rowBottom}>
                 <Badge status={job.priority} />
-                {job.completionDate ? <Text style={s.due}>Due {formatDate(job.completionDate)}</Text> : null}
+                {job.completionDate ? (
+                  <Text style={[s.due, job.overdue && s.dueOverdue]}>Due {formatDate(job.completionDate)}</Text>
+                ) : null}
+                {/* `overdue` and `daysLate` are both server-derived against the company timezone —
+                    see the note on the Job type. Rendered, never recomputed from completionDate. */}
+                {job.overdue && job.daysLate != null ? (
+                  <Text style={s.latePill}>{job.daysLate}d late</Text>
+                ) : null}
                 {job.pendingKitRequestCount > 0 ? (
                   <Text style={s.kitBadge}>{job.pendingKitRequestCount} kit pending</Text>
                 ) : null}
@@ -170,5 +185,18 @@ const s = StyleSheet.create({
   meta: { fontSize: 13, color: colors.muted },
   rowBottom: { flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" },
   due: { fontSize: 12, color: colors.muted },
+  dueOverdue: { color: colors.danger, fontWeight: "700" },
+  // Mirrors the web's "Nd late" pill: the count is what turns "this is late" into "this is 9 days
+  // late", which is the difference between a row you scroll past and one you act on.
+  latePill: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: colors.danger,
+    backgroundColor: colors.dangerSoft,
+    borderRadius: 999,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    overflow: "hidden",
+  },
   kitBadge: { fontSize: 12, fontWeight: "600", color: colors.warn },
 });

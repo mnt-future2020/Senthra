@@ -18,9 +18,12 @@ import {
 import Ionicons from "@expo/vector-icons/Ionicons";
 import type { StyleProp, TextInputProps, ViewStyle } from "react-native";
 import { BlurView } from "expo-blur";
-// This Expo Router build vendors react-navigation — these are the supported subpaths.
-import { HeaderHeightContext } from "expo-router/react-navigation";
-import { BottomTabBarHeightContext } from "expo-router/js-tabs";
+// Expo Router is built on react-navigation. Import these contexts from the
+// react-navigation packages directly (both pinned in package.json to the exact
+// versions Expo Router resolves, so npm dedupes to a single copy — two copies
+// would give us a context instance the navigator never populates).
+import { HeaderHeightContext } from "@react-navigation/elements";
+import { BottomTabBarHeightContext } from "@react-navigation/bottom-tabs";
 import { colors, statusTone, toneColors } from "../lib/theme";
 import { titleCase } from "../lib/format";
 
@@ -72,8 +75,12 @@ export function Screen({
   const headerHeight = useContext(HeaderHeightContext) ?? 0;
   const tabBarHeight = useContext(BottomTabBarHeightContext) ?? 0;
   const inTabs = tabBarHeight > 0;
+  // The bar's own height CLEARS it (content scrolls under the glass); the extra is the visible gap
+  // between the last card and the glass edge. One `gap` unit, matching the rhythm between cards —
+  // a bigger number reads as the list having ended early, which on a scrolling feed looks like a
+  // loading bug rather than breathing room.
   const inset = inTabs
-    ? { paddingTop: headerHeight + 16, paddingBottom: tabBarHeight + 24 }
+    ? { paddingTop: headerHeight + 16, paddingBottom: tabBarHeight + 12 }
     : undefined;
 
   const scrollRef = useRef<ScrollView>(null);
@@ -273,9 +280,20 @@ export function DetailSkeleton() {
   );
 }
 
-export function EmptyState({ title, subtitle }: { title: string; subtitle?: string }) {
+export function EmptyState({
+  title,
+  subtitle,
+  icon,
+}: {
+  title: string;
+  subtitle?: string;
+  /** Optional glyph above the title, matching the web's `<EmptyState icon={…}>`. Decorative only —
+   *  the title already carries the meaning, so it is hidden from screen readers by the caller. */
+  icon?: ReactNode;
+}) {
   return (
     <View style={s.empty}>
+      {icon ? <View style={s.emptyIcon}>{icon}</View> : null}
       <Text style={s.emptyTitle}>{title}</Text>
       {subtitle ? <Text style={s.emptySubtitle}>{subtitle}</Text> : null}
     </View>
@@ -368,6 +386,34 @@ export function Input({
   );
 }
 
+/**
+ * A search field: the same Input with a magnifier sitting inside its left edge.
+ *
+ * The glyph is what makes a text box read as "search" before anything is typed. Placeholder copy
+ * alone doesn't do it — it disappears the moment the field has content, and on a list screen the box
+ * is then indistinguishable from any other input. Every search box in the app goes through here so
+ * they cannot drift apart.
+ *
+ * Deliberately no `label`: the icon IS the label, and the absolutely-positioned glyph is centred
+ * against the wrapper, which a label above the field would push out of alignment.
+ */
+export function SearchInput({ style, ...props }: Omit<TextInputProps, "multiline">) {
+  return (
+    <View>
+      <Input
+        autoCapitalize="none"
+        returnKeyType="search"
+        {...props}
+        style={[s.searchInput, style]}
+      />
+      {/* pointerEvents none so the glyph never eats a tap meant for the field behind it. */}
+      <View style={s.searchIcon} pointerEvents="none">
+        <Ionicons name="search" size={16} color={colors.faint} />
+      </View>
+    </View>
+  );
+}
+
 /** Password field with an eye toggle to show/hide what's typed. */
 export function PasswordInput({
   label,
@@ -441,7 +487,13 @@ export function Chips({
   value,
   onChange,
 }: {
-  options: Array<{ key: string; label: string }>;
+  /**
+   * `icon` is a FUNCTION of the colour rather than a ready-made node, because a chip inverts when it
+   * becomes active (muted on white → white on accent). A pre-built element would carry whatever colour
+   * it was created with and sit wrong in one of the two states; handing the caller the colour lets the
+   * chip stay the single owner of its own palette.
+   */
+  options: { key: string; label: string; icon?: (color: string) => ReactNode }[];
   value: string | null;
   onChange: (key: string) => void;
 }) {
@@ -449,12 +501,17 @@ export function Chips({
     <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.chips}>
       {options.map((opt) => {
         const active = opt.key === value;
+        const tint = active ? "#ffffff" : colors.muted;
         return (
           <Pressable
             key={opt.key}
             onPress={() => onChange(opt.key)}
             style={[s.chip, active && s.chipActive]}
+            accessibilityRole="tab"
+            accessibilityState={{ selected: active }}
+            accessibilityLabel={opt.label}
           >
+            {opt.icon ? opt.icon(tint) : null}
             <Text style={[s.chipText, active && s.chipTextActive]}>{opt.label}</Text>
           </Pressable>
         );
@@ -570,6 +627,143 @@ export function FilterRow({ children }: { children: ReactNode }) {
   return <View style={s.filterRow}>{children}</View>;
 }
 
+// ── Search + folded filters ────────────────────────────────────────────────────────────────────
+//
+// The search box keeps the row; every other filter moves behind one trigger beside it. On a phone a
+// second row of Selects costs a whole card's worth of the list you came to read, and most of those
+// Selects are set once and left.
+//
+// The COUNT on the trigger is the whole bargain, and the reason this is safe: hiding a filter is
+// only acceptable if you can still tell at a glance that it is on. Without it a list silently shows
+// a subset and nobody knows why it looks short — which on a job list reads as "I have no work today".
+// Same reasoning as the web's FilterPopover, which is where this pattern comes from.
+
+/**
+ * The trigger + its sheet, on its own. Use directly where a surface has filters but no search box
+ * (the movements ledger, whose date range stays on the row outside); most screens want
+ * `SearchFilterBar`, which is this sitting beside a SearchInput.
+ */
+export function FilterButton({
+  activeCount,
+  onClear,
+  children,
+  title = "Filters",
+}: {
+  /** How many of the filters inside are set to something other than their default. */
+  activeCount: number;
+  /** Reset every filter inside. Omit to hide the Clear action. */
+  onClear?: () => void;
+  children: ReactNode;
+  title?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const active = activeCount > 0;
+  return (
+    <>
+      <Pressable
+        style={[s.filterBtn, active && s.filterBtnActive]}
+        onPress={() => setOpen(true)}
+        accessibilityRole="button"
+        accessibilityLabel={active ? `${title}, ${activeCount} active` : title}
+      >
+        <Ionicons name="options-outline" size={18} color={active ? "#ffffff" : colors.muted} />
+        {active ? (
+          <View style={s.filterCount}>
+            <Text style={s.filterCountText}>{activeCount}</Text>
+          </View>
+        ) : null}
+      </Pressable>
+
+      <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
+        <Pressable style={s.sheetBackdrop} onPress={() => setOpen(false)}>
+          <Pressable style={s.sheet} onPress={() => undefined}>
+            <View style={s.sheetHeader}>
+              <Text style={s.sheetTitle}>{title}</Text>
+              {onClear && active ? (
+                <Pressable onPress={onClear} hitSlop={8} accessibilityRole="button">
+                  <Text style={s.sheetClear}>Clear all</Text>
+                </Pressable>
+              ) : null}
+            </View>
+            <ScrollView style={s.sheetScroll} contentContainerStyle={s.sheetContent}>
+              {children}
+            </ScrollView>
+            {/* The sheet stays open while filters are tapped — changing two of them is one trip, not
+                two — so it needs an explicit way out that isn't only the backdrop. */}
+            <View style={s.sheetFooter}>
+              <Button title="Done" onPress={() => setOpen(false)} />
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+    </>
+  );
+}
+
+export function SearchFilterBar({
+  value,
+  onChangeText,
+  placeholder,
+  activeCount,
+  onClear,
+  children,
+  title = "Filters",
+}: {
+  value: string;
+  onChangeText: (v: string) => void;
+  placeholder?: string;
+  activeCount: number;
+  onClear?: () => void;
+  children: ReactNode;
+  title?: string;
+}) {
+  return (
+    <View style={s.searchRow}>
+      <View style={s.searchFlex}>
+        <SearchInput placeholder={placeholder} value={value} onChangeText={onChangeText} />
+      </View>
+      <FilterButton activeCount={activeCount} onClear={onClear} title={title}>
+        {children}
+      </FilterButton>
+    </View>
+  );
+}
+
+/** One single-select filter inside a SearchFilterBar sheet: a heading plus its options as chips. */
+export function FilterGroup({
+  label,
+  options,
+  value,
+  onChange,
+}: {
+  label: string;
+  options: { key: string; label: string }[];
+  value: string;
+  onChange: (key: string) => void;
+}) {
+  return (
+    <View style={s.filterGroup}>
+      <Text style={s.filterGroupLabel}>{label}</Text>
+      <View style={s.filterGroupChips}>
+        {options.map((opt) => {
+          const on = opt.key === value;
+          return (
+            <Pressable
+              key={opt.key}
+              style={[s.filterChip, on && s.filterChipActive]}
+              onPress={() => onChange(opt.key)}
+              accessibilityRole="radio"
+              accessibilityState={{ selected: on }}
+            >
+              <Text style={[s.filterChipText, on && s.filterChipTextActive]}>{opt.label}</Text>
+            </Pressable>
+          );
+        })}
+      </View>
+    </View>
+  );
+}
+
 export function Stepper({
   value,
   onChange,
@@ -607,7 +801,10 @@ export function Stepper({
 const s = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
   screenScroll: { flex: 1 },
-  screenContent: { padding: 16, paddingBottom: 40, gap: 12 },
+  // NOTE: `paddingBottom` here applies to STACK screens only — inside the tab navigator the `inset`
+  // above replaces it (later entry in the style array wins). Change the inset, not this, to move the
+  // gap above the tab bar.
+  screenContent: { padding: 16, paddingBottom: 24, gap: 12 },
   glassIos: { backgroundColor: "rgba(255,255,255,0.55)" },
   glassFallback: { backgroundColor: "rgba(255,255,255,0.92)" },
   glassAccentIos: { backgroundColor: "rgba(123,110,240,0.88)" },
@@ -646,6 +843,15 @@ const s = StyleSheet.create({
   center: { flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: colors.bg },
   errorText: { color: colors.danger, fontSize: 14 },
   empty: { alignItems: "center", paddingVertical: 32, gap: 4 },
+  emptyIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: colors.mutedSoft,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 4,
+  },
   emptyTitle: { fontSize: 15, fontWeight: "600", color: colors.text },
   emptySubtitle: { fontSize: 13, color: colors.muted, textAlign: "center" },
   badge: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 3, alignSelf: "flex-start" },
@@ -676,6 +882,9 @@ const s = StyleSheet.create({
     color: colors.text,
   },
   inputMultiline: { minHeight: 80, textAlignVertical: "top" },
+  // 12 (the input's own padding) + 16 (glyph) + 8 (breathing room) = 36.
+  searchInput: { paddingLeft: 36 },
+  searchIcon: { position: "absolute", left: 12, top: 0, bottom: 0, justifyContent: "center" },
   pwRow: { position: "relative" },
   pwInput: { paddingRight: 44 },
   pwEye: { position: "absolute", right: 12, top: 0, bottom: 0, justifyContent: "center" },
@@ -701,6 +910,11 @@ const s = StyleSheet.create({
     backgroundColor: colors.card,
     paddingHorizontal: 12,
     paddingVertical: 6,
+    // Row, so an optional icon sits beside the label rather than above it (RN defaults to column).
+    // Harmless for icon-less chips: a single child lays out identically either way.
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
   },
   chipActive: { backgroundColor: colors.accent, borderColor: colors.accent },
   chipText: { fontSize: 13, fontWeight: "600", color: colors.muted },
@@ -741,6 +955,70 @@ const s = StyleSheet.create({
   sheetRowText: { fontSize: 15, color: colors.text },
   sheetRowTextActive: { fontWeight: "700", color: colors.accent },
   filterRow: { flexDirection: "row", gap: 8 },
+  // `stretch`, so the button takes its height from the Input beside it rather than guessing at one.
+  // A hardcoded height was wrong the moment the TextInput's real line box differed from the estimate
+  // — and it would go wrong again on any font-scale setting, which a guess cannot follow.
+  searchRow: { flexDirection: "row", alignItems: "stretch", gap: 8 },
+  searchFlex: { flex: 1 },
+  filterBtn: {
+    width: 45,
+    // No `height`: inside searchRow the row stretches it to match the Input. `minHeight` is the
+    // floor for the standalone FilterButton (the movements ledger), which has no Input to match.
+    minHeight: 44,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.card,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  filterBtnActive: { backgroundColor: colors.accent, borderColor: colors.accent },
+  filterCount: {
+    position: "absolute",
+    top: -5,
+    right: -5,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    paddingHorizontal: 5,
+    backgroundColor: colors.danger,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 2,
+    borderColor: colors.bg,
+  },
+  filterCountText: { fontSize: 10, fontWeight: "800", color: "#ffffff" },
+  sheetHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 20,
+    paddingTop: 8,
+    paddingBottom: 4,
+  },
+  sheetTitle: { fontSize: 16, fontWeight: "800", color: colors.text },
+  sheetClear: { fontSize: 13, fontWeight: "700", color: colors.accent },
+  sheetFooter: { paddingHorizontal: 16, paddingTop: 4 },
+  filterGroup: { paddingHorizontal: 8, paddingVertical: 10, gap: 8 },
+  filterGroupLabel: {
+    fontSize: 11,
+    fontWeight: "800",
+    color: colors.faint,
+    textTransform: "uppercase",
+    letterSpacing: 0.6,
+  },
+  filterGroupChips: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  filterChip: {
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.card,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  filterChipActive: { backgroundColor: colors.accentSoft, borderColor: colors.accent },
+  filterChipText: { fontSize: 13, fontWeight: "600", color: colors.muted },
+  filterChipTextActive: { color: colors.accent, fontWeight: "700" },
   stepper: { flexDirection: "row", alignItems: "center", gap: 10 },
   stepBtn: {
     width: 32,

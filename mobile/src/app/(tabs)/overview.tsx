@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 import Ionicons from "@expo/vector-icons/Ionicons";
@@ -9,7 +9,7 @@ import { useLoad } from "@/lib/useLoad";
 import { useSocketRefresh } from "@/lib/useSocketRefresh";
 import { Badge, Card, EmptyState, ErrorText, Button, ListSkeleton, Screen, SectionTitle, Skeleton } from "@/components/ui";
 import { colors } from "@/lib/theme";
-import { formatDate, signed } from "@/lib/format";
+import { formatDate, signed, timeAgo } from "@/lib/format";
 import type { EngineerOverview, EngineerOverviewJob, Movement } from "@/types";
 
 // Engineer dashboard — the field engineer's day at a glance, mirroring the web's
@@ -20,6 +20,8 @@ const SUBTITLE = "Your jobs, stock and activity at a glance.";
 // The dashboard fans in four socket domains, so one action can emit a burst of
 // events — coalesce them into a single refetch this long after the last one.
 const REFRESH_DEBOUNCE_MS = 250;
+// How often the "Updated X ago" caption re-renders. No refetch — just the wording ageing.
+const CAPTION_TICK_MS = 30_000;
 
 const DASH_EVENTS = [
   "job:new",
@@ -134,7 +136,7 @@ export default function OverviewScreen() {
   const link = (pathname: string, p: Record<string, string> = {}) => () =>
     router.push({ pathname, params: { ...p, t: String(Date.now()) } });
 
-  const { data, loading, error, refreshing, refresh, reload } = useLoad(
+  const { data, loading, error, refreshing, refresh, reload, updatedAt } = useLoad(
     useCallback(async () => {
       // One aggregated read + the last few movements (best-effort), like the web.
       const [overview, moves] = await Promise.all([
@@ -157,6 +159,16 @@ export default function OverviewScreen() {
     },
     [],
   );
+
+  // Re-render the "Updated X ago" caption on a tick, without refetching. The caption is the only
+  // thing on this screen that says whether the numbers are current — which matters far more on a
+  // handset that gets backgrounded, loses signal and comes back showing a cached render than it does
+  // in a browser tab someone is looking at.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setTick((n) => n + 1), CAPTION_TICK_MS);
+    return () => clearInterval(t);
+  }, []);
 
   if (loading)
     return (
@@ -212,13 +224,18 @@ export default function OverviewScreen() {
       tone: "accent",
       value: o.jobs.inProgress,
       label: "In progress",
+      // Every branch here counts across ACTIVE jobs (assigned + accepted + in_progress), while the
+      // value above counts `in_progress` alone — so the hint is NOT a breakdown of the number it sits
+      // under, and each one has to say so. Unqualified, "1 / In progress / 4 overdue" reads as "4 of
+      // that 1 are late", which cannot be true; the job dragging it red is usually still Accepted.
+      // (Same wording as the web's engineerDashboardModel — keep the two in step.)
       hint:
         o.jobs.overdue > 0
-          ? `${o.jobs.overdue} overdue`
+          ? `${o.jobs.overdue} overdue across active jobs`
           : o.jobs.accepted > 0
             ? `${o.jobs.accepted} accepted, not started`
             : o.jobs.dueThisWeek > 0
-              ? `${o.jobs.dueThisWeek} due this week`
+              ? `${o.jobs.dueThisWeek} due this week across active jobs`
               : "nothing due this week",
       hintTone: o.jobs.overdue > 0 ? "red" : undefined,
       go: link("/(tabs)/jobs", { status: "in_progress" }),
@@ -317,13 +334,16 @@ export default function OverviewScreen() {
       go: link("/(tabs)/requests", { tab: "transfers", view: "outgoing", status: "" }),
     });
   if (canRequestKit && o.kitRequests.pending > 0)
-    // Informational (no link): kit requests are raised + tracked inside each job's
-    // detail page and only the planner can action a pending one.
+    // The engineer still can't ACTION a pending kit request — only the planner reviews it — which is
+    // why the web leaves this row unlinked: it has no aggregate kit view to open. This app does (the
+    // Requests screen's Kit tab), so the row goes there. Reporting a count with nowhere to look is
+    // the part that was worth fixing; the row is still informational about what happens next.
     attention.push({
       key: "kit",
       icon: <Ionicons name="build" size={16} color={TONE_CHIP.accent.fg} />,
       tone: "accent",
       text: `${o.kitRequests.pending} kit request${plural(o.kitRequests.pending)} awaiting the planner`,
+      go: link("/(tabs)/requests", { tab: "kit" }),
     });
 
   // ── Quick actions — the engineer's CREATE verbs, permission-gated ──
@@ -352,7 +372,14 @@ export default function OverviewScreen() {
     <Screen refreshing={refreshing} onRefresh={() => void refresh()}>
       <View style={s.headerRow}>
         <Text style={s.subtitle}>{SUBTITLE}</Text>
-        <Pressable style={s.updatedRow} onPress={() => void reload()} hitSlop={10}>
+        <Pressable
+          style={s.updatedRow}
+          onPress={() => void reload()}
+          hitSlop={10}
+          accessibilityRole="button"
+          accessibilityLabel="Refresh dashboard"
+        >
+          {updatedAt ? <Text style={s.updatedText}>Updated {timeAgo(updatedAt)}</Text> : null}
           <Ionicons name="refresh" size={15} color={colors.faint} />
         </Pressable>
       </View>
@@ -468,7 +495,8 @@ const s = StyleSheet.create({
   flex1: { flex: 1 },
   headerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
   subtitle: { fontSize: 13, color: colors.muted, flex: 1 },
-  updatedRow: { flexDirection: "row", alignItems: "center" },
+  updatedRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  updatedText: { fontSize: 11, color: colors.faint },
   statRow: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
   statCard: { flexBasis: "47%", flexGrow: 1, gap: 4 },
   statIcon: { width: 30, height: 30, borderRadius: 10, alignItems: "center", justifyContent: "center" },

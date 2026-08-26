@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
+import Ionicons from "@expo/vector-icons/Ionicons";
+import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
 import { useLocalSearchParams } from "expo-router";
 import DateTimePicker, { DateTimePickerAndroid } from "@react-native-community/datetimepicker";
 import type { DateTimePickerEvent } from "@react-native-community/datetimepicker";
@@ -7,8 +9,11 @@ import {
   getOwnCustomerStock,
   getOwnMiscStock,
   getOwnMovements,
+  getOwnRentals,
   getOwnStock,
+  type RentalHolding,
 } from "@/services/engineer.service";
+import { dueLabel } from "@/lib/hireDeadline";
 import { useLoad } from "@/lib/useLoad";
 import { useSocketRefresh } from "@/lib/useSocketRefresh";
 import { useClientTable, type ClientTableOptions } from "@/lib/useClientTable";
@@ -18,13 +23,13 @@ import {
   Chips,
   EmptyState,
   ErrorText,
-  FilterRow,
-  Input,
+  FilterButton,
+  FilterGroup,
   ListFade,
   ListSkeleton,
   Pager,
   Screen,
-  Select,
+  SearchFilterBar,
 } from "@/components/ui";
 import { colors } from "@/lib/theme";
 import { formatDate, formatDateTime, signed } from "@/lib/format";
@@ -33,16 +38,33 @@ import type { CustomerHolding, EngineerStockItem, MiscHeldItem, Movement } from 
 // Section pills, captions, per-tab search/sort/pagination and movement filters
 // mirror the web dashboard's EngineerInventory / MovementFeed.
 
+// Section pills carry the same glyphs as the web's EngineerInventory tabs, mapped to the icon sets
+// this app already ships: Boxes→cube, Package→people, CalendarClock→calendar-clock, Wrench→wrench,
+// History→history. `icon` is a function of the colour because a chip inverts when it goes active.
 const SECTIONS = [
-  { key: "irm", label: "Company (IRM)" },
-  { key: "customer", label: "Customer" },
-  { key: "misc", label: "Misc" },
-  { key: "movements", label: "Movements" },
+  { key: "irm", label: "Company (IRM)", icon: (c: string) => <Ionicons name="cube" size={14} color={c} /> },
+  { key: "customer", label: "Customer", icon: (c: string) => <Ionicons name="people" size={14} color={c} /> },
+  {
+    key: "rental",
+    label: "Hired",
+    icon: (c: string) => <MaterialCommunityIcons name="calendar-clock" size={14} color={c} />,
+  },
+  {
+    key: "misc",
+    label: "Misc",
+    icon: (c: string) => <MaterialCommunityIcons name="wrench-outline" size={14} color={c} />,
+  },
+  {
+    key: "movements",
+    label: "Movements",
+    icon: (c: string) => <MaterialCommunityIcons name="history" size={14} color={c} />,
+  },
 ];
 
 const SECTION_CAPTIONS: Record<string, string> = {
   irm: "Company (IRM) stock currently assigned to you.",
   customer: "Consignment items issued from a job — return these when the job is complete.",
+  rental: "Hired equipment you're carrying. It belongs to a provider and bills by the day — soonest return first.",
   misc: "Free-text items handed to you on a job (no barcode / not stock-tracked).",
   movements:
     "Every movement of stock in and out of your van — dispatches, transfers, job issues, returns and consumption. Newest first.",
@@ -110,9 +132,39 @@ const MISC_SORTS = [
   { key: "qty:asc", label: "On hand (low–high)" },
 ];
 
+// A large FINITE sentinel for an undated hire, not Infinity: two undated rows would otherwise give
+// Infinity − Infinity = NaN, and a comparator returning NaN makes the sort order undefined.
+const UNDATED = 8.64e15;
+
+const RENTAL_TABLE: ClientTableOptions<RentalHolding> = {
+  searchText: (r) => r.itemName,
+  comparators: {
+    item: (a, b) => a.itemName.localeCompare(b.itemName),
+    qty: (a, b) => a.quantityOnHand - b.quantityOnHand,
+    // Undated hires sort last in the DEFAULT (ascending) order, which is the one that matters: an
+    // unknown deadline is not an urgent one, and letting it lead would push a genuinely overdue hire
+    // off the top.
+    due: (a, b) => (a.hireEndDate ? dateVal(a.hireEndDate) : UNDATED) - (b.hireEndDate ? dateVal(b.hireEndDate) : UNDATED),
+  },
+  initialSort: "due:asc",
+};
+
+const RENTAL_SORTS = [
+  { key: "due:asc", label: "Return by (soonest)" },
+  { key: "due:desc", label: "Return by (latest)" },
+  { key: "item:asc", label: "Item (A–Z)" },
+  { key: "item:desc", label: "Item (Z–A)" },
+  { key: "qty:desc", label: "On hire (high–low)" },
+  { key: "qty:asc", label: "On hire (low–high)" },
+];
+
 function NoMatches() {
   return (
-    <EmptyState title="No items match your search" subtitle="Try a different search or clear the filter." />
+    <EmptyState
+      icon={<Ionicons name="search" size={20} color={colors.faint} />}
+      title="No items match your search"
+      subtitle="Try a different search or clear the filter."
+    />
   );
 }
 
@@ -217,15 +269,18 @@ export default function StockScreen() {
   // per-section fetches.
   const irmLoad = useLoad(getOwnStock);
   const customerLoad = useLoad(getOwnCustomerStock);
+  const rentalLoad = useLoad(getOwnRentals);
   const miscLoad = useLoad(getOwnMiscStock);
   const irm = irmLoad.data;
   const customer = customerLoad.data;
+  const rentals = rentalLoad.data;
   const misc = miscLoad.data;
 
   // Like the web: a goods event refetches only the tab being looked at.
   useSocketRefresh(GOODS_EVENTS, () => {
     if (tab === "irm") void irmLoad.reload();
     else if (tab === "customer") void customerLoad.reload();
+    else if (tab === "rental") void rentalLoad.reload();
     else if (tab === "misc") void miscLoad.reload();
   });
 
@@ -247,6 +302,11 @@ export default function StockScreen() {
     [activeCustomer],
   );
   const customerTable = useClientTable(customer ?? [], CUSTOMER_TABLE, customerPredicate);
+
+  const rentalTable = useClientTable(rentals ?? [], RENTAL_TABLE);
+  // Counted off the FULL holding list, not the paged/filtered rows: an overdue hire the engineer has
+  // searched past is still overdue, and the banner exists to say so.
+  const overdueHires = (rentals ?? []).filter((r) => r.overdue).length;
 
   const miscTable = useClientTable(misc ?? [], MISC_TABLE);
 
@@ -346,7 +406,15 @@ export default function StockScreen() {
 
   // Pull-to-refresh targets whichever tab is on screen.
   const activeLoad =
-    tab === "customer" ? customerLoad : tab === "misc" ? miscLoad : tab === "movements" ? movementsLoad : irmLoad;
+    tab === "customer"
+      ? customerLoad
+      : tab === "rental"
+        ? rentalLoad
+        : tab === "misc"
+          ? miscLoad
+          : tab === "movements"
+            ? movementsLoad
+            : irmLoad;
 
   return (
     <Screen refreshing={activeLoad.refreshing} onRefresh={() => void activeLoad.refresh()}>
@@ -365,22 +433,27 @@ export default function StockScreen() {
             {(irm ?? []).length === 0 ? (
               irmLoad.error ? null : (
                 <EmptyState
+                  icon={<Ionicons name="cube" size={20} color={colors.faint} />}
                   title="No IRM stock on hand"
                   subtitle="Stock dispatched to you from a warehouse will appear here."
                 />
               )
             ) : (
               <>
-                <Input
+                <SearchFilterBar
                   placeholder="Search item or code…"
                   value={irmTable.query}
                   onChangeText={irmTable.setQuery}
-                  autoCapitalize="none"
-                  returnKeyType="search"
-                />
-                <FilterRow>
-                  <Select options={IRM_SORTS} value={irmTable.sort} onChange={irmTable.setSort} />
-                </FilterRow>
+                  activeCount={irmTable.sort === IRM_TABLE.initialSort ? 0 : 1}
+                  onClear={() => irmTable.setSort(IRM_TABLE.initialSort!)}
+                >
+                  <FilterGroup
+                    label="Sort"
+                    options={IRM_SORTS}
+                    value={irmTable.sort}
+                    onChange={irmTable.setSort}
+                  />
+                </SearchFilterBar>
                 {irmTable.noMatches ? (
                   <NoMatches />
                 ) : (
@@ -424,22 +497,31 @@ export default function StockScreen() {
             {(customer ?? []).length === 0 ? (
               customerLoad.error ? null : (
                 <EmptyState
+                  icon={<Ionicons name="people" size={20} color={colors.faint} />}
                   title="No customer stock held"
                   subtitle="Customer consignment items issued to you for a job will appear here."
                 />
               )
             ) : (
               <>
-                <Input
+                <SearchFilterBar
                   placeholder="Search item or customer…"
                   value={customerTable.query}
                   onChangeText={customerTable.setQuery}
-                  autoCapitalize="none"
-                  returnKeyType="search"
-                />
-                <FilterRow>
+                  activeCount={
+                    (activeCustomer ? 1 : 0) + (customerTable.sort === CUSTOMER_TABLE.initialSort ? 0 : 1)
+                  }
+                  onClear={() => {
+                    setCustomerFilter("");
+                    customerTable.setSort(CUSTOMER_TABLE.initialSort!);
+                    customerTable.setPage(1);
+                  }}
+                >
+                  {/* Only worth showing when there is actually a choice to make — one customer, or
+                      none, and the control is a dropdown with a single answer. */}
                   {customerOptions.length > 2 || activeCustomer !== "" ? (
-                    <Select
+                    <FilterGroup
+                      label="Customer"
                       options={customerOptions}
                       value={activeCustomer}
                       onChange={(key) => {
@@ -448,8 +530,13 @@ export default function StockScreen() {
                       }}
                     />
                   ) : null}
-                  <Select options={CUSTOMER_SORTS} value={customerTable.sort} onChange={customerTable.setSort} />
-                </FilterRow>
+                  <FilterGroup
+                    label="Sort"
+                    options={CUSTOMER_SORTS}
+                    value={customerTable.sort}
+                    onChange={customerTable.setSort}
+                  />
+                </SearchFilterBar>
                 {customerTable.noMatches ? (
                   <NoMatches />
                 ) : (
@@ -480,6 +567,80 @@ export default function StockScreen() {
         )
       ) : null}
 
+      {tab === "rental" ? (
+        rentalLoad.loading ? (
+          <ListSkeleton />
+        ) : (
+          <>
+            <ErrorText message={rentalLoad.error} />
+            {overdueHires > 0 ? (
+              // Amber, not red: by the web portal's own tone rule red means broken or blocked, and
+              // nothing here is blocked — the engineer can still do everything. It is a real cost
+              // leaking, so it earns a banner, but it is an advisory to act on.
+              <View style={s.hireWarn}>
+                <Text style={s.hireWarnText}>
+                  {`${overdueHires} hired item${overdueHires === 1 ? " is" : "s are"} past the return date. `}
+                  {`Hired kit keeps costing while it's out and has to go back to the provider — take ${overdueHires === 1 ? "it" : "them"} to the warehouse.`}
+                </Text>
+              </View>
+            ) : null}
+            {(rentals ?? []).length === 0 ? (
+              rentalLoad.error ? null : (
+                <EmptyState
+                  icon={<MaterialCommunityIcons name="calendar-clock" size={20} color={colors.faint} />}
+                  title="No hired kit with you"
+                  subtitle="Rental equipment issued to you for a job will appear here, with its return date."
+                />
+              )
+            ) : (
+              <>
+                <SearchFilterBar
+                  placeholder="Search item…"
+                  value={rentalTable.query}
+                  onChangeText={rentalTable.setQuery}
+                  activeCount={rentalTable.sort === RENTAL_TABLE.initialSort ? 0 : 1}
+                  onClear={() => rentalTable.setSort(RENTAL_TABLE.initialSort!)}
+                >
+                  <FilterGroup
+                    label="Sort"
+                    options={RENTAL_SORTS}
+                    value={rentalTable.sort}
+                    onChange={rentalTable.setSort}
+                  />
+                </SearchFilterBar>
+                {rentalTable.noMatches ? (
+                  <NoMatches />
+                ) : (
+                  rentalTable.rows.map((item) => (
+                    <Card key={item.id}>
+                      <View style={s.rowTop}>
+                        <Text style={s.itemName} numberOfLines={2}>
+                          {item.itemName}
+                        </Text>
+                        <Text style={s.qtyBig}>{item.quantityOnHand}</Text>
+                      </View>
+                      <Text style={[s.meta, item.overdue && s.overdueText]}>
+                        {item.hireEndDate ? `Return by ${formatDate(item.hireEndDate)}` : "Return by —"}
+                      </Text>
+                      <Text style={[s.hireDue, item.overdue && s.overdueText]}>{dueLabel(item)}</Text>
+                    </Card>
+                  ))
+                )}
+                {rentalTable.total > 0 ? (
+                  <Pager
+                    page={rentalTable.page}
+                    totalPages={rentalTable.totalPages}
+                    onPage={rentalTable.setPage}
+                    total={rentalTable.total}
+                    label="items"
+                  />
+                ) : null}
+              </>
+            )}
+          </>
+        )
+      ) : null}
+
       {tab === "misc" ? (
         miscLoad.loading ? (
           <ListSkeleton />
@@ -488,20 +649,28 @@ export default function StockScreen() {
             <ErrorText message={miscLoad.error} />
             {(misc ?? []).length === 0 ? (
               miscLoad.error ? null : (
-                <EmptyState title="No misc items" subtitle="Misc kit items issued to you for a job will appear here." />
+                <EmptyState
+                  icon={<MaterialCommunityIcons name="wrench-outline" size={20} color={colors.faint} />}
+                  title="No misc items"
+                  subtitle="Misc kit items issued to you for a job will appear here."
+                />
               )
             ) : (
               <>
-                <Input
+                <SearchFilterBar
                   placeholder="Search item…"
                   value={miscTable.query}
                   onChangeText={miscTable.setQuery}
-                  autoCapitalize="none"
-                  returnKeyType="search"
-                />
-                <FilterRow>
-                  <Select options={MISC_SORTS} value={miscTable.sort} onChange={miscTable.setSort} />
-                </FilterRow>
+                  activeCount={miscTable.sort === MISC_TABLE.initialSort ? 0 : 1}
+                  onClear={() => miscTable.setSort(MISC_TABLE.initialSort!)}
+                >
+                  <FilterGroup
+                    label="Sort"
+                    options={MISC_SORTS}
+                    value={miscTable.sort}
+                    onChange={miscTable.setSort}
+                  />
+                </SearchFilterBar>
                 {miscTable.noMatches ? (
                   <NoMatches />
                 ) : (
@@ -533,10 +702,10 @@ export default function StockScreen() {
 
       {tab === "movements" ? (
         <>
-          <FilterRow>
-            <Select options={OWNERSHIP_OPTIONS} value={ownership} onChange={setOwnership} />
-            <Select options={TYPE_OPTIONS} value={mtype} onChange={setMtype} />
-          </FilterRow>
+          {/* No search box on the ledger, so the trigger sits with the dates instead.
+              The DATE RANGE deliberately stays out here: it is the axis a ledger is actually read
+              along, while ownership and type are set once and left — the same split the web's
+              MovementFeed makes. Each chip shows its own value, so nothing is hidden by folding. */}
           <View style={s.dateRow}>
             <Pressable style={s.dateChip} onPress={() => openDatePicker("from")}>
               <Text style={s.dateChipText}>From: {dateFrom ? formatDate(dateFrom) : "—"}</Text>
@@ -544,10 +713,18 @@ export default function StockScreen() {
             <Pressable style={s.dateChip} onPress={() => openDatePicker("to")}>
               <Text style={s.dateChipText}>To: {dateTo ? formatDate(dateTo) : "—"}</Text>
             </Pressable>
-            {hasActiveFilter ? (
-              <Button title="Clear filters" variant="ghost" small onPress={clearFilters} />
-            ) : null}
+            <View style={s.flex1} />
+            <FilterButton
+              activeCount={(ownership ? 1 : 0) + (mtype ? 1 : 0)}
+              onClear={clearFilters}
+            >
+              <FilterGroup label="Ownership" options={OWNERSHIP_OPTIONS} value={ownership} onChange={setOwnership} />
+              <FilterGroup label="Movement type" options={TYPE_OPTIONS} value={mtype} onChange={setMtype} />
+            </FilterButton>
           </View>
+          {hasActiveFilter ? (
+            <Button title="Clear filters" variant="ghost" small onPress={clearFilters} />
+          ) : null}
           {Platform.OS === "ios" && iosPicker ? (
             <Card>
               <DateTimePicker
@@ -571,7 +748,12 @@ export default function StockScreen() {
           ) : (
             <ListFade dimmed={movementsLoad.fetching}>
               {movements.length === 0 ? (
-                <EmptyState title={movementsLoad.error ?? "No movements match these filters"} />
+                <EmptyState
+                  // Shown for the error case too, exactly as the web's MovementFeed does: the glyph
+                  // labels the surface ("this is the movement feed"), not the outcome.
+                  icon={<MaterialCommunityIcons name="script-text-outline" size={20} color={colors.faint} />}
+                  title={movementsLoad.error ?? "No movements match these filters"}
+                />
               ) : (
                 <>
                   {movements.map((m) => (
@@ -598,6 +780,16 @@ const s = StyleSheet.create({
   qty: { fontSize: 16, fontWeight: "800" },
   code: { fontSize: 12, color: colors.faint },
   meta: { fontSize: 12, color: colors.muted },
+  // Hire deadline: the sentence an engineer acts on, so it carries weight even before it turns red.
+  hireDue: { fontSize: 12, fontWeight: "700", color: colors.text, marginTop: 2 },
+  overdueText: { color: colors.danger },
+  hireWarn: {
+    backgroundColor: colors.warnSoft,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  hireWarnText: { fontSize: 12, fontWeight: "600", color: colors.warn, lineHeight: 17 },
   tagRow: { flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" },
   ownerTag: { borderRadius: 999, paddingHorizontal: 8, paddingVertical: 2 },
   ownerTagText: { fontSize: 11, fontWeight: "700" },
@@ -610,6 +802,7 @@ const s = StyleSheet.create({
   },
   typePillText: { fontSize: 11, fontWeight: "600", color: colors.muted },
   dateRow: { flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" },
+  flex1: { flex: 1 },
   dateChip: {
     borderRadius: 999,
     borderWidth: 1,
