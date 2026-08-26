@@ -626,6 +626,21 @@ export default function AccountScreen() {
         ) : null}
       </Card>
 
+      {/* Also on the sign-in screen, deliberately. Play's data-safety review expects the notice to
+          be reachable from inside the app by someone already signed in, not only from the store
+          listing — and this is where a user goes looking for anything about their own account. */}
+      <SectionTitle>Legal</SectionTitle>
+      <Card onPress={() => router.push("/privacy")}>
+        <View style={s.legalRow}>
+          <Ionicons name="shield-checkmark-outline" size={20} color={colors.muted} />
+          <View style={s.flex1}>
+            <Text style={s.legalTitle}>Privacy notice</Text>
+            <Text style={s.desc}>How your personal data is collected and used.</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={18} color={colors.faint} />
+        </View>
+      </Card>
+
       <Button
         title="Sign Out"
         variant="danger"
@@ -639,6 +654,8 @@ export default function AccountScreen() {
 
 const s = StyleSheet.create({
   flex1: { flex: 1 },
+  legalRow: { flexDirection: "row", alignItems: "center", gap: 12 },
+  legalTitle: { fontSize: 14, fontWeight: "700", color: colors.text },
   desc: { fontSize: 13, color: colors.muted },
   note: { fontSize: 12, color: colors.faint },
   hintSmall: { fontSize: 12, color: colors.faint },
