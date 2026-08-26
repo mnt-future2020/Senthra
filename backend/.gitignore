@@ -35,3 +35,10 @@ _scratch.*
 
 # Firebase service-account key — never commit
 firebase-service-account*.json
+
+# npm's lockfile — this app is pnpm (pnpm-lock.yaml is the tracked one).
+# An `npm install` run here generates package-lock.json as a byproduct, and it has
+# been swept into a commit by `git add .` before. Two lockfiles resolve independently,
+# so pnpm and npm users end up on different dependency versions from the same commit —
+# with nothing in the diff to explain it. Ignore it rather than rely on remembering.
+package-lock.json
