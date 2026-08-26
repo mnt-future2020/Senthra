@@ -366,6 +366,11 @@ export function findByHireLines(lineIds: string[]): Promise<HireCustodyExit[]> {
  * A row larger than what is left to cover is SPLIT rather than partly settled — one row cannot be half
  * on a note. The remainder keeps standing as an open report, which is the honest reading of a note that
  * accepts one of the two units someone reported.
+ *
+ * "COVERED" MEANS "ALREADY ACCOUNTED FOR", NOT "SETTLED ONTO THIS NOTE". The two differ for a
+ * DISMISSED report, whose unit is still physically quarantined while its claim is closed: the note
+ * cannot settle it, but it must not open a second row for it either. See phase two in the body — that
+ * distinction is the whole reason this returns a number instead of void.
  */
 export async function settleOpenDamageAgainstNoteTx(
   tx: Prisma.TransactionClient,
@@ -386,13 +391,14 @@ async function settleOpenAgainstNoteTx(
   settledAt: Date,
 ): Promise<number> {
   if (qty <= 0) return 0;
+  // The custody state a still-open exit of this kind is in. A damaged unit withdrawn, or a lost one
+  // recovered, is not physically quarantined at all and must never be swept onto a note.
+  const heldState = kind === "loss" ? CUSTODY_LOST : CUSTODY_HELD_DAMAGED;
   const open = await tx.hireCustodyExit.findMany({
     where: {
       purchaseOrderRentalLineId: lineId,
       kind,
-      // The custody state a still-open exit of this kind is in. A damaged unit withdrawn, or a lost one
-      // recovered, owes the provider nothing and must not be swept onto a note.
-      custodyState: kind === "loss" ? CUSTODY_LOST : CUSTODY_HELD_DAMAGED,
+      custodyState: heldState,
       settlementState: SETTLE_UNSETTLED,
     },
     orderBy: { declaredAt: "asc" },
@@ -450,6 +456,58 @@ async function settleOpenAgainstNoteTx(
     });
     left = 0;
   }
+
+  // ── PHASE TWO: units already quarantined that this note can no longer settle ──────────────────
+  //
+  // THE SPLIT THIS FUNCTION EXISTS ON. It does two different jobs in one pass, and they do not have
+  // the same filter:
+  //
+  //   • FINANCIAL — move an open claim onto the note being raised. That is `unsettled` rows only,
+  //     which is the loop above.
+  //   • PHYSICAL  — make sure ONE broken unit is not quarantined twice. That is every row physically
+  //     holding a unit off the shelf, whatever the office decided about the money.
+  //
+  // A DISMISSED row is the case where the two answers differ. "Nothing is owed" closes the claim; it
+  // does not un-break the tester, so the unit is still `held_damaged` and still out of the issuable
+  // pool. Phase one cannot see it — correctly, because settling a dismissed row would silently charge
+  // the provider for a report the office had already dropped. But when the note reported that same
+  // physical unit, phase one returned "covered 0", the caller opened a SECOND exit for it, and
+  // `recomputeCountersTx` — which counts `custodyState` and ignores settlement — then read TWO held
+  // rows for ONE unit. On a 1-unit hire that is `fieldDamageQty: 2`, and the next
+  // `reconcileDamageCustodyTx` derives `gone = total − shelf = 1` and sends the older row to
+  // `returned_to_supplier`, recording a collection that never happened.
+  //
+  // So the leftover is ABSORBED against dismissed rows: it counts as covered, and NOTHING is written.
+  // Not settled (the office dropped that claim and a later note must not silently reopen it), not
+  // reduced, not split — the row is already the record of that unit being off the shelf, and the note
+  // adds nothing to it. Only the RETURN VALUE moves, which is what stops the caller minting a
+  // duplicate.
+  //
+  // Runs AFTER phase one deliberately: live claims are worth more on a note than closed ones, so the
+  // note settles everything it actually can before the remainder is written off as already-accounted.
+  //
+  // The provider still gets charged for what they were sent — the note carries its own
+  // `damagedQuantity` and the caller advances the hire's provider-facing tally from it. What does not
+  // happen is a second quarantine of one physical unit.
+  if (left > 0) {
+    const alreadyHeld = await tx.hireCustodyExit.findMany({
+      where: {
+        purchaseOrderRentalLineId: lineId,
+        kind,
+        custodyState: heldState,
+        settlementState: SETTLE_DISMISSED,
+      },
+      orderBy: { declaredAt: "asc" },
+      select: { qty: true },
+    });
+    for (const row of alreadyHeld) {
+      if (left <= 0) break;
+      // Partial absorption needs no split: nothing about the row changes either way, so there is no
+      // second state for a slice of it to carry.
+      left -= Math.min(left, row.qty);
+    }
+  }
+
   return qty - left;
 }
 
