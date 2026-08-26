@@ -8,6 +8,7 @@ import type {
   CreateRentalReceiptInput,
   CreateRentalReturnInput,
   RecordDamageChargeInput,
+  ChargeCustodyExitInput,
   ReportHireDamageInput,
   ReverseRentalReceiptInput,
 } from "./rental-receipt.validation.js";
@@ -85,6 +86,17 @@ export const createRentalReturn = asyncHandler(async (req, res) => {
 // POST /rental-receipts/damage — report damage found while the kit is with us.
 export const reportHireDamage = asyncHandler(async (req, res) => {
   const receipt = await receiptService.reportHireDamage(req.body as ReportHireDamageInput, actorFrom(req));
+  res.status(201).json({ receipt });
+});
+
+// POST /rental-receipts/custody-exits/:exitId/charge
+// Put one job-reported damage, or one declared loss, to the provider with what they are charging.
+export const chargeCustodyExit = asyncHandler(async (req, res) => {
+  const receipt = await receiptService.chargeCustodyExit(
+    param(req, "exitId"),
+    req.body as ChargeCustodyExitInput,
+    actorFrom(req),
+  );
   res.status(201).json({ receipt });
 });
 

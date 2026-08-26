@@ -77,6 +77,63 @@ beforeEach(() => {
   );
 });
 
+// ── What the row tells a WAREHOUSE ─────────────────────────────────────────────────────────────
+//
+// Two fields the warehouse's on-hire pane needs and the row did not carry.
+//
+// `issuedQuantity` is the difference between what we owe the provider and what is actually on the
+// shelf. Without it the pane showed one number, so a row reading "3 held" invited someone to hand
+// three units to a collecting driver when one was in a van — and `createRentalReturn` answered with a
+// 409 explaining the difference, correctly and too late to be useful.
+//
+// `deliveryAtWarehouse` says which arm of the delivery chain fired. The pane is scoped to one depot,
+// so without it every ordinary row printed that depot's own name, burying the hires that genuinely go
+// straight to a site.
+describe("the row a warehouse reads", () => {
+  it("carries what is out with an engineer, so the shelf figure can be derived", async () => {
+    listRepo.mockResolvedValue({ rows: [hireRow({ receivedQuantity: 3, returnedQuantity: 0, issuedQuantity: 1 })], total: 1 });
+    const { rows } = await listOnHire({ status: "all" }, ACTOR);
+    expect(rows[0].issuedQuantity).toBe(1);
+    // The number the pane prints beside it: 3 on hire − 1 on a job = 2 that a driver could take today.
+    expect(rows[0].receivedQuantity - rows[0].returnedQuantity - rows[0].issuedQuantity).toBe(2);
+  });
+
+  // A row written before the counter existed carries no value at all. Absent is zero — the same
+  // reading the atomic issue guard gives a missing counter — so the pane degrades to "all of it is
+  // here" rather than rendering NaN.
+  it("reads an absent counter as zero rather than undefined", async () => {
+    const row = hireRow();
+    delete row.issuedQuantity;
+    listRepo.mockResolvedValue({ rows: [row], total: 1 });
+    const { rows } = await listOnHire({ status: "all" }, ACTOR);
+    expect(rows[0].issuedQuantity).toBe(0);
+  });
+
+  it("says the delivery fell through to the warehouse when neither address is set", async () => {
+    const { rows } = await listOnHire({ status: "all" }, ACTOR);
+    expect(rows[0].deliveryAtWarehouse).toBe(true);
+  });
+
+  it("says it did NOT when the line carries its own address", async () => {
+    listRepo.mockResolvedValue({ rows: [hireRow({ deliveryAddress: "Site A, Leeds" })], total: 1 });
+    const { rows } = await listOnHire({ status: "all" }, ACTOR);
+    expect(rows[0].deliveryAtWarehouse).toBe(false);
+  });
+
+  // The case the pane got visibly wrong before: an ORDER-level override is a real destination, but
+  // the line's own `deliveryAddress` is null, so a column reading that field alone printed the literal
+  // words "Order delivery address" while the kit went somewhere definite.
+  it("says it did NOT when the ORDER overrides the destination", async () => {
+    listRepo.mockResolvedValue({
+      rows: [hireRow({ purchaseOrder: { ...hireRow().purchaseOrder, deliveryAddress: "12 Site Road" } })],
+      total: 1,
+    });
+    const { rows } = await listOnHire({ status: "all" }, ACTOR);
+    expect(rows[0].deliveryAtWarehouse).toBe(false);
+    expect(rows[0].deliveryLocation.address).toBe("12 Site Road");
+  });
+});
+
 describe("the finished-hire row", () => {
   it("carries the price it committed and the charge added since, separately", async () => {
     const { rows } = await listOnHire({ status: "returned" }, ACTOR);

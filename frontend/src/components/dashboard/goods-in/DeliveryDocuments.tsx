@@ -8,7 +8,7 @@ import { shrinkImage } from "@/lib/image";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { ImageLightbox } from "@/components/ui/ImageLightbox";
 import type { GrnAttachment } from "@/types/goods-in";
-import { isImageType, resolveDocType, stageFiles } from "./docPicker";
+import { isImageType, resolveDocType, stageFiles, UNTYPED_IMAGE } from "./docPicker";
 
 // Shared delivery-document UI for the GRN form + detail. Limits MIRROR the backend
 // source of truth in backend/src/modules/goods-in/goods-in.validation.ts — keep in sync.
@@ -253,7 +253,15 @@ export function AttachmentList({
           upper bound so a long file name truncates instead of stretching the row. */}
       <ul className="max-w-xl divide-y divide-[var(--border-2)]">
         {items.map((a) => {
-          const meta = `${a.fileType.toUpperCase()} · ${kb(a.fileSizeBytes)}`;
+          // Each half is DROPPED when the record does not hold it, rather than printed as a
+          // placeholder: an evidence photo stored as a bare URL knows neither its format nor its
+          // size, and "IMAGE/JPEG · 0 KB" states two things that are not true of it.
+          const meta = [
+            a.fileType === UNTYPED_IMAGE ? "" : a.fileType.toUpperCase(),
+            a.fileSizeBytes > 0 ? kb(a.fileSizeBytes) : "",
+          ]
+            .filter(Boolean)
+            .join(" · ");
           // An image opens IN THE APP; anything else has no in-app viewer and opens its own tab.
           const body = (
             <>
@@ -265,7 +273,7 @@ export function AttachmentList({
               )}
               <span className="min-w-0">
                 <span className="block truncate text-sm font-bold text-[var(--accent)] hover:underline">{a.fileName}</span>
-                <span className="text-[11px] text-[var(--faint)]">{meta}</span>
+                {meta && <span className="text-[11px] text-[var(--faint)]">{meta}</span>}
               </span>
             </>
           );

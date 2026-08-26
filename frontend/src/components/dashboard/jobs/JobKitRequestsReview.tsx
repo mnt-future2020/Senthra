@@ -227,7 +227,10 @@ function ApproveDialog({ request, onClose, onDone, onError }: { request: KitRequ
                 .map((r) => ({ ...r, free: Math.max(0, r.available - (rentalDemand.get(`${l.rentalItemId}|${r.warehouseId}`) ?? 0)) }))
                 .filter((r) => r.free > 0)
                 .sort((a, b) => b.free - a.free)
-                .map((r) => ({ value: r.warehouseId, free: r.free, label: `${r.warehouseName ?? "Depot"}${r.warehouseCode ? ` (${r.warehouseCode})` : ""} · ${r.free} free on hire` }));
+                // "available to issue", matching the engineer's composer: the same demand-netted figure
+                // described two ways reads as two different facts. It is also the narrower, accurate
+                // claim now that the server excludes hires whose period has ended.
+                .map((r) => ({ value: r.warehouseId, free: r.free, label: `${r.warehouseName ?? "Depot"}${r.warehouseCode ? ` (${r.warehouseCode})` : ""} · ${r.free} available to issue` }));
               if (depots.length) {
                 opts[l.id] = depots;
                 defaults[l.id] = depots[0].value;

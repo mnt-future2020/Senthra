@@ -17,7 +17,7 @@ import { capQty } from "./kitRequestQty";
 import { EmptyState, fmtDate } from "@/components/dashboard/portal/portalUi";
 import type { Job } from "@/types/job";
 import type { Msg } from "@/components/ui/types";
-import { availabilityParts, kitItemAvailability } from "./kitItemAvailability";
+import { availabilityParts, kitItemAvailability, rentalAvailabilityParts } from "./kitItemAvailability";
 
 // Engineer-portal panel on a job: raise a request for MORE kit (extra units of a planned item, or a
 // new item picked from the catalogue) for the planner to review, and track the status of the
@@ -309,6 +309,19 @@ export function EngineerKitRequests({ job, locked, open, onOpenChange }: { job: 
 
 // ── Request modal ────────────────────────────────────────────────────────────────────────────
 
+/**
+ * What a composer row knows about where its stock is.
+ *
+ * `depots` is present ONLY for hired equipment, and doubles as the discriminator: owned stock and
+ * consignment have no hire behind them, so a row carrying depots is a rental and must be described as
+ * "available to issue" rather than as stock we hold. See rentalAvailabilityParts.
+ */
+interface Stock {
+  warehouse: number;
+  van: number;
+  depots?: readonly { warehouseName: string | null }[];
+}
+
 interface PlannedOption {
   key: string;
   source: "irm" | "customer_stock" | "rental" | "misc";
@@ -341,12 +354,19 @@ function customerStockLabel(it: KitItemCustomerStockOption): string {
   return `${where} · ${it.qty} in stock${it.serialNumber ? ` · SN ${it.serialNumber}` : ""}`;
 }
 
-/** One-line label for a rental option: "RNT-0007 · Leeds +1 more · 4 free on hire". */
+/**
+ * One-line label for a rental option: "RNT-0007 · Leeds +1 more · 4 available to issue".
+ *
+ * Phrased to match the planned-row sub-line (rentalAvailabilityParts) rather than the older "N free on
+ * hire", because the two sit in the SAME modal describing the same figure and read as two different
+ * facts when they are worded differently. "Available to issue" is also the accurate claim now that the
+ * server excludes hires whose period has ended.
+ */
 function rentalLabel(it: KitItemRentalOption): string {
-  if (it.depots.length === 0) return `${it.code} · none on hire`;
+  if (it.depots.length === 0) return `${it.code} · none available to issue`;
   const [first, ...rest] = it.depots;
   const where = `${first.warehouseName ?? "Depot"}${rest.length ? ` +${rest.length} more` : ""}`;
-  return `${it.code} · ${where} · ${it.quantityOnHand} free on hire`;
+  return `${it.code} · ${where} · ${it.quantityOnHand} available to issue`;
 }
 
 function plannedOptionsFrom(job: Job): PlannedOption[] {
@@ -444,7 +464,7 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
   // showing only the sum is what made this modal read "1995 free to request" for an item the
   // field-stock composer showed as "1992 in stock", with nothing explaining the difference.
   // `null` = unknown (misc lines, or the lookup failed) — never cap on a guess.
-  const stockFor = (source: string, irmItemId: string | null, cseId: string | null, rentalItemId?: string | null): { warehouse: number; van: number } | null => {
+  const stockFor = (source: string, irmItemId: string | null, cseId: string | null, rentalItemId?: string | null): Stock | null => {
     if (source === "irm" && irmItemId) {
       const a = avail.irm[irmItemId];
       return a ? { warehouse: a.quantityOnHand, van: a.heldByEngineers } : null;
@@ -452,8 +472,14 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
     if (source === "rental" && rentalItemId) {
       const a = avail.rental[rentalItemId];
       // van is structurally 0: hired kit is never transferable between engineers, so the split reads
-      // "N free on hire, none on a van" rather than leaving the second figure unknown.
-      return a ? { warehouse: a.quantityOnHand, van: 0 } : null;
+      // "N available to issue, none on a van" rather than leaving the second figure unknown.
+      //
+      // `depots` rides along so the sub-line can NAME where the kit is. That is not decoration for a
+      // rental: a hire is collected from the depot that took delivery and can never come off a van, so
+      // "where" is the only thing that tells the engineer whether the number is reachable. Its presence
+      // is also what marks this row as hired equipment for AvailabilityLine, which must not describe it
+      // as stock we own.
+      return a ? { warehouse: a.quantityOnHand, van: 0, depots: a.depots } : null;
     }
     if (source === "customer_stock" && cseId) {
       // Consignment has no van figure by design — see the note on qty in jobKitRequest.service.
@@ -776,14 +802,21 @@ function RequestModal({ job, onClose, onSent }: { job: Job; onClose: () => void;
 // a failed lookup must not render a confident "0") — saying nothing beats saying something wrong.
 // Turns negative once the asked-for quantity passes what could be sourced, which is the moment the
 // planner would have had to reject it.
-function AvailabilityLine({ stock, want }: { stock: { warehouse: number; van: number } | null; want: number }) {
+function AvailabilityLine({ stock, want }: { stock: Stock | null; want: number }) {
   if (stock == null) return null;
   const free = stock.warehouse + stock.van;
   if (free <= 0) return <div className="text-[10px] font-semibold text-[var(--neg)]">None free to request</div>;
   const short = want > free;
+  // Hired equipment gets its own sentence. This row used to read "23 in stock" for a fibre tester —
+  // false twice over: it is not our stock, and the figure is bounded by a hire period rather than by
+  // what we own. The item SEARCH list above already said "N free on hire" for the very same item, so
+  // the modal contradicted itself. `depots` marks the row as a rental (see Stock).
+  const text = stock.depots
+    ? rentalAvailabilityParts(free, stock.depots)
+    : availabilityParts(stock.warehouse, stock.van);
   return (
     <div className={`text-[10px] font-semibold ${short ? "text-amber-600" : "text-[var(--muted)]"}`}>
-      {availabilityParts(stock.warehouse, stock.van)}
+      {text}
       {short ? " — more than that isn’t available" : ""}
     </div>
   );

@@ -9,7 +9,6 @@ import {
   createPurchaseOrderSchema,
   createPurchaseOrdersSplitSchema,
   poAssignPmSchema,
-  poAttachmentSchema,
   poCancelSchema,
   poDeliveryDateSchema,
   poRejectSchema,
@@ -17,6 +16,8 @@ import {
   updatePurchaseOrderSchema,
   closeHireShortSchema,
   extendHireSchema,
+  declareHireLostSchema,
+  recoverHireLossSchema,
 } from "./purchase-order.validation.js";
 
 const router = Router();
@@ -109,13 +110,6 @@ router.patch(
 );
 
 // --- attachments ------------------------------------------------------------
-router.post(
-  "/:id/attachments",
-  requirePermission("purchase_orders.edit"),
-  writeLimiter,
-  validateBody(poAttachmentSchema),
-  poController.addAttachment,
-);
 router.delete(
   "/:id/attachments/:attachmentId",
   requirePermission("purchase_orders.edit"),
@@ -169,5 +163,39 @@ router.patch(
   validateBody(extendHireSchema),
   poController.extendHire,
 );
+
+// Declaring hired kit lost, and booking it back in if it turns up.
+//
+// `HIRE_SETTLE_PERMISSIONS`, exactly as close-short above — and for the same reason, from the other
+// end of the hire. Close short says "the rest is never arriving"; this says "the rest is never coming
+// back". Both are decisions about what the provider is still owed, both are learned by the people
+// working the equipment rather than by procurement, and both are warehouse-scoped at the service.
+//
+// The pair rather than `rentals.hire.settle` alone because `manage` is documented as a SUPERSET of
+// settle (see permissions.ts) — every settle-class route in this module takes both, and taking only
+// the narrower key here would lock out a procurement role that legitimately holds the wider one.
+router.post(
+  "/:id/rental-lines/:lineId/declare-lost",
+  requireAnyPermission(...HIRE_SETTLE_PERMISSIONS),
+  writeLimiter,
+  validateBody(declareHireLostSchema),
+  poController.declareHireLost,
+);
+router.post(
+  "/:id/custody-exits/:exitId/recover",
+  requireAnyPermission(...HIRE_SETTLE_PERMISSIONS),
+  writeLimiter,
+  validateBody(recoverHireLossSchema),
+  poController.recoverHireLoss,
+);
+
+// Reading the custody record back. `rentals.view` — seeing that a tester was lost or broken is part of
+// seeing the hire; ACTING on it is what needs settlement authority (the two POSTs above).
+//
+// The open-list route is declared BEFORE the :id one it would otherwise be swallowed by — "rental-lines"
+// is not an ObjectId, but Express matches on order, not on shape.
+router.get("/rental-lines/custody-exits", requirePermission("rentals.view"), poController.listOpenCustodyExits);
+router.get("/rental-lines/:lineId/custody-exits", requirePermission("rentals.view"), poController.listHireCustodyHistory);
+router.get("/:id/custody-exits", requirePermission("rentals.view"), poController.listOrderCustodyExits);
 
 export default router;

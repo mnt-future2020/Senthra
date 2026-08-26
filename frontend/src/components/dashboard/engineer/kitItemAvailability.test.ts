@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { availabilityParts, kitItemAvailability } from "./kitItemAvailability";
+import { availabilityParts, kitItemAvailability, rentalAvailabilityParts } from "./kitItemAvailability";
 import type { KitItemOption } from "@/services/jobKitRequest.service";
 
 const irm = (quantityOnHand: number, heldByEngineers: number): KitItemOption => ({
@@ -179,5 +179,53 @@ describe("availabilityParts — one vocabulary for where the stock is", () => {
   // The IRM search row's label must BE this, so the two can't drift.
   it("is what the IRM search row renders", () => {
     expect(kitItemAvailability(irm(4, 3)).label).toBe(availabilityParts(4, 3));
+  });
+});
+
+// ── Hired equipment is not stock we own ────────────────────────────────────────────────────────
+//
+// The bug: a fibre tester on hire rendered as "23 in stock" on the planned-row sub-line, because that
+// row called the generic formatter above. False twice over — it is not our stock, and the figure is
+// bounded by a hire period rather than by what we own — and the SEARCH row for the very same item in
+// the very same modal described it differently, so the modal contradicted itself.
+describe("rentalAvailabilityParts — hired equipment", () => {
+  const depot = (warehouseName: string | null) => ({ warehouseName });
+
+  it("never describes hired equipment as stock", () => {
+    expect(rentalAvailabilityParts(23, [depot("test work")])).not.toContain("in stock");
+  });
+
+  it("states what can actually go out, and from where", () => {
+    expect(rentalAvailabilityParts(23, [depot("test work")])).toBe("Available to issue: 23 · test work");
+  });
+
+  // An engineer with kit at several depots needs to know there is a choice, not read the list — this
+  // is a sub-line under a quantity stepper.
+  it("names one depot and counts the rest", () => {
+    expect(rentalAvailabilityParts(23, [depot("Leeds"), depot("York"), depot("Hull")])).toBe(
+      "Available to issue: 23 · Leeds +2 more",
+    );
+  });
+
+  it("falls back to a neutral word when a depot has no name", () => {
+    expect(rentalAvailabilityParts(4, [depot(null)])).toBe("Available to issue: 4 · Depot");
+  });
+
+  // No depots resolved (the lookup returned a total but no breakdown): still say the useful half
+  // rather than inventing a location.
+  it("omits the location when there is none to name", () => {
+    expect(rentalAvailabilityParts(4, [])).toBe("Available to issue: 4");
+  });
+
+  // Nothing issuable is a DEAD END for a rental — there is no van fallback, so the only way forward is
+  // to hire one. Reusing the search row's sentence keeps that advice in one place.
+  it("points at the only way forward when nothing is issuable", () => {
+    // The SAME sentence the search row uses, so the advice lives in one place.
+    expect(rentalAvailabilityParts(0, [depot("Leeds")])).toBe(kitItemAvailability(rental(0)).label);
+    expect(rentalAvailabilityParts(0, [])).toContain("raise a purchase request to hire one");
+  });
+
+  it("treats a negative figure as nothing issuable", () => {
+    expect(rentalAvailabilityParts(-1, [])).toContain("raise a purchase request");
   });
 });

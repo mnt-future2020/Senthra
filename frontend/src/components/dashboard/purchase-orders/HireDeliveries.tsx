@@ -15,7 +15,8 @@ import { Modal } from "@/components/ui/Modal";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { formatMoney } from "./poStatus";
 import type { RentalReceipt } from "@/types/rental";
-import { canMoveHires, canSettleHires, noteCanBeReversed } from "@/components/dashboard/rentals/hireActions";
+import { canMoveHires, canSettleHires, noteReversalBlocker } from "@/components/dashboard/rentals/hireActions";
+import type { HireReversalFacts } from "@/components/dashboard/rentals/hireActions";
 import { legOf } from "@/components/dashboard/rentals/hireMovementLeg";
 
 // Everything that physically happened to the hired kit on this order — what arrived, what went back,
@@ -37,7 +38,7 @@ const dateOnly = (iso: string) =>
 export function HireDeliveries({
   purchaseOrderId,
   poStatus,
-  deliveryLockedHireLineIds,
+  hireReversalFacts,
   netOrderedByHireLine,
   onChanged,
   onCount,
@@ -46,14 +47,18 @@ export function HireDeliveries({
   /** A closed or cancelled order takes no more movements — reversals included. */
   poStatus: string;
   /**
-   * The hire lines that will no longer take a DELIVERY reversal, by id.
+   * What each hire on this order has held back from its deliveries, by hire-line id.
    *
-   * Passed in rather than re-fetched: the order's own read already has them, and the only question
-   * asked of them here is whether a delivery note can still be given back. See
-   * `hireRefusesDeliveryReversal` for the two ways a hire says no; gating on the ORDER's status alone
-   * left the button offering a reversal the server always refuses.
+   * Passed in rather than re-fetched: the order's own read already has them. A delivery reversal
+   * asserts its units never came, so it is legitimate only while every one of them is still on our
+   * shelf, whole and unclaimed — a QUANTITY question, since the same hire can refuse one note and
+   * accept another. So the facts come down and the arithmetic happens per note.
+   *
+   * Gating on the ORDER's status alone left the button offering a reversal the server always refuses;
+   * gating on the HIRE's status alone left it offering three more the server refuses for reasons a
+   * status cannot express. See `deliveryReversalBlocker`.
    */
-  deliveryLockedHireLineIds: ReadonlySet<string>;
+  hireReversalFacts: ReadonlyMap<string, HireReversalFacts>;
   /**
    * What each hire line will EVER hold, by id — the denominator its notes print against.
    *
@@ -99,8 +104,17 @@ export function HireDeliveries({
       .listHireDeliveries(purchaseOrderId)
       .then((rows) => {
         if (!active) return;
-        setReceipts(rows);
-        onCount?.(rows.length);
+        // MOVEMENTS ONLY — deliveries and returns. This panel's own sentence says what it is for: a
+        // delivery starts the hire, a return ends it. Damage reports and loss settlements move no
+        // equipment, and they were being listed here AND as their own record in the Damage & loss panel
+        // below, so one fault filled two cards on one page and the page grew twice as fast as the
+        // hire's history did.
+        //
+        // They are not lost by this: the record they belong to carries the note's code, its charge and
+        // its actions, which is one place instead of two.
+        const movements = rows.filter((r) => r.direction === "in" || r.direction === "out");
+        setReceipts(movements);
+        onCount?.(movements.length);
         // Cleared on success, or one transient failure would render its message over freshly loaded
         // rows for the rest of the page's life — every reload here is socket-driven, so it happens.
         setError(null);
@@ -173,6 +187,11 @@ export function HireDeliveries({
       setBusy(false);
     }
   };
+
+  // Per NOTE, not per hire: the same hire can refuse one delivery and accept another, because the
+  // question is whether THIS note's units are all still untouched.
+  const blockedReason = (r: RentalReceipt): string | null =>
+    noteReversalBlocker(r.direction ?? "in", r.lines, hireReversalFacts);
 
   const doReverse = async () => {
     if (!reversing || busy) return;
@@ -290,20 +309,29 @@ export function HireDeliveries({
                     .join(" · ")}
                 </p>
               </div>
+              {/* THE BUTTON, OR WHY THERE ISN'T ONE. A control that silently vanishes reads as a
+                  missing feature and sends somebody looking for a step that does not exist — and the
+                  reasons here are all things they can act on ("reverse the return first"), so the
+                  sentence is worth more than the space it costs. Only shown to the people who would
+                  have had the button: to everyone else its absence is a permission, not a puzzle. */}
               {canReverse &&
                 !r.reversedAt &&
-                noteCanBeReversed(r.direction ?? "in", r.lines.map((l) => l.purchaseOrderRentalLineId), deliveryLockedHireLineIds) && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setReversing(r);
-                    setReason("");
-                  }}
-                  className="flex items-center gap-1.5 rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-[11px] font-bold text-[var(--muted)] transition-colors hover:border-[var(--neg)] hover:text-[var(--neg)]"
-                >
-                  <Undo2 className="h-3.5 w-3.5" /> Reverse
-                </button>
-              )}
+                (blockedReason(r) === null ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setReversing(r);
+                      setReason("");
+                    }}
+                    className="flex items-center gap-1.5 rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-[11px] font-bold text-[var(--muted)] transition-colors hover:border-[var(--neg)] hover:text-[var(--neg)]"
+                  >
+                    <Undo2 className="h-3.5 w-3.5" /> Reverse
+                  </button>
+                ) : (
+                  <p className="max-w-[16rem] shrink-0 text-right text-[11px] text-[var(--faint)]">
+                    Can&apos;t be reversed — {blockedReason(r)}.
+                  </p>
+                ))}
             </div>
 
             <ul className="mt-2 space-y-1">

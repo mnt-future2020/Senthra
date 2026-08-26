@@ -38,6 +38,27 @@ vi.mock("../../lib/realtime.js", () => ({
 }));
 
 import * as receiptRepo from "./rental-receipt.repository.js";
+// The custody records a note settles. Stubbed rather than exercised: what belongs to THIS suite is
+// which of them a note reaches for, not how they move — that is pinned in the repository's own tests.
+vi.mock("#modules/purchase-order/hireCustodyExit.repository.js", () => ({
+  createExitTx: vi.fn(async () => ({ id: "x1" })),
+  moveSettlementStateTx: vi.fn(async () => true),
+  moveCustodyStateTx: vi.fn(async () => true),
+  recomputeCountersTx: vi.fn(async () => ({ fieldDamageQty: 0, lostQuantity: 0 })),
+  findById: vi.fn(),
+  settleOpenDamageAgainstNoteTx: vi.fn(async () => 0),
+  openDamageQtyByLines: vi.fn(async () => new Map<string, number>()),
+  findByReceiptTx: vi.fn(async () => []),
+  findBySourceTx: vi.fn(async () => []),
+  CUSTODY_HELD_DAMAGED: "held_damaged",
+  CUSTODY_RECOVERED: "recovered",
+  CUSTODY_WITHDRAWN: "withdrawn",
+  CUSTODY_LOST: "lost",
+  SETTLE_UNSETTLED: "unsettled",
+  SETTLE_SETTLED: "settled",
+  SETTLE_DISMISSED: "dismissed",
+}));
+import * as custodyExitRepo from "#modules/purchase-order/hireCustodyExit.repository.js";
 import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import { recomputeRentalReceiptStatus } from "#modules/purchase-order/purchase-order.service.js";
 import * as audit from "#modules/audit/audit.service.js";
@@ -49,6 +70,7 @@ import {
   createRentalReturn,
   listForPurchaseOrder,
   removePhoto,
+  chargeCustodyExit,
   reportHireDamage,
   recordDamageCharge,
   reverseRentalReceipt,
@@ -74,7 +96,10 @@ const damagedTotals = vi.mocked(receiptRepo.damagedTotalsByLine);
 // A stand-in transaction client. reverseReceipt now takes the RECOMPUTE rather than its result and
 // runs it against the transaction that writes the answer, so a test that wants to see the updates
 // runs that work itself — with a marker the deferral test can also assert was threaded through.
-const TX = { marker: "tx" } as never;
+// The reversal now also unwinds custody exits through this same transaction, so the stub has to
+// answer the two reads it makes. Empty by default: most reversals here predate custody exits and have
+// none, and the tests that care about them set their own rows.
+const TX = { marker: "tx", hireCustodyExit: { findMany: async () => [] } } as never;
 const updatesOf = async (call = 0) => await reverseReceipt.mock.calls[call]![2](TX);
 
 /**
@@ -156,6 +181,10 @@ beforeEach(() => {
     (async () => ((await findPo(PO_ID)) as unknown as { rentalItems: [] } | null)?.rentalItems ?? []) as never,
   );
   damagedTotals.mockResolvedValue(new Map());
+  // Re-seeded here, not left to the module factory: `clearAllMocks` clears CALLS, not implementations,
+  // so a test that seeds a pending damage report would otherwise leak it into every collection note
+  // after it in the file.
+  vi.mocked(custodyExitRepo.openDamageQtyByLines).mockResolvedValue(new Map());
 });
 
 // A delivery of hired kit is a RECORD, not an assertion: quantities, condition, the supplier's asset
@@ -454,14 +483,82 @@ describe("reverseRentalReceipt", () => {
   // row that proves the arithmetic broke.
   it("refuses once ANY of the delivery has gone back, even on a line still on hire", async () => {
     totalsBy(2, 1); // one unit already returned, hire still on_hire
+    // The refusal now NAMES the claim and counts it, rather than stating a category. Same guard, and
+    // the assertion is on both halves: the shortfall ("1 of the 2") and what is holding it.
     await expect(reverseRentalReceipt(RECEIPT_ID, { reason: "mistake" }, ACTOR)).rejects.toThrow(
-      /already been returned in part/i,
+      /only 1 of the 2 units .* still untouched here — 1 already back with the supplier/i,
     );
     // The refusal is raised from inside the recompute, which now runs within the transaction — so
     // the transaction opens and then aborts, and nothing is stamped or written. Evaluating the guard
     // in there is the point: read outside, it could be satisfied by a snapshot that a concurrent
     // return had already invalidated.
-    await expect(updatesOf()).rejects.toThrow(/already been returned in part/i);
+    await expect(updatesOf()).rejects.toThrow(/still untouched here/i);
+  });
+
+  /**
+   * A LOSS SETTLEMENT IS A CHARGE, AND A CHARGE MOVES NO EQUIPMENT.
+   *
+   * `loss` used to fall past the `damage` and `out` branches into the ARRIVAL path, which reads the
+   * totals of the notes in its own direction and writes them to the hire's `receivedQuantity`. On a
+   * fully-received hire that meant reversing one HLS note set `received` to 0 — a live, delivered
+   * order back on the intake queue, with no error raised and nothing on screen to explain it.
+   *
+   * The assertion is that it writes NOTHING, not that it writes something better: any hire update at
+   * all from a credit note is the bug, whatever value it carries.
+   */
+  it("writes no quantity at all when a loss settlement is reversed", async () => {
+    findReceipt.mockResolvedValue(receiptRow({ code: "HLS-0001", direction: "loss" }));
+    await reverseRentalReceipt(RECEIPT_ID, { reason: "credited" }, ACTOR);
+    await expect(updatesOf()).resolves.toEqual([]);
+  });
+
+  // ── THE THREE CLAIMS A STATUS-SHAPED GUARD COULD NOT SEE ──────────────────────────────────────
+  //
+  // Each of these left the delivery reversible while the units it delivered were demonstrably not on
+  // the shelf. The damage is the same every time and it is silent: `received` drops below what the
+  // surviving records account for, and every screen clamps the negative away with `Math.max(0, …)`.
+  //
+  // Driven through the HIRE LINE rather than the note totals, because that is where each fact lives.
+  const reversingWith = (over: Record<string, unknown>) =>
+    findPo.mockResolvedValue(po({ rentalItems: [hire({ receivedQuantity: 2, hireStatus: "on_hire", ...over })] }));
+
+  it("refuses while any of the delivery is out with an engineer", async () => {
+    reversingWith({ issuedQuantity: 1 });
+    await expect(reverseRentalReceipt(RECEIPT_ID, { reason: "mistake" }, ACTOR)).rejects.toThrow(
+      /1 out with an engineer/i,
+    );
+    await expect(updatesOf()).rejects.toThrow(/out with an engineer/i);
+  });
+
+  it("refuses once a unit has been declared lost", async () => {
+    reversingWith({ lostQuantity: 1 });
+    await expect(reverseRentalReceipt(RECEIPT_ID, { reason: "mistake" }, ACTOR)).rejects.toThrow(
+      /1 declared lost/i,
+    );
+  });
+
+  it("refuses while a unit is reported damaged in our custody", async () => {
+    reversingWith({ fieldDamageQty: 1 });
+    await expect(reverseRentalReceipt(RECEIPT_ID, { reason: "mistake" }, ACTOR)).rejects.toThrow(
+      /1 reported damaged here/i,
+    );
+  });
+
+  // Several at once read as one list, not as whichever the code happened to test first — the bay needs
+  // to know everything in the way, or they clear one and meet the next refusal.
+  it("names every claim in the way, not just the first", async () => {
+    reversingWith({ receivedQuantity: 4, issuedQuantity: 1, lostQuantity: 1, fieldDamageQty: 1 });
+    await expect(reverseRentalReceipt(RECEIPT_ID, { reason: "mistake" }, ACTOR)).rejects.toThrow(
+      /1 out with an engineer, 1 declared lost, 1 reported damaged here/i,
+    );
+  });
+
+  // THE CASE THIS RULE EXISTS TO ALLOW. A hire with two deliveries and some kit out on a job can still
+  // unwind the note whose units never moved — a blanket "anything issued blocks everything" would take
+  // the only correction path away from the larger, busier orders that need it most.
+  it("allows a delivery whose own units are all still on the shelf", async () => {
+    reversingWith({ receivedQuantity: 5, issuedQuantity: 3 });
+    await expect(reverseRentalReceipt(RECEIPT_ID, { reason: "mistake" }, ACTOR)).resolves.toBeTruthy();
   });
 
   // The kit was demonstrably here — it went back. Unwinding its arrival would make `returned` a lie.
@@ -699,6 +796,40 @@ describe("damage is a count of UNITS, and both notes that record it share the co
     expect(updates[0]!.expect).toMatchObject({ damagedQuantity: 1 });
   });
 
+  /**
+   * THE OTHER HALF OF THE DOUBLE-COUNT, and the one the tally alone cannot see.
+   *
+   * An engineer brings a tester back broken. That opens a custody exit and deliberately leaves
+   * `damagedQuantity` at zero — the tally moves when the exit is SETTLED, either by a warehouse note
+   * that consumes it or by `chargeCustodyExit`. So a pending claim is invisible to a cap written
+   * against "units never recorded damaged": the office could name the same broken unit on the
+   * collection note AND charge the exit still standing open behind it, and one fault reached the
+   * supplier's damaged total twice. On a 1-unit hire that is `damagedQuantity: 2` against a single
+   * received unit — a number that cannot be true, on the figure the invoice is argued from.
+   */
+  it("refuses damage already covered by a report waiting for its note", async () => {
+    findPo.mockResolvedValue(po({ status: "fully_received", rentalItems: [onHire({ receivedQuantity: 1 })] }));
+    vi.mocked(custodyExitRepo.openDamageQtyByLines).mockResolvedValue(new Map([[LINE_ID, 1]]));
+    await expect(createRentalReturn(ret(1, 1), ACTOR)).rejects.toThrow(/still waiting for a note/i);
+    expect(createWithCode).not.toHaveBeenCalled();
+  });
+
+  it("still allows the units the open report does not speak for", async () => {
+    findPo.mockResolvedValue(po({ status: "fully_received", rentalItems: [onHire()] }));
+    vi.mocked(custodyExitRepo.openDamageQtyByLines).mockResolvedValue(new Map([[LINE_ID, 1]]));
+    await createRentalReturn(ret(2), ACTOR);
+    const updates = createWithCode.mock.calls[0]![2] as { data: Record<string, unknown> }[];
+    expect(updates[0]!.data).toMatchObject({ damagedQuantity: 2 });
+  });
+
+  // Both ceilings apply at once, or a hire with an open report AND units already on a note would let
+  // the overlap through the arm the other one was holding.
+  it("nets the open report and the tally together, not one or the other", async () => {
+    findPo.mockResolvedValue(po({ status: "fully_received", rentalItems: [onHire({ damagedQuantity: 1 })] }));
+    vi.mocked(custodyExitRepo.openDamageQtyByLines).mockResolvedValue(new Map([[LINE_ID, 1]]));
+    await expect(createRentalReturn(ret(2), ACTOR)).rejects.toThrow(/only 1 of the 3 going back/i);
+  });
+
   // The cap is against units NEVER recorded damaged, not against what is held — a unit that went back
   // damaged is off the site but still on the record, and the two undamaged ones behind it can still
   // break. `held - alreadyDamaged` would refuse the second of them.
@@ -798,6 +929,20 @@ describe("reportHireDamage", () => {
     await expect(
       reportHireDamage(damageBody({ lines: [{ purchaseOrderRentalLineId: LINE_ID, damagedQuantity: 0 }] }), ACTOR),
     ).rejects.toThrow(/at least one line/i);
+  });
+
+  // The form asks WHEN the damage was found, and a note raised on Tuesday for a fault found on Friday
+  // is the ordinary case — the office writes these up in batches. The note itself carried that day
+  // and the custody record stamped the moment it was typed, so one screen showed the same event on
+  // two different dates, and the record's was the one nobody could explain.
+  it("declares the record on the day the damage was found, not the day the note was typed", async () => {
+    await reportHireDamage(damageBody({ reportedDate: new Date("2026-08-20T00:00:00Z") }), ACTOR);
+    const alsoInTx = createWithCode.mock.calls[0]![3] as (tx: unknown, id: string) => Promise<void>;
+    await alsoInTx({}, "r1");
+    expect(vi.mocked(custodyExitRepo.createExitTx)).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ declaredAt: new Date("2026-08-20T12:00:00.000Z") }),
+    );
   });
 
   it("audits under its own action", async () => {
@@ -1273,5 +1418,143 @@ describe("movements against a hire that was closed short", () => {
     );
     const hireUpdates = createWithCode.mock.calls[0]![2] as { expect: Record<string, unknown> }[];
     expect(hireUpdates[0]!.expect).toMatchObject({ returnedQuantity: 0, fullyReceived: false });
+  });
+});
+
+// ── Lost units leave every custody figure this module caps against ─────────────────────────────
+//
+// A unit declared lost is not on the shelf, so it cannot go back to the provider and it cannot be
+// inspected for damage. Both caps net it off; neither did before the loss path existed, and the
+// failure would have been a collection note closing a hire on equipment nobody could produce.
+describe("lost units and the collection/damage caps", () => {
+  it("refuses to return more than is actually still here once units are lost", async () => {
+    findPo.mockResolvedValue(po({ rentalItems: [hire({ receivedQuantity: 3, returnedQuantity: 0, lostQuantity: 1, hireStatus: "on_hire" })] }));
+    await expect(
+      createRentalReturn(
+        { purchaseOrderId: PO_ID, returnDate: new Date("2026-09-20T00:00:00Z"), lines: [{ purchaseOrderRentalLineId: LINE_ID, returnedQuantity: 3 }] },
+        ACTOR,
+      ),
+    ).rejects.toThrow(/only 2 still out/i);
+  });
+
+  it("refuses to report damage on a unit that is lost rather than broken", async () => {
+    findPo.mockResolvedValue(po({ rentalItems: [hire({ receivedQuantity: 2, returnedQuantity: 0, lostQuantity: 2, hireStatus: "on_hire" })] }));
+    await expect(
+      reportHireDamage(
+        { purchaseOrderId: PO_ID, reportedDate: new Date("2026-09-20T00:00:00Z"), conditionNotes: "Screen cracked", lines: [{ purchaseOrderRentalLineId: LINE_ID, damagedQuantity: 1 }] },
+        ACTOR,
+      ),
+    ).rejects.toThrow(/nothing from this line is still with us/i);
+  });
+});
+
+// ── Charging ONE record that already exists ────────────────────────────────────────────────────
+//
+// Damage found at the warehouse is reported on a form, and the note that form creates then carries a
+// charge. Damage found on a JOB was already reported — by the engineer, on the day, with a photograph —
+// so reopening a report form over it asked somebody to describe, date and count it again from memory.
+// This is the one call that supplies the only missing half: the money.
+describe("chargeCustodyExit", () => {
+  const exit = (over: Record<string, unknown> = {}) => ({
+    id: "x1",
+    purchaseOrderRentalLineId: LINE_ID,
+    purchaseOrderId: PO_ID,
+    warehouseId: "w1",
+    kind: "damage",
+    qty: 2,
+    itemName: "Fibre Tester",
+    custodyState: "held_damaged",
+    settlementState: "unsettled",
+    reason: "Screen cracked on site",
+    notes: null,
+    jobNumber: "JOB-2026-0041",
+    declaredAt: new Date("2026-08-24T00:00:00Z"),
+    ...over,
+  });
+
+  const charge = (over: Record<string, unknown> = {}) => chargeCustodyExit("x1", { charge: 250, ...over }, ACTOR);
+
+  beforeEach(() => {
+    vi.mocked(custodyExitRepo.findById).mockResolvedValue(exit() as never);
+    findPo.mockResolvedValue(po({ rentalItems: [hire({ hireStatus: "on_hire", damagedQuantity: 0 })] }));
+  });
+
+  it("raises the provider's document FROM the record, not from a form", async () => {
+    await charge();
+    const [header, lines] = createWithCode.mock.calls[0]!;
+    expect(header).toMatchObject({ direction: "damage" });
+    // The engineer's own words and the day it was FOUND. Stamping today's date onto a fault reported
+    // last week quietly rewrites what a supplier charge is argued from.
+    expect(header).toMatchObject({ conditionNotes: "Screen cracked on site", deliveryDate: new Date("2026-08-24T00:00:00Z") });
+    expect(lines[0]).toMatchObject({ receivedQuantity: 2, damagedQuantity: 2, damageChargePence: 25000 });
+  });
+
+  /**
+   * THE INVOICE ARRIVES AFTER THE VAN LEAVES.
+   *
+   * A hire's damaged units go back to the provider on the collection note — that is the only way they
+   * leave — and the provider then bills us for the damage, days or weeks later. So a record whose
+   * custody has moved to `returned_to_supplier` is precisely the one most likely to need charging.
+   *
+   * The guard here is a DENYLIST (`withdrawn`, `recovered`) and must stay one. Rewritten as "only
+   * `held_damaged` may be charged" it would read as tighter and would silently close the money door at
+   * the exact moment the money turned up.
+   */
+  it("still charges a record whose equipment has already gone back", async () => {
+    vi.mocked(custodyExitRepo.findById).mockResolvedValue(exit({ custodyState: "returned_to_supplier" }) as never);
+    await expect(charge()).resolves.toBeTruthy();
+  });
+
+  it("records an unquoted charge as NOT KNOWN, never as zero", async () => {
+    // A missing quote and a supplier charging nothing are different facts, and only one of them is a
+    // number.
+    await charge({ charge: undefined });
+    expect(createWithCode.mock.calls[0]![1][0]).toMatchObject({ damageChargePence: null });
+  });
+
+  it("advances the provider-facing damaged total, guarded on what it read", async () => {
+    await charge();
+    expect(createWithCode.mock.calls[0]![2]).toEqual([
+      { id: LINE_ID, expect: { damagedQuantity: 0 }, data: { damagedQuantity: 2 } },
+    ]);
+  });
+
+  it("raises a LOSS settlement for a loss, and keeps it out of the damaged figure", async () => {
+    // The figure the provider bills damage on must never carry a unit that was never damaged.
+    vi.mocked(custodyExitRepo.findById).mockResolvedValue(exit({ kind: "loss", custodyState: "lost", reason: "site_theft" }) as never);
+    await charge();
+    expect(createWithCode.mock.calls[0]![0]).toMatchObject({ direction: "loss" });
+    expect(createWithCode.mock.calls[0]![1][0]).toMatchObject({ damagedQuantity: 0, receivedQuantity: 2 });
+    // …and no hire-line write at all: a loss moved its quantity when it was declared.
+    expect(createWithCode.mock.calls[0]![2]).toEqual([]);
+  });
+
+  it("settles the record inside the note's own transaction", async () => {
+    await charge();
+    const alsoInTx = createWithCode.mock.calls[0]![3] as (tx: unknown, id: string) => Promise<void>;
+    await alsoInTx({}, "r1");
+    expect(vi.mocked(custodyExitRepo.moveSettlementStateTx)).toHaveBeenCalledWith(
+      expect.anything(), "x1", "unsettled", "settled", expect.objectContaining({ settledByReceiptId: "r1" }),
+    );
+  });
+
+  it("aborts the whole note when someone settled the record first", async () => {
+    // A document raised for a claim that is already answered is a second bill.
+    vi.mocked(custodyExitRepo.moveSettlementStateTx).mockResolvedValue(false);
+    await charge();
+    const alsoInTx = createWithCode.mock.calls[0]![3] as (tx: unknown, id: string) => Promise<void>;
+    await expect(alsoInTx({}, "r1")).rejects.toThrow(/settled by someone else/i);
+  });
+
+  it("refuses a record that is already settled", async () => {
+    vi.mocked(custodyExitRepo.findById).mockResolvedValue(exit({ settlementState: "settled" }) as never);
+    await expect(charge()).rejects.toThrow(/already been settled/i);
+  });
+
+  it("refuses a withdrawn report and a recovered loss", async () => {
+    for (const state of ["withdrawn", "recovered"]) {
+      vi.mocked(custodyExitRepo.findById).mockResolvedValue(exit({ custodyState: state }) as never);
+      await expect(charge()).rejects.toThrow(/withdrawn/i);
+    }
   });
 });

@@ -62,6 +62,11 @@ const FILTERS: { id: OnHireFilter; label: string }[] = [
   { id: "late", label: "Late arrival" },
   { id: "expiring", label: "Ending soon" },
   { id: "overdue", label: "Overdue" },
+  // Damage or loss the office has not finished with — where the "Hire damage & loss to settle" badge
+  // lands. The backend has answered `?status=custody` since the badge existed; this list did not, so
+  // `OnHireFilter` clamped the unknown value back to "all" and the badge opened the whole register
+  // with no pill lit and no way to find the rows it had counted.
+  { id: "custody", label: "To settle" },
   // The END of the same life, and the only place a finished hire can be found — the warehouse pane,
   // this list and the item's own page are all live-only by design, so a returned hire used to leave
   // every rental screen at once and survive only inside the movement panel of an order you had to

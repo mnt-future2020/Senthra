@@ -5,6 +5,7 @@ import { vi } from "vitest";
 import {
   isReturnMode,
   RETURN_MODES,
+  deliversToWarehouse,
   resolveDeliveryLocation,
   resolveReturnLocation,
   returnLocationLine,
@@ -131,6 +132,45 @@ describe("resolveDeliveryLocation", () => {
 
   it("treats a whitespace-only address as no address", () => {
     expect(resolveDeliveryLocation(ctx({ deliveryAddress: "   " })).address).toBe("1 Depot Way, Leeds, LS1 1AB");
+  });
+
+  // ── Which ARM fired ──────────────────────────────────────────────────────────────────────────
+  //
+  // The warehouse's own on-hire pane is already scoped to one depot, so a delivery column that
+  // resolved to that depot printed the name of the page you were standing on, once per row — burying
+  // the few hires that genuinely go somewhere else. `deliversToWarehouse` is how the pane tells them
+  // apart. It mirrors the chain above, so these cases are asserted AGAINST that chain rather than on
+  // their own: the pair must agree by construction or the pane starts lying about a real address.
+  describe("deliversToWarehouse", () => {
+    it("is false when the line carries its own address", () => {
+      expect(deliversToWarehouse(ctx({ deliveryAddress: "Site A" }))).toBe(false);
+    });
+
+    it("is false when the ORDER overrides the destination", () => {
+      expect(deliversToWarehouse(ctx({ orderDeliveryAddress: "Order override" }))).toBe(false);
+    });
+
+    it("is true only when neither address is set", () => {
+      expect(deliversToWarehouse(ctx())).toBe(true);
+    });
+
+    // Same whitespace rule as the resolver, or a line with a stray space would claim to go somewhere
+    // while the resolver sent it to the depot.
+    it("treats whitespace-only addresses as absent, exactly as the resolver does", () => {
+      expect(deliversToWarehouse(ctx({ deliveryAddress: "   ", orderDeliveryAddress: "  " }))).toBe(true);
+    });
+
+    // The invariant: true EXACTLY when the resolver returned the warehouse arm. Checked across every
+    // combination rather than case by case, because the two living in step is the whole point.
+    it("agrees with the resolver on every combination", () => {
+      for (const deliveryAddress of [null, "  ", "Site A"]) {
+        for (const orderDeliveryAddress of [null, "  ", "Order override"]) {
+          const c = ctx({ deliveryAddress, orderDeliveryAddress });
+          const resolvedToWarehouse = resolveDeliveryLocation(c).label === "Leeds Depot";
+          expect(deliversToWarehouse(c)).toBe(resolvedToWarehouse);
+        }
+      }
+    });
   });
 
   // The return leg's `delivery` mode is DEFINED as this one, so the two can never drift apart —

@@ -3,9 +3,13 @@ import { describe, expect, it } from "vitest";
 import {
   canManageHires,
   damageableNow,
-  hireRefusesDeliveryReversal,
+  groupHiresByItem,
+  heldOnHire,
+  hireCustodySplit,
+  deliveryReversalBlocker,
+  issuableOnHire,
   netOrdered,
-  noteCanBeReversed,
+  noteReversalBlocker,
   shortfallAfterDelivery,
   canMoveHires,
   canSettleHires,
@@ -13,6 +17,7 @@ import {
   hireTakesDelivery,
   isTerminalHireStatus,
 } from "./hireActions";
+import type { HireReversalFacts } from "./hireActions";
 import type { HireStatus } from "@/types/rental";
 
 // A hire line as the screens actually hold one. Typed on its own shape rather than on the narrow
@@ -114,6 +119,178 @@ describe("who can do what to a hire", () => {
 // Damage is a count of UNITS across the whole hire, and the server caps a new report at units NEVER
 // recorded damaged — intersected with what is actually here. The screens were still subtracting the
 // tally from what is HELD, which is a different sum the moment a damaged unit goes back.
+// ── Where the kit we hold actually IS ──────────────────────────────────────────────────────────
+//
+// The warehouse's on-hire pane showed one figure, "units held" = received − returned, which is what we
+// owe the provider. Some of that can be in an engineer's van. A row reading "3 held" therefore invited
+// someone to hand three units to a collecting driver when only two were in the building — and
+// `createRentalReturn` refused with a 409 explaining the difference, correctly and far too late to be
+// useful. These are the client's copy of that server-side split.
+describe("heldOnHire", () => {
+  it("is what arrived less what has gone back", () => {
+    expect(heldOnHire({ receivedQuantity: 5, returnedQuantity: 2 })).toBe(3);
+  });
+
+  it("never goes negative on a hand-edited row", () => {
+    expect(heldOnHire({ receivedQuantity: 1, returnedQuantity: 4 })).toBe(0);
+  });
+});
+
+describe("hireCustodySplit", () => {
+  it("puts everything on the shelf when nothing is out on a job", () => {
+    expect(hireCustodySplit({ receivedQuantity: 3, returnedQuantity: 0, issuedQuantity: 0 })).toEqual({
+      atWarehouse: 3,
+      withEngineers: 0,
+    });
+  });
+
+  // The screenshot case: 3 on hire, 1 with Kansha, so only 2 can go back to the provider today.
+  it("separates what is on a job from what is on the shelf", () => {
+    expect(hireCustodySplit({ receivedQuantity: 3, returnedQuantity: 0, issuedQuantity: 1 })).toEqual({
+      atWarehouse: 2,
+      withEngineers: 1,
+    });
+  });
+
+  it("counts units already gone back to the provider against the holding first", () => {
+    expect(hireCustodySplit({ receivedQuantity: 5, returnedQuantity: 2, issuedQuantity: 1 })).toEqual({
+      atWarehouse: 2,
+      withEngineers: 1,
+    });
+  });
+
+  // The invariant the pane depends on: the two halves are a SPLIT of the holding, so a row can never
+  // display parts that add up to more (or less) than the number above them.
+  it("always sums to what is held", () => {
+    for (const line of [
+      { receivedQuantity: 3, returnedQuantity: 0, issuedQuantity: 1 },
+      { receivedQuantity: 5, returnedQuantity: 2, issuedQuantity: 3 },
+      { receivedQuantity: 1, returnedQuantity: 1, issuedQuantity: 0 },
+      { receivedQuantity: 4, returnedQuantity: 0, issuedQuantity: 4 },
+    ]) {
+      const s = hireCustodySplit(line);
+      expect(s.atWarehouse + s.withEngineers).toBe(heldOnHire(line));
+    }
+  });
+
+  // `issuedQuantity` is a maintained counter; a stale or hand-edited one must not be able to print a
+  // negative shelf figure, which would read as a fault in the pane rather than in the data.
+  it("clamps a counter that claims more is out than is held", () => {
+    expect(hireCustodySplit({ receivedQuantity: 2, returnedQuantity: 0, issuedQuantity: 9 })).toEqual({
+      atWarehouse: 0,
+      withEngineers: 2,
+    });
+  });
+
+  it("treats a negative counter as nothing out", () => {
+    expect(hireCustodySplit({ receivedQuantity: 2, returnedQuantity: 0, issuedQuantity: -3 })).toEqual({
+      atWarehouse: 2,
+      withEngineers: 0,
+    });
+  });
+
+  // A row written before the column existed carries no `issuedQuantity` at all. Absent is zero — the
+  // same reading the server's own guard gives a missing counter — so the pane degrades to "all of it
+  // is here" rather than rendering NaN.
+  it("reads an absent counter as zero", () => {
+    expect(hireCustodySplit({ receivedQuantity: 3, returnedQuantity: 0 })).toEqual({
+      atWarehouse: 3,
+      withEngineers: 0,
+    });
+  });
+});
+
+// ── One row per ITEM, not per contract ─────────────────────────────────────────────────────────
+//
+// A hire LINE is a contract — one item, one period, one price — so a depot holding the same tester on
+// three periods legitimately has three lines. Correct bookkeeping, unreadable as a stock list: one
+// warehouse showed ELEVEN rows of "Fibre Tester", which reads as a yard full of testers when the
+// answer to "can I issue one" was six.
+describe("groupHiresByItem", () => {
+  const line = (over: Partial<Parameters<typeof groupHiresByItem>[0][number]> = {}) => ({
+    id: "l1",
+    rentalItemId: "item-a",
+    rentalItemCode: "RNT-0005",
+    itemName: "Fibre Tester",
+    receivedQuantity: 3,
+    returnedQuantity: 0,
+    issuedQuantity: 0,
+    availableToIssue: 3,
+    hireEndDate: "2026-09-30T00:00:00.000Z",
+    window: "ok" as const,
+    ...over,
+  });
+
+  it("collapses many contracts of one item into a single row", () => {
+    const groups = groupHiresByItem([line({ id: "a" }), line({ id: "b" }), line({ id: "c" })]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].lines).toHaveLength(3);
+    expect(groups[0].itemName).toBe("Fibre Tester");
+  });
+
+  // The whole reason for grouping: the totals answer the question without the reader summing rows and
+  // remembering which were expired.
+  it("sums held, the custody split and what may actually be issued", () => {
+    const groups = groupHiresByItem([
+      // Expired: physically here, but nothing may go out. This is the row that used to mislead.
+      line({ id: "a", receivedQuantity: 3, issuedQuantity: 1, availableToIssue: 0, window: "overdue", hireEndDate: "2026-08-16T00:00:00.000Z" }),
+      line({ id: "b", receivedQuantity: 3, issuedQuantity: 0, availableToIssue: 3 }),
+    ]);
+    expect(groups[0]).toMatchObject({
+      held: 6,
+      atWarehouse: 5,
+      withEngineers: 1,
+      availableToIssue: 3, // NOT 5 — the expired hire's two shelf units cannot go out
+    });
+  });
+
+  // Two catalogue items can share a name. Summing them would report quantities across different
+  // equipment, which is worse than the fragmentation it was meant to fix.
+  it("keys on the item id, never the name", () => {
+    const groups = groupHiresByItem([line({ rentalItemId: "item-a" }), line({ rentalItemId: "item-b" })]);
+    expect(groups).toHaveLength(2);
+  });
+
+  it("takes the soonest deadline in the group", () => {
+    const groups = groupHiresByItem([
+      line({ id: "a", hireEndDate: "2026-10-30T00:00:00.000Z" }),
+      line({ id: "b", hireEndDate: "2026-08-16T00:00:00.000Z" }),
+      line({ id: "c", hireEndDate: "2026-09-30T00:00:00.000Z" }),
+    ]);
+    expect(groups[0].earliestEnd).toBe("2026-08-16T00:00:00.000Z");
+  });
+
+  // The WORST window, not the first line's: a group holding one overdue hire is an overdue group, or
+  // the badge would depend on the order rows happened to arrive in.
+  it("inherits the worst window from its lines, whatever the order", () => {
+    expect(groupHiresByItem([line({ id: "a" }), line({ id: "b", window: "overdue" })])[0].worstWindow).toBe("overdue");
+    expect(groupHiresByItem([line({ id: "a", window: "overdue" }), line({ id: "b" })])[0].worstWindow).toBe("overdue");
+    expect(groupHiresByItem([line({ id: "a" }), line({ id: "b", window: "expiring" })])[0].worstWindow).toBe("expiring");
+  });
+
+  it("puts the worst news first, then sorts by name for a stable order", () => {
+    const groups = groupHiresByItem([
+      line({ id: "a", rentalItemId: "z", itemName: "Zebra Tester" }),
+      line({ id: "b", rentalItemId: "o", itemName: "Overdue Item", window: "overdue" }),
+      line({ id: "c", rentalItemId: "a", itemName: "Alpha Tester" }),
+    ]);
+    expect(groups.map((g) => g.itemName)).toEqual(["Overdue Item", "Alpha Tester", "Zebra Tester"]);
+  });
+
+  // An absent figure means the server did not answer. On a number that authorises handing equipment
+  // out, the safe reading of "unknown" is zero — never the physical count standing in for it.
+  it("treats a missing availability figure as nothing issuable", () => {
+    const rows = [line({ availableToIssue: undefined })];
+    expect(groupHiresByItem(rows)[0].availableToIssue).toBe(0);
+    // …while the physical figures still report honestly.
+    expect(groupHiresByItem(rows)[0].held).toBe(3);
+  });
+
+  it("returns nothing for an empty set rather than an empty group", () => {
+    expect(groupHiresByItem([])).toEqual([]);
+  });
+});
+
 describe("damageableNow", () => {
   it("is what is held while nothing has been reported", () => {
     expect(damageableNow({ receivedQuantity: 3, returnedQuantity: 0, damagedQuantity: 0 })).toBe(3);
@@ -142,26 +319,6 @@ describe("damageableNow", () => {
 
   it("is nothing once the kit has gone back", () => {
     expect(damageableNow({ receivedQuantity: 3, returnedQuantity: 3, damagedQuantity: 0 })).toBe(0);
-  });
-});
-
-describe("hireRefusesDeliveryReversal", () => {
-  // TWO server refusals, not one. The status catches a hire that went back; `shortClosedAt` catches a
-  // part-delivered one that stopped expecting the rest and is STILL on hire — reversing its delivery
-  // would leave `cancelledQuantity` describing units the line no longer has, and the line could never
-  // take a delivery again. Mirroring only the first left the button 409ing on the second.
-  it("refuses on a finished hire", () => {
-    expect(hireRefusesDeliveryReversal({ hireStatus: "returned", shortClosedAt: null })).toBe(true);
-    expect(hireRefusesDeliveryReversal({ hireStatus: "cancelled", shortClosedAt: null })).toBe(true);
-  });
-
-  it("refuses on a hire closed short that is still on hire", () => {
-    expect(hireRefusesDeliveryReversal({ hireStatus: "on_hire", shortClosedAt: "2026-09-05" })).toBe(true);
-  });
-
-  it("allows an ordinary live hire", () => {
-    expect(hireRefusesDeliveryReversal({ hireStatus: "on_hire", shortClosedAt: null })).toBe(false);
-    expect(hireRefusesDeliveryReversal({ hireStatus: "awaiting_delivery", shortClosedAt: null })).toBe(false);
   });
 });
 
@@ -216,35 +373,98 @@ describe("shortfallAfterDelivery", () => {
   });
 });
 
-describe("noteCanBeReversed", () => {
-  const finished = new Set(["line-returned"]);
-
-  // Giving back an ARRIVAL for kit that has demonstrably already gone back is the one the server
-  // refuses: "has already been returned — this delivery can no longer be reversed".
-  it("refuses a delivery reversal once the hire it delivered has finished", () => {
-    expect(noteCanBeReversed("in", ["line-returned"], finished)).toBe(false);
+describe("deliveryReversalBlocker / noteReversalBlocker", () => {
+  const live = (over: Partial<HireReversalFacts> = {}): HireReversalFacts => ({
+    hireStatus: "on_hire",
+    shortClosedAt: null,
+    receivedQuantity: 2,
+    returnedQuantity: 0,
+    issuedQuantity: 0,
+    lostQuantity: 0,
+    damagedHeldQuantity: 0,
+    ...over,
   });
 
-  it("allows a delivery reversal while the hire is still live", () => {
-    expect(noteCanBeReversed("in", ["line-live"], finished)).toBe(true);
+  // REVERSING A DELIVERY ASSERTS THE UNITS NEVER CAME — true only of a unit still on our shelf, whole
+  // and claimed by nobody. The gate used to test the hire's STATUS, which catches exactly one of the
+  // four ways a unit stops being untouched. These three are the ones it let through: each left the
+  // button showing on a delivery the server refuses, and pressing it drove `received` below what the
+  // surviving records account for, where every screen clamps the negative away.
+  it("refuses while any of it is out with an engineer", () => {
+    expect(deliveryReversalBlocker(live({ issuedQuantity: 1 }), 2)).toMatch(/1 out with an engineer/);
   });
 
-  // Undoing a collection is how a hire REOPENS — "they collected the wrong order". Refusing it on a
-  // returned hire would remove the only way back, on the exact hire that needs it.
-  it("allows a collection to be undone on a finished hire — that is what reopens it", () => {
-    expect(noteCanBeReversed("out", ["line-returned"], finished)).toBe(true);
+  it("refuses once a unit has been declared lost", () => {
+    expect(deliveryReversalBlocker(live({ lostQuantity: 1 }), 2)).toMatch(/1 declared lost/);
   });
 
-  // Withdrawing a claim we ourselves made stays possible after the kit goes back. The report cannot
-  // be CREATED then, but that is a different question from taking one back.
-  it("allows a damage claim to be withdrawn on a finished hire", () => {
-    expect(noteCanBeReversed("damage", ["line-returned"], finished)).toBe(true);
+  it("refuses while a unit is reported damaged in our custody", () => {
+    expect(deliveryReversalBlocker(live({ damagedHeldQuantity: 1 }), 2)).toMatch(/1 reported damaged here/);
   });
 
-  // A note can carry several lines. One finished hire on it is enough — the server walks every line
-  // and throws on the first, so a partially-offered reversal would still fail as a whole.
-  it("refuses a multi-line delivery when ANY of its hires has finished", () => {
-    expect(noteCanBeReversed("in", ["line-live", "line-returned"], finished)).toBe(false);
+  it("names every claim in the way, not just the first", () => {
+    const reason = deliveryReversalBlocker(live({ receivedQuantity: 4, issuedQuantity: 1, lostQuantity: 1, damagedHeldQuantity: 1 }), 4);
+    expect(reason).toMatch(/1 out with an engineer, 1 declared lost, 1 reported damaged here/);
+  });
+
+  // THE CASE THE QUANTITY RULE EXISTS TO ALLOW, and the reason this is not simply "anything issued
+  // blocks everything": a hire with two deliveries can still unwind the note whose own units never
+  // moved. A blanket refusal would take the correction path away from the busiest orders.
+  it("allows a delivery whose own units are all still on the shelf", () => {
+    expect(deliveryReversalBlocker(live({ receivedQuantity: 5, issuedQuantity: 3 }), 2)).toBeNull();
+  });
+
+  // Stated rather than inferred. A full return leaves nothing untouched, so the arithmetic would catch
+  // the ordinary case — but a hire closed short with everything already back is set terminal without
+  // its `returnedQuantity` moving, and only the status says so.
+  it("refuses on a finished hire", () => {
+    expect(deliveryReversalBlocker(live({ hireStatus: "returned" }), 2)).toMatch(/finished/);
+    expect(deliveryReversalBlocker(live({ hireStatus: "cancelled" }), 2)).toMatch(/finished/);
+  });
+
+  it("refuses on a hire closed short that is still on hire", () => {
+    expect(deliveryReversalBlocker(live({ shortClosedAt: "2026-09-05" }), 2)).toMatch(/closed short/);
+  });
+
+  it("allows an ordinary live hire", () => {
+    expect(deliveryReversalBlocker(live(), 2)).toBeNull();
+  });
+
+  // ── The note-level wrapper: which LEGS the rule applies to at all ───────────────────────────────
+  const hires = new Map<string, HireReversalFacts>([["line-lost", live({ lostQuantity: 1 })], ["line-live", live()]]);
+  const noteFor = (id: string) => [{ purchaseOrderRentalLineId: id, receivedQuantity: 2 }];
+
+  it("refuses a delivery reversal once something has claimed its units", () => {
+    expect(noteReversalBlocker("in", noteFor("line-lost"), hires)).toMatch(/declared lost/);
+  });
+
+  it("allows a delivery reversal while nothing has", () => {
+    expect(noteReversalBlocker("in", noteFor("line-live"), hires)).toBeNull();
+  });
+
+  // Undoing a collection is how a hire REOPENS — "they collected the wrong order". It only ever gives
+  // units back, so no total can go negative and there is nothing to refuse.
+  it("allows a collection to be undone whatever the hire holds", () => {
+    expect(noteReversalBlocker("out", noteFor("line-lost"), hires)).toBeNull();
+  });
+
+  // Withdrawing a claim we ourselves made stays possible; a loss settlement withdraws money and moves
+  // no equipment at all.
+  it("allows a damage claim and a loss settlement to be withdrawn", () => {
+    expect(noteReversalBlocker("damage", noteFor("line-lost"), hires)).toBeNull();
+    expect(noteReversalBlocker("loss", noteFor("line-lost"), hires)).toBeNull();
+  });
+
+  // A note can carry several lines. The first blocker wins, matching the server, which walks every
+  // line and throws on the first — a partially-offered reversal would still fail as a whole.
+  it("refuses a multi-line delivery when ANY of its hires has a claim", () => {
+    expect(noteReversalBlocker("in", [...noteFor("line-live"), ...noteFor("line-lost")], hires)).toMatch(/declared lost/);
+  });
+
+  // The order in front of us does not always hold every line a note names. Guessing from an absence
+  // is how a gate refuses something the server would allow; the server has the facts, so it answers.
+  it("defers to the server on a line the page does not hold", () => {
+    expect(noteReversalBlocker("in", noteFor("line-unknown"), hires)).toBeNull();
   });
 });
 
@@ -257,5 +477,76 @@ describe("hireKeepsOrderOpen", () => {
   it("is true while the hire is still live", () => {
     expect(hireKeepsOrderOpen(line({ hireStatus: "on_hire" }))).toBe(true);
     expect(hireKeepsOrderOpen(line({ hireStatus: "awaiting_delivery" }))).toBe(true);
+  });
+});
+
+// The client's copy of the server's custody arithmetic. It exists because a pane promising units the
+// scan will refuse is worse than a pane showing nothing — the person who promised them finds out at
+// the counter — so these cases are deliberately the same ones the server's own suite walks.
+describe("lost and damaged units in the client's arithmetic", () => {
+  const line = (over: Record<string, number> = {}) => ({
+    receivedQuantity: 5,
+    returnedQuantity: 0,
+    lostQuantity: 0,
+    issuedQuantity: 0,
+    damagedQuantity: 0,
+    damagedHeldQuantity: 0,
+    ...over,
+  });
+
+  it("drops a lost unit out of what we hold", () => {
+    // We cannot hand back what we do not have. Counting it would offer a collecting driver equipment
+    // that is not in the building.
+    expect(heldOnHire(line({ lostQuantity: 2 }))).toBe(3);
+  });
+
+  it("keeps a damaged unit in what we hold, and out of what may be issued", () => {
+    const l = line({ damagedHeldQuantity: 1 });
+    expect(heldOnHire(l)).toBe(5); // still ours to give back, broken or not
+    expect(issuableOnHire(l)).toBe(4); // …but it must not go out to a new job
+  });
+
+  it("nets the van and the damage together without double-counting either", () => {
+    expect(issuableOnHire(line({ issuedQuantity: 2, damagedHeldQuantity: 1 }))).toBe(2);
+  });
+
+  it("refuses to report damage on a unit that is lost rather than broken", () => {
+    // Claiming damage on equipment nobody can produce is the weakest possible position in a supplier
+    // dispute, so the cap is what we HOLD, not what arrived.
+    expect(damageableNow(line({ lostQuantity: 5 }))).toBe(0);
+  });
+
+  it("reads a row from a server that has not sent the newer counters as none-lost, none-damaged", () => {
+    expect(heldOnHire({ receivedQuantity: 3, returnedQuantity: 0 })).toBe(3);
+    expect(issuableOnHire({ receivedQuantity: 3, returnedQuantity: 0 })).toBe(3);
+  });
+});
+
+/**
+ * A HIRE THAT HOLDS NOTHING IS NOT A HIRE THAT HAPPENED TO NOBODY.
+ *
+ * `heldOnHire` subtracts `lostQuantity` — correctly, a unit nobody can produce is not ours to hand
+ * back — so a hire whose units are ALL declared lost holds zero. The warehouse pane filtered its rows
+ * on `held > 0`, and that hire left the screen entirely, taking its "N declared lost" line and its
+ * share of the summary total with it: the one pane somebody opens to ask what happened to a hire was
+ * the last place its loss was visible.
+ */
+describe("a fully-lost hire is still worth showing", () => {
+  const line = { receivedQuantity: 3, returnedQuantity: 0, lostQuantity: 3, issuedQuantity: 0, damagedHeldQuantity: 0 };
+
+  it("holds nothing", () => {
+    expect(heldOnHire(line)).toBe(0);
+  });
+
+  it("is kept by the pane's row filter anyway", () => {
+    const keep = (r: typeof line) => heldOnHire(r) > 0 || (r.lostQuantity ?? 0) > 0;
+    expect(keep(line)).toBe(true);
+  });
+
+  // And a hire that genuinely has nothing on it still drops out — the filter must not become "show
+  // everything", which is what a returned hire would then be.
+  it("still drops a hire that is simply finished", () => {
+    const keep = (r: typeof line) => heldOnHire(r) > 0 || (r.lostQuantity ?? 0) > 0;
+    expect(keep({ ...line, lostQuantity: 0, returnedQuantity: 3 })).toBe(false);
   });
 });

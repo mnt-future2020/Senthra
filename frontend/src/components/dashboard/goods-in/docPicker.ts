@@ -28,8 +28,19 @@ const EXT_TYPE: Record<string, string> = {
   webp: "webp",
 };
 
-/** Types that render in the lightbox rather than behind a file icon. */
-const IMAGE_TYPES = new Set(["png", "jpg", "gif", "webp"]);
+/**
+ * Types that render in the lightbox rather than behind a file icon.
+ *
+ * `image` is the odd one out: it is not a format, it is "we know this is a photograph but never
+ * recorded which kind". Damage evidence is stored as a bare Cloudinary URL on the record — no file
+ * row, so no name, size, or format — and that URL carries no extension to read one back from. The
+ * upload purpose only ever accepted the four formats above, so the picture always renders; claiming
+ * it is a JPG to get it past this gate would put a made-up format under it on screen.
+ */
+const IMAGE_TYPES = new Set(["png", "jpg", "gif", "webp", "image"]);
+
+/** A `fileType` that says nothing beyond "it is an image" — omitted from the caption. */
+export const UNTYPED_IMAGE = "image";
 
 export const isImageType = (fileType: string): boolean => IMAGE_TYPES.has(fileType);
 

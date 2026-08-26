@@ -58,11 +58,6 @@ export const deleteJob = asyncHandler(async (req, res) => {
   res.json({ ok: true });
 });
 
-// POST /jobs/attachment — upload a document/photo attachment data URI to Cloudinary; returns { url }.
-export const uploadAttachment = asyncHandler(async (req, res) => {
-  const { data, fileName } = req.body as { data: string; fileName?: string };
-  res.json(await jobService.uploadAttachment(data, fileName));
-});
 
 // --- workflow transitions (state machine enforced in the service) -----------
 export const assignJob = asyncHandler(async (req, res) => {

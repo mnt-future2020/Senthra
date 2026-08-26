@@ -5,6 +5,7 @@ import type { RentalReceiptWithRelations } from "./rental-receipt.repository.js"
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import { paginate } from "../../utils/pagination.js";
 import { parseFilterDate } from "../../utils/filter-date.js";
+import { instantForDay } from "../../utils/calendar-day.js";
 import { EXPORT_MAX, EXPORT_PAGING, toCsv } from "../../utils/csv.js";
 import { getRegionalSettings } from "#modules/settings/settings.service.js";
 import { formatDate } from "#modules/document/document.formatter.js";
@@ -16,10 +17,13 @@ import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import { recomputeRentalReceiptStatus } from "#modules/purchase-order/purchase-order.service.js";
 import type { ReceiptDirection } from "./rentalReceiptCode.js";
 import { emitHireUpdated } from "#modules/purchase-order/rentalHire.realtime.js";
+import * as custodyExitRepo from "#modules/purchase-order/hireCustodyExit.repository.js";
+import { hireAtWarehouse, hireUntouched } from "#modules/purchase-order/rentalHire.allocation.js";
 import type {
   CreateRentalReceiptInput,
   CreateRentalReturnInput,
   RecordDamageChargeInput,
+  ChargeCustodyExitInput,
   ReportHireDamageInput,
   ReverseRentalReceiptInput,
 } from "./rental-receipt.validation.js";
@@ -649,6 +653,9 @@ export async function createRentalReturn(
   const now = new Date();
   const lines: receiptRepo.NewReceiptLine[] = [];
   const hireUpdates: HireUpdate[] = [];
+  // Damage already reported but not yet on any provider paper — read ONCE for the whole note rather
+  // than per line. See the cap below for what it is netted against and why.
+  const openDamage = await custodyExitRepo.openDamageQtyByLines(posted.map((l) => l.purchaseOrderRentalLineId));
 
   for (const [i, l] of posted.entries()) {
     const hire = byId.get(l.purchaseOrderRentalLineId);
@@ -667,7 +674,11 @@ export async function createRentalReturn(
       throw conflict(`${hire.itemName} was cancelled — nothing was ever delivered against it.`);
     }
 
-    const here = hire.receivedQuantity ?? 0;
+    // What we still HOLD for the provider: everything that arrived, less what has gone back, less what
+    // is gone for good. A unit declared lost cannot be handed to a collecting driver — offering it here
+    // would let a return note close a hire on equipment nobody can produce.
+    const lost = hire.lostQuantity ?? 0;
+    const here = (hire.receivedQuantity ?? 0) - lost;
     const already = hire.returnedQuantity ?? 0;
     const stillOut = here - already;
     if (stillOut <= 0) throw conflict(`${hire.itemName}: all ${here} received units have already gone back.`);
@@ -709,12 +720,25 @@ export async function createRentalReturn(
     // Against `received - alreadyDamaged` rather than `held - alreadyDamaged`: a unit that went back
     // damaged is off the site but still on the record, and the undamaged ones behind it can still
     // break. Netting it against what is HELD would refuse them.
+    //
+    // OPEN CUSTODY EXITS COUNT AS ALREADY REPORTED, even though they have moved no tally yet. That is
+    // the whole gap: an engineer's damaged return opens an exit and leaves `damagedQuantity` at zero
+    // deliberately — the tally moves when the exit is settled. Netted only against `alreadyDamaged`,
+    // this note could name that same broken unit, and `chargeCustodyExit` would then advance the tally
+    // AGAIN for the exit still standing open behind it. One fault, billed twice, on a total that ended
+    // up higher than the units ever received. Those units are not lost to the note — they reach the
+    // supplier through their own exit, with the engineer's words and photograph on it, which is the
+    // stronger document anyway.
     const alreadyDamaged = hire.damagedQuantity ?? 0;
-    const damageable = Math.min(l.returnedQuantity, here - alreadyDamaged);
+    const pendingDamage = openDamage.get(hire.id) ?? 0;
+    const damageable = Math.max(0, Math.min(l.returnedQuantity, here - alreadyDamaged - pendingDamage));
     if (damaged > damageable) {
       throw conflict(
         `${hire.itemName}: only ${damageable} of the ${l.returnedQuantity} going back ` +
-          `${damageable === 1 ? "is" : "are"} not already reported damaged. ` +
+          `${damageable === 1 ? "is" : "are"} not already reported damaged` +
+          (pendingDamage > 0
+            ? ` — ${pendingDamage} ${pendingDamage === 1 ? "is" : "are"} on a damage report still waiting for a note. `
+            : ". ") +
           `A unit already on a damage report keeps its charge there — recording it again would bill it twice.`,
       );
     }
@@ -786,6 +810,17 @@ export async function createRentalReturn(
     },
     lines,
     hireUpdates,
+    // THE DAMAGE GOES BACK WITH THE KIT. `alsoInTx` runs after the hire counters have landed, so the
+    // reconciliation reads the shelf this collection just left behind rather than the one before it.
+    //
+    // No note field says which damaged units the driver took — a collection note's own damage column
+    // is capped against units never reported, so it can only ever describe NEW damage found at the
+    // door. The shelf is the evidence: it cannot hold more damaged units than it holds units.
+    async (tx) => {
+      for (const l of lines) {
+        await custodyExitRepo.reconcileDamageCustodyTx(tx, l.purchaseOrderRentalLineId);
+      }
+    },
   );
 
   // Deliberately NOT recomputing the order's received status: a return does not un-receive anything.
@@ -836,6 +871,10 @@ export async function reportHireDamage(
   const byId = new Map(po.rentalItems.map((r) => [r.id, r]));
   const lines: receiptRepo.NewReceiptLine[] = [];
   const hireUpdates: HireUpdate[] = [];
+  // Built alongside the note's own lines and written once the note has an id — a custody exit is
+  // keyed on the document that justifies it, and that id does not exist until the note is created.
+  const exitsToOpen: (Omit<custodyExitRepo.NewCustodyExit, "sourceId"> & { sourceType: string })[] = [];
+  const actorLabelForExits = actor?.email ?? null;
 
   for (const [i, l] of posted.entries()) {
     const hire = byId.get(l.purchaseOrderRentalLineId);
@@ -862,7 +901,9 @@ export async function reportHireDamage(
     //
     // This is a count of damaged UNITS, not of damage events. A second fault on a unit already
     // reported is more evidence about the same unit, and belongs on the note that already names it.
-    const held = (hire.receivedQuantity ?? 0) - (hire.returnedQuantity ?? 0);
+    // Netting LOST off as well: damage is a claim about equipment's condition, and a claim about a unit
+    // nobody can produce is the weakest possible position in a dispute with the provider.
+    const held = (hire.receivedQuantity ?? 0) - (hire.returnedQuantity ?? 0) - (hire.lostQuantity ?? 0);
     if (held <= 0) throw conflict(`${hire.itemName}: nothing from this line is still with us.`);
     const alreadyDamaged = hire.damagedQuantity ?? 0;
     // Two ceilings, and the lower wins: only kit HELD can be broken here, and only units never
@@ -905,6 +946,32 @@ export async function reportHireDamage(
       expect: { damagedQuantity: alreadyDamaged },
       data: { damagedQuantity: alreadyDamaged + l.damagedQuantity },
     });
+    // …and a custody exit, which is what actually takes the units out of the ISSUABLE pool. EVERY
+    // damage event opens one, whichever door it came in by — a return scan or this note — because one
+    // physical event must be one row. Counting the note total AND a separate field-damage figure would
+    // quarantine the same tester twice.
+    //
+    // Born SETTLED: this note is the settlement document, so there is nothing left for the office to
+    // do and the row must not appear on the "needs a note" worklist it was created from.
+    exitsToOpen.push({
+      purchaseOrderRentalLineId: hire.id,
+      purchaseOrderId: po.id,
+      poCode: po.code,
+      warehouseId: po.warehouseId,
+      kind: "damage" as const,
+      qty: l.damagedQuantity,
+      itemName: hire.itemName,
+      custodyState: custodyExitRepo.CUSTODY_HELD_DAMAGED,
+      reason: input.conditionNotes?.trim() || l.notes?.trim() || "Damage found while the equipment was with us",
+      notes: l.notes ?? null,
+      declaredBy: actorLabelForExits,
+      // The day the FORM says the damage was found, not the moment this note was typed. Those are the
+      // same day for a report written the day it happened and days apart for the ones written up in a
+      // batch, and the record is read beside the note that carries the reported date — a record
+      // disagreeing with its own note is the kind of discrepancy a supplier gets to point at.
+      declaredAt: instantForDay(input.reportedDate),
+      sourceType: "warehouse_damage_note",
+    });
   }
 
   const actorLabel = actor?.email ?? null;
@@ -930,6 +997,27 @@ export async function reportHireDamage(
     // No equipment moves — it is where it was. Only the damaged tally moves, because only what we
     // know about it has changed.
     hireUpdates,
+    // The custody exits, in the note's own transaction. They quarantine the units and the note settles
+    // them; born together so no window exists in which a damage note is on file and its equipment is
+    // still being offered to the next engineer.
+    async (tx, receiptId) => {
+      const settledAt = new Date();
+      for (const e of exitsToOpen) {
+        // SETTLE WHAT IS ALREADY OPEN FIRST. Most damage on a note was reported days earlier by the
+        // engineer who found it, and that report already took the unit out of the issuable pool.
+        // Opening a second exit for the same tester would quarantine one physical unit twice.
+        const covered = await custodyExitRepo.settleOpenDamageAgainstNoteTx(tx, e.purchaseOrderRentalLineId, e.qty, receiptId, settledAt);
+        const fresh = e.qty - covered;
+        if (fresh <= 0) continue;
+        // Only what this note reports BEYOND the open reports gets a row of its own — damage found at
+        // the warehouse that no engineer had raised.
+        const exit = await custodyExitRepo.createExitTx(tx, { ...e, qty: fresh, sourceId: receiptId });
+        await custodyExitRepo.moveSettlementStateTx(tx, exit.id, custodyExitRepo.SETTLE_UNSETTLED, custodyExitRepo.SETTLE_SETTLED, {
+          settledByReceiptId: receiptId,
+          settledAt,
+        });
+      }
+    },
   );
 
   emitHireUpdated(po.id, po.code);
@@ -1002,6 +1090,54 @@ export async function reverseRentalReceipt(
     );
   }
 
+  // ── WHAT A REVERSAL MEANS FOR CUSTODY, WHICH IS NOT ONE THING ────────────────────────────────
+  //
+  // Withdrawing a note undoes a CLAIM. Whether it also undoes a quarantine depends entirely on where
+  // that quarantine came from, and the two cases are opposites:
+  //
+  //   • an exit this note CREATED (a warehouse damage report) — the report itself is withdrawn, so
+  //     the units were never damaged of record and must return to the issuable pool.
+  //   • an exit this note SETTLED (damage an engineer reported from a job, or a declared loss) — the
+  //     damage still happened and the tester is still broken. Only the charge is withdrawn, so the row
+  //     goes back to UNSETTLED and onto the worklist. Putting a broken unit back on the shelf because
+  //     a credit note was raised is exactly the confusion the two-column state model exists to prevent.
+  //
+  // BOTH MOVES ARE COMPARE-AND-SET, AND BOTH ARE CHECKED. `moveSettlementStateTx` and
+  // `moveCustodyStateTx` return whether they matched; ignoring that return is what makes a state
+  // machine drift, because the failure looks exactly like success — the note gets stamped reversed,
+  // the record it was supposed to release keeps its old state, and no total, log or screen disagrees
+  // with any other. Throwing aborts the whole transaction, so the note stays live and the operator is
+  // told what changed underneath them, which is the only outcome that leaves the two in step.
+  const unwindCustody = async (tx: Prisma.TransactionClient): Promise<void> => {
+    for (const exit of await custodyExitRepo.findByReceiptTx(tx, existing.id)) {
+      const released = await custodyExitRepo.moveSettlementStateTx(
+        tx,
+        exit.id,
+        custodyExitRepo.SETTLE_SETTLED,
+        custodyExitRepo.SETTLE_UNSETTLED,
+        { settledByReceiptId: null, settledAt: null },
+      );
+      if (!released) {
+        throw conflict(
+          `${exit.itemName}: the record this note settled is no longer settled against it — reload and check it before reversing again.`,
+        );
+      }
+    }
+    for (const exit of await custodyExitRepo.findBySourceTx(tx, existing.id)) {
+      if (exit.kind !== "damage") continue;
+      // Takes the record back whether the units are still here or already back with the provider —
+      // see withdrawDamageExitTx. A wrong report is usually found when they dispute the invoice, which
+      // is after they have collected.
+      const withdrawn = await custodyExitRepo.withdrawDamageExitTx(tx, exit.id);
+      if (!withdrawn) {
+        throw conflict(
+          `${exit.itemName}: this report has already been withdrawn — there is nothing left to take back.`,
+        );
+      }
+      await custodyExitRepo.recomputeCountersTx(tx, exit.purchaseOrderRentalLineId);
+    }
+  };
+
   const reversed = await receiptRepo.reverseReceipt(
     existing.id,
     { reversedAt: new Date(), reversedBy: actor?.email ?? null, reversalReason: input.reason },
@@ -1010,7 +1146,24 @@ export async function reverseRentalReceipt(
     // that writes the answer, so a movement committed a moment ago cannot be silently overwritten.
     // The guards inside it (already returned, already partly back) throw from in there too, which
     // aborts the transaction: exactly what should happen when the reversal is no longer legitimate.
-    (tx) => buildReversalUpdates(direction, existing, tx),
+    async (tx) => {
+      const updates = await buildReversalUpdates(direction, existing, tx);
+      await unwindCustody(tx);
+      return updates;
+    },
+    // AFTER the counters land, because the shelf is what this reads. Reversing a collection puts units
+    // back on it, and the damage records that went out with them have to come back too — otherwise a
+    // corrected collection leaves the equipment here and its damage still filed as gone.
+    //
+    // Only the two legs that move the shelf. A damage report and a loss settlement change no quantity,
+    // so there is nothing for this to re-partition and their own paths already recompute the counters.
+    direction === "in" || direction === "out"
+      ? async (tx) => {
+          for (const l of existing.lines) {
+            await custodyExitRepo.reconcileDamageCustodyTx(tx, l.purchaseOrderRentalLineId);
+          }
+        }
+      : undefined,
   );
 
   // Only an arrival can change how much of the ORDER has been received. Same rule as the create
@@ -1127,18 +1280,252 @@ export async function recordDamageCharge(
   return toPublic(saved);
 }
 
+/**
+ * Put ONE custody exit to the provider and record what they are charging — in a single act.
+ *
+ * ── Why this is not the report form ────────────────────────────────────────────────────────────
+ *
+ * Damage found at the warehouse is REPORTED on a form, and the note that form creates then carries a
+ * charge, entered afterwards through a small dialog. Damage found on a job has already been reported —
+ * by the engineer, with a photograph and their own words, on the day it happened. Sending that person
+ * to the report form asked them to describe, date and count something somebody else had already
+ * recorded, from memory, with the real account one click away and unread.
+ *
+ * The missing half is only the money. So this raises the provider's document FROM the record that
+ * already exists, and the same dialog the warehouse leg uses collects the figure. Nothing is retyped
+ * and nothing is reported twice.
+ *
+ * ── What it writes ─────────────────────────────────────────────────────────────────────────────
+ *
+ * A note of the matching direction — `damage` (HDM) or `loss` (HLS) — carrying the exit's own quantity,
+ * words and date, and then the exit is settled against it. NO QUANTITY MOVES: the units moved when the
+ * damage came back or the loss was declared, and a charge moves no equipment.
+ *
+ * The DAMAGE leg still advances the hire's provider-facing `damagedQuantity`, exactly as the report
+ * form does — that figure is what the supplier bills against, and it is a different number from the
+ * custody count that keeps the unit out of the issuable pool.
+ *
+ * Uncapped, and safely so: every writer of that tally leaves `damagedQuantity + open damage exits ≤
+ * received` true, so an exit that still stands open has room reserved for it by construction. The two
+ * notes that could have taken it both refuse to — a warehouse report CONSUMES open exits
+ * (settleOpenDamageAgainstNoteTx) and a collection note NETS them out of its cap
+ * (openDamageQtyByLines). Capping here as well would be unreachable, and reaching it would strand the
+ * exit on the worklist with no document able to clear it.
+ */
+export async function chargeCustodyExit(
+  exitId: string,
+  input: ChargeCustodyExitInput,
+  actor?: AuditActor,
+): Promise<PublicRentalReceipt> {
+  const exit = await custodyExitRepo.findById(exitId);
+  if (!exit) throw notFound("That record no longer exists.");
+  assertWarehouseAccess(actor, exit.warehouseId);
+  if (exit.settlementState !== custodyExitRepo.SETTLE_UNSETTLED) {
+    throw conflict("This record has already been settled with the provider.");
+  }
+  // A withdrawn report never happened and a recovered loss is back on the shelf. Money against either
+  // would be counted by every total that reads live records, and matched by nothing.
+  if (exit.custodyState === custodyExitRepo.CUSTODY_WITHDRAWN || exit.custodyState === custodyExitRepo.CUSTODY_RECOVERED) {
+    throw conflict("This record has been withdrawn — there is nothing to charge against it.");
+  }
+
+  const isLoss = exit.kind === "loss";
+  const po = await loadOrderForNote(exit.purchaseOrderId, isLoss ? "settled on" : "reported on", HOLDING_PO_STATUSES, actor);
+  const hire = po.rentalItems.find((r) => r.id === exit.purchaseOrderRentalLineId);
+  if (!hire) throw conflict("That hire is no longer on this order.");
+
+  const chargePence = toPence(input.charge ?? undefined);
+  const actorLabel = actor?.email ?? null;
+
+  const receipt = await receiptRepo.createWithCode(
+    {
+      purchaseOrderId: po.id,
+      poCode: po.code,
+      supplierId: po.supplierId,
+      supplierName: po.supplierName,
+      warehouseId: po.warehouseId,
+      direction: isLoss ? "loss" : "damage",
+      // The day it was FOUND, not today. A supplier charge is argued from when the fault happened, and
+      // stamping the invoice date onto it quietly rewrites that.
+      deliveryDate: exit.declaredAt,
+      carrier: null,
+      deliveryNoteRef: null,
+      damageChargeRef: input.chargeRef?.trim() || null,
+      condition: isLoss ? "lost" : "damaged",
+      // The engineer's own words. This is the sentence a supplier's charge is argued against, and it
+      // is worth more than anything retyped from memory a week later.
+      conditionNotes: exit.reason,
+      notes: exit.notes,
+      receivedBy: null,
+      createdBy: actorLabel,
+    },
+    [
+      {
+        purchaseOrderRentalLineId: hire.id,
+        itemName: hire.itemName,
+        baseUnit: hire.baseUnit,
+        orderedQuantity: hire.quantity,
+        previouslyReceived: hire.receivedQuantity ?? 0,
+        // "The units this note is about" — both columns on a damage note, and `damagedQuantity` zero on
+        // a loss, whose units were never damaged and must never reach the figure the provider bills
+        // damage on.
+        receivedQuantity: exit.qty,
+        damagedQuantity: isLoss ? 0 : exit.qty,
+        assetTags: [],
+        notes: exit.notes,
+        sortOrder: 0,
+        damageChargePence: chargePence,
+      },
+    ],
+    // The provider-facing damaged total, advanced exactly as the report form advances it. Guarded on
+    // the value read, so a note landing in the gap invalidates this write rather than overwriting it.
+    isLoss
+      ? []
+      : [
+          {
+            id: hire.id,
+            expect: { damagedQuantity: hire.damagedQuantity ?? 0 },
+            data: { damagedQuantity: (hire.damagedQuantity ?? 0) + exit.qty },
+          },
+        ],
+    async (tx, receiptId) => {
+      const settledAt = new Date();
+      const moved = await custodyExitRepo.moveSettlementStateTx(
+        tx,
+        exit.id,
+        custodyExitRepo.SETTLE_UNSETTLED,
+        custodyExitRepo.SETTLE_SETTLED,
+        { settledByReceiptId: receiptId, settledAt },
+      );
+      // Somebody settled it in the window. Aborting takes the note with it, which is right: a document
+      // raised for a claim that is already answered is a second bill.
+      if (!moved) throw conflict("This record was settled by someone else a moment ago. Refresh and check.");
+    },
+  );
+
+  emitHireUpdated(po.id, po.code);
+  audit.record({
+    actor,
+    action: isLoss ? "rental_loss.settled" : "rental_damage.charged",
+    targetType: "purchase_order",
+    targetId: po.id,
+    targetLabel: po.code,
+    metadata: {
+      receipt: receipt.code,
+      changes: [
+        {
+          label:
+            `${hire.itemName}: ${exit.qty} ${isLoss ? "lost" : "damaged"}` +
+            (exit.jobNumber ? ` on ${exit.jobNumber}` : "") +
+            (chargePence != null ? ` · charged £${(chargePence / 100).toFixed(2)}` : " · no charge recorded") +
+            ` · ${receipt.code}`,
+        },
+      ],
+    },
+  });
+  return toPublic(receipt);
+}
+
 /** One action per direction, so the trail reads as what was withdrawn rather than "a receipt". */
 const REVERSAL_AUDIT_ACTION: Record<ReceiptDirection, string> = {
   in: "rental_receipt.reversed",
   out: "rental_return.reversed",
   damage: "rental_damage.reversed",
+  loss: "rental_loss.reversed",
 };
 
 const reversalLabel = (direction: ReceiptDirection, quantity: number): string => {
   if (direction === "out") return `${quantity} back on hire`;
   if (direction === "damage") return `${quantity} no longer reported damaged`;
+  // The units stay LOST — only the money is withdrawn. Saying anything about quantity here would
+  // suggest the equipment came back, which is the one thing a credit note never does.
+  if (direction === "loss") return `charge withdrawn for ${quantity}`;
   return `${quantity} taken back off the hire`;
 };
+
+/**
+ * Why a delivery of `qty` units can no longer be unwound on this hire, or null if it still can.
+ *
+ * NAMES THE CLAIM rather than refusing flatly. "This delivery can no longer be reversed" tells the
+ * receiving bay nothing about what to do next; "1 declared lost, 2 reported damaged" tells them both
+ * why and which record to deal with first. The count comes with it because a hire with several
+ * deliveries can usually still reverse the smaller one, and a bare refusal hides that.
+ */
+function deliveryReversalBlocker(
+  hire: {
+    itemName: string;
+    hireStatus: string;
+    receivedQuantity: number;
+    returnedQuantity: number;
+    issuedQuantity: number;
+    lostQuantity: number;
+    fieldDamageQty: number;
+    shortClosedAt: Date | null;
+  },
+  qty: number,
+  /**
+   * What the LIVE return notes still say for this line, which is not always what the column says.
+   *
+   * The counter and the notes cannot disagree in healthy data — the return path writes one from the
+   * other — so this is not a second opinion, it is a floor. `Math.max` of the two means neither a
+   * stale column nor a note the column has not caught up with can open this gate, and the module's
+   * own rule ("recomputed from the notes rather than decremented") keeps its say.
+   */
+  returnedLive: number,
+): string | null {
+  // A FINISHED hire, stated rather than inferred. The arithmetic below would catch the ordinary way a
+  // hire ends, because a full return leaves `returned === received` and nothing untouched. It would
+  // NOT catch a hire closed short with everything already back: that path sets `hireStatus` from
+  // `stillHeld === 0` and never touches `returnedQuantity` (see closeHireShort). Reading the status
+  // directly costs one comparison and does not depend on two columns agreeing.
+  if (hire.hireStatus === "returned") {
+    return `${hire.itemName} has already been returned — this delivery can no longer be reversed.`;
+  }
+  if (hire.hireStatus === "cancelled") {
+    return `${hire.itemName} was cancelled — nothing was ever delivered against it.`;
+  }
+  // A hire CLOSED SHORT is the quietest way this reversal does damage, and the one the arithmetic
+  // below cannot see. The recompute owns `receivedQuantity`, `fullyReceived` and the status; it knows
+  // nothing about `cancelledQuantity`, so it would put the line back on the intake queue while the
+  // shortfall it cannot reach stays recorded beside it — `received + cancelled = ordered`, the
+  // invariant that column exists for, silently broken. Worse, the line could then never take a
+  // delivery again: `createRentalReceipt` refuses anything carrying `shortClosedAt`. Refused whole,
+  // because reopening a short close is a decision somebody makes deliberately, not a side effect of
+  // correcting a note.
+  if (hire.shortClosedAt) {
+    return (
+      `${hire.itemName} was closed short — the outstanding units are recorded as not arriving, ` +
+      `and reversing this delivery would leave that shortfall describing a hire that no longer exists.`
+    );
+  }
+
+  const returned = Math.max(hire.returnedQuantity, returnedLive);
+  const untouched = hireUntouched({ ...hire, returnedQuantity: returned });
+  if (untouched >= qty) return null;
+
+  // Clamped the same way `hireIssuable` clamps it, so the breakdown can never describe more damaged
+  // units than there is shelf to stand them on.
+  const shelf = hireAtWarehouse({ ...hire, returnedQuantity: returned });
+  // Noun phrases, no verbs: they are joined into one list and a mix of "has"/"are" would have to
+  // agree with each count separately for the sentence to survive two claims at once.
+  const damagedHere = Math.min(shelf, hire.fieldDamageQty);
+  const claims = [
+    returned > 0 ? `${returned} already back with the supplier` : "",
+    hire.issuedQuantity > 0 ? `${hire.issuedQuantity} out with an engineer` : "",
+    hire.lostQuantity > 0 ? `${hire.lostQuantity} declared lost` : "",
+    damagedHere > 0 ? `${damagedHere} reported damaged here` : "",
+  ].filter(Boolean);
+
+  const head = `${hire.itemName}: only ${untouched} of the ${qty} units on this record ${untouched === 1 ? "is" : "are"} still untouched here`;
+  // The fallback is unreachable through the counters — every shortfall has a claim behind it — but a
+  // legacy row with a received figure lower than its own note would otherwise produce a sentence
+  // ending in a dash.
+  if (claims.length === 0) return `${head}, so it can no longer be reversed.`;
+  return (
+    `${head} — ${claims.join(", ")}. ` +
+    `A delivery can only be reversed while everything it delivered is still on the shelf — undo the later record first.`
+  );
+}
 
 /** What each hire line this note touched becomes once the note no longer counts. */
 async function buildReversalUpdates(
@@ -1169,6 +1556,17 @@ async function buildReversalUpdates(
     }));
   }
 
+  // A LOSS SETTLEMENT moves no quantity at all — not even a tally. It is a charge raised against a
+  // unit already declared gone, so withdrawing it withdraws the money and nothing else; the tester is
+  // still lost, and `unwindCustody` putting its record back on the worklist is the whole of the undo.
+  //
+  // This branch is not a refinement, it closes a hole. `loss` used to fall past both checks below into
+  // the ARRIVAL path, which reads `receivedTotalsByLine(po, "loss", "receivedQuantity")` — the totals
+  // of the LOSS notes — and writes them to `receivedQuantity` as the line's absolute received figure.
+  // Reversing one HLS note on a fully-received hire would have set `received` to 0 and put a live,
+  // fully-delivered order back on the intake queue, with no error and nothing on screen to explain it.
+  if (direction === "loss") return [];
+
   const remaining = await receiptRepo.receivedTotalsByLine(existing.purchaseOrderId, direction, "receivedQuantity", tx);
   const hireById = new Map((await receiptRepo.hireLinesForOrderTx(tx, existing.purchaseOrderId)).map((r) => [r.id, r]));
 
@@ -1194,46 +1592,29 @@ async function buildReversalUpdates(
     });
   }
 
-  // An ARRIVAL. Kit that has gone BACK cannot have its arrival unwound — it was demonstrably here.
+  // An ARRIVAL. Reversing one asserts that its units NEVER CAME — so it is legitimate only while every
+  // unit it delivered is still standing on our shelf, whole, and claimed by nobody.
   //
-  // TWO questions, because the two ways a hire gives kit back leave different traces.
+  // This used to ask a narrower question — "has any of it gone back to the supplier?" — in three
+  // status-shaped checks. That is one of the four ways a delivered unit stops being untouched, and it
+  // let the other three straight through: a unit in an engineer's van, a unit declared lost, and a
+  // unit reported damaged in our custody all left the delivery reversible. Reversing then drove
+  // `received` below what the surviving records account for, and every screen clamps the result with
+  // `Math.max(0, …)` — so the arithmetic broke and the pane that would have shown it went blank.
   //
-  // The status catches a hire already CLOSED by a full return. The live return NOTES catch a PARTIAL
-  // return, which leaves the line at `on_hire` and
-  // therefore slipped straight past a status-only guard: reverse the delivery afterwards and the line
-  // has returned more than it ever received. `held` then goes NEGATIVE, every screen clamps it to zero
-  // with Math.max, and the warehouse pane — which lists `held > 0` — drops the one row that proves the
-  // arithmetic broke.
-  const closed = [...hireById.values()].find(
-    (r) => r.hireStatus === "returned" && existing.lines.some((l) => l.purchaseOrderRentalLineId === r.id),
-  );
-  if (closed) {
-    throw conflict(`${closed.itemName} has already been returned — this delivery can no longer be reversed.`);
-  }
-  // A hire CLOSED SHORT is the third way this reversal can do damage, and the quietest. The recompute
-  // below owns `receivedQuantity`, `fullyReceived` and the status; it knows nothing about
-  // `cancelledQuantity`, so it would put the line back on the intake queue while the shortfall it
-  // cannot reach stays recorded beside it — `received + cancelled = ordered`, the invariant that
-  // column exists for, silently broken. Worse, the line could then never take a delivery again:
-  // `createRentalReceipt` refuses anything carrying `shortClosedAt`. Refused whole, for the same
-  // reason a delivery is — reopening a short close is a decision somebody makes deliberately, not a
-  // side effect of correcting a note.
-  const shortClosed = [...hireById.values()].find(
-    (r) => r.shortClosedAt && existing.lines.some((l) => l.purchaseOrderRentalLineId === r.id),
-  );
-  if (shortClosed) {
-    throw conflict(
-      `${shortClosed.itemName} was closed short — the outstanding units are recorded as not arriving, ` +
-        `and reversing this delivery would leave that shortfall describing a hire that no longer exists.`,
-    );
-  }
+  // `hireUntouched` is the whole test, and it is the SAME function the issue guard uses (see its note
+  // on why one number answers both questions). The short close is the one blocker it cannot express,
+  // so it keeps its own check below.
   const returnedByLine = await receiptRepo.receivedTotalsByLine(existing.purchaseOrderId, "out", "receivedQuantity", tx);
-  const partlyBack = existing.lines.find((l) => (returnedByLine.get(l.purchaseOrderRentalLineId) ?? 0) > 0);
-  if (partlyBack) {
-    throw conflict(
-      `${partlyBack.itemName} has already been returned in part — this delivery can no longer be reversed. ` +
-        `Reverse the return first.`,
+  for (const l of existing.lines) {
+    const hire = hireById.get(l.purchaseOrderRentalLineId);
+    if (!hire) continue;
+    const blocker = deliveryReversalBlocker(
+      hire,
+      l.receivedQuantity,
+      returnedByLine.get(l.purchaseOrderRentalLineId) ?? 0,
     );
+    if (blocker) throw conflict(blocker);
   }
 
   return existing.lines.map((l) => {

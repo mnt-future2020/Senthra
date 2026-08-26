@@ -7,10 +7,11 @@ import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import * as audit from "#modules/audit/audit.service.js";
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { requireActiveRentalCategory } from "#modules/rental-category/rental-category.service.js";
-import { getRentalCodePrefix } from "#modules/settings/settings.service.js";
+import { getCompanyTimezone, getRentalCodePrefix } from "#modules/settings/settings.service.js";
+import { startOfDayIn } from "../../utils/filter-date.js";
 import * as rentalCustodyRepo from "#modules/engineer-rental/engineer-rental.repository.js";
 import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
-import { hireAvailable } from "#modules/purchase-order/rentalHire.allocation.js";
+import { hireIssuable } from "#modules/purchase-order/rentalHire.allocation.js";
 import type { CreateRentalItemInput, UpdateRentalItemInput } from "./rental-item.validation.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
@@ -315,11 +316,15 @@ export interface RentalItemWarehouseAvailability {
  */
 export async function getRentalItemAvailability(idOrCode: string): Promise<RentalItemWarehouseAvailability[]> {
   const item = await getRentalItem(idOrCode);
-  const hires = await poRepo.findLiveHiresByRentalItems([item.id]);
+  // ISSUABLE hires, not merely live ones. This feeds two depot PICKERS — the job-planning kit row and
+  // the kit-request approve dialog — and both ask "where can I get one for a job", so a depot whose
+  // only units sit on a hire that has already ended is not an answer. The on-hire board and the
+  // overdue views read their own predicate and still show those units.
+  const hires = await poRepo.findIssuableHiresByRentalItems([item.id], startOfDayIn(await getCompanyTimezone(), new Date()));
 
   const byWarehouse = new Map<string, RentalItemWarehouseAvailability>();
   for (const h of hires) {
-    const free = hireAvailable(h);
+    const free = hireIssuable(h);
     if (free <= 0) continue;
     const due = h.hireEndDate.toISOString();
     const row = byWarehouse.get(h.warehouseId);

@@ -42,6 +42,12 @@ const APPLY = process.argv.includes("--apply");
 const COUNTERS = [
   { field: "issuedQuantity", value: 0 },
   { field: "fieldDamageQty", value: 0 },
+  // Added with rental loss. This one is NOT merely cosmetic on a pre-existing row: `lostQuantity`
+  // joins the issue guard's conditional `where` (it is re-asserted there so a loss landing mid-request
+  // invalidates the write), and MongoDB does not match a missing field on an equality either. The
+  // guard carries its own `isSet: false` arm for exactly that reason, but a stored 0 is what keeps
+  // `received − returned − lost − issued` readable straight out of the database.
+  { field: "lostQuantity", value: 0 },
 ] as const;
 
 async function countMissing(field: string): Promise<number> {

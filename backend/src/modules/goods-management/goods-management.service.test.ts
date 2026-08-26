@@ -1488,6 +1488,34 @@ describe("getOpenDemand", () => {
     const demand = await getOpenDemand();
     expect(demand.size).toBe(0);
   });
+
+  // ── The skip is RIGHT; the bug was leaving the status behind ─────────────────────────────────
+  //
+  // These two tests are the pair that defines the fix. The skip below stays exactly as it was — a
+  // genuinely finished job must not be dragged back into demand, or the contract's
+  // no-double-subtraction rule breaks. What changed is that adding unissued kit now MOVES the job to
+  // `partially_issued` (see reopenIssuanceForAddedKitTx), and this asserts that once it has moved, the
+  // newly added units are counted. Fixing it the other way round — loosening this skip — would have
+  // broken the first of these to fix the second.
+  it("still ignores a genuinely finished awaiting_return job with nothing left to issue", async () => {
+    mockActive.mockResolvedValue([{ id: "j1", kitLines: [irmLine("j1k", 4)] }]);
+    mockSummaries.mockResolvedValue([{ jobId: "j1", goodsStatus: "awaiting_return" }]);
+    mockMovesBatch.mockResolvedValue([{ status: "posted", direction: "issue", items: [{ jobKitLineId: "j1k", qty: 4 }] }]);
+    const demand = await getOpenDemand();
+    expect(demand.size).toBe(0);
+  });
+
+  it("counts newly added unissued kit once the transition has moved the job to partially_issued", async () => {
+    // The state after an additional-kit approval on a job that had reached awaiting_return: the
+    // original line fully issued, a brand-new line with nothing against it.
+    mockActive.mockResolvedValue([{ id: "j1", kitLines: [irmLine("j1k", 4), irmLine("j1k2", 2)] }]);
+    mockSummaries.mockResolvedValue([{ jobId: "j1", goodsStatus: "partially_issued" }]);
+    mockMovesBatch.mockResolvedValue([{ status: "posted", direction: "issue", items: [{ jobKitLineId: "j1k", qty: 4 }] }]);
+    const demand = await getOpenDemand();
+    // Only the new line is owed — the issued one already left the warehouse and counting it here too
+    // would subtract the same units twice.
+    expect(demand.get(`irm|${IRM_ID}|${WH_ID}`)?.demand).toBe(2);
+  });
 });
 
 describe("listDamaged", () => {

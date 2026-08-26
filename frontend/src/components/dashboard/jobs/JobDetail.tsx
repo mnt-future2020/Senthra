@@ -2,9 +2,13 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeftRight, ExternalLink, FileText, Globe, Image as ImageIcon, Link as LinkIcon, Loader2, Lock, Pencil, UserCog, XCircle } from "lucide-react";
+import { ArrowLeftRight, CalendarClock, ExternalLink, FileText, Globe, Image as ImageIcon, Link as LinkIcon, Loader2, Lock, Pencil, UserCog, XCircle } from "lucide-react";
 
 import * as jobService from "@/services/job.service";
+// The shared calendar-day formatter — a hire date is a calendar day stored at UTC midnight, so it has
+// to render in UTC or every viewer behind it reads the day before. Same rule as every other surface
+// that prints one.
+import { formatCalendarDay } from "@/lib/formatDate";
 import { listEngineerOptions } from "@/services/warehouse.service";
 import type { WarehouseManager } from "@/types/warehouse";
 import { useAuth } from "@/hooks/useAuth";
@@ -145,6 +149,38 @@ function JobView({ initial }: { initial: Job }) {
                       <div className="font-semibold text-[var(--ink)]">{l.itemName}</div>
                       {l.seCode && <div className="text-[11px] text-[var(--faint)]">{l.seCode}</div>}
                       {l.description && <div className="text-[11px] text-[var(--muted)]">{l.description}</div>}
+                      {/* THE RETURN DEADLINE, which this table did not show at all.
+                          `hireEndDate`, `hireOverdue` and `hires` have always ridden on the same kit
+                          line the engineer portal renders them from — the office, the people who
+                          actually settle with the provider and pay for the overrun, were reading a
+                          rental row that looked exactly like an IRM one. Only while units are still
+                          out: a line that is fully back owes nothing and a date on it reads as an
+                          outstanding obligation.
+                          Per-hire breakdown when a line drew off more than one order, for the same
+                          reason the engineer's row carries it — one date is not the whole answer. */}
+                      {isRental && l.hireEndDate && l.remaining > 0 && (
+                        <div className="mt-0.5">
+                          <span
+                            className={`flex items-center gap-1 text-[11px] font-semibold ${
+                              l.hireOverdue ? "text-[var(--neg)]" : "text-[var(--muted)]"
+                            }`}
+                          >
+                            <CalendarClock className="h-3 w-3 shrink-0" />
+                            {l.hireOverdue
+                              ? `Was due back ${formatCalendarDay(l.hireEndDate)} — overdue`
+                              : `Return by ${formatCalendarDay(l.hireEndDate)}`}
+                          </span>
+                          {l.hires.length > 1 &&
+                            l.hires.map((h, i) => (
+                              <span
+                                key={`${h.poCode ?? "hire"}-${h.hireEndDate ?? i}`}
+                                className={`block text-[11px] ${h.overdue ? "font-semibold text-[var(--neg)]" : "text-[var(--faint)]"}`}
+                              >
+                                {h.qty} × {h.poCode ?? "—"} · {formatCalendarDay(h.hireEndDate)}
+                              </span>
+                            ))}
+                        </div>
+                      )}
                     </td>
                     {/* One row can hold BOTH origins (kit lines merge), so break it down per source
                         with quantities rather than naming a single place. */}

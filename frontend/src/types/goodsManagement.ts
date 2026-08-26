@@ -26,6 +26,27 @@ export type GoodsLineStatus = GoodsStatus | "returned" | "used";
 
 // ── Scan-lookup result ────────────────────────────────────────────────────────
 
+/** One hire a scan touches, and this hire's share of the units the scan may move. */
+export interface ScanHire {
+  purchaseOrderRentalLineId: string;
+  poCode: string | null;
+  hireEndDate: string | null;
+  overdue: boolean;
+  /**
+   * ISSUE: units to take off this hire. RETURN: units that may go back on it. Either way the cap for
+   * a movement line naming this hire, already spent server-side against what the KIT LINE needs or
+   * owes — so the entries sum to at most that, and every card staged from them will post.
+   */
+  qty: number;
+  /**
+   * ISSUE only: this hire's own issuable stock, which is a different number from `qty` — a hire
+   * holding 4 against a line that needs 3 lends 3 and still HAS 4. This is what the card prints as
+   * "Available"; using `qty` there would show the depot's stock shrinking to whatever this job asked
+   * for.
+   */
+  available?: number;
+}
+
 export interface ScanMatch {
   source: LineSource;
   irmItemId?: string;
@@ -38,6 +59,18 @@ export interface ScanMatch {
   purchaseOrderRentalLineId?: string;
   /** The hire's human context — which order it sits on and when it has to go back. */
   hire?: { poCode: string | null; hireEndDate: string | null; itemName: string; overdue: boolean } | null;
+  /**
+   * RENTALS ONLY — every hire this scan touches, earliest deadline first, the bound one (`hire` above)
+   * at the head. Absent on every non-rental source.
+   *
+   * A movement line names ONE hire, and reporting only the bound one made the rest invisible. Coming
+   * back, a kit line reading "issued 2" offered "Held: 1" and the second unit surfaced only if somebody
+   * thought to scan again after posting. Going out, a line for 12 spread over four orders took four
+   * scan→type→Post cycles, each capped at a number the warehouse discovered by being refused.
+   *
+   * The panel stages a card per entry, so one scan covers the whole line either way.
+   */
+  hires?: ScanHire[];
   jobKitLineId?: string;
   itemName: string;
   uom?: string | null;
@@ -58,6 +91,18 @@ export interface PublicMovementLine {
   itemName: string;
   qty: number;
   condition: LineCondition;
+  /**
+   * The evidence captured at the moment the damage was seen.
+   *
+   * The return scan REQUIRES both before it accepts a damaged unit, and until now no read shape carried
+   * either — so the photograph worth most on the day it was taken could never be looked at again. A
+   * `condition: "damaged"` with nothing behind it is a claim; with the picture and the words it is a
+   * record, and a supplier dispute turns on which of the two you have.
+   *
+   * Null on every good line, and on a damaged line recorded before this was captured.
+   */
+  damagePhotoUrl: string | null;
+  damageReason: string | null;
 }
 
 // ── Movement (issue / return / consume) ──────────────────────────────────────
@@ -225,7 +270,19 @@ export interface DamagedRow {
   id: string;
   warehouseId: string;
   warehouseName: string | null;
-  ownerType: "company" | "customer";
+  /**
+   * Who owns the damaged units — and `rental` is not a third pool, it is a third SOURCE.
+   *
+   * Company and customer rows come from `DamagedStockBalance`, the pool of stock WE hold and can write
+   * off or restore. A rental row is built from the hire's own custody records instead, because a hire
+   * is the provider's equipment: its damage is a charge they will raise, not our shrinkage, and
+   * writing it into that pool would count one fault twice — once against us and once on their invoice.
+   *
+   * They are listed TOGETHER because separating them on screen was the actual failure: a manager
+   * looking for the tester an engineer brought back broken opened this tab, saw only owned stock, and
+   * concluded nothing was wrong. Two sources, one list, one column saying which.
+   */
+  ownerType: "company" | "customer" | "rental";
   irmItemId: string | null;
   customerStockEntryId: string | null;
   customerId: string | null;
@@ -237,6 +294,28 @@ export interface DamagedRow {
   // reason and photo come from the history drill-down below.
   reason: string | null;
   photoUrl: string | null;
+  /**
+   * RENTAL rows only — where it happened and which order settles it.
+   *
+   * Undefined on an owned row. A hire's damage is chased on its purchase order rather than restored to
+   * usable, so the row needs somewhere to send you; and the job and engineer are the two facts a
+   * conversation with the provider turns on.
+   */
+  poCode?: string | null;
+  jobNumber?: string | null;
+  engineerName?: string | null;
+  /** `damage` or `loss`. Owned rows are always damage — nothing else reaches that pool. */
+  exitKind?: "damage" | "loss";
+  /** The hire line this row came off — what its History drill-down is keyed on. */
+  hireLineId?: string;
+  /**
+   * How many individual reports the quantity is made of — rental rows only.
+   *
+   * The owned rows opposite are balances too, but theirs come from a ledger that already knows its own
+   * depth; this one is rolled up here, so the count says out loud that History has more than one thing
+   * in it rather than leaving a "3" looking like a single report of three units.
+   */
+  reportCount?: number;
 }
 
 // ── Report damage on stock already in a warehouse ─────────────────────────────
@@ -280,7 +359,7 @@ export interface DamagedHistoryEntry {
 
 export interface DamagedHistory {
   warehouseId: string;
-  ownerType: "company" | "customer";
+  ownerType: "company" | "customer" | "rental";
   irmItemId: string | null;
   customerStockEntryId: string | null;
   itemName: string;
@@ -386,6 +465,34 @@ export interface CloseReconcileResult {
   summary: JobStockSummary;
   /** `itemCode` is the catalogue code — `itemName` is a kit-line snapshot and is not reliably unique. */
   unaccounted: { itemName: string; itemCode: string | null; qty: number }[];
+  /**
+   * Hired kit still out with the engineer. Non-empty ⇒ THE JOB DID NOT CLOSE.
+   *
+   * A hire is never written off as lost here — it is the provider's equipment, not our shrinkage — so it
+   * never appears in `unaccounted` and the request succeeds whatever else it wrote. What it does do is
+   * hold the job at `awaiting_return`, because `reconciled` LOCKS the job against further scans and the
+   * only way that tester can come home is the return scan the lock would forbid.
+   *
+   * Every caller must check this BEFORE reporting success. A response with an empty `unaccounted` is not
+   * proof the job closed, and treating it as such put a green "Job reconciled" toast on screen and sent
+   * the operator back to a queue where the job was still sitting open.
+   */
+  rentalOutstanding: {
+    itemName: string;
+    itemCode: string | null;
+    qty: number;
+    /**
+     * The exact hires these units sit on — what turns the message into an action.
+     *
+     * Empty when the outstanding units cannot be traced to a hire (a movement line written before hire
+     * ids existed). The row is still listed then, just without a Declare lost button: showing it with
+     * no action beats hiding kit that is genuinely still out.
+     */
+    /** This job's own engineer — who a loss would be declared against. Null on a job with none assigned. */
+    engineerId: string | null;
+    engineerName: string | null;
+    hires: { purchaseOrderRentalLineId: string; purchaseOrderId: string; poCode: string | null; qty: number }[];
+  }[];
 }
 
 export interface UsedLinePayload {

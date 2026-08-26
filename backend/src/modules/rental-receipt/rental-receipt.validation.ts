@@ -206,6 +206,21 @@ export const reportHireDamageSchema = z
   .refine(linesAreDistinct, DISTINCT_MESSAGE);
 export type ReportHireDamageInput = z.infer<typeof reportHireDamageSchema>;
 
+// ── Charging one custody record ─────────────────────────────────────────────────────────────────
+//
+// The dialog that puts an engineer's damage report, or a declared loss, to the provider. Quantity and
+// words come from the record itself, so all this collects is the money — which is the only part that
+// was ever missing.
+export const chargeCustodyExitSchema = z
+  .object({
+    // Nullable AND optional, both meaning "no figure agreed yet". A missing quote is a different fact
+    // from a zero charge, and the record shows "not yet charged" rather than "charged nothing".
+    charge: z.preprocess(emptyToUndef, damageCharge.nullable().optional()),
+    chargeRef: z.preprocess(emptyToUndef, z.string().trim().max(60).optional()),
+  })
+  .strip();
+export type ChargeCustodyExitInput = z.infer<typeof chargeCustodyExitSchema>;
+
 // ── The charge, recorded after the fact ─────────────────────────────────────────────────────────
 //
 // The one value on a note that may be set later instead of requiring the note to be reversed. It

@@ -38,3 +38,28 @@ export function addDays(day: Date, days: number): Date {
 export function daysBetween(from: Date, to: Date): number {
   return Math.round((to.getTime() - from.getTime()) / MS_PER_DAY);
 }
+
+/**
+ * A calendar day somebody CHOSE, resolved to an instant — for the fields that store instants.
+ *
+ * `HireCustodyExit.declaredAt` is an instant, and a damage report carries a day picked on a form.
+ * Putting the day in raw is where the off-by-a-day lives: a calendar day is UTC midnight, and UTC
+ * midnight rendered in the viewer's own zone is the DAY BEFORE for anyone behind UTC. That is the
+ * hazard `lib/formatDate.ts` warns about, and a field holding a mix of real instants and smuggled-in
+ * calendar days cannot be rendered correctly by either formatter.
+ *
+ * So:
+ *  - the day it is NOW keeps the real instant — the ordinary case, and the one where the time of day
+ *    is true and worth keeping: records on one day settle oldest-first, and midnight would flatten
+ *    that ordering into a tie.
+ *  - any OTHER day is anchored at MIDDAY, which reads as that same date in every zone from UTC-12 to
+ *    UTC+11. The time of day is not known — nobody asked for it — and midday says so without lying
+ *    about the date, which is the part somebody will argue over with a supplier.
+ *
+ * "Now" is read in UTC, because that is the zone the day itself was flattened to on the way in.
+ */
+export function instantForDay(day: Date, now: Date = new Date()): Date {
+  return toCalendarDay(day).getTime() === toCalendarDay(now).getTime()
+    ? now
+    : new Date(toCalendarDay(day).getTime() + MS_PER_DAY / 2);
+}

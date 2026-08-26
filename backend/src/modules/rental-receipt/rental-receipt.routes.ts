@@ -9,6 +9,7 @@ import {
   createRentalReceiptSchema,
   createRentalReturnSchema,
   recordDamageChargeSchema,
+  chargeCustodyExitSchema,
   reportHireDamageSchema,
   reverseRentalReceiptSchema,
 } from "./rental-receipt.validation.js";
@@ -74,6 +75,19 @@ router.post(
   writeLimiter,
   validateBody(reportHireDamageSchema),
   receiptController.reportHireDamage,
+);
+// Charging ONE record that already exists — a job's damage report, or a declared loss.
+//
+// `HIRE_SETTLE_PERMISSIONS`, like every other act that agrees money with a supplier: the floor reports
+// what it finds, and settling what we owe for it is a commercial decision. Raising the provider's
+// document is part of this call rather than a form the user fills first, because the report it is
+// raised from was already written — by the engineer, on the day.
+router.post(
+  "/custody-exits/:exitId/charge",
+  requireAnyPermission(...HIRE_SETTLE_PERMISSIONS),
+  writeLimiter,
+  validateBody(chargeCustodyExitSchema),
+  receiptController.chargeCustodyExit,
 );
 // What the supplier is CHARGING for the damage — the one value on a note that can be set after the
 // fact, because it feeds no running total (see recordDamageCharge). `settle`, not the bare floor key
