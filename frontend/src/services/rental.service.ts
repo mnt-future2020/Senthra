@@ -255,6 +255,25 @@ export function chargeCustodyExit(
   return api(`/rental-receipts/custody-exits/${exitId}/charge`, { method: "POST", body: payload });
 }
 
+/**
+ * Answer a damage report with "nothing is owed" — no provider document, no charge.
+ *
+ * The THIRD outcome, and the one a job-reported report had no way to reach. Deliberately its own call
+ * and not `chargeCustodyExit` with a blank figure: that raises an HDM against the provider and
+ * advances the damaged total they are billed on, so using it here would file a claim nobody is making.
+ * A missing charge means "no figure agreed YET"; this means "nobody is paying".
+ *
+ * Moves the SETTLEMENT column only. The units stay exactly as damaged as they were, and stay out of
+ * the issuable pool — see the server, where custody and settlement are two independent columns.
+ */
+export function dismissCustodyExit(
+  purchaseOrderId: string,
+  exitId: string,
+  payload: { reason: string },
+): Promise<{ exitId: string; settlementState: string; changed: boolean }> {
+  return api(`/purchase-orders/${purchaseOrderId}/custody-exits/${exitId}/dismiss`, { method: "POST", body: payload });
+}
+
 /** Every damage/loss event on one hire — the History drill-down for a rental damaged row. */
 export function listHireCustodyHistory(lineId: string): Promise<{ exits: HireCustodyExit[] }> {
   return api(`/purchase-orders/rental-lines/${lineId}/custody-exits`);

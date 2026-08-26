@@ -18,6 +18,7 @@ import {
   extendHireSchema,
   declareHireLostSchema,
   recoverHireLossSchema,
+  dismissCustodyExitSchema,
 } from "./purchase-order.validation.js";
 
 const router = Router();
@@ -187,6 +188,26 @@ router.post(
   writeLimiter,
   validateBody(recoverHireLossSchema),
   poController.recoverHireLoss,
+);
+
+// Answering a damage report with "nothing is owed" — the third outcome, beside charging it and
+// withdrawing the note behind it.
+//
+// `HIRE_SETTLE_PERMISSIONS`, exactly like the charge it is the alternative to (POST
+// /rental-receipts/custody-exits/:exitId/charge). Deciding NOT to bill a provider is the same class of
+// commercial decision as deciding to, taken by the same people, and giving it a narrower key would
+// have left the warehouse floor able to close a claim procurement could not. No new permission: the
+// existing model already expresses "may settle a hire record with the provider", which is precisely
+// what this is.
+//
+// A POST and not a PATCH, matching `recover` above: this records a DECISION taken on a date, not an
+// edit to a field. Warehouse-scoped and transactional at the service, like every other one here.
+router.post(
+  "/:id/custody-exits/:exitId/dismiss",
+  requireAnyPermission(...HIRE_SETTLE_PERMISSIONS),
+  writeLimiter,
+  validateBody(dismissCustodyExitSchema),
+  poController.dismissCustodyExit,
 );
 
 // Reading the custody record back. `rentals.view` — seeing that a tester was lost or broken is part of

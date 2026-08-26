@@ -23,9 +23,13 @@ vi.mock("./hireCustodyExit.repository.js", () => ({
   findByOrder: vi.fn(async () => []),
   findOpenByWarehouses: vi.fn(async () => []),
   moveCustodyStateTx: vi.fn(async () => true),
+  moveSettlementStateTx: vi.fn(async () => true),
   recomputeCountersTx: vi.fn(async () => ({ fieldDamageQty: 0, lostQuantity: 0 })),
   CUSTODY_LOST: "lost",
   CUSTODY_RECOVERED: "recovered",
+  CUSTODY_HELD_DAMAGED: "held_damaged",
+  CUSTODY_RETURNED_TO_SUPPLIER: "returned_to_supplier",
+  CUSTODY_WITHDRAWN: "withdrawn",
   SETTLE_UNSETTLED: "unsettled",
   SETTLE_SETTLED: "settled",
   SETTLE_DISMISSED: "dismissed",
@@ -47,7 +51,7 @@ import * as rentalCustodyRepo from "#modules/engineer-rental/engineer-rental.rep
 import * as custodyExitRepo from "./hireCustodyExit.repository.js";
 import * as poRepo from "./purchase-order.repository.js";
 import { assertWarehouseAccess } from "../../lib/warehouse-access.js";
-import { declareHireLost, listOpenCustodyExits, listOrderCustodyExits, recoverHireLoss } from "./hireLoss.service.js";
+import { declareHireLost, dismissCustodyExit, listOpenCustodyExits, listOrderCustodyExits, recoverHireLoss } from "./hireLoss.service.js";
 
 const HIRE_ID = "e".repeat(24);
 const ENG_ID = "c".repeat(24);
@@ -309,5 +313,203 @@ describe("listOpenCustodyExits", () => {
     vi.mocked(custodyExitRepo.findOpenByWarehouses).mockResolvedValue([] as never);
     await listOpenCustodyExits({ warehouseId: WH_ID, kind: "damage" }, {} as never);
     expect(vi.mocked(custodyExitRepo.findOpenByWarehouses)).toHaveBeenCalledWith([WH_ID], "damage");
+  });
+});
+
+// ── Dismissing a damage report ────────────────────────────────────────────────────────────────
+//
+// The third answer to a damage report, and the one a job-reported exit had no way to reach: the units
+// really are broken and nobody is being billed. Everything here is about what dismissal must NOT do —
+// it is a settlement-only write, and every assertion below pins one thing it must leave alone.
+
+const damageExit = (over: Record<string, unknown> = {}) => ({
+  id: "x".repeat(24),
+  purchaseOrderRentalLineId: HIRE_ID,
+  purchaseOrderId: PO_ID,
+  poCode: "PO-0042",
+  warehouseId: WH_ID,
+  kind: "damage",
+  qty: 2,
+  itemName: "Fibre Tester",
+  custodyState: "held_damaged",
+  settlementState: "unsettled",
+  reason: "Screen cracked in the van",
+  notes: null,
+  photoUrl: "https://cdn/x.jpg",
+  jobId: "a".repeat(24),
+  jobNumber: "JOB-2026-0117",
+  engineerId: ENG_ID,
+  engineerName: "Dave",
+  // A job-reported exit — opened by a return MOVEMENT, so there is no note behind it to withdraw.
+  // This is precisely the row that previously had no way off the worklist except a supplier charge.
+  sourceType: "goods_management_return",
+  sourceId: "m".repeat(24),
+  settledByReceiptId: null,
+  settledAt: null,
+  ...over,
+});
+
+const dismiss = (over: Record<string, unknown> = {}, actor: unknown = { email: "pm@x.co" }) =>
+  dismissCustodyExit({ exitId: "x".repeat(24), reason: "Fair wear over a six-month hire", ...over }, actor as never);
+
+describe("dismissCustodyExit — the money stops, the equipment does not move", () => {
+  beforeEach(() => {
+    vi.mocked(custodyExitRepo.findById).mockResolvedValue(damageExit() as never);
+    vi.mocked(custodyExitRepo.moveSettlementStateTx).mockResolvedValue(true);
+  });
+
+  it("moves a job-reported damage report to dismissed, and writes nothing else", async () => {
+    const res = await dismiss();
+
+    expect(res).toEqual({ exitId: "x".repeat(24), settlementState: "dismissed", changed: true });
+    // The ONE write. Conditional on `unsettled`, so a concurrent charge cannot be overwritten.
+    expect(custodyExitRepo.moveSettlementStateTx).toHaveBeenCalledWith(
+      expect.anything(),
+      "x".repeat(24),
+      "unsettled",
+      "dismissed",
+      // The decision date, and a null receipt — `settledByReceiptId` is what every reader uses to ask
+      // "is there a document behind this", and a dismissal has none.
+      expect.objectContaining({ settledAt: expect.any(Date) }),
+    );
+    expect(custodyExitRepo.moveSettlementStateTx).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates NO supplier document — the whole point of the action", async () => {
+    await dismiss();
+    // A charge raises an HDM through the receipt repository; a dismissal must never reach it. The
+    // hireLoss module does not import it at all, and no exit row is created either.
+    expect(custodyExitRepo.createExitTx).not.toHaveBeenCalled();
+    expect(txStub.hireCustodyExit.create).not.toHaveBeenCalled();
+  });
+
+  it("does NOT touch physical custody — the tester is still broken", async () => {
+    await dismiss();
+    // Custody is the other column, and nothing here may move it. `returned_to_supplier` and
+    // `withdrawn` are custody facts about where equipment is; "nobody is paying" is not one.
+    expect(custodyExitRepo.moveCustodyStateTx).not.toHaveBeenCalled();
+    // Nor the engineer's holding, nor the hire's issued bucket.
+    expect(rentalCustodyRepo.upsertRentalHoldingTx).not.toHaveBeenCalled();
+    expect(poRepo.adjustHireIssuedQtyTx).not.toHaveBeenCalled();
+  });
+
+  it("leaves fieldDamageQty alone, so the units stay OUT of the issuable pool", async () => {
+    await dismiss();
+    // `recomputeCountersTx` derives `fieldDamageQty` from `custodyState` alone. Not calling it is the
+    // proof that dismissal cannot restore a damaged unit to stock: the counter the issuable predicate
+    // reads is never recomputed, because the rows it counts never changed.
+    expect(custodyExitRepo.recomputeCountersTx).not.toHaveBeenCalled();
+  });
+
+  it("does NOT convert the damage into a loss", async () => {
+    await dismiss();
+    expect(custodyExitRepo.createExitTx).not.toHaveBeenCalled();
+    const call = vi.mocked(custodyExitRepo.moveSettlementStateTx).mock.calls[0]!;
+    expect(call[3]).toBe("dismissed");
+  });
+
+  it("leaves the hire's own quantities untouched, so HRN/return caps are unchanged", async () => {
+    await dismiss();
+    // `receivedQuantity`, `returnedQuantity` and `damagedQuantity` all live on the hire line and only
+    // the purchase-order repository writes them. A settlement decision moves no equipment, so none of
+    // them may be reached from here.
+    expect(poRepo.adjustHireIssuedQtyTx).not.toHaveBeenCalled();
+    expect(txStub.engineerRentalHolding.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("preserves the engineer's evidence — the reason, photo, quantity and job context", async () => {
+    await dismiss();
+    const call = vi.mocked(custodyExitRepo.moveSettlementStateTx).mock.calls[0]!;
+    // The update carries the decision date and NOTHING that could overwrite what the engineer wrote.
+    expect(Object.keys(call[4] as object)).toEqual(["settledAt"]);
+  });
+
+  it("records the decision and its reason on the audit trail", async () => {
+    await dismiss({ reason: "Provider agreed to absorb it" });
+    expect(audit.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "rental_damage.dismissed",
+        targetId: PO_ID,
+        metadata: expect.objectContaining({
+          dismissReason: "Provider agreed to absorb it",
+          quantity: 2,
+          jobNumber: "JOB-2026-0117",
+        }),
+      }),
+    );
+  });
+
+  it("is idempotent — a repeated dismissal succeeds without a second decision", async () => {
+    // The compare-and-set loses (already dismissed), and the re-read agrees.
+    vi.mocked(custodyExitRepo.moveSettlementStateTx).mockResolvedValue(false);
+    vi.mocked(custodyExitRepo.findById)
+      .mockResolvedValueOnce(damageExit() as never)
+      .mockResolvedValueOnce(damageExit({ settlementState: "dismissed" }) as never);
+
+    const res = await dismiss();
+
+    expect(res).toEqual({ exitId: "x".repeat(24), settlementState: "dismissed", changed: false });
+    // No second audit entry: nothing changed, and a repeated line would read as a second decision.
+    expect(audit.record).not.toHaveBeenCalled();
+  });
+
+  it("refuses when someone charged it in the same moment", async () => {
+    vi.mocked(custodyExitRepo.moveSettlementStateTx).mockResolvedValue(false);
+    vi.mocked(custodyExitRepo.findById)
+      .mockResolvedValueOnce(damageExit() as never)
+      .mockResolvedValueOnce(damageExit({ settlementState: "settled" }) as never);
+    await expect(dismiss()).rejects.toThrow(/settled by someone else/i);
+  });
+
+  it("refuses a record already settled with the provider", async () => {
+    vi.mocked(custodyExitRepo.findById).mockResolvedValue(damageExit({ settlementState: "settled" }) as never);
+    await expect(dismiss()).rejects.toThrow(/already been settled/i);
+    expect(custodyExitRepo.moveSettlementStateTx).not.toHaveBeenCalled();
+  });
+
+  it("refuses a withdrawn or recovered record — there is no live claim to drop", async () => {
+    vi.mocked(custodyExitRepo.findById).mockResolvedValue(damageExit({ custodyState: "withdrawn" }) as never);
+    await expect(dismiss()).rejects.toThrow(/withdrawn/i);
+    vi.mocked(custodyExitRepo.findById).mockResolvedValue(damageExit({ custodyState: "recovered" }) as never);
+    await expect(dismiss()).rejects.toThrow(/withdrawn/i);
+    expect(custodyExitRepo.moveSettlementStateTx).not.toHaveBeenCalled();
+  });
+
+  it("accepts a report on kit the provider has already collected", async () => {
+    // A wrong claim is usually found when they dispute the invoice, weeks after collection — the same
+    // case `chargeCustodyExit` and the note withdrawal both accept. Custody stays `returned_to_supplier`.
+    vi.mocked(custodyExitRepo.findById).mockResolvedValue(damageExit({ custodyState: "returned_to_supplier" }) as never);
+    await expect(dismiss()).resolves.toMatchObject({ changed: true });
+    expect(custodyExitRepo.moveCustodyStateTx).not.toHaveBeenCalled();
+  });
+
+  it("refuses a LOSS record — a different commercial question", async () => {
+    vi.mocked(custodyExitRepo.findById).mockResolvedValue(damageExit({ kind: "loss", custodyState: "lost" }) as never);
+    await expect(dismiss()).rejects.toThrow(/only a damage report/i);
+    expect(custodyExitRepo.moveSettlementStateTx).not.toHaveBeenCalled();
+  });
+
+  it("enforces warehouse scoping on the exit's own warehouse", async () => {
+    await dismiss();
+    expect(vi.mocked(assertWarehouseAccess)).toHaveBeenCalledWith(expect.objectContaining({ email: "pm@x.co" }), WH_ID);
+  });
+
+  it("rejects a caller outside the record's warehouse before writing anything", async () => {
+    vi.mocked(assertWarehouseAccess).mockImplementationOnce(() => {
+      throw new Error("You don't have access to that warehouse.");
+    });
+    await expect(dismiss()).rejects.toThrow(/access to that warehouse/i);
+    expect(custodyExitRepo.moveSettlementStateTx).not.toHaveBeenCalled();
+    expect(audit.record).not.toHaveBeenCalled();
+  });
+
+  it("requires a stated reason — a blank one is not a decision", async () => {
+    await expect(dismiss({ reason: "   " })).rejects.toThrow(/say why/i);
+    expect(custodyExitRepo.moveSettlementStateTx).not.toHaveBeenCalled();
+  });
+
+  it("404s a record that no longer exists", async () => {
+    vi.mocked(custodyExitRepo.findById).mockResolvedValue(null as never);
+    await expect(dismiss()).rejects.toThrow(/no longer exists/i);
   });
 });

@@ -9,6 +9,8 @@ import {
   SETTLE_SETTLED,
   SETTLE_UNSETTLED,
   CUSTODY_RETURNED_TO_SUPPLIER,
+  CUSTODY_WITHDRAWN,
+  SETTLE_DISMISSED,
   createExitTx,
   recomputeCountersTx,
   reconcileDamageCustodyTx,
@@ -393,5 +395,144 @@ describe("withdrawDamageExitTx", () => {
   it("refuses a report already withdrawn", async () => {
     const { tx } = makeTx([damageRow({ id: "a1", custodyState: "withdrawn" })]);
     expect(await withdrawDamageExitTx(tx, "a1")).toBe(false);
+  });
+});
+
+// ── ONE PHYSICAL UNIT, ONE QUARANTINE — even after the charge is dropped ───────────────────────
+//
+// `settleOpenAgainstNoteTx` does two jobs with one pass, and they do not share a filter:
+//
+//   • FINANCIAL — move a live claim onto the note. `unsettled` rows only.
+//   • PHYSICAL  — stop one broken unit being quarantined twice. EVERY row holding a unit off the
+//     shelf, whatever the office decided about the money.
+//
+// A DISMISSED report is where the two answers part company: "nothing is owed" closes the claim and
+// does not un-break the tester, so the unit stays `held_damaged` and stays out of `hireIssuable`.
+// Filtering it out of BOTH jobs is what let a later warehouse note mint a second custody row for a
+// unit already quarantined — `fieldDamageQty: 2` on a hire that received one.
+describe("a dismissed report still holds its physical unit", () => {
+  const dismissed = (over: Record<string, unknown> = {}) =>
+    damageRow({ id: "d1", settlementState: SETTLE_DISMISSED, ...over });
+
+  it("absorbs a later note instead of letting it open a SECOND quarantine row", async () => {
+    // 1 received, 1 reported off a job, dismissed as fair wear. The office later changes its mind and
+    // raises the provider's damage note for that same tester.
+    const { tx, rows } = makeTx([dismissed({ qty: 1 })]);
+
+    const covered = await settleOpenDamageAgainstNoteTx(tx, LINE, 1, RECEIPT, AT);
+
+    // Covered, so the caller opens nothing further — the unit is already accounted for.
+    expect(covered).toBe(1);
+    expect(rows).toHaveLength(1);
+  });
+
+  it("changes NOTHING on the row it absorbs — the claim stays dropped", async () => {
+    const { tx, rows } = makeTx([dismissed({ qty: 1 })]);
+    const before = { ...rows[0] };
+
+    await settleOpenDamageAgainstNoteTx(tx, LINE, 1, RECEIPT, AT);
+
+    // Not settled, not reduced, not split, no receipt stamped on it. A note must never silently
+    // reopen or charge a report the office had already dismissed.
+    expect(rows[0]).toEqual(before);
+    expect(rows[0].settlementState).toBe(SETTLE_DISMISSED);
+    expect(rows[0].settledByReceiptId).toBeUndefined();
+  });
+
+  it("keeps fieldDamageQty at the physically damaged quantity, not double it", async () => {
+    const { tx, rows, line } = makeTx([dismissed({ qty: 1 })], { receivedQuantity: 1 });
+
+    const covered = await settleOpenDamageAgainstNoteTx(tx, LINE, 1, RECEIPT, AT);
+    // The caller only creates a row for what was NOT covered. Nothing was left, so nothing is created.
+    expect(covered).toBe(1);
+    await recomputeCountersTx(tx, LINE);
+
+    // ONE unit received, ONE quarantined. Before the fix this read 2.
+    expect(line.fieldDamageQty).toBe(1);
+    expect(line.fieldDamageQty as number).toBeLessThanOrEqual(rows[0].qty as number);
+  });
+
+  it("settles live claims FIRST and only absorbs the remainder", async () => {
+    // 2 received: one report still open, one already dismissed. A note for both units should settle
+    // the live one — a note is worth more spent on a real claim than on a closed one.
+    const { tx, rows } = makeTx([
+      damageRow({ id: "open1", qty: 1, declaredAt: new Date("2026-09-02T00:00:00Z") }),
+      dismissed({ qty: 1, declaredAt: new Date("2026-09-01T00:00:00Z") }),
+    ]);
+
+    expect(await settleOpenDamageAgainstNoteTx(tx, LINE, 2, RECEIPT, AT)).toBe(2);
+
+    const open = rows.find((r) => r.id === "open1")!;
+    const drop = rows.find((r) => r.id === "d1")!;
+    expect(open.settlementState).toBe(SETTLE_SETTLED);
+    expect(open.settledByReceiptId).toBe(RECEIPT);
+    // The dismissed one absorbed the leftover unit and stayed exactly as it was.
+    expect(drop.settlementState).toBe(SETTLE_DISMISSED);
+    // Two units reported, two rows, no third minted.
+    expect(rows).toHaveLength(2);
+  });
+
+  it("absorbs only up to what it physically holds", async () => {
+    // 1 unit dismissed, but the note reports 2 — the second is genuinely new damage on another unit.
+    const { tx } = makeTx([dismissed({ qty: 1 })]);
+    // Covered = 1; the caller opens a fresh exit for the uncovered one, which is correct.
+    expect(await settleOpenDamageAgainstNoteTx(tx, LINE, 2, RECEIPT, AT)).toBe(1);
+  });
+
+  it("absorbs part of a bigger dismissed row without splitting it", async () => {
+    // Nothing about the row changes either way, so a slice has no second state to carry.
+    const { tx, rows } = makeTx([dismissed({ qty: 3 })]);
+    expect(await settleOpenDamageAgainstNoteTx(tx, LINE, 1, RECEIPT, AT)).toBe(1);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].qty).toBe(3);
+  });
+
+  it("never absorbs a WITHDRAWN report — those units were never damaged", async () => {
+    // `withdrawn` + `dismissed` is the shape a reversed damage note leaves. The unit is fit and back
+    // in the pool, so it holds nothing and must not soak up a real report.
+    const { tx } = makeTx([dismissed({ qty: 1, custodyState: CUSTODY_WITHDRAWN })]);
+    expect(await settleOpenDamageAgainstNoteTx(tx, LINE, 1, RECEIPT, AT)).toBe(0);
+  });
+
+  it("never absorbs a report on kit already gone back to the provider", async () => {
+    // `returned_to_supplier` is off our shelf, so it is not holding a unit here for a note to cover.
+    const { tx } = makeTx([dismissed({ qty: 1, custodyState: CUSTODY_RETURNED_TO_SUPPLIER })]);
+    expect(await settleOpenDamageAgainstNoteTx(tx, LINE, 1, RECEIPT, AT)).toBe(0);
+  });
+
+  it("leaves the ordinary charge path completely unchanged", async () => {
+    // No dismissed rows in play at all: phase two never runs and the behaviour is exactly as before.
+    const { tx, rows } = makeTx([damageRow({ qty: 1 })]);
+    expect(await settleOpenDamageAgainstNoteTx(tx, LINE, 1, RECEIPT, AT)).toBe(1);
+    expect(rows[0].settlementState).toBe(SETTLE_SETTLED);
+    expect(rows[0].settledByReceiptId).toBe(RECEIPT);
+    expect(rows).toHaveLength(1);
+  });
+
+  it("still quarantines genuinely new damage after a dismissed event on the same hire", async () => {
+    // 2 received. One dismissed. A note reports 2 — one is the dismissed unit, one is a new fault.
+    const { tx, rows, line } = makeTx([dismissed({ qty: 1 })], { receivedQuantity: 2 });
+    const covered = await settleOpenDamageAgainstNoteTx(tx, LINE, 2, RECEIPT, AT);
+    expect(covered).toBe(1);
+
+    // The caller opens a row for the uncovered unit — simulated here the way reportHireDamage does.
+    await createExitTx(tx, {
+      purchaseOrderRentalLineId: LINE,
+      purchaseOrderId: "9".repeat(24),
+      poCode: "PO-0042",
+      warehouseId: "b".repeat(24),
+      kind: "damage",
+      qty: 2 - covered,
+      itemName: "Fibre Tester",
+      custodyState: CUSTODY_HELD_DAMAGED,
+      reason: "Second unit cracked",
+      sourceType: "warehouse_damage_note",
+      sourceId: RECEIPT,
+    } as NewCustodyExit);
+
+    // Two physical units, two quarantine rows — one dismissed, one live. Never three.
+    expect(rows).toHaveLength(2);
+    expect(line.fieldDamageQty).toBe(2);
+    expect(line.fieldDamageQty as number).toBeLessThanOrEqual(2);
   });
 });
