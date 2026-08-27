@@ -449,7 +449,11 @@ export function findKitLineTypesByJobs(jobIds: string[]): Promise<{ id: string; 
  */
 export interface EngineerCommittedKitLines {
   id: string;
-  kitLines: { id: string; lineType: string; irmItemId: string | null }[];
+  // `rentalItemId` was already SELECTED below but missing from this type, so the rental commitment
+  // tally could not be written against it. Both ids ride along because the two committed-stock
+  // readers ask the same question of different pools — what an engineer still holds for a job, in
+  // company stock and in hired kit — and both must be subtracted before anything is field-returnable.
+  kitLines: { id: string; lineType: string; irmItemId: string | null; rentalItemId: string | null }[];
 }
 export function findActiveByEngineerWithKitLines(engineerId: string): Promise<EngineerCommittedKitLines[]> {
   return prisma.job.findMany({

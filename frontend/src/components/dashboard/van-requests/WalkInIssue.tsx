@@ -12,7 +12,7 @@ import { Notice } from "@/components/ui/Notice";
 import { Select } from "@/components/ui/Select";
 import { inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import type { Msg } from "@/components/ui/types";
-import { VAN_STOCK_PRIORITY_OPTIONS, VanStockCartTable, VanStockItemSearch, type SearchItemOption, type VanStockCartItem } from "./vanRequestUi";
+import { VAN_STOCK_PRIORITY_OPTIONS, VanStockCartTable, VanStockItemSearch, vanStockItemKey, type SearchItemOption, type VanStockCartItem } from "./vanRequestUi";
 
 // Counter issue: the reviewer builds a PRE-APPROVED request for an engineer standing in front of them,
 // then scan-fulfils it. Mirrors the engineer's own composer (same FormSection shell, same shared item
@@ -60,20 +60,24 @@ export function WalkInIssue({
   // cap, and the reorder advisory below. Keyed by item id; cart-scoped reads ignore stale keys.
   const [stockById, setStockById] = React.useState<Record<string, { onHand: number; reorderLevel: number | null }>>({});
 
-  const excludeIds = React.useMemo(() => new Set(cart.map((c) => c.irmItemId)), [cart]);
+  // Walk-in is COMPANY STOCK ONLY — hired kit is not issued over the counter in this phase (the
+  // server refuses it outright), so every row here carries an "irm" source. The cart still uses the
+  // shared composite key so this composer and the engineer's stay one component.
+  const excludeIds = React.useMemo(() => new Set(cart.map((c) => c.key)), [cart]);
   const addItem = (it: SearchItemOption) => {
-    setCart((c) => (c.some((x) => x.irmItemId === it.irmItemId) ? c : [...c, { irmItemId: it.irmItemId, name: it.name, code: it.code, qty: 1, maxQty: it.quantityOnHand }]));
+    const key = vanStockItemKey(it);
+    setCart((c) => (c.some((x) => x.key === key) ? c : [...c, { key, source: it.source, irmItemId: it.irmItemId, rentalItemId: it.rentalItemId, name: it.name, code: it.code, qty: 1, maxQty: it.quantityOnHand }]));
     if (typeof it.quantityOnHand === "number") {
-      setStockById((m) => ({ ...m, [it.irmItemId]: { onHand: it.quantityOnHand as number, reorderLevel: it.reorderLevel ?? null } }));
+      setStockById((m) => ({ ...m, [key]: { onHand: it.quantityOnHand as number, reorderLevel: it.reorderLevel ?? null } }));
     }
   };
-  const setQty = (id: string, qty: number) => setCart((c) => c.map((x) => (x.irmItemId === id ? { ...x, qty } : x)));
-  const remove = (id: string) => setCart((c) => c.filter((x) => x.irmItemId !== id));
+  const setQty = (key: string, qty: number) => setCart((c) => c.map((x) => (x.key === key ? { ...x, qty } : x)));
+  const remove = (key: string) => setCart((c) => c.filter((x) => x.key !== key));
 
   // On-hand at this counter per cart item — feeds the cart's coloured "In stock: N" line.
   const shelfByItem = React.useMemo(() => {
     const m = new Map<string, number>();
-    for (const c of cart) { const s = stockById[c.irmItemId]; if (s) m.set(c.irmItemId, s.onHand); }
+    for (const c of cart) { const s = stockById[c.key]; if (s) m.set(c.key, s.onHand); }
     return m;
   }, [cart, stockById]);
 
@@ -83,10 +87,10 @@ export function WalkInIssue({
   const reorderWarnings = React.useMemo(
     () =>
       cart.flatMap((c) => {
-        const s = stockById[c.irmItemId];
+        const s = stockById[c.key];
         if (!s || s.reorderLevel == null || s.reorderLevel <= 0) return [];
         const after = s.onHand - c.qty;
-        return after <= s.reorderLevel ? [{ id: c.irmItemId, name: c.name, after, reorderLevel: s.reorderLevel }] : [];
+        return after <= s.reorderLevel ? [{ id: c.key, name: c.name, after, reorderLevel: s.reorderLevel }] : [];
       }),
     [cart, stockById],
   );
@@ -124,7 +128,7 @@ export function WalkInIssue({
         warehouseId: warehouse.id, // the tab's warehouse — a walk-in is issued HERE by definition
         reason: reason.trim(),
         priority,
-        lines: cart.map((c) => ({ irmItemId: c.irmItemId, itemName: c.name, qty: c.qty })),
+        lines: cart.map((c) => ({ source: c.source, irmItemId: c.irmItemId ?? undefined, itemName: c.name, qty: c.qty })),
       });
       onCreated(req.code);
     } catch (err) {

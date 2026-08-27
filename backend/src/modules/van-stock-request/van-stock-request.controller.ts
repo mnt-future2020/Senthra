@@ -61,12 +61,18 @@ export const warehousesLite = asyncHandler(async (_req, res) => {
   res.json({ warehouses: await vsrService.listWarehousesLite() });
 });
 
-// GET /van-stock-requests/availability?irmItemIds=a,b,c  (per-warehouse on-hand for the cart — advisory)
+// GET /van-stock-requests/availability?irmItemIds=a,b,c&rentalItemIds=d,e
+// Per-warehouse availability for the cart — advisory. The two id lists stay SEPARATE because they
+// address different catalogues; one merged list keyed on a bare id could not tell a tester from a
+// cable. `rentalItemIds` is optional, so a client that predates it (and the mobile app until its own
+// pass) keeps working unchanged.
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
+const idList = (raw: string | undefined): string[] =>
+  (raw ?? "").split(",").map((s) => s.trim()).filter((s) => OBJECT_ID_RE.test(s));
 export const availability = asyncHandler(async (req, res) => {
-  const raw = queryStr(req.query.irmItemIds) ?? "";
-  const ids = raw.split(",").map((s) => s.trim()).filter((s) => OBJECT_ID_RE.test(s));
-  res.json({ warehouses: await vsrService.availability(ids) });
+  const ids = idList(queryStr(req.query.irmItemIds));
+  const rentalIds = idList(queryStr(req.query.rentalItemIds));
+  res.json({ warehouses: await vsrService.availability(ids, rentalIds) });
 });
 
 // GET /van-stock-requests  (reviewer queue; ?warehouseId= narrows to one warehouse's queue)

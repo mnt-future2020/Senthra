@@ -1,16 +1,17 @@
 "use client";
 
 import * as React from "react";
-import { Check, ExternalLink, Loader2, MapPin, Plus, Search, Trash2 } from "lucide-react";
+import { Check, ExternalLink, Loader2, MapPin, Plus, Search, Timer, Trash2 } from "lucide-react";
 
 import * as vanStockSvc from "@/services/vanStockRequest.service";
-import type { VanStockFulfilment, VanStockItemOption, VanStockLine, VanStockPriority, VanStockRequest } from "@/services/vanStockRequest.service";
+import type { VanStockFulfilment, VanStockItemOption, VanStockLine, VanStockLineSource, VanStockPriority, VanStockRequest } from "@/services/vanStockRequest.service";
 import { CopyableCode } from "@/components/ui/CopyableCode";
 import { useDashboard } from "@/hooks/useDashboard";
 import { fmtDateTime } from "@/components/dashboard/portal/portalUi";
 import { WarehousePickupModal } from "@/components/dashboard/engineer/WarehousePickupModal";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { inputCls } from "@/components/ui/styles";
+import { formatHireDate, vanStockItemKey } from "./vanStockLine";
 import { VSR_STATUS } from "@/components/dashboard/engineer/EngineerVanStock";
 
 // Shared presentational bits for the Field Stock (VSR) lists — used by BOTH the warehouse board and
@@ -240,7 +241,13 @@ export function VanRequestLinesTable({ lines, variant, className }: { lines: Van
                     An EXCLUDED line stays plain text: nothing is being issued for it, so offering a
                     code to scan would invite exactly the action the exclusion just refused. */}
                 <td className={`px-3 py-2 font-semibold ${excluded ? "text-[var(--muted)] line-through" : "text-[var(--ink)]"}`}>
-                  {l.code && !excluded ? <CopyableCode code={l.code} label={l.itemName} className="text-left" onCopied={(c) => pushToast(`Copied ${c}`)} /> : l.itemName}
+                  <span className="flex flex-wrap items-center gap-1.5">
+                    {l.code && !excluded ? <CopyableCode code={l.code} label={l.itemName} className="text-left" onCopied={(c) => pushToast(`Copied ${c}`)} /> : l.itemName}
+                    {/* Marked on BOTH the engineer's and the reviewer's read of the same line — hired
+                        kit carries a return deadline and a bill, and neither side should have to infer
+                        that from the item name. */}
+                    {l.source === "rental" && <RentalBadge />}
+                  </span>
                 </td>
                 {showSource && (
                   <td className="px-3 py-2 text-[var(--muted)]">
@@ -331,6 +338,18 @@ export function VanStockPostings({
               {f.lines.map((fl) => (
                 <div key={fl.id}>
                   <span className="font-semibold text-[var(--ink)]">{fl.itemName}</span> ×{fl.qty}
+                  {/* WHICH HIRE these units actually moved on. The request named a catalogue item;
+                      this names the physical hire the warehouse reached for, so the posting can be
+                      reconciled against the order it drew from — and so nobody reads the catalogue
+                      item as though it were the hired unit itself. A line that split across two
+                      hires posts as two rows, each naming its own. */}
+                  {fl.source === "rental" && fl.poCode && (
+                    <>
+                      {" · "}
+                      <span className="font-semibold text-[var(--accent)]">{fl.poCode}</span>
+                      {fl.hireEndDate && <span> (due {formatHireDate(fl.hireEndDate)})</span>}
+                    </>
+                  )}
                   {fl.condition === "damaged" ? (
                     <>
                       {" · "}
@@ -475,12 +494,34 @@ export function VanRequestListSkeleton({ rows = 6 }: { rows?: number }) {
 // One row of a request being composed. Shared by the engineer's composer and the reviewer's walk-in
 // issue — both build the same thing (an engineer + a list of items + a reason), so they build it with
 // the same parts.
+// The identity + payload rules live in vanStockLine.ts — plain TS, so they can be unit-tested without
+// dragging JSX into the test. Re-exported here because every call site already imports from this
+// module, and the two must never drift into two definitions.
+export { vanStockItemKey };
+
+/** The "this is hired equipment" marker. Rental kit must never read as interchangeable with company
+ *  stock — it belongs to someone else, it has a return deadline, and it keeps billing. */
+export function RentalBadge({ className = "" }: { className?: string }) {
+  return (
+    <span className={`inline-flex shrink-0 items-center gap-1 rounded-md border border-[var(--accent)]/40 bg-[var(--accent)]/10 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-[var(--accent)] ${className}`}>
+      <Timer aria-hidden className="h-3 w-3" />
+      Rental
+    </span>
+  );
+}
+
 export interface VanStockCartItem {
-  irmItemId: string;
+  key: string; // vanStockItemKey() — the row's identity across both catalogues
+  source: VanStockLineSource;
+  irmItemId: string | null;
+  rentalItemId: string | null;
   name: string;
   code: string | null;
   qty: number;
-  maxQty?: number; // returns: capped at the engineer's on-hand
+  maxQty?: number; // returns: capped at the engineer's on-hand / on-hire
+  // Returns only, rental only: the soonest deadline among the hires these units sit on.
+  hireEndDate?: string | null;
+  overdue?: boolean;
 }
 
 // The cart being composed. Pairs with VanStockItemSearch below: search adds, this edits/removes.
@@ -494,9 +535,11 @@ export function VanStockCartTable({
   warehouseCell,
 }: {
   cart: VanStockCartItem[];
-  onQty: (irmItemId: string, qty: number) => void;
-  onRemove: (irmItemId: string) => void;
-  // Restock only: on-hand at the SELECTED collect-from warehouse (advisory).
+  // Addressed by the composite KEY, not a raw item id — see vanStockItemKey.
+  onQty: (key: string, qty: number) => void;
+  onRemove: (key: string) => void;
+  // Restock only: availability at the SELECTED collect-from warehouse (advisory), keyed by the same
+  // composite key so company stock and hired kit share one map without colliding.
   shelfByItem?: Map<string, number>;
   // Wording for the on-hand line — "On shelf there" reads for the engineer's collect-from warehouse;
   // the walk-in composer passes "In stock" (the item's on-hand at the issuing counter).
@@ -544,12 +587,14 @@ export function VanStockCartTable({
         </thead>
         <tbody>
           {cart.map((c) => {
-            const shelf = shelfByItem?.get(c.irmItemId);
+            const shelf = shelfByItem?.get(c.key);
+            const isRental = c.source === "rental";
             return (
-              <tr key={c.irmItemId} className="border-b border-[var(--border)] last:border-0">
+              <tr key={c.key} className="border-b border-[var(--border)] last:border-0">
                 <td className="px-3 py-2">
-                  <span className="font-semibold text-[var(--ink)]">
+                  <span className="flex flex-wrap items-center gap-1.5 font-semibold text-[var(--ink)]">
                     {c.code ? <CopyableCode code={c.code} label={c.name} className="text-left" onCopied={(t) => pushToast(`Copied ${t}`)} /> : c.name}
+                    {isRental && <RentalBadge />}
                   </span>
 
                   {/* "Holding N" (returns cap) is redundant when a shelf figure is shown — the shelf line
@@ -557,9 +602,18 @@ export function VanStockCartTable({
                   {typeof c.maxQty === "number" && typeof shelf !== "number" && <div className="text-[10px] text-[var(--faint)]">Holding {c.maxQty}</div>}
                   {typeof shelf === "number" && (
                     <div className={`text-[10px] font-semibold ${shelf >= c.qty ? "text-[var(--pos)]" : shelf > 0 ? "text-amber-600" : "text-[var(--neg)]"}`}>
-                      {shelfLabel}: {shelf}
+                      {/* Hired kit is not "on the shelf" — it is a hire the depot can lend out, and
+                          saying so is what stops an engineer reading it as stock we own. */}
+                      {isRental ? "Free on hire there" : shelfLabel}: {shelf}
                       {shelf < c.qty && shelf > 0 && " — less than you're asking"}
-                      {shelf === 0 && " — out of stock"}
+                      {shelf === 0 && (isRental ? " — none free on hire" : " — out of stock")}
+                    </div>
+                  )}
+                  {/* The deadline, on a RETURN row. The one fact that makes hired kit urgent. */}
+                  {isRental && c.hireEndDate && (
+                    <div className={`text-[10px] font-semibold ${c.overdue ? "text-[var(--neg)]" : "text-[var(--muted)]"}`}>
+                      {c.overdue ? "Overdue — due back " : "Due back "}
+                      {formatHireDate(c.hireEndDate)}
                     </div>
                   )}
                 </td>
@@ -574,7 +628,7 @@ export function VanStockCartTable({
                     aria-label={`Quantity for ${c.name}`}
                     onChange={(e) => {
                       const raw = Math.max(1, Math.floor(Number(e.target.value) || 1));
-                      onQty(c.irmItemId, typeof c.maxQty === "number" ? Math.min(raw, c.maxQty) : raw);
+                      onQty(c.key, typeof c.maxQty === "number" ? Math.min(raw, c.maxQty) : raw);
                     }}
                     // min-w, not w: inputCls already carries w-full, and min-width beats it in the
                     // cascade. Without a floor, auto table layout squeezed this to 30px — a number
@@ -583,7 +637,7 @@ export function VanStockCartTable({
                   />
                 </td>
                 <td className="px-3 py-2 text-right">
-                  <button type="button" onClick={() => onRemove(c.irmItemId)} aria-label="Remove item" className="rounded-lg border border-[var(--border)] p-1.5 text-[var(--muted)] transition-all hover:border-[var(--neg)] hover:text-[var(--neg)]">
+                  <button type="button" onClick={() => onRemove(c.key)} aria-label="Remove item" className="rounded-lg border border-[var(--border)] p-1.5 text-[var(--muted)] transition-all hover:border-[var(--neg)] hover:text-[var(--neg)]">
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>
                 </td>
@@ -704,20 +758,28 @@ export function VanStockItemSearch({
       {results.length > 0 && (
         <div className="max-h-56 space-y-1.5 overflow-auto">
           {results.map((it) => {
-            // Out of stock at THIS warehouse — walk-in can't issue it, so it's pickable in name only.
+            // Nothing available — walk-in / restock can't fulfil it, so it's pickable in name only.
             const outOfStock = typeof it.quantityOnHand === "number" && it.quantityOnHand <= 0;
-            const added = excludeIds.has(it.irmItemId);
+            const isRental = it.source === "rental";
+            const key = vanStockItemKey(it);
+            const added = excludeIds.has(key);
             const disabled = added || outOfStock;
+            const emptyLabel = isRental ? "None free on hire" : "Out of stock";
             return (
-              <button key={it.irmItemId} type="button" disabled={disabled} onClick={() => onAddItem(it)} title={outOfStock ? "Out of stock at this warehouse" : undefined} className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left transition-all ${disabled ? "cursor-default border-[var(--border)] bg-[var(--surface-2)] opacity-60" : "border-[var(--border)] bg-[var(--surface-2)] hover:border-[var(--accent)]"}`}>
+              <button key={key} type="button" disabled={disabled} onClick={() => onAddItem(it)} title={outOfStock ? emptyLabel : undefined} className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left transition-all ${disabled ? "cursor-default border-[var(--border)] bg-[var(--surface-2)] opacity-60" : "border-[var(--border)] bg-[var(--surface-2)] hover:border-[var(--accent)]"}`}>
                 <span className="min-w-0">
-                  <span className="block truncate text-sm font-semibold text-[var(--ink)]">{it.name}</span>
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <span className="truncate text-sm font-semibold text-[var(--ink)]">{it.name}</span>
+                    {/* Rental hits are marked in the RESULT list, not only after they're added — the
+                        engineer has to know what they're picking before they pick it. */}
+                    {isRental && <RentalBadge />}
+                  </span>
                   {it.code && <span className="block truncate font-mono text-[11px] text-[var(--muted)]">{it.code}</span>}
                 </span>
                 <span className="flex shrink-0 items-center gap-2">
                   {typeof it.quantityOnHand === "number" && (
                     <span className={`text-[11px] font-semibold tabular-nums ${it.quantityOnHand <= 0 ? "text-[var(--neg)]" : "text-[var(--muted)]"}`}>
-                      {it.quantityOnHand <= 0 ? "Out of stock" : `${it.quantityOnHand} in stock`}
+                      {it.quantityOnHand <= 0 ? emptyLabel : `${it.quantityOnHand} ${isRental ? "free on hire" : "in stock"}`}
                     </span>
                   )}
                   {added ? <Check className="h-4 w-4 shrink-0 text-[var(--pos)]" /> : !outOfStock && <Plus className="h-4 w-4 shrink-0 text-[var(--accent)]" />}

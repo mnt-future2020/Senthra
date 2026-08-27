@@ -11,11 +11,17 @@ export type VanStockRequestStatus = "pending" | "approved" | "partially_fulfille
 // value; the option list rendered by every composer lives in van-requests/vanRequestUi.
 export type VanStockPriority = "normal" | "urgent";
 
+/** Which catalogue a line draws from. "rental" is hired equipment — third-party kit with a return
+ *  deadline — and the UI must never present it as interchangeable with company stock. */
+export type VanStockLineSource = "irm" | "rental";
+
 export interface VanStockLine {
   id: string;
-  irmItemId: string;
+  source: VanStockLineSource;
+  irmItemId: string | null; // set when source is irm
+  rentalItemId: string | null; // set when source is rental — the CATALOGUE item, never a hire
   itemName: string;
-  code: string | null; // IRM item code (e.g. IRM-0002) — shown + click-to-copy
+  code: string | null; // item code (IRM-0002 / RNT-0007) — shown + click-to-copy
   sku: string | null;
   uom: string | null;
   requestedQty: number;
@@ -45,7 +51,15 @@ export interface VanStockLine {
 export interface VanStockFulfilmentLine {
   id: string;
   lineId: string;
-  irmItemId: string;
+  source: VanStockLineSource;
+  irmItemId: string | null;
+  rentalItemId: string | null;
+  // The ACTUAL hire these units moved on (rental postings only). The request names a catalogue item;
+  // only the posting names the physical hire the warehouse reached for — which is what the reviewer
+  // needs to see, and what makes the units traceable back to an order.
+  purchaseOrderRentalLineId: string | null;
+  poCode: string | null;
+  hireEndDate: string | null;
   itemName: string;
   qty: number;
   condition: "good" | "damaged";
@@ -110,7 +124,10 @@ export interface PagedVanStockRequests {
 }
 
 export interface VanStockLinePayload {
-  irmItemId: string;
+  // Omit it and the server defaults to "irm", so an older client keeps working untouched.
+  source?: VanStockLineSource;
+  irmItemId?: string;
+  rentalItemId?: string;
   itemName: string;
   qty: number;
   // RESTOCK only: the warehouse this line is collected from. The engineer picks it per item against
@@ -139,17 +156,32 @@ export interface FulfilEntryPayload {
   scannedCode: string; // required — every entry must come from a scan (server enforces this too)
 }
 
+/** One hire a scanned rental line is expected to bind to. ADVISORY — the server re-resolves the real
+ *  binding when the posting is made, and never accepts a hire id from the client. */
+export interface ScanLookupHire {
+  purchaseOrderRentalLineId: string;
+  poCode: string | null;
+  hireEndDate: string | null;
+  overdue: boolean;
+  qty: number;
+}
+
 export interface ScanLookupResult {
-  irmItemId: string;
+  source: VanStockLineSource;
+  irmItemId: string | null;
+  rentalItemId: string | null;
   lineId: string;
   itemName: string;
   uom: string | null;
   remainingQty: number;
   available: number | null;
+  hires: ScanLookupHire[];
 }
 
 export interface VanStockItemOption {
-  irmItemId: string;
+  source: VanStockLineSource;
+  irmItemId: string | null;
+  rentalItemId: string | null;
   code: string;
   name: string;
   sku: string | null;
@@ -157,11 +189,19 @@ export interface VanStockItemOption {
 }
 
 export interface HoldingOption {
-  irmItemId: string;
+  source: VanStockLineSource;
+  irmItemId: string | null;
+  rentalItemId: string | null;
   code: string;
   name: string;
   uom: string | null;
   quantityOnHand: number;
+  // Rental only: the soonest deadline among the hires these units sit on, and whether it has passed.
+  // The one fact that makes hired kit different from a cable in a van — it keeps billing and is owed
+  // to a third party — so the return list leads with it.
+  hireEndDate: string | null;
+  overdue: boolean;
+  poCodes: string[];
 }
 
 export interface WarehouseLite {
@@ -203,8 +243,17 @@ export function listMyVanStockRequests(params: ListParams = {}): Promise<PagedVa
   return api<PagedVanStockRequests>(`/van-stock-requests/mine${qs(params as Record<string, unknown>)}`);
 }
 
-export function myOpenLineItems(type: VanStockRequestType): Promise<Array<{ irmItemId: string; code: string }>> {
-  return api<{ items: Array<{ irmItemId: string; code: string }> }>(`/van-stock-requests/mine/open-lines${qs({ type })}`).then((r) => r.items);
+/** Items already on one of this engineer's OPEN requests — powers the composer's advisory duplicate
+ *  warning. Carries the source so a duplicate HIRE is caught too: the two catalogues have independent
+ *  id spaces, so matching on a bare id would both miss real duplicates and invent false ones. */
+export interface OpenLineItem {
+  source: VanStockLineSource;
+  irmItemId: string | null;
+  rentalItemId: string | null;
+  code: string;
+}
+export function myOpenLineItems(type: VanStockRequestType): Promise<OpenLineItem[]> {
+  return api<{ items: OpenLineItem[] }>(`/van-stock-requests/mine/open-lines${qs({ type })}`).then((r) => r.items);
 }
 
 export function myHoldings(): Promise<HoldingOption[]> {
@@ -243,10 +292,15 @@ export interface WarehouseAvailability {
   warehouseName: string;
   warehouseCode: string | null;
   items: Array<{ irmItemId: string; quantityOnHand: number }>;
+  // Hired kit at this depot — free-on-hire net of what jobs have planned. Kept as its own list
+  // because the two ids come from different catalogues; one list keyed on a bare id could not tell
+  // a tester from a cable.
+  rentalItems: Array<{ rentalItemId: string; quantityOnHand: number }>;
 }
-export function getVanStockAvailability(irmItemIds: string[]): Promise<WarehouseAvailability[]> {
-  if (irmItemIds.length === 0) return Promise.resolve([]);
-  return api<{ warehouses: WarehouseAvailability[] }>(`/van-stock-requests/availability?irmItemIds=${encodeURIComponent(irmItemIds.join(","))}`).then((r) => r.warehouses);
+export function getVanStockAvailability(irmItemIds: string[], rentalItemIds: string[] = []): Promise<WarehouseAvailability[]> {
+  if (irmItemIds.length === 0 && rentalItemIds.length === 0) return Promise.resolve([]);
+  const q = qs({ irmItemIds: irmItemIds.join(","), rentalItemIds: rentalItemIds.join(",") });
+  return api<{ warehouses: WarehouseAvailability[] }>(`/van-stock-requests/availability${q}`).then((r) => r.warehouses);
 }
 
 

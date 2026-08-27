@@ -85,6 +85,21 @@ export function findActiveByIds(ids: string[]): Promise<RentalItem[]> {
   return prisma.rentalItem.findMany({ where: { id: { in: ids }, status: "active", ...LIVE } });
 }
 
+/**
+ * Items among the given ids REGARDLESS of status or soft-delete — the lookup for anything describing
+ * kit that has already moved.
+ *
+ * Deliberately unfiltered, and not a variant of `findActiveByIds` with a flag. An engineer holding a
+ * tester whose catalogue entry was retired last month still has to be able to hand it back, and their
+ * return list still has to name it — filtering to `active` there would blank the row's code and
+ * silently drop the one item most urgently owed to a provider. The active filter belongs on the
+ * REQUEST path (you may not ask for a retired hire), which is a different question.
+ */
+export function findManyByIds(ids: string[]): Promise<RentalItem[]> {
+  if (ids.length === 0) return Promise.resolve([]);
+  return prisma.rentalItem.findMany({ where: { id: { in: ids } } });
+}
+
 export function update(id: string, data: Prisma.RentalItemUpdateInput): Promise<RentalItemWithCategory> {
   return prisma.rentalItem.update({ where: { id }, data, include: withCategory });
 }

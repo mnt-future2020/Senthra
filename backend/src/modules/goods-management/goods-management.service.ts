@@ -15,6 +15,7 @@ import * as custodyExitRepo from "#modules/purchase-order/hireCustodyExit.reposi
 import { emitHireUpdated } from "#modules/purchase-order/rentalHire.realtime.js";
 import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import { allocateFromHires, hireIssuable, totalAvailable } from "#modules/purchase-order/rentalHire.allocation.js";
+import * as rentalPool from "#modules/purchase-order/rentalHire.pool.js";
 import * as transferRepo from "#modules/engineer-transfer/engineer-transfer.repository.js";
 import * as warehouseRepo from "#modules/warehouse/warehouse.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
@@ -249,22 +250,12 @@ async function companyTodayStart(): Promise<Date> {
   return startOfDayIn(await getCompanyTimezone(), new Date());
 }
 
-async function rentalPoolByItemAndWarehouse(
-  rentalItemIds: string[],
-  warehouseIds: string[],
-  // Company-timezone start of today, resolved once by the caller. Present because this pool answers
-  // "what can this depot hand out", so an EXPIRED hire does not belong in it however many units of it
-  // are physically on the shelf — see `issuableWhere`.
-  todayStart: Date,
-): Promise<Map<string, number>> {
-  const pool = new Map<string, number>();
-  if (rentalItemIds.length === 0) return pool;
-  for (const h of await poRepo.findIssuableHiresByRentalItems(rentalItemIds, todayStart, warehouseIds)) {
-    const key = `${h.rentalItemId}|${h.warehouseId}`;
-    pool.set(key, (pool.get(key) ?? 0) + hireIssuable(h));
-  }
-  return pool;
-}
+// MOVED to #modules/purchase-order/rentalHire.pool.js and re-exported under its original name so
+// every call site below reads unchanged. Field Stock (Van Stock Request) has to answer the same
+// "what can this depot hand out" question, and a second copy of the arithmetic would drift — a Field
+// Stock issue computing availability differently from the job planner hands out a tester a job had
+// already counted on. Same function, two callers.
+const rentalPoolByItemAndWarehouse = rentalPool.rentalPoolByItemAndWarehouse;
 
 /**
  * What one engineer is holding on hire, per CATALOGUE item: how many, and the soonest deadline
@@ -489,9 +480,30 @@ export async function getJobKitTallies(jobId: string, prefetched?: KitTallyJob):
 // "held" — so this figure can never drift from the job side. Customer stock is a separate pool (its own
 // holdings), never field-returnable, so it isn't considered here.
 export async function jobCommittedByEngineer(engineerId: string): Promise<Map<string, number>> {
-  const committed = new Map<string, number>();
+  return (await committedByEngineer(engineerId)).irm;
+}
+
+/**
+ * BOTH committed-holding maps, from ONE read of the engineer's active jobs and their movements.
+ *
+ * The two wrappers around this were line-for-line identical apart from which kit lines they counted
+ * and which id they keyed by — so a caller needing both (the Field Stock return guard, and the
+ * engineer's holdings picker) paid for the same two reads twice, and those reads are a job scan plus
+ * every movement on those jobs.
+ *
+ * The two results stay DISTINCT, and that is deliberate rather than incidental: they are different
+ * pools keyed by different catalogues, and a caller wanting one has no business seeing the other's
+ * numbers. What is shared is the snapshot, not the arithmetic — each map is still built by the same
+ * `kitLineSplit` expression it was built by before, so neither figure can shift as a result of this.
+ *
+ * The single-pool wrappers remain exported and unchanged in behaviour: callers that genuinely need
+ * only one (the kit-request availability paths) keep reading exactly as they did.
+ */
+export async function committedByEngineer(engineerId: string): Promise<{ irm: Map<string, number>; rental: Map<string, number> }> {
+  const irm = new Map<string, number>();
+  const rental = new Map<string, number>();
   const jobs = await jobRepo.findActiveByEngineerWithKitLines(engineerId);
-  if (jobs.length === 0) return committed;
+  if (jobs.length === 0) return { irm, rental };
   const movesByJob = new Map<string, Awaited<ReturnType<typeof goodsManagementRepo.findMovementsByJobs>>>();
   for (const m of await goodsManagementRepo.findMovementsByJobs(jobs.map((j) => j.id))) {
     const list = movesByJob.get(m.jobId);
@@ -501,13 +513,42 @@ export async function jobCommittedByEngineer(engineerId: string): Promise<Map<st
   for (const job of jobs) {
     const moves = movesByJob.get(job.id) ?? [];
     for (const kit of job.kitLines ?? []) {
-      if (kit.lineType !== "irm" || !kit.irmItemId) continue;
+      const isIrm = kit.lineType === "irm" && !!kit.irmItemId;
+      // `used` stays in the rental formula though a hire can never be consumed (see the ledger's own
+      // note): writing the same expression for both is what keeps them readable as one rule, and a
+      // future write-off path would be counted rather than silently ignored.
+      const isRental = kit.lineType === "rental" && !!kit.rentalItemId;
+      if (!isIrm && !isRental) continue;
       const { issued, used, returned } = kitLineSplit(moves, kit.id);
       const held = Math.max(0, issued - used - returned);
-      if (held > 0) committed.set(kit.irmItemId, (committed.get(kit.irmItemId) ?? 0) + held);
+      if (held <= 0) continue;
+      if (isIrm) irm.set(kit.irmItemId!, (irm.get(kit.irmItemId!) ?? 0) + held);
+      else rental.set(kit.rentalItemId!, (rental.get(kit.rentalItemId!) ?? 0) + held);
     }
   }
-  return committed;
+  return { irm, rental };
+}
+
+/**
+ * The RENTAL twin of `jobCommittedByEngineer`: how many units of each hired CATALOGUE item an
+ * engineer still holds against active jobs.
+ *
+ * Field Stock returns subtract this for exactly the reason the IRM version exists. Hired kit issued
+ * against a job goes back through that job's own scan-in, which is what clears the job's
+ * `awaiting_return` state and releases the units to the provider. Let it leave through the Field Stock
+ * door instead and the custody row drains while the job still believes the kit is out — the job can
+ * never be reconciled, and its return is recorded against nothing.
+ *
+ * Keyed by CATALOGUE item, not by hire, deliberately — and it matches how the figure is USED. The
+ * engineer's holding is compared per catalogue item ("you hold 3 testers, 2 are on a job, so 1 is
+ * field-returnable"); which hire each unit sits on is resolved later, at the scan, by the shared
+ * returnable-hire policy. Keying this by hire would answer a question no caller asks.
+ *
+ * Reuses `kitLineSplit` — the same movement arithmetic Goods Management renders as "held" — so this
+ * can never drift from the job side.
+ */
+export async function rentalCommittedByEngineer(engineerId: string): Promise<Map<string, number>> {
+  return (await committedByEngineer(engineerId)).rental;
 }
 
 // Current goods-lifecycle status for a job ("not_issued" if no stock has moved yet). The job module
@@ -780,30 +821,11 @@ export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Pr
       const held = job.assignedEngineerId
         ? await rentalCustodyRepo.findRentalHoldingsByEngineer(job.assignedEngineerId)
         : [];
-      // Soonest deadline first again — returning against the most urgent hire first is what gets it
-      // off the overdue badge. An UNDATED holding sorts last, not first: `?? 0` put it at the epoch,
-      // so a hire with no deadline snapshot beat every real one and was always the hire picked.
-      const forThisItem = held
-        .filter((h) => h.rentalItemId === rentalItem.id && h.quantityOnHand > 0)
-        .sort((a, b) => (a.hireEndDate?.getTime() ?? Infinity) - (b.hireEndDate?.getTime() ?? Infinity));
-      // …but only among the hires DELIVERED HERE. EngineerRentalHolding carries no warehouse (see the
-      // model), so this filter is item-only and an engineer can hold the same tester on hires from two
-      // depots — an ordinary state, since each was issued against its own kit line. Picking purely by
-      // deadline then bound the scan to the OTHER depot's hire, and postReturn refuses exactly that
-      // ("that hire belongs to a different warehouse") with no second option to scan. `hires` is
-      // already this warehouse's live set, fetched above.
-      //
-      // The fallback keeps the deliberate no-`orderLive` rule on this leg: kit already in someone's
-      // hands has to be able to come back whatever happened to the paperwork, and such a hire may no
-      // longer appear in `hires`. Better to bind it and let postReturn adjudicate than to refuse the
-      // scan outright.
-      const liveHere = new Set(hires.map((h) => h.id));
-      const here = forThisItem.filter((h) => liveHere.has(h.purchaseOrderRentalLineId));
-      // Every live-here hire is offerable; the fallback deliberately offers exactly ONE. A holding
-      // whose hire is not live at this depot may well belong to another one, and postReturn refuses
-      // precisely that — so listing the whole set here would stage rows that can only fail on Post,
-      // which is worse than the single row that at least stands a chance of being the right one.
-      const candidates = here.length > 0 ? here : forThisItem.slice(0, 1);
+      // Soonest deadline first, narrowed to the hires DELIVERED HERE, with the deliberate
+      // one-row fallback when none is. All three rules — and the reasons they are what they are —
+      // now live in rentalHire.pool.ts, shared with Field Stock's return leg so the two can never
+      // bind a returning unit to different hires. `hires` is already this warehouse's live set.
+      const candidates = rentalPool.pickReturnableHoldings(held, rentalItem.id, new Set(hires.map((h) => h.id)));
       const target = candidates[0] ?? null;
       if (!target) throw badRequest(`${rentalItem.name} isn't currently out with this engineer.`);
 
@@ -817,22 +839,15 @@ export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Pr
       // And the SUM is capped at the line, which is the other half of the same rule. Two hires
       // holding 3 each against a line that owes 3 must offer 3, not 6; the running budget is what
       // makes a panel free to stage every row it is given without the till refusing the surplus.
-      let budget = lineOutstanding;
-      const bindable: ScanHire[] = [];
-      for (const h of candidates) {
-        const qty = Math.min(h.quantityOnHand, budget);
-        if (qty <= 0) break; // holdings are already `quantityOnHand > 0`, so this is the budget running out
-        budget -= qty;
-        bindable.push({
-          purchaseOrderRentalLineId: h.purchaseOrderRentalLineId,
-          poCode: h.poCode,
-          hireEndDate: h.hireEndDate?.toISOString() ?? null,
-          // Same `todayStart` as the bound hire below and as the issue leg — one scan cannot straddle
-          // two dates, however many hires it reports.
-          overdue: h.hireEndDate ? h.hireEndDate.getTime() < todayStart.getTime() : false,
-          qty,
-        });
-      }
+      const bindable: ScanHire[] = rentalPool.allocateAcrossHoldings(candidates, lineOutstanding).map(({ holding: h, qty }) => ({
+        purchaseOrderRentalLineId: h.purchaseOrderRentalLineId,
+        poCode: h.poCode,
+        hireEndDate: h.hireEndDate?.toISOString() ?? null,
+        // Same `todayStart` as the bound hire below and as the issue leg — one scan cannot straddle
+        // two dates, however many hires it reports.
+        overdue: h.hireEndDate ? h.hireEndDate.getTime() < todayStart.getTime() : false,
+        qty,
+      }));
       // The head of the list IS the bound hire, so the legacy scalar keeps saying exactly what it
       // always said: what may go back on `purchaseOrderRentalLineId`. Zero when the line has nothing
       // outstanding, which is what `Math.min(lineOutstanding, …)` used to produce.
