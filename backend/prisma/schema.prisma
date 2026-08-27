@@ -3183,7 +3183,7 @@ model AuditLog {
 
 // An active login session = one signed-in device. Tokens carry the `sid`, and
 // requireAuth + refresh validate that the session row still exists — so logout
-// and the 2-device cap (evicting the oldest session on a 3rd sign-in) take effect
+// and the device cap (evicting the least-recently-used session once it is full) take effect
 // immediately. Rows are deleted on logout / password change.
 model Session {
   id            String   @id @default(auto()) @map("_id") @db.ObjectId

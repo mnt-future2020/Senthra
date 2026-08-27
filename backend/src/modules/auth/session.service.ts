@@ -5,9 +5,10 @@ import type { Session } from "@prisma/client";
 import * as sessionRepo from "./session.repository.js";
 import type { Actor } from "../../utils/jwt.js";
 
-// Max concurrent devices per account (business rule). A 3rd sign-in evicts the
-// least-recently-used session so only this many ever stay live.
-export const MAX_DEVICES = 2;
+// Max concurrent devices per account (business rule). Signing in past this evicts
+// the least-recently-used session, so only this many ever stay live. The number is
+// mirrored in the frontend's SessionsCard copy — change both together.
+export const MAX_DEVICES = 3;
 
 // How long a session (and its refresh token) stays valid. Matches the refresh
 // cookie's lifetime.

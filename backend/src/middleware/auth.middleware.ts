@@ -38,7 +38,7 @@ export const requireAuth: RequestHandler = async (req, res, next) => {
 
   try {
     // The session must still exist — it doesn't after logout, a password change,
-    // or eviction by the 2-device cap, so this is where those take effect. It must
+    // or eviction by the device cap, so this is where those take effect. It must
     // also belong to exactly this token's principal (actor + sub): defence in depth
     // so a sid can never be paired with a different account than it was minted for.
     const session = await sessionService.findActive(payload.sid);

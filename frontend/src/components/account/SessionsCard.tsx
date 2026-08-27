@@ -8,6 +8,10 @@ import type { DeviceSession } from "@/types/auth";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { AccountCard } from "./AccountCard";
 
+// Mirrors MAX_DEVICES in the backend's session.service.ts, which is what actually
+// enforces the cap — this copy only tells the user what it is. Change both together.
+const MAX_DEVICES = 3;
+
 // Best-effort, dependency-free user-agent label (e.g. "Chrome on Windows").
 function deviceLabel(ua: string | null): string {
   if (!ua) return "Unknown device";
@@ -104,12 +108,12 @@ export function SessionsCard({ style }: { style?: React.CSSProperties }) {
     <AccountCard
       icon={MonitorSmartphone}
       title="Devices"
-      desc="Where you're signed in. Up to 2 devices — a new sign-in drops the oldest."
+      desc={`Where you're signed in. Up to ${MAX_DEVICES} devices — a new sign-in drops the oldest.`}
       style={style}
       action={
         sessions && sessions.length > 0 ? (
           <span className="rounded-full border border-[var(--border)] bg-[var(--surface-2)] px-2.5 py-1 text-[11px] font-extrabold tabular-nums text-[var(--muted)]">
-            {sessions.length}/2
+            {sessions.length}/{MAX_DEVICES}
           </span>
         ) : null
       }
