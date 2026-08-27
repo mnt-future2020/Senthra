@@ -961,6 +961,11 @@ model PurchaseOrder {
   @@index([purchaseRequestId])
   @@index([jobId])
   @@index([pmUserId])
+  // Finance reporting: every figure is a date-ranged read over the reportable statuses
+  // (modules/reports/reports.constants.ts). Status leads because it is an equality on a small set and
+  // orderDate is the range — the order Mongo can actually use. Without it a period report collection-
+  // scans every purchase order ever raised, on every tile of the dashboard.
+  @@index([status, orderDate])
 }
 
 // A line on a purchase order. Snapshots the IRM item's name/sku/unit at add-time so a later
@@ -3402,4 +3407,136 @@ model PolicyVersion {
   @@unique([documentKey, version])
   // The history list, newest first.
   @@index([documentKey, publishedAt])
+}
+
+// ── Scheduled reports ──────────────────────────────────────────────────────────────────────────
+//
+// The client asked for reports of type "Weekly / Monthly / On-demand". On-demand is the Finance and
+// Custom Report screens; these two models are the other two.
+//
+// THE DATABASE IS THE SOURCE OF TRUTH, deliberately. An in-memory timer cannot answer "has September
+// already been sent?" across a restart, a redeploy or a second instance — and that question is the
+// whole problem, because the failure mode of a scheduler is emailing the same report twice (or not at
+// all) and nobody noticing for a month. Schedule state and run state live here; the trigger that
+// wakes the scheduler is deliberately NOT modelled, because it is infrastructure.
+
+/// A standing instruction to produce and email a report on a cadence.
+model ReportSchedule {
+  id   String @id @default(auto()) @map("_id") @db.ObjectId
+  name String
+
+  /// What to run. `finance.summary`, or a Custom Report key from customReports.registry.
+  /// Validated against the live catalogue at save time AND again at run time — a report removed from
+  /// the registry must not silently keep firing.
+  reportKey String
+  /// weekly | monthly. `on_demand` is not a cadence — it is a person pressing a button.
+  cadence   String
+
+  /// WHEN within the cadence it fires. These move the firing moment only — they do NOT touch which
+  /// period the run covers, which `completedPeriod` still derives from cadence + timezone + clock.
+  /// That separation is what keeps the idempotency key stable while the send time is configurable.
+  ///
+  /// weekly  → dayOfWeek 1–7 (ISO: 1 = Monday). Null falls back to Monday.
+  /// monthly → dayOfMonth 1–31, or -1 for the last day of the month. A day that does not exist in a
+  ///           given month runs on that month's LAST day (29/30/31 → 28 or 29 in February), so every
+  ///           day is selectable and none of them silently skips a month. -1 stores the distinct
+  ///           intent "month end" — iCalendar's BYMONTHDAY=-1 convention. The rule lives in
+  ///           reports.period.ts → dayIndexIn(); this is a documented product decision, not a client
+  ///           requirement (the client docs never define day-of-month).
+  dayOfWeek  Int?
+  dayOfMonth Int?
+  /// Local wall-clock time in `timeZone`, not UTC — "09:00 in London" stays 09:00 across a DST change.
+  hour   Int @default(6)
+  minute Int @default(0)
+
+  /// xlsx | csv. The workbook is the default because it is what the client asked accounts for; CSV is
+  /// offered for a recipient feeding another system.
+  format String @default("xlsx")
+
+  /// IANA zone the period boundaries are resolved in. Null = the company timezone at run time, which
+  /// is what almost every schedule wants; an explicit value is for a report a different office reads.
+  timeZone String?
+
+  /// Where it goes: USER IDS, resolved to a current address at send time.
+  ///
+  /// Ids rather than stored addresses, so the two things that change about a recipient both take
+  /// effect without anyone editing the schedule — a new email address is picked up automatically, and
+  /// somebody who leaves, is suspended, or loses the report's permission STOPS receiving it on the
+  /// next run. A frozen address list would keep mailing a finance workbook to a departed employee
+  /// until a human remembered to prune it. See reportSchedule.service → resolveDeliverableRecipients.
+  ///
+  /// Legacy rows may still hold plain addresses; that resolver matches both, so nothing needs
+  /// migrating.
+  recipients String[]
+
+  /// The report's own filters, exactly as the on-demand screen would send them. Stored as given so a
+  /// schedule reproduces the report a human built rather than a re-derived approximation.
+  filters Json?
+
+  enabled Boolean @default(true)
+
+  /// When this schedule is next DUE. Stored rather than derived so "find what is due" is one indexed
+  /// range scan instead of loading every schedule and computing cadences in memory.
+  nextRunAt DateTime
+  lastRunAt DateTime?
+
+  createdBy String?
+  updatedBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  runs ReportRun[]
+
+  /// The due query: equality on `enabled`, range on `nextRunAt` — the order Mongo can use.
+  @@index([enabled, nextRunAt])
+}
+
+/// One execution of one schedule for one reporting period.
+///
+/// `@@unique([scheduleId, periodStart])` IS the idempotency key, and it is enforced by the DATABASE
+/// rather than by a check-then-act in the service. Two workers racing to run September both attempt
+/// the insert; exactly one wins and the loser takes a unique violation and stands down. An advisory
+/// check would leave a window between "does it exist?" and "create it" — which is precisely the window
+/// a cron platform's retry lands in.
+model ReportRun {
+  id         String         @id @default(auto()) @map("_id") @db.ObjectId
+  scheduleId String         @db.ObjectId
+  schedule   ReportSchedule @relation(fields: [scheduleId], references: [id])
+
+  /// The period the report COVERS — not when it ran. A run retried at 09:05 after failing at 09:00
+  /// still covers September, which is why the key is the period and never the clock.
+  periodStart DateTime
+  periodEnd   DateTime
+  /// Echoed for the email subject and the audit line without re-deriving it.
+  periodLabel String
+
+  /// pending | running | delivered | failed
+  ///
+  /// `failed` is not terminal: `attempts` below is what makes a retry bounded, so a transient SMTP
+  /// outage recovers on the next sweep while a genuinely broken schedule stops shouting.
+  status   String @default("pending")
+  attempts Int    @default(0)
+
+  /// The claim. The TOKEN is the ownership proof, not the expiry — a lease can lapse while its holder
+  /// is still inside a slow SMTP call, so every completion is a compare-and-set on this token. Without
+  /// it a stale worker's write would clear the LIVE worker's claim and a third could then send the
+  /// same report mid-flight. Same pattern the rental deadline sweep already uses.
+  claimToken     String?
+  claimExpiresAt DateTime?
+
+  startedAt   DateTime?
+  completedAt DateTime?
+  /// Who it actually reached, snapshotted — the schedule's list may change before anyone asks.
+  deliveredTo String[]
+  /// Last failure, for the operator. Never shown to a report recipient.
+  error       String?
+  rowCount    Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// THE idempotency key. One run per schedule per period, enforced by the database.
+  @@unique([scheduleId, periodStart])
+  /// Reclaiming a run abandoned by a worker that died mid-flight.
+  @@index([status, claimExpiresAt])
 }

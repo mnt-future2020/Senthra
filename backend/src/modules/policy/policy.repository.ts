@@ -78,6 +78,20 @@ export function findDocumentTx(tx: Prisma.TransactionClient, key: string): Promi
   return tx.policyDocument.findUnique({ where: { key } });
 }
 
+/**
+ * Read one version inside the publish transaction — the currently-published body, for the
+ * identical-republish guard.
+ *
+ * A `*Tx` helper rather than a `tx.policyVersion.*` call in the service, because the repository is
+ * the only layer that touches Prisma (CLAUDE.md) and a transactional read is still a read. Taking
+ * `tx` keeps it on the SAME snapshot as `findDocumentTx` above, which is what lets the guard and the
+ * version allocation agree: a concurrent publish that beats this one aborts it, and the replay sees
+ * the committed body and refuses.
+ */
+export function findVersionByIdTx(tx: Prisma.TransactionClient, id: string): Promise<PolicyVersion | null> {
+  return tx.policyVersion.findUnique({ where: { id } });
+}
+
 export function createVersionTx(
   tx: Prisma.TransactionClient,
   data: {
@@ -115,6 +129,22 @@ export function setPublishedVersionTx(
 export function findVersionById(id: string): Promise<PolicyVersion | null> {
   if (!id) return Promise.resolve(null);
   return prisma.policyVersion.findUnique({ where: { id } });
+}
+
+/**
+ * One published version, scoped to the document it belongs to.
+ *
+ * The document key is part of the LOOKUP, not checked afterwards: an id alone would let a caller
+ * authorised for one policy read a version of another simply by knowing its id. There is one policy
+ * document today, so nothing can currently exploit that — which is exactly when the scope is cheap
+ * to put in and free of consequences.
+ *
+ * Read-only by construction: PolicyVersion has no update or delete anywhere in this repository, so
+ * "viewing cannot mutate" is a property of what exists rather than of this function being careful.
+ */
+export function findVersionForDocument(documentKey: string, id: string): Promise<PolicyVersion | null> {
+  if (!id) return Promise.resolve(null);
+  return prisma.policyVersion.findFirst({ where: { id, documentKey } });
 }
 
 /**

@@ -62,6 +62,33 @@ const envSchema = z.object({
     .enum(["true", "false"])
     .default("false")
     .transform((v) => v === "true"),
+
+  // ── Scheduled reports: the two trigger paths ────────────────────────────────────────────────
+  //
+  // Shared secret for the HTTP trigger (POST /internal/report-scheduler/run), for a platform cron.
+  // UNSET means the endpoint is mounted but refuses everything with a 503 — an endpoint that emails
+  // people must never be reachable by default, so the absence of a secret is a closed door, not an
+  // open one.
+  // Empty is treated as UNSET, not as a zero-length secret: a copied .env.example must leave the
+  // trigger closed, never stop the server booting. A real value must be long enough to be a secret.
+  REPORT_SCHEDULER_SECRET: z
+    .string()
+    .optional()
+    .transform((v) => (v && v.trim() !== "" ? v.trim() : undefined))
+    .refine(
+      (v) => v === undefined || v.length >= 16,
+      "REPORT_SCHEDULER_SECRET must be at least 16 characters (or empty to disable the HTTP trigger)",
+    ),
+
+  // Whether the long-running process sweeps for itself. ON by default, matching the three sweeps
+  // server.ts already runs: on a long-running host that is the mechanism this codebase uses for this
+  // exact class of work, and defaulting it off would mean a forgotten variable silently sends nothing.
+  // Set "false" only where an external scheduler is the sole driver. Running BOTH is safe by design —
+  // the database decides what has already run.
+  REPORT_SCHEDULER_IN_PROCESS: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((v) => v === "true"),
 });
 
 const parsed = envSchema.safeParse(process.env);

@@ -8,6 +8,7 @@ import {
   requirePermission,
 } from "../../middleware/auth.middleware.js";
 import { writeLimiter, bulkWriteLimiter, exportLimiter } from "../../middleware/rateLimit.middleware.js";
+import * as reportsController from "#modules/reports/reports.controller.js";
 import { validateBody } from "../../middleware/validate.middleware.js";
 import {
   adminStockRequestSchema,
@@ -243,6 +244,14 @@ adminRouter.post(
 // ----------------------------------------------------------------------------
 const portalRouter = Router();
 portalRouter.use(requireAuth, requireCustomer);
+
+// Customer-facing reports (FLOW 9). Mounted on the PORTAL router so `requireCustomer` applies, and
+// served by customer-safe handlers that take the customer id from the session — never the query.
+// No staff permission is involved: a customer's right to their own data is their session.
+portalRouter.get("/reports/types", reportsController.customerReportTypes);
+portalRouter.get("/reports", reportsController.runCustomerReport);
+portalRouter.get("/reports/export.csv", exportLimiter, reportsController.exportCustomerReportCsv);
+portalRouter.get("/reports/export.xlsx", exportLimiter, reportsController.exportCustomerReportXlsx);
 
 portalRouter.get("/me", customerController.getOwnProfile);
 portalRouter.get("/overview", customerController.getOwnOverview);

@@ -76,22 +76,83 @@ describe("the public page shows only published content", () => {
 });
 
 /**
- * The two switches that make the notice public. Publishing must not flip either — going public is a
- * decision someone takes by editing these files, not a consequence of a database write.
+ * The notice is PUBLIC now — linked from sign-in and indexable.
+ *
+ * This block used to assert the opposite, and was right to: /privacy then rendered policy text
+ * hardcoded in the page, so an unapproved draft could have been announced to the world by a stray
+ * edit. That page is gone. The content is now whatever an operator holding `policy.publish`
+ * deliberately published, with no fallback and no prose in the deployable — the guards above pin
+ * exactly that, and they are what makes linking safe.
+ *
+ * So the direction of the check flips rather than disappearing. What must not regress is no longer
+ * "is it still hidden" but "is it still REACHABLE": a data-protection notice is only doing its job
+ * if somebody at the point of collection can find it, and an unlinked, de-indexed notice silently
+ * stops doing that while every test stays green.
  */
-describe("the manual publication switches are still off", () => {
-  it("the page is noindexed", () => {
-    expect(read("app/privacy/page.tsx")).toContain("robots: { index: false, follow: false }");
+describe("the notice is reachable from where data is collected", () => {
+  it("the sign-in screen links to it", () => {
+    const auth = read("components/auth/AuthLayout.tsx");
+    // The IMPORT is the machine-checkable half — a <Link> cannot render without it. The href is the
+    // other half. Comments are stripped first, or the old restore snippet would satisfy this.
+    const code = codeOf(auth);
+    expect(code, "AuthLayout must import next/link to render the notice link").toMatch(
+      /^import .*from "next\/link";$/m,
+    );
+    expect(code, "the sign-in footer must point at /privacy").toMatch(/href="\/privacy"/);
   });
 
-  it("the sign-in screen does not link to it", () => {
-    const auth = read("components/auth/AuthLayout.tsx");
-    // The IMPORT is the machine-checkable fact: with no `next/link` import a <Link> cannot render,
-    // whatever the file says elsewhere. (The restore snippet lives inside a JSX comment, so a naive
-    // substring search finds it and proves nothing.)
-    expect(auth).not.toMatch(/^import .*from "next\/link";$/m);
-    // And no plain anchor either.
-    expect(auth).not.toMatch(/<a\s[^>]*href="\/privacy"/);
+  it("the page is not de-indexed", () => {
+    // `robots: { index: false }` would keep the page out of search results. Harmless-looking, and it
+    // was correct while the content was a draft; with a published notice it just makes the document
+    // harder to find for no benefit.
+    expect(codeOf(read("app/privacy/page.tsx"))).not.toContain("index: false");
+  });
+});
+
+/**
+ * Copy-to-draft must copy the SOURCE, never what the viewer is showing.
+ *
+ * The version viewer renders parsed blocks — headings styled, bullets as bullets. Copying that back
+ * would paste a document stripped of its `#` and `-` markers and its paragraph breaks: structurally
+ * different from the version it claims to be, and silently so, because it still reads correctly.
+ *
+ * The detail response carries both `body` (the immutable source) and `blocks` (the render). Only one
+ * of them may reach the draft.
+ */
+describe("copying a historical version copies its SOURCE", () => {
+  const section = codeOf(read("components/dashboard/settings/legal/LegalSection.tsx"));
+
+  it("saves the raw body, not the rendered blocks", () => {
+    expect(section, "copy-to-draft must save `detail.body`").toMatch(/saveDraft\(\s*viewing\.detail\.body/);
+    expect(section, "`blocks` must never be written back into the draft").not.toMatch(/saveDraft\([^)]*\.blocks/);
+  });
+
+  it("routes through the existing draft save, so it inherits the revision guard", () => {
+    // A bespoke copy endpoint would have needed its own concurrency and audit story. Reusing
+    // saveDraft means there is nothing new to get wrong: it already refuses a stale revision.
+    expect(section).toMatch(/saveDraft\(\s*viewing\.detail\.body,\s*policy\.draftRevision/);
+  });
+
+  it("does not publish, repoint, or otherwise touch a version", () => {
+    const fn = section.slice(section.indexOf("const copyToDraft"), section.indexOf("const viewVersion"));
+    expect(fn).not.toContain("publishPolicy");
+    expect(fn).not.toContain("publishedVersionId");
+  });
+
+  // Label must describe what happens. "Restore"/"Make live"/"Revert" would all promise the live
+  // version changes, which it does not — publishing stays a separate, permissioned act.
+  it("is labelled for what it does", () => {
+    const jsx = read("components/dashboard/settings/legal/LegalSection.tsx");
+    expect(jsx).toContain("Copy to draft");
+    for (const wrong of [">Restore<", ">Make live<", ">Revert<"]) {
+      expect(jsx, `${wrong} would misdescribe the action`).not.toContain(wrong);
+    }
+  });
+
+  it("is gated on policy.edit and never on policy.publish", () => {
+    const block = section.slice(section.indexOf("onClick={copyToDraft}") - 400, section.indexOf("onClick={copyToDraft}") + 200);
+    expect(block).toContain("canEdit");
+    expect(block).not.toContain("canPublish");
   });
 });
 

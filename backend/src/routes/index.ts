@@ -1,6 +1,8 @@
 import { Router } from "express";
 
 import attentionRoutes from "#modules/attention/attention.routes.js";
+import reportsRoutes from "#modules/reports/reports.routes.js";
+import { schedulerTriggerHandler } from "#modules/reports/reportScheduler.trigger.js";
 import auditRoutes from "#modules/audit/audit.routes.js";
 import authRoutes from "#modules/auth/auth.routes.js";
 import engineerTransferRoutes from "#modules/engineer-transfer/engineer-transfer.routes.js";
@@ -44,12 +46,28 @@ router.get("/", (_req, res) => {
   res.json({ status: "ok", service: "backend" });
 });
 
+// ── Scheduled-report trigger ───────────────────────────────────────────────────────────────────
+//
+// The ONE thing a production environment must invoke, at least once an hour. Deliberately outside
+// every module router: a cron carries no session, so `requireAuth` would reject it. Its own guard is
+// a shared secret (REPORT_SCHEDULER_SECRET) checked in constant time, and with no secret configured
+// the handler answers 503 to everyone — mounting it can never create an unauthenticated way to email
+// people.
+//
+// Not under /reports, because it is not part of the Reports API surface: no permission opens it and
+// no user calls it. POST is the honest verb (it has effects); GET is accepted too, because several
+// cron platforms can only issue one.
+const schedulerTrigger = "/internal/report-scheduler/run";
+router.post(schedulerTrigger, schedulerTriggerHandler);
+router.get(schedulerTrigger, schedulerTriggerHandler);
+
 // Feature routes
 router.use("/auth", authRoutes);
 router.use("/audit", auditRoutes);
 router.use("/dashboard", dashboardRoutes);
 // Global pending-work counts (sidebar badges + dashboard strip + module tab counts — one source).
 router.use("/attention", attentionRoutes);
+router.use("/reports", reportsRoutes);
 router.use("/settings", settingsRoutes);
 // Legal policies. Its GET /policies/privacy is PUBLIC (mounted before requireAuth inside the router,
 // like /settings/branding); every other route is permission-gated.

@@ -8,6 +8,7 @@ import { prisma } from "./lib/prisma.js";
 import { startUploadReaper } from "#modules/upload/upload.reaper.js";
 import { startRentalDeadlineSweep } from "#modules/purchase-order/rentalHire.sweep.js";
 import { startExpiredSessionSweep } from "#modules/auth/session.sweep.js";
+import { startSchedulerLoop } from "#modules/reports/reportScheduler.trigger.js";
 
 async function start(): Promise<void> {
   // Ensure the admin + settings exist before accepting requests.
@@ -33,12 +34,27 @@ async function start(): Promise<void> {
   // already refused by findActive/listSessions/the device cap; this stops the dead row (and the IP
   // on it) outliving the session because nobody happened to present its sid again.
   const stopSessionSweep = startExpiredSessionSweep();
+  // Scheduled reports. Same in-process-timer reasoning as the three above, and safe to run on every
+  // instance for the same reason: the claim and the (schedule, period) unique key decide what runs.
+  //
+  // Announced at boot either way. The failure this guards against is nobody noticing that NOTHING
+  // drives the sweep — an operator should be able to read what will trigger it from the startup log
+  // rather than from a schedule that quietly never fires.
+  const stopReportScheduler = env.REPORT_SCHEDULER_IN_PROCESS ? startSchedulerLoop() : null;
+  console.info(
+    stopReportScheduler
+      ? "[report-scheduler] in-process sweep active (every 15m)"
+      : `[report-scheduler] in-process sweep DISABLED — an external scheduler must POST ${
+          env.REPORT_SCHEDULER_SECRET ? "" : "(NO SECRET CONFIGURED) "
+        }/internal/report-scheduler/run at least hourly`,
+  );
 
   const shutdown = async (): Promise<void> => {
     stopReaper();
     // Stopped like the reaper: a pass starting during teardown would query a disconnecting client.
     stopRentalSweep();
     stopSessionSweep();
+    stopReportScheduler?.();
     await prisma.$disconnect();
     server.close(() => process.exit(0));
   };

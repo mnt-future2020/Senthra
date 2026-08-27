@@ -50,6 +50,30 @@ describe("route gating", () => {
     expect(declaration('router.post("/privacy/preview"')).toContain("canView");
   });
 
+  // Reading what WAS published is neither publishing nor editing. Gating it on either would mean the
+  // people who audit the policy need the rights to change it, which inverts the point of the split.
+  it("viewing one historical version requires policy.view and nothing more", () => {
+    const decl = declaration('router.get("/privacy/versions/:id"');
+    expect(decl).toContain("canView");
+    expect(decl).not.toContain("canEdit");
+    expect(decl).not.toContain("canPublish");
+  });
+
+  // Discard rewrites the WORKING COPY and can reach no published version, so it is an edit.
+  // Requiring publish for it would mean an author cannot undo their own unsaved mistake.
+  it("discarding the draft requires policy.edit, not policy.publish", () => {
+    const decl = declaration('router.post("/privacy/draft/discard"');
+    expect(decl).toContain("canEdit");
+    expect(decl).not.toContain("canPublish");
+  });
+
+  // The parameterised route must not be able to swallow a sibling literal path.
+  it("registers /privacy/versions/:id after the literal /privacy/admin route", () => {
+    expect(routes.indexOf('router.get("/privacy/versions/:id"')).toBeGreaterThan(
+      routes.indexOf('router.get("/privacy/admin"'),
+    );
+  });
+
   it("binds each helper to exactly the permission its name claims", () => {
     expect(routes).toContain('const canView = requirePermission("policy.view")');
     expect(routes).toContain('const canEdit = requirePermission("policy.edit")');
@@ -68,7 +92,14 @@ describe("the public surface is exactly one read route", () => {
 
   it("declares every other route AFTER it", () => {
     const authWall = routes.indexOf("router.use(requireAuth)");
-    for (const r of ['"/privacy/admin"', '"/privacy/preview"', '"/privacy/draft"', '"/privacy/publish"']) {
+    for (const r of [
+      '"/privacy/admin"',
+      '"/privacy/preview"',
+      '"/privacy/draft"',
+      '"/privacy/draft/discard"',
+      '"/privacy/versions/:id"',
+      '"/privacy/publish"',
+    ]) {
       expect(routes.indexOf(r), `${r} must be behind requireAuth`).toBeGreaterThan(authWall);
     }
   });

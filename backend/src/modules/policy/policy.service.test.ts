@@ -12,18 +12,28 @@ vi.mock("./policy.repository.js", () => ({
   createVersionTx: vi.fn(),
   setPublishedVersionTx: vi.fn(),
   findVersionById: vi.fn(),
+  findVersionByIdTx: vi.fn(),
+  findVersionForDocument: vi.fn(),
   findPublishedVersion: vi.fn(),
   listVersions: vi.fn(),
 }));
 vi.mock("#modules/audit/audit.service.js", () => ({ record: vi.fn() }));
+// The publish transaction reads the CURRENT version to reject an identical republish. That read is
+// `policyRepo.findVersionByIdTx` — a REPOSITORY call, so the transaction client is opaque here and
+// the test controls the repository instead of impersonating a Prisma client. Previously this mock
+// had to fake a `{ policyVersion: { findUnique } }` shape, which meant the test knew what table the
+// service touched: exactly the coupling the repository layer exists to remove.
+const TX = vi.hoisted(() => Symbol("tx"));
 vi.mock("../../lib/prisma.js", () => ({
   prisma: {},
-  withTransactionRetry: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn({})),
+  withTransactionRetry: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(TX)),
 }));
 
 import * as policyRepo from "./policy.repository.js";
 import * as audit from "#modules/audit/audit.service.js";
 import { withTransactionRetry } from "../../lib/prisma.js";
+// discardDraft / getPublishedVersion are exercised in policy.lifecycle.test.ts, which owns the
+// three lifecycle additions and their own harness.
 import {
   getPolicyForAdmin,
   getPublishedPolicy,
@@ -76,6 +86,7 @@ const mockSetPublished = policyRepo.setPublishedVersionTx as ReturnType<typeof v
 const mockFindVersionById = policyRepo.findVersionById as ReturnType<typeof vi.fn>;
 const mockFindPublished = policyRepo.findPublishedVersion as ReturnType<typeof vi.fn>;
 const mockListVersions = policyRepo.listVersions as ReturnType<typeof vi.fn>;
+const mockFindVersionForDoc = policyRepo.findVersionForDocument as ReturnType<typeof vi.fn>;
 const mockAudit = audit.record as ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
@@ -88,8 +99,11 @@ beforeEach(() => {
   );
   mockSetPublished.mockResolvedValue(doc());
   mockFindVersionById.mockResolvedValue(null);
+  mockFindVersionForDoc.mockResolvedValue(null);
   mockFindPublished.mockResolvedValue(null);
   mockListVersions.mockResolvedValue([]);
+  // Nothing published by default, so the identical-republish guard has nothing to compare against.
+  vi.mocked(policyRepo.findVersionByIdTx).mockResolvedValue(null);
 });
 
 /** Invariant: the public endpoint can never serve unpublished text. */

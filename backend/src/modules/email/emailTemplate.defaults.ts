@@ -128,6 +128,33 @@ Regards,
 {{companyLegalName}}`,
   },
   {
+    key: "report.scheduled",
+    name: "Scheduled Report",
+    category: "notification",
+    subject: "{{reportName}} — {{period}}",
+    variables: ["reportName", "period", "summary", "brandName", "currentYear"],
+    // Without the period the message is unfilable: two months of the same schedule would arrive
+    // looking identical, and the recipient could not tell which one they were opening.
+    requiredVariables: ["reportName", "period"],
+    // INFORMATIONAL ONLY, for the same reason the rental reminder is: SMTP has no idempotency key, so
+    // delivery is at-least-once and a duplicate copy must do nothing the first did not. No link that
+    // changes state, no one-time token.
+    //
+    // The body carries a COUNT, never a financial figure. An inbox is not an authorised surface — the
+    // access decision was made when somebody was put on the recipient list, and the numbers live in
+    // the attached workbook rather than in a message that can be forwarded on.
+    body: `Your scheduled report is ready.
+
+Report: {{reportName}}
+Period: {{period}}
+{{summary}}
+
+The full report is attached to this email.
+
+Regards,
+{{brandName}}`,
+  },
+  {
     key: "rental_deadline_reminder",
     name: "Rental Deadline Reminder",
     category: "notification",

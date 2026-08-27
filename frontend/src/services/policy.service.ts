@@ -1,5 +1,5 @@
 import { api, LONG_WRITE_TIMEOUT } from "@/lib/api";
-import type { AdminPolicy, PolicyBlock } from "@/types/policy";
+import type { AdminPolicy, PolicyBlock, PublishedVersionDetail } from "@/types/policy";
 
 // Typed wrappers around the /policies endpoints (admin side).
 //
@@ -37,6 +37,35 @@ export function saveDraft(body: string, expectedRevision: number): Promise<Admin
  */
 export function publishPolicy(expectedRevision: number): Promise<AdminPolicy> {
   return api<{ policy: AdminPolicy }>("/policies/privacy/publish", {
+    method: "POST",
+    body: { expectedRevision },
+    timeout: LONG_WRITE_TIMEOUT,
+  }).then((r) => r.policy);
+}
+
+/**
+ * Read ONE published version, body included.
+ *
+ * A separate call rather than a `body` on every history row: the list is metadata, read on every
+ * visit; the text is wanted occasionally and for one version at a time. Shipping every body with the
+ * list would send every policy ever published on each page load to answer a question nobody asked.
+ *
+ * Requires `policy.view` only — reading what was published is not publishing.
+ */
+export function getPublishedVersion(id: string): Promise<PublishedVersionDetail> {
+  return api<{ version: PublishedVersionDetail }>(`/policies/privacy/versions/${id}`).then((r) => r.version);
+}
+
+/**
+ * Throw the working copy away and put the published text back.
+ *
+ * Carries `expectedRevision` for the same reason `saveDraft` does — a discard is a draft write, and
+ * must not be the one way to silently overwrite an edit somebody else just saved.
+ *
+ * Cannot change what the public sees: the server writes `draftBody` and nothing else.
+ */
+export function discardDraft(expectedRevision: number): Promise<AdminPolicy> {
+  return api<{ policy: AdminPolicy }>("/policies/privacy/draft/discard", {
     method: "POST",
     body: { expectedRevision },
     timeout: LONG_WRITE_TIMEOUT,

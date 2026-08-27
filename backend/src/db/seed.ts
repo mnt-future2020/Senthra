@@ -88,6 +88,19 @@ const VAN_STOCK_REQUEST_PERMISSIONS = ["van_stock_request.review"];
 // route it to a PM, and cancel/close orders. Seeded on finance_director + backfilled idempotently
 // below. The three read keys (suppliers/warehouse/irm .view) are REQUIRED for the PRF *and* PO
 // form pickers; audit.view drives the "Audit trail" tab.
+// The Reports module's Finance half. SEPARATE from FINANCE_PROCUREMENT_PERMISSIONS because it is a
+// separate capability: procurement is raising and approving spend, this is reading what it added up to.
+//
+// Why this exists at all: `reports.finance.view` and `reports.export` were defined in the permission
+// catalogue when the Reports module shipped but granted to NO role, so the entire Finance section was
+// reachable only by a Super Admin holding "*" — including the Scheduled Reports recipient picker,
+// which correctly showed nobody else because nobody else was authorised.
+//
+// `reports.view` (the general, non-financial Reports & Audit hub) is deliberately NOT here. Who may
+// run stock, project and engineer reports is a business decision nobody has made, and it is one click
+// in Users & Roles; guessing it in a seed would be inventing an access grant.
+const FINANCE_REPORTING_PERMISSIONS = ["reports.finance.view", "reports.export"];
+
 const FINANCE_PROCUREMENT_PERMISSIONS = [
   "purchase_requests.view",
   "purchase_requests.create",
@@ -184,7 +197,7 @@ const SEED_ROLES: {
   { key: "project_coordinator", name: "Project Coordinator", description: "Supports project managers with day-to-day coordination.", sortOrder: 3, permissions: [] },
   { key: "warehouse_manager", name: "Warehouse Manager", description: "Receives goods, scans stock in/out and manages a warehouse.", sortOrder: 4, permissions: [...WAREHOUSE_MANAGER_PERMISSIONS, ...GOODS_MANAGEMENT_PERMISSIONS, ...VAN_STOCK_REQUEST_PERMISSIONS, ...ENGINEER_STOCK_ADMIN_PERMISSIONS], isWarehouseScoped: true },
   { key: "field_engineer", name: "Field Engineer", description: "Collects stock, installs on site and updates job status.", sortOrder: 5, permissions: [...ENGINEER_PORTAL_PERMISSIONS], canHoldStock: true },
-  { key: "finance_director", name: "Finance Director", description: "Reviews purchase requests, generates purchase orders and tracks spend.", sortOrder: 6, permissions: [...FINANCE_PROCUREMENT_PERMISSIONS] },
+  { key: "finance_director", name: "Finance Director", description: "Reviews purchase requests, generates purchase orders and tracks spend.", sortOrder: 6, permissions: [...FINANCE_PROCUREMENT_PERMISSIONS, ...FINANCE_REPORTING_PERMISSIONS] },
   { key: "hr_manager", name: "HR Manager", description: "Manages people-related records and onboarding.", sortOrder: 7, permissions: [] },
 ];
 
@@ -364,9 +377,14 @@ export async function seedDatabase(): Promise<void> {
   // Backfill the procurement (PRF → PO) permissions onto finance_director and project_manager
   // idempotently (covers DBs seeded before the Purchase Request module shipped — the
   // finance_director previously seeded EMPTY). Additive + never revokes; skips "*" roles.
+  //
+  // Also carries the Finance REPORTING keys, which shipped granted to nobody: this is the delivery
+  // channel every new permission in this codebase has used, and it is what makes the Finance section
+  // (and therefore the scheduled-report recipient list) reachable by the Finance Director role on a
+  // database that already exists.
   {
     const grants: Record<string, string[]> = {
-      finance_director: FINANCE_PROCUREMENT_PERMISSIONS,
+      finance_director: [...FINANCE_PROCUREMENT_PERMISSIONS, ...FINANCE_REPORTING_PERMISSIONS],
       project_manager: PM_PROCUREMENT_PERMISSIONS,
     };
     let granted = 0;
@@ -379,7 +397,7 @@ export async function seedDatabase(): Promise<void> {
         granted++;
       }
     }
-    if (granted > 0) console.log(`Granted procurement (PRF/PO) permissions to ${granted} role(s).`);
+    if (granted > 0) console.log(`Granted procurement (PRF/PO) + Finance reporting permissions to ${granted} role(s).`);
   }
 
   // One-time REVOKE (runs EXACTLY once, ever): an earlier build wrongly granted the

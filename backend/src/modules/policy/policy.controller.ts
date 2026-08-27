@@ -1,7 +1,8 @@
 import * as policyService from "./policy.service.js";
 import { asyncHandler } from "../../utils/async-handler.js";
 import { actorFrom } from "../../utils/actor.js";
-import type { PreviewInput, PublishInput, SaveDraftInput } from "./policy.validation.js";
+import { param } from "../../utils/request.js";
+import type { DiscardDraftInput, PreviewInput, PublishInput, SaveDraftInput } from "./policy.validation.js";
 
 // GET /policies/privacy  (PUBLIC) — the published policy, or an explicit "nothing published".
 //
@@ -27,6 +28,26 @@ export const previewPolicy = asyncHandler(async (req, res) => {
 export const saveDraft = asyncHandler(async (req, res) => {
   const { body, expectedRevision } = req.body as SaveDraftInput;
   const policy = await policyService.saveDraft(body, expectedRevision, actorFrom(req));
+  res.json({ policy });
+});
+
+// GET /policies/privacy/versions/:id  (policy.view) — ONE published version, with its body.
+//
+// `policy.view`, the same right that lists the history this reads from. Reading what was published is
+// not publishing, and it is not editing, so it asks for neither of those permissions.
+//
+// A read with no write path: the service looks the version up scoped to its document and returns it.
+export const getPublishedVersion = asyncHandler(async (req, res) => {
+  res.json({ version: await policyService.getPublishedVersion(param(req, "id")) });
+});
+
+// POST /policies/privacy/draft/discard  (policy.edit) — put the published text back in the draft.
+//
+// `policy.edit`, NOT `policy.publish`: this changes the working copy and cannot touch a published
+// version. Nothing here can create or modify one — see the service.
+export const discardDraft = asyncHandler(async (req, res) => {
+  const { expectedRevision } = req.body as DiscardDraftInput;
+  const policy = await policyService.discardDraft(expectedRevision, actorFrom(req));
   res.json({ policy });
 });
 

@@ -2,13 +2,16 @@
 
 import * as React from "react";
 import Link from "next/link";
+import { createPortal } from "react-dom";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Package, Plus, Search } from "lucide-react";
+import { MoreHorizontal, Package, Pencil, Plus, Power, Search, Trash2 } from "lucide-react";
 
 import { useAuth } from "@/hooks/useAuth";
+import { useDashboard } from "@/hooks/useDashboard";
 import * as rentalService from "@/services/rental.service";
 import type { RentalCategory, RentalItem } from "@/types/rental";
 import type { UserStatus } from "@/types/user";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { ExportButton } from "@/components/ui/ExportButton";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
@@ -16,13 +19,152 @@ import { toolbarInputCls, toolbarPrimaryBtn } from "@/components/ui/styles";
 import { CELL_ONE_LINE, colClass, tableMinWidth } from "@/components/ui/tableLayout";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { nextRentalStatus, rentalRowActions } from "./rentalRowActions";
 
 const PAGE_SIZE = 20;
 
-// Code · Name · Category · Unit · Status. Declared per column rather than one flat minimum so a long
-// item name scrolls the table sideways instead of wrapping to a second line — a wrapped row is ~27px
-// taller, paid once PER ROW, which costs far more of a 1024px laptop than any band above the table.
-const TABLE_MIN_WIDTH = tableMinWidth(["narrow", "wide", "normal", "narrow", "narrow"]);
+// Code · Name · Category · Unit · Status · actions. Declared per column rather than one flat minimum
+// so a long item name scrolls the table sideways instead of wrapping to a second line — a wrapped row
+// is ~27px taller, paid once PER ROW, which costs far more of a 1024px laptop than any band above the
+// table. The actions cell holds one 28px button, so it asks for the smallest class there is.
+const TABLE_MIN_WIDTH = tableMinWidth(["narrow", "wide", "normal", "narrow", "narrow", "narrow"]);
+
+function MenuItem({ icon: Icon, danger, onClick, children }: { icon: React.ElementType; danger?: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      role="menuitem"
+      onClick={onClick}
+      className={`flex w-full items-center gap-2.5 px-3.5 py-2 text-left text-xs font-bold transition-colors hover:bg-[var(--surface-2)] focus:bg-[var(--surface-2)] focus:outline-none ${
+        danger ? "text-[var(--neg)]" : "text-[var(--ink)]"
+      }`}
+    >
+      <Icon className="h-3.5 w-3.5 shrink-0" />
+      {children}
+    </button>
+  );
+}
+
+/**
+ * The "…" menu on a catalogue row.
+ *
+ * Mechanically the same control as IrmItemsView's — portalled to <body> so the table's own
+ * `overflow-auto` cannot clip it, flipped above the trigger when there is no room below, dismissed on
+ * Escape / scroll / resize / outside click, and returning focus to the trigger when it closes.
+ *
+ * A copy rather than a shared component ON PURPOSE: nine other lists in this app each carry their own
+ * (`SupplierRowActions`, `WarehouseRowActions`, `IrmRowActions`, …) and lifting all ten into
+ * `components/ui/` is a refactor of nine screens this change has no business touching. When that
+ * extraction happens it should take this one with it.
+ *
+ * WHICH entries appear is not decided here — see rentalRowActions.ts, which is testable without a DOM.
+ */
+function RentalRowActions({
+  item,
+  canEdit,
+  canDelete,
+  onEdit,
+  onToggleStatus,
+  onDelete,
+}: {
+  item: RentalItem;
+  canEdit: boolean;
+  canDelete: boolean;
+  onEdit: () => void;
+  onToggleStatus: () => void;
+  onDelete: () => void;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [pos, setPos] = React.useState<{ top?: number; bottom?: number; right: number } | null>(null);
+  const btnRef = React.useRef<HTMLButtonElement>(null);
+  const menuRef = React.useRef<HTMLDivElement>(null);
+  const close = () => {
+    setOpen(false);
+    btnRef.current?.focus();
+  };
+  const openMenu = () => {
+    const rect = btnRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const right = Math.max(8, window.innerWidth - rect.right);
+    const spaceBelow = window.innerHeight - rect.bottom;
+    setPos(spaceBelow < 200 ? { bottom: window.innerHeight - rect.top + 4, right } : { top: rect.bottom + 4, right });
+    setOpen(true);
+  };
+  React.useEffect(() => {
+    if (!open) return;
+    const onMove = () => close();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("scroll", onMove, true);
+    window.addEventListener("resize", onMove);
+    window.addEventListener("keydown", onKey);
+    // Focus the first entry on open, so the menu is operable from the keyboard alone.
+    menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    return () => {
+      window.removeEventListener("scroll", onMove, true);
+      window.removeEventListener("resize", onMove);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const actions = rentalRowActions({ status: item.status, canEdit, canDelete });
+  if (actions.length === 0) return null;
+
+  const run = { edit: onEdit, "toggle-status": onToggleStatus, delete: onDelete } as const;
+  const icons = { edit: Pencil, "toggle-status": Power, delete: Trash2 } as const;
+
+  return (
+    <div className="flex justify-end">
+      <button
+        ref={btnRef}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (open) close();
+          else openMenu();
+        }}
+        className="rounded-lg p-1.5 text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--ink)]"
+        aria-label={`Actions for ${item.code}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        <MoreHorizontal className="h-4 w-4" />
+      </button>
+      {open &&
+        pos &&
+        createPortal(
+          <>
+            <div className="fixed inset-0 z-[55]" onClick={close} />
+            <div
+              ref={menuRef}
+              role="menu"
+              aria-label="Rental item actions"
+              className="anim-fade-in fixed z-[60] w-48 rounded-xl border border-[var(--border)] bg-[var(--surface)] py-1 shadow-2xl"
+              style={{ top: pos.top, bottom: pos.bottom, right: pos.right }}
+            >
+              {actions.map((a, idx) => (
+                <React.Fragment key={a.key}>
+                  {/* Delete sits behind a divider — the destructive entry should not be the immediate
+                      neighbour of the one above it in a menu people click quickly. */}
+                  {a.danger && idx > 0 && <div className="my-1 border-t border-[var(--border-2)]" />}
+                  <MenuItem
+                    icon={icons[a.key]}
+                    danger={a.danger}
+                    onClick={() => {
+                      close();
+                      run[a.key]();
+                    }}
+                  >
+                    {a.label}
+                  </MenuItem>
+                </React.Fragment>
+              ))}
+            </div>
+          </>,
+          document.body,
+        )}
+    </div>
+  );
+}
 
 /**
  * Rentals → Catalogue: the master list of equipment the company hires.
@@ -33,6 +175,7 @@ const TABLE_MIN_WIDTH = tableMinWidth(["narrow", "wide", "normal", "narrow", "na
  */
 export function RentalItemsView() {
   const { can } = useAuth();
+  const { pushToast } = useDashboard();
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -87,6 +230,17 @@ export function RentalItemsView() {
   const [total, setTotal] = React.useState(0);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
+  // Bumped after a row mutation so the SAME filters refetch — the list effect keys on the filters,
+  // which have not changed, so without this the row keeps its stale badge until the next navigation.
+  const [refreshKey, setRefreshKey] = React.useState(0);
+  const [confirm, setConfirm] = React.useState<{ open: boolean; item: RentalItem | null }>({ open: false, item: null });
+  const [deleting, setDeleting] = React.useState(false);
+
+  const canEdit = can("rentals.edit");
+  const canDelete = can("rentals.delete");
+  // The whole column goes when a viewer can do neither — an empty cell on every row is a column's
+  // worth of width spent on nothing, and this table is already six columns wide.
+  const showActions = canEdit || canDelete;
 
   React.useEffect(() => {
     let cancelled = false;
@@ -113,7 +267,7 @@ export function RentalItemsView() {
     return () => {
       cancelled = true;
     };
-  }, [search, status, categoryId, page]);
+  }, [search, status, categoryId, page, refreshKey]);
 
   // The category filter is a convenience, not a gate: a failure here leaves the dropdown empty
   // rather than blocking the list the user came for.
@@ -125,6 +279,57 @@ export function RentalItemsView() {
   }, []);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  /**
+   * Retire an item, or bring it back.
+   *
+   * A STATUS-ONLY PATCH, and that is the point of doing it here rather than routing the user through
+   * the edit form. `/rental-items/:id` takes `createRentalItemSchema.partial()`, so every field the
+   * body omits is left exactly as the server has it. Sending the row's other values back — the shape
+   * the edit form uses, because it has actually collected them — would make this control capable of
+   * silently reverting a name or a category that someone else changed since this page was loaded.
+   * The row in `items` is a snapshot from the last fetch; it is not authority on anything.
+   *
+   * Everything else about the change stays where it already lives: the service records
+   * `rental_item.updated` for the audit trail, and an inactive item is still refused at PRF→PO
+   * conversion by `requireActiveRentalItems`. Nothing here re-implements either.
+   */
+  const toggleStatus = async (item: RentalItem) => {
+    const next = nextRentalStatus(item.status);
+    try {
+      await rentalService.updateRentalItem(item.id, { status: next });
+      pushToast(next === "inactive" ? "Rental item deactivated." : "Rental item activated.", "success");
+      setRefreshKey((k) => k + 1);
+    } catch (e) {
+      pushToast(e instanceof Error ? e.message : "Could not update the rental item.", "alert");
+    }
+  };
+
+  /**
+   * Same call, same guards and same failure wording as the detail page's Delete.
+   *
+   * The server refuses while any purchase request, purchase order, job kit list or engineer-held hire
+   * still references the item, and its 409 names WHICH — so the message is surfaced as-is. Mirroring
+   * that rule on the client would give us a second copy to keep in step with
+   * DELETE_DEPENDENCY_CHECKERS, and the copy that drifts is always the one that lets a delete through.
+   */
+  const onDelete = async () => {
+    if (!confirm.item || deleting) return;
+    setDeleting(true);
+    try {
+      await rentalService.deleteRentalItem(confirm.item.id);
+      setConfirm({ open: false, item: null });
+      pushToast("Rental item deleted.", "success");
+      // Deleting the last row of a page would otherwise leave the user on an empty page N.
+      if (items.length === 1 && page > 1) patch({ page: page - 1 > 1 ? String(page - 1) : null }, false);
+      else setRefreshKey((k) => k + 1);
+    } catch (e) {
+      pushToast(e instanceof Error ? e.message : "Delete failed.", "alert");
+      setConfirm({ open: false, item: null });
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   return (
     <div className="stack flex h-full flex-col">
@@ -221,6 +426,9 @@ export function RentalItemsView() {
                     same class or every following cell shifts by one. */}
                 <th className={`cell-y px-4 ${colClass("lg")}`}>Unit</th>
                 <th className="cell-y px-4">Status</th>
+                {/* Deliberately unlabelled, like every other actions column in the app — a header
+                    over a 28px button reads as a column of data that isn't there. */}
+                {showActions && <th className="cell-y px-4" />}
               </tr>
             </thead>
             <tbody>
@@ -237,6 +445,21 @@ export function RentalItemsView() {
                   <td className="cell-y px-4">
                     <StatusBadge status={item.status as UserStatus} />
                   </td>
+                  {/* The whole CELL stops the click, not just the trigger: the row navigates on
+                      click, so a press that lands on the cell's padding — or on the menu's own
+                      backdrop — would open the item underneath the action being taken. */}
+                  {showActions && (
+                    <td className="cell-y px-4" onClick={(e) => e.stopPropagation()}>
+                      <RentalRowActions
+                        item={item}
+                        canEdit={canEdit}
+                        canDelete={canDelete}
+                        onEdit={() => router.push(`/dashboard/rentals/${item.code}/edit`)}
+                        onToggleStatus={() => toggleStatus(item)}
+                        onDelete={() => setConfirm({ open: true, item })}
+                      />
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
@@ -254,6 +477,27 @@ export function RentalItemsView() {
           />
         )}
       </div>
+
+      {/* Same wording as the detail page's dialog, and for the same reason: a rental code is
+          allocated once and never freed, so this is not the IRM catalogue's "you can re-add it
+          later". Naming the item AND its code is what makes the dialog checkable — from a list, the
+          row that opened it is no longer the one being read. */}
+      <ConfirmDialog
+        open={confirm.open}
+        title="Delete rental item"
+        confirmLabel="Delete"
+        danger
+        busy={deleting}
+        onClose={() => setConfirm({ open: false, item: null })}
+        onConfirm={onDelete}
+        message={
+          <>
+            Delete <strong className="text-[var(--ink)]">{confirm.item?.name}</strong> ({confirm.item?.code})? An item
+            referenced by any purchase request, purchase order, job kit list or engineer-held hire cannot be deleted.
+            Deactivate instead if you only want to stop it being requested.
+          </>
+        }
+      />
     </div>
   );
 }
