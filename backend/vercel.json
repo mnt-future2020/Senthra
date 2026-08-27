@@ -4,7 +4,7 @@
   "crons": [
     {
       "path": "/internal/report-scheduler/run",
-      "schedule": "0 * * * *"
+      "schedule": "0 6 * * *"
     }
   ]
 }

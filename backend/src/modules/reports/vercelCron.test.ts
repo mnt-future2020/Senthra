@@ -43,10 +43,39 @@ describe("vercel.json cron wiring", () => {
     expect(routes).toMatch(/router\.get\(schedulerTrigger/);
   });
 
-  // The contract in .env.example is "at least once an hour" — a schedule fires at a wall-clock time,
-  // so a coarser sweep delays a report by however long the gap is.
-  it("wakes the scheduler hourly", () => {
-    expect(vercel.crons![0]!.schedule).toBe("0 * * * *");
+  // ── DAILY, and it has to be ─────────────────────────────────────────────────────────────────
+  //
+  // This was "0 * * * *". Vercel HOBBY does not merely throttle a sub-daily cron, it REFUSES THE
+  // DEPLOYMENT: "Hobby accounts are limited to daily cron jobs. This cron expression would run more
+  // than once per day." So the hourly expression did not delay reports on the demo — it took the
+  // whole backend deployment down with it.
+  //
+  // 06:00 UTC. Vercel crons run in UTC and Hobby precision is +/-59 min, and that drift is always
+  // LATE, never early ("will trigger anywhere between 1:00 am and 1:59 am"), so this sweeps somewhere
+  // in 06:00-06:59 UTC.
+  //
+  // A schedule's default fire time is 06:00 in the COMPANY timezone (ReportSchedule.hour defaults to
+  // 6) — 05:00 UTC under BST, 06:00 UTC under GMT. Both are <= the sweep window, and the due query is
+  // `nextRunAt: { lte: now }` (inclusive), so the GMT case landing exactly on 06:00 UTC is still
+  // collected rather than missed by a boundary. A schedule set later in the day waits for the next
+  // sweep; one daily sweep cannot do better, and the demo is the only place this applies.
+  //
+  // Production is untouched: the always-on host runs the in-process loop every 15 minutes.
+  it("uses a DAILY schedule, which is all Vercel Hobby will deploy", () => {
+    const [minute, hour, ...rest] = vercel.crons![0]!.schedule.split(" ");
+    expect(rest.join(" "), "day/month/weekday must stay unrestricted — this runs every day").toBe("* * *");
+    // A literal hour, not "*" and not a step: both run more than once a day and fail deployment.
+    expect(hour, "an hourly or sub-hourly cron FAILS deployment on Hobby").toMatch(/^\d{1,2}$/);
+    expect(minute).toMatch(/^\d{1,2}$/);
+  });
+
+  it("does not sweep before the default schedule fire time in either GMT or BST", () => {
+    // ReportSchedule.hour defaults to 6 (company timezone) = 05:00 UTC in BST, 06:00 UTC in GMT.
+    // Hobby fires up to 59 minutes LATE and never early, and `findDueSchedules` matches on
+    // `nextRunAt: { lte: now }`, so a sweep at exactly 06:00 UTC still collects the GMT case.
+    // Earlier than 06:00 UTC would miss it for a whole day every winter.
+    const hour = Number(vercel.crons![0]!.schedule.split(" ")[1]);
+    expect(hour, "a sweep before 06:00 UTC misses the default 06:00 schedule under GMT").toBeGreaterThanOrEqual(6);
   });
 
   // Every route reaches Express through this rewrite; removing it takes the whole API down, cron
@@ -101,10 +130,8 @@ describe("the Vercel cron secret contract is documented where a deployer will se
     expect(example.toLowerCase()).toMatch(/silent|nothing tells you|never sent|never runs/);
   });
 
-  it("records the plan caveat for the hourly schedule this repo declares", () => {
-    // vercel.json asks for "0 * * * *"; Hobby caps crons at daily. A deployer on the wrong plan needs
-    // to know the schedule they configured is not the schedule they will get.
-    expect(vercel.crons![0]!.schedule).toBe("0 * * * *");
+  it("records the plan caveat for the schedule this repo declares", () => {
+    // A deployer needs to know WHY the sweep is daily here and hourly everywhere else.
     expect(example.toLowerCase()).toMatch(/hobby|pro/);
   });
 });
