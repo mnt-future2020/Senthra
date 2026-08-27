@@ -975,11 +975,14 @@ function StockTab({
 
   // "Received stock to catalogue" is customer-pool work, and this tab opens on Company (IRM) — so
   // without the count on the pill the Inventory tab's number points at a pane nobody opens.
+  // Ordered by OWNERSHIP first, condition last: the three pools are who the stock belongs to
+  // (ours, the customer's, the supplier's), and Damaged cuts across all of them. Keeping it at the
+  // end stops a condition sitting in the middle of a list of owners.
   const ALL_PILLS = [
     { key: "irm", label: "Company (IRM)" },
     { key: "customer", label: "Customer" },
-    { key: "damaged", label: "Damaged" },
     { key: "rental", label: "Rental (hired in)" },
+    { key: "damaged", label: "Damaged" },
   ] as const;
   // Only shown once there is a CHOICE — a single pill is a label pretending to be a control.
   const POOL_PILLS = POOLS.filter((k) => allowed[k]).length > 1 ? ALL_PILLS.filter((p) => allowed[p.key]) : [];

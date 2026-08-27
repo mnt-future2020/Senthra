@@ -1,4 +1,6 @@
-import { api, LONG_WRITE_TIMEOUT } from "@/lib/api";
+import { api, apiFile, LONG_WRITE_TIMEOUT } from "@/lib/api";
+import { downloadBlob, filenameFromDisposition } from "@/lib/download";
+import type { CustomReportColumn, CustomReportResult, CustomReportType } from "./reports.service";
 import { downloadCsv, withoutPaging } from "@/lib/csvExport";
 import { registerClientCache } from "@/lib/clientCache";
 import type {
@@ -689,4 +691,62 @@ export function submitStockRequest(payload: StockRequestPayload): Promise<Portal
     method: "POST",
     body: payload,
   }).then((r) => r.request);
+}
+
+
+// ── Customer-facing reports (FLOW 9) ───────────────────────────────────────────────────────────
+//
+// Every call goes to `/customer/reports/*` — the PORTAL endpoints, which take the customer id from
+// the authenticated session and never from the request. This module deliberately does NOT expose a
+// customerId parameter: there is no way for the portal to ask for another customer's data, because
+// there is no argument in which to put it.
+//
+// The staff endpoints (/reports/custom/*) are never called from the portal. They sit behind staff
+// permissions a customer cannot hold, and their results may carry money.
+
+export type { CustomReportColumn, CustomReportResult, CustomReportType };
+
+/** The filters a customer report may carry. No customerId — see above. */
+export interface CustomerReportQuery {
+  report: string;
+  dateFrom?: string;
+  dateTo?: string;
+  projectId?: string;
+  irmItemId?: string;
+  cursor?: string | null;
+  limit?: number;
+}
+
+function reportQs(q: CustomerReportQuery): string {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(q)) if (v != null && v !== "") p.set(k, String(v));
+  return p.toString() ? `?${p.toString()}` : "";
+}
+
+/** The report types THIS customer may run — the server returns only the customer-safe subset. */
+export async function listOwnReportTypes(): Promise<CustomReportType[]> {
+  return (await api<{ reports: CustomReportType[] }>("/customer/reports/types")).reports;
+}
+
+export async function runOwnReport(q: CustomerReportQuery): Promise<CustomReportResult> {
+  return (await api<{ result: CustomReportResult }>(`/customer/reports${reportQs(q)}`)).result;
+}
+
+export const ownReportCsvUrl = (q: CustomerReportQuery) => `/customer/reports/export.csv${reportQs(q)}`;
+
+/**
+ * The Excel workbook, built SERVER-side from the customer-safe result.
+ *
+ * Not assembled here from a fetched table: the requirement is that the response itself carries no
+ * pricing, so the file the customer receives is the same customer-safe shape the screen renders.
+ */
+/**
+ * Returns `capped` for the same reason the CSV path does: a workbook that stopped at the row cap opens
+ * looking like the whole answer, and a customer has no other way to tell.
+ */
+export async function downloadOwnReportXlsx(q: CustomerReportQuery): Promise<{ capped: boolean }> {
+  const { blob, headers } = await apiFile(`/customer/reports/export.xlsx${reportQs(q)}`);
+  const fallback = `${q.report}-${new Date().toISOString().slice(0, 10)}.xlsx`;
+  downloadBlob(blob, filenameFromDisposition(headers["content-disposition"] ?? null, fallback));
+  return { capped: String(headers["x-export-capped"] ?? "") === "true" };
 }

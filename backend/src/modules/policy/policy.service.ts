@@ -103,6 +103,52 @@ export async function getPolicyForAdmin(key = PRIVACY_POLICY_KEY): Promise<Admin
   };
 }
 
+/** One published version, with its body — the read behind "View" in Previous versions. */
+export interface PublishedVersionDetail extends PublishedVersionSummary {
+  /** The immutable stored text, byte for byte. */
+  body: string;
+  /**
+   * The same text parsed by the SAME parser the public page renders through.
+   *
+   * Returned from the server rather than parsed in the browser so a historical version is displayed
+   * exactly as it was served — a second parser on the client would be a second answer to "what does
+   * this document look like", and the whole point of reading an archived version is fidelity.
+   */
+  blocks: PolicyBlock[];
+  /** True when this is the version `/privacy` is serving right now. */
+  isCurrent: boolean;
+}
+
+/**
+ * Read ONE published version, including its immutable body.
+ *
+ * A separate call rather than a `body` on every row of `history`: the list is metadata and is read on
+ * every visit to the settings screen, while the text is wanted occasionally and for one version at a
+ * time. Putting the bodies in the list would send every policy this company has ever published on
+ * each page load to answer a question nobody asked yet.
+ *
+ * Gated on `policy.view` at the route — the same right that already shows the history it belongs to.
+ * Deliberately NOT `policy.publish`: reading what was published is not publishing.
+ *
+ * This function performs no write of any kind, and there is no update or delete on PolicyVersion in
+ * the repository for it to reach even by mistake.
+ */
+export async function getPublishedVersion(
+  id: string,
+  key = PRIVACY_POLICY_KEY,
+): Promise<PublishedVersionDetail> {
+  const version = await policyRepo.findVersionForDocument(key, id);
+  if (!version) throw notFound("That policy version does not exist.");
+
+  const doc = await policyRepo.findDocument(key);
+  return {
+    ...summarise(version),
+    body: version.body,
+    blocks: parsePolicyBody(version.body),
+    isCurrent: doc?.publishedVersionId === version.id,
+  };
+}
+
 /** Render an arbitrary body to blocks — the editor's preview, before anything is saved. */
 export function previewBody(body: string): PolicyBlock[] {
   return parsePolicyBody(body);
@@ -148,6 +194,65 @@ export async function saveDraft(
   return getPolicyForAdmin(key);
 }
 
+/**
+ * Throw away the working copy and put the PUBLISHED text back in the draft.
+ *
+ * The only "undo" this screen has. Without it a mistaken edit is unrecoverable except by retyping the
+ * live policy from the version beside it, which is both tedious and a fresh chance to introduce a
+ * difference nobody intended.
+ *
+ * Implemented as an ordinary draft write, deliberately:
+ *
+ *   • it goes through `saveDraftIfUnchanged`, so it carries the SAME revision guard every other draft
+ *     write has — a discard cannot silently clobber an edit somebody else saved a second earlier;
+ *   • it touches `draftBody` and nothing else. No version is created, no version is modified, and the
+ *     document's `publishedVersionId` is not reachable from here. What the public sees is untouched
+ *     by construction rather than by intent.
+ *
+ * With NOTHING published, the target is the empty string — the draft's own starting state, and what
+ * `hasUnpublishedChanges` already compares against (`published?.body ?? ""`). That is the existing
+ * empty-draft semantic, not a new lifecycle: discarding before a first publish clears the draft.
+ *
+ * Requires `policy.edit`, not `policy.publish`: this is an edit to the working copy.
+ */
+export async function discardDraft(
+  expectedRevision: number,
+  actor?: AuditActor,
+  key = PRIVACY_POLICY_KEY,
+): Promise<AdminPolicy> {
+  const doc = await policyRepo.findDocument(key);
+  if (!doc) throw notFound("Policy document not found.");
+
+  const published = doc.publishedVersionId
+    ? await policyRepo.findVersionById(doc.publishedVersionId)
+    : null;
+  const target = published?.body ?? "";
+
+  // Nothing to discard. Refused rather than treated as a no-op success, so the UI cannot report that
+  // it undid something it did not: the same equality `hasUnpublishedChanges` is derived from.
+  if (doc.draftBody === target) {
+    throw conflict("There is nothing to discard — the draft already matches the published policy.");
+  }
+
+  const count = await policyRepo.saveDraftIfUnchanged(key, expectedRevision, target, actor?.email ?? null);
+  if (count === 0) {
+    throw conflict("This draft was changed by someone else. Reload before discarding.");
+  }
+
+  audit.record({
+    actor,
+    action: "policy.draft_discarded",
+    targetType: "policy",
+    targetId: doc.id,
+    targetLabel: key,
+    // Version restored TO, never the text — same rule as draft_saved. `null` means the draft was
+    // cleared because nothing has been published yet.
+    metadata: { revision: expectedRevision + 1, restoredToVersion: published?.version ?? null },
+  });
+
+  return getPolicyForAdmin(key);
+}
+
 // --- publish -------------------------------------------------------------------------------------
 
 /**
@@ -181,6 +286,28 @@ export async function publishDraft(
     }
     if (!doc.draftBody.trim()) {
       throw conflict("There is nothing to publish — the draft is empty.");
+    }
+
+    // Republishing byte-identical text would mint a permanent version that says nothing, and because
+    // versions are immutable by design there is no way to take it back — the one case where "no
+    // delete" stops being purely protective.
+    //
+    // Checked INSIDE the transaction, against the row this transaction read. A check before the
+    // transaction would be a read that another publish could invalidate before this one commits; here
+    // the same snapshot that allocates the version number decides whether there should be one, and a
+    // loser is aborted and replayed by `withTransactionRetry` against the committed state — where it
+    // now sees the identical body and refuses. That is what makes a concurrent double-publish of the
+    // same content impossible rather than unlikely.
+    //
+    // EXACT equality, matching `hasUnpublishedChanges` — the codebase's one comparison rule for this.
+    // Nothing is trimmed or normalised: whitespace is meaningful in this content model (a blank line
+    // starts a paragraph, a leading `#` makes a heading), so text differing only in whitespace is a
+    // different document and is allowed to publish.
+    if (doc.publishedVersionId) {
+      const current = await policyRepo.findVersionByIdTx(tx, doc.publishedVersionId);
+      if (current && current.body === doc.draftBody) {
+        throw conflict("Nothing changed since the current published version.");
+      }
     }
 
     const version = doc.lastPublishedVersion + 1;

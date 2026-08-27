@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 
 import { useBranding } from "@/hooks/useBranding";
 import { BrandMark } from "@/components/branding/BrandMark";
@@ -32,21 +33,31 @@ export function AuthLayout({ children }: { children: React.ReactNode }) {
         </div>
 
         {/*
-          NO PRIVACY LINK HERE — deliberately.
+          The privacy notice is linked from HERE because this is where personal data is collected.
 
-          The notice at /privacy is a DRAFT: its lawful bases, retention periods, controller identity
-          and rights-contact are unresolved placeholders awaiting legal sign-off. Linking to it from
-          the public sign-in screen would publish an unapproved document as this product's privacy
-          policy, which is worse than having no link at all.
+          A notice nobody can reach is not a notice. The sign-in screen is the point of collection, so
+          it is the place a data-protection notice is expected to be reachable from — not a URL you
+          have to already know.
 
-          The route still exists and is reachable directly, so the draft can be reviewed.
+          This link was previously removed, correctly at the time: /privacy then rendered policy text
+          hardcoded in the page, with placeholder lawful bases and retention periods awaiting legal
+          sign-off, so linking to it would have published an unapproved document as this product's
+          policy. That is no longer how the page works. It now renders ONLY what somebody holding
+          `policy.publish` deliberately published (Settings → Privacy Policy), it ships no policy text
+          of its own, and with nothing published it says so rather than falling back to a draft.
 
-          TO RESTORE once the notice is approved — put back:
-            <Link href="/privacy" className="transition-colors hover:text-white">Privacy Notice</Link>
-          alongside the footer text below, and re-add the next/link import.
+          What this link shows is therefore whatever the operator published — which is exactly what a
+          privacy link should show. Keeping the published content correct is an operational
+          responsibility, not something to solve by hiding the link.
         */}
-        <div className="flex items-center text-xs text-white/70">
+        {/* `justify-between` — the layout this footer had before the link was pulled: copyright at
+            the left edge of the panel, notice at the right. Restored rather than re-invented, so the
+            sign-in screen looks the way it was designed to. */}
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-xs text-white/70">
           <span>{footerText}</span>
+          <Link href="/privacy" className="transition-colors hover:text-white">
+            Privacy Notice
+          </Link>
         </div>
       </div>
 

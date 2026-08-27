@@ -59,8 +59,13 @@ describe("firstDashboardPath", () => {
   it("an engineer-only user lands on the engineer portal", () => {
     expect(firstDashboardPath(makeUser(["engineer.dashboard.view"]))).toBe("/dashboard/engineer");
   });
-  it("an audit-only user lands on the Audit log", () => {
-    expect(firstDashboardPath(makeUser(["audit.view"]))).toBe("/dashboard/audit");
+  it("an audit-only user lands on the Reports & Audit hub, which contains the audit trail", () => {
+    expect(firstDashboardPath(makeUser(["audit.view"]))).toBe("/dashboard/reports");
+  });
+  it("a finance-only user lands on Finance, not the hub that also admits them", () => {
+    // The hub admits `reports.finance.view` so scheduling is reachable, but Finance is the page that
+    // role actually came for — and it is ranked first, so the hub never steals the landing.
+    expect(firstDashboardPath(makeUser(["reports.finance.view"]))).toBe("/dashboard/finance");
   });
   it("lands on the higher-priority section when a user holds several", () => {
     // Engineer is intentionally ranked below real modules; audit below the engineer portal.

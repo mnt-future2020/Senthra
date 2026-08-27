@@ -22,6 +22,7 @@ import { Field } from "@/components/ui/Field";
 import { ReadOnlyNotice } from "@/components/dashboard/settings/ui/ReadOnlyNotice";
 import { Notice } from "@/components/ui/Notice";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
+import { cn } from "@/lib/utils";
 import type { Msg } from "@/components/ui/types";
 
 type EditorTab = "message" | "preview";
@@ -472,7 +473,12 @@ export function EmailTemplateEditor({
             <button
               type="button"
               onClick={() => (confirmAction === "restore" ? doRestore() : setConfirmAction("restore"))}
-              className={`${ghostBtn} ${confirmAction === "restore" ? "border-[var(--accent)] text-[var(--accent)]" : ""}`}
+              // `cn`, not template-literal concatenation. `ghostBtn` pins `text-[var(--ink)]` and
+              // `border-[var(--border)]`; appending the accent pair in a string leaves Tailwind to
+              // pick a winner by CSS source order, so the confirm state's emphasis was not reliably
+              // applied. `cn` runs twMerge, which drops the losing utility and lets the LAST one win —
+              // which is what the code reads like it does.
+              className={cn(ghostBtn, confirmAction === "restore" && "border-[var(--accent)] text-[var(--accent)]")}
             >
               <RotateCcw className="h-3.5 w-3.5" />
               {confirmAction === "restore" ? "Click to confirm" : "Restore default"}

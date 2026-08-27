@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { formatCalendarDay, formatDate, formatDateTime } from "./formatDate";
+import { formatCalendarDay, formatDate, formatDateTime, formatDateTimeIn } from "./formatDate";
 
 // This module exists because the same six-line formatter had been copy-pasted into thirteen files
 // under three different names (fmtDate / formatDate / formatDay), and five of those copies had
@@ -68,5 +68,72 @@ describe("formatCalendarDay", () => {
     expect(formatCalendarDay(null)).toBe("—");
     expect(formatCalendarDay(undefined)).toBe("—");
     expect(formatCalendarDay("not a date")).toBe("—");
+  });
+});
+
+// A scheduled report is configured as a wall-clock time in the COMPANY timezone, and stored as UTC.
+// Rendering it in the viewer's zone produced a row that read "Monthly on the 1st at 06:00 ·
+// Europe/London" beside "Next run: 01 Sept 2026, 10:30" — the same event, twice, disagreeing.
+
+// 06:00 on 1 September 2026 in London, which is BST (+1) — so 05:00 UTC.
+const SEPT_0600_LONDON = "2026-09-01T05:00:00.000Z";
+// 06:00 on 1 December 2026 in London, which is GMT (+0).
+const DEC_0600_LONDON = "2026-12-01T06:00:00.000Z";
+
+describe("formatDateTimeIn — the schedule's zone, not the viewer's", () => {
+  it("renders the configured wall-clock time", () => {
+    expect(formatDateTimeIn(SEPT_0600_LONDON, "Europe/London")).toBe("01 Sept 2026, 06:00 BST");
+  });
+
+  // THE point of the fix: the same instant, read from three places on earth, still says 06:00 London.
+  it("does not move with the viewer, which is why the number can be trusted", () => {
+    const london = formatDateTimeIn(SEPT_0600_LONDON, "Europe/London");
+    expect(london).toContain("06:00");
+    // The viewer's own rendering of that instant differs by zone — that is exactly what was on screen
+    // before (10:30 on an Indian machine), and what this function no longer does.
+    expect(formatDateTimeIn(SEPT_0600_LONDON, "Asia/Kolkata")).toContain("10:30");
+    expect(formatDateTimeIn(SEPT_0600_LONDON, "America/New_York")).toContain("01:00");
+  });
+
+  // One stored instant, two labels across the year: the abbreviation is what makes 06:00 unambiguous.
+  it("shows the zone, and follows DST", () => {
+    expect(formatDateTimeIn(SEPT_0600_LONDON, "Europe/London")).toContain("BST");
+    expect(formatDateTimeIn(DEC_0600_LONDON, "Europe/London")).toContain("GMT");
+    // Both are still 06:00 local — a schedule set for 06:00 does not drift an hour every summer.
+    expect(formatDateTimeIn(DEC_0600_LONDON, "Europe/London")).toBe("01 Dec 2026, 06:00 GMT");
+  });
+
+  it("labels an offset zone unambiguously too", () => {
+    expect(formatDateTimeIn(SEPT_0600_LONDON, "Asia/Kolkata")).toContain("GMT+5:30");
+  });
+});
+
+describe("formatDateTimeIn — falling back rather than failing", () => {
+  // `timeZone` reaches here from the database. An unusable one must not take a whole table down.
+  it("falls back to the viewer's rendering on an unusable zone", () => {
+    expect(formatDateTimeIn(SEPT_0600_LONDON, "Mars/Olympus")).toBe(formatDateTime(SEPT_0600_LONDON));
+  });
+
+  // Null is the NORMAL case for a schedule with no override — it means "the company timezone", which
+  // the caller resolves before calling. Reaching here with null means nobody knew the zone.
+  it("falls back when no zone is given at all", () => {
+    expect(formatDateTimeIn(SEPT_0600_LONDON, null)).toBe(formatDateTime(SEPT_0600_LONDON));
+    expect(formatDateTimeIn(SEPT_0600_LONDON, "")).toBe(formatDateTime(SEPT_0600_LONDON));
+  });
+
+  it("returns the em dash for a missing or unparseable instant", () => {
+    expect(formatDateTimeIn(null, "Europe/London")).toBe("—");
+    expect(formatDateTimeIn(undefined, "Europe/London")).toBe("—");
+    expect(formatDateTimeIn("not a date", "Europe/London")).toBe("—");
+  });
+});
+
+describe("formatDateTime is unchanged", () => {
+  // The viewer's-zone formatter is still right for ledger and audit timestamps ("when did this happen,
+  // my time"). This fix adds a second answer; it does not replace the first.
+  it("still renders in the viewer's zone and carries no zone label", () => {
+    const out = formatDateTime(SEPT_0600_LONDON);
+    expect(out).toMatch(/^01 Sept 2026, \d{2}:\d{2}$/);
+    expect(out).not.toContain("BST");
   });
 });
