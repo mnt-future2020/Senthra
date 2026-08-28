@@ -4,7 +4,7 @@ import * as React from "react";
 import { ArrowLeft, Camera, Check, CheckCircle2, ImageUp, Loader2, PackageCheck, Trash2, X } from "lucide-react";
 
 import * as vanStockSvc from "@/services/vanStockRequest.service";
-import type { FulfilEntryPayload, VanStockRequest, WarehouseAvailability } from "@/services/vanStockRequest.service";
+import type { FulfilEntryPayload, ScanLookupHire, VanStockLineSource, VanStockRequest, WarehouseAvailability } from "@/services/vanStockRequest.service";
 import { subscribe } from "@/lib/socket";
 import { cn } from "@/lib/utils";
 import { useDashboard } from "@/hooks/useDashboard";
@@ -16,7 +16,8 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { dangerBtn, inputCls, labelCls, primaryBtn, secondaryBtn } from "@/components/ui/styles";
 import { fmtDateTime } from "@/components/dashboard/portal/portalUi";
 import { ScannerInput } from "@/components/dashboard/goods-management/ScannerInput";
-import { VanStockAttachments, VanStockCompletionBadge, VanStockPostings, VanStockWalkInBadge, linesForWarehouse, warehouseStatus } from "./vanRequestUi";
+import { formatHireDate } from "./vanStockLine";
+import { RentalBadge, VanStockAttachments, VanStockCompletionBadge, VanStockPostings, VanStockWalkInBadge, linesForWarehouse, warehouseStatus } from "./vanRequestUi";
 import type { Msg } from "@/components/ui/types";
 import { uploadDirectForUrl } from "@/lib/upload";
 
@@ -38,6 +39,14 @@ interface FulfilRow {
   damagedQty: number; // returns only
   remainingQty: number;
   available: number | null;
+  source: VanStockLineSource;
+  // RENTAL only, and ADVISORY: which hire(s) these units are expected to move on, so the counter can
+  // see what it is handing over (or taking back) and against which order.
+  //
+  // Never sent back to the server. The posting re-resolves the binding itself from the request's own
+  // lines and the engineer's own custody rows — accepting a hire id from the client would let a
+  // crafted request name a hire at another depot and walk past the warehouse and custody checks.
+  hires?: ScanLookupHire[];
   damagePhotoDataUrl?: string; // data URI — local preview only, never sent
   damagePhotoUrl?: string; // Cloudinary URL — what the posting carries
   damageReason?: string;
@@ -200,16 +209,22 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
   React.useEffect(() => {
     if (!req || req.type !== "restock") return;
     if (["declined", "cancelled", "fulfilled"].includes(req.status)) return;
-    const ids = req.lines.map((l) => l.irmItemId);
-    vanStockSvc.getVanStockAvailability(ids).then(setAvailability).catch(() => setAvailability([]));
+    // Two catalogues, two id lists — a hire has no stock balance to read, so its figure comes from
+    // the depot's live hires instead. Sending them merged would silently return zero for every
+    // rental line and make the reviewer's shortfall check block a line that is perfectly available.
+    const ids = req.lines.filter((l) => l.source !== "rental").map((l) => l.irmItemId!).filter(Boolean);
+    const rentalIds = req.lines.filter((l) => l.source === "rental").map((l) => l.rentalItemId!).filter(Boolean);
+    vanStockSvc.getVanStockAvailability(ids, rentalIds).then(setAvailability).catch(() => setAvailability([]));
   }, [req]);
   // NB "free", not "on shelf": /availability subtracts stock already planned on active jobs, so this
   // is what can actually be taken — the same number and the same word the engineer's composer shows.
+  // Rental reads the same way, from its own pool: free on hire at that depot, net of job demand.
   const shelfOf = React.useCallback(
-    (irmItemId: string, whId: string): number | null => {
+    (line: { source: string; irmItemId: string | null; rentalItemId: string | null }, whId: string): number | null => {
       const w = availability.find((a) => a.warehouseId === whId);
       if (!w) return null;
-      return w.items.find((i) => i.irmItemId === irmItemId)?.quantityOnHand ?? 0;
+      if (line.source === "rental") return w.rentalItems.find((i) => i.rentalItemId === line.rentalItemId)?.quantityOnHand ?? 0;
+      return w.items.find((i) => i.irmItemId === line.irmItemId)?.quantityOnHand ?? 0;
     },
     [availability],
   );
@@ -219,9 +234,15 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
   // sourceOptionsFor's `onHand > 0` rule, so "stocked somewhere" and "the dropdown has another option"
   // can never disagree. Unknown (feed not loaded) ⇒ true, so we never claim "nowhere" on missing data.
   const stockedSomewhere = React.useCallback(
-    (irmItemId: string): boolean => {
+    (line: { source: string; irmItemId: string | null; rentalItemId: string | null }): boolean => {
       if (availability.length === 0) return true; // unknown — don't assert nowhere
-      return availability.some((a) => (a.items.find((i) => i.irmItemId === irmItemId)?.quantityOnHand ?? 0) > 0);
+      // Each pool answers for itself. A rental line checked against `items` would always report
+      // "nowhere" — a hire has no balance row at all — and send the reviewer to exclude a line that
+      // several depots could actually supply.
+      if (line.source === "rental") {
+        return availability.some((a) => (a.rentalItems.find((i) => i.rentalItemId === line.rentalItemId)?.quantityOnHand ?? 0) > 0);
+      }
+      return availability.some((a) => (a.items.find((i) => i.irmItemId === line.irmItemId)?.quantityOnHand ?? 0) > 0);
     },
     [availability],
   );
@@ -281,7 +302,7 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
     return myPendingLines.some((l) => {
       const need = trims[l.id] ?? l.requestedQty;
       if (need === 0) return false; // excluded — fine
-      const shelf = shelfOf(l.irmItemId, sources[l.id]!);
+      const shelf = shelfOf(l, sources[l.id]!);
       return shelf !== null && shelf < need; // block ONLY on a KNOWN shortfall (unknown ⇒ let server decide)
     });
   }, [req, isReviewZone, myPendingLines, availability, trims, sources, shelfOf]);
@@ -372,7 +393,9 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
       // This scan's lookup is the freshest truth for both numbers: a split-fulfilment sibling may have
       // posted against this line since it was staged, so a row's snapshot can be stale. Refresh the row
       // from it on every bump, or the qty box keeps offering a cap the server will reject at Post.
-      const fresh = { remainingQty: line.remainingQty, available: result.available, uom: result.uom };
+      // The hire preview refreshes with the rest of the row: another posting may have drained the hire
+      // this line was expecting since it was staged, and a stale PO number on screen is worse than none.
+      const fresh = { remainingQty: line.remainingQty, available: result.available, uom: result.uom, source: result.source, hires: result.hires };
       const cap = entryCap(fresh);
       // Read the CART through the ref, not the closure: `scanning` gates only the network window, so a
       // scan gun firing again before React commits the previous bump would re-read a stale `entries`
@@ -664,6 +687,10 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
                     <td className="cell-y px-4">
                       <div className="font-semibold text-[var(--ink)]">
                         {l.code ? <CopyableCode code={l.code} label={l.itemName} className="text-left" onCopied={(c) => pushToast(`Copied ${c}`)} /> : l.itemName}
+                        {/* Hired equipment, marked at the point of REVIEW — the reviewer is deciding
+                            whether to send out third-party kit with a return deadline on it, and that
+                            has to be visible before they approve, not after. */}
+                        {l.source === "rental" && <RentalBadge className="ml-1.5 align-middle" />}
                       </div>
                     </td>
                     <td className="cell-y px-4 text-[var(--muted)]">{l.requestedQty}</td>
@@ -720,7 +747,7 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
                                 // Free stock at that warehouse, shown next to its name — the same
                                 // number the engineer chose against, and what the reviewer judges the
                                 // qty by. It disappeared when this cell became read-only.
-                                const free = l.sourceWarehouseId ? shelfOf(l.irmItemId, l.sourceWarehouseId) : null;
+                                const free = l.sourceWarehouseId ? shelfOf(l, l.sourceWarehouseId) : null;
                                 if (free === null) return null;
                                 return <span className="text-[10px] font-semibold text-[var(--muted)]">· {free} free</span>;
                               })()}
@@ -732,7 +759,7 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
                             </div>
                             {(() => {
                               const src = sources[l.id];
-                              const shelf = src ? shelfOf(l.irmItemId, src) : null;
+                              const shelf = src ? shelfOf(l, src) : null;
                               if (shelf === null) return null;
                               const cls = shelf >= need ? "text-[var(--pos)]" : shelf > 0 ? "text-amber-600" : "text-[var(--neg)]";
                               // A 0-shelf line has two very different remedies, and the hint must name the
@@ -740,7 +767,7 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
                               // stocked NOWHERE ⇒ there is nothing to re-point to, so say so and point at the
                               // real exit (qty 0 = exclude), instead of sending the reviewer hunting a
                               // warehouse that doesn't exist.
-                              const zeroHint = stockedSomewhere(l.irmItemId) ? "⚠ 0 here — pick another" : "⚠ Not stocked anywhere — set qty to 0 to exclude";
+                              const zeroHint = stockedSomewhere(l) ? "⚠ 0 here — pick another" : "⚠ Not stocked anywhere — set qty to 0 to exclude";
                               return <div className={`text-[10px] font-semibold ${cls}`}>{shelf >= need ? `✓ ${shelf} free` : shelf > 0 ? `⚠ only ${shelf} here` : zeroHint}</div>;
                             })()}
                           </div>
@@ -847,7 +874,23 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
           {isFulfilZone && openLines.length > 0 && (
             <div className="space-y-3 rounded-xl border border-[var(--border)] p-3">
               <p className="text-xs font-bold text-[var(--faint)]">{req.type === "return" ? "Scan the returned stock in" : "Scan the stock out"}</p>
-              <ScannerInput onCode={onScan} disabled={busy || scanning} placeholder={req.type === "return" ? "Scan or type an IRM code / barcode to receive…" : "Scan or type an IRM code / barcode to issue…"} />
+              {/* "IRM code" only when every line IS company stock. A request carrying hired kit is
+                  scanned by the rental item's own code (RNT-0005), which the placeholder was telling
+                  the counter would not work — the one instruction on the panel, naming the wrong
+                  catalogue. Neutral wording covers both without making the common case vaguer. */}
+              <ScannerInput
+                onCode={onScan}
+                disabled={busy || scanning}
+                placeholder={
+                  req.lines.some((l) => l.source === "rental")
+                    ? req.type === "return"
+                      ? "Scan or type an item code / barcode to receive…"
+                      : "Scan or type an item code / barcode to issue…"
+                    : req.type === "return"
+                      ? "Scan or type an IRM code / barcode to receive…"
+                      : "Scan or type an IRM code / barcode to issue…"
+                }
+              />
 
               {/* Outstanding lines are REFERENCE ONLY — every entry must come through the scanner, so the
                   posted stock is what was physically read off the item (matches Goods Management, which has
@@ -890,11 +933,38 @@ export function VanRequestDetail({ idOrCode, warehouseName, currentWarehouseId, 
                     <div key={e.lineId} className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
-                          <p className="font-bold text-[var(--ink)]">{e.itemName}</p>
+                          <p className="flex flex-wrap items-center gap-1.5 font-bold text-[var(--ink)]">
+                            {e.itemName}
+                            {e.source === "rental" && <RentalBadge />}
+                          </p>
                           <p className="text-xs text-[var(--muted)]">
-                            {e.remainingQty} left on request{e.available !== null ? ` · ${e.available} ${req.type === "return" ? "on the van" : "on the shelf"}` : ""}
+                            {e.remainingQty} left on request
+                            {e.available !== null
+                              ? ` · ${e.available} ${e.source === "rental" ? (req.type === "return" ? "held on hire" : "free on hire") : req.type === "return" ? "on the van" : "on the shelf"}`
+                              : ""}
                             {req.type === "return" && rowTotal(e) > 0 && <span className="ml-1 font-semibold text-[var(--ink)]">· returning {rowTotal(e)}</span>}
                           </p>
+                          {/* WHICH HIRE this scan is expected to move. The catalogue item is not the
+                              hired unit — the hire is — and the counter needs to know which order it is
+                              handing kit out of, and when that kit is owed back. Advisory: the server
+                              re-resolves the binding when the posting is made. */}
+                          {e.source === "rental" && e.hires && e.hires.length > 0 && (
+                            <p className="mt-0.5 text-[11px] text-[var(--muted)]">
+                              {e.hires.map((h, i) => (
+                                <span key={h.purchaseOrderRentalLineId}>
+                                  {i > 0 && " · "}
+                                  <span className="font-semibold text-[var(--accent)]">{h.poCode ?? "hire"}</span>
+                                  {` ×${h.qty}`}
+                                  {h.hireEndDate && (
+                                    <span className={h.overdue ? "font-semibold text-[var(--neg)]" : ""}>
+                                      {h.overdue ? " — overdue " : " — due "}
+                                      {formatHireDate(h.hireEndDate)}
+                                    </span>
+                                  )}
+                                </span>
+                              ))}
+                            </p>
+                          )}
                         </div>
                         <div className="flex shrink-0 items-center gap-1">
                           {/* Restock issues good stock only — a single stepper in the header. It never

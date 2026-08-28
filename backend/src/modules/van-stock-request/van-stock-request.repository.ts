@@ -97,7 +97,11 @@ export interface CreateRequestData {
 }
 
 export interface CreateRequestLineData {
-  irmItemId: string;
+  // Which catalogue this line draws from. Defaults to "irm" at the DB level, so a caller that omits it
+  // writes exactly the row it always did.
+  source?: string; // irm | rental
+  irmItemId?: string | null; // when source is irm
+  rentalItemId?: string | null; // when source is rental — the CATALOGUE item, never a hire
   itemName: string;
   code?: string | null;
   sku?: string | null;
@@ -331,12 +335,18 @@ export function countReturnsToScanByWarehouse(warehouseScope?: string[]): Promis
 
 // Open (pending/approved/partially_fulfilled) line items for one engineer + type — powers the
 // non-blocking duplicate warning in the composer.
-export async function findOpenLineItems(engineerId: string, type: string): Promise<Array<{ irmItemId: string; code: string }>> {
+export async function findOpenLineItems(
+  engineerId: string,
+  type: string,
+): Promise<Array<{ source: string; irmItemId: string | null; rentalItemId: string | null; code: string }>> {
   const rows = await prisma.vanStockRequest.findMany({
     where: { engineerId, type, deletedAt: null, status: { in: ["pending", "approved", "partially_fulfilled"] } },
-    select: { code: true, lines: { select: { irmItemId: true } } },
+    select: { code: true, lines: { select: { source: true, irmItemId: true, rentalItemId: true } } },
   });
-  return rows.flatMap((r) => r.lines.map((l) => ({ irmItemId: l.irmItemId, code: r.code })));
+  // The source rides along so the composer can warn on a duplicate HIRE as well as a duplicate IRM
+  // item. Matching on a bare item id across two catalogues would both miss real duplicates and invent
+  // false ones — the id spaces are independent.
+  return rows.flatMap((r) => r.lines.map((l) => ({ source: l.source, irmItemId: l.irmItemId, rentalItemId: l.rentalItemId, code: r.code })));
 }
 
 /**
@@ -599,7 +609,18 @@ export async function closeShortLines(requestId: string, lineIds: string[], note
 
 export interface FulfilEntry {
   lineId: string;
-  irmItemId: string;
+  source: string; // irm | rental — mirrors the request line's own discriminator
+  irmItemId?: string | null;
+  rentalItemId?: string | null;
+  // THE BOUND HIRE, on rental entries only. The service resolves it before the transaction (soonest
+  // deadline first) and the posting re-asserts it atomically. One request line can span several hires,
+  // so the service may hand over SEVERAL entries for one lineId — the remaining-qty guard below sums
+  // per line, so that splits correctly without any special case.
+  purchaseOrderRentalLineId?: string | null;
+  // Snapshotted onto the posted row so the reviewer's detail view can name the order and the deadline
+  // without loading the order chain — the same reason EngineerRentalHolding snapshots them.
+  poCode?: string | null;
+  hireEndDate?: Date | null;
   itemName: string;
   qty: number;
   condition: string; // good | damaged
@@ -608,15 +629,27 @@ export interface FulfilEntry {
   scannedCode?: string | null;
 }
 
-// One atomic posting: re-read + guard inside the tx, run the caller's ledger writes (apply), append
-// the VanStockFulfilment document, accumulate fulfilledQty, recompute status. Mirrors GM's
+// One atomic posting: re-read + guard inside the tx, append the VanStockFulfilment document, run the
+// caller's ledger writes (apply), accumulate fulfilledQty, recompute status. Mirrors GM's
 // createMovementWithCode(header, lines, apply) shape — everything commits or nothing does.
+//
+// THE FULFILMENT IS WRITTEN BEFORE `apply`, and that ordering is load-bearing rather than incidental.
+// `apply` needs the POSTING's id: a damaged hire opens a HireCustodyExit keyed
+// [sourceType, sourceId, hire, kind], and only the posting is a correct `sourceId` there. Keying on
+// the REQUEST would make a second posting's damage on the same hire collide with the first — and
+// createExitTx reads a collision as an idempotent retry and hands back the earlier row, so the second
+// posting's units would be drained from custody with no exit row holding them down, quietly returning
+// a damaged tester to the issuable pool. Splitting a Field Stock return across several postings is
+// ordinary, so that is a live hazard, not a theoretical one.
+//
+// Nothing else changes by moving it: the whole body is one transaction, so a sequence collision now
+// fails before the ledger writes instead of after, and either way the transaction rolls back whole.
 export async function postFulfilment(
   requestId: string,
   allowedStatuses: string[],
   performedBy: string,
   entries: FulfilEntry[],
-  apply: (tx: Prisma.TransactionClient, req: RequestWithLines) => Promise<void>,
+  apply: (tx: Prisma.TransactionClient, req: RequestWithLines, fulfilmentId: string) => Promise<void>,
 ): Promise<RequestWithLines> {
   return withTransaction(async (tx) => {
     const req = await tx.vanStockRequest.findFirst({ where: { id: requestId, deletedAt: null }, include: INCLUDE });
@@ -637,14 +670,12 @@ export async function postFulfilment(
       if (qty > cap) throw conflict(`"${line.itemName}": only ${Math.max(0, cap)} left to fulfil on this request.`);
     }
 
-    await apply(tx, req);
-
-    // Derive the sequence from the CURRENT max inside the tx rather than the pre-apply read's
-    // length — combined with the @@unique([requestId, sequence]), a concurrent poster either sees
-    // our row (and takes the next number) or loses the insert with P2002 and retries the posting.
+    // Derive the sequence from the CURRENT max inside the tx — combined with the
+    // @@unique([requestId, sequence]), a concurrent poster either sees our row (and takes the next
+    // number) or loses the insert with P2002 and retries the posting.
     const last = await tx.vanStockFulfilment.findFirst({ where: { requestId }, orderBy: { sequence: "desc" }, select: { sequence: true } });
     const seq = (last?.sequence ?? 0) + 1;
-    await tx.vanStockFulfilment.create({
+    const fulfilment = await tx.vanStockFulfilment.create({
       data: {
         requestId,
         sequence: seq,
@@ -652,7 +683,13 @@ export async function postFulfilment(
         lines: {
           create: entries.map((e) => ({
             lineId: e.lineId,
-            irmItemId: e.irmItemId,
+            irmItemId: e.irmItemId ?? null,
+            rentalItemId: e.rentalItemId ?? null,
+            // The hire these units actually moved on — the record that makes a Field Stock issue
+            // traceable and, later, returnable.
+            purchaseOrderRentalLineId: e.purchaseOrderRentalLineId ?? null,
+            poCode: e.poCode ?? null,
+            hireEndDate: e.hireEndDate ?? null,
             itemName: e.itemName,
             qty: e.qty,
             condition: e.condition,
@@ -663,6 +700,8 @@ export async function postFulfilment(
         },
       },
     });
+
+    await apply(tx, req, fulfilment.id);
 
     for (const [lineId, qty] of postedByLine) {
       await tx.vanStockRequestLine.update({ where: { id: lineId }, data: { fulfilledQty: { increment: qty } } });

@@ -98,6 +98,90 @@ export function insertRentalTxnTx(
 }
 
 /**
+ * THE TWO DOORS a hired unit can enter or leave an engineer's custody by.
+ *
+ * Every production write to `EngineerRentalHolding` goes through `upsertRentalHoldingTx` above or the
+ * compare-and-set drain in `hireLoss.service`, and every one of them writes exactly one ledger row —
+ * so these five types are the complete set of custody events, and the `type` column is the only place
+ * that records WHICH DOOR a unit came through:
+ *
+ *   JOB door    job_issue  (+, Goods Management scan-out)
+ *               job_return (−, Goods Management scan-in)
+ *               job_lost   (−, hire loss declared while out with the engineer)
+ *   FIELD door  van_restock (+, Field Stock collection)
+ *               van_return  (−, Field Stock hand-back)
+ *
+ * Origin matters because the two pools have different exits. Hired kit taken for a JOB goes back
+ * through that job's scan-in or is declared lost against the hire; kit collected through Field Stock
+ * goes back through a Field Stock return. Letting job-origin units leave by the Field Stock door
+ * drains custody while the job still believes the kit is out.
+ *
+ * `RENTAL_FIELD_TXN_TYPES` is deliberately the FIELD list rather than the job list: an unrecognised
+ * future type then counts as NOT field-origin, so a new door defaults to "not field-returnable" and
+ * the invariant fails closed instead of quietly leaking a pool nobody has classified yet.
+ */
+export const RENTAL_FIELD_TXN_TYPES = ["van_restock", "van_return"] as const;
+export const RENTAL_JOB_TXN_TYPES = ["job_issue", "job_return", "job_lost"] as const;
+
+/**
+ * FIELD-STOCK-ORIGIN custody per hire for one engineer: `van_restock − van_return`, from the ledger.
+ *
+ * ONE aggregation, and it is the ledger that answers rather than a second stored counter — the whole
+ * point of an append-only custody ledger is that it can be asked this without a new column to keep in
+ * step. Verified against live data: for every holding row, `jobNet + fieldNet` equals
+ * `quantityOnHand` exactly, and every row's `balanceAfter` matches its own running total, so the two
+ * nets are a true partition of what the engineer holds.
+ *
+ * Keyed on `(purchaseOrderRentalLineId, engineerId)` so it rides the existing compound index — never a
+ * scan of one engineer's whole history, and one round trip for however many hires they hold. A hire
+ * with no field-door rows is simply ABSENT from the map (read as 0), which is the fail-closed default.
+ *
+ * The figure is NOT clamped here: this layer reports what the ledger says, and the caller clamps it
+ * against the live holding, because custody is what decides how many units are physically there.
+ */
+export async function findFieldOriginByHires(engineerId: string, purchaseOrderRentalLineIds: string[]): Promise<Map<string, number>> {
+  return fieldOriginByHires(prisma, engineerId, purchaseOrderRentalLineIds);
+}
+
+/**
+ * The same figure, read INSIDE the caller's transaction.
+ *
+ * Not a convenience: it is what makes the origin rule ENFORCEABLE rather than advisory. The Field
+ * Stock return posting drains custody in a transaction whose only quantity guard is the holding's
+ * floor, and that floor is on TOTAL custody — job-origin plus field-origin. Read outside the
+ * transaction, the field-door figure can be stale by the time the drain happens, and the floor will
+ * happily let the shortfall come out of the job's units instead.
+ *
+ * Reading it here, in the same transaction that writes the drain, closes that: the transaction also
+ * updates the holding document, so a concurrent posting that commits first turns this one into a Mongo
+ * write conflict rather than letting both spend the same field-origin units.
+ */
+export async function findFieldOriginByHiresTx(
+  tx: Prisma.TransactionClient,
+  engineerId: string,
+  purchaseOrderRentalLineIds: string[],
+): Promise<Map<string, number>> {
+  return fieldOriginByHires(tx, engineerId, purchaseOrderRentalLineIds);
+}
+
+/** One query, one classification — shared so the tx and non-tx readers can never disagree. */
+async function fieldOriginByHires(
+  client: Pick<Prisma.TransactionClient, "engineerRentalTransaction">,
+  engineerId: string,
+  purchaseOrderRentalLineIds: string[],
+): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  if (purchaseOrderRentalLineIds.length === 0) return out;
+  const rows = await client.engineerRentalTransaction.groupBy({
+    by: ["purchaseOrderRentalLineId"],
+    where: { engineerId, purchaseOrderRentalLineId: { in: purchaseOrderRentalLineIds }, type: { in: [...RENTAL_FIELD_TXN_TYPES] } },
+    _sum: { quantityDelta: true },
+  });
+  for (const r of rows) out.set(r.purchaseOrderRentalLineId, r._sum.quantityDelta ?? 0);
+  return out;
+}
+
+/**
  * Push a hire's NEW deadline onto every engineer currently holding units of it.
  *
  * `upsertRentalHoldingTx` above promises the snapshot is "REFRESHED on every update" — but the only

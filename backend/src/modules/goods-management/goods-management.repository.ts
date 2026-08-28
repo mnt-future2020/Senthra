@@ -292,7 +292,12 @@ export interface JobMovementTally {
   status: string;
   direction: string;
   warehouseId: string | null;
-  items: { jobKitLineId: string | null; qty: number; condition: string }[];
+  // The POOL ids ride along for one reason: a reconcile write-off (`consume` / `condition: "lost"`)
+  // written before it named its kit line can only be attributed back to a line through the item it
+  // wrote off — see `unattributedLostByKitLine`. Without them the batch consumers could not tell such
+  // a line from any other consume, and the phantom it leaves would still hold down stock the engineer
+  // no longer has. Two scalars on lines already being read: no join, no extra round trip.
+  items: { jobKitLineId: string | null; qty: number; condition: string; irmItemId: string | null; customerStockEntryId: string | null }[];
 }
 export function findMovementsByJobs(jobIds: string[]): Promise<JobMovementTally[]> {
   if (jobIds.length === 0) return Promise.resolve([]);
@@ -304,7 +309,7 @@ export function findMovementsByJobs(jobIds: string[]): Promise<JobMovementTally[
       status: true,
       direction: true,
       warehouseId: true,
-      items: { select: { jobKitLineId: true, qty: true, condition: true } },
+      items: { select: { jobKitLineId: true, qty: true, condition: true, irmItemId: true, customerStockEntryId: true } },
     },
     orderBy: { createdAt: "asc" },
   });

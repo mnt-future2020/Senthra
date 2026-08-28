@@ -13,15 +13,18 @@ import type {
   WarehouseAvailability,
 } from "@/services/vanStockRequest.service";
 import { useDashboard } from "@/hooks/useDashboard";
-import { VAN_STOCK_PRIORITY_OPTIONS, VanStockCartTable, VanStockItemSearch, type VanStockCartItem } from "@/components/dashboard/van-requests/vanRequestUi";
+import { RentalBadge, VAN_STOCK_PRIORITY_OPTIONS, VanStockCartTable, VanStockItemSearch, vanStockItemKey, type VanStockCartItem } from "@/components/dashboard/van-requests/vanRequestUi";
 import { FieldError, FormPageHeader, FormSection, FormAsideCard, RequiredMark } from "@/components/ui/FormScaffold";
 import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 import { Notice } from "@/components/ui/Notice";
 import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
-import { inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
+import { hintCls, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import type { Msg } from "@/components/ui/types";
 import { uploadDirectForUrl } from "@/lib/upload";
+import { formatHireDate, splitItemKeys, toLinePayload } from "@/components/dashboard/van-requests/vanStockLine";
+
+import { openLineAdvisory } from "./openLineAdvisory";
 
 // Full-page composers for the engineer's NON-job field-stock flow, on the shared FormScaffold
 // (sticky header + sectioned main column + sticky summary aside) so they read exactly like the
@@ -38,7 +41,8 @@ function useOpenLineMap(type: "restock" | "return"): Map<string, string> {
   React.useEffect(() => {
     vanStockSvc
       .myOpenLineItems(type)
-      .then((items) => setMap(new Map(items.map((i) => [i.irmItemId, i.code]))))
+      // Keyed the same way the cart is, so a duplicate HIRE is caught as well as a duplicate IRM item.
+      .then((items) => setMap(new Map(items.map((i) => [vanStockItemKey(i), i.code]))))
       .catch(() => setMap(new Map()));
   }, [type]);
   return map;
@@ -58,20 +62,36 @@ function AdvisoryStack({ children }: { children: React.ReactNode }) {
   return <div className="mt-3 space-y-2 empty:mt-0">{children}</div>;
 }
 
-function DuplicateWarning({ cart, openLines }: { cart: VanStockCartItem[]; openLines: Map<string, string> }) {
-  const dups = cart.filter((c) => openLines.has(c.irmItemId));
-  if (dups.length === 0) return null;
+function DuplicateWarning({ cart, openLines, kind }: { cart: VanStockCartItem[]; openLines: Map<string, string>; kind: "restock" | "return" }) {
+  // `kind` because ONE component serves both composers, and that is precisely how the return screen
+  // came to talk about a "request" you "send". The wording now follows the screen — see
+  // openLineAdvisory, where it lives as a pure function so it can be tested without a DOM.
+  const advisory = openLineAdvisory(
+    cart.filter((c) => openLines.has(c.key)).map((c) => ({ name: c.name, code: openLines.get(c.key) })),
+    kind,
+  );
+  if (!advisory) return null;
   // No margin of its own — AdvisoryStack owns the spacing for every composer that renders one.
+  //
+  // The clashing items and their references ride on `title` rather than a second visible line. The
+  // banner is advisory and sits directly under the cart table that already NAMES every selected item,
+  // so a printed list mostly repeats the rows above it — and it was that list, not the padding, that
+  // made this notice tall: the sentence is fixed-length now, so the banner is one line whether one
+  // item clashes or ten.
   return (
-    <Notice
-      size="sm"
-      msg={{
-        // "warn", not "error": this is advisory by design (spec §8) and the text says so. It read as
-        // a blocker purely because Notice had no middle tier.
-        type: "warn",
-        text: `Heads up — you already have an open request for: ${dups.map((d) => `${d.name} (${openLines.get(d.irmItemId)})`).join(", ")}. You can still send this one.`,
-      }}
-    />
+    <div title={advisory.title ?? advisory.detail}>
+      <Notice
+        size="sm"
+        msg={{
+          // "info", not "warn": a duplicate is a LEGITIMATE choice — the sentence itself ends "you can
+          // still include it here" — so nothing here is wrong, degraded or costing anyone anything.
+          // It was amber only because Notice had no tier below caution; it first stopped being red for
+          // the same reason. Amber stays for the messages that have a problem behind them.
+          type: "info",
+          text: advisory.text,
+        }}
+      />
+    </div>
   );
 }
 
@@ -98,15 +118,19 @@ export function RestockComposerPage() {
   const fileRef = React.useRef<HTMLInputElement>(null);
 
   const openLines = useOpenLineMap("restock");
-  const excludeKeys = React.useMemo(() => new Set(cart.map((c) => c.irmItemId)), [cart]);
+  const excludeKeys = React.useMemo(() => new Set(cart.map((c) => c.key)), [cart]);
 
   // Refresh per-warehouse availability whenever the cart's ITEM SET changes (not on qty edits).
   // Empty cart resolves to [] inside the service, so state updates only happen in callbacks.
-  const cartKey = React.useMemo(() => cart.map((c) => c.irmItemId).sort().join(","), [cart]);
+  //
+  // The two id lists stay separate all the way to the query string: they address different catalogues,
+  // and one merged list keyed on a bare id could not tell a tester from a cable.
+  const cartKey = React.useMemo(() => cart.map((c) => c.key).sort().join(","), [cart]);
   React.useEffect(() => {
     let cancelled = false;
+    const { irmItemIds, rentalItemIds } = splitItemKeys(cartKey ? cartKey.split(",") : []);
     vanStockSvc
-      .getVanStockAvailability(cartKey ? cartKey.split(",") : [])
+      .getVanStockAvailability(irmItemIds, rentalItemIds)
       .then((rows) => { if (!cancelled) setAvailability(rows); })
       // "warn": the counts are advisory (see the header note), so losing them degrades the form
       // rather than breaking it — the request still sends.
@@ -124,13 +148,19 @@ export function RestockComposerPage() {
     for (const c of cart) {
       const opts = availability
         .map((w) => {
-          const free = w.items.find((i) => i.irmItemId === c.irmItemId)?.quantityOnHand ?? 0;
+          // Two pools, read from the list that matches this line's catalogue. Hired kit has no stock
+          // balance at all — its figure is free-on-hire at that depot — so reading `items` for a
+          // rental line would silently report zero and hide every depot that actually holds it.
+          const free =
+            c.source === "rental"
+              ? w.rentalItems.find((i) => i.rentalItemId === c.rentalItemId)?.quantityOnHand ?? 0
+              : w.items.find((i) => i.irmItemId === c.irmItemId)?.quantityOnHand ?? 0;
           const name = w.warehouseCode ? `${w.warehouseName} (${w.warehouseCode})` : w.warehouseName;
           return { value: w.warehouseId, label: `${name} — ${free} free`, free };
         })
         .filter((o) => o.free > 0)
         .sort((a, b) => b.free - a.free || a.label.localeCompare(b.label));
-      map.set(c.irmItemId, opts);
+      map.set(c.key, opts);
     }
     return map;
   }, [availability, cart]);
@@ -144,11 +174,11 @@ export function RestockComposerPage() {
   const effectiveWarehouses = React.useMemo(() => {
     const out: Record<string, string> = {};
     for (const c of cart) {
-      const opts = warehouseOptionsByItem.get(c.irmItemId) ?? [];
-      const picked = lineWarehouses[c.irmItemId];
+      const opts = warehouseOptionsByItem.get(c.key) ?? [];
+      const picked = lineWarehouses[c.key];
       const valid = picked && opts.some((o) => o.value === picked);
       const chosen = valid ? picked : opts[0]?.value;
-      if (chosen) out[c.irmItemId] = chosen;
+      if (chosen) out[c.key] = chosen;
     }
     return out;
   }, [cart, warehouseOptionsByItem, lineWarehouses]);
@@ -158,7 +188,7 @@ export function RestockComposerPage() {
     () => new Set(Object.values(effectiveWarehouses)).size,
     [effectiveWarehouses],
   );
-  const unplaced = cart.filter((c) => !effectiveWarehouses[c.irmItemId]);
+  const unplaced = cart.filter((c) => !effectiveWarehouses[c.key]);
   const totalQty = cart.reduce((s, c) => s + c.qty, 0);
 
   // Free stock at the warehouse THIS line is collected from — the cap the qty box is judged against.
@@ -166,11 +196,14 @@ export function RestockComposerPage() {
   const shelfByItem = React.useMemo(() => {
     const m = new Map<string, number>();
     for (const c of cart) {
-      const whId = effectiveWarehouses[c.irmItemId];
+      const whId = effectiveWarehouses[c.key];
       if (!whId) continue;
       const w = availability.find((a) => a.warehouseId === whId);
-      const free = w?.items.find((i) => i.irmItemId === c.irmItemId)?.quantityOnHand;
-      if (typeof free === "number") m.set(c.irmItemId, free);
+      const free =
+        c.source === "rental"
+          ? w?.rentalItems.find((i) => i.rentalItemId === c.rentalItemId)?.quantityOnHand
+          : w?.items.find((i) => i.irmItemId === c.irmItemId)?.quantityOnHand;
+      if (typeof free === "number") m.set(c.key, free);
     }
     return m;
   }, [availability, cart, effectiveWarehouses]);
@@ -180,7 +213,7 @@ export function RestockComposerPage() {
   // maxQty, so the number simply cannot be typed past the shelf.
   const cappedCart = React.useMemo(
     () => cart.map((c) => {
-      const free = shelfByItem.get(c.irmItemId);
+      const free = shelfByItem.get(c.key);
       return typeof free === "number" ? { ...c, maxQty: free } : c;
     }),
     [cart, shelfByItem],
@@ -188,15 +221,22 @@ export function RestockComposerPage() {
   // Switching a line to a warehouse with less stock leaves an already-typed qty above the new cap
   // (clamping it silently would rewrite a number the engineer chose), so it's caught here instead.
   const overCap = cart.find((c) => {
-    const free = shelfByItem.get(c.irmItemId);
+    const free = shelfByItem.get(c.key);
     return typeof free === "number" && c.qty > free;
   });
 
 
   const addItem = (it: VanStockItemOption) =>
-    setCart((c) => (c.some((x) => x.irmItemId === it.irmItemId) ? c : [...c, { irmItemId: it.irmItemId, name: it.name, code: it.code, qty: 1 }]));
-  const setQty = (id: string, qty: number) => setCart((c) => c.map((x) => (x.irmItemId === id ? { ...x, qty } : x)));
-  const remove = (id: string) => setCart((c) => c.filter((x) => x.irmItemId !== id));
+    setCart((c) => {
+      const key = vanStockItemKey(it);
+      if (c.some((x) => x.key === key)) return c;
+      // The item's own source travels with the row from here all the way to the payload, so what the
+      // engineer picked and what the server stores are the same value — never re-derived from a
+      // nullable id further down.
+      return [...c, { key, source: it.source, irmItemId: it.irmItemId, rentalItemId: it.rentalItemId, name: it.name, code: it.code, qty: 1 }];
+    });
+  const setQty = (key: string, qty: number) => setCart((c) => c.map((x) => (x.key === key ? { ...x, qty } : x)));
+  const remove = (key: string) => setCart((c) => c.filter((x) => x.key !== key));
 
   const onFile = async (file: File) => {
     // `accept="image/*"` is a hint the file dialog lets the user override, and a file the browser
@@ -225,13 +265,19 @@ export function RestockComposerPage() {
     e.preventDefault();
     if (cart.length === 0) { setMsg({ type: "error", text: "Add at least one item." }); noticeRef.current?.scrollIntoView({ block: "nearest" }); return; }
     if (overCap) {
-      const free = shelfByItem.get(overCap.irmItemId) ?? 0;
+      const free = shelfByItem.get(overCap.key) ?? 0;
       setMsg({ type: "error", text: `Only ${free} of "${overCap.name}" are free at the warehouse you picked — lower the quantity or collect it from somewhere else.` });
       return;
     }
     if (unplaced.length > 0) {
-      // Only reachable when an item is stocked NOWHERE (auto-select fills every other case).
-      setMsg({ type: "error", text: `No warehouse has "${unplaced[0]!.name}" in stock — remove it or ask the office to order it.` });
+      // Only reachable when an item is available NOWHERE (auto-select fills every other case).
+      const u = unplaced[0]!;
+      setMsg({
+        type: "error",
+        text: u.source === "rental"
+          ? `No warehouse has "${u.name}" free on hire — remove it or ask the office to arrange a hire.`
+          : `No warehouse has "${u.name}" in stock — remove it or ask the office to order it.`,
+      });
       return;
     }
     if (!reason.trim()) { setReasonError("Tell the warehouse why you need this."); focusFirstInvalid(); return; }
@@ -239,12 +285,7 @@ export function RestockComposerPage() {
     setSubmitting(true);
     setMsg(null);
     try {
-      const lines: VanStockLinePayload[] = cart.map((c) => ({
-        irmItemId: c.irmItemId,
-        itemName: c.name,
-        qty: c.qty,
-        warehouseId: effectiveWarehouses[c.irmItemId]!,
-      }));
+      const lines: VanStockLinePayload[] = cart.map((c) => toLinePayload(c, effectiveWarehouses[c.key]!));
       await vanStockSvc.createVanStockRequest({
         type: "restock",
         reason: reason.trim(),
@@ -291,22 +332,22 @@ export function RestockComposerPage() {
               shelfByItem={shelfByItem}
               shelfLabel="Free there"
               warehouseCell={(c) => {
-                const opts = warehouseOptionsByItem.get(c.irmItemId) ?? [];
+                const opts = warehouseOptionsByItem.get(c.key) ?? [];
                 if (opts.length === 0) {
                   return <span className="text-[11px] font-semibold text-[var(--neg)]">No warehouse has this in stock</span>;
                 }
                 return (
                   <Select
                     ariaLabel={`Collect ${c.name} from`}
-                    value={effectiveWarehouses[c.irmItemId] ?? ""}
-                    onChange={(v) => setLineWarehouses((prev) => ({ ...prev, [c.irmItemId]: v }))}
+                    value={effectiveWarehouses[c.key] ?? ""}
+                    onChange={(v) => setLineWarehouses((prev) => ({ ...prev, [c.key]: v }))}
                     options={opts.map(({ value, label }) => ({ value, label }))}
                   />
                 );
               }}
             />
             <AdvisoryStack>
-              <DuplicateWarning cart={cart} openLines={openLines} />
+              <DuplicateWarning cart={cart} openLines={openLines} kind="restock" />
               {stops > 1 && (
                 // The engineer is the one who drives, so the cost of their own split is stated while
                 // they can still change it — this used to be a reviewer's decision they learned
@@ -314,8 +355,11 @@ export function RestockComposerPage() {
                 <Notice
                   size="sm"
                   msg={{
-                    type: "warn",
-                    text: `This request collects from ${stops} warehouses — you'll need ${stops} stops. Move a line to a shared warehouse if one has everything.`,
+                    // "info": this is a FACT ABOUT THE PLAN the engineer just built, not a fault in it.
+                    // Two warehouses is a valid request — sometimes the only possible one — and the
+                    // line offers a change rather than demanding one ("if one has everything").
+                    type: "info",
+                    text: `Collects from ${stops} warehouses — ${stops} stops. Move a line if one has everything.`,
                   }}
                 />
               )}
@@ -444,13 +488,24 @@ export function ReturnComposerPage() {
     vanStockSvc.listWarehousesLite().then(setWarehouses).catch(() => { setWarehouses([]); setMsg({ type: "error", text: "Couldn't load warehouses. Refresh and try again." }); });
   }, []);
 
-  const inCart = React.useMemo(() => new Set(cart.map((c) => c.irmItemId)), [cart]);
+  const inCart = React.useMemo(() => new Set(cart.map((c) => c.key)), [cart]);
   const totalQty = cart.reduce((s, c) => s + c.qty, 0);
 
   const add = (h: HoldingOption) =>
-    setCart((c) => (c.some((x) => x.irmItemId === h.irmItemId) ? c : [...c, { irmItemId: h.irmItemId, name: h.name, code: h.code, qty: h.quantityOnHand, maxQty: h.quantityOnHand }]));
-  const setQty = (id: string, qty: number) => setCart((c) => c.map((x) => (x.irmItemId === id ? { ...x, qty } : x)));
-  const remove = (id: string) => setCart((c) => c.filter((x) => x.irmItemId !== id));
+    setCart((c) => {
+      const key = vanStockItemKey(h);
+      if (c.some((x) => x.key === key)) return c;
+      // The hire deadline travels onto the cart row so the return list keeps showing WHY this one is
+      // urgent — it is the only thing distinguishing a tester that must go back from a cable that need
+      // not. Which hire each unit goes back on is the warehouse's scan to resolve, never the engineer's.
+      return [...c, {
+        key, source: h.source, irmItemId: h.irmItemId, rentalItemId: h.rentalItemId,
+        name: h.name, code: h.code, qty: h.quantityOnHand, maxQty: h.quantityOnHand,
+        hireEndDate: h.hireEndDate, overdue: h.overdue,
+      }];
+    });
+  const setQty = (key: string, qty: number) => setCart((c) => c.map((x) => (x.key === key ? { ...x, qty } : x)));
+  const remove = (key: string) => setCart((c) => c.filter((x) => x.key !== key));
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -461,7 +516,8 @@ export function ReturnComposerPage() {
     setSubmitting(true);
     setMsg(null);
     try {
-      const lines: VanStockLinePayload[] = cart.map((c) => ({ irmItemId: c.irmItemId, itemName: c.name, qty: c.qty }));
+      // No per-line warehouse on a return: one destination governs the whole request.
+      const lines: VanStockLinePayload[] = cart.map((c) => toLinePayload(c));
       await vanStockSvc.createVanStockRequest({ type: "return", reason: reason.trim(), warehouseId, lines });
       pushToast("Return raised — drive in and the warehouse will scan it in.", "success");
       router.push(LIST_URL);
@@ -509,14 +565,44 @@ export function ReturnComposerPage() {
             ) : (
               <div className="max-h-72 space-y-1.5 overflow-auto">
                 {holdings.map((h) => {
-                  const added = inCart.has(h.irmItemId);
+                  const key = vanStockItemKey(h);
+                  const added = inCart.has(key);
+                  const isRental = h.source === "rental";
                   return (
-                    <button key={h.irmItemId} type="button" disabled={added} onClick={() => add(h)} className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left transition-all ${added ? "cursor-default border-[var(--border)] bg-[var(--surface-2)] opacity-60" : "border-[var(--border)] bg-[var(--surface-2)] hover:border-[var(--accent)]"}`}>
+                    <button key={key} type="button" disabled={added} onClick={() => add(h)} className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left transition-all ${added ? "cursor-default border-[var(--border)] bg-[var(--surface-2)] opacity-60" : "border-[var(--border)] bg-[var(--surface-2)] hover:border-[var(--accent)]"}`}>
                       <span className="min-w-0">
-                        <span className="block truncate text-sm font-semibold text-[var(--ink)]">{h.name}</span>
+                        <span className="flex min-w-0 items-center gap-1.5">
+                          <span className="truncate text-sm font-semibold text-[var(--ink)]">{h.name}</span>
+                          {isRental && <RentalBadge />}
+                        </span>
                         {/* Free-to-return qty = van holding MINUS stock committed to active jobs (that
-                            goes back via the job's Close & Reconcile, not here). */}
-                        <span className="block truncate font-mono text-[11px] text-[var(--muted)]">{h.code} · {h.quantityOnHand} free to return</span>
+                            goes back via the job's Close & Reconcile, not here). Hired kit is subject to
+                            the same rule — a hire out on a job goes back through that job's scan-in. */}
+                        <span className="block truncate font-mono text-[11px] text-[var(--muted)]">
+                          {h.code} · {h.quantityOnHand} free to return
+                          {/* The order(s) these units sit on — reference only. The engineer never picks
+                              a hire; the warehouse binds it when they scan the kit back in. */}
+                          {isRental && h.poCodes.length > 0 && ` · ${h.poCodes.join(", ")}`}
+                        </span>
+                        {/* WHERE IT CAME FROM. A hire goes back to the depot it was collected from
+                            — the rule the posting has always enforced — and until this line the
+                            engineer only met it as a refusal after picking a warehouse below. The
+                            name is the hire order's own warehouse, the same authoritative field
+                            that guard reads; no id is exposed, because this is context for a person
+                            choosing where to drive. Company stock has no such source, so IRM rows
+                            carry none. Muted 11px, the register the code line above already uses,
+                            so the item name stays the loudest thing in the row. */}
+                        {isRental && h.depots.length > 0 && (
+                          <span className="block truncate text-[11px] text-[var(--muted)]" title={h.depots.join(", ")}>
+                            Collected from {h.depots.length === 1 ? h.depots[0] : h.depots.join(" · ")}
+                          </span>
+                        )}
+                        {isRental && h.hireEndDate && (
+                          <span className={`block truncate text-[11px] font-semibold ${h.overdue ? "text-[var(--neg)]" : "text-[var(--muted)]"}`}>
+                            {h.overdue ? "Overdue — was due back " : "Due back "}
+                            {formatHireDate(h.hireEndDate)}
+                          </span>
+                        )}
                       </span>
                       {added ? <Check className="h-4 w-4 shrink-0 text-[var(--pos)]" /> : <Plus className="h-4 w-4 shrink-0 text-[var(--accent)]" />}
                     </button>
@@ -529,20 +615,29 @@ export function ReturnComposerPage() {
           <FormSection title={`Selected items${cart.length ? ` (${cart.length})` : ""}`} description="Set the quantity you're bringing back.">
             <VanStockCartTable cart={cart} onQty={setQty} onRemove={remove} />
             <AdvisoryStack>
-              <DuplicateWarning cart={cart} openLines={openLines} />
+              <DuplicateWarning cart={cart} openLines={openLines} kind="return" />
             </AdvisoryStack>
           </FormSection>
 
           <FormSection title="Details" description="Where you'll return it, and why.">
             <div className="space-y-4">
               <div>
-                <label className={labelCls}>Return to warehouse <RequiredMark /></label>
+                <label className={labelCls} id="return-warehouse-label">Return to warehouse <RequiredMark /></label>
                 <Select
                   ariaLabel="Return warehouse"
                   value={warehouseId}
                   onChange={setWarehouseId}
                   options={[{ value: "", label: "Pick a warehouse…" }, ...warehouses.map((w) => ({ value: w.id, label: w.code ? `${w.name} (${w.code})` : w.name }))]}
                 />
+                {/* Shown ONLY when the cart actually holds hired kit. The label is already accurate —
+                    this is where the stock is booked in — so the field is not renamed; what was
+                    missing is that a hire is not free to go back anywhere, which the engineer
+                    otherwise discovered as a refusal after filling the form in. States the existing
+                    rule at the point of choosing, and names nothing the picker above does not
+                    already show on each hired row. */}
+                {cart.some((c) => c.source === "rental") && (
+                  <p className={hintCls}>Hired kit goes back to the depot it was collected from — shown on each hired item above.</p>
+                )}
               </div>
               <div>
                 <label className={labelCls} htmlFor="return-reason">Reason <RequiredMark /></label>

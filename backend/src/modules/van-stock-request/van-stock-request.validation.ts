@@ -59,17 +59,54 @@ export function priorityFilterValues(priority: string): string[] {
   return priority === "urgent" || priority === "high" ? ["urgent", "high"] : [priority];
 }
 
-const requestLineSchema = z.object({
-  irmItemId: objectId,
-  itemName: z.string().trim().min(1, "Item name is required.").max(300),
-  qty: z.number().int("Quantity must be a whole number.").min(1, "Quantity must be at least 1.").max(1_000_000),
-  // RESTOCK only: where the engineer collects THIS line. Required there (superRefine below), rejected
-  // on a return — a return has ONE destination the engineer drives to, named at request level.
-  warehouseId: objectId.optional(),
-});
+// ── Line sources: company stock, or hired equipment ─────────────────────────────────────────────
+//
+// `irm` is what this flow has always carried. `rental` joins it so an engineer can collect HIRED kit
+// for field work that is not tied to one job — the same pool a job kit request can draw on, reached
+// from the non-job door. The two pools a JOB request also offers are deliberately absent: customer
+// stock belongs to a customer's job, and `misc` free-text names nothing a warehouse could scan out.
+//
+// `source` DEFAULTS to "irm", which is what keeps every existing client working untouched: a payload
+// that names only `irmItemId` — every request ever sent before this shipped, and the mobile app until
+// its own pass lands — parses to exactly the line it always did.
+export const VAN_STOCK_LINE_SOURCES = ["irm", "rental"] as const;
+export type VanStockLineSource = (typeof VAN_STOCK_LINE_SOURCES)[number];
 
-// Shared line-array rule: no duplicate items on one request — scan-lookup matches a line BY irmItemId,
-// so a duplicated item would make its second line unreachable by scan.
+const requestLineSchema = z
+  .object({
+    source: z.enum(VAN_STOCK_LINE_SOURCES).default("irm"),
+    irmItemId: objectId.optional(),
+    rentalItemId: objectId.optional(),
+    itemName: z.string().trim().min(1, "Item name is required.").max(300),
+    qty: z.number().int("Quantity must be a whole number.").min(1, "Quantity must be at least 1.").max(1_000_000),
+    // RESTOCK only: where the engineer collects THIS line. Required there (superRefine below), rejected
+    // on a return — a return has ONE destination the engineer drives to, named at request level.
+    warehouseId: objectId.optional(),
+  })
+  // source ⇄ id consistency, mirroring the job kit-line rules. Rejecting the WRONG id rather than
+  // ignoring it is the point: a line carrying both would otherwise persist with one silently dropped,
+  // and the request would name an item nobody asked for.
+  .superRefine((l, ctx) => {
+    if (l.source === "rental") {
+      if (!l.rentalItemId) ctx.addIssue({ code: "custom", path: ["rentalItemId"], message: "Select a rental item." });
+      if (l.irmItemId) ctx.addIssue({ code: "custom", path: ["irmItemId"], message: "Rental lines can't reference an IRM item." });
+    } else {
+      if (!l.irmItemId) ctx.addIssue({ code: "custom", path: ["irmItemId"], message: "Select an IRM item." });
+      if (l.rentalItemId) ctx.addIssue({ code: "custom", path: ["rentalItemId"], message: "IRM lines can't reference a rental item." });
+    }
+  });
+
+// Shared line-array rule: no duplicate items on one request — scan-lookup matches a line BY its item
+// id, so a duplicated item would make its second line unreachable by scan.
+//
+// Keyed by SOURCE + id, not id alone. An IRM item and a rental item are separate catalogues with
+// separate id spaces, so collapsing them onto a bare id would be wrong in both directions: two
+// genuinely different items could collide, and — far worse — nothing would catch the same tester
+// added twice.
+function lineKey(l: { source: VanStockLineSource; irmItemId?: string; rentalItemId?: string }): string {
+  return l.source === "rental" ? `rental:${l.rentalItemId}` : `irm:${l.irmItemId}`;
+}
+
 const dedupedLines = z
   .array(requestLineSchema)
   .min(1, "Add at least one item.")
@@ -77,8 +114,9 @@ const dedupedLines = z
   .superRefine((lines, ctx) => {
     const seen = new Set<string>();
     lines.forEach((l, i) => {
-      if (seen.has(l.irmItemId)) ctx.addIssue({ code: "custom", path: [i], message: "This item appears twice — combine the quantities into one line." });
-      else seen.add(l.irmItemId);
+      const key = lineKey(l);
+      if (seen.has(key)) ctx.addIssue({ code: "custom", path: [i], message: "This item appears twice — combine the quantities into one line." });
+      else seen.add(key);
     });
   });
 
@@ -183,6 +221,17 @@ export const walkInSchema = z.object({
   reason: z.string().trim().min(1, "A reason is required.").max(2000),
   priority: prioritySchema,
   notes: z.string().trim().max(2000).optional(),
+  // BOTH POOLS. Hired kit may now be issued over the counter — the business decision this schema
+  // previously recorded as unmade has been made.
+  //
+  // Nothing about a hire is trusted from here beyond WHICH CATALOGUE ITEM is wanted: `dedupedLines`
+  // already refuses a rental line carrying an IRM id (and the reverse), and no hire id is accepted on
+  // a line at all. Which actual hire supplies the units is resolved server-side at posting, exactly as
+  // it is on every other rental flow.
+  //
+  // The control a walk-in skips is `approve()`, and that is replaced rather than dropped: `walkIn()`
+  // runs `assertWalkInRentalAvailability` at create against live free-on-hire at THIS depot, so a
+  // pre-approved request that could never be scanned cannot be created. See the note there.
   lines: dedupedLines,
 });
 export type WalkInInput = z.infer<typeof walkInSchema>;

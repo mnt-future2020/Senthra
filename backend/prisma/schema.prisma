@@ -1693,7 +1693,14 @@ model HireCustodyExit {
   // movement, the damage note, the loss declaration's movement. A retried request resolves to the same
   // pair and the unique index below refuses the duplicate, so a double-submit cannot report the same
   // damage twice or lose the same tester twice.
-  sourceType String // goods_management_return | warehouse_damage_note | reconcile_loss
+  //
+  // `van_stock_return` is the Field Stock leg, and its `sourceId` is the VanStockFulfilment (the
+  // POSTING), never the request. A Field Stock return is fulfilled in as many postings as the
+  // warehouse needs, so keying on the request would make the second posting's damage on the same hire
+  // collide with the first — createExitTx reads a collision as an idempotent retry and returns the
+  // earlier row, which would drain the units from custody with no exit row holding them down and
+  // quietly hand a damaged tester to the next engineer.
+  sourceType String // goods_management_return | van_stock_return | warehouse_damage_note | reconcile_loss
   sourceId   String @db.ObjectId
 
   createdAt DateTime @default(now())
@@ -2027,12 +2034,21 @@ model EngineerRentalTransaction {
   engineer                  User   @relation("EngineerRentalTxnOwner", fields: [engineerId], references: [id])
 
   quantityDelta Int // + issue to engineer | − return to warehouse
-  // job_issue | job_return — deliberately NO job_consume. A hire cannot be used up: it is equipment
-  // we do not own and every unit has to go back. The consume path refuses rental lines outright, so a
-  // rental line's units stay outstanding until they are scanned back, which is exactly what keeps the
-  // job in `awaiting_return` and the hire on its deadline badge.
+  // job_issue | job_return | van_restock | van_return — deliberately NO consume of any kind. A hire
+  // cannot be used up: it is equipment we do not own and every unit has to go back. The consume path
+  // refuses rental lines outright, so a rental line's units stay outstanding until they are scanned
+  // back, which is exactly what keeps the job in `awaiting_return` and the hire on its deadline badge.
+  //
+  // The `van_*` pair is the NON-JOB twin, written by the Field Stock (Van Stock Request) flow — an
+  // engineer collecting hired kit for field work that is not tied to one job, and handing it back the
+  // same way. Named to match EngineerStockTransaction's own van_restock / van_return so the two
+  // custody ledgers read alike; the ISSUE side is `van_restock` (not `van_issue`) for that symmetry.
+  //
+  // Both legs matter equally: without the return half a hire collected through Field Stock could never
+  // be scanned back — the job-return path matches on a job kit line and a Field Stock issue has none —
+  // so the units would sit "issued" forever, un-returnable to the provider and still billing.
   type          String
-  sourceType    String // goods_management
+  sourceType    String // goods_management | van_stock_request
   sourceId      String   @db.ObjectId
   sourceCode    String? // snapshot, e.g. GM-0001
   balanceAfter  Int
@@ -2325,10 +2341,25 @@ model VanStockRequestLine {
   requestId String          @db.ObjectId
   request   VanStockRequest @relation(fields: [requestId], references: [id])
 
-  irmItemId String @db.ObjectId // loose socket — company IRM only
+  // WHICH POOL this line draws from. `irm` (company stock) or `rental` (hired equipment). Defaults to
+  // `irm` so every row written before rental reached this flow reads correctly without a backfill —
+  // they are all IRM lines, and the default states that rather than leaving a null the readers must
+  // guess at. Mirrors JobKitRequestLine.source, minus the pools a NON-JOB request cannot draw from:
+  // customer stock belongs to a customer's job, and `misc` free-text has no van to be issued into.
+  source String @default("irm") // irm | rental
+
+  // Exactly ONE of these is set, chosen by `source`; the validation layer enforces the pairing and the
+  // service never reads one without checking the discriminator first.
+  irmItemId String? @db.ObjectId // when irm — loose socket, company IRM only
+  // When `rental` — the CATALOGUE item asked for, never a particular hire. WHICH hire the units come
+  // off is decided at the warehouse scan, long after this line is written, for the same reason a job
+  // kit line does not pin one: at request time nobody knows which of the testers on order the
+  // warehouse will reach for. The bound hire lands on VanStockFulfilmentLine instead.
+  rentalItemId String? @db.ObjectId // when rental — loose socket
+
   itemName  String // snapshot
-  code      String? // snapshot — the IRM item code (e.g. IRM-0002), shown + copyable in the UI
-  sku       String? // snapshot
+  code      String? // snapshot — the item code (IRM-0002 / RNT-0007), shown + copyable in the UI
+  sku       String? // snapshot — always null on a rental line (a hire master carries no SKU by design)
   uom       String? // snapshot
 
   requestedQty Int
@@ -2372,6 +2403,10 @@ model VanStockRequestLine {
 
   @@index([requestId])
   @@index([irmItemId])
+  // The rental twin of the irmItemId index above, and needed for the same reads: "is this item already
+  // on one of my open requests" (the composer's duplicate warning) and the retire-guard asking whether
+  // a catalogue item is still referenced. Without it those degrade to a full collection scan.
+  @@index([rentalItemId])
   @@index([sourceWarehouseId])
 }
 
@@ -2402,7 +2437,25 @@ model VanStockFulfilmentLine {
   fulfilment   VanStockFulfilment @relation(fields: [fulfilmentId], references: [id])
 
   lineId    String @db.ObjectId // the VanStockRequestLine fulfilled (loose socket)
-  irmItemId String @db.ObjectId // loose socket
+  irmItemId String? @db.ObjectId // loose socket — set when the request line's source is `irm`
+  // Set when the request line's source is `rental`. The catalogue item, carried for filtering and for
+  // rendering the posting without loading the order chain.
+  rentalItemId String? @db.ObjectId // loose socket
+
+  // THE ACTUAL HIRE these units moved on — a PurchaseOrderRentalLine. Null on every IRM line.
+  //
+  // This is the whole reason a rental fulfilment line exists separately from its request line: the
+  // request names a catalogue item, and only at the scan does a physical unit get bound to the hire
+  // that carries its deadline and the provider we owe it back to. Recording it here is what makes the
+  // units RETURNABLE later — the return leg resolves the hire from the engineer's custody rows, and
+  // this is the audit trail proving which hire a Field Stock issue drew from.
+  //
+  // One request line can span SEVERAL hires (the allocator drains the soonest deadline first), so a
+  // single scanned entry may post as several of these rows — one per hire, each with its own qty.
+  poCode      String? // snapshot, e.g. PO-0042 — which order this hire sits on
+  hireEndDate DateTime? // snapshot of the return deadline as it stood when these units went out
+  purchaseOrderRentalLineId String? @db.ObjectId // loose socket
+
   itemName  String // snapshot
 
   qty            Int
@@ -2414,6 +2467,9 @@ model VanStockFulfilmentLine {
   createdAt DateTime @default(now())
 
   @@index([fulfilmentId])
+  // "Which Field Stock postings moved this hire" — the hire's own audit pane, and the read that proves
+  // a VSR-issued unit is accounted for. Unindexed it is a full scan of every posting ever made.
+  @@index([purchaseOrderRentalLineId])
 }
 
 // Damaged-stock pool (write-off). Both owner types; never re-enters usable stock in v1.

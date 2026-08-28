@@ -1028,6 +1028,49 @@ export async function findHireStockByIdTx(tx: Prisma.TransactionClient, lineId: 
   return row ? mapHireStock(row) : null;
 }
 
+/** Which depot a hire belongs to, and what it is for. The identity axes a return is judged on. */
+export interface HireDepotRow {
+  id: string;
+  rentalItemId: string;
+  warehouseId: string;
+  warehouseName: string | null;
+}
+
+/**
+ * The depot (and catalogue item) behind each of the given hires, in ONE query.
+ *
+ * The read behind the CREATE-time half of the return depot guard. `fulfil` asks the same question of
+ * one hire at a time inside its transaction (`findHireStockByIdTx`); a composer is holding a whole
+ * custody list and has to ask it of all of them at once, and per-row lookups there would be a round
+ * trip per hire on a path that already renders a van's worth of kit.
+ *
+ * Warehouse comes from the ORDER, exactly as `mapHireStock` reads it — a hire has no depot of its own
+ * (see HIRE_STOCK_SELECT). Same field, same join, so the early check and the posting guard can never
+ * disagree about where a hire lives.
+ *
+ * DELIBERATELY UNFILTERED: no `onHireWhere()`, no period test, no order-live test. This answers "where
+ * did this hire come from", which stays true after the order is cancelled and after the period ends —
+ * and both of those must still be returnable. Narrowing here would re-introduce, at create, precisely
+ * the stranding the posting guard's missing-liveness note exists to prevent.
+ */
+export async function findHireDepotsByIds(ids: string[]): Promise<HireDepotRow[]> {
+  if (ids.length === 0) return [];
+  const rows = await prisma.purchaseOrderRentalLine.findMany({
+    where: { id: { in: ids } },
+    select: {
+      id: true,
+      rentalItemId: true,
+      purchaseOrder: { select: { warehouseId: true, warehouse: { select: { name: true } } } },
+    },
+  });
+  return rows.map((r) => ({
+    id: r.id,
+    rentalItemId: r.rentalItemId,
+    warehouseId: r.purchaseOrder.warehouseId,
+    warehouseName: r.purchaseOrder.warehouse?.name ?? null,
+  }));
+}
+
 /**
  * Move a hire's `issuedQuantity` by `delta` (+ out to an engineer, − back to the warehouse), and
  * refuse the move if it would break the arithmetic.

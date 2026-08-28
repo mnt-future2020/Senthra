@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { NOTICE_SIZE_CLS, NOTICE_TONE_CLS, type NoticeSize, type NoticeType } from "./noticeTone";
 
-const ALL: NoticeType[] = ["success", "warn", "error"];
+const ALL: NoticeType[] = ["info", "success", "warn", "error"];
 const SIZES: NoticeSize[] = ["xs", "sm", "md"];
 
 // Notice was `success ? green : red` — a boolean, not a lookup. That shape is why a NON-BLOCKING
@@ -28,11 +28,34 @@ describe("NOTICE_TONE_CLS — one visual tier per severity", () => {
     expect(NOTICE_TONE_CLS.warn).not.toBe(NOTICE_TONE_CLS.error);
   });
 
-  // Amber is already this codebase's advisory colour — ~50 components use text-amber-600 for exactly
-  // this kind of message, including the "you'll need 2 stops" line that sits directly beneath a
-  // Notice. Pinning it is what lets those bare <p> advisories fold into Notice with no visual change.
-  it("uses the amber the rest of the app already treats as advisory", () => {
+  // Amber is already this codebase's caution colour — ~50 components use text-amber-600 for it, and so
+  // do the low_stock / overdue / in_progress badges. Pinning it is what lets those bare <p> warnings
+  // fold into Notice with no visual change.
+  it("uses the amber the rest of the app already treats as caution", () => {
     expect(NOTICE_TONE_CLS.warn).toContain("amber");
+  });
+
+  // `info` must not borrow the CAUTION colour, which is the whole reason it exists. Two advisories on
+  // the van-stock composer were amber while their own text said nothing was wrong ("you can still
+  // send this one", "you'll need 2 stops"), so they read as alarms the sentence then withdrew.
+  it("keeps info off the caution colour", () => {
+    expect(NOTICE_TONE_CLS.info).not.toContain("amber");
+    expect(NOTICE_TONE_CLS.info).not.toBe(NOTICE_TONE_CLS.warn);
+  });
+
+  // ...nor either of the outcome colours. Nothing has succeeded and nothing has failed.
+  it("keeps info off the success and error tokens", () => {
+    expect(NOTICE_TONE_CLS.info).not.toContain("--pos");
+    expect(NOTICE_TONE_CLS.info).not.toContain("--neg");
+  });
+
+  // An existing token, at the same 10% wash as every other tier. --surface-2 was the obvious neutral
+  // pick and is #fafafa on a #ffffff card: a banner nobody can see is not a calmer banner. --accent is
+  // also declared once rather than per-theme, so this tier survives dark mode like the others.
+  it("tints info with the accent rather than inventing a colour", () => {
+    expect(NOTICE_TONE_CLS.info).toContain("--accent");
+    expect(NOTICE_TONE_CLS.info).not.toContain("surface");
+    for (const t of ALL) expect(NOTICE_TONE_CLS[t]).toContain("/10");
   });
 
   it("still reserves the positive and negative tokens for success and error", () => {
