@@ -1,9 +1,12 @@
-import { Check, AlertCircle, AlertTriangle } from "lucide-react";
+import { Check, AlertCircle, AlertTriangle, Info } from "lucide-react";
 
 import type { Msg } from "./types";
 import { NOTICE_SIZE_CLS, NOTICE_TONE_CLS, type NoticeSize, type NoticeType } from "./noticeTone";
 
 const ICONS: Record<NoticeType, typeof Check> = {
+  // The glyph is half the message. A caution triangle on "you can still send this one" is an alarm the
+  // sentence then withdraws — see the tier note in noticeTone.ts. `info` states, it does not warn.
+  info: Info,
   success: Check,
   warn: AlertTriangle,
   error: AlertCircle,

@@ -19,10 +19,12 @@ import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 import { Notice } from "@/components/ui/Notice";
 import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
-import { inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
+import { hintCls, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import type { Msg } from "@/components/ui/types";
 import { uploadDirectForUrl } from "@/lib/upload";
 import { formatHireDate, splitItemKeys, toLinePayload } from "@/components/dashboard/van-requests/vanStockLine";
+
+import { openLineAdvisory } from "./openLineAdvisory";
 
 // Full-page composers for the engineer's NON-job field-stock flow, on the shared FormScaffold
 // (sticky header + sectioned main column + sticky summary aside) so they read exactly like the
@@ -60,20 +62,36 @@ function AdvisoryStack({ children }: { children: React.ReactNode }) {
   return <div className="mt-3 space-y-2 empty:mt-0">{children}</div>;
 }
 
-function DuplicateWarning({ cart, openLines }: { cart: VanStockCartItem[]; openLines: Map<string, string> }) {
-  const dups = cart.filter((c) => openLines.has(c.key));
-  if (dups.length === 0) return null;
+function DuplicateWarning({ cart, openLines, kind }: { cart: VanStockCartItem[]; openLines: Map<string, string>; kind: "restock" | "return" }) {
+  // `kind` because ONE component serves both composers, and that is precisely how the return screen
+  // came to talk about a "request" you "send". The wording now follows the screen — see
+  // openLineAdvisory, where it lives as a pure function so it can be tested without a DOM.
+  const advisory = openLineAdvisory(
+    cart.filter((c) => openLines.has(c.key)).map((c) => ({ name: c.name, code: openLines.get(c.key) })),
+    kind,
+  );
+  if (!advisory) return null;
   // No margin of its own — AdvisoryStack owns the spacing for every composer that renders one.
+  //
+  // The clashing items and their references ride on `title` rather than a second visible line. The
+  // banner is advisory and sits directly under the cart table that already NAMES every selected item,
+  // so a printed list mostly repeats the rows above it — and it was that list, not the padding, that
+  // made this notice tall: the sentence is fixed-length now, so the banner is one line whether one
+  // item clashes or ten.
   return (
-    <Notice
-      size="sm"
-      msg={{
-        // "warn", not "error": this is advisory by design (spec §8) and the text says so. It read as
-        // a blocker purely because Notice had no middle tier.
-        type: "warn",
-        text: `Heads up — you already have an open request for: ${dups.map((d) => `${d.name} (${openLines.get(d.key)})`).join(", ")}. You can still send this one.`,
-      }}
-    />
+    <div title={advisory.title ?? advisory.detail}>
+      <Notice
+        size="sm"
+        msg={{
+          // "info", not "warn": a duplicate is a LEGITIMATE choice — the sentence itself ends "you can
+          // still include it here" — so nothing here is wrong, degraded or costing anyone anything.
+          // It was amber only because Notice had no tier below caution; it first stopped being red for
+          // the same reason. Amber stays for the messages that have a problem behind them.
+          type: "info",
+          text: advisory.text,
+        }}
+      />
+    </div>
   );
 }
 
@@ -329,7 +347,7 @@ export function RestockComposerPage() {
               }}
             />
             <AdvisoryStack>
-              <DuplicateWarning cart={cart} openLines={openLines} />
+              <DuplicateWarning cart={cart} openLines={openLines} kind="restock" />
               {stops > 1 && (
                 // The engineer is the one who drives, so the cost of their own split is stated while
                 // they can still change it — this used to be a reviewer's decision they learned
@@ -337,8 +355,11 @@ export function RestockComposerPage() {
                 <Notice
                   size="sm"
                   msg={{
-                    type: "warn",
-                    text: `This request collects from ${stops} warehouses — you'll need ${stops} stops. Move a line to a shared warehouse if one has everything.`,
+                    // "info": this is a FACT ABOUT THE PLAN the engineer just built, not a fault in it.
+                    // Two warehouses is a valid request — sometimes the only possible one — and the
+                    // line offers a change rather than demanding one ("if one has everything").
+                    type: "info",
+                    text: `Collects from ${stops} warehouses — ${stops} stops. Move a line if one has everything.`,
                   }}
                 />
               )}
@@ -563,6 +584,19 @@ export function ReturnComposerPage() {
                               a hire; the warehouse binds it when they scan the kit back in. */}
                           {isRental && h.poCodes.length > 0 && ` · ${h.poCodes.join(", ")}`}
                         </span>
+                        {/* WHERE IT CAME FROM. A hire goes back to the depot it was collected from
+                            — the rule the posting has always enforced — and until this line the
+                            engineer only met it as a refusal after picking a warehouse below. The
+                            name is the hire order's own warehouse, the same authoritative field
+                            that guard reads; no id is exposed, because this is context for a person
+                            choosing where to drive. Company stock has no such source, so IRM rows
+                            carry none. Muted 11px, the register the code line above already uses,
+                            so the item name stays the loudest thing in the row. */}
+                        {isRental && h.depots.length > 0 && (
+                          <span className="block truncate text-[11px] text-[var(--muted)]" title={h.depots.join(", ")}>
+                            Collected from {h.depots.length === 1 ? h.depots[0] : h.depots.join(" · ")}
+                          </span>
+                        )}
                         {isRental && h.hireEndDate && (
                           <span className={`block truncate text-[11px] font-semibold ${h.overdue ? "text-[var(--neg)]" : "text-[var(--muted)]"}`}>
                             {h.overdue ? "Overdue — was due back " : "Due back "}
@@ -581,20 +615,29 @@ export function ReturnComposerPage() {
           <FormSection title={`Selected items${cart.length ? ` (${cart.length})` : ""}`} description="Set the quantity you're bringing back.">
             <VanStockCartTable cart={cart} onQty={setQty} onRemove={remove} />
             <AdvisoryStack>
-              <DuplicateWarning cart={cart} openLines={openLines} />
+              <DuplicateWarning cart={cart} openLines={openLines} kind="return" />
             </AdvisoryStack>
           </FormSection>
 
           <FormSection title="Details" description="Where you'll return it, and why.">
             <div className="space-y-4">
               <div>
-                <label className={labelCls}>Return to warehouse <RequiredMark /></label>
+                <label className={labelCls} id="return-warehouse-label">Return to warehouse <RequiredMark /></label>
                 <Select
                   ariaLabel="Return warehouse"
                   value={warehouseId}
                   onChange={setWarehouseId}
                   options={[{ value: "", label: "Pick a warehouse…" }, ...warehouses.map((w) => ({ value: w.id, label: w.code ? `${w.name} (${w.code})` : w.name }))]}
                 />
+                {/* Shown ONLY when the cart actually holds hired kit. The label is already accurate —
+                    this is where the stock is booked in — so the field is not renamed; what was
+                    missing is that a hire is not free to go back anywhere, which the engineer
+                    otherwise discovered as a refusal after filling the form in. States the existing
+                    rule at the point of choosing, and names nothing the picker above does not
+                    already show on each hired row. */}
+                {cart.some((c) => c.source === "rental") && (
+                  <p className={hintCls}>Hired kit goes back to the depot it was collected from — shown on each hired item above.</p>
+                )}
               </div>
               <div>
                 <label className={labelCls} htmlFor="return-reason">Reason <RequiredMark /></label>

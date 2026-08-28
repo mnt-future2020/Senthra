@@ -98,6 +98,50 @@ export function pickReturnableHoldings<T extends ReturnableHolding>(
   return here.length > 0 ? here : forThisItem.slice(0, 1);
 }
 
+/** What an engineer holds of one catalogue item, split by whether it can go back at the named depot. */
+export interface ReturnableHere {
+  /** Units sitting on hires that belong to THIS depot — the only ones a posting here can bind. */
+  here: number;
+  /** Units held on hires from other depots, by depot label, so the refusal can say where they go. */
+  elsewhere: Map<string, number>;
+}
+
+/**
+ * Split an engineer's holdings per catalogue item into "returnable at this depot" and "belongs
+ * somewhere else", using the hires' own depots.
+ *
+ * WHY IT IS NOT `pickReturnableHoldings`. That function answers the SCAN's question — which hire do
+ * these units bind to — and to keep overdue kit scannable it falls back to a single holding even when
+ * nothing is live here. This one answers CREATE's question: is a return through this depot possible at
+ * all. A fallback would defeat the point, because the row it falls back to is exactly the row the
+ * posting guard then refuses.
+ *
+ * Judged on the hire's own depot rather than on a live-hire set, so a hire whose order was cancelled
+ * or whose period has ended still counts as returnable at the depot it came from.
+ */
+export function returnableByItemAtDepot<T extends ReturnableHolding>(
+  holdings: readonly T[],
+  depotOfHire: ReadonlyMap<string, { warehouseId: string; warehouseName: string | null }>,
+  warehouseId: string,
+): Map<string, ReturnableHere> {
+  const out = new Map<string, ReturnableHere>();
+  for (const h of holdings) {
+    if (!h.rentalItemId || h.quantityOnHand <= 0) continue;
+    const entry = out.get(h.rentalItemId) ?? { here: 0, elsewhere: new Map<string, number>() };
+    const depot = depotOfHire.get(h.purchaseOrderRentalLineId);
+    if (depot && depot.warehouseId === warehouseId) {
+      entry.here += h.quantityOnHand;
+    } else {
+      // An unresolved hire counts as elsewhere, never as here: a return can only be posted against a
+      // depot we positively know matches, and "we could not read the order" is not that.
+      const label = depot?.warehouseName ?? "another depot";
+      entry.elsewhere.set(label, (entry.elsewhere.get(label) ?? 0) + h.quantityOnHand);
+    }
+    out.set(h.rentalItemId, entry);
+  }
+  return out;
+}
+
 /** One holding, and how many of the returning units go back on its hire. */
 export interface HoldingAllocation<T> {
   holding: T;

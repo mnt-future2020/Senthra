@@ -652,7 +652,10 @@ export function VanStockCartTable({
 
 // A search hit carrying OPTIONAL warehouse stock context — the engineer composer's plain catalogue hit
 // has neither field; the walk-in composer's (warehouse-scoped) hit carries both.
-export type SearchItemOption = VanStockItemOption & { quantityOnHand?: number; reorderLevel?: number | null };
+// `hireEndDate` is present only on the WALK-IN search, where the hit is scoped to one depot and the
+// counter is handing the kit over now. The engineer's network-wide search leaves it undefined — with
+// no depot chosen there is no single deadline that would be true.
+export type SearchItemOption = VanStockItemOption & { quantityOnHand?: number; reorderLevel?: number | null; hireEndDate?: string | null };
 
 // Debounced catalogue item-search — shared by the engineer composer and the reviewer walk-in issue.
 // A monotonic reqId guards against out-of-order responses. `excludeIds` greys out already-added items.

@@ -426,6 +426,11 @@ async function resolveLines(
   // Restock only: resolves each line's chosen collection warehouse. Omitted for returns/walk-in,
   // where one warehouse governs the whole request and the caller sets the source itself.
   sourceFor?: (warehouseId: string) => { id: string; name: string; code: string | null },
+  // RETURNS only. A retired hire master may not be ASKED for, but kit already in a van has to be able
+  // to come home — the same asymmetry `findManyByIds` exists for on the holdings list, and the same
+  // rule Goods Management's posting path already follows (it resolves a rental line by id with no
+  // status test at all). Without this the engineer could SEE the retired holding and not return it.
+  allowRetiredRental = false,
 ): Promise<CreateRequestLineData[]> {
   return Promise.all(
     lines.map(async (l): Promise<CreateRequestLineData> => {
@@ -441,8 +446,8 @@ async function resolveLines(
         if (!item) throw badRequest(`The rental item for "${l.itemName}" no longer exists.`);
         // Refused rather than allowed-through-with-a-warning: a retired hire master is one the company
         // has stopped hiring, so a request for it can only ever be declined later, after the engineer
-        // has already driven somewhere.
-        if (item.status !== "active") throw badRequest(`"${item.name}" is not active.`);
+        // has already driven somewhere. A RETURN asks for nothing, so it is exempt — see the parameter.
+        if (!allowRetiredRental && item.status !== "active") throw badRequest(`"${item.name}" is not active.`);
         return {
           source: "rental",
           rentalItemId: item.id,
@@ -524,6 +529,7 @@ export async function create(input: CreateVanStockRequestInput, actor: AuditActo
   const lines = await resolveLines(
     input.lines,
     lineWarehouses ? (id) => lineWarehouses.get(id) ?? (() => { throw badRequest("That collection warehouse is no longer available."); })() : undefined,
+    input.type === "return",
   );
 
   let warehouseId: string | null = null;
@@ -557,10 +563,17 @@ export async function create(input: CreateVanStockRequestInput, actor: AuditActo
     // ONE read of the engineer's active jobs and their movements for BOTH pools — see
     // committedByEngineer. Resolved separately these two walked the same job set and the same
     // movement set twice for one request.
+    //
+    // The custody read is handed to the commitment UN-AWAITED: its rental arm is DERIVED from custody
+    // (which of these units came in through the Field Stock door rather than a job's), so it needs the
+    // very set this guard needs. Sharing the one read keeps all three in a single parallel batch, and
+    // guarantees the guard and the figure it enforces are judging one snapshot of custody rather than
+    // two reads a moment apart.
+    const rentalHoldingsRead = rentalCustodyRepo.findRentalHoldingsByEngineer(engineerId);
     const [balanceRows, jobCommitted, rentalHoldings] = await Promise.all([
       engineerStockRepo.findEngineerBalances(engineerId),
-      committedByEngineer(engineerId),
-      rentalCustodyRepo.findRentalHoldingsByEngineer(engineerId),
+      committedByEngineer(engineerId, { rentalHoldings: rentalHoldingsRead }),
+      rentalHoldingsRead,
     ]);
     const committed = jobCommitted.irm;
     const rentalCommitted = jobCommitted.rental;
@@ -570,11 +583,53 @@ export async function create(input: CreateVanStockRequestInput, actor: AuditActo
       if (!h.rentalItemId) continue;
       rentalHeld.set(h.rentalItemId, (rentalHeld.get(h.rentalItemId) ?? 0) + h.quantityOnHand);
     }
+
+    // WHERE each held hire actually came from, for the depot guard in the loop below. Read only when
+    // the request names hired kit, and in ONE batched query keyed on the custody rows already in hand
+    // — never from anything the client sent. A crafted body cannot reach this: a line names a
+    // CATALOGUE item, the hire ids come from the engineer's own custody, and the depot comes off the
+    // hire's order.
+    const hireIds = [...new Set(rentalHoldings.map((h) => h.purchaseOrderRentalLineId))];
+    const depotOfHire = new Map(
+      (lines.some((l) => l.source === "rental") ? await poRepo.findHireDepotsByIds(hireIds) : []).map((d) => [d.id, d]),
+    );
+    // Depot returnability is judged on FIELD-ORIGIN custody, matching the posting allocator: a hire's
+    // job-origin units are not returnable through Field Stock at all, so counting them here would accept
+    // a request the post can never bind (the depot's units are all a job's) — the same class of dead-end
+    // this guard was written to prevent. The per-hire field map is the one `committedByEngineer` already
+    // read (no second ledger round trip); field-origin is a subset of custody, so the cap never inflates.
+    const rentalFieldByHire = jobCommitted.rentalFieldByHire;
+    const returnableHere = rentalPool.returnableByItemAtDepot(
+      rentalHoldings.map((h) => ({ ...h, quantityOnHand: Math.min(h.quantityOnHand, Math.max(0, rentalFieldByHire.get(h.purchaseOrderRentalLineId) ?? 0)) })),
+      depotOfHire,
+      warehouseId!,
+    );
     for (const l of lines) {
       if (l.source === "rental") {
         const free = Math.max(0, (rentalHeld.get(l.rentalItemId!) ?? 0) - (rentalCommitted.get(l.rentalItemId!) ?? 0));
         if (free < l.requestedQty) {
           throw badRequest(`You only have ${free} of "${l.itemName}" free to return — the rest is out on a job (return it through that job).`);
+        }
+        // DEPOT. A hire goes back where it came from, and until now nothing said so until the posting:
+        // the quantity check above is depot-blind, so a return raised against the wrong warehouse was
+        // accepted, routed, and staged at the counter, and only died when `fulfil` re-asserted the
+        // hire's depot inside its transaction — a request that could never be posted by anyone.
+        //
+        // Judged on the hires' OWN depots (their order's warehouse, the field the posting guard
+        // reads), not on what is live here, so an overdue hire and one whose order was cancelled both
+        // still count as returnable at the depot they came from.
+        //
+        // This does NOT replace the posting guard, and must not: on-hand moves between composing a
+        // request and scanning it in. This is the early "you have driven to the wrong depot" — the
+        // transaction stays the authority.
+        const atDepot = returnableHere.get(l.rentalItemId!);
+        if ((atDepot?.here ?? 0) < l.requestedQty) {
+          const owed = [...(atDepot?.elsewhere ?? new Map<string, number>())].map(([name, qty]) => `${qty} at ${name}`).join(", ");
+          throw badRequest(
+            owed ?
+              `"${l.itemName}" was collected from a different depot — it has to go back there (${owed}), not to ${warehouseName}.`
+            : `You are not holding "${l.itemName}" on a hire from ${warehouseName} — it has to go back to the depot it came from.`,
+          );
         }
         continue;
       }
@@ -651,6 +706,38 @@ export function assertWalkInAvailability(
   }
 }
 
+// The RENTAL twin of assertWalkInAvailability, and mandatory for the same reason: a walk-in opens
+// ALREADY-APPROVED, so it never passes through `approve()` — which is where an engineer-raised rental
+// line meets the free-on-hire hard block. Without this the counter could pre-approve hired kit that no
+// hire at this depot can supply, and the refusal would arrive at the gun instead of at the screen.
+//
+// `freeByKey` is the caller's `${rentalItemId}|${warehouseId}` map from `rentalFreeByItemAndWarehouse`
+// — issuable hires only (order live, still out, period not ended as of COMPANY today), netted against
+// open job demand. Injected rather than fetched so this stays unit-testable without a database, the
+// same shape assertWalkInAvailability and resolveLineApprovals already use.
+//
+// Advisory-vs-authoritative: this is authoritative at CREATE, and it is not the last word. The posting
+// transaction re-resolves the hire and re-asserts item, depot and issued-quantity, so a hire that moves
+// between counter and gun still fails safely there. Both are needed — this one stops an impossible
+// request existing, that one stops a stale one committing.
+export function assertWalkInRentalAvailability(
+  lines: Array<{ rentalItemId: string; itemName: string; requestedQty: number }>,
+  warehouseId: string,
+  warehouseName: string,
+  freeByKey: Map<string, number>,
+): void {
+  for (const l of lines) {
+    const free = freeByKey.get(`${l.rentalItemId}|${warehouseId}`) ?? 0;
+    if (free < l.requestedQty) {
+      throw badRequest(
+        free === 0 ?
+          `"${l.itemName}": no hired unit is free at ${warehouseName} — every one is already out, planned for a job, or on a hire whose period has ended.`
+        : `"${l.itemName}": only ${free} free on hire at ${warehouseName} — adjust the quantity.`,
+      );
+    }
+  }
+}
+
 export async function walkIn(input: WalkInInput, actor: AuditActor): Promise<PublicVanStockRequest> {
   const engineer = await userRepo.findById(input.engineerId);
   if (!engineer) throw notFound("Engineer not found.");
@@ -665,19 +752,39 @@ export async function walkIn(input: WalkInInput, actor: AuditActor): Promise<Pub
   if (wh.status !== "active") throw badRequest("That warehouse is no longer active."); // M1: walk-in warehouse must be active
   assertWarehouseAccess(actor, wh.id);
 
+  // Rental lines are resolved like any other — catalogue item only, active-checked, no hire id
+  // anywhere near the request. `allowRetiredRental` stays false: a walk-in ASKS for kit, and a retired
+  // hire master is one the company has stopped hiring.
   const lines = await resolveLines(input.lines);
   // Authoritative availability gate — this warehouse must physically hold every line NOW (see
   // assertWalkInAvailability). One batched balance read over the request's items keeps it off N
   // round-trips; the map defaults a missing (item, warehouse) balance to 0 on-hand.
-  // IRM only — walkInSchema refuses rental lines outright (hired kit is not issued over the counter
-  // in this phase), so every line here has an irmItemId. The filter is what proves that to the type
-  // system rather than asserting it.
-  const walkInItemIds = lines.map((l) => l.irmItemId).filter((x): x is string => Boolean(x));
-  const balances = await inventoryRepo.findBalancesByItemsAndWarehouses(walkInItemIds, [wh.id]);
+  // Split by pool, because the two are answered by different sources: company stock has an
+  // InventoryBalance row to read, a hire has none and its availability must be COMPUTED from the live
+  // hires at this depot. The filters are also what prove each line's id to the type system.
+  const irmLines = lines.filter((l) => l.source !== "rental");
+  const rentalLines = lines.filter((l) => l.source === "rental");
+  const walkInItemIds = irmLines.map((l) => l.irmItemId).filter((x): x is string => Boolean(x));
+  // ONE company-today for the whole walk-in, so a multi-line counter issue at midnight cannot judge
+  // one hire against yesterday and the next against today — the same rule approve() follows.
+  const [balances, rentalFree] = await Promise.all([
+    inventoryRepo.findBalancesByItemsAndWarehouses(walkInItemIds, [wh.id]),
+    rentalLines.length > 0 ?
+      companyTodayStart().then((todayStart) =>
+        rentalFreeByItemAndWarehouse(rentalLines.map((l) => l.rentalItemId!).filter(Boolean), [wh.id], todayStart),
+      )
+    : Promise.resolve(new Map<string, number>()),
+  ]);
   assertWalkInAvailability(
-    lines.map((l) => ({ irmItemId: l.irmItemId as string, itemName: l.itemName, requestedQty: l.requestedQty })),
+    irmLines.map((l) => ({ irmItemId: l.irmItemId as string, itemName: l.itemName, requestedQty: l.requestedQty })),
     wh.name,
     new Map(balances.map((b) => [b.irmItemId, b.quantityOnHand])),
+  );
+  assertWalkInRentalAvailability(
+    rentalLines.map((l) => ({ rentalItemId: l.rentalItemId as string, itemName: l.itemName, requestedQty: l.requestedQty })),
+    wh.id,
+    wh.name,
+    rentalFree,
   );
 
   const data: CreateRequestData = {
@@ -1115,8 +1222,12 @@ export async function scanLookup(input: ScanLookupInput, actor: AuditActor): Pro
  * the legs is what would leave overdue kit sitting in a van with nothing to scan it against.
  */
 async function rentalScanLookup(req: RequestWithLines, input: ScanLookupInput, actor: AuditActor): Promise<ScanLookupResult> {
-  const rentalItem = await rentalItemRepo.findActiveByCode(input.code);
-  if (!rentalItem) throw badRequest("No active catalogue item matches that code.");
+  // A RETURN resolves the label whatever became of the catalogue entry behind it; every other leg
+  // stays active-only. Retiring an item must stop it being issued, not strand the units already out
+  // — and `code` is unique and never reissued, so the unfiltered lookup finds the same item, not
+  // another one. This is the scan-side half of the same exemption `create` makes for a return.
+  const rentalItem = req.type === "return" ? await rentalItemRepo.findByCodeAnyStatus(input.code) : await rentalItemRepo.findActiveByCode(input.code);
+  if (!rentalItem) throw badRequest(req.type === "return" ? "No catalogue item matches that code." : "No active catalogue item matches that code.");
 
   const line = req.lines.find((l) => l.source === "rental" && l.rentalItemId === rentalItem.id);
   if (!line) throw badRequest(`"${rentalItem.name}" isn't on this request.`);
@@ -1143,8 +1254,35 @@ async function rentalScanLookup(req: RequestWithLines, input: ScanLookupInput, a
       poRepo.findLiveHiresByRentalItems([rentalItem.id], [line.sourceWarehouseId]),
       rentalCustodyRepo.findRentalHoldingsByEngineer(req.engineerId),
     ]);
-    const candidates = rentalPool.pickReturnableHoldings(held, rentalItem.id, new Set(liveHires.map((h) => h.id)));
-    if (candidates.length === 0) throw badRequest(`${rentalItem.name} isn't currently out with this engineer.`);
+    // FIELD-ORIGIN ONLY, capped per hire — the same restriction `expandFulfilEntries` applies to the
+    // posting allocator, from the same ledger derivation (`van_restock − van_return`).
+    //
+    // This panel STAGES what the reviewer posts, and the shared picker orders by soonest deadline over
+    // raw custody. So a job-origin hire due sooner than a field-origin one was presented as the
+    // candidate: wrong PO code, wrong deadline, and an `available` counting units Field Stock may never
+    // take back. Nothing was ever mis-bound — the posting re-derives the hire server-side and the
+    // client cannot send one — but the counter was told the wrong thing about the return it was making.
+    //
+    // Selection only. `findFieldOriginByHiresTx` inside the posting transaction remains the concurrency
+    // authority. Field-origin is a subset of custody, so the cap can never inflate a row, and hires with
+    // no field-door quantity fall out of the picker's own `quantityOnHand > 0` filter — which preserves
+    // its ordering and the split behaviour untouched among the hires that remain eligible.
+    const fieldByHire = held.length > 0
+      ? await rentalCustodyRepo.findFieldOriginByHires(req.engineerId, [...new Set(held.map((h) => h.purchaseOrderRentalLineId))])
+      : new Map<string, number>();
+    const heldFieldOrigin = held.map((h) => ({
+      ...h,
+      quantityOnHand: Math.min(h.quantityOnHand, Math.max(0, fieldByHire.get(h.purchaseOrderRentalLineId) ?? 0)),
+    }));
+    const candidates = rentalPool.pickReturnableHoldings(heldFieldOrigin, rentalItem.id, new Set(liveHires.map((h) => h.id)));
+    // Accurate about WHY there is nothing to scan. The engineer may well be holding this item — for a
+    // job — and telling them it "isn't out with them" would be false. Job-origin kit goes back through
+    // that job's own scan-in, or is declared lost against the hire.
+    if (candidates.length === 0) {
+      throw badRequest(
+        `${rentalItem.name} has nothing collected through Field Stock left with this engineer — anything they still hold of it is out on a job and returns through it.`,
+      );
+    }
     const hires = rentalPool.allocateAcrossHoldings(candidates, remainingQty).map(({ holding: h, qty }) => ({
       purchaseOrderRentalLineId: h.purchaseOrderRentalLineId,
       poCode: h.poCode,
@@ -1234,6 +1372,17 @@ async function expandFulfilEntries(
   // Loaded ONCE for the whole posting rather than per entry — a return posting can carry many lines,
   // and the engineer's custody set is the same set for all of them.
   const held = hasRental && req.type === "return" ? await rentalCustodyRepo.findRentalHoldingsByEngineer(req.engineerId) : [];
+  // FIELD-ORIGIN per hire, so the allocator BINDS field-door units only. The allocator picks by soonest
+  // deadline and total custody (shared with job returns, which is right for THEM), so on its own it can
+  // bind a job-origin hire that the in-tx origin guard then rejects — dead-ending a return the engineer
+  // could actually make on a later, field-origin hire (same catalogue item, an ordinary mixed-origin
+  // state). Capping each candidate at its field-origin BEFORE selection makes the bound hire agree with
+  // the posting guard. Non-tx, for SELECTION only; findFieldOriginByHiresTx inside the tx stays the
+  // concurrency authority. Field-origin is a subset of custody (invariant), so the cap never inflates.
+  const fieldByHire = held.length > 0
+    ? await rentalCustodyRepo.findFieldOriginByHires(req.engineerId, [...new Set(held.map((h) => h.purchaseOrderRentalLineId))])
+    : new Map<string, number>();
+  const heldFieldOrigin = held.map((h) => ({ ...h, quantityOnHand: Math.min(h.quantityOnHand, Math.max(0, fieldByHire.get(h.purchaseOrderRentalLineId) ?? 0)) }));
   // Units already spoken for by an EARLIER entry in this same posting. Without this, two entries
   // against one hire would each be allocated the hire's full free quantity and the posting would
   // commit more units than exist — the transaction's atomic guard would catch it, but only after
@@ -1308,7 +1457,9 @@ async function expandFulfilEntries(
       // narrowing here would strand overdue kit in a van with nothing to scan it against.
       const liveHires = hiresByPair.get(`${rentalItemId}|${warehouseId}`) ?? [];
       const candidates = rentalPool
-        .pickReturnableHoldings(held, rentalItemId, new Set(liveHires.map((h) => h.id)))
+        // Field-origin-capped custody: a Field Stock return may only draw field-door units, so the
+        // allocator must never bind a hire's job-origin quantity (it would only fail the tx guard).
+        .pickReturnableHoldings(heldFieldOrigin, rentalItemId, new Set(liveHires.map((h) => h.id)))
         // Net off what earlier entries in this posting already claimed.
         .map((h) => ({ ...h, quantityOnHand: h.quantityOnHand - (spent.get(h.purchaseOrderRentalLineId) ?? 0) }))
         .filter((h) => h.quantityOnHand > 0);
@@ -1402,6 +1553,37 @@ export async function fulfil(id: string, input: FulfilVanStockRequestInput, acto
       throw conflict("This return has no destination warehouse — it can't be fulfilled.");
     }
     const returnWarehouseId = fresh.warehouseId as string;
+
+    // ── THE ORIGIN INVARIANT, RE-ASSERTED HERE AND NOWHERE ELSE ───────────────────────────────
+    //
+    // A Field Stock return may only consume custody that came in through the FIELD door
+    // (`van_restock − van_return`). Create-time availability already says so, and the engineer's
+    // picker shows only that figure — but neither is binding: both are read outside this transaction
+    // and neither holds a reservation. The only quantity guard inside it is the holding's floor, and
+    // that floor is on TOTAL custody, which is job-origin PLUS field-origin. So a posting arriving
+    // after the field-origin units have gone can satisfy the floor by draining the JOB's units
+    // instead — a `van_return` written against kit that owes its return to a job, with nothing in the
+    // ledger recording the conversion and the job's outstanding count left unbackable.
+    //
+    // Not a narrow timing window: the create guard reserves nothing, so two returns for the same hire
+    // can both be raised while the field figure still covers each, and the second posting overdraws.
+    //
+    // ONE aggregation for the whole posting, over the hires this posting actually touches, from the
+    // same ledger and the same derivation `findFieldOriginByHires` uses for the read side — never a
+    // second source of truth, and never per entry. Read INSIDE the transaction, which is what makes
+    // it enforceable: the drain below updates the same holding document, so a concurrent posting that
+    // commits first turns this one into a write conflict instead of letting both spend the same units.
+    const returnHireIds =
+      fresh.type === "restock"
+        ? []
+        : [...new Set(entries.filter((e) => e.source === "rental" && e.purchaseOrderRentalLineId).map((e) => e.purchaseOrderRentalLineId as string))];
+    const fieldOriginByHire =
+      returnHireIds.length > 0 ? await rentalCustodyRepo.findFieldOriginByHiresTx(tx, fresh.engineerId, returnHireIds) : new Map<string, number>();
+    // What EARLIER entries in this same posting have already spent of each hire's field-door budget.
+    // Without it two scanned rows against one hire would each be measured against the full figure and
+    // the pair could still overdraw — the same reason `expandFulfilEntries` tracks `spent`.
+    const fieldSpent = new Map<string, number>();
+
     for (const e of entries) {
       // ── HIRED KIT ─────────────────────────────────────────────────────────────────────────────
       // Never touches InventoryBalance. A hire is the provider's equipment: it has no stock balance
@@ -1476,6 +1658,18 @@ export async function fulfil(id: string, input: FulfilVanStockRequestInput, acto
           // paperwork WRONG (the two checks above) is a different thing from the paperwork having
           // moved on. Mirrors goods-management's return leg exactly.
           hiresTouched.set(returnHire.purchaseOrderId, returnHire.poCode ?? "");
+
+          // ORIGIN. Before anything moves: are these units actually the Field Stock door's to give
+          // back? Checked ahead of the drain so a refusal writes nothing at all rather than relying on
+          // the rollback, and stated as its own error because it is a different fact from "you are not
+          // holding that many" — the engineer may well be holding them, for a job.
+          const fieldAvailable = Math.max(0, fieldOriginByHire.get(hireId) ?? 0) - (fieldSpent.get(hireId) ?? 0);
+          if (e.qty > fieldAvailable) {
+            throw conflict(
+              `${e.itemName}: only ${Math.max(0, fieldAvailable)} of these units were collected through Field Stock, so only that many can go back this way — the rest is out on a job and returns through it. Refresh and scan again.`,
+            );
+          }
+          fieldSpent.set(hireId, (fieldSpent.get(hireId) ?? 0) + e.qty);
 
           // Drain custody first — its floor guard is what refuses a return of units the engineer was
           // never holding, and it rolls the whole posting back rather than persisting a negative
@@ -1679,17 +1873,29 @@ export interface HoldingOption {
   hireEndDate: string | null;
   overdue: boolean;
   poCodes: string[]; // the orders these units sit on, for reference only
+  // The depot(s) these units were collected from — the hires' own warehouses, read from the same
+  // authoritative place the posting guard reads (the hire's order). NAMES only, never ids: this is
+  // context for a person choosing where to drive, not a handle to address anything by.
+  //
+  // Present because a hire goes back where it came from, and until the return list said so the
+  // engineer only learnt it by being refused. A single row can span depots, so it is a LIST — the
+  // same roll-up per catalogue item that poCodes gets.
+  depots: string[];
 }
 export async function myHoldings(engineerId: string): Promise<HoldingOption[]> {
   // Show only the FREE (field) portion: global van holding MINUS what's committed to active jobs. Job
   // stock returns via the job's Close & Reconcile, so it must never appear as field-returnable here — an
   // item wholly committed to a job drops out (free 0). Same subtraction the create guard enforces, and
   // it applies to BOTH pools: hired kit out on a job goes back through that job's own scan-in.
-  // Both committed pools from ONE job + movement read — see committedByEngineer.
+  // Both committed pools from one call — see committedByEngineer. The custody read is shared with it
+  // un-awaited (its rental arm is derived from these same rows: which units came in through the Field
+  // Stock door), so the list and the commitment netted off it can never be built from two different
+  // snapshots of custody.
+  const rentalRowsRead = rentalCustodyRepo.findRentalHoldingsByEngineer(engineerId);
   const [rows, jobCommitted, rentalRows] = await Promise.all([
     engineerStockRepo.findEngineerBalances(engineerId),
-    committedByEngineer(engineerId),
-    rentalCustodyRepo.findRentalHoldingsByEngineer(engineerId),
+    committedByEngineer(engineerId, { rentalHoldings: rentalRowsRead }),
+    rentalRowsRead,
   ]);
   const committed = jobCommitted.irm;
   const rentalCommitted = jobCommitted.rental;
@@ -1707,12 +1913,15 @@ export async function myHoldings(engineerId: string): Promise<HoldingOption[]> {
       hireEndDate: null,
       overdue: false,
       poCodes: [],
+      // Company stock has no "collected from" in this model — a van balance is a running total, not
+      // units traceable to one depot. Left empty rather than guessed.
+      depots: [],
     }))
     .filter((h) => h.quantityOnHand > 0);
 
   // Rolled up per CATALOGUE item, summed across however many hires the units sit on — that is the
   // unit the engineer requests in, and the unit the free-vs-committed subtraction is expressed in.
-  const byItem = new Map<string, { qty: number; soonest: Date | null; poCodes: Set<string>; name: string; uom: string | null }>();
+  const byItem = new Map<string, { qty: number; soonest: Date | null; poCodes: Set<string>; hireIds: Set<string>; name: string; uom: string | null }>();
   for (const h of rentalRows) {
     if (!h.rentalItemId) continue;
     const cur = byItem.get(h.rentalItemId);
@@ -1723,7 +1932,9 @@ export async function myHoldings(engineerId: string): Promise<HoldingOption[]> {
       : cur.soonest;
     const poCodes = cur?.poCodes ?? new Set<string>();
     if (h.poCode) poCodes.add(h.poCode);
-    byItem.set(h.rentalItemId, { qty: (cur?.qty ?? 0) + h.quantityOnHand, soonest, poCodes, name: cur?.name ?? h.itemName, uom: cur?.uom ?? null });
+    const hireIds = cur?.hireIds ?? new Set<string>();
+    hireIds.add(h.purchaseOrderRentalLineId);
+    byItem.set(h.rentalItemId, { qty: (cur?.qty ?? 0) + h.quantityOnHand, soonest, poCodes, hireIds, name: cur?.name ?? h.itemName, uom: cur?.uom ?? null });
   }
   // COMPANY midnight, not the process clock. A hire deadline is a calendar day stored at UTC
   // midnight, so `hireEndDate < Date.now()` calls a hire due TODAY overdue from one minute past
@@ -1736,6 +1947,19 @@ export async function myHoldings(engineerId: string): Promise<HoldingOption[]> {
   // the code is what the warehouse's scanner resolves against.
   const catalogue = rentalIds.length > 0 ? await rentalItemRepo.findManyByIds(rentalIds) : [];
   const codeById = new Map(catalogue.map((r) => [r.id, { code: r.code, name: r.name, uom: r.baseUnit ?? null }]));
+
+  // WHERE each of those hires came from, in ONE batched read — the same finder, and the same
+  // authoritative field (the hire's order warehouse), that the create guard and the posting guard
+  // judge a return on. Read here purely to SAY it: nothing on this path decides anything from it.
+  const allHeldHireIds = [...new Set([...byItem.values()].flatMap((v) => [...v.hireIds]))];
+  const depotRows = rentalIds.length > 0 ? await poRepo.findHireDepotsByIds(allHeldHireIds) : [];
+  const depotOfHire = new Map(depotRows.map((d) => [d.id, d.warehouseName]));
+  // Which of those hires actually hold FIELD-door units — so the depots we tell the engineer to drive
+  // to are only the ones a Field Stock return can bind. A job-origin-only hire's depot is not a place
+  // this item can go back through here (it returns through the job), so listing it would send the
+  // engineer to a counter that refuses the scan. The field-returnable QUANTITY is already origin-aware,
+  // and this is the SAME per-hire field map committedByEngineer read above — no extra ledger round trip.
+  const rentalFieldByHire = jobCommitted.rentalFieldByHire;
 
   const rental: HoldingOption[] = rentalIds
     .map((rentalItemId) => {
@@ -1752,6 +1976,10 @@ export async function myHoldings(engineerId: string): Promise<HoldingOption[]> {
         hireEndDate: h.soonest ? h.soonest.toISOString() : null,
         overdue: h.soonest ? h.soonest.getTime() < todayStart : false,
         poCodes: [...h.poCodes],
+        // Only FIELD-origin hires' depots: those are the only counters a Field Stock return can bind
+        // here. Unresolved depots drop out rather than becoming Unknown: a name we could not read is not
+        // a place anyone can drive to, and printing a placeholder would read as a real depot.
+        depots: [...new Set([...h.hireIds].filter((id) => (rentalFieldByHire.get(id) ?? 0) > 0).map((id) => depotOfHire.get(id)).filter((n): n is string => Boolean(n)))].sort(),
       };
     })
     .filter((h) => h.quantityOnHand > 0);
@@ -1854,6 +2082,8 @@ export async function searchRequestableItems(q: string): Promise<WarehouseItemOp
       uom: r.baseUnit ?? null,
       quantityOnHand: totalByItem.get(r.id) ?? 0, // network-wide total; 0 ⇒ shown disabled in the composer
       reorderLevel: r.reorderLevel ?? null,
+      hireEndDate: null, // company stock has no hire behind it
+      poCodes: [],
     })),
     ...rentalOptions,
   ];
@@ -1879,6 +2109,20 @@ export interface WarehouseItemOption {
   uom: string | null;
   quantityOnHand: number;
   reorderLevel: number | null; // GLOBAL IRM policy threshold — advisory only, never blocks issuance
+  // ── Rental only, DISPLAY only ────────────────────────────────────────────────────────────
+  //
+  // The soonest deadline among the hires that could supply this item AT THE SCOPED WAREHOUSE, and the
+  // orders those hires sit on. The counter is handing kit over now, so "when must this come back" is
+  // part of the decision — the same fact the scan panel and the engineer's return list both lead with.
+  //
+  // Null / empty on IRM, and null on the engineer's network-wide search too: without a depot there is
+  // no single deadline to state, and inventing one from a nationwide minimum would be a date that does
+  // not apply to wherever they end up collecting.
+  //
+  // Neither field is an input. The order codes are confirmation for a human ("PO-0057"); WHICH hire
+  // actually supplies the units is resolved server-side at posting and is never sent by the client.
+  hireEndDate: string | null;
+  poCodes: string[];
 }
 
 /**
@@ -1914,8 +2158,67 @@ async function rentalRequestableOptions(
     uom: i.baseUnit ?? null,
     quantityOnHand: totalByItem.get(i.id) ?? 0,
     reorderLevel: null, // a hire never reaches the reorder engine — see the RentalItem model
+    // Network-wide search: the engineer has not chosen a depot yet, so there is no one deadline to
+    // state. availability() answers it per depot once they have.
+    hireEndDate: null,
+    poCodes: [],
   }));
 }
+/**
+ * Rental hits for the WALK-IN counter: what this ONE depot can hand out right now, with the deadline.
+ *
+ * Differs from `rentalRequestableOptions` above in the only way that matters — it is depot-scoped.
+ * The engineer's composer asks "does the company have one of these anywhere", because they choose a
+ * collection depot afterwards. A walk-in has already chosen: the counter the engineer is standing at.
+ *
+ * The free figure comes from `rentalFreeByItemAndWarehouse`, the SAME helper approve() and the scan
+ * panel use — issuable hires only (order live, still out, period not ended as of company-today),
+ * netted against open job demand. Not re-derived here: a counter that computed availability its own
+ * way would hand out the last tester a job had planned, which is exactly what the netting exists to
+ * stop, and it is the fastest door in the building for doing it.
+ *
+ * The deadline is a SECOND read of the same hires, and deliberately so rather than widening the pool
+ * helper's return type: the pool answers "how many", this answers "by when", and only this caller
+ * needs the second answer. One batched query for the whole result set, never per row.
+ */
+async function walkInRentalOptions(
+  items: Array<{ id: string; code: string; name: string; baseUnit: string | null }>,
+  warehouseId: string,
+  todayStart: Date,
+  preloadedDemand?: Awaited<ReturnType<typeof getOpenDemand>>,
+): Promise<WarehouseItemOption[]> {
+  if (items.length === 0) return [];
+  const ids = items.map((i) => i.id);
+  const [free, hires] = await Promise.all([
+    rentalFreeByItemAndWarehouse(ids, [warehouseId], todayStart, preloadedDemand),
+    // Issuable-only, same predicate the free figure is built from, so the date shown can never belong
+    // to a hire the counter is not actually allowed to draw on.
+    poRepo.findIssuableHiresByRentalItems(ids, todayStart, [warehouseId]),
+  ]);
+  const soonest = new Map<string, Date>();
+  const poCodes = new Map<string, Set<string>>();
+  for (const h of hires) {
+    const cur = soonest.get(h.rentalItemId);
+    if (!cur || h.hireEndDate < cur) soonest.set(h.rentalItemId, h.hireEndDate);
+    const set = poCodes.get(h.rentalItemId) ?? new Set<string>();
+    if (h.poCode) set.add(h.poCode);
+    poCodes.set(h.rentalItemId, set);
+  }
+  return items.map((i) => ({
+    source: "rental",
+    irmItemId: null,
+    rentalItemId: i.id,
+    code: i.code,
+    name: i.name,
+    sku: null, // a hire master carries no SKU by design; its code is the identifier
+    uom: i.baseUnit ?? null,
+    quantityOnHand: free.get(`${i.id}|${warehouseId}`) ?? 0,
+    reorderLevel: null, // a hire never reaches the reorder engine — see the RentalItem model
+    hireEndDate: soonest.get(i.id)?.toISOString() ?? null,
+    poCodes: [...(poCodes.get(i.id) ?? [])].sort(),
+  }));
+}
+
 const WALK_IN_BROWSE_LIMIT = 50;
 export async function searchWarehouseItems(actor: AuditActor, warehouseId: string, q: string): Promise<WarehouseItemOption[]> {
   assertWarehouseAccess(actor, warehouseId);
@@ -1935,20 +2238,43 @@ export async function searchWarehouseItems(actor: AuditActor, warehouseId: strin
       if (!d.irmItemId || d.warehouseId !== warehouseId) continue;
       browseDemand.set(d.irmItemId, (browseDemand.get(d.irmItemId) ?? 0) + d.demand);
     }
-    return balances
+    // Hired kit this depot can hand out, browsed the same way. Capped and name-sorted like the company
+    // arm; items with nothing free here drop out, so the browse list stays "what is actually on the
+    // shelf" for both pools.
+    const browseRentals = await rentalItemRepo.findMany({ status: "active", page: 1, pageSize: WALK_IN_BROWSE_LIMIT });
+    // Company-today is only resolved when there is actually a hire to judge — a settings read on a
+    // catalogue with no rentals in it would be work no answer depends on.
+    const rentalHits =
+      browseRentals.items.length === 0 ? []
+      : (
+          await walkInRentalOptions(
+            browseRentals.items.map((r) => ({ id: r.id, code: r.code, name: r.name, baseUnit: r.baseUnit ?? null })),
+            warehouseId,
+            await companyTodayStart(),
+            demand,
+          )
+        ).filter((it) => it.quantityOnHand > 0);
+
+    return [...balances
       .filter((b) => !b.irmItem.trackSerialNumbers && !b.irmItem.trackBatchNumbers)
-      // IRM only, and stated rather than implied: the walk-in counter does not hand out hired kit in
-      // this phase (walkInSchema refuses it), so every hit here is company stock.
-      .map((b) => ({ source: "irm", irmItemId: b.irmItemId, rentalItemId: null, code: b.irmItem.code, name: b.irmItem.name, sku: b.irmItem.sku ?? null, uom: b.irmItem.baseUnit ?? null, quantityOnHand: Math.max(0, b.quantityOnHand - (browseDemand.get(b.irmItemId) ?? 0)), reorderLevel: b.irmItem.reorderLevel ?? null }))
+      .map((b) => ({ source: "irm", irmItemId: b.irmItemId, rentalItemId: null, code: b.irmItem.code, name: b.irmItem.name, sku: b.irmItem.sku ?? null, uom: b.irmItem.baseUnit ?? null, quantityOnHand: Math.max(0, b.quantityOnHand - (browseDemand.get(b.irmItemId) ?? 0)), reorderLevel: b.irmItem.reorderLevel ?? null, hireEndDate: null, poCodes: [] }))
       .filter((it) => it.quantityOnHand > 0)
-      .sort((a, b) => a.name.localeCompare(b.name));
+      .sort((a, b) => a.name.localeCompare(b.name)),
+      // Company stock first, then hired kit — the same stable order the engineer's composer uses, so
+      // the two search lists cannot disagree about which pool leads.
+      ...rentalHits.sort((a, b) => a.name.localeCompare(b.name))];
   }
   // Typed search spans the catalogue (matches code/name/sku), then is narrowed to what THIS warehouse
   // actually holds: an item with no balance row here, or one depleted to 0, is dropped — a walk-in can
   // only hand out stock on the shelf. (This is why an item like a fibre panel that was never stocked at
   // this counter no longer appears as a phantom "out of stock" row.)
-  const rows = (await irmRepo.findMany({ search: term, status: "active" }, 0, 20, "name")).filter((r) => !r.trackSerialNumbers && !r.trackBatchNumbers);
-  if (rows.length === 0) return [];
+  // BOTH catalogues, searched together — the counter types a name, not a pool. Active only on each
+  // side, matching every other requestable search in the module.
+  const [rows, rentalMatches] = await Promise.all([
+    irmRepo.findMany({ search: term, status: "active" }, 0, 20, "name").then((r) => r.filter((x) => !x.trackSerialNumbers && !x.trackBatchNumbers)),
+    rentalItemRepo.findMany({ search: term, status: "active", page: 1, pageSize: 20 }),
+  ]);
+  if (rows.length === 0 && rentalMatches.items.length === 0) return [];
   const [balances, demand] = await Promise.all([
     inventoryRepo.findBalancesByItemsAndWarehouses(rows.map((r) => r.id), [warehouseId]),
     // Netted like every other "what can leave this shelf" figure. The counter is the FASTEST way to
@@ -1964,7 +2290,20 @@ export async function searchWarehouseItems(actor: AuditActor, warehouseId: strin
     demandHere.set(d.irmItemId, (demandHere.get(d.irmItemId) ?? 0) + d.demand);
   }
   const onHand = new Map(balances.map((b) => [b.irmItemId, Math.max(0, b.quantityOnHand - (demandHere.get(b.irmItemId) ?? 0))]));
-  return rows
+  // Depot-scoped and demand-netted by the shared helper, then filtered the same way the company arm is
+  // — a hire with nothing free HERE is not something this counter can hand over, however many units of
+  // it stand at another depot.
+  const rentalHits =
+    rentalMatches.items.length === 0 ? []
+    : (
+        await walkInRentalOptions(
+          rentalMatches.items.map((r) => ({ id: r.id, code: r.code, name: r.name, baseUnit: r.baseUnit ?? null })),
+          warehouseId,
+          await companyTodayStart(),
+          demand,
+        )
+      ).filter((it) => it.quantityOnHand > 0);
+  return [...rows
     .map((r) => ({
       source: "irm", // walk-in is company stock only — see the browse arm above
       irmItemId: r.id,
@@ -1975,8 +2314,10 @@ export async function searchWarehouseItems(actor: AuditActor, warehouseId: strin
       uom: r.baseUnit ?? null,
       quantityOnHand: onHand.get(r.id) ?? 0,
       reorderLevel: r.reorderLevel ?? null,
+      hireEndDate: null, // company stock has no hire behind it
+      poCodes: [],
     }))
-    .filter((it) => it.quantityOnHand > 0);
+    .filter((it) => it.quantityOnHand > 0), ...rentalHits];
 }
 
 // Active warehouses for the composer's preference picker (engineers hold no warehouse.view).

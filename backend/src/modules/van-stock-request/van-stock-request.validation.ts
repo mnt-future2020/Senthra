@@ -221,19 +221,18 @@ export const walkInSchema = z.object({
   reason: z.string().trim().min(1, "A reason is required.").max(2000),
   priority: prioritySchema,
   notes: z.string().trim().max(2000).optional(),
-  // IRM ONLY — hired kit is deliberately NOT issuable over the counter in this phase.
+  // BOTH POOLS. Hired kit may now be issued over the counter — the business decision this schema
+  // previously recorded as unmade has been made.
   //
-  // Not an oversight and not a technical limit: a walk-in is pre-approved and scanned out in one
-  // motion, which is precisely the review step that a hire — third-party equipment with a return
-  // deadline and a bill attached — should not skip. Whether the counter may hand out hired kit is a
-  // business call nobody has made, so this refuses it loudly rather than quietly issuing one.
-  lines: dedupedLines.superRefine((lines, ctx) => {
-    lines.forEach((l, i) => {
-      if (l.source === "rental") {
-        ctx.addIssue({ code: "custom", path: [i, "source"], message: "Hired equipment can't be issued over the counter — the engineer must raise a field stock request for it." });
-      }
-    });
-  }),
+  // Nothing about a hire is trusted from here beyond WHICH CATALOGUE ITEM is wanted: `dedupedLines`
+  // already refuses a rental line carrying an IRM id (and the reverse), and no hire id is accepted on
+  // a line at all. Which actual hire supplies the units is resolved server-side at posting, exactly as
+  // it is on every other rental flow.
+  //
+  // The control a walk-in skips is `approve()`, and that is replaced rather than dropped: `walkIn()`
+  // runs `assertWalkInRentalAvailability` at create against live free-on-hire at THIS depot, so a
+  // pre-approved request that could never be scanned cannot be created. See the note there.
+  lines: dedupedLines,
 });
 export type WalkInInput = z.infer<typeof walkInSchema>;
 

@@ -18,7 +18,23 @@ vi.mock("#modules/inventory/inventory.repository.js", () => ({ findBalancesByIte
 vi.mock("#modules/inventory/inventory.service.js", () => ({}));
 vi.mock("#modules/irm/irm.repository.js", () => ({ findMany: vi.fn() }));
 vi.mock("#modules/irm/irm.service.js", () => ({}));
-vi.mock("#modules/settings/settings.service.js", () => ({ getCloudinaryCreds: vi.fn() }));
+// The counter serves BOTH pools now, so the browse and typed arms both reach the rental catalogue and
+// the hire finder. Stubbed empty here on purpose: this file's subject is how PLANNED DEMAND is netted
+// off COMPANY stock, and the rental pool is covered end-to-end in van-stock-request.rental.test.ts.
+// Without these the arms would reach the real Prisma client, which this suite has no database for.
+vi.mock("#modules/rental-item/rental-item.repository.js", () => ({
+  findMany: vi.fn(async () => ({ items: [], total: 0 })),
+}));
+vi.mock("#modules/purchase-order/purchase-order.repository.js", () => ({
+  findIssuableHiresByRentalItems: vi.fn(async () => []),
+}));
+
+// The counter now serves hired kit as well as company stock, so the browse arm resolves company-today
+// to judge which hires are still issuable. A fixed timezone keeps these assertions about DEMAND, which
+// is what this file is for.
+vi.mock("#modules/settings/settings.service.js", () => ({
+  getCloudinaryCreds: vi.fn(), getCompanyTimezone: vi.fn(async () => "Europe/London"),
+}));
 vi.mock("#modules/user/user.repository.js", () => ({}));
 vi.mock("#modules/warehouse/warehouse.repository.js", () => ({ findMany: vi.fn() }));
 vi.mock("../../lib/cloudinary.js", () => ({ uploadToCloudinary: vi.fn() }));

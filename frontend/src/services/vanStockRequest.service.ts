@@ -202,6 +202,8 @@ export interface HoldingOption {
   hireEndDate: string | null;
   overdue: boolean;
   poCodes: string[];
+  /** Depot NAMES the hired units were collected from (rental only; empty for company stock). */
+  depots: string[];
 }
 
 export interface WarehouseLite {
@@ -277,6 +279,10 @@ export function searchRequestableItems(q: string): Promise<WalkInItemOption[]> {
 export interface WalkInItemOption extends VanStockItemOption {
   quantityOnHand: number;
   reorderLevel: number | null;
+  // Rental hits also carry the deadline (consumed by the cart's due-date) and the orders the units
+  // sit on; the wire sends both on every hit (null/[] for company stock), so the type must too.
+  hireEndDate: string | null;
+  poCodes: string[];
 }
 export function searchWalkInItems(warehouseId: string, q: string): Promise<WalkInItemOption[]> {
   return api<{ items: WalkInItemOption[] }>(`/van-stock-requests/warehouse-item-search?warehouseId=${encodeURIComponent(warehouseId)}&q=${encodeURIComponent(q)}`).then((r) => r.items);

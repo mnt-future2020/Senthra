@@ -123,7 +123,20 @@ type MovementTally = {
   warehouseId: string | null;
   // `condition` ("good" | "damaged") is a plain column, not a join — the reconcile tally splits
   // returns on it, and carrying one scalar costs nothing next to the relations this type drops.
-  items: { jobKitLineId: string | null; qty: number; condition: string }[];
+  //
+  // The three ids are OPTIONAL, and that is what lets the lean batch shape and the full per-job shape
+  // both satisfy this type. The reconcile tallies read them (which pool a write-off settled, which
+  // hire a rental line moved on); the arithmetic-only consumers never look, and a shape that omits
+  // them still type-checks rather than being forced to select columns it has no use for.
+  items: {
+    jobKitLineId: string | null;
+    qty: number;
+    condition: string;
+    irmItemId?: string | null;
+    customerStockEntryId?: string | null;
+    rentalItemId?: string | null;
+    purchaseOrderRentalLineId?: string | null;
+  }[];
 };
 
 function issuedForKitLine(movements: readonly MovementTally[], kitLineId: string): number {
@@ -139,11 +152,85 @@ function issuedForKitLine(movements: readonly MovementTally[], kitLineId: string
   return n;
 }
 
+/**
+ * WRITE-OFFS THAT NAME NO KIT LINE, ATTRIBUTED BACK TO THE LINES THEY SETTLED.
+ *
+ * `closeReconcile` books an unaccounted COMPANY item as lost by posting a `consume` movement with
+ * `condition: "lost"`, and it drains the engineer's balance by the same quantity. Historically those
+ * lines carried `jobKitLineId: null` — the unaccounted list is grouped per ITEM (one row per item, so
+ * the screen never asks you to approve two identical-looking permanent losses), and the write-off was
+ * built straight off that grouping.
+ *
+ * The consequence was a PHANTOM. Every per-kit-line tally in this module reads
+ * `issued − used − returned` and matches lines on `jobKitLineId`, so a write-off that named none was
+ * invisible to it: the line's remainder never fell, for ever, while the stock it referred to had
+ * already left the engineer's balance. Live proof, JOB-2026-0015: IRS-0007 issued 8, a declared
+ * consume of 4, then GM-0113 `consume/lost` 4 with no kit line and a matching `job_lost −4` on the
+ * engineer ledger. Truth outstanding: 0. Every tally said 4.
+ *
+ * `closeReconcile` now writes the kit line on each lost line, so no new instance can arise. This
+ * helper is what makes the ROWS ALREADY WRITTEN read correctly, without rewriting one of them: an
+ * unattributed lost quantity is spread across that item's kit lines on the same job, capped at each
+ * line's own unresolved remainder and in kit-line order. Nothing is invented — the quantity, the item
+ * and the job all come off the movement line that recorded the write-off.
+ *
+ * Capping per line is what keeps it honest: a write-off can never credit a line more than that line
+ * actually had outstanding, so it cannot mask a genuine shortfall elsewhere.
+ */
+export function unattributedLostByKitLine(
+  movements: readonly MovementTally[],
+  kitLines: readonly { id: string; irmItemId?: string | null; customerStockEntryId?: string | null }[],
+): Map<string, number> {
+  const credit = new Map<string, number>();
+  // What each line still shows as unresolved on its OWN attributed movements — the ceiling below.
+  const remainingByLine = new Map<string, number>();
+  for (const kl of kitLines) {
+    const { issued, used, returned } = kitLineSplit(movements, kl.id);
+    remainingByLine.set(kl.id, Math.max(0, issued - used - returned));
+  }
+
+  // Lost quantity per pool key, from the lines that named no kit line.
+  const lostByKey = new Map<string, number>();
+  for (const m of movements) {
+    if (m.status !== "posted" || m.direction !== "consume") continue;
+    for (const l of m.items) {
+      if (l.jobKitLineId || l.condition !== "lost") continue;
+      // A rental is never written off as our own loss (see closeReconcile), so a lost line is company
+      // or customer stock. Keyed the same way the tallies are grouped, so the two cannot drift.
+      const key = l.irmItemId ? `irm:${l.irmItemId}` : l.customerStockEntryId ? `cse:${l.customerStockEntryId}` : null;
+      if (!key) continue;
+      lostByKey.set(key, (lostByKey.get(key) ?? 0) + l.qty);
+    }
+  }
+  if (lostByKey.size === 0) return credit;
+
+  for (const kl of kitLines) {
+    const key = kl.irmItemId ? `irm:${kl.irmItemId}` : kl.customerStockEntryId ? `cse:${kl.customerStockEntryId}` : null;
+    if (!key) continue;
+    const budget = lostByKey.get(key) ?? 0;
+    if (budget <= 0) continue;
+    const take = Math.min(budget, remainingByLine.get(kl.id) ?? 0);
+    if (take <= 0) continue;
+    credit.set(kl.id, (credit.get(kl.id) ?? 0) + take);
+    lostByKey.set(key, budget - take);
+  }
+  return credit;
+}
+
 // Split a kit line's posted movements into GROSS issued / used (consumed, incl. lost) / returned.
 // Powers the queue's per-item lifecycle status (issued → awaiting return → returned/used).
-function kitLineSplit(movements: readonly MovementTally[], kitLineId: string): { issued: number; used: number; returned: number } {
+//
+// `lostByKitLine` is the OPTIONAL credit from `unattributedLostByKitLine` — a write-off already booked
+// against this job's stock that names no kit line. Optional rather than required so the read paths that
+// have no business with a write-off (availability, the issue-side splits) keep their exact behaviour;
+// a caller that reports what a job still HOLDS passes it.
+function kitLineSplit(
+  movements: readonly MovementTally[],
+  kitLineId: string,
+  lostByKitLine?: ReadonlyMap<string, number>,
+): { issued: number; used: number; returned: number } {
   let issued = 0;
-  let used = 0;
+  let used = lostByKitLine?.get(kitLineId) ?? 0;
   let returned = 0;
   for (const m of movements) {
     if (m.status !== "posted") continue;
@@ -370,6 +457,75 @@ export function jobHiresOutstanding(
   return byItem;
 }
 
+/**
+ * HOW MUCH HIRED KIT A JOB STILL HAS OUT, PER CATALOGUE ITEM — but counted per HIRE.
+ *
+ * The reconcile gate used to answer this at catalogue-item level: `min(item's raw remaining, item's
+ * total held)`, where "total held" summed every hire of that item the engineer was carrying. Two
+ * different orders of the same model are not interchangeable, so that comparison mixed one hire's
+ * ledger with another hire's custody and could land either way — blocking a job on units it never
+ * touched, or letting one close while its OWN hire was still out.
+ *
+ * Live proof, JOB-2026-0036 / RNT-0005: the job issued 3 off one hire and the engineer holds 1 of THAT
+ * hire; a second hire of the same catalogue item carries the other 3 units. Item level saw
+ * `min(3, 4) = 3` outstanding. Per hire the truth is 1 — the other 2 of its own hire are gone from
+ * custody (returned under another job, or declared lost) and are no longer this job's to wait for.
+ *
+ * So the identified part comes from `jobHiresOutstanding` — this job's movements netted per
+ * `purchaseOrderRentalLineId` and clamped against the custody row for that same hire, which is the
+ * intersect the whole rental module already reasons in.
+ *
+ * FAILS CLOSED on missing identity. A rental movement line written before hires carried an id nets to
+ * no hire at all, and dropping it would quietly release stock. Those quantities are still counted, at
+ * ITEM level, but capped at whatever of the item's custody the identified hires have not already
+ * claimed — so a legacy row can keep a job open, and can never inflate past what the engineer holds.
+ * (Zero such rows exist in live data: 58 rental movement lines, all carrying their hire.)
+ *
+ * `itemByKitLine` is how that arm knows WHICH item a hire-less line belongs to when the line itself
+ * does not say: the kit line it was filed against does, and that mapping is authoritative. Without it
+ * a line carrying neither id would be attributable to nothing and would fail OPEN — the one direction
+ * this function must never fail in.
+ */
+export function jobRentalOutstandingByItem(
+  movements: readonly MovementTally[],
+  holdings: readonly { rentalItemId: string | null; purchaseOrderRentalLineId: string; quantityOnHand: number }[],
+  hiresByItem: ReadonlyMap<string, JobHireOutstanding[]>,
+  itemByKitLine?: ReadonlyMap<string, string | null>,
+): Map<string, number> {
+  const out = new Map<string, number>();
+  const heldByItem = new Map<string, number>();
+  for (const h of holdings) {
+    if (!h.rentalItemId) continue;
+    heldByItem.set(h.rentalItemId, (heldByItem.get(h.rentalItemId) ?? 0) + Math.max(0, h.quantityOnHand));
+  }
+
+  // The identified arm: per hire, already clamped to that hire's own custody.
+  for (const [rentalItemId, hires] of hiresByItem) {
+    out.set(rentalItemId, hires.reduce((n, h) => n + h.qty, 0));
+  }
+
+  // The fail-closed arm: rental movement lines that name no hire, netted per catalogue item.
+  const noHireNet = new Map<string, number>();
+  for (const m of movements) {
+    if (m.status !== "posted") continue;
+    const sign = m.direction === "issue" ? 1 : m.direction === "return" ? -1 : 0;
+    if (sign === 0) continue;
+    for (const l of m.items) {
+      if (l.purchaseOrderRentalLineId) continue;
+      const itemId = l.rentalItemId ?? (l.jobKitLineId ? itemByKitLine?.get(l.jobKitLineId) : null);
+      if (!itemId) continue;
+      noHireNet.set(itemId, (noHireNet.get(itemId) ?? 0) + sign * l.qty);
+    }
+  }
+  for (const [rentalItemId, net] of noHireNet) {
+    const identified = out.get(rentalItemId) ?? 0;
+    const unclaimedHeld = Math.max(0, (heldByItem.get(rentalItemId) ?? 0) - identified);
+    const legacy = Math.min(Math.max(0, net), unclaimedHeld);
+    if (legacy > 0) out.set(rentalItemId, identified + legacy);
+  }
+  return out;
+}
+
 // Per-kit-line goods tallies for a single job, keyed by jobKitLineId. Used on the job-detail "job
 // pack" views so the engineer/office can see issued / returned / remaining per item.
 export async function getJobKitTallies(jobId: string, prefetched?: KitTallyJob): Promise<Record<string, KitLineTally>> {
@@ -387,6 +543,14 @@ export async function getJobKitTallies(jobId: string, prefetched?: KitTallyJob):
       else if (m.direction === "consume") e.consumed += l.qty;
     }
   }
+  // A write-off booked against this job that named no kit line settled that line's stock just the same
+  // — it left the engineer's balance when it was posted. Counted as consumed, so "Remaining" on the job
+  // pack means the same thing the reconcile screen and the queue mean by it. See
+  // `unattributedLostByKitLine`; nothing is double-counted, it only reads lines with no kit line.
+  for (const [kitLineId, qty] of unattributedLostByKitLine(movements, job?.kitLines ?? [])) {
+    const e = (acc[kitLineId] ??= { issued: 0, returned: 0, consumed: 0 });
+    e.consumed += qty;
+  }
 
   // "Remaining" must reflect what the engineer ACTUALLY still holds (global per item), not raw issued −
   // returned − used. A unit returned at another warehouse, or handed back under another job (a shared
@@ -394,19 +558,22 @@ export async function getJobKitTallies(jobId: string, prefetched?: KitTallyJob):
   const engId = job?.assignedEngineerId ?? null;
   const irmHeld = new Map<string, number>();
   const cseHeld = new Map<string, number>();
-  // Per CATALOGUE ITEM across everything the engineer holds — the cap for `remaining`, which is
-  // deliberately a global figure (a unit returned at another warehouse, or under another job, is
-  // genuinely no longer held).
-  let rentalHeld = new Map<string, RentalHeld>();
-  // Per catalogue item, but scoped to THIS JOB's own hires — what the deadline is read from. See
-  // jobHiresOutstanding for why the two are different questions.
+  // Per catalogue item, but scoped to THIS JOB's own hires — what the deadline is read from, and now
+  // also what the rental `remaining` is capped on. See jobHiresOutstanding.
   let jobHires = new Map<string, JobHireOutstanding[]>();
+  // The per-HIRE outstanding total per item — the rental cap, shared with the reconcile gate.
+  let rentalOutstandingByItem = new Map<string, number>();
   if (engId) {
     for (const b of await engineerStockRepo.findEngineerBalances(engId)) irmHeld.set(b.irmItemId, b.quantityOnHand);
     for (const h of await goodsManagementRepo.findCustomerHoldingsByEngineer(engId)) cseHeld.set(h.customerStockEntryId, h.quantityOnHand);
     const holdings = await rentalCustodyRepo.findRentalHoldingsByEngineer(engId);
-    rentalHeld = rentalHeldFrom(holdings);
     jobHires = jobHiresOutstanding(movements as never, holdings);
+    rentalOutstandingByItem = jobRentalOutstandingByItem(
+      movements,
+      holdings,
+      jobHires,
+      new Map((job?.kitLines ?? []).filter((kl) => kl.lineType === "rental").map((kl) => [kl.id, kl.rentalItemId ?? null])),
+    );
   }
   // Resolved ONCE for the whole job, and only when a rental line is actually present — this function
   // runs on the queue, the job pack and the start gate, and getCompanyTimezone is a settings read.
@@ -431,13 +598,16 @@ export async function getJobKitTallies(jobId: string, prefetched?: KitTallyJob):
     else groups.set(key, [kl]);
   }
   for (const group of groups.values()) {
-    const rental = group[0].rentalItemId ? rentalHeld.get(group[0].rentalItemId) : undefined;
     let remainingHeld = group[0].lineType === "misc"
       ? Number.MAX_SAFE_INTEGER // misc isn't engineer-tracked → keep its raw remaining
       : group[0].irmItemId
         ? irmHeld.get(group[0].irmItemId) ?? 0
         : group[0].rentalItemId
-          ? rental?.qty ?? 0
+          // RENTAL caps PER HIRE, not on every hire of the item at once — the same figure the reconcile
+          // gate is decided on, so the job pack and the reconcile screen can never disagree about how
+          // much of a hire is still out. Capping on the item total let a second order of the same model
+          // in the engineer's van inflate this row (JOB-2026-0036: 3 shown, 1 real).
+          ? rentalOutstandingByItem.get(group[0].rentalItemId) ?? 0
           : cseHeld.get(group[0].customerStockEntryId!) ?? 0;
     for (const kl of group) {
       const e = acc[kl.id] ?? { issued: 0, returned: 0, consumed: 0 };
@@ -480,7 +650,90 @@ export async function getJobKitTallies(jobId: string, prefetched?: KitTallyJob):
 // "held" — so this figure can never drift from the job side. Customer stock is a separate pool (its own
 // holdings), never field-returnable, so it isn't considered here.
 export async function jobCommittedByEngineer(engineerId: string): Promise<Map<string, number>> {
-  return (await committedByEngineer(engineerId)).irm;
+  // `irmOnly` because this wrapper hands back only the IRM map: the rental arm would otherwise cost a
+  // custody read and a ledger aggregation on a path that runs once per holding engineer inside
+  // kit-request approval.
+  return (await committedByEngineer(engineerId, { irmOnly: true })).irm;
+}
+
+/** One hire an engineer is holding, in the shape `findRentalHoldingsByEngineer` returns it. */
+export interface EngineerHeldHire {
+  purchaseOrderRentalLineId: string;
+  rentalItemId: string | null;
+  quantityOnHand: number;
+}
+
+export interface CommittedByEngineerOptions {
+  /**
+   * The engineer's custody rows, or the IN-FLIGHT read of them.
+   *
+   * The rental arm is computed FROM custody, and both Field Stock consumers load the same set for
+   * their own reasons. The promise form matters as much as the array form: awaiting it before calling
+   * here would put a round trip in front of the reads that used to run beside it. A caller passing a
+   * promise must await it itself as well (both do), so a rejection is never left floating.
+   */
+  rentalHoldings?: readonly EngineerHeldHire[] | Promise<readonly EngineerHeldHire[]>;
+  /** Skip the rental pool entirely (IRM-only callers). Leaves `rental` empty and reads no custody. */
+  irmOnly?: boolean;
+}
+
+/**
+ * RENTAL: the slice of an engineer's hired-kit custody that is NOT Field-Stock-returnable.
+ *
+ * Derived from ORIGIN, per hire, and from nothing else — no job state, no job movements.
+ *
+ * A hired unit enters custody through exactly one of two doors and must leave by the same one (see
+ * RENTAL_FIELD_TXN_TYPES for the enumeration and why it is the field list that is named):
+ *
+ *   • JOB door — goes back through that job's scan-in, or is declared lost against the hire. Both
+ *     exits stay available for as long as the unit exists, and neither depends on the job still being
+ *     open: `declareHireLost` takes a hire, an engineer and a quantity, with `jobId` optional and no
+ *     job-state gate at all. So refusing these units at the Field Stock door strands nothing.
+ *   • FIELD door — collected through Field Stock, handed back through Field Stock.
+ *
+ * WHY ORIGIN AND NOT JOB STATE. The previous rule asked "what does the job's movement ledger say was
+ * never scanned back", which was wrong twice over. It read a settled job's remainder as a live claim
+ * (an engineer holding 4 units of a fresh hire was offered 3, and refused the fourth at create — the
+ * unit was returnable through no door while the hire kept billing); and once that was gated on the
+ * goods lifecycle, a reconciled job CONVERTED its still-held units into Field-Stock-returnable ones,
+ * which is the opposite error and the more dangerous of the two.
+ *
+ * The custody ledger has neither problem, because it is the record the whole rental lifecycle writes
+ * to. A loss writes `job_lost −Y` and the units leave custody there and then; a recovery books them to
+ * the DEPOT SHELF and writes no custody row at all (proven: `recoverHireLoss` touches only
+ * HireCustodyExit and the hire's counters, and both live recoveries have zero custody rows against
+ * them), so recovery can never hand quantity to the Field Stock door. Job movements record none of
+ * this, which is precisely why they were the wrong input.
+ *
+ * CLAMPED at the live holding, and that is load-bearing rather than defensive: Goods Management's
+ * return scan resolves a hire from custody without consulting origin, so a job scan-in CAN drain
+ * field-origin units and leave `van_restock − van_return` higher than what is actually there.
+ */
+async function rentalCommittedByOrigin(
+  engineerId: string,
+  preloaded: CommittedByEngineerOptions["rentalHoldings"],
+): Promise<{ committed: Map<string, number>; fieldByHire: Map<string, number> }> {
+  const committed = new Map<string, number>();
+  // The field-returnable qty PER HIRE (clamped at the live holding). Returned alongside the item-level
+  // commitment so the depot-aware callers (Field Stock return create guard, the posting allocator's
+  // candidates, the holdings picker's depot list) can reason at hire level WITHOUT a second ledger read
+  // — this is the ONE `findFieldOriginByHires` the perf tests pin. Everything below is derived from it.
+  const fieldClamped = new Map<string, number>();
+  const holdings = preloaded ? await preloaded : await rentalCustodyRepo.findRentalHoldingsByEngineer(engineerId);
+  const held = holdings.filter((h) => h.rentalItemId && h.quantityOnHand > 0);
+  if (held.length === 0) return { committed, fieldByHire: fieldClamped };
+  const fieldByHire = await rentalCustodyRepo.findFieldOriginByHires(engineerId, [...new Set(held.map((h) => h.purchaseOrderRentalLineId))]);
+  for (const h of held) {
+    const field = Math.min(Math.max(0, fieldByHire.get(h.purchaseOrderRentalLineId) ?? 0), h.quantityOnHand);
+    fieldClamped.set(h.purchaseOrderRentalLineId, field);
+    // The COMMITTED half is reported so the shape and every consumer's `max(0, held − committed)` stay
+    // exactly as they were. Per hire, then summed per catalogue item — which is what keeps a hire's
+    // commitment inside its own units: the total works out to the sum of each hire's free quantity, so
+    // one order can never consume another's however short it is.
+    const c = h.quantityOnHand - field;
+    if (c > 0) committed.set(h.rentalItemId!, (committed.get(h.rentalItemId!) ?? 0) + c);
+  }
+  return { committed, fieldByHire: fieldClamped };
 }
 
 /**
@@ -493,17 +746,43 @@ export async function jobCommittedByEngineer(engineerId: string): Promise<Map<st
  *
  * The two results stay DISTINCT, and that is deliberate rather than incidental: they are different
  * pools keyed by different catalogues, and a caller wanting one has no business seeing the other's
- * numbers. What is shared is the snapshot, not the arithmetic — each map is still built by the same
- * `kitLineSplit` expression it was built by before, so neither figure can shift as a result of this.
+ * numbers.
  *
- * The single-pool wrappers remain exported and unchanged in behaviour: callers that genuinely need
- * only one (the kit-request availability paths) keep reading exactly as they did.
+ * ── THE TWO POOLS NO LONGER SHARE THEIR ARITHMETIC, AND MUST NOT ───────────────────────────────
+ *
+ * They did, and that was the defect. Company stock in a van is FUNGIBLE — a balance is a running
+ * total, not units traceable to where they came from — so what a job still holds can only be derived
+ * from that job's own movement ledger, and reconcile's write-off drains the balance so nothing lingers.
+ * Hired kit is the opposite on both counts: every unit is traceable to a hire, and a hire is NEVER
+ * written off as our own loss, so job-origin units genuinely can remain in a van after the job closes.
+ * Answering both with `kitLineSplit` made a hire behave like a cable.
+ *
+ * So: IRM keeps `kitLineSplit` over the engineer's live jobs, unchanged, and rental is answered from
+ * custody ORIGIN — see `rentalCommittedByOrigin`. One read of the jobs and their movements still
+ * serves the IRM arm for both callers; the rental arm runs beside it, not after it.
+ *
+ * The single-pool wrapper remains exported and unchanged in behaviour: callers that genuinely need
+ * only IRM (the kit-request availability paths) keep reading exactly as they did.
  */
-export async function committedByEngineer(engineerId: string): Promise<{ irm: Map<string, number>; rental: Map<string, number> }> {
+export async function committedByEngineer(
+  engineerId: string,
+  opts?: CommittedByEngineerOptions,
+): Promise<{ irm: Map<string, number>; rental: Map<string, number>; rentalFieldByHire: Map<string, number> }> {
   const irm = new Map<string, number>();
-  const rental = new Map<string, number>();
-  const jobs = await jobRepo.findActiveByEngineerWithKitLines(engineerId);
-  if (jobs.length === 0) return { irm, rental };
+  // BOTH ARMS IN PARALLEL, and the rental one deliberately OUTSIDE the "no live jobs" exit below.
+  // Job-origin custody outlives the job window — an engineer can be holding kit from a job that is
+  // completed, cancelled or long since reconciled — so gating the rental arm on there being live jobs
+  // would release exactly the units this calculation exists to hold down.
+  const [rentalRes, jobs] = await Promise.all([
+    opts?.irmOnly
+      ? Promise.resolve({ committed: new Map<string, number>(), fieldByHire: new Map<string, number>() })
+      : rentalCommittedByOrigin(engineerId, opts?.rentalHoldings),
+    jobRepo.findActiveByEngineerWithKitLines(engineerId),
+  ]);
+  const rental = rentalRes.committed;
+  // Per-hire field-returnable qty, surfaced so the depot-aware Field Stock callers reuse this ONE read.
+  const rentalFieldByHire = rentalRes.fieldByHire;
+  if (jobs.length === 0) return { irm, rental, rentalFieldByHire };
   const movesByJob = new Map<string, Awaited<ReturnType<typeof goodsManagementRepo.findMovementsByJobs>>>();
   for (const m of await goodsManagementRepo.findMovementsByJobs(jobs.map((j) => j.id))) {
     const list = movesByJob.get(m.jobId);
@@ -512,40 +791,44 @@ export async function committedByEngineer(engineerId: string): Promise<{ irm: Ma
   }
   for (const job of jobs) {
     const moves = movesByJob.get(job.id) ?? [];
+    // A write-off booked against this job that named no kit line has already left the engineer's
+    // balance, so it is settled quantity — counting it as still committed would hold down stock the
+    // engineer no longer has. Resolved once per job, from movements already in hand.
+    const lostByKitLine = unattributedLostByKitLine(moves, job.kitLines ?? []);
     for (const kit of job.kitLines ?? []) {
-      const isIrm = kit.lineType === "irm" && !!kit.irmItemId;
-      // `used` stays in the rental formula though a hire can never be consumed (see the ledger's own
-      // note): writing the same expression for both is what keeps them readable as one rule, and a
-      // future write-off path would be counted rather than silently ignored.
-      const isRental = kit.lineType === "rental" && !!kit.rentalItemId;
-      if (!isIrm && !isRental) continue;
-      const { issued, used, returned } = kitLineSplit(moves, kit.id);
+      // IRM ONLY. A rental kit line is not counted here and must not be: `kitLineSplit` cannot see a
+      // hire loss or a recovery (neither writes a job movement), and it cannot tell a job's units from
+      // Field Stock units of the same catalogue item on the same hire. The rental arm above reads the
+      // custody ledger, which records every one of those events.
+      if (kit.lineType !== "irm" || !kit.irmItemId) continue;
+      const { issued, used, returned } = kitLineSplit(moves, kit.id, lostByKitLine);
       const held = Math.max(0, issued - used - returned);
       if (held <= 0) continue;
-      if (isIrm) irm.set(kit.irmItemId!, (irm.get(kit.irmItemId!) ?? 0) + held);
-      else rental.set(kit.rentalItemId!, (rental.get(kit.rentalItemId!) ?? 0) + held);
+      irm.set(kit.irmItemId, (irm.get(kit.irmItemId) ?? 0) + held);
     }
   }
-  return { irm, rental };
+  return { irm, rental, rentalFieldByHire };
 }
 
 /**
- * The RENTAL twin of `jobCommittedByEngineer`: how many units of each hired CATALOGUE item an
- * engineer still holds against active jobs.
+ * The RENTAL twin of `jobCommittedByEngineer`: how many units of each hired CATALOGUE item are NOT
+ * Field-Stock-returnable — i.e. everything the engineer holds that did not come in through the Field
+ * Stock door.
  *
  * Field Stock returns subtract this for exactly the reason the IRM version exists. Hired kit issued
- * against a job goes back through that job's own scan-in, which is what clears the job's
- * `awaiting_return` state and releases the units to the provider. Let it leave through the Field Stock
- * door instead and the custody row drains while the job still believes the kit is out — the job can
- * never be reconciled, and its return is recorded against nothing.
+ * against a job goes back through that job's own scan-in, or is declared lost against the hire. Let it
+ * leave through the Field Stock door instead and the custody row drains while the job still believes
+ * the kit is out — the job can never be reconciled, and its return is recorded against nothing.
  *
- * Keyed by CATALOGUE item, not by hire, deliberately — and it matches how the figure is USED. The
- * engineer's holding is compared per catalogue item ("you hold 3 testers, 2 are on a job, so 1 is
- * field-returnable"); which hire each unit sits on is resolved later, at the scan, by the shared
- * returnable-hire policy. Keying this by hire would answer a question no caller asks.
+ * NOT "against ACTIVE jobs", which is what this said and what the arithmetic used to do. A job closing
+ * does not carry its units out of the van, so the commitment outlives the job; and the units it covers
+ * are identified by the door they came through, never by which job is still open. See
+ * `rentalCommittedByOrigin` for the derivation and why job movements cannot answer it.
  *
- * Reuses `kitLineSplit` — the same movement arithmetic Goods Management renders as "held" — so this
- * can never drift from the job side.
+ * Keyed by CATALOGUE item because that is how the figure is USED — the engineer's holding is compared
+ * per catalogue item, and which hire each returning unit binds to is resolved later, at the scan, by
+ * the shared returnable-hire policy. The arithmetic underneath is per HIRE, and the per-item total is
+ * the sum of the per-hire results, so no order's shortfall can reach another order's units.
  */
 export async function rentalCommittedByEngineer(engineerId: string): Promise<Map<string, number>> {
   return (await committedByEngineer(engineerId)).rental;
@@ -652,13 +935,19 @@ async function completedVanQtyByKitLine(kitLineIds: string[]): Promise<Map<strin
 // units first — so the running total of away-from-home returns can never exceed the van quantity.
 // That guarantees the warehouse-owed part is always brought home, never mis-credited elsewhere. We
 // can't tell one physical box from another; this is the safe accounting, not a per-unit truth.
+//
+// `lostCredit` is the OPTIONAL write-off already booked against this line that named no kit line (see
+// `unattributedLostByKitLine`). Those units left the engineer's balance when it was posted, so they
+// are used up as surely as a declared consume. Optional so the callers that report a POSTING allowance
+// keep their exact behaviour; the scan lookup, which ADVERTISES a capacity to a human, passes it.
 function vanReturnableAwayFromHome(
   movements: readonly MovementTally[],
   kitLineId: string,
   homeWarehouseId: string | null,
   vanQty: number,
+  lostCredit = 0,
 ): number {
-  let used = 0;
+  let used = lostCredit;
   let awayReturned = 0;
   for (const m of movements) {
     if (m.status !== "posted") continue;
@@ -677,12 +966,13 @@ function vanReturnableAwayFromHome(
 async function findAwayReturnKitLine<T extends { id: string; warehouseId: string | null }>(
   candidates: T[],
   movements: readonly MovementTally[],
+  lostByKitLine?: ReadonlyMap<string, number>,
 ): Promise<{ kit: T; cap: number } | null> {
   if (candidates.length === 0) return null;
   const vanQty = await completedVanQtyByKitLine(candidates.map((c) => c.id));
   let best: { kit: T; cap: number } | null = null;
   for (const c of candidates) {
-    const cap = vanReturnableAwayFromHome(movements, c.id, c.warehouseId, vanQty.get(c.id) ?? 0);
+    const cap = vanReturnableAwayFromHome(movements, c.id, c.warehouseId, vanQty.get(c.id) ?? 0, lostByKitLine?.get(c.id) ?? 0);
     if (cap > 0 && (!best || cap > best.cap)) best = { kit: c, cap };
   }
   return best;
@@ -730,11 +1020,28 @@ export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Pr
     // When the item isn't homed at the scanning warehouse, a RETURN of its VAN portion may still land
     // here (van stock owes no warehouse). awayCap is that allowance; null ⇒ a normal same-warehouse
     // return, capped by the whole line. Issues are unaffected — you can only issue what's actually held.
+    // A WRITE-OFF ALREADY BOOKED AGAINST THIS JOB IS SPENT QUANTITY, AND THE SCANNER MUST SAY SO.
+    //
+    // Both caps below are built from `issued − used − returned` matched on `jobKitLineId`, so a
+    // reconcile write-off written before it named its line was invisible to them — and unlike the
+    // reconcile screen there is no balance clamp here that happens to mask it: `globalHeld` is the
+    // engineer's TOTAL of the item across all their work, so it clears an inflated line easily.
+    // Live proof, JOB-2026-0015: `heldByEngineer` offered 4 of IRS-0007 and 2 of IRM-0004 against kit
+    // lines that owe nothing, both written off months ago (GM-0113).
+    //
+    // The posting floor stops those units from actually moving, so nothing was corrupted — but a
+    // scanner that advertises stock the reconcile screen says does not exist sends a warehouse looking
+    // for boxes that are not there. Same helper, same attribution, same answer as the tallies.
+    //
+    // PURE: the movements are already in hand and the kit lines came with the job, so this costs no
+    // query. Computed before the away branch because that cap needs it too.
+    const lostByKitLine = unattributedLostByKitLine(movements, job.kitLines ?? []);
     let awayCap: number | null = null;
     if (!kit && input.direction === "return") {
       const away = await findAwayReturnKitLine(
         (job.kitLines ?? []).filter((k) => k.lineType === "irm" && k.irmItemId === irmItem.id),
         movements,
+        lostByKitLine,
       );
       if (away) { kit = away.kit; awayCap = away.cap; }
     }
@@ -755,7 +1062,7 @@ export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Pr
     // only allow back at each what actually left it, else one is over-credited and the other short.
     // Away from home, only the van portion may land (awayCap). The global bound also covers the
     // cross-job case (item handed back under another job → global lower).
-    const split = kitLineSplit(movements, kit.id);
+    const split = kitLineSplit(movements, kit.id, lostByKitLine);
     const lineOutstanding = Math.max(0, split.issued - split.used - split.returned);
     const globalHeld = job.assignedEngineerId
       ? (await engineerStockRepo.findEngineerBalance(irmItem.id, job.assignedEngineerId))?.quantityOnHand ?? 0
@@ -956,7 +1263,13 @@ export async function scanLookup(input: ScanLookupInput, actor?: AuditActor): Pr
     assertWarehouseAccess(actor, input.warehouseId);
     const already = issuedForKitLine(movements, kit.id);
     // Per-warehouse return cap (see IRM branch): still-out from this line, bounded by global holding.
-    const split = kitLineSplit(movements, kit.id);
+    // A reconcile write-off booked against this job before it named its kit line is spent quantity, and
+    // the scanner must say so here exactly as the IRM branch does — customer stock is written off the
+    // same way (`unattributedLostByKitLine` keys `cse:` too, `closeReconcile` books `source:"customer"`
+    // lost lines), so without the credit this branch re-advertised a phantom the reconcile screen and
+    // job pack already agree does not exist. Pure — movements and kit lines are already in hand.
+    const lostByKitLine = unattributedLostByKitLine(movements, job.kitLines ?? []);
+    const split = kitLineSplit(movements, kit.id, lostByKitLine);
     const lineOutstanding = Math.max(0, split.issued - split.used - split.returned);
     const globalHeld = job.assignedEngineerId
       ? (await goodsManagementRepo.findCustomerHolding(entry.id, job.assignedEngineerId))?.quantityOnHand ?? 0
@@ -1633,6 +1946,12 @@ function buildKitLineRow(
   // Free hired units per `${rentalItemId}|${warehouseId}`, summed from that item's LIVE HIRES at the
   // depot. A hire has no stock balance of its own, so this is the rental analogue of balByKey.
   rentalAvailByKey: Map<string, number> = new Map(),
+  // A write-off booked against this line that named no kit line — see `unattributedLostByKitLine`.
+  // Those units left the engineer's balance when it was posted, so `usedQty` has to include them or
+  // this row shows an outstanding quantity the reconcile screen and the job pack both say is settled.
+  // This function exists so the queue and the job detail cannot drift on the split; the write-off is
+  // part of the split.
+  lostCredit = 0,
 ): QueueKitLine {
   let available = 0;
   if (kl.lineType === "irm" && kl.irmItemId && kl.warehouseId) {
@@ -1646,7 +1965,7 @@ function buildKitLineRow(
   } else if (kl.lineType === "customer_stock" && kl.customerStockEntryId) {
     available = cseQty.get(kl.customerStockEntryId) ?? 0; // qty only — no cost/value exposed
   }
-  const split = kitLineSplit(movements, kl.id);
+  const split = kitLineSplit(movements, kl.id, lostCredit > 0 ? new Map([[kl.id, lostCredit]]) : undefined);
   return {
     id: kl.id,
     lineType: kl.lineType,
@@ -1872,6 +2191,9 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
 
   const rows: QueueRow[] = pageJobs.map((job) => {
     const movements = movementsByJob.get(job.id) ?? [];
+    // Write-offs booked against this job that named no kit line — pure, over movements already in hand,
+    // so the queue's split says the same thing the job pack and the reconcile screen say.
+    const lostByKitLine = unattributedLostByKitLine(movements, job.kitLines ?? []);
     const heldOf = (kl: { irmItemId: string | null; rentalItemId?: string | null; customerStockEntryId: string | null }) => {
       if (!job.assignedEngineerId) return 0;
       // Rental sits between the other two: without it a hired line reported "held 0", so the return
@@ -1879,7 +2201,7 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
       const itemId = kl.irmItemId ?? kl.rentalItemId ?? kl.customerStockEntryId;
       return itemId ? engHeld.get(`${job.assignedEngineerId}|${itemId}`) ?? 0 : 0;
     };
-    const kitLines: QueueKitLine[] = (job.kitLines ?? []).map((kl) => buildKitLineRow(kl, movements, balByKey, cseQty, cseBarcode, heldOf(kl), vanQtyByLine.get(kl.id) ?? 0, rentalAvailByKey));
+    const kitLines: QueueKitLine[] = (job.kitLines ?? []).map((kl) => buildKitLineRow(kl, movements, balByKey, cseQty, cseBarcode, heldOf(kl), vanQtyByLine.get(kl.id) ?? 0, rentalAvailByKey, lostByKitLine.get(kl.id) ?? 0));
     return {
       jobId: job.id,
       jobNumber: job.jobNumber,
@@ -1955,7 +2277,9 @@ export async function getJobGoods(jobId: string, actor?: AuditActor): Promise<Jo
     return itemId ? engHeld.get(itemId) ?? 0 : 0;
   };
   const vanQtyByLine = await completedVanQtyByKitLine((job.kitLines ?? []).map((k) => k.id));
-  const lines: QueueKitLine[] = (job.kitLines ?? []).map((kl) => buildKitLineRow(kl, movements, balByKey, cseQty, cseBarcode, heldOf(kl), vanQtyByLine.get(kl.id) ?? 0, rentalAvailByKey));
+  // Same credit as the queue list — this row builder exists so the two views cannot drift.
+  const lostByKitLine = unattributedLostByKitLine(movements, job.kitLines ?? []);
+  const lines: QueueKitLine[] = (job.kitLines ?? []).map((kl) => buildKitLineRow(kl, movements, balByKey, cseQty, cseBarcode, heldOf(kl), vanQtyByLine.get(kl.id) ?? 0, rentalAvailByKey, lostByKitLine.get(kl.id) ?? 0));
 
   return {
     job: {
@@ -3084,6 +3408,34 @@ interface UnaccountedItem {
   customerStockEntryId: string | null;
   warehouseId: string | null;
   customerId: string | null;
+  /**
+   * WHICH KIT LINES this per-item quantity is made of. The row itself stays per item because that is
+   * what the confirmation screen must show, but the write-off movement has to name the lines it
+   * settles: a `consume/lost` line with no `jobKitLineId` is invisible to every per-kit-line tally in
+   * this module, which is exactly how the phantom in `unattributedLostByKitLine` was created.
+   */
+  lines: { jobKitLineId: string; qty: number }[];
+}
+
+/**
+ * Spread a per-item quantity back over the kit lines that make it up, worst-first is NOT the rule —
+ * kit-line order is, so two runs over the same data attribute identically.
+ *
+ * Each line takes at most its own unresolved remainder, so the spread can never claim more of a line
+ * than that line was actually short by, and the total can never exceed the item quantity it came from.
+ */
+function spreadAcrossKitLines(group: readonly TallyEntry[], qty: number): { jobKitLineId: string; qty: number }[] {
+  const out: { jobKitLineId: string; qty: number }[] = [];
+  let left = qty;
+  for (const t of group) {
+    if (left <= 0) break;
+    const lineRemainder = Math.max(0, t.issued - t.consumed - t.returnedGood - t.returnedDamaged);
+    const take = Math.min(left, lineRemainder);
+    if (take <= 0) continue;
+    out.push({ jobKitLineId: t.jobKitLineId, qty: take });
+    left -= take;
+  }
+  return out;
 }
 
 /**
@@ -3164,6 +3516,16 @@ function computeTallies(
     }
   }
 
+  // A write-off already booked against this job's stock that named no kit line is settled quantity too
+  // — the units left the engineer's balance when it was posted. Counted as `consumed`, the same bucket
+  // an attributed one lands in, so a line's remainder means one thing however the write-off was
+  // written. `closeReconcile` now names the lines, so this only ever fires for rows written before it
+  // did; the guard is `jobKitLineId == null`, so nothing can be counted twice.
+  for (const [kitLineId, qty] of unattributedLostByKitLine(movements, kitLines ?? [])) {
+    const t = tallies.get(kitLineId);
+    if (t) t.consumed += qty;
+  }
+
   return tallies;
 }
 
@@ -3234,12 +3596,23 @@ export async function closeReconcile(
   // Per-hire detail for the rental leg, from the same holdings read — which hire, on which order, so the
   // screen can offer the action instead of only naming the problem.
   let jobHires = new Map<string, JobHireOutstanding[]>();
+  // How much of each hired ITEM this job still has out, counted per HIRE — the quantity the terminal
+  // gate below is decided on. Same holdings read, same movements: no extra query.
+  let rentalOutstandingByItem = new Map<string, number>();
   if (engId) {
     for (const b of await engineerStockRepo.findEngineerBalances(engId)) irmHeld.set(b.irmItemId, b.quantityOnHand);
     for (const h of await goodsManagementRepo.findCustomerHoldingsByEngineer(engId)) cseHeld.set(h.customerStockEntryId, h.quantityOnHand);
     const holdings = await rentalCustodyRepo.findRentalHoldingsByEngineer(engId);
     rentalHeld = rentalHeldFrom(holdings);
     jobHires = jobHiresOutstanding(movements as never, holdings);
+    rentalOutstandingByItem = jobRentalOutstandingByItem(
+      movements,
+      holdings,
+      jobHires,
+      // The kit line → catalogue item map, so a rental movement line that names neither its hire nor
+      // its item is still attributable to the item its own kit line is for.
+      new Map([...tallies.values()].filter((t) => t.source === "rental").map((t) => [t.jobKitLineId, t.rentalItemId])),
+    );
   }
 
   // Group the tallies by item (the engineer holding is global per item, not per kit line) and spread
@@ -3266,8 +3639,10 @@ export async function closeReconcile(
   // ONE entry per ITEM, not per kit line. The same item can sit on two kit lines of a job and both be
   // short, which used to produce two rows with the identical name and different numbers — indis-
   // tinguishable from a bug on a screen asking you to approve a permanent loss. Summing is safe: the
-  // drain below keys off irmItemId / customerStockEntryId (never the kit line), the lost movement lines
-  // carry `jobKitLineId: null` anyway, and `warehouseId`/`customerId` on this shape are unread.
+  // drain below keys off irmItemId / customerStockEntryId (never the kit line), and `warehouseId` /
+  // `customerId` on this shape are unread. The per-LINE breakdown rides along on `lines`, because the
+  // write-off movement must name the kit lines it settles — see the phantom in
+  // `unattributedLostByKitLine`.
   const unaccountedItems: UnaccountedItem[] = [];
   for (const group of talliesByItem.values()) {
     const first = group[0];
@@ -3278,12 +3653,23 @@ export async function closeReconcile(
           ? rentalHeld.get(first.rentalItemId!)?.qty ?? 0
           : cseHeld.get(first.customerStockEntryId!) ?? 0;
     const rawRemaining = group.reduce((n, t) => n + Math.max(0, t.issued - t.consumed - t.returnedGood - t.returnedDamaged), 0);
-    const qty = Math.min(rawRemaining, held); // never more than the engineer truly holds
+    // RENTAL counts per HIRE, and only rental. A hire is not fungible with another order of the same
+    // catalogue model, so comparing this item's raw remainder against every hire's custody at once
+    // answered the wrong question — see `jobRentalOutstandingByItem`. Company and customer stock in a
+    // van genuinely ARE fungible totals, so their arithmetic is untouched.
+    const qty =
+      first.source === "rental"
+        ? rentalOutstandingByItem.get(first.rentalItemId!) ?? 0
+        : Math.min(rawRemaining, held); // never more than the engineer truly holds
     if (qty > 0) {
       unaccountedItems.push({
         itemName: first.itemName,
         itemCode: first.itemCode,
         qty,
+        // Capped at each line's own unresolved remainder and spread in kit-line order — the same rule
+        // `unattributedLostByKitLine` reads historical write-offs back with, so a write-off written
+        // today and one written before this shipped are attributed identically.
+        lines: spreadAcrossKitLines(group, qty),
         source: first.source,
         irmItemId: first.irmItemId,
         rentalItemId: first.rentalItemId,
@@ -3380,25 +3766,41 @@ export async function closeReconcile(
 
   // Build lost movement lines for unaccounted items.
   // condition: "lost" distinguishes these write-off consume lines from normal consumes in the audit ledger.
-  const lostLines: goodsManagementRepo.MovementLineRow[] = writeOffCandidates.map((u) => ({
-    source: u.source,
-    irmItemId: u.irmItemId,
-    customerStockEntryId: u.customerStockEntryId,
-    // Always null, and unreachable: the guard above throws before this point if any unaccounted row
-    // is a rental, because hired equipment is never written off as our own loss.
-    rentalItemId: null,
-    purchaseOrderRentalLineId: null,
-    itemName: u.itemName,
-    sku: null,
-    uom: null,
-    qty: u.qty,
-    condition: "lost",
-    jobKitLineId: null,
-    scannedCode: null,
-    damagePhotoUrl: null,
-    damageReason: "written off as lost",
-    notes: null,
-  }));
+  //
+  // ONE LINE PER KIT LINE, each naming the kit line it settles. It used to be one line per item with
+  // `jobKitLineId: null`, and that null was the whole phantom: every per-kit-line tally in this module
+  // matches on `jobKitLineId`, so the write-off was invisible to all of them and the line's remainder
+  // never fell — while the stock it wrote off had already left the engineer's balance. The
+  // confirmation screen still shows one row per item (`unaccounted` below is unchanged); it is the
+  // LEDGER that now says which line each unit came off, which is what makes it readable afterwards.
+  //
+  // The drain in `apply` still keys off irmItemId / customerStockEntryId, deliberately — a balance is
+  // per item, not per kit line, and splitting it would be inventing a distinction the balance does not
+  // have. So one item's write-off may post several movement lines and exactly one balance movement.
+  const lostLines: goodsManagementRepo.MovementLineRow[] = writeOffCandidates.flatMap((u) =>
+    (u.lines.length > 0 ? u.lines : [{ jobKitLineId: null as string | null, qty: u.qty }]).map((part) => ({
+      source: u.source,
+      irmItemId: u.irmItemId,
+      customerStockEntryId: u.customerStockEntryId,
+      // Always null, and unreachable: the guard above throws before this point if any unaccounted row
+      // is a rental, because hired equipment is never written off as our own loss.
+      rentalItemId: null,
+      purchaseOrderRentalLineId: null,
+      itemName: u.itemName,
+      sku: null,
+      uom: null,
+      qty: part.qty,
+      condition: "lost",
+      // Null only in the degenerate case where the spread found no line to hang the quantity on (every
+      // line already square). Left as null rather than guessed at, and `unattributedLostByKitLine`
+      // reads that case correctly anyway.
+      jobKitLineId: part.jobKitLineId,
+      scannedCode: null,
+      damagePhotoUrl: null,
+      damageReason: "written off as lost",
+      notes: null,
+    })),
+  );
 
   if (lostLines.length > 0) {
     // Write the lost movement + drain holdings + upsert summary in one transaction.
