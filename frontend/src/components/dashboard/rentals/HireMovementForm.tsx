@@ -12,7 +12,7 @@ import { useReportDirty } from "@/providers/NavigationGuardProvider";
 import { ghostBtn, hintCls, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import { NumberInput } from "@/components/ui/NumberInput";
 import { AttachmentList, DocPicker } from "@/components/dashboard/goods-in/DeliveryDocuments";
-import { canSettleHires, damageableNow, hireTakesDelivery, shortfallAfterDelivery } from "./hireActions";
+import { canSettleHires, damageableNow, damageReportCap, hireTakesDelivery, shortfallAfterDelivery, tidyAddress } from "./hireActions";
 import { Select } from "@/components/ui/Select";
 import {
   FieldError,
@@ -257,6 +257,8 @@ type LineState = {
   hireEndDate: string;
   /** Where this line is, resolved by the server. Lines can differ within one order. */
   destination: string;
+  /** The full address behind `destination` when it was shortened to a place name. */
+  destinationFull: string | null;
   /** As typed. Blank means "none of this line moved", which is ordinary. */
   quantity: string;
   damaged: string;
@@ -332,9 +334,25 @@ function readLine(direction: MovementLeg, r: PoRentalLine): LineState | null {
     hireEndDate: r.hireEndDate,
     // Where the kit is: on the way in that is where it is going, on the way back where it is coming
     // from. Both resolved by the same server function the order document prints from.
+    //
+    // A DAMAGE REPORT GETS THE PLACE NAME, NOT THE POSTAL ADDRESS. Nothing moves on this leg — the
+    // equipment is where it already is — so the address is not something anybody acts on; it is only
+    // there to tell two hire lines of the same item apart, and a name does that in three words instead
+    // of two lines. The delivery and collection legs keep the full address, because a driver is going
+    // there. The full text stays on hover either way.
+    //
+    // And it reads the DELIVERY side, not the return side. `returnLocation` answers "where will this go
+    // back to", whose label is frequently "Same as delivery" — true, and not a place. Damage asks where
+    // the kit IS, and that is where it was delivered.
     destination:
-      (direction === "in" ? r.deliveryLocation.address : r.returnLocation.address) ??
-      (direction === "in" ? r.deliveryLocation.label : r.returnLocation.label),
+      direction === "damage"
+        ? r.deliveryLocation.label || tidyAddress(r.deliveryLocation.address) || "—"
+        : tidyAddress(direction === "in" ? r.deliveryLocation.address : r.returnLocation.address) ??
+          (direction === "in" ? r.deliveryLocation.label : r.returnLocation.label),
+    /** The full address, for the one place that still wants it on hover. */
+    destinationFull:
+      tidyAddress(direction === "damage" ? r.deliveryLocation.address : direction === "in" ? r.deliveryLocation.address : r.returnLocation.address) ??
+      null,
     // Pre-filled with the whole remainder on the movements where "all of it" is the common case by far,
     // and BLANK on a damage report, where the common case is one broken unit out of five and a
     // pre-filled five would be a claim nobody meant to make.
@@ -381,11 +399,45 @@ export function HireMovementForm({ poId, direction }: { poId: string; direction:
    *
    * So the screen carries the facts and the person carries the judgement.
    */
+  /**
+   * DAMAGE ALREADY ON FILE for a hire line — shown as CONTEXT, never as something to act on here.
+   *
+   * This form reports damage nobody has recorded yet. An event already on file is acted on through its
+   * own record — charged, dismissed, or the note behind it withdrawn — because those name one record
+   * exactly, and a quantity typed here never could: a hire line is a count with no unit identity, so
+   * "1 damaged" here and "1 damaged" already open are the same number and two different facts. The
+   * service used to resolve that by absorbing the new report into the oldest open one.
+   *
+   * So the only job these figures have is to be READ: they say what is already known, and they set the
+   * cap so this report cannot claim a unit another report is already holding.
+   */
+  type OpenDamage = { quarantined: number; newest: { when: string; reason: string; who: string | null } | null };
+  const [openDamage, setOpenDamage] = React.useState<Record<string, OpenDamage>>({});
+
   type PriorDamage = { units: number; codes: string[] };
   const [priorDamage, setPriorDamage] = React.useState<
     Record<string, { onArrival?: PriorDamage; withUs?: PriorDamage }>
   >({});
 
+  /**
+   * The damage-already-on-file read did not answer. NOT an error state for the form.
+   *
+   * Reporting damage needs `purchase_orders.view` plus a hire-floor permission; the read that fills
+   * `openDamage` is `rentals.view`, which a floor role legitimately may not hold. Treating its refusal
+   * as a page-level failure locked exactly those people out of the one thing they are here to do, and
+   * did the same to anybody whose network blinked. So the context is OPTIONAL: without it the form
+   * caps on the ordinary remainder, says plainly that it could not check, and the server — which reads
+   * the real figure inside the note's own transaction — stays the authority it always was.
+   */
+  const [damageContextUnavailable, setDamageContextUnavailable] = React.useState(false);
+
+  /**
+   * The ORDER itself would not load — and that one IS fatal, which is the distinction above it.
+   *
+   * Without the purchase order there are no hire lines, no caps and nothing to file against, so the
+   * page has nothing to show and says so. The optional damage-context read above is a different kind of
+   * failure and must not borrow this treatment: it costs a permission a damage filer need not hold.
+   */
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const [lines, setLines] = React.useState<LineState[]>([]);
   const [movementDate, setMovementDate] = React.useState(today);
@@ -463,6 +515,62 @@ export function HireMovementForm({ poId, direction }: { poId: string; direction:
       active = false;
     };
   }, [po, direction]);
+
+  // WHAT IS ALREADY REPORTED AND UNANSWERED, per hire line. ONE call for the whole order — the same
+  // endpoint the order's own damage panel uses — never one per line.
+  //
+  // Only the damage leg needs it. A delivery or a collection cannot settle a report, so asking there
+  // would be a read whose answer nothing on the page could act on.
+  React.useEffect(() => {
+    if (!po || direction !== "damage") return;
+    let active = true;
+    rentalService
+      .listOrderCustodyExits(po.id)
+      .then(({ exits }) => {
+        if (!active) return;
+        const byLine: Record<string, OpenDamage> = {};
+        for (const e of exits) {
+          // Mirrors damageCapFiguresByLines on the server. `held_damaged` is what holds a unit out of
+          // the issuable pool; `unsettled` is what a note can settle, and a DISMISSED report still
+          // holds its unit (the claim was dropped, the equipment is still broken) so it counts toward
+          // what may not be quarantined again.
+          if (e.kind !== "damage" || e.custodyState !== "held_damaged") continue;
+          const settleable = e.settlementState === "unsettled";
+          if (!settleable && e.settlementState !== "dismissed") continue;
+          const at = (byLine[e.purchaseOrderRentalLineId] ??= { quarantined: 0, newest: null });
+          at.quarantined += e.qty;
+          if (!settleable) continue;
+          // The one shown on the card: the most recent open report is the one a person recognises.
+          if (!at.newest || Date.parse(e.declaredAt) > Date.parse(at.newest.when)) {
+            at.newest = { when: e.declaredAt, reason: e.reason, who: e.engineerName ?? e.declaredBy ?? null };
+          }
+        }
+        setOpenDamage(byLine);
+        setDamageContextUnavailable(false);
+      })
+      // Said out loud, unlike the prior-damage read below — this one shapes a cap, so its absence is
+      // worth naming. But NOT fatal: see `damageContextUnavailable`. The form stays usable, the cap
+      // falls back to the plain remainder, and the server's in-transaction check is what actually
+      // refuses an over-report.
+      .catch(() => active && setDamageContextUnavailable(true))
+    return () => {
+      active = false;
+    };
+  }, [po, direction]);
+
+  /**
+   * WHAT THIS LINE MAY REPORT, given the answer about damage already on file. Mirrors the two branches
+   * of reportHireDamage exactly, so the figure on screen is the figure the server checks.
+   *
+   *   existing — at most the open reports themselves. More than that is a stale screen.
+   *   new      — the ordinary cap MINUS units an open or dismissed report is already holding. That
+   *              subtraction is the whole double-quarantine guard: it makes over-quarantining
+   *              arithmetically impossible instead of a side effect of consuming another event.
+   */
+  const capFor = React.useCallback(
+    (l: LineState): number => damageReportCap(l.remainder, openDamage[l.purchaseOrderRentalLineId]),
+    [openDamage],
+  );
 
   // Every staged photo's object URL, released when the form goes away. Without it, leaving this page
   // with photos still staged keeps each file alive in memory until the tab closes.
@@ -557,9 +665,10 @@ export function HireMovementForm({ poId, direction }: { poId: string; direction:
         break;
       }
       // The same cap the server re-checks against the live order — stated here so it is not a round
-      // trip to find out.
-      if (moved > l.remainder) {
-        errs.lines = `${l.itemName}: ${mode.overLine(l.remainder).toLowerCase()}`;
+      // trip to find out. On the damage leg it already excludes whatever an existing report holds.
+      const cap = direction === "damage" ? capFor(l) : l.remainder;
+      if (moved > cap) {
+        errs.lines = `${l.itemName}: ${mode.overLine(cap).toLowerCase()}`;
         break;
       }
       // The reason is the only record that the shortfall was a DECISION. Checked here so the user is
@@ -786,6 +895,17 @@ export function HireMovementForm({ poId, direction }: { poId: string; direction:
         }
       />
 
+      {/* WHY THE CAPS MAY BE GENEROUS — said once, at the top, because it qualifies every line's
+          figure rather than any one of them. Deliberately not a blocking error: the note can still be
+          filed and the server checks the real figure when it lands. */}
+      {direction === "damage" && damageContextUnavailable && (
+        <p className="flex items-start gap-1.5 text-[11px] font-semibold text-[var(--warn,#d97706)]">
+          <AlertTriangle className="mt-px h-3 w-3 shrink-0" aria-hidden />
+          Couldn&rsquo;t check what damage is already reported on this order, so the figures below may
+          not account for it. You can still file — anything already on file will be refused when you save.
+        </p>
+      )}
+
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
         <div className="space-y-6">
           <FormSection title={mode.eventTitle} description={mode.eventDescription}>
@@ -958,16 +1078,90 @@ export function HireMovementForm({ poId, direction }: { poId: string; direction:
                               : "Already reported with us"}{" "}
                           {l.alreadyMoved} ·{" "}
                           <strong className={over ? "text-[var(--neg)]" : "text-[var(--ink)]"}>
-                            {mode.remainderLabel} {l.remainder}
+                            {/* FOLLOWS THE ANSWER. The old form printed one fixed figure while the
+                                server checked a different one, and the gap between them is where a
+                                genuinely new broken unit used to vanish. */}
+                            {/* The cap this leg will actually be held to. A report already on file
+                                holds its units — a DISMISSED one included, since the claim was dropped
+                                and the equipment is still broken — so the plain remainder would offer
+                                more than the server will take, and printing a figure the server
+                                disagrees with is the whole class of bug here. */}
+                            {direction === "damage"
+                              ? `${mode.remainderLabel} ${capFor(l)}`
+                              : `${mode.remainderLabel} ${l.remainder}`}
                           </strong>
                         </span>
                       </div>
                       {/* WHICH hire, and where the kit is. An order can carry the same item twice for
-                          different periods, and its lines can sit at different places. */}
-                      <p className="mb-2.5 text-[11px] text-[var(--faint)]">
+                          different periods, and its lines can sit at different places.
+                          The full address stays reachable on hover for the leg that shortened it — see
+                          `destination` in readLine for why a damage report does not print it. */}
+                      <p
+                        className="mb-2.5 truncate text-[11px] text-[var(--faint)]"
+                        title={l.destinationFull && l.destinationFull !== l.destination ? l.destinationFull : undefined}
+                      >
                         Hire {shortDate(l.hireStartDate)} → {shortDate(l.hireEndDate)} · {direction === "in" ? "to" : "at"}{" "}
                         {l.destination}
                       </p>
+                      {/* WHAT IS ALREADY KNOWN — read-only, and deliberately not a choice.
+                          A hire line is a count with no unit identity, so "1 damaged" typed below and
+                          "1 damaged" already on file are the same number and two different facts. This
+                          form used to ask which, because the service used to resolve it by absorbing
+                          the new report into the oldest open one. Neither is right: an event already on
+                          file is acted on through its OWN record — charged, dismissed, or the note
+                          behind it withdrawn — and those name one record exactly. So this states what
+                          is known, sets the cap below, and points at the place that can act on it.
+
+                          ONE PARAGRAPH, NO BOX — the shape the arrival warning below already uses, and
+                          for the reason stated there: the guidance belongs WITH the fact it qualifies,
+                          because stacked sentences above a single number box are a wall. As a bordered,
+                          washed panel of two paragraphs it was the largest thing on the card and cost a
+                          narrow screen four lines to say one thing.
+
+                          AND IT IS INFORMATION, NOT A WARNING. Amber with a hazard triangle is how this
+                          form says something is WRONG — the no-photo advisory below, and arrival damage
+                          that changes who pays. Nothing is wrong here: units are already on file, which
+                          is ordinary and is being reported so the figure above adds up. Dressed as a
+                          hazard it sat beside a real one and made both of them mean less, and it read as
+                          an accusation to whoever opened the form. So it takes the register the card
+                          already uses for its own facts — the 11px muted line that prints "With us 50 ·
+                          Already reported with us 3" — and the accent link carries the eye instead. */}
+                      {direction === "damage" && (openDamage[l.purchaseOrderRentalLineId]?.quarantined ?? 0) > 0 && (() => {
+                        const open = openDamage[l.purchaseOrderRentalLineId];
+                        const n = open.quarantined;
+                        return (
+                          // NO BOLD RUN IN IT. Emphasising the count put a second heavy line directly
+                          // above the "DAMAGED UNITS" label, and two bold 11px lines touching read as a
+                          // heading that lost its section. The figure that must be obeyed is already
+                          // bold in the line header above ("Not yet reported with us 46"); this is the
+                          // context for it, so it sits in the same even weight as the hire-period line
+                          // it follows and lets the accent link be the only thing that stands out.
+                          <p className="mb-3 text-[11px] leading-snug text-[var(--muted)]">
+                            {/* AS SHORT AS IT CAN BE AND STILL BE USEFUL: the count, enough to
+                                recognise WHICH damage, and the way to act on it.
+                                  • "already counted" was said twice over — "already recorded" says it.
+                                  • "Report here only what has been damaged since" repeats the section
+                                    description above and the bold cap in the line header.
+                                  • who reported it is on the record itself, one click away.
+                                Each of those cost a line on a narrow screen to add nothing. */}
+                            <span>
+                              {n} already recorded as damaged
+                              {open.newest && <> ({shortDate(open.newest.when)} · &ldquo;{open.newest.reason}&rdquo;)</>}
+                              {po?.code && (
+                                <>
+                                  {" · "}
+                                  <a
+                                    href={`/dashboard/purchase-orders/${po.code}`}
+                                    className="font-semibold text-[var(--accent)] hover:underline"
+                                  >
+                                    View existing damage
+                                  </a>
+                                </>
+                              )}
+                            </span>
+                          </p>
+                        );
+                      })()}
                       {/* WHAT IS ALREADY ON FILE, and whose it is. Both halves, because the person at
                           the handover needs the whole picture to judge the box below — and because
                           naming which is which is the difference between "the supplier sent it broken"
@@ -1048,16 +1242,23 @@ export function HireMovementForm({ poId, direction }: { poId: string; direction:
                             <label className="text-xs font-bold uppercase tracking-wider text-[var(--muted)]">
                               {mode.qtyLabel}
                             </label>
-                            {/* The same shortcut the goods-receipt form offers, in the same place. */}
-                            {l.remainder > 0 && movedNow !== l.remainder && (
-                              <button
-                                type="button"
-                                onClick={() => setLine(idx, { quantity: String(l.remainder) })}
-                                className="text-[11px] font-bold text-[var(--accent)] hover:underline"
-                              >
-                                All {l.remainder}
-                              </button>
-                            )}
+                            {/* The same shortcut the goods-receipt form offers, in the same place —
+                                filling THIS line's real cap, which on the damage leg depends on which
+                                damage the report is about. Offering the plain remainder here would put
+                                an over-cap figure in the box with one click. */}
+                            {(() => {
+                              const all = direction === "damage" ? capFor(l) : l.remainder;
+                              if (all <= 0 || movedNow === all) return null;
+                              return (
+                                <button
+                                  type="button"
+                                  onClick={() => setLine(idx, { quantity: String(all) })}
+                                  className="text-[11px] font-bold text-[var(--accent)] hover:underline"
+                                >
+                                  All {all}
+                                </button>
+                              );
+                            })()}
                           </div>
                           <NumberInput
                             className={inputCls}

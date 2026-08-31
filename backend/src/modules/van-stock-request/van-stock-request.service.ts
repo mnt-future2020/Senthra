@@ -1874,13 +1874,26 @@ export interface HoldingOption {
   overdue: boolean;
   poCodes: string[]; // the orders these units sit on, for reference only
   // The depot(s) these units were collected from — the hires' own warehouses, read from the same
-  // authoritative place the posting guard reads (the hire's order). NAMES only, never ids: this is
-  // context for a person choosing where to drive, not a handle to address anything by.
+  // authoritative place the posting guard reads (the hire's order).
   //
   // Present because a hire goes back where it came from, and until the return list said so the
   // engineer only learnt it by being refused. A single row can span depots, so it is a LIST — the
   // same roll-up per catalogue item that poCodes gets.
-  depots: string[];
+  //
+  // The ID rides along with the name, and that is the point. This used to be names only, on the
+  // reasoning that a depot is "context for a person choosing where to drive, not a handle". But the
+  // return warehouse is NOT a free choice for hired kit — it is decided by the hire — so the composer
+  // has to be able to SET the destination from this, and matching a name back to a warehouse would be
+  // inventing a mapping the server already holds. Same shape the kit-request availability DTO uses for
+  // its own rental depots, so the two rental surfaces describe a depot identically.
+  //
+  // `qty` is HOW MANY of this row's units sit at that depot — field-returnable units only, the same
+  // origin-aware figure `quantityOnHand` is built from. It exists because `quantityOnHand` is a
+  // ROLL-UP across depots and one return carries one warehouse: 2 at Bristol and 3 at Leeds is a row
+  // of 5 that can be posted to neither. Without the split the composer offered the full 5 against
+  // whichever depot was chosen, and the engineer met the refusal at the counter. With it, the row is
+  // capped at the chosen depot's own holding and the rest goes back on its own return.
+  depots: { warehouseId: string; warehouseName: string; qty: number }[];
 }
 export async function myHoldings(engineerId: string): Promise<HoldingOption[]> {
   // Show only the FREE (field) portion: global van holding MINUS what's committed to active jobs. Job
@@ -1953,13 +1966,24 @@ export async function myHoldings(engineerId: string): Promise<HoldingOption[]> {
   // judge a return on. Read here purely to SAY it: nothing on this path decides anything from it.
   const allHeldHireIds = [...new Set([...byItem.values()].flatMap((v) => [...v.hireIds]))];
   const depotRows = rentalIds.length > 0 ? await poRepo.findHireDepotsByIds(allHeldHireIds) : [];
-  const depotOfHire = new Map(depotRows.map((d) => [d.id, d.warehouseName]));
+  // Keyed by hire → the depot's id AND name. The id is what the composer sets the return warehouse
+  // from; the name is what it prints. Rows whose warehouse cannot be resolved are dropped below.
+  const depotOfHire = new Map(depotRows.map((d) => [d.id, { warehouseId: d.warehouseId, warehouseName: d.warehouseName }]));
   // Which of those hires actually hold FIELD-door units — so the depots we tell the engineer to drive
   // to are only the ones a Field Stock return can bind. A job-origin-only hire's depot is not a place
   // this item can go back through here (it returns through the job), so listing it would send the
   // engineer to a counter that refuses the scan. The field-returnable QUANTITY is already origin-aware,
   // and this is the SAME per-hire field map committedByEngineer read above — no extra ledger round trip.
   const rentalFieldByHire = jobCommitted.rentalFieldByHire;
+
+  // What the engineer actually HOLDS on each hire — the per-depot split needs a per-hire figure, and
+  // `byItem.qty` is already rolled up across them. Field-returnable on one hire is the lesser of what
+  // is held on it and what came in through the field door, the same pair `quantityOnHand` is built on.
+  const heldByHire = new Map<string, number>();
+  for (const r of rentalRows) {
+    if (!r.rentalItemId) continue;
+    heldByHire.set(r.purchaseOrderRentalLineId, (heldByHire.get(r.purchaseOrderRentalLineId) ?? 0) + r.quantityOnHand);
+  }
 
   const rental: HoldingOption[] = rentalIds
     .map((rentalItemId) => {
@@ -1979,7 +2003,28 @@ export async function myHoldings(engineerId: string): Promise<HoldingOption[]> {
         // Only FIELD-origin hires' depots: those are the only counters a Field Stock return can bind
         // here. Unresolved depots drop out rather than becoming Unknown: a name we could not read is not
         // a place anyone can drive to, and printing a placeholder would read as a real depot.
-        depots: [...new Set([...h.hireIds].filter((id) => (rentalFieldByHire.get(id) ?? 0) > 0).map((id) => depotOfHire.get(id)).filter((n): n is string => Boolean(n)))].sort(),
+        // Deduped by warehouse ID (two depots can share a name) and name-sorted, so the row reads the
+        // same way on every render.
+        depots: (() => {
+          // Summed per warehouse, not just deduped: two hires at the same depot are two rows here and
+          // one place to drive to, and the engineer needs the TOTAL they may hand in there.
+          const byWarehouse = new Map<string, { warehouseId: string; warehouseName: string; qty: number }>();
+          for (const id of h.hireIds) {
+            const fieldQty = rentalFieldByHire.get(id) ?? 0;
+            if (fieldQty <= 0) continue;
+            const d = depotOfHire.get(id);
+            if (!d?.warehouseId || !d.warehouseName) continue;
+            const at = byWarehouse.get(d.warehouseId) ?? { warehouseId: d.warehouseId, warehouseName: d.warehouseName, qty: 0 };
+            // The lesser of the two, never the field-door net alone: that net is a running history and
+            // can exceed what is on the van today. A ceiling, deliberately not netted for job
+            // commitment — that subtraction is item-wide and already applied to `quantityOnHand`, which
+            // the composer takes the MINIMUM against. The server's create and posting guards remain the
+            // authority on the exact number; this only stops the picker offering one it cannot post.
+            at.qty += Math.min(heldByHire.get(id) ?? 0, fieldQty);
+            byWarehouse.set(d.warehouseId, at);
+          }
+          return [...byWarehouse.values()].sort((a, b) => a.warehouseName.localeCompare(b.warehouseName));
+        })(),
       };
     })
     .filter((h) => h.quantityOnHand > 0);

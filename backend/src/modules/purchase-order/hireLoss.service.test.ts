@@ -35,6 +35,10 @@ vi.mock("./hireCustodyExit.repository.js", () => ({
   SETTLE_DISMISSED: "dismissed",
 }));
 
+vi.mock("#modules/rental-receipt/rental-receipt.repository.js", () => ({
+  findSettlementSummaries: vi.fn(async () => new Map()),
+}));
+
 const txStub = {
   engineerRentalHolding: { updateMany: vi.fn(async () => ({ count: 1 })) },
   hireCustodyExit: {
@@ -49,6 +53,7 @@ const txStub = {
 import * as audit from "#modules/audit/audit.service.js";
 import * as rentalCustodyRepo from "#modules/engineer-rental/engineer-rental.repository.js";
 import * as custodyExitRepo from "./hireCustodyExit.repository.js";
+import * as receiptRepo from "#modules/rental-receipt/rental-receipt.repository.js";
 import * as poRepo from "./purchase-order.repository.js";
 import { assertWarehouseAccess } from "../../lib/warehouse-access.js";
 import { declareHireLost, dismissCustodyExit, listOpenCustodyExits, listOrderCustodyExits, recoverHireLoss } from "./hireLoss.service.js";
@@ -511,5 +516,142 @@ describe("dismissCustodyExit — the money stops, the equipment does not move", 
   it("404s a record that no longer exists", async () => {
     vi.mocked(custodyExitRepo.findById).mockResolvedValue(null as never);
     await expect(dismiss()).rejects.toThrow(/no longer exists/i);
+  });
+});
+
+/**
+ * WHOSE MONEY, AND WHEN — the two things a settled record could not previously say about itself.
+ *
+ * `findSettlementSummaries` returns the note's total across every line, and that total used to be
+ * handed to every record the note settled. A note covering two hire lines therefore told each of its
+ * records the whole document figure, so anything summing records reported the money twice. And the
+ * note's own date reached nothing at all, which is why an office filing on the 31st saw its record
+ * dated the 27th with no explanation on the page.
+ */
+describe("settled records — charge and date attribution", () => {
+  const LINE_B = "b".repeat(24);
+  const NOTE = "n".repeat(24);
+
+  const damageRow = (over: Record<string, unknown> = {}) => ({
+    id: "x".repeat(24),
+    purchaseOrderRentalLineId: HIRE_ID,
+    purchaseOrderId: PO_ID,
+    poCode: "PO-0042",
+    warehouseId: WH_ID,
+    kind: "damage",
+    qty: 1,
+    custodyState: "held_damaged",
+    settlementState: "settled",
+    reason: "Cracked casing",
+    notes: null,
+    photoUrl: null,
+    jobId: null,
+    jobNumber: null,
+    engineerId: null,
+    engineerName: null,
+    declaredBy: "eng@x.co",
+    declaredAt: new Date("2026-08-27T00:00:00Z"),
+    settledByReceiptId: NOTE,
+    settledAt: new Date("2026-08-31T05:44:17Z"),
+    recoveredBy: null,
+    recoveredAt: null,
+    recoveryNotes: null,
+    sourceType: "van_stock_return",
+    sourceId: "m".repeat(24),
+    ...over,
+  });
+
+  /** One note, £1 on the first hire line and £3 on the second — a total of £4 belonging to neither. */
+  const noteWithTwoLines = () =>
+    vi.mocked(receiptRepo.findSettlementSummaries).mockResolvedValue(
+      new Map([
+        [
+          NOTE,
+          {
+            code: "HDM-0014",
+            chargePence: 400,
+            chargeByHireLine: new Map([
+              [HIRE_ID, 100],
+              [LINE_B, 300],
+            ]),
+            notedAt: new Date("2026-08-31T00:00:00Z"),
+            attachments: [],
+          },
+        ],
+      ]) as never,
+    );
+
+  beforeEach(() => {
+    vi.mocked(receiptRepo.findSettlementSummaries).mockResolvedValue(new Map() as never);
+  });
+
+  it("charges each record for ITS OWN hire line, never the whole note", async () => {
+    noteWithTwoLines();
+    vi.mocked(custodyExitRepo.findByOrder).mockResolvedValue([
+      damageRow(),
+      damageRow({ id: "y".repeat(24), purchaseOrderRentalLineId: LINE_B }),
+    ] as never);
+    const out = await listOrderCustodyExits(PO_ID, { email: "pm@x.co" } as never);
+    expect(out.map((e) => e.settledCharge)).toEqual([1, 3]);
+    // And the two of them add up to the document, which is the property that was broken: handing both
+    // the £4 total made the same money reachable twice.
+    expect(out.reduce((n, e) => n + (e.settledCharge ?? 0), 0)).toBe(4);
+  });
+
+  it("keeps a line with no figure as 'not quoted', never a fabricated zero", async () => {
+    vi.mocked(receiptRepo.findSettlementSummaries).mockResolvedValue(
+      new Map([
+        [
+          NOTE,
+          { code: "HDM-0014", chargePence: 300, chargeByHireLine: new Map([[HIRE_ID, null]]), notedAt: null, attachments: [] },
+        ],
+      ]) as never,
+    );
+    vi.mocked(custodyExitRepo.findByOrder).mockResolvedValue([damageRow()] as never);
+    const [out] = await listOrderCustodyExits(PO_ID, { email: "pm@x.co" } as never);
+    // The document total is 300, but THIS line carries no quote. Awaiting a quote is a different fact from
+    // being charged nothing and has to survive as one.
+    expect(out!.settledCharge).toBeNull();
+  });
+
+  it("falls back to the document total only when the note has no line for this hire", async () => {
+    vi.mocked(receiptRepo.findSettlementSummaries).mockResolvedValue(
+      new Map([
+        [NOTE, { code: "HDM-0014", chargePence: 250, chargeByHireLine: new Map(), notedAt: null, attachments: [] }],
+      ]) as never,
+    );
+    vi.mocked(custodyExitRepo.findByOrder).mockResolvedValue([damageRow()] as never);
+    const [out] = await listOrderCustodyExits(PO_ID, { email: "pm@x.co" } as never);
+    expect(out!.settledCharge).toBe(2.5);
+  });
+
+  it("carries the note's own date beside the date the damage was found", async () => {
+    noteWithTwoLines();
+    vi.mocked(custodyExitRepo.findByOrder).mockResolvedValue([damageRow()] as never);
+    const [out] = await listOrderCustodyExits(PO_ID, { email: "pm@x.co" } as never);
+    // FOUND on the 27th, WRITTEN UP on the 31st. Both true, and the found date is never overwritten —
+    // it is the date a provider's charge is argued against.
+    expect(out!.declaredAt).toBe("2026-08-27T00:00:00.000Z");
+    expect(out!.settledNotedAt).toBe("2026-08-31T00:00:00.000Z");
+  });
+
+  it("has no noted date on a record nothing has settled", async () => {
+    vi.mocked(custodyExitRepo.findByOrder).mockResolvedValue([
+      damageRow({ settlementState: "unsettled", settledByReceiptId: null, settledAt: null }),
+    ] as never);
+    const [out] = await listOrderCustodyExits(PO_ID, { email: "pm@x.co" } as never);
+    expect(out!.settledNotedAt).toBeNull();
+    expect(out!.settledCharge).toBeNull();
+  });
+
+  it("resolves every settling note in ONE lookup, whatever the row count", async () => {
+    noteWithTwoLines();
+    vi.mocked(custodyExitRepo.findByOrder).mockResolvedValue(
+      Array.from({ length: 8 }, (_, i) => damageRow({ id: `z${i}`.padEnd(24, "0") })) as never,
+    );
+    await listOrderCustodyExits(PO_ID, { email: "pm@x.co" } as never);
+    expect(vi.mocked(receiptRepo.findSettlementSummaries)).toHaveBeenCalledTimes(1);
+    // Deduped: eight records settled by one note ask for one id.
+    expect(vi.mocked(receiptRepo.findSettlementSummaries).mock.calls[0]![0]).toEqual([NOTE]);
   });
 });

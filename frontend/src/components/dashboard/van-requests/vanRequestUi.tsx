@@ -522,6 +522,13 @@ export interface VanStockCartItem {
   // Returns only, rental only: the soonest deadline among the hires these units sit on.
   hireEndDate?: string | null;
   overdue?: boolean;
+  /**
+   * Returns only, rental only: the depot(s) this row was collected from. Carried on the cart row so the
+   * return warehouse can be decided from the cart itself (see returnDepot.ts) — a hire goes back to the
+   * warehouse of its own order, so the destination is a consequence of what is in the cart, not a
+   * separate question. Absent on company stock, which any warehouse can book in.
+   */
+  depots?: readonly { warehouseId: string; warehouseName: string; qty: number }[];
 }
 
 // The cart being composed. Pairs with VanStockItemSearch below: search adds, this edits/removes.
