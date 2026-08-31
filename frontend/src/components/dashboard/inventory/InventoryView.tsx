@@ -120,10 +120,23 @@ export function InventoryView({ warehouseId, embedded }: { warehouseId?: string;
     [warehouseId],
   );
 
+  // ONE filter object for the list and the download, as every other list in this dashboard does.
+  // It was two literals, and the export's copy was already the shorter one — the same drift the
+  // server-side parser this pairs with had (see inventory.controller's listParamsFrom).
+  const exportParams = React.useMemo(
+    () => ({
+      search: debounced || undefined,
+      warehouse: warehouse || undefined,
+      category: category || undefined,
+      status: status || undefined,
+    }),
+    [debounced, warehouse, category, status],
+  );
+
   React.useEffect(() => {
     let active = true;
     (async () => {
-      const params = { search: debounced || undefined, warehouse: warehouse || undefined, category: category || undefined, status: status || undefined, page, pageSize: PAGE_SIZE };
+      const params = { ...exportParams, page, pageSize: PAGE_SIZE };
       const cached = inventoryService.getCachedInventory(params);
       if (active && cached) setData(cached);
       setLoading(true);
@@ -139,7 +152,9 @@ export function InventoryView({ warehouseId, embedded }: { warehouseId?: string;
       }
     })();
     return () => { active = false; };
-  }, [debounced, warehouse, category, status, page, reloadKey]);
+    // `exportParams` in place of the four values it memoises — one dependency for one object, and
+    // the list can no longer refetch on a filter the download would not have carried.
+  }, [exportParams, page, reloadKey]);
 
   const rows = data?.inventory ?? [];
   const showSkeleton = loading && rows.length === 0;
@@ -157,7 +172,7 @@ export function InventoryView({ warehouseId, embedded }: { warehouseId?: string;
   const onExport = async () => {
     setExporting(true);
     try {
-      const { capped } = await inventoryService.exportInventoryCsv({ search: debounced || undefined, warehouse: warehouse || undefined, category: category || undefined, status: status || undefined });
+      const { capped } = await inventoryService.exportInventoryCsv(exportParams);
       pushToast(capped ? "Export ready (truncated to the first 50,000 rows)." : "Inventory exported.", "success");
     } catch (e) {
       pushToast(e instanceof Error ? e.message : "Export failed.", "alert");

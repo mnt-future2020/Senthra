@@ -138,6 +138,22 @@ export const listOverdue = asyncHandler(async (req, res) => {
 });
 
 
+// GET /goods-management/overdue/groups — the same selection as /overdue, folded per warehouse and
+// per engineer for the dashboard's Overdue Holdings drill-down. Bounded by entity count, never by
+// job count, so it stays a summary read however long the backlog is. Same window rule as above: it
+// comes from Settings and is reported in the response, never accepted from the caller.
+export const listOverdueGroups = asyncHandler(async (req, res) => {
+  res.json(
+    await service.getOverdueGroups(actorFrom(req), {
+      warehouseId: queryStr(req.query["warehouseId"])?.trim() || undefined,
+      search: queryStr(req.query["search"]) ?? undefined,
+      engineerId: queryStr(req.query["engineerId"])?.trim() || undefined,
+      issuedFrom: queryStr(req.query["issuedFrom"])?.trim() || undefined,
+      issuedTo: queryStr(req.query["issuedTo"])?.trim() || undefined,
+    }),
+  );
+});
+
 // POST /goods-management/damaged/report — move units from usable stock into the damaged pool.
 export const reportDamage = asyncHandler(async (req, res) => {
   const result = await service.reportWarehouseDamage(req.body as ReportDamageInput, actorFrom(req));

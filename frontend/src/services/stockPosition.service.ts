@@ -43,6 +43,19 @@ export interface PositionParams {
   search?: string;
   status?: string;
   customer?: string;
+  /**
+   * WHICH ENGINEER is holding it — the engineer lens's own name/email search.
+   *
+   * Distinct from `search`, which matches the ITEM. The field-stock export is the lens's download and
+   * used to send none of the lens's filters, so searching one engineer and exporting produced every
+   * engineer's holdings. Resolved server-side by the same predicate the lens's list uses.
+   *
+   * ENGINEER-SCOPED BY DEFINITION: a warehouse shelf has no engineer, so setting this excludes every
+   * non-engineer row. Named `engineerSearch` rather than `holderSearch` so that is impossible to
+   * misread. There is deliberately NO `holding` here — it cannot change which positions exist (an
+   * engineer holding nothing has no rows to omit), and reading it dragged the location scope along.
+   */
+  engineerSearch?: string;
   page?: number;
   pageSize?: number;
 }
@@ -184,6 +197,15 @@ export interface EngineerLensParams {
 export interface PagedEngineerOverview {
   rows: EngineerOverviewRow[];
   total: number;
+  /**
+   * Matched engineers holding at least one item — exactly how many will contribute rows to the
+   * field-stock export, and therefore what its button is enabled on.
+   *
+   * `total` cannot answer that: an engineer holding nothing is a legitimate row on this list and
+   * zero rows in that file, so a screen showing one such engineer would otherwise offer a download
+   * that opens as a header and nothing else.
+   */
+  holdingCount: number;
   page: number;
   pageSize: number;
   totalPages: number;

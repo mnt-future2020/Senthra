@@ -635,6 +635,10 @@ export async function listPurchaseOrders(params: ListPurchaseOrdersParams = {}, 
     // "Overdue" is derived, not stored — the service owns settings, so the company-timezone day
     // boundary is resolved here and handed down (same contract as the jobs list).
     overdueBefore: params.status === "overdue" ? startOfDayIn(await getCompanyTimezone(), new Date()) : undefined,
+    // "Expected this week" is derived from the SAME company-timezone day start — the card counts
+    // forward from it (expectedDeliveries) and this list filters forward from it, so a delivery
+    // becomes "this week" on both surfaces at the same midnight.
+    dayStart: params.status === "due_this_week" ? startOfDayIn(await getCompanyTimezone(), new Date()) : undefined,
     // "awaiting_send" is likewise derived, and its pm_review half is PERSONAL: only the assigned PM
     // may send (see sendPurchaseOrder), so a caller without the override sees only their own. The
     // same rule the attention badge counts by, resolved here so the badge and this list agree.
@@ -2414,26 +2418,36 @@ function onHireCtx(r: {
  * reading 3 opens exactly those 3 rows. Two copies of "expiring" is how a count and its list drift
  * apart — the failure the attention registry already documents for `?status=rework`.
  */
+/**
+ * The on-hire register's filter set — ONE declaration, shared by the list and its CSV.
+ *
+ * It was written out on the list and re-declared as `{ status, search }` on the export. That is only
+ * a type, so nothing failed to compile and nothing threw: the export still forwarded the rest by
+ * spreading its runtime object. It was one refactor away from real, though — destructure instead of
+ * spread and four filters vanish from the download in silence. Naming the set removes the chance.
+ */
+export interface ListOnHireParams {
+  status?: string;
+  page?: number;
+  pageSize?: number;
+  warehouseId?: string;
+  rentalItemId?: string;
+  search?: string;
+  supplierId?: string;
+  /** Inclusive calendar days on when the hire ENDS (`hireEndDate`). */
+  endsFrom?: string;
+  endsTo?: string;
+  /**
+   * Raises the 200-row page cap for a SERVER-INITIATED read — only the CSV export sets it.
+   * Not reachable from the wire: the controller builds these params field by field out of
+   * `req.query` and never copies this one, so a client cannot ask for an unbounded page.
+   * See EXPORT_PAGING in utils/csv.ts, and `paginate`'s `maxPageSize` for the same argument.
+   */
+  maxPageSize?: number;
+}
+
 export async function listOnHire(
-  params: {
-    status?: string;
-    page?: number;
-    pageSize?: number;
-    warehouseId?: string;
-    rentalItemId?: string;
-    search?: string;
-    supplierId?: string;
-    /** Inclusive calendar days on when the hire ENDS (`hireEndDate`). */
-    endsFrom?: string;
-    endsTo?: string;
-    /**
-     * Raises the 200-row page cap for a SERVER-INITIATED read — only the CSV export sets it.
-     * Not reachable from the wire: the controller builds these params field by field out of
-     * `req.query` and never copies this one, so a client cannot ask for an unbounded page.
-     * See EXPORT_PAGING in utils/csv.ts, and `paginate`'s `maxPageSize` for the same argument.
-     */
-    maxPageSize?: number;
-  },
+  params: ListOnHireParams,
   // Company-wide, deliberately: a hire is chased by the PM on the order, not by whoever holds the
   // warehouse it was delivered to. The actor is taken so the signature matches every other list
   // and a future scope rule has somewhere to land.
@@ -2748,7 +2762,9 @@ export async function exportHireExtensionsCsv(
  * exactly the rows that view showed.
  */
 export async function exportOnHireCsv(
-  params: { status?: string; search?: string },
+  // The list's OWN filter type, minus paging — an export is the whole filtered set. See
+  // ListOnHireParams for why the narrower literal that used to sit here was a latent filter drop.
+  params: Omit<ListOnHireParams, "page" | "pageSize" | "maxPageSize">,
   actor?: AuditActor,
 ): Promise<{ csv: string; capped: boolean }> {
   const regional = await getRegionalSettings();

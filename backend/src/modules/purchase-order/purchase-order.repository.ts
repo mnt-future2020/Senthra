@@ -3,7 +3,7 @@ import { Prisma, type PurchaseOrder, type PurchaseOrderAttachment } from "@prism
 import { isWriteConflict, prisma, withTransaction } from "../../lib/prisma.js";
 import { escapeRegex } from "../../utils/search.js";
 import { isEmptyWindow, type DayWindow } from "../../utils/filter-date.js";
-import { effectiveEta, isDeliveryOverdue } from "./po-overdue.js";
+import { effectiveEta, expectedWindowEnd, isDeliveryDueSoon, isDeliveryOverdue } from "./po-overdue.js";
 import {
   atWarehouses,
   awaitingDeliveryWhere,
@@ -120,7 +120,8 @@ export interface PoTotals {
 
 export interface PurchaseOrderListFilters {
   search?: string;
-  /** a real status, or a DERIVED pseudo-status — "overdue" | "awaiting_approval" | "awaiting_send" (see buildWhere) */
+  /** a real status, or a DERIVED pseudo-status — "open" | "overdue" | "due_this_week" | "receivable" |
+   *  "awaiting_approval" | "awaiting_send" | "awaiting_close" (see buildWhere) */
   status?: string;
   // Multiple statuses (e.g. the warehouse "Expected deliveries" worklist wants sent +
   // partially_received in one query). Takes precedence over `status` when non-empty.
@@ -145,6 +146,14 @@ export interface PurchaseOrderListFilters {
   expectedWindow?: DayWindow;
   /** Start of "today" in the COMPANY timezone. REQUIRED whenever `status === "overdue"`. */
   overdueBefore?: Date;
+  /**
+   * Start of "today" in the COMPANY timezone. REQUIRED whenever `status === "due_this_week"`.
+   *
+   * The same instant `overdueBefore` carries, under the name the branch that reads it actually
+   * means: `due_this_week` is bounded BY today, not before it. Kept as its own field rather than
+   * reusing the other so neither branch has to be read against a name that describes the other one.
+   */
+  dayStart?: Date;
   // Restricts the pm_review HALF of the "awaiting_send" pseudo-status to one PM, leaving the
   // "approved" half (which has no PM yet) untouched. The service sets it for an actor who can't
   // override PM assignment, so the list matches that actor's badge count exactly. Ignored for every
@@ -241,7 +250,14 @@ export function buildWhere(filters: PurchaseOrderListFilters): Prisma.PurchaseOr
     // Loud on a missing boundary, like the jobs list: "today" is a company-timezone question the
     // service answers, and a quiet default would silently report an empty overdue list.
     if (!filters.overdueBefore) throw new Error("buildWhere: overdueBefore is required for the overdue filter.");
-    where.status = { in: [...RECEIVABLE_PO_STATUSES] };
+    // Through `receivableWhere()`, NOT the bare status list. The badge counts `expectedDeliveries`,
+    // which selects through that predicate — statuses AND at least one goods line — and this branch
+    // used to ask only for the statuses. So a HIRE-ONLY order that was late showed up in the list and
+    // not in the count: "Deliveries overdue 9" opened twelve rows, three of them orders with nothing
+    // for Goods In to receive at all. That is the same class of break the `receivable` branch below
+    // was written to close, pointing the other way, and it is why the registry can call this key a
+    // strict subset of "Deliveries to receive" — which it only is if both select the same population.
+    Object.assign(where, receivableWhere());
     where.AND = [
       {
         OR: [
@@ -263,6 +279,37 @@ export function buildWhere(filters: PurchaseOrderListFilters): Prisma.PurchaseOr
         ],
       },
     ];
+  } else if (filters.status === "due_this_week") {
+    // DERIVED pseudo-status, never stored: a receivable PO whose effective ETA falls inside the
+    // planning window and has NOT already passed — the exact set `expectedDeliveries` reports as
+    // `dueThisWeek` for the dashboard's "Expected This Week" card.
+    //
+    // The card used to open `?status=sent`, which is one of the three receivable statuses and takes
+    // no notice of a date at all: a card reading 4 opened every sent order, most due next month, and
+    // the ones sitting under supplier_accepted / partially_received were missing entirely.
+    //
+    // Mirrors isDeliveryDueSoon in po-overdue.ts, including the `confirmed ?? expected` rule and the
+    // MONGO TRAP the overdue branch above documents — absent is not null, so both must be asked for.
+    if (!filters.dayStart) throw new Error("buildWhere: dayStart is required for the due_this_week filter.");
+    const soon = expectedWindowEnd(filters.dayStart);
+    const window = { gte: filters.dayStart, lte: soon };
+    Object.assign(where, receivableWhere());
+    where.AND = [
+      {
+        OR: [
+          { confirmedDeliveryDate: window },
+          {
+            OR: [{ confirmedDeliveryDate: null }, { confirmedDeliveryDate: { isSet: false } }],
+            expectedDeliveryDate: window,
+          },
+        ],
+      },
+    ];
+  } else if (filters.status === "open") {
+    // DERIVED pseudo-status: every non-terminal, not-fully-received status — literally the list
+    // `openSummary` counts for the "Open POs" card, so the card and the list it opens are one set.
+    // Closed, cancelled and fully_received orders are finished work and are deliberately absent.
+    where.status = { in: [...OPEN_PO_STATUSES] };
   } else if (filters.status === "awaiting_close") {
     // DERIVED pseudo-status: arrived, and nothing still on hire. Same predicate the badge counts, so
     // the chip and the list it opens can never disagree. See awaitingClosePoWhere.
@@ -701,7 +748,10 @@ export async function createWithCode(
 // --- Dashboard read-models — not a generic reporting API (read-only; warehouse-scoped) ---
 
 // Non-terminal, not-fully-received "open" statuses — same definition as the supplier summary.
-const OPEN_PO_STATUSES = ["draft", "pending_approval", "approved", "pm_review", "sent", "supplier_accepted", "partially_received"] as const;
+// Exported so buildWhere's `open` pseudo-status and openSummary's count are literally the same list:
+// the dashboard's "Open POs" card counts through the second and opens the first, and a card that
+// opened `/dashboard/purchase-orders` unfiltered listed closed and cancelled orders too.
+export const OPEN_PO_STATUSES = ["draft", "pending_approval", "approved", "pm_review", "sent", "supplier_accepted", "partially_received"] as const;
 // Open statuses that represent a real financial commitment — a draft is workload, not spend.
 const COMMITTED_PO_STATUSES = OPEN_PO_STATUSES.filter((s) => s !== "draft");
 // Per-queue fetch cap for dashboard worklists — the merged list is re-sorted and capped again in
@@ -724,7 +774,7 @@ function whereWarehouse(warehouseIds?: string[]) {
 // delivery "overdue" hours before a job due the same day is, so the badges would contradict each other
 // every morning.
 export async function expectedDeliveries(now: Date, dayStart: Date, warehouseIds?: string[]): Promise<{ dueThisWeek: number; overdue: number }> {
-  const soon = new Date(dayStart.getTime() + 7 * 86_400_000);
+  const soon = expectedWindowEnd(dayStart);
   // The supplier-confirmed date is authoritative for planning (updatable after the supplier commits);
   // fall back to the expected date when it isn't set yet. Because the effective date can be EITHER
   // column, we can't filter by date in the where clause — the open-receivable set is small, so we
@@ -745,8 +795,11 @@ export async function expectedDeliveries(now: Date, dayStart: Date, warehouseIds
     // by side and tested against the same table of cases. They last drifted on absent-vs-null.
     const eta = effectiveEta(r.confirmedDeliveryDate, r.expectedDeliveryDate);
     if (!eta || eta > soon) continue;
+    // Both halves go through po-overdue's predicates, so each number is produced by the very
+    // function its `?status=` filter is mirrored from — `overdue` → `?status=overdue`,
+    // `dueThisWeek` → `?status=due_this_week`.
     if (isDeliveryOverdue(r.confirmedDeliveryDate, r.expectedDeliveryDate, dayStart)) overdue++;
-    else dueThisWeek++;
+    else if (isDeliveryDueSoon(r.confirmedDeliveryDate, r.expectedDeliveryDate, dayStart)) dueThisWeek++;
   }
   return { dueThisWeek, overdue };
 }

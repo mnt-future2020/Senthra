@@ -59,11 +59,19 @@ const LOCATION_OPTIONS = [
   { value: "damaged", label: "Damaged" },
 ];
 
-const STATUS_OPTIONS = [
+// Exported so the dashboard-destination test can assert the picker offers every value a card's
+// link can arrive with: a status the Select does not know renders as an unset filter while the list
+// IS narrowed, which reads as a bug in the list rather than in the link.
+export const STATUS_OPTIONS = [
   { value: "", label: "All statuses" },
   { value: "in_stock", label: "In stock" },
   { value: "low_stock", label: "Low stock" },
   { value: "out_of_stock", label: "Out of stock" },
+  // DERIVED: the union of the two above — at or below the reorder level, empty shelves included.
+  // It is what "low stock" means everywhere else in the product (the Overview card counts exactly
+  // this), and no single stored status covers both: with `?status=low_stock` alone the card said 9
+  // and the list showed 6, silently dropping the three most severe rows.
+  { value: "below_reorder", label: "Low or out of stock" },
   { value: "on_van", label: "On van" },
   { value: "damaged", label: "Damaged" },
   { value: "overdue", label: "Overdue" },

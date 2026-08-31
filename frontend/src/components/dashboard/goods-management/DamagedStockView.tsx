@@ -290,6 +290,51 @@ const LOSS_REASON_LABEL: Record<string, string> = {
   other: "Other",
 };
 
+/**
+ * Whether the damaged-stock export may run, why not when it may not, and what its tooltip says.
+ *
+ * ONE decision behind three pieces of UI, so the greyed button, the visible reason and the tooltip
+ * cannot drift apart.
+ *
+ * TWO independent reasons to stand down:
+ *
+ *   · an ACTIVE SEARCH, because this box and the export search different things. The box matches
+ *     item name, damage reason, order and job; the stock-position ledger the export reads matches
+ *     item name, SKU and item code — and a damaged position carries neither a reason nor a code.
+ *     Forwarding the term would answer a different question in silence.
+ *   · NOTHING TO EXPORT, the convention every other export in this dashboard follows.
+ *
+ * `reason` is returned as text for the PAGE, not only as a tooltip: a disabled button cannot take
+ * focus and nothing hovers on the warehouse tablet this screen is used on, so a `title` alone leaves
+ * a greyed control with no explanation anyone can reach.
+ */
+export function damagedExportState(input: {
+  /** The DEBOUNCED search term — the one the list actually queried with. */
+  search: string;
+  /** Rows the file would hold: the OWNED pools only, since a hire has no position row. */
+  exportableCount: number;
+  /** Whether this instance is pinned to one warehouse or customer (changes the wording only). */
+  scoped: boolean;
+}): { disabled: boolean; reason: string | null; title: string } {
+  if (input.search.trim()) {
+    return {
+      disabled: true,
+      reason: "Export can’t match reason, order or job — clear the search to export.",
+      title: "Clear the search to export — it matches damage details the export cannot carry",
+    };
+  }
+  if (input.exportableCount === 0) {
+    return { disabled: true, reason: null, title: "Nothing to export in this pool" };
+  }
+  return {
+    disabled: false,
+    reason: null,
+    title: input.scoped
+      ? "Export this warehouse's owned damaged stock to CSV (hired equipment is on its own order)"
+      : "Export every owned damaged-stock holding to CSV (hired equipment is on its own order)",
+  };
+}
+
 export function DamagedStockView({
   warehouseId,
   customerId,
@@ -464,6 +509,24 @@ export function DamagedStockView({
     () => ({ company: ownedCounts.company, customer: ownedCounts.customer, rental: rentalCount }),
     [ownedCounts, rentalCount],
   );
+
+  /**
+   * How many rows the export would actually hold — the OWNED pools only, since a hire has no
+   * position row to export.
+   *
+   * Read off the counts the list already returned rather than the rows on screen: those are paged,
+   * and the counts are computed server-side across both owned pools before `ownerType` narrows
+   * anything. No extra query, and it is correct on the "rental" pool too, where the file is the owned
+   * stock the screen is not currently showing.
+   */
+  const exportableCount =
+    owner === "company" ? ownedCounts.company : owner === "customer" ? ownedCounts.customer : ownedCounts.company + ownedCounts.customer;
+
+  const exportState = damagedExportState({
+    search: debouncedSearch,
+    exportableCount,
+    scoped: Boolean(warehouseId || customerId),
+  });
   /** Is the reader looking at a narrowed view? Drives every "you can still get back" affordance. */
   const anyFilterActive = owner !== "all" || search.trim() !== "";
   /** Anything at all to show, before this filter narrowed it. */
@@ -717,16 +780,47 @@ export function DamagedStockView({
               button sitting on one customer's page. The service's params are `warehouse`/`customer`,
               not the prop names, which is exactly how the omission went unnoticed.
 
-              The search box filters the loaded rows in memory, so it is NOT sent. */}
+              The OWNER pool goes with it too — company/customer map one-for-one onto the positions
+              ledger's `ownership`, so selecting a pool and exporting no longer returns both. "Rental"
+              is not sent because a hire has no position row at all; the file is owned-stock only and
+              the title says so.
+
+              SEARCH is deliberately NOT sent, and it is the one filter that cannot be forwarded
+              honestly. This box searches item name, damage REASON, order and job (see its
+              placeholder); the positions ledger the export reads searches item name, SKU and item
+              code — and a damaged position carries neither a reason nor a code, so most of what this
+              box matches simply does not exist on the other side. Forwarding the term would be a
+              SECOND interpretation of one control: "cracked screen" would come back empty and look
+              like a bug in the data rather than in the query. Making it match for real means joining
+              the damage TRANSACTION for its reason on every exported row, which is a query this
+              download does not otherwise need.
+
+              So the export stands down while a search is active — and SAYS SO IN THE PAGE. A `title`
+              alone was not enough: this screen is used on a warehouse tablet, where nothing hovers, a
+              disabled button cannot take focus, and a greyed control with no visible reason reads as
+              broken. The note below is real text in the flow, so it is announced in document order
+              and legible on a phone. */}
           {can("inventory.export") && (
-            <ExportButton
-              label="Export damaged"
-              // OWNED stock only. The export walks the stock-position ledger, which a hire has no row
-              // in by design, so the title says so rather than handing someone a file that looks like
-              // the whole screen and quietly is not.
-              title={warehouseId || customerId ? "Export this warehouse's owned damaged stock to CSV (hired equipment is on its own order)" : "Export every owned damaged-stock holding to CSV (hired equipment is on its own order)"}
-              onExport={() => stockPositionService.exportPositionsCsv({ location: "damaged", warehouse: warehouseId, customer: customerId })}
-            />
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 sm:ml-auto">
+              {exportState.reason && (
+                // Real text in the flow, not a tooltip — see damagedExportState for why.
+                <span className="text-xs leading-snug text-[var(--muted)]">{exportState.reason}</span>
+              )}
+              <ExportButton
+                label="Export damaged"
+                // Disabled state and wording from one decision — see damagedExportState.
+                title={exportState.title}
+                disabled={exportState.disabled}
+                onExport={() =>
+                  stockPositionService.exportPositionsCsv({
+                    location: "damaged",
+                    warehouse: warehouseId,
+                    customer: customerId,
+                    ownership: owner === "company" || owner === "customer" ? owner : undefined,
+                  })
+                }
+              />
+            </div>
           )}
         </div>
       )}

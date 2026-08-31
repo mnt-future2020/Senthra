@@ -77,14 +77,51 @@ function scopePositions(all: StockPosition[], actor?: WarehouseScopedActor): Sto
   return all.filter((p) => (p.locationType === "warehouse" || p.locationType === "damaged") && scope.includes(p.locationId));
 }
 
+/**
+ * The engineer lens's OWN predicate — name/email search plus "holding something".
+ *
+ * Exported and shared rather than written twice: the lens's screen and the lens's CSV both narrow by
+ * it, and the download used to apply NEITHER filter. A user who searched one engineer and pressed
+ * "Export field stock" got every engineer's holdings in the file, with nothing in it to say so.
+ */
+export function matchesEngineerLens(row: EngineerOverviewRow, params: { search?: string; holdingOnly?: boolean }): boolean {
+  const term = params.search?.trim().toLowerCase();
+  if (params.holdingOnly && row.itemsHeld <= 0) return false;
+  return !term || [row.name, row.email].some((f) => f?.toLowerCase().includes(term));
+}
+
+/**
+ * Turn the lens's free-text engineer search into the exact engineer ids it matches.
+ *
+ * Returns `undefined` when no engineer filter was asked for — NOT an empty array, which means
+ * "asked, and nobody matched". See PositionFilters.engineerIds for why that distinction is
+ * load-bearing.
+ *
+ * Only `engineerSearch` triggers the roster read. `holdingOnly` deliberately does NOT: it removes
+ * engineers whose `itemsHeld` is zero, and `itemsHeld` counts exactly the engineer-balance and
+ * customer-holding rows that assembleAll turns INTO that engineer's positions — so every engineer it
+ * would remove already contributes no rows. Resolving it bought a provably identical result for four
+ * extra collection reads. The lens's own list still applies it, where it decides which engineers are
+ * listed rather than which positions exist.
+ *
+ * One round trip, shared by the list and the export, so both resolve the same text to the same set.
+ */
+async function resolveEngineerIds(f: PositionFilters): Promise<string[] | undefined> {
+  if (f.engineerIds) return f.engineerIds;
+  if (!f.engineerSearch?.trim()) return undefined;
+  const roster = await listEngineerInventory();
+  return roster.filter((r) => matchesEngineerLens(r, { search: f.engineerSearch })).map((r) => r.engineerId);
+}
+
 export async function listStockPositions(
   params: PositionFilters & { page?: number; pageSize?: number } = {},
   actor?: WarehouseScopedActor,
 ) {
   // Order matters and is the whole point: permission scope, THEN the user's filters, THEN sort, THEN
   // the page. Filtering first would let a filter widen the set the scope was meant to bound.
+  const engineerIds = await resolveEngineerIds(params);
   const all = scopePositions(await assembleAll(params), actor);
-  const filtered = sortPositions(filterPositions(all, params));
+  const filtered = sortPositions(filterPositions(all, { ...params, engineerIds }));
   const { slice, total, page, pageSize, totalPages } = paginate(filtered, params.page, params.pageSize ?? 25);
   return { positions: slice, total, page, pageSize, totalPages };
 }
@@ -238,12 +275,14 @@ export async function exportAllPositionsCsv(
   actor?: WarehouseScopedActor,
 ): Promise<AllPositionsCsvResult> {
   // Same boundary as the list — see scopePositions for why this is shared rather than repeated.
+  // The engineer filter is resolved by the SAME helper the list uses, for the same reason.
+  const engineerIds = await resolveEngineerIds(filters);
   const all = scopePositions(await assembleAll(filters), actor);
   // Capped like every other export. This one alone rendered EVERY matching row into one string: the
   // set grows with the business and an unfiltered request would eventually be asked to hold all of
   // it in memory. It also reported a `count` header nothing on the client read, while the flag that
   // actually matters — "this file is not the whole answer" — was the one it never sent.
-  const matched = sortPositions(filterPositions(all, filters));
+  const matched = sortPositions(filterPositions(all, { ...filters, engineerIds }));
   const rows = matched.slice(0, EXPORT_MAX);
 
   // Company timezone + configured date format, like every generated artifact; the column names the
@@ -310,6 +349,8 @@ export interface EngineerLensParams {
 export interface PagedEngineerOverview {
   rows: EngineerOverviewRow[];
   total: number;
+  /** Matched engineers holding at least one item — the field-stock export's true row source. */
+  holdingCount: number;
   page: number;
   pageSize: number;
   totalPages: number;
@@ -346,15 +387,26 @@ export async function listEngineerOptions(): Promise<EngineerOption[]> {
 
 export async function listEngineerInventoryPaged(params: EngineerLensParams = {}): Promise<PagedEngineerOverview> {
   const all = await listEngineerInventory();
-  const term = params.search?.trim().toLowerCase();
-  const matched = all
-    .filter((r) => !params.holdingOnly || r.itemsHeld > 0)
-    .filter((r) => !term || [r.name, r.email].some((f) => f?.toLowerCase().includes(term)));
+  // The shared predicate — see matchesEngineerLens. The lens's screen and the lens's CSV narrow by
+  // the same search through it, so the two can no longer disagree about who is in scope.
+  const matched = all.filter((r) => matchesEngineerLens(r, params));
   const total = matched.length;
   const pageSize = Math.min(Math.max(Math.trunc(params.pageSize ?? ENGINEER_LENS_PAGE_SIZE), 1), 100);
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const page = Math.min(Math.max(Math.trunc(params.page ?? 1), 1), totalPages);
-  return { rows: matched.slice((page - 1) * pageSize, page * pageSize), total, page, pageSize, totalPages };
+  return {
+    rows: matched.slice((page - 1) * pageSize, page * pageSize),
+    total,
+    // How many of the MATCHED engineers actually hold something — i.e. exactly how many will
+    // contribute rows to the field-stock export. `total` cannot answer that: an engineer holding
+    // nothing is a legitimate row on this list and zero rows in that file, so a screen showing one
+    // such engineer would otherwise offer an export that downloads a header and nothing else.
+    // Derived from rows already in memory, so it costs no query.
+    holdingCount: matched.reduce((n, r) => n + (r.itemsHeld > 0 ? 1 : 0), 0),
+    page,
+    pageSize,
+    totalPages,
+  };
 }
 
 export async function listEngineerInventory(): Promise<EngineerOverviewRow[]> {

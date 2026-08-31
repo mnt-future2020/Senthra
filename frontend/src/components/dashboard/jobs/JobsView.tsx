@@ -24,7 +24,7 @@ import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { AttentionBar } from "@/components/dashboard/shell/AttentionBar";
-import { JOB_STATUS_LABELS, JOB_LINE_TYPE_LABELS, JOB_PRIORITIES, JOB_PRIORITY_LABELS, JobStatusChip, GoodsStatusChip, formatDate } from "./jobStatus";
+import { JOB_DERIVED_STATUS_OPTIONS, JOB_STATUS_LABELS, JOB_LINE_TYPE_LABELS, JOB_PRIORITIES, JOB_PRIORITY_LABELS, JobStatusChip, GoodsStatusChip, formatDate } from "./jobStatus";
 import { CELL_ONE_LINE, colClass, colClassAt, tableMinWidth, type ColPriority } from "@/components/ui/tableLayout";
 import type { Job, JobStatus } from "@/types/job";
 
@@ -130,10 +130,12 @@ export function JobsView() {
 
   // ── URL-derived filter state ────────────────────────────────────────────────
   const search = searchParams.get("q") ?? "";
-  // "overdue" is a DERIVED pseudo-status the server resolves against the company-timezone day start
-  // (same predicate as the overdue dashboard card and the Jobs attention badge, so all three agree).
-  // It is not a JobStatus, so it never reaches a status chip — only this filter and the query string.
-  const statusFilter = (searchParams.get("status") ?? "all") as "all" | "overdue" | JobStatus;
+  // "overdue" and "active" are DERIVED pseudo-statuses the server resolves in job.repository's
+  // buildWhere — "overdue" against the company-timezone day start, "active" as the three in-flight
+  // statuses. Each is the same predicate a dashboard card / attention badge counts by, so the number
+  // and the list it opens can never disagree. Neither is a JobStatus, so neither reaches a status
+  // chip — they live only in this filter and the query string.
+  const statusFilter = (searchParams.get("status") ?? "all") as "all" | "overdue" | "active" | JobStatus;
   const customer = searchParams.get("customer") ?? "";
   const engineer = searchParams.get("engineer") ?? "";
   const site = searchParams.get("site") ?? "";
@@ -301,7 +303,7 @@ export function JobsView() {
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input value={searchInput} onChange={(e) => setSearchInput(e.target.value)} placeholder="Search job, name, customer or engineer…" className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]" />
         </div>
-        <Select size="sm" value={statusFilter} onChange={(v) => patchParams({ status: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All statuses" }, { value: "overdue", label: "Overdue" }, ...(Object.keys(JOB_STATUS_LABELS) as JobStatus[]).map((s) => ({ value: s, label: JOB_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
+        <Select size="sm" value={statusFilter} onChange={(v) => patchParams({ status: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All statuses" }, ...JOB_DERIVED_STATUS_OPTIONS, ...(Object.keys(JOB_STATUS_LABELS) as JobStatus[]).map((s) => ({ value: s, label: JOB_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
         {/* Customer and engineer fold away; status stays out. Both of these are set once and left, and
             they are the two widest controls in the row (a customer name and a full engineer name).
             The trigger carries the ACTIVE count so a list narrowed to one engineer can never be

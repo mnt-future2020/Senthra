@@ -3,6 +3,28 @@ export type LocationType = "warehouse" | "engineer" | "customer_site" | "damaged
 export type StockPositionStatus =
   | "in_stock" | "low_stock" | "out_of_stock" | "on_van" | "damaged" | "overdue";
 
+/**
+ * The DERIVED status filter value: "at or below the reorder level", i.e. `low_stock` OR
+ * `out_of_stock` in one filter.
+ *
+ * It exists because that union is what "low stock" MEANS everywhere else in the product — the
+ * dashboard KPI counts it, `positionStatus` produces it as two values only because a shelf at zero
+ * deserves its own badge, and no single stored status covers both. Without it the Low Stock card
+ * counted N and opened a list of the low rows only, silently dropping the most severe ones.
+ */
+export const BELOW_REORDER = "below_reorder";
+
+/** A status a caller may filter by: a real position status, or the derived union above. */
+export type PositionStatusFilter = StockPositionStatus | typeof BELOW_REORDER;
+
+/** The statuses `below_reorder` stands for — at or below the reorder level, empty shelves included. */
+const BELOW_REORDER_STATUSES: readonly StockPositionStatus[] = ["low_stock", "out_of_stock"];
+
+/** Does this row's status satisfy the requested filter (real value or the derived union)? */
+export function matchesStatusFilter(status: StockPositionStatus, filter: PositionStatusFilter): boolean {
+  return filter === BELOW_REORDER ? BELOW_REORDER_STATUSES.includes(status) : status === filter;
+}
+
 export interface PositionFlags {
   highValue?: boolean;
   serialized?: boolean;
@@ -178,8 +200,40 @@ export interface PositionFilters {
   warehouseId?: string;     // matches locationId when locationType is warehouse/damaged
   categoryName?: string;
   search?: string;          // item name / sku / code
-  status?: StockPositionStatus;
+  /** A real status, or the derived `below_reorder` union — see PositionStatusFilter. */
+  status?: PositionStatusFilter;
   customerId?: string;
+  /**
+   * WHICH ENGINEER is holding it — free text over an engineer's name/email, matched exactly as the
+   * engineer lens's own search box matches it.
+   *
+   * ENGINEER-SCOPED BY DEFINITION, and named so you cannot miss it. A warehouse shelf, a customer
+   * site and a damage pool have no engineer, so "held by an engineer called Kansha" is false for
+   * every one of their rows and they are excluded — a narrowing, never a widening. Setting this
+   * together with `locationType: "warehouse"` is a contradictory query and correctly returns
+   * nothing; it is not rejected, because a filter that returns an empty set is honest and a 400
+   * would break a caller who merely over-specified.
+   *
+   * This replaced a `holderSearch`/`holdingOnly` pair. `holdingOnly` ("only engineers who hold
+   * something") is a property of the engineer ROSTER, not of a position, and on this filter it was
+   * provably a no-op that nonetheless dragged the location scope with it: an engineer's `itemsHeld`
+   * counts exactly the engineer-balance and customer-holding rows that BECOME their positions, so
+   * an engineer it excluded had no position rows to exclude. It now lives only on EngineerLensParams,
+   * where it means something. See the aggregation service's resolveEngineerIds.
+   *
+   * Resolved to `engineerIds` before it reaches `filterPositions`, because a name lives on the User
+   * record and this function is pure.
+   */
+  engineerSearch?: string;
+  /**
+   * The RESOLVED engineer ids. Internal — set by the service from `engineerSearch`, never read from
+   * the query string, so a caller cannot name an engineer the lens's own search would not match.
+   *
+   * An EMPTY array means "the search matched nobody" and correctly yields no rows; `undefined` means
+   * no engineer filter at all. Collapsing the two would turn a search with no matches into an
+   * unfiltered export — the precise widening this whole audit is about.
+   */
+  engineerIds?: string[];
 }
 
 export function filterPositions(rows: StockPosition[], f: PositionFilters): StockPosition[] {
@@ -189,8 +243,13 @@ export function filterPositions(rows: StockPosition[], f: PositionFilters): Stoc
     if (f.locationType && r.locationType !== f.locationType) return false;
     if (f.warehouseId && r.locationId !== f.warehouseId) return false;
     if (f.categoryName && r.categoryName !== f.categoryName) return false;
-    if (f.status && r.status !== f.status) return false;
+    if (f.status && !matchesStatusFilter(r.status, f.status)) return false;
     if (f.customerId && r.customerId !== f.customerId) return false;
+    // Engineer narrowing, and it is engineer-scoped BY DEFINITION rather than by side effect: a row
+    // not held by an engineer cannot be held by the engineer you named. Excluded rather than passed
+    // through — "these engineers" must not also return everything held everywhere else. See
+    // PositionFilters.engineerSearch for why this is the whole contract now.
+    if (f.engineerIds && !(r.locationType === "engineer" && f.engineerIds.includes(r.locationId))) return false;
     if (q) {
       const hay = `${r.itemName} ${r.sku ?? ""} ${r.itemCode}`.toLowerCase();
       if (!hay.includes(q)) return false;

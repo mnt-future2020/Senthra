@@ -1,3 +1,5 @@
+import type { Request } from "express";
+
 import * as inventoryService from "./inventory.service.js";
 import * as aggregation from "./aggregation.service.js";
 import * as movementService from "./movement.service.js";
@@ -6,25 +8,32 @@ import { decodeCursor } from "./movement.js";
 import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
 import { sendCsv } from "../../utils/csv-response.js";
-import { param, queryInt, queryStr } from "../../utils/request.js";
+import { param, queryBool, queryInt, queryStr } from "../../utils/request.js";
 import type { AddStockInput, AdjustStockInput, CreateTransferInput } from "./inventory.validation.js";
-import type { Ownership, LocationType, StockPositionStatus } from "./stock-position.js";
+import type { Ownership, LocationType, PositionFilters, PositionStatusFilter } from "./stock-position.js";
 
 
 // GET /inventory?search=&warehouse=&irmItem=&category=&status=&page=&pageSize=
+//
+// The list's filters, parsed ONCE and shared with the CSV export below — the same bargain every
+// other module in this codebase makes. It was two literals here, and they had already drifted: the
+// export omitted `irmItem`, so a request narrowed to ONE item downloaded every item's balances with
+// nothing in the file to say so. That is exactly the failure a shared parser exists to prevent.
+function listParamsFrom(req: Request): inventoryService.ListInventoryParams {
+  const { search, warehouse, irmItem, category, status } = req.query;
+  return {
+    search: queryStr(search),
+    warehouse: queryStr(warehouse),
+    irmItem: queryStr(irmItem),
+    category: queryStr(category),
+    status: queryStr(status),
+  };
+}
+
 export const listInventory = asyncHandler(async (req, res) => {
-  const { search, warehouse, irmItem, category, status, page, pageSize } = req.query;
   res.json(
     await inventoryService.listInventory(
-      {
-        search: queryStr(search),
-        warehouse: queryStr(warehouse),
-        irmItem: queryStr(irmItem),
-        category: queryStr(category),
-        status: queryStr(status),
-        page: queryInt(page),
-        pageSize: queryInt(pageSize),
-      },
+      { ...listParamsFrom(req), page: queryInt(req.query.page), pageSize: queryInt(req.query.pageSize) },
       actorFrom(req),
     ),
   );
@@ -35,17 +44,9 @@ export const getReorderSuggestions = asyncHandler(async (req, res) => {
   res.json(await inventoryService.getReorderSuggestions(actorFrom(req)));
 });
 
-// GET /inventory/export.csv?... (same filters as the list)
+// GET /inventory/export.csv?... — the SAME filtered list as a download (paging ignored).
 export const exportInventoryCsv = asyncHandler(async (req, res) => {
-  const { search, warehouse, category, status } = req.query;
-  sendCsv(
-    res,
-    "inventory",
-    await inventoryService.exportInventoryCsv(
-      { search: queryStr(search), warehouse: queryStr(warehouse), category: queryStr(category), status: queryStr(status) },
-      actorFrom(req),
-    ),
-  );
+  sendCsv(res, "inventory", await inventoryService.exportInventoryCsv(listParamsFrom(req), actorFrom(req)));
 });
 
 // GET /inventory/availability?irmItem=&warehouse=
@@ -107,24 +108,38 @@ export const listPurchases = asyncHandler(async (req, res) => {
   res.json({ purchases: await inventoryService.listPurchaseHistory(param(req, "id"), actorFrom(req)) });
 });
 
+// The positions filters, parsed ONCE and shared with the CSV export below. Two literals is two
+// places for a filter to be forgotten, and a download that quietly holds more rows than the screen
+// it was taken from gives no sign of it.
+//
+// `holderSearch` and `holdingOnly` are the ENGINEER LENS's own two filters (see the field-stock
+// export): they narrow by who is holding the stock rather than what it is, which is why they are not
+// covered by `search`. The lens itself does not read them from here — it has its own endpoint — but
+// its export does, and it must resolve them the same way the lens does.
+function positionParamsFrom(req: Request): PositionFilters {
+  const q = req.query;
+  return {
+    ownership: queryStr(q.ownership) as Ownership | undefined,
+    locationType: queryStr(q.location) as LocationType | undefined,
+    warehouseId: queryStr(q.warehouse),
+    categoryName: queryStr(q.category),
+    search: queryStr(q.search),
+    status: queryStr(q.status) as PositionStatusFilter | undefined,
+    customerId: queryStr(q.customer),
+    // The engineer lens's own search, forwarded so its download narrows to the engineers on screen.
+    // `holding` is deliberately NOT read here: it cannot change which positions exist (see
+    // resolveEngineerIds), and reading it dragged the location scope along with it.
+    engineerSearch: queryStr(q.engineerSearch),
+  };
+}
+
 // GET /inventory/positions
 export const listPositions = asyncHandler(async (req, res) => {
-  const q = req.query;
   // `actorFrom(req)` is what applies the warehouse scope — the same argument the CSV export of this
   // data has always passed. Without it a warehouse-restricted user could read any warehouse's
   // positions, with or without the ?warehouse filter.
   const result = await aggregation.listStockPositions(
-    {
-      ownership: q.ownership as Ownership | undefined,
-      locationType: q.location as LocationType | undefined,
-      warehouseId: q.warehouse as string | undefined,
-      categoryName: q.category as string | undefined,
-      search: q.search as string | undefined,
-      status: q.status as StockPositionStatus | undefined,
-      customerId: q.customer as string | undefined,
-      page: queryInt(q.page),
-      pageSize: queryInt(q.pageSize),
-    },
+    { ...positionParamsFrom(req), page: queryInt(req.query.page), pageSize: queryInt(req.query.pageSize) },
     actorFrom(req),
   );
   res.json(result);
@@ -176,18 +191,9 @@ export const getItemJobs = asyncHandler(async (req, res) => {
   res.json(await aggregation.getItemJobs(irmItemId));
 });
 
-// GET /inventory/positions/export.csv
+// GET /inventory/positions/export.csv — the SAME filtered positions as a download (paging ignored).
 export const exportAllPositionsCsv = asyncHandler(async (req, res) => {
-  const q = req.query;
-  const { csv, capped } = await aggregation.exportAllPositionsCsv({
-    ownership: q.ownership as Ownership | undefined,
-    locationType: q.location as LocationType | undefined,
-    warehouseId: q.warehouse as string | undefined,
-    categoryName: q.category as string | undefined,
-    search: q.search as string | undefined,
-    status: q.status as StockPositionStatus | undefined,
-    customerId: q.customer as string | undefined,
-  }, actorFrom(req));
+  const { csv, capped } = await aggregation.exportAllPositionsCsv(positionParamsFrom(req), actorFrom(req));
   sendCsv(res, "all-inventory", { csv, capped });
 });
 
@@ -206,7 +212,8 @@ export const listEngineers = asyncHandler(async (req, res) => {
   res.json(
     await aggregation.listEngineerInventoryPaged({
       search: queryStr(req.query.search),
-      holdingOnly: queryStr(req.query.holding) === "1",
+      // The shared strict parser: `1`/`true` on, `0`/`false` off, anything else "not asked".
+      holdingOnly: queryBool(req.query.holding),
       page: queryInt(req.query.page),
       pageSize: queryInt(req.query.pageSize),
     }),

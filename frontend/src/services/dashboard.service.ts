@@ -33,6 +33,9 @@ export interface ExpectedThisWeekCard {
 export interface GoodsReceivedCard {
   count: number;
   weeklyReceived: number[];
+  /** `YYYY-MM-DD` lower bound the count was taken with, in the COMPANY timezone — the card's link
+   *  passes it as the Goods In list's `receivedFrom` so the two describe one set of receipts. */
+  receivedSince: string;
 }
 export interface OverdueHoldingsCard {
   count: number;

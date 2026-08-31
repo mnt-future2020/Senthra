@@ -94,6 +94,24 @@ describe("buildDashboardSummary", () => {
     expect(summary.errors ?? []).toEqual([]); // nothing failed
   });
 
+  // The card is a LINK now: it opens Goods In filtered to completed receipts from this day onward.
+  // The boundary has to travel with the number, or the browser would re-derive "seven days ago" off
+  // its own clock and open a different set — the drift getOverdueView reports its own `days` to avoid.
+  it("reports the window the goods-received count was taken with, on the COMPANY day boundary", async () => {
+    // 08:00 UTC on 8 Aug is 09:00 in London — the same calendar day, so the window starts on 1 Aug.
+    const { summary } = await buildDashboardSummary(admin, { now: new Date("2026-08-08T08:00:00.000Z") });
+    expect(summary.cards.goodsReceived?.receivedSince).toBe("2026-08-01");
+  });
+
+  // The bug this replaced: the pulse was anchored on UTC's today. For the first hour of every BST
+  // day that is a day behind, so this card alone reported yesterday's window while the jobs, delivery
+  // and overdue numbers beside it had already rolled over.
+  it("uses the company's calendar day, not UTC's, in the hour where the two disagree", async () => {
+    // 23:30 UTC on 7 Aug is already 8 Aug in London (BST).
+    const { summary } = await buildDashboardSummary(admin, { now: new Date("2026-08-07T23:30:00.000Z") });
+    expect(summary.cards.goodsReceived?.receivedSince).toBe("2026-08-01");
+  });
+
   it("defaults the spend window to 12 monthly buckets and echoes the period", async () => {
     const { summary } = await buildDashboardSummary(admin);
     expect(summary.charts.spendPeriod).toBe("12m");
