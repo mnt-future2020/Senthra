@@ -19,6 +19,7 @@ import {
   DetailSkeleton,
   ErrorText,
   InfoRow,
+  RentalBadge,
   Screen,
   SectionTitle,
 } from "@/components/ui";
@@ -182,9 +183,15 @@ export default function VanStockDetailScreen() {
       {request.lines.map((line) => (
         <Card key={line.id}>
           <View style={s.rowTop}>
-            <Text style={s.lineName} numberOfLines={2}>
-              {line.itemName}
-            </Text>
+            <View style={s.nameRow}>
+              <Text style={s.lineName} numberOfLines={2}>
+                {line.itemName}
+              </Text>
+              {/* Which pool this line came out of. Without it a hire reads as company stock on the
+                  one screen the engineer checks before driving — and the two are collected from
+                  different places, on different terms, with a deadline attached to only one. */}
+              {line.source === "rental" ? <RentalBadge /> : null}
+            </View>
             <Text style={s.progressText}>{lineProgress(line)}</Text>
           </View>
           <Text style={s.meta}>
@@ -275,6 +282,7 @@ const s = StyleSheet.create({
   caption: { fontSize: 13, fontWeight: "600", color: colors.text },
   body: { fontSize: 14, color: colors.text, fontStyle: "italic" },
   meta: { fontSize: 12, color: colors.muted },
+  nameRow: { flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1, flexWrap: "wrap" },
   lineName: { fontSize: 14, fontWeight: "700", color: colors.text, flex: 1 },
   progressText: { fontSize: 13, fontWeight: "700", color: colors.info },
   warehouseRow: { flexDirection: "row", alignItems: "center", gap: 4 },

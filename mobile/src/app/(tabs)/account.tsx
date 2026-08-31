@@ -23,6 +23,7 @@ import {
   Badge,
   Button,
   Card,
+  ConfirmDialog,
   ErrorText,
   InfoRow,
   ListSkeleton,
@@ -34,6 +35,11 @@ import {
 } from "@/components/ui";
 import { colors } from "@/lib/theme";
 import type { SessionInfo } from "@/types";
+
+// Mirrors MAX_DEVICES in the backend's session.service.ts, which is what actually enforces the cap —
+// this copy only tells the user what it is. The app cannot import from the backend, so the value is
+// restated here and in the web's SessionsCard.tsx. Change all three together.
+const MAX_DEVICES = 3;
 
 
 // ── Web AccountPanel helpers, ported ──────────────────────────────────────────
@@ -118,6 +124,11 @@ export default function AccountScreen() {
   const router = useRouter();
   const toast = useToast();
   const { principal, logout } = useAuth();
+  // Signing out is not destructive, but it IS unrecoverable in the moment that matters: an engineer
+  // mid-job who mis-taps it is back at a login screen, on site, needing credentials they may not
+  // carry. The button sits at the very bottom of a long scrolling page, right where a thumb lands.
+  const [signOutOpen, setSignOutOpen] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
 
   // ── Profile (summary + edit) ────────────────────────────────────────────────
   const [phone, setPhone] = useState("");
@@ -569,11 +580,13 @@ export default function AccountScreen() {
       <Card>
         <View style={s.devicesHeader}>
           <Text style={[s.desc, s.flex1]}>
-            Where you&rsquo;re signed in. Up to 2 devices — a new sign-in drops the oldest.
+            Where you&rsquo;re signed in. Up to {MAX_DEVICES} devices — a new sign-in drops the oldest.
           </Text>
           {(sessions ?? []).length > 0 ? (
             <View style={s.countPill}>
-              <Text style={s.countPillText}>{(sessions ?? []).length}/2</Text>
+              <Text style={s.countPillText}>
+                {(sessions ?? []).length}/{MAX_DEVICES}
+              </Text>
             </View>
           ) : null}
         </View>
@@ -641,11 +654,24 @@ export default function AccountScreen() {
         </View>
       </Card>
 
-      <Button
-        title="Sign Out"
-        variant="danger"
-        onPress={() => {
-          void logout().then(() => router.replace("/login"));
+      <Button title="Sign Out" variant="danger" onPress={() => setSignOutOpen(true)} />
+
+      <ConfirmDialog
+        open={signOutOpen}
+        title="Sign out?"
+        message="You'll need your email and password to sign back in."
+        confirmLabel="Sign out"
+        danger
+        busy={signingOut}
+        onClose={() => setSignOutOpen(false)}
+        onConfirm={() => {
+          setSigningOut(true);
+          // No catch that re-opens the form: `logout` clears the local session whatever the server
+          // says, so landing on /login is the correct end state either way. The dialog goes with the
+          // screen on replace(), so there is nothing left to reset.
+          void logout()
+            .then(() => router.replace("/login"))
+            .catch(() => router.replace("/login"));
         }}
       />
     </Screen>

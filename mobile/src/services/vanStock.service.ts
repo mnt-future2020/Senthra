@@ -4,6 +4,7 @@ import type {
   HoldingOption,
   PagedVanStockRequests,
   VanStockItemOption,
+  VanStockLineSource,
   VanStockRequest,
   VanStockRequestType,
   WarehouseLite,
@@ -64,12 +65,20 @@ export function searchVanStockItems(q: string): Promise<VanStockItemOption[]> {
 export interface RequestableItemOption extends VanStockItemOption {
   quantityOnHand: number;
   reorderLevel: number | null;
+  // Rental hits also carry the deadline and the orders the units sit on. The wire sends both on
+  // EVERY hit (null / [] for company stock), so the type says so rather than making each caller
+  // guess which hits have them.
+  hireEndDate: string | null;
+  poCodes: string[];
 }
 
 /**
  * Restock composer search: catalogue hits annotated with each item's total on-hand across warehouses.
  * An item out of stock everywhere comes back with quantityOnHand 0 (shown disabled, not offered) — so
  * the engineer can't raise a request for stock no warehouse holds, which would only fail at scan-out.
+ *
+ * Returns BOTH pools — company stock and hired equipment — discriminated by `source`. For a rental
+ * hit `quantityOnHand` is free-on-hire, not shelf stock: it is not ours and there is no shelf.
  */
 export function searchRequestableItems(q: string): Promise<RequestableItemOption[]> {
   return api<{ items: RequestableItemOption[] }>(
@@ -96,12 +105,22 @@ export interface WarehouseAvailability {
   warehouseName: string;
   warehouseCode: string | null;
   items: { irmItemId: string; quantityOnHand: number }[];
+  // Hired kit at this depot — free-on-hire net of what jobs have planned. Kept as its OWN list
+  // because the two ids come from different catalogues; one list keyed on a bare id could not tell
+  // a tester from a cable.
+  rentalItems: { rentalItemId: string; quantityOnHand: number }[];
 }
 
-export function getVanStockAvailability(irmItemIds: string[]): Promise<WarehouseAvailability[]> {
-  if (irmItemIds.length === 0) return Promise.resolve([]);
+export function getVanStockAvailability(
+  irmItemIds: string[],
+  rentalItemIds: string[] = [],
+): Promise<WarehouseAvailability[]> {
+  if (irmItemIds.length === 0 && rentalItemIds.length === 0) return Promise.resolve([]);
   return api<{ warehouses: WarehouseAvailability[] }>(
-    `/van-stock-requests/availability?irmItemIds=${encodeURIComponent(irmItemIds.join(","))}`,
+    `/van-stock-requests/availability${qs({
+      irmItemIds: irmItemIds.join(","),
+      rentalItemIds: rentalItemIds.join(","),
+    })}`,
   ).then((r) => r.warehouses);
 }
 
@@ -115,11 +134,23 @@ export function uploadVanStockAttachment(image: string): Promise<string> {
   }).then((r) => r.url);
 }
 
-/** Item ids already on the engineer's OPEN requests of a type (duplicate guard hint). */
-export function myOpenLineItems(
-  type: VanStockRequestType,
-): Promise<Array<{ irmItemId: string; code: string }>> {
-  return api<{ items: Array<{ irmItemId: string; code: string }> }>(
+/**
+ * Items already on one of this engineer's OPEN requests of a type — the advisory duplicate guard.
+ *
+ * Carries the SOURCE so a duplicate hire is caught too. `irmItemId` is null on a rental line and
+ * `rentalItemId` is null on a company one, so compare these through `vanStockItemKey` rather than on
+ * a bare id: the two catalogues have independent id spaces, and matching on a bare id would both
+ * miss real duplicates and invent false ones.
+ */
+export interface OpenLineItem {
+  source: VanStockLineSource;
+  irmItemId: string | null;
+  rentalItemId: string | null;
+  code: string;
+}
+
+export function myOpenLineItems(type: VanStockRequestType): Promise<OpenLineItem[]> {
+  return api<{ items: OpenLineItem[] }>(
     `/van-stock-requests/mine/open-lines${qs({ type })}`,
   ).then((r) => r.items);
 }

@@ -30,6 +30,28 @@ export function formatDate(iso: string | null | undefined): string {
   return `${dd} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
 }
 
+/**
+ * A HIRE DEADLINE — same "03 Aug 2026" shape as `formatDate`, but read in UTC.
+ *
+ * NOT interchangeable with `formatDate`, and the difference is a whole day.
+ *
+ * A hire's return date is a CALENDAR DAY, stored at UTC midnight — it is "the 30th", not an instant.
+ * `formatDate` reads a timestamp with the device's local getters, which is right for a timestamp
+ * (when something happened, in the reader's own day) and wrong for a calendar day: on any device
+ * BEHIND UTC, `new Date("2026-09-30T00:00:00Z").getDate()` is 29. The engineer is then told their
+ * kit was due yesterday, or that today's deadline is tomorrow — on the one field whose entire job is
+ * naming a day, and against a warehouse that is chasing them by the real one.
+ *
+ * The web pins the same fields the same way (`formatHireDate` in van-requests/vanStockLine.ts, and
+ * `formatDueDay` in goods-management/jobAge.ts). Use this for `hireEndDate` and nothing else.
+ */
+export function formatHireDate(iso: string | null | undefined): string {
+  const d = parse(iso);
+  if (!d) return EMPTY;
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  return `${dd} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+}
+
 /** "03 Aug 2026, 15:30" — for timestamps where the time of day matters. */
 export function formatDateTime(iso: string | null | undefined): string {
   const d = parse(iso);
@@ -59,7 +81,7 @@ export function titleCase(value: string | null | undefined): string {
   return value.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
-export function joinAddress(parts: Array<string | null | undefined>): string {
+export function joinAddress(parts: (string | null | undefined)[]): string {
   return parts.filter((p): p is string => !!p && p.trim().length > 0).join(", ");
 }
 

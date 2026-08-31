@@ -24,6 +24,7 @@ import { BlurView } from "expo-blur";
 // would give us a context instance the navigator never populates).
 import { HeaderHeightContext } from "@react-navigation/elements";
 import { BottomTabBarHeightContext } from "@react-navigation/bottom-tabs";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { colors, statusTone, toneColors } from "../lib/theme";
 import { titleCase } from "../lib/format";
 
@@ -63,11 +64,28 @@ export function Screen({
   refreshing,
   onRefresh,
   scroll = true,
+  footer,
 }: {
   children: ReactNode;
   refreshing?: boolean;
   onRefresh?: () => void;
   scroll?: boolean;
+  /**
+   * Pinned to the bottom of the viewport instead of scrolling away with the content — the web's
+   * sticky form footer, which is where every composer's primary action lives.
+   *
+   * On a composer this is not decoration. The action is the LAST thing in a long scroll (search
+   * results, a cart of steppers, reason, attachments), so the engineer had to scroll past all of it
+   * to send, and after a validation error scroll back down again to retry.
+   *
+   * Deliberately OUTSIDE the keyboard avoider: it holds the bottom of the window and the keyboard
+   * simply covers it. Riding up on top of the keyboard would put the primary action against the key
+   * rows while the engineer is mid-sentence in the reason box — a send they have not finished
+   * composing, one thumb-width from the letters they are typing. The avoider still shrinks the
+   * scroll area (it measures its OWN frame, so the footer's height is already accounted for), so a
+   * focused field still scrolls clear.
+   */
+  footer?: ReactNode;
 }) {
   // Inside the tab navigator the header/tab bar float transparently over the
   // content, so scrollable screens pad by their heights; stack screens (no tab
@@ -75,13 +93,22 @@ export function Screen({
   const headerHeight = useContext(HeaderHeightContext) ?? 0;
   const tabBarHeight = useContext(BottomTabBarHeightContext) ?? 0;
   const inTabs = tabBarHeight > 0;
-  // The bar's own height CLEARS it (content scrolls under the glass); the extra is the visible gap
-  // between the last card and the glass edge. One `gap` unit, matching the rhythm between cards —
-  // a bigger number reads as the list having ended early, which on a scrolling feed looks like a
-  // loading bug rather than breathing room.
+  // EXACTLY the bar's height, with nothing added. That height is react-navigation's own
+  // (TABBAR_HEIGHT_UIKIT 49 + the bottom safe-area inset), and it is the whole distance the last row
+  // has to clear — the glass starts there, so a card ending at that line is flush against the bar's
+  // top edge, not hidden by it. Any resting gap on top of it is dead space on every tab, and on a
+  // handset already giving up ~97dp to the tab bar and the system nav there is none to spare.
   const inset = inTabs
-    ? { paddingTop: headerHeight + 16, paddingBottom: tabBarHeight + 12 }
+    ? { paddingTop: headerHeight + 16, paddingBottom: tabBarHeight }
     : undefined;
+  // The home indicator / gesture bar. Only the footer needs it: without a footer the content's own
+  // paddingBottom (or the tab-bar inset above) already clears the bottom of the window.
+  //
+  // MAX, not a sum. Under edge-to-edge the window already extends behind the navigation bar, so this
+  // inset IS the strip the button must sit above — adding a resting gap on top of it stacks the two
+  // and leaves a band of dead white under the action. The resting gap only applies where there is no
+  // inset to clear (a device with no bar, or an inset smaller than the gap).
+  const safeBottom = Math.max(12, useSafeAreaInsets().bottom);
 
   const scrollRef = useRef<ScrollView>(null);
   const scrollYRef = useRef(0);
@@ -116,43 +143,51 @@ export function Screen({
 
   if (!scroll) return <View style={s.screen}>{children}</View>;
   return (
-    // Keyboard avoidance lives here so every screen gets it. "padding" on BOTH
-    // platforms: under edge-to-edge Android the window no longer resizes for the
-    // keyboard, so without this the scroll area keeps its full height and the
-    // bottom-most fields have no room to scroll clear — the avoider's overlap
-    // math zeroes itself out on devices where the window does still resize.
-    // Offset: in tabs the view runs under the translucent header from window top
-    // (0); in stacks it starts below the opaque header (headerHeight).
-    <KeyboardAvoidingView
-      style={s.screen}
-      behavior="padding"
-      keyboardVerticalOffset={inTabs ? 0 : headerHeight}
-    >
-      <ScrollView
-        ref={scrollRef}
-        style={s.screenScroll}
-        contentContainerStyle={[s.screenContent, inset]}
-        keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="on-drag"
-        onScroll={(e) => {
-          scrollYRef.current = e.nativeEvent.contentOffset.y;
-        }}
-        scrollEventThrottle={16}
-        scrollIndicatorInsets={inTabs ? { top: headerHeight, bottom: tabBarHeight } : undefined}
-        refreshControl={
-          onRefresh ? (
-            <RefreshControl
-              refreshing={!!refreshing}
-              onRefresh={onRefresh}
-              tintColor={colors.accent}
-              progressViewOffset={inTabs ? headerHeight : undefined}
-            />
-          ) : undefined
-        }
+    <View style={s.screen}>
+      {/* Keyboard avoidance lives here so every screen gets it. "padding" on BOTH platforms: under
+          edge-to-edge Android the window no longer resizes for the keyboard, so without this the
+          scroll area keeps its full height and the bottom-most fields have no room to scroll clear
+          — the avoider's overlap math zeroes itself out on devices where the window does still
+          resize. Offset: in tabs the view runs under the translucent header from window top (0); in
+          stacks it starts below the opaque header (headerHeight).
+
+          It wraps the SCROLL AREA ONLY, so a pinned footer stays put while the keyboard covers it.
+          RN measures the avoider's own frame, so the footer's height is already netted off the
+          padding it applies. */}
+      <KeyboardAvoidingView
+        style={s.screenBody}
+        behavior="padding"
+        keyboardVerticalOffset={inTabs ? 0 : headerHeight}
       >
-        <FieldFocusContext.Provider value={ensureVisible}>{children}</FieldFocusContext.Provider>
-      </ScrollView>
-    </KeyboardAvoidingView>
+        <ScrollView
+          ref={scrollRef}
+          style={s.screenScroll}
+          contentContainerStyle={[s.screenContent, inset]}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
+          onScroll={(e) => {
+            scrollYRef.current = e.nativeEvent.contentOffset.y;
+          }}
+          scrollEventThrottle={16}
+          scrollIndicatorInsets={inTabs ? { top: headerHeight, bottom: tabBarHeight } : undefined}
+          refreshControl={
+            onRefresh ? (
+              <RefreshControl
+                refreshing={!!refreshing}
+                onRefresh={onRefresh}
+                tintColor={colors.accent}
+                progressViewOffset={inTabs ? headerHeight : undefined}
+              />
+            ) : undefined
+          }
+        >
+          <FieldFocusContext.Provider value={ensureVisible}>{children}</FieldFocusContext.Provider>
+        </ScrollView>
+      </KeyboardAvoidingView>
+      {/* No FieldFocusContext here: nothing in the footer can be scrolled clear of the keyboard,
+          because the footer is not in the scroll area. It holds actions, not fields. */}
+      {footer ? <View style={[s.screenFooter, { paddingBottom: safeBottom }]}>{footer}</View> : null}
+    </View>
   );
 }
 
@@ -311,6 +346,23 @@ export function Badge({ status, label }: { status: string; label?: string }) {
   );
 }
 
+/**
+ * "RENTAL" — the marker on any row that names HIRED kit rather than company stock.
+ *
+ * A one-word tag rather than a colour or an icon alone, because the distinction it draws is not a
+ * shade of the same thing: company stock is ours and a hire is somebody else's equipment, billing by
+ * the day, owed back to one specific depot. Every list that can mix the two pools carries this on
+ * the rental rows — the ported twin of the web's `RentalBadge`.
+ */
+export function RentalBadge() {
+  return (
+    <View style={s.rentalBadge}>
+      <Ionicons name="timer-outline" size={10} color={colors.accent} />
+      <Text style={s.rentalBadgeText}>RENTAL</Text>
+    </View>
+  );
+}
+
 export function Button({
   title,
   onPress,
@@ -458,7 +510,7 @@ export function Segmented({
   value,
   onChange,
 }: {
-  options: Array<{ key: string; label: string }>;
+  options: { key: string; label: string }[];
   value: string;
   onChange: (key: string) => void;
 }) {
@@ -622,6 +674,79 @@ export function Select({
   );
 }
 
+/**
+ * Confirmation dialog for destructive or irreversible actions — the mobile twin of the web's
+ * ConfirmDialog, with the same props so a screen reads the same on both surfaces.
+ *
+ * An in-app modal rather than `Alert.alert`: the OS alert is the system's chrome, not the app's, so
+ * it carries none of the brand, cannot show a busy state on its confirm button, and on Android
+ * renders its buttons in the platform's order rather than the one the rest of Senthra uses. This is
+ * the surface that asks before something cannot be undone, so it should look like the app asking.
+ *
+ * Dismissal — backdrop tap and the Android back button — is refused while `busy`: there is nothing
+ * safe to cancel once the action is in flight, and closing would leave the caller's state stranded.
+ */
+export function ConfirmDialog({
+  open,
+  title,
+  message,
+  confirmLabel = "Confirm",
+  cancelLabel = "Cancel",
+  danger,
+  busy,
+  onConfirm,
+  onClose,
+}: {
+  open: boolean;
+  title: string;
+  message?: string;
+  confirmLabel?: string;
+  cancelLabel?: string;
+  danger?: boolean;
+  busy?: boolean;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  const dismiss = () => {
+    if (!busy) onClose();
+  };
+  return (
+    <Modal visible={open} transparent animationType="fade" onRequestClose={dismiss}>
+      <Pressable style={s.dialogBackdrop} onPress={dismiss}>
+        {/* Swallows the tap so pressing the panel itself never dismisses. */}
+        <Pressable style={s.dialog} onPress={() => undefined}>
+          <View style={s.dialogHead}>
+            <View style={[s.dialogIcon, danger ? s.dialogIconDanger : s.dialogIconAccent]}>
+              <Ionicons
+                name="alert-circle-outline"
+                size={20}
+                color={danger ? colors.danger : colors.accent}
+              />
+            </View>
+            <View style={s.flexShrink}>
+              <Text style={s.dialogTitle}>{title}</Text>
+              {message ? <Text style={s.dialogMessage}>{message}</Text> : null}
+            </View>
+          </View>
+          <View style={s.dialogActions}>
+            {/* Cancel FIRST, and it is the plain one. The destructive button is never the resting
+                target of a mis-tap on a dialog whose whole purpose is to catch one. */}
+            <Button title={cancelLabel} variant="secondary" small style={s.flex1} disabled={busy} onPress={onClose} />
+            <Button
+              title={confirmLabel}
+              variant={danger ? "danger" : "primary"}
+              small
+              style={s.flex1}
+              loading={busy}
+              onPress={onConfirm}
+            />
+          </View>
+        </Pressable>
+      </Pressable>
+    </Modal>
+  );
+}
+
 /** Lays out Selects two-up, matching the web's filter toolbar rows. */
 export function FilterRow({ children }: { children: ReactNode }) {
   return <View style={s.filterRow}>{children}</View>;
@@ -769,26 +894,32 @@ export function Stepper({
   onChange,
   min = 0,
   max,
+  disabled,
 }: {
   value: number;
   onChange: (next: number) => void;
   min?: number;
   max?: number;
+  /** Held while the figure this stepper is capped against is still outstanding — the web's
+   *  `qtyPending`. Without it a number typed before the counts land goes in uncapped. */
+  disabled?: boolean;
 }) {
+  const downOff = disabled || value <= min;
+  const upOff = disabled || (max !== undefined && value >= max);
   return (
-    <View style={s.stepper}>
+    <View style={[s.stepper, disabled && { opacity: 0.5 }]}>
       <Pressable
         onPress={() => onChange(Math.max(min, value - 1))}
-        disabled={value <= min}
-        style={[s.stepBtn, value <= min && { opacity: 0.35 }]}
+        disabled={downOff}
+        style={[s.stepBtn, downOff && { opacity: 0.35 }]}
       >
         <Text style={s.stepBtnText}>−</Text>
       </Pressable>
       <Text style={s.stepValue}>{value}</Text>
       <Pressable
         onPress={() => onChange(max === undefined ? value + 1 : Math.min(max, value + 1))}
-        disabled={max !== undefined && value >= max}
-        style={[s.stepBtn, max !== undefined && value >= max && { opacity: 0.35 }]}
+        disabled={upOff}
+        style={[s.stepBtn, upOff && { opacity: 0.35 }]}
       >
         <Text style={s.stepBtnText}>+</Text>
       </Pressable>
@@ -801,10 +932,20 @@ export function Stepper({
 const s = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg },
   screenScroll: { flex: 1 },
+  // The keyboard avoider's own box: everything above a pinned footer.
+  screenBody: { flex: 1 },
   // NOTE: `paddingBottom` here applies to STACK screens only — inside the tab navigator the `inset`
   // above replaces it (later entry in the style array wins). Change the inset, not this, to move the
   // gap above the tab bar.
   screenContent: { padding: 16, paddingBottom: 24, gap: 12 },
+  screenFooter: {
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    backgroundColor: colors.card,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
+    gap: 8,
+  },
   glassIos: { backgroundColor: "rgba(255,255,255,0.55)" },
   glassFallback: { backgroundColor: "rgba(255,255,255,0.92)" },
   glassAccentIos: { backgroundColor: "rgba(123,110,240,0.88)" },
@@ -854,6 +995,19 @@ const s = StyleSheet.create({
   },
   emptyTitle: { fontSize: 15, fontWeight: "600", color: colors.text },
   emptySubtitle: { fontSize: 13, color: colors.muted, textAlign: "center" },
+  rentalBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+    alignSelf: "flex-start",
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: colors.accent,
+    backgroundColor: colors.accentSoft,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+  },
+  rentalBadgeText: { fontSize: 9, fontWeight: "800", letterSpacing: 0.8, color: colors.accent },
   badge: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 3, alignSelf: "flex-start" },
   badgeText: { fontSize: 12, fontWeight: "600" },
   button: {
@@ -933,6 +1087,24 @@ const s = StyleSheet.create({
     flex: 1,
   },
   selectText: { fontSize: 13, fontWeight: "600", color: colors.text, flexShrink: 1 },
+  dialogBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(23,23,28,0.45)",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 24,
+  },
+  dialog: { width: "100%", maxWidth: 380, backgroundColor: colors.card, borderRadius: 20, padding: 20, gap: 18 },
+  dialogHead: { flexDirection: "row", alignItems: "flex-start", gap: 12 },
+  dialogIcon: { width: 40, height: 40, borderRadius: 12, alignItems: "center", justifyContent: "center" },
+  dialogIconDanger: { backgroundColor: colors.dangerSoft },
+  dialogIconAccent: { backgroundColor: colors.accentSoft },
+  dialogTitle: { fontSize: 16, fontWeight: "800", color: colors.text },
+  dialogMessage: { fontSize: 13, color: colors.muted, marginTop: 4 },
+  dialogActions: { flexDirection: "row", gap: 10 },
+  // Equal halves, so neither action is the wider (and easier) target.
+  flex1: { flex: 1 },
+  flexShrink: { flexShrink: 1 },
   sheetBackdrop: { flex: 1, backgroundColor: "rgba(23,23,28,0.45)", justifyContent: "flex-end" },
   sheet: {
     backgroundColor: colors.card,

@@ -38,7 +38,7 @@ import {
   SectionTitle,
 } from "@/components/ui";
 import { colors } from "@/lib/theme";
-import { formatDate, formatDateTime, joinAddress, titleCase } from "@/lib/format";
+import { formatDate, formatDateTime, formatHireDate, joinAddress, titleCase } from "@/lib/format";
 import type { JobKitLine, JobKitWarehouse, KitRequest, KitRequestLine } from "@/types";
 
 function KitLineCard({
@@ -93,9 +93,10 @@ function KitLineCard({
             color={line.hireOverdue ? colors.danger : colors.muted}
           />
           <Text style={[s.hireText, line.hireOverdue && s.hireTextOverdue]}>
+            {/* formatHireDate, NOT formatDate — see lib/format.ts. The deadline is a calendar day. */}
             {line.hireOverdue
-              ? `Was due back ${formatDate(line.hireEndDate)} — overdue`
-              : `Return by ${formatDate(line.hireEndDate)}`}
+              ? `Was due back ${formatHireDate(line.hireEndDate)} — overdue`
+              : `Return by ${formatHireDate(line.hireEndDate)}`}
           </Text>
         </View>
       ) : null}

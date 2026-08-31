@@ -32,7 +32,7 @@ import {
   SearchFilterBar,
 } from "@/components/ui";
 import { colors } from "@/lib/theme";
-import { formatDate, formatDateTime, signed } from "@/lib/format";
+import { formatDate, formatDateTime, formatHireDate, signed } from "@/lib/format";
 import type { CustomerHolding, EngineerStockItem, MiscHeldItem, Movement } from "@/types";
 
 // Section pills, captions, per-tab search/sort/pagination and movement filters
@@ -619,8 +619,10 @@ export default function StockScreen() {
                         </Text>
                         <Text style={s.qtyBig}>{item.quantityOnHand}</Text>
                       </View>
+                      {/* formatHireDate, NOT formatDate: a hire deadline is a calendar day stored at
+                          UTC midnight, so local getters show the day before on any device behind UTC. */}
                       <Text style={[s.meta, item.overdue && s.overdueText]}>
-                        {item.hireEndDate ? `Return by ${formatDate(item.hireEndDate)}` : "Return by —"}
+                        {item.hireEndDate ? `Return by ${formatHireDate(item.hireEndDate)}` : "Return by —"}
                       </Text>
                       <Text style={[s.hireDue, item.overdue && s.overdueText]}>{dueLabel(item)}</Text>
                     </Card>

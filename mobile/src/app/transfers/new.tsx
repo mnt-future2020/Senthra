@@ -1,5 +1,5 @@
 import React, { useCallback, useRef, useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { Keyboard, StyleSheet, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 import {
   createTransfer,
@@ -15,6 +15,7 @@ import {
   Card,
   EmptyState,
   ErrorText,
+  InfoRow,
   Input,
   Screen,
   SearchInput,
@@ -32,6 +33,7 @@ interface DraftLine {
   irmItemId?: string;
   customerStockEntryId?: string;
   itemName: string;
+  code: string | null;
   quantity: number;
   max: number;
   engineerId: string;
@@ -97,6 +99,10 @@ export default function NewTransferScreen() {
   const debouncedSearch = useDebouncedCallback(runSearch);
 
   const clearSearch = () => {
+    // Both callers (adding a candidate, Start over) end the searching phase, and what comes next —
+    // the quantity steppers, the reason box, Send request — is all BELOW the keyboard. Leaving it up
+    // over a box that is now empty hides the very thing the tap just changed.
+    Keyboard.dismiss();
     setQuery("");
     setResults([]);
     setSearchFailed(false);
@@ -122,6 +128,7 @@ export default function NewTransferScreen() {
         irmItemId: isCompany(c) ? c.irmItemId : undefined,
         customerStockEntryId: isCompany(c) ? undefined : (c as CustomerCandidate).customerStockEntryId,
         itemName: c.itemName,
+        code: isCompany(c) ? c.code : (c.code ?? (c as CustomerCandidate).barcode ?? c.sku),
         quantity: 1,
         max: c.available,
         engineerId: c.engineerId,
@@ -132,6 +139,7 @@ export default function NewTransferScreen() {
   };
 
   const submit = async () => {
+    Keyboard.dismiss();
     if (lines.length === 0) {
       setError("Add at least one item.");
       return;
@@ -169,9 +177,21 @@ export default function NewTransferScreen() {
   const visibleResults = lockedFrom ? results.filter((c) => c.engineerId === lockedFrom) : results;
   const hiddenMatches = lockedFrom ? results.length - visibleResults.length : 0;
   const searched = query.trim().length >= 2 && !searching;
+  const totalQty = lines.reduce((sum, l) => sum + l.quantity, 0);
 
   return (
-    <Screen>
+    // The action is pinned rather than sitting at the foot of the scroll: with a full cart it was
+    // several screens below the summary the engineer had just read, and a validation error meant
+    // scrolling back down to press it again. The error rides with it for the same reason — a
+    // message about why the send failed belongs beside the control that failed.
+    <Screen
+      footer={
+        <>
+          <ErrorText message={error} />
+          <Button title="Send request" onPress={() => void submit()} loading={busy} />
+        </>
+      }
+    >
       <Text style={s.hint}>
         Search items other engineers hold, pick what you need, and send a hand-over request. The
         holder approves it before stock moves.
@@ -196,6 +216,10 @@ export default function NewTransferScreen() {
           setQuery(v);
           debouncedSearch(v);
         }}
+        // Runs the search NOW rather than waiting out the 300ms the engineer just decided not to
+        // wait for. A single-line input blurs on submit by default, so the keyboard clears itself
+        // and the results land on screen instead of behind it.
+        onSubmitEditing={() => void runSearch(query)}
       />
       {searching ? <Text style={s.hint}>Searching…</Text> : null}
       {searchFailed ? (
@@ -241,6 +265,7 @@ export default function NewTransferScreen() {
                 <Text style={s.lineName} numberOfLines={2}>
                   {line.itemName}
                 </Text>
+                {line.code ? <Text style={s.codeText}>{line.code}</Text> : null}
                 <Text style={s.meta}>
                   {line.ownership === "company" ? "IRM" : "Customer"} · max {line.max}
                 </Text>
@@ -268,8 +293,12 @@ export default function NewTransferScreen() {
       <Input label="Notes (optional)" value={notes} onChangeText={setNotes} multiline placeholder="Any additional context…" />
       <SectionTitle>Attachments (optional)</SectionTitle>
       <AttachmentPicker attachments={attachments} onChange={setAttachments} upload={uploadAttachment} />
-      <ErrorText message={error} />
-      <Button title="Send request" onPress={() => void submit()} loading={busy} />
+      <SectionTitle>Summary</SectionTitle>
+      <Card>
+        <InfoRow label="From" value={lockedFromName ?? ""} />
+        <InfoRow label="Items" value={lines.length} />
+        <InfoRow label="Total quantity" value={totalQty} />
+      </Card>
     </Screen>
   );
 }

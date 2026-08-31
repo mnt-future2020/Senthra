@@ -2,6 +2,7 @@
   "expo": {
     "name": "Senthra Engineer",
     "slug": "senthra-engineer",
+    "owner": "karneya",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
@@ -57,7 +58,7 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "0cbdd0ed-b9bc-447b-970f-2009adffa745"
+        "projectId": "6759d94b-e3c8-4caf-a165-fbc8c372c38b"
       }
     }
   }
