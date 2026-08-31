@@ -75,7 +75,7 @@ function recordAuth(
   });
 }
 
-// Open a new device session (enforcing the 2-device cap) and mint its tokens.
+// Open a new device session (enforcing the device cap) and mint its tokens.
 async function startAndIssue(
   sub: string,
   actor: Actor,

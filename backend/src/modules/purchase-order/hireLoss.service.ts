@@ -311,6 +311,176 @@ export async function recoverHireLoss(input: RecoverHireLossInput, actor?: Audit
   return { exitId: exit.id, lostQuantity, issuedQuantity };
 }
 
+// ── Dismissing a damage report ─────────────────────────────────────────────────────────────────
+//
+// THE THIRD ANSWER a damage report can be given, and until now the only one with no way to say it.
+//
+// A report reaches the office in one of three states of truth: the provider owes us for it (charge
+// it), the report was wrong and the units were never damaged (withdraw the note behind it), or — the
+// ordinary case — the units ARE broken and nobody is being billed. Fair wear on a six-month hire, a
+// fault the provider has already agreed to absorb, a scuff not worth the invoice.
+//
+// Damage found on a JOB had no way to reach that third answer. Its exit is opened by a return
+// MOVEMENT, not by a note, so `sourceReceiptId` is null and there is nothing to withdraw; and the only
+// other action offered — `chargeCustodyExit` — unconditionally raises an HDM document against the
+// provider and advances the `damagedQuantity` they are billed on. Using it to clear a fair-wear report
+// therefore filed a damage claim nobody was making. A blank charge does NOT say this either: the
+// schema is explicit that a null `damageChargePence` means "no figure agreed YET", which is a pending
+// claim, not a dropped one.
+//
+// WHY THIS NEEDS NO NEW STATE. `settlementState` already names the outcome — `dismissed`, documented
+// on the model as "looked at, nothing owed — fair wear, reported in error". What it does NOT do is
+// make every reader correct for free, and the distinction that matters is which QUESTION a reader is
+// asking, because `dismissed` answers only one of them:
+//
+//   PHYSICAL — "is this unit off the shelf?" Yes. A dropped charge does not un-break a tester, so
+//   these readers must go on seeing the row:
+//     • `recomputeCountersTx` reads `custodyState` ONLY, so `fieldDamageQty` does not move and the
+//       units stay out of `hireIssuable`.
+//     • `reconcileDamageCustodyTx` carries settlement across its splits and never filters on it, so a
+//       dismissed unit still follows the shelf back to the provider.
+//     • `settleOpenAgainstNoteTx` ABSORBS dismissed rows in its second phase — see the long note
+//       there. This is the one that had to change: filtering them out let a later warehouse note mint
+//       a second quarantine row for the same physical unit.
+//
+//   FINANCIAL — "does the provider owe us for this?" No, and these correctly drop it:
+//     • `OPEN_EXIT_WHERE` takes it off the settle worklist and its badge — the office has answered it.
+//     • `openDamageQtyByLines` stops reserving provider-tally headroom for a claim never coming, so
+//       `damagedQuantity + open exits ≤ received` still holds.
+//     • `chargeCustodyExit` refuses anything not `unsettled`, so it cannot then be billed silently.
+//
+// ONE READER SPANS BOTH AND IS DELIBERATELY LEFT FINANCIAL: `findOpenByWarehouses`, behind the Damaged
+// Stock pane, filters `unsettled` — so a dismissed row leaves that pane exactly as a CHARGED one
+// already does. The pane lists damage still awaiting an answer, and this has been answered. Where the
+// units remain readable is the hire's own custody timeline, which is unfiltered by design and labels
+// the state as "no charge · still damaged" rather than letting "dismissed" read as "repaired".
+//
+// So this writes ONE column transition and nothing else. No document, no quantity, no custody.
+export interface DismissCustodyExitInput {
+  exitId: string;
+  /**
+   * WHY nobody is being billed — required, and that is the point of the action.
+   *
+   * Dismissal is the one settlement outcome that leaves no paper behind it: a charge has its note, a
+   * withdrawal has the reversal reason on the note it reverses, and this has neither. Without a stated
+   * reason the record would read "nothing owed" with nothing anywhere saying who decided that or on
+   * what grounds — the same hole recording counters instead of rows leaves.
+   *
+   * Recorded on the AUDIT entry rather than in a new column, following `chargeCustodyExit`, which
+   * likewise keeps the commercial decision behind a settlement in the audit trail and not on the row.
+   * The exit's own `reason`, `notes` and `photoUrl` are the ENGINEER's evidence and are never touched.
+   */
+  reason: string;
+}
+
+export interface DismissCustodyExitResult {
+  exitId: string;
+  settlementState: string;
+  /** True when this call performed the transition, false when it found the work already done. */
+  changed: boolean;
+}
+
+/**
+ * Answer a damage report with "nothing is owed on this".
+ *
+ * DAMAGE ONLY. A loss carries the same two columns but a different commercial question — writing off
+ * somebody else's missing equipment without charging for it is a decision about the whole hire, not
+ * about one report — and nothing asked for it. Refusing it here keeps this action to the one case it
+ * was built for rather than quietly becoming the module's general-purpose settle button.
+ *
+ * IDEMPOTENT BY RE-READ, not by a blind write. The transition is a compare-and-set on `unsettled`, so
+ * a double-submit loses the race exactly once; the loser then looks at what it lost to. Already
+ * `dismissed` is the SAME outcome this call wanted, so it returns success with `changed: false` — a
+ * retried request must not surface an error for work that is done. Already `settled` is a DIFFERENT
+ * outcome and conflicts: somebody has charged the provider, and silently reporting "nothing owed"
+ * would hide a live claim.
+ */
+export async function dismissCustodyExit(
+  input: DismissCustodyExitInput,
+  actor?: AuditActor,
+): Promise<DismissCustodyExitResult> {
+  const reason = input.reason.trim();
+  if (!reason) throw badRequest("Say why nothing is being charged for this damage.");
+
+  const exit = await custodyExitRepo.findById(input.exitId);
+  if (!exit) throw notFound("That damage record no longer exists.");
+  if (exit.kind !== "damage") throw badRequest("Only a damage report can be dismissed as no charge.");
+  // Warehouse-scoped like every other hire settlement action, and read off the exit's own denormalised
+  // column rather than through its order — the same field `chargeCustodyExit` asserts on.
+  assertWarehouseAccess(actor, exit.warehouseId);
+  // The two custody states with no live claim behind them, named exactly as `chargeCustodyExit` names
+  // them. A withdrawn report never happened and a recovered unit is back on the shelf; "nothing owed"
+  // is already true of both, and writing it again would put a decision date on a decision nobody took.
+  if (exit.custodyState === custodyExitRepo.CUSTODY_WITHDRAWN || exit.custodyState === custodyExitRepo.CUSTODY_RECOVERED) {
+    throw conflict("This report has been withdrawn — there is nothing to dismiss.");
+  }
+  if (exit.settlementState === custodyExitRepo.SETTLE_SETTLED) {
+    throw conflict("This record has already been settled with the provider. Withdraw that charge first.");
+  }
+
+  const dismissedAt = new Date();
+  let changed = false;
+
+  await withTransaction(async (tx) => {
+    // Conditional on `unsettled`, so two people dismissing the same report cannot both write a
+    // decision date. NO counter recompute follows, deliberately: `recomputeCountersTx` derives from
+    // `custodyState`, which this does not touch, so calling it could only ever rewrite the same
+    // numbers — and its absence here is the proof that dismissal moves no equipment.
+    changed = await custodyExitRepo.moveSettlementStateTx(
+      tx,
+      exit.id,
+      custodyExitRepo.SETTLE_UNSETTLED,
+      custodyExitRepo.SETTLE_DISMISSED,
+      // WHEN the office answered. `settledByReceiptId` stays null and that null is load-bearing: it is
+      // what every reader uses to ask "is there a document behind this", and a dismissal has none.
+      { settledAt: dismissedAt },
+    );
+  });
+
+  if (!changed) {
+    // Lost the race. Re-read rather than assume which way: a concurrent charge and a concurrent
+    // dismissal are different answers, and only one of them is safe to report as success.
+    const fresh = await custodyExitRepo.findById(exit.id);
+    if (fresh?.settlementState !== custodyExitRepo.SETTLE_DISMISSED) {
+      throw conflict("This record was settled by someone else a moment ago. Refresh and check.");
+    }
+    // Already dismissed — the retry's own outcome. No event and no audit entry: neither the hire nor
+    // the decision changed, and a second identical audit line would read as a second decision.
+    return { exitId: exit.id, settlementState: custodyExitRepo.SETTLE_DISMISSED, changed: false };
+  }
+
+  emitHireUpdated(exit.purchaseOrderId, exit.poCode ?? "");
+  audit.record({
+    actor,
+    action: "rental_damage.dismissed",
+    targetType: "purchase_order",
+    targetId: exit.purchaseOrderId,
+    targetLabel: exit.poCode ?? exit.purchaseOrderId,
+    metadata: {
+      item: exit.itemName,
+      quantity: exit.qty,
+      dismissReason: reason,
+      // The report being answered, so the entry stands alone: what was said, by whom, on which job.
+      reportedReason: exit.reason,
+      jobNumber: exit.jobNumber,
+      engineerName: exit.engineerName,
+      changes: [
+        {
+          label:
+            `${exit.itemName}: ${exit.qty} damaged` +
+            (exit.jobNumber ? ` on ${exit.jobNumber}` : "") +
+            ` — dismissed, no supplier charge — ${reason}` +
+            // Said explicitly because it is the question anyone reading this entry asks next, and the
+            // answer is counter-intuitive: the money stopped, the equipment did not come back.
+            ` (the units remain ${exit.custodyState === custodyExitRepo.CUSTODY_RETURNED_TO_SUPPLIER ? "returned to the provider" : "held damaged"} — custody unchanged)`,
+        },
+      ],
+    },
+  });
+
+  return { exitId: exit.id, settlementState: custodyExitRepo.SETTLE_DISMISSED, changed };
+}
+
 // ── Reading the record back ─────────────────────────────────────────────────────────────────────
 //
 // The write side of this module was complete and every screen was blind to it: a tester was declared

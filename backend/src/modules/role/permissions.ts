@@ -67,6 +67,7 @@ export const PERMISSION_CATEGORIES: string[] = [
   "Goods Management",
   "Jobs",
   "Engineer Portal",
+  "Reports",
   "System",
 ];
 
@@ -330,6 +331,28 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
       { key: "rentals.hire.receive", action: "Receive & return", description: "Book hired equipment in at a warehouse, record it going back, and report damage found while it is with us." },
       { key: "rentals.hire.settle", action: "Settle hire records", description: "Close a hire short when the outstanding units are never arriving, reverse a hire record entered in error, and record what a supplier is charging for damage — for this role's own warehouses. Includes everything Receive & return allows." },
       { key: "rentals.hire.manage", action: "Manage hires", description: "Extend a hire period — a fresh commitment of money to the supplier. Includes everything Receive & return and Settle hire records allow." },
+    ],
+  },
+  {
+    key: "reports",
+    label: "Reports",
+    description:
+      "Reporting surfaces. Finance figures are split from the rest deliberately — procurement spend is the most sensitive data in the product, and plenty of people who need a stock report should never see what it cost.",
+    category: "Reports",
+    permissions: [
+      { key: "reports.view", action: "View", description: "Open the Reports module and view non-financial reports." },
+      {
+        key: "reports.finance.view",
+        action: "View finance",
+        description:
+          "View purchase spend, VAT and supplier/project/item cost breakdowns. Separate from Reports View: this is the permission that exposes money.",
+      },
+      {
+        key: "reports.export",
+        action: "Export",
+        description:
+          "Take a report out of the system as a file: download it as CSV or XLSX, and set up a scheduled report that emails one. A scheduled report is the same file by a slower route, so it needs this right as well as the report's own View.",
+      },
     ],
   },
   {

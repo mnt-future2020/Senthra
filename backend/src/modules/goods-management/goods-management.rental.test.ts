@@ -1391,3 +1391,306 @@ describe("scanLookup — a return binds a hire from THIS depot", () => {
     expect(m.purchaseOrderRentalLineId).toBe(HIRE_ID);
   });
 });
+
+// ══ PART A ═════════════════════════════════════════════════════════════════════════════════════
+// RECONCILE COUNTS HIRED KIT PER HIRE, NOT PER CATALOGUE ITEM
+//
+// The gate used to ask `min(this item's raw remainder, every hire of this item the engineer holds)`.
+// Two orders of the same model are not interchangeable, so that compared one hire's movement ledger
+// against another hire's custody — and it could land either way: block a job on units it never
+// touched, or close one while its OWN hire was still out. Closing is the worse half, because
+// `reconciled` refuses every later scan and the kit is then stranded in the van.
+//
+// Live proof, JOB-2026-0036 / RNT-0005: issued 3 off one hire, engineer holds 1 of THAT hire, a second
+// hire of the same catalogue item carries 3 more. Item level saw min(3, 4) = 3. The truth is 1.
+
+describe("closeReconcile — hired kit is counted per HIRE", () => {
+  const OTHER_HIRE = "7".repeat(24);
+
+  beforeEach(() => {
+    vi.mocked(repo.getSummary).mockResolvedValue({ goodsStatus: "awaiting_return", workSummary: null, lastMovementAt: null } as never);
+    mockJob.mockResolvedValue({
+      id: JOB_ID, jobNumber: "JOB-2026-0036", status: "completed", assignedEngineerId: ENG_ID,
+      assignedEngineerName: "Dave", assignedEngineerEmail: "dave@x.co", kitLines: [rentalKitLine],
+    } as never);
+    vi.mocked(engineerStockRepo.findEngineerBalances).mockResolvedValue([] as never);
+  });
+
+  /** One issue movement of `qty` off `hire`, filed against kit line `kl`. */
+  const issued = (qty: number, hire: string, kl = "k1") =>
+    ({ status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: kl, qty, condition: "good", rentalItemId: RENTAL_ID, purchaseOrderRentalLineId: hire }] });
+  const returned = (qty: number, hire: string, kl = "k1") =>
+    ({ status: "posted", direction: "return", warehouseId: WH_ID, items: [{ jobKitLineId: kl, qty, condition: "good", rentalItemId: RENTAL_ID, purchaseOrderRentalLineId: hire }] });
+  const holds = (hire: string, quantityOnHand: number) =>
+    ({ purchaseOrderRentalLineId: hire, rentalItemId: RENTAL_ID, itemName: "Fibre Tester", poCode: "PO-0042", hireEndDate: new Date("2026-09-14T00:00:00Z"), quantityOnHand });
+  /** A rental line written before hires carried an id — neither hire nor item on the movement line. */
+  const legacyIssue = (qty: number, kl = "k1") =>
+    ({ status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: kl, qty, condition: "good" }] });
+
+  // 10 + 1. The reported scenario, in its own numbers.
+  it("counts only the job's OWN hire when another hire of the same item is in the van (JOB-2026-0036)", async () => {
+    mockMoves.mockResolvedValue([issued(3, HIRE_ID)] as never);
+    // 1 unit of the job's hire is left; a DIFFERENT hire of the same catalogue item carries 3 more.
+    mockHoldingsByEngineer.mockResolvedValue([holds(HIRE_ID, 1), holds(OTHER_HIRE, 3)] as never);
+
+    const res = await closeReconcile(JOB_ID, { writeOffLost: true });
+    expect(res.rentalOutstanding).toEqual([expect.objectContaining({ qty: 1 })]);
+    // The row's own hire breakdown must agree with its quantity — item level could disagree with it.
+    expect(res.rentalOutstanding[0]!.hires.reduce((n, h) => n + h.qty, 0)).toBe(1);
+    expect(res.rentalOutstanding[0]!.hires.map((h) => h.purchaseOrderRentalLineId)).toEqual([HIRE_ID]);
+  });
+
+  // THE DANGEROUS DIRECTION. A return binds its hire from CUSTODY, not from what the issue used, so a
+  // job can legitimately issue off hire A and scan back against hire B. At item level those two net to
+  // zero and the job reconciled — locking itself against every later scan with hire A still in the van
+  // and nothing left that could book it in. Per hire, A still owes its units.
+  it("does NOT close when a return was bound to a different hire than the issue", async () => {
+    mockMoves.mockResolvedValue([issued(3, HIRE_ID), returned(3, OTHER_HIRE)] as never);
+    mockHoldingsByEngineer.mockResolvedValue([holds(HIRE_ID, 3)] as never);
+
+    const res = await closeReconcile(JOB_ID, { writeOffLost: true });
+    expect(res.rentalOutstanding).toEqual([expect.objectContaining({ qty: 3 })]);
+    expect(res.rentalOutstanding[0]!.hires).toEqual([expect.objectContaining({ purchaseOrderRentalLineId: HIRE_ID, qty: 3 })]);
+    expect(vi.mocked(repo.upsertSummaryTx)).toHaveBeenCalledWith(expect.anything(), JOB_ID, { goodsStatus: "awaiting_return" });
+  });
+
+  // 5. An unrelated hire, fully settled on this job, must not hold it open.
+  it("closes the job when its own hire is square, however much of the item sits on another hire", async () => {
+    mockMoves.mockResolvedValue([issued(2, HIRE_ID), returned(2, HIRE_ID)] as never);
+    mockHoldingsByEngineer.mockResolvedValue([holds(OTHER_HIRE, 5)] as never);
+
+    const res = await closeReconcile(JOB_ID, { writeOffLost: true });
+    expect(res.rentalOutstanding).toEqual([]);
+    expect(vi.mocked(repo.upsertSummaryTx)).toHaveBeenCalledWith(expect.anything(), JOB_ID, expect.objectContaining({ goodsStatus: "reconciled" }));
+  });
+
+  // 4. Its own hire genuinely outstanding still blocks — the rule must not have been loosened.
+  it("keeps the job open while its own hire is genuinely still out", async () => {
+    mockMoves.mockResolvedValue([issued(2, HIRE_ID)] as never);
+    mockHoldingsByEngineer.mockResolvedValue([holds(HIRE_ID, 2)] as never);
+
+    const res = await closeReconcile(JOB_ID, { writeOffLost: true });
+    expect(res.rentalOutstanding).toEqual([expect.objectContaining({ qty: 2 })]);
+    expect(vi.mocked(repo.upsertSummaryTx)).toHaveBeenCalledWith(expect.anything(), JOB_ID, { goodsStatus: "awaiting_return" });
+  });
+
+  // 2. One job drawing on two hires of one item: each hire answers for its own units.
+  it("adds up two hires of one item separately, never as a single pool", async () => {
+    mockMoves.mockResolvedValue([issued(2, HIRE_ID), issued(3, OTHER_HIRE)] as never);
+    // 1 of the first hire left, 2 of the second — the other units went back or were declared lost.
+    mockHoldingsByEngineer.mockResolvedValue([holds(HIRE_ID, 1), holds(OTHER_HIRE, 2)] as never);
+
+    const res = await closeReconcile(JOB_ID, { writeOffLost: true });
+    expect(res.rentalOutstanding).toEqual([expect.objectContaining({ qty: 3 })]); // 1 + 2, not min(5, 3)
+    expect(res.rentalOutstanding[0]!.hires.map((h) => h.qty).sort()).toEqual([1, 2]);
+  });
+
+  // 6. A job return settles the hire it names, and only that one.
+  it("settles the hire the return was posted against", async () => {
+    mockMoves.mockResolvedValue([issued(2, HIRE_ID), issued(2, OTHER_HIRE), returned(2, HIRE_ID)] as never);
+    mockHoldingsByEngineer.mockResolvedValue([holds(HIRE_ID, 2), holds(OTHER_HIRE, 2)] as never);
+
+    // HIRE_ID nets to 0 even though the engineer still holds 2 of it (those units are Field Stock's or
+    // another job's); OTHER_HIRE still owes 2.
+    const res = await closeReconcile(JOB_ID, { writeOffLost: true });
+    expect(res.rentalOutstanding[0]!.hires).toEqual([expect.objectContaining({ purchaseOrderRentalLineId: OTHER_HIRE, qty: 2 })]);
+  });
+
+  // 7 + 8. Loss and recovery move CUSTODY and write no job movement, so the clamp is what sees them.
+  it("follows a declared loss down through custody without a job movement for it", async () => {
+    // Issue 3, return 1 leaves the ledger saying 2 outstanding. One of those 2 was then declared lost,
+    // which drained custody to 1 and wrote nothing on the job. Outstanding is 1, and the job stays open.
+    mockMoves.mockResolvedValue([issued(3, HIRE_ID), returned(1, HIRE_ID)] as never);
+    mockHoldingsByEngineer.mockResolvedValue([holds(HIRE_ID, 1)] as never);
+    expect((await closeReconcile(JOB_ID, { writeOffLost: true })).rentalOutstanding).toEqual([expect.objectContaining({ qty: 1 })]);
+  });
+
+  it("lets the job close once the last unit is settled, by return or by loss", async () => {
+    // The final unit went — scanned back, or declared lost and recovered to the DEPOT SHELF, which is
+    // where recovery puts it. Either way custody is empty and nothing is outstanding.
+    mockMoves.mockResolvedValue([issued(3, HIRE_ID), returned(1, HIRE_ID)] as never);
+    mockHoldingsByEngineer.mockResolvedValue([] as never);
+    const res = await closeReconcile(JOB_ID, { writeOffLost: true });
+    expect(res.rentalOutstanding).toEqual([]);
+    expect(vi.mocked(repo.upsertSummaryTx)).toHaveBeenCalledWith(expect.anything(), JOB_ID, expect.objectContaining({ goodsStatus: "reconciled" }));
+  });
+
+  it("never writes hired kit off as our own loss, whatever it is counted per", async () => {
+    mockMoves.mockResolvedValue([issued(2, HIRE_ID)] as never);
+    mockHoldingsByEngineer.mockResolvedValue([holds(HIRE_ID, 2)] as never);
+    await closeReconcile(JOB_ID, { writeOffLost: true });
+    expect(mockCreate).not.toHaveBeenCalled(); // no consume/lost movement for a hire, ever
+  });
+
+  // 9. Missing hire identity must fail CLOSED.
+  it("still holds the job open for a rental line that names no hire at all", async () => {
+    mockMoves.mockResolvedValue([legacyIssue(2)] as never);
+    mockHoldingsByEngineer.mockResolvedValue([holds(HIRE_ID, 2)] as never);
+    expect((await closeReconcile(JOB_ID, { writeOffLost: true })).rentalOutstanding).toEqual([expect.objectContaining({ qty: 2 })]);
+  });
+
+  it("caps a hire-less line at what the engineer actually holds of that item", async () => {
+    mockMoves.mockResolvedValue([legacyIssue(5)] as never);
+    mockHoldingsByEngineer.mockResolvedValue([holds(HIRE_ID, 1)] as never);
+    expect((await closeReconcile(JOB_ID, { writeOffLost: true })).rentalOutstanding).toEqual([expect.objectContaining({ qty: 1 })]);
+  });
+
+  it("does not let a hire-less line double-count on top of an identified hire", async () => {
+    // 2 identified on HIRE_ID plus a legacy line for the same item: the legacy arm may only claim
+    // custody the identified hires have not already claimed.
+    mockMoves.mockResolvedValue([issued(2, HIRE_ID), legacyIssue(2)] as never);
+    mockHoldingsByEngineer.mockResolvedValue([holds(HIRE_ID, 2)] as never);
+    expect((await closeReconcile(JOB_ID, { writeOffLost: true })).rentalOutstanding).toEqual([expect.objectContaining({ qty: 2 })]);
+  });
+});
+
+// ══ PART B ═════════════════════════════════════════════════════════════════════════════════════
+// A WRITE-OFF SETTLES THE KIT LINE IT WAS BOOKED FOR
+//
+// `closeReconcile` used to post its `consume/lost` line with `jobKitLineId: null`, because the
+// unaccounted list is grouped per ITEM. Every per-kit-line tally in this module matches on
+// `jobKitLineId`, so the write-off was invisible to all of them: the line's remainder never fell,
+// for ever, while the stock had already left the engineer's balance.
+//
+// Live proof, JOB-2026-0015 / IRS-0007: issue 8, a declared consume of 4, then GM-0113 consume/lost
+// 4 with no kit line and a matching job_lost -4 on the engineer ledger. Truth outstanding: 0. Every
+// tally said 4. Fixed at the source (the write-off now names its lines) AND on the read side, so the
+// two rows already written read correctly without rewriting either of them.
+
+describe("closeReconcile — IRM write-offs settle their own kit line", () => {
+  const IRM_2 = "8".repeat(24);
+  const irmLine = (id: string, irmItemId: string, itemName: string, qty: number) =>
+    ({ id, lineType: "irm", irmItemId, rentalItemId: null, customerStockEntryId: null, warehouseId: WH_ID, itemName, qty });
+  const irmJob = (kitLines: unknown[]) => ({
+    id: JOB_ID, jobNumber: "JOB-2026-0015", status: "completed", assignedEngineerId: ENG_ID,
+    assignedEngineerName: "Dave", assignedEngineerEmail: "dave@x.co", kitLines,
+  });
+  const mv = (direction: string, items: Record<string, unknown>[]) => ({ status: "posted", direction, warehouseId: WH_ID, items });
+
+  beforeEach(() => {
+    vi.mocked(repo.getSummary).mockResolvedValue({ goodsStatus: "awaiting_return", workSummary: null, lastMovementAt: null } as never);
+    mockHoldingsByEngineer.mockResolvedValue([] as never);
+    mockJob.mockResolvedValue(irmJob([irmLine("k3", IRM_ID, "Cat6 Box", 10)]) as never);
+    vi.mocked(engineerStockRepo.findEngineerBalanceTx).mockResolvedValue({ quantityOnHand: 4 } as never);
+    vi.mocked(engineerStockRepo.upsertEngineerBalanceTx).mockResolvedValue({ quantityOnHand: 0 } as never);
+  });
+
+  // 14. The phantom, where the balance clamp cannot mask it.
+  it("reads a historical write-off that named no kit line as settled, not as still outstanding", async () => {
+    // issued 10, declared consume 3, written off 7 (unattributed) ⇒ nothing unresolved. The engineer
+    // still holds 10 of the same item from OTHER work, which is what makes this the discriminating
+    // shape: `min(rawRemaining, balance)` has nothing to clamp against, so the phantom shows through
+    // as 7 units the screen would ask to be written off a SECOND time.
+    mockMoves.mockResolvedValue([
+      mv("issue", [{ jobKitLineId: "k3", qty: 10, condition: "good", irmItemId: IRM_ID }]),
+      mv("consume", [{ jobKitLineId: "k3", qty: 3, condition: "good", irmItemId: IRM_ID }]),
+      mv("consume", [{ jobKitLineId: null, qty: 7, condition: "lost", irmItemId: IRM_ID }]),
+    ] as never);
+    vi.mocked(engineerStockRepo.findEngineerBalances).mockResolvedValue([{ irmItemId: IRM_ID, quantityOnHand: 10 }] as never);
+
+    expect((await closeReconcile(JOB_ID, {})).unaccounted).toEqual([]);
+  });
+
+  it("still reports the part a write-off did NOT cover", async () => {
+    // issued 10, declared consume 3, written off 4 ⇒ 3 genuinely unresolved, and the engineer holds
+    // plenty of the item, so the answer is the kit line's own truth rather than a clamp.
+    mockMoves.mockResolvedValue([
+      mv("issue", [{ jobKitLineId: "k3", qty: 10, condition: "good", irmItemId: IRM_ID }]),
+      mv("consume", [{ jobKitLineId: "k3", qty: 3, condition: "good", irmItemId: IRM_ID }]),
+      mv("consume", [{ jobKitLineId: null, qty: 4, condition: "lost", irmItemId: IRM_ID }]),
+    ] as never);
+    vi.mocked(engineerStockRepo.findEngineerBalances).mockResolvedValue([{ irmItemId: IRM_ID, quantityOnHand: 10 }] as never);
+
+    expect((await closeReconcile(JOB_ID, {})).unaccounted).toEqual([expect.objectContaining({ itemName: "Cat6 Box", qty: 3 })]);
+  });
+
+  it("reports nothing unaccounted once the write-off covers the whole remainder", async () => {
+    mockMoves.mockResolvedValue([
+      mv("issue", [{ jobKitLineId: "k3", qty: 8, condition: "good", irmItemId: IRM_ID }]),
+      mv("consume", [{ jobKitLineId: "k3", qty: 4, condition: "good", irmItemId: IRM_ID }]),
+      mv("consume", [{ jobKitLineId: null, qty: 4, condition: "lost", irmItemId: IRM_ID }]),
+    ] as never);
+    vi.mocked(engineerStockRepo.findEngineerBalances).mockResolvedValue([{ irmItemId: IRM_ID, quantityOnHand: 4 }] as never);
+
+    const res = await closeReconcile(JOB_ID, {});
+    expect(res.unaccounted).toEqual([]);
+    expect(vi.mocked(repo.upsertSummaryTx)).toHaveBeenCalledWith(expect.anything(), JOB_ID, expect.objectContaining({ goodsStatus: "reconciled" }));
+  });
+
+  // 12. The fix at the SOURCE: a write-off written today names the line it settles.
+  it("writes the kit line onto every lost movement line it posts", async () => {
+    mockMoves.mockResolvedValue([mv("issue", [{ jobKitLineId: "k3", qty: 3, condition: "good", irmItemId: IRM_ID }])] as never);
+    vi.mocked(engineerStockRepo.findEngineerBalances).mockResolvedValue([{ irmItemId: IRM_ID, quantityOnHand: 3 }] as never);
+
+    await closeReconcile(JOB_ID, { writeOffLost: true, writeOffReason: "not_returned" });
+    const lines = mockCreate.mock.calls.at(-1)?.[1] as { jobKitLineId: string | null; qty: number; condition: string }[];
+    expect(lines).toEqual([expect.objectContaining({ jobKitLineId: "k3", qty: 3, condition: "lost" })]);
+  });
+
+  it("splits one item's write-off across the kit lines it actually came from", async () => {
+    // Same catalogue item on two kit lines, both short. The screen still shows ONE row for the item;
+    // the ledger records which line each unit came off.
+    mockJob.mockResolvedValue(irmJob([irmLine("k3", IRM_ID, "Cat6 Box", 2), irmLine("k4", IRM_ID, "Cat6 Box", 3)]) as never);
+    mockMoves.mockResolvedValue([
+      mv("issue", [{ jobKitLineId: "k3", qty: 2, condition: "good", irmItemId: IRM_ID }, { jobKitLineId: "k4", qty: 3, condition: "good", irmItemId: IRM_ID }]),
+    ] as never);
+    vi.mocked(engineerStockRepo.findEngineerBalances).mockResolvedValue([{ irmItemId: IRM_ID, quantityOnHand: 5 }] as never);
+
+    // The confirmation pass still shows ONE row for the item — that grouping is deliberate and unchanged.
+    expect((await closeReconcile(JOB_ID, {})).unaccounted).toEqual([expect.objectContaining({ qty: 5 })]);
+    // …and the ledger it then writes says which line each unit came off.
+    await closeReconcile(JOB_ID, { writeOffLost: true, writeOffReason: "not_returned" });
+    const lines = mockCreate.mock.calls.at(-1)?.[1] as { jobKitLineId: string | null; qty: number }[];
+    expect(lines.map((l) => [l.jobKitLineId, l.qty])).toEqual([["k3", 2], ["k4", 3]]);
+  });
+
+  // 11 + 13 + 17. The ordinary arithmetic is untouched.
+  it("keeps issue + return arithmetic exactly as it was", async () => {
+    mockMoves.mockResolvedValue([
+      mv("issue", [{ jobKitLineId: "k3", qty: 10, condition: "good", irmItemId: IRM_ID }]),
+      mv("return", [{ jobKitLineId: "k3", qty: 3, condition: "good", irmItemId: IRM_ID }]),
+    ] as never);
+    vi.mocked(engineerStockRepo.findEngineerBalances).mockResolvedValue([{ irmItemId: IRM_ID, quantityOnHand: 7 }] as never);
+    expect((await closeReconcile(JOB_ID, {})).unaccounted).toEqual([expect.objectContaining({ qty: 7 })]);
+  });
+
+  it("keeps issue + return + declared consume arithmetic exactly as it was", async () => {
+    mockMoves.mockResolvedValue([
+      mv("issue", [{ jobKitLineId: "k3", qty: 10, condition: "good", irmItemId: IRM_ID }]),
+      mv("return", [{ jobKitLineId: "k3", qty: 3, condition: "good", irmItemId: IRM_ID }]),
+      mv("consume", [{ jobKitLineId: "k3", qty: 5, condition: "good", irmItemId: IRM_ID }]),
+    ] as never);
+    vi.mocked(engineerStockRepo.findEngineerBalances).mockResolvedValue([{ irmItemId: IRM_ID, quantityOnHand: 2 }] as never);
+    expect((await closeReconcile(JOB_ID, {})).unaccounted).toEqual([expect.objectContaining({ qty: 2 })]);
+  });
+
+  it("never credits a line more than that line was short by", async () => {
+    // A write-off larger than the line's own remainder (the balance had already been drained
+    // elsewhere) must not turn into a credit against a line that owes nothing.
+    mockJob.mockResolvedValue(irmJob([irmLine("k3", IRM_ID, "Cat6 Box", 2), irmLine("k4", IRM_2, "Other", 2)]) as never);
+    mockMoves.mockResolvedValue([
+      mv("issue", [{ jobKitLineId: "k3", qty: 2, condition: "good", irmItemId: IRM_ID }, { jobKitLineId: "k4", qty: 2, condition: "good", irmItemId: IRM_2 }]),
+      mv("consume", [{ jobKitLineId: null, qty: 9, condition: "lost", irmItemId: IRM_ID }]),
+    ] as never);
+    vi.mocked(engineerStockRepo.findEngineerBalances).mockResolvedValue([
+      { irmItemId: IRM_ID, quantityOnHand: 0 }, { irmItemId: IRM_2, quantityOnHand: 2 },
+    ] as never);
+
+    // k3 is settled by its own write-off; k4 belongs to a different item and is untouched by it.
+    expect((await closeReconcile(JOB_ID, {})).unaccounted).toEqual([expect.objectContaining({ itemName: "Other", qty: 2 })]);
+  });
+
+  // 15 + 16. Another job's history cannot reach this one.
+  it("reads only THIS job's movements, so another job's write-off cannot settle this one", async () => {
+    // findMovementsByJob is per job by construction — asserted here so a future optimisation that
+    // widened it would fail loudly rather than silently crediting one job's loss to another.
+    mockMoves.mockResolvedValue([
+      mv("issue", [{ jobKitLineId: "k3", qty: 4, condition: "good", irmItemId: IRM_ID }]),
+      // A line filed against a kit line this job does not own — another job's row.
+      mv("consume", [{ jobKitLineId: "kX", qty: 4, condition: "lost", irmItemId: IRM_ID }]),
+    ] as never);
+    vi.mocked(engineerStockRepo.findEngineerBalances).mockResolvedValue([{ irmItemId: IRM_ID, quantityOnHand: 4 }] as never);
+    expect((await closeReconcile(JOB_ID, {})).unaccounted).toEqual([expect.objectContaining({ qty: 4 })]);
+    expect(mockMoves).toHaveBeenCalledWith(JOB_ID);
+  });
+});

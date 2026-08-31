@@ -22,6 +22,7 @@ import {
   Truck,
   Boxes,
   ArrowRightLeft,
+  BarChart3,
   FileText,
 } from "lucide-react";
 
@@ -76,6 +77,16 @@ export const NAV: NavItem[] = [
   { href: "/dashboard/inventory", label: "Inventory", icon: Boxes, perms: ["inventory.view"] },
   // Rentals has NO top-level entry, exactly like the IRM catalogue: it is reached through the
   // Inventory Hub (Inventory → Rentals). Its deadline badges surface on the Inventory row.
+  //
+  // FINANCE, not "Reports". The client's flow separates them — Finance → Finance Reports → Report,
+  // versus Reports & Audit Trails → Custom Reports → Audit Trails — and one nav item must mean one
+  // concept. Labelling this "Reports" claimed that all reporting is financial, which stops being true
+  // the moment a stock or engineer report exists.
+  //
+  // Gated on `reports.finance.view` ALONE. `reports.view` is reserved for the general Reports hub
+  // (Custom Reports, FLOW 10B) that will take /dashboard/reports — listing it here would show a
+  // Finance row to someone who cannot see a single figure on it.
+  { href: "/dashboard/finance", label: "Finance", icon: BarChart3, perms: ["reports.finance.view"] },
   {
     // Only the perms that map to a real Settings section (see SettingsPanel). Master-data view perms
     // (warehouse/supplier/IRM types + IRM categories, and customer stock categories) belong to their
@@ -88,15 +99,33 @@ export const NAV: NavItem[] = [
     perms: ["settings.view", "email_templates.view"],
   },
   {
-    // The GLOBAL audit page. A warehouse-scoped manager holds `audit.view` for the warehouse
-    // detail's "Audit trail" tab (their warehouses only), but this system-wide page is not their
-    // surface — hide it for them. The endpoint is warehouse-scoped regardless (audit.service), so
-    // this is a UX/nav decision, not a security one.
-    href: "/dashboard/audit",
-    label: "Audit Log",
+    // Reports & Audit — the general reporting hub. Custom Reports, Scheduled Reports and the Audit
+    // Trail are tabs behind one door, which is what stops the sidebar growing a separate entry for
+    // each.
+    //
+    // Replaces the old top-level "Audit Log" row: /dashboard/audit still works and is unchanged, but
+    // a second nav entry pointing into this hub's own audit tab would be the duplicate the IA fix
+    // exists to remove. Either permission opens it; the hub shows only the tabs you hold.
+    //
+    // NO `hideForWarehouseScoped` here, unlike the Audit Log row this replaced.
+    //
+    // That flag hides the WHOLE row (lib/nav.ts), which was right when the row WAS the system-wide
+    // audit page. It is now a hub of three surfaces, so hiding all of them to hide one took Custom
+    // Reports and Scheduled Reports away from every warehouse-scoped user — including one explicitly
+    // granted `reports.view`, who then had no path to the reports they were given.
+    //
+    // The concern it existed for is real and is handled where it belongs: ReportsAuditHub drops the
+    // Audit Trail TAB for a warehouse-scoped user, so the system-wide audit surface stays out of
+    // reach while the reporting tabs remain. The audit endpoint is warehouse-scoped regardless.
+    href: "/dashboard/reports",
+    label: "Reports & Audit",
     icon: ScrollText,
-    perms: ["audit.view"],
-    hideForWarehouseScoped: true,
+    // `reports.finance.view` is here for ONE reason: Scheduled Reports lives in this hub, and a
+    // finance-only role may schedule the Finance report. Without it that role could reach the report
+    // but never automate it. It does not open Custom Reports or the Audit Trail — the hub renders
+    // only the tabs you hold, so for that role this door leads to scheduling alone. Finance still
+    // comes first in DASHBOARD_SECTIONS, so they land on /dashboard/finance, not here.
+    perms: ["reports.view", "reports.finance.view", "audit.view"],
   },
 ];
 
@@ -113,12 +142,15 @@ export const CUSTOMER_NAV: NavItem[] = [
   { href: "/dashboard/portal/sites", label: "Sites", icon: MapPin, perms: [] },
   { href: "/dashboard/stock", label: "My Stock", icon: Package, perms: [] },
   { href: "/dashboard/portal/requests", label: "Stock Submissions", icon: ClipboardList, perms: [] },
-  // No "Reports" entry. It was a placeholder page promising stock/request/movement reports "once your
-  // inventory data is connected" — and one of those three can never arrive (customer stock has no
-  // transaction ledger). What the other two would have contained is now an Export CSV button on My
-  // Stock and Stock Submissions, which is also this app's existing convention (see the audit and
-  // inventory exports): the download carries the filters you already set, rather than making you
-  // re-specify them on a second screen.
+  // Reports (FLOW 9): "Customer generates report · Filter: Date range, item type, project · Export:
+  // Excel / CSV · NO pricing shown in customer reports."
+  //
+  // This row was previously removed on the grounds that customer stock had no transaction ledger.
+  // That is no longer true — customer stock moving through engineers IS ledgered, and the unified
+  // movement feed serves it — so the report the client asked for is now a real, backed screen rather
+  // than the placeholder it once was. The per-list Export CSV buttons stay; they answer a different
+  // question ("this list, as I filtered it") from a report over a date range.
+  { href: "/dashboard/portal/reports", label: "Reports", icon: FileText, perms: [] },
   { href: "/dashboard/account", label: "Settings", icon: Settings, perms: [] },
 ];
 

@@ -85,6 +85,43 @@ export function findActiveByIds(ids: string[]): Promise<RentalItem[]> {
   return prisma.rentalItem.findMany({ where: { id: { in: ids }, status: "active", ...LIVE } });
 }
 
+/**
+ * Items among the given ids REGARDLESS of status or soft-delete — the lookup for anything describing
+ * kit that has already moved.
+ *
+ * Deliberately unfiltered, and not a variant of `findActiveByIds` with a flag. An engineer holding a
+ * tester whose catalogue entry was retired last month still has to be able to hand it back, and their
+ * return list still has to name it — filtering to `active` there would blank the row's code and
+ * silently drop the one item most urgently owed to a provider. The active filter belongs on the
+ * REQUEST path (you may not ask for a retired hire), which is a different question.
+ */
+/**
+ * A SCANNED label resolved REGARDLESS of status — the return leg's twin of `findActiveByCode`.
+ *
+ * Same rule as `findManyByIds` below, at the other end of the same journey: a retired catalogue entry
+ * must not be REQUESTABLE, but kit already in a van has to be scannable on its way home. `code` is
+ * `@unique` and never reissued, so dropping the status filter cannot resolve a different item — it
+ * resolves the same one, later in its life.
+ *
+ * Case-insensitive, matching `findActiveByCode` and for the same reason (a gun or a typed entry can
+ * arrive lowercased). Deliberately NOT a relaxation of `findByCode` above, which stays exact because
+ * it backs a route param where a loose match would let two URLs address one record.
+ *
+ * Soft-deleted entries stay excluded: a retired item is one we stopped hiring, a deleted one is a row
+ * that should never have existed, and only the first has kit in the field.
+ */
+export function findByCodeAnyStatus(code: string): Promise<RentalItemWithCategory | null> {
+  return prisma.rentalItem.findFirst({
+    where: { code: { equals: code, mode: "insensitive" }, ...LIVE },
+    include: withCategory,
+  });
+}
+
+export function findManyByIds(ids: string[]): Promise<RentalItem[]> {
+  if (ids.length === 0) return Promise.resolve([]);
+  return prisma.rentalItem.findMany({ where: { id: { in: ids } } });
+}
+
 export function update(id: string, data: Prisma.RentalItemUpdateInput): Promise<RentalItemWithCategory> {
   return prisma.rentalItem.update({ where: { id }, data, include: withCategory });
 }

@@ -59,41 +59,59 @@ function sourceFiles(dir: string, out: string[] = []): string[] {
   return out;
 }
 
+/** One scanned file: its repo-relative label, and its contents read exactly once. */
+interface Source {
+  label: string;
+  contents: string;
+}
+
+function readSources(dir: string): Source[] {
+  return sourceFiles(dir).map((file) => ({
+    label: relative(REPO_ROOT, file).split(sep).join("/"),
+    contents: readFileSync(file, "utf8"),
+  }));
+}
+
 // "path:line - offending text" for every hit, so a failure points straight at the fix.
-function badLines(file: string, contents: string, test: (line: string) => boolean): string[] {
-  const label = relative(REPO_ROOT, file).split(sep).join("/");
-  return contents
+function badLines(src: Source, test: (line: string) => boolean): string[] {
+  return src.contents
     .split("\n")
-    .map((line, i) => (test(line) ? `${label}:${i + 1} - ${line.trim()}` : null))
+    .map((line, i) => (test(line) ? `${src.label}:${i + 1} - ${line.trim()}` : null))
     .filter((hit): hit is string => hit !== null);
 }
 
 describe("source text encoding", () => {
-  const files = sourceFiles(REPO_ROOT);
+  // Walked AND read once, out here rather than inside each assertion.
+  //
+  // The three cases below used to re-read the whole tree with readFileSync, so the source of all
+  // three apps came off the disk three times over. Run alone that finished in about four seconds;
+  // run inside the full suite, sharing a disk with eighty-odd other test files, it did not - and
+  // the cases failed at random with "Test timed out in 5000ms". That is the worst way for this
+  // file to fail: a red build blaming the encoding guard for a busy disk, on a check whose whole
+  // job is to be trusted when it does go red.
+  //
+  // Module scope is evaluated at collection time and is not subject to the per-test timeout, so
+  // the reading is bounded by the disk instead of by a clock, and the assertions become pure
+  // in-memory scans. Cheaper too: one pass over the tree instead of three.
+  const sources = readSources(REPO_ROOT);
 
   it("finds source files to scan", () => {
     // Cheap canary: if the walk breaks, the other assertions would pass on an empty list.
-    expect(files.length).toBeGreaterThan(100);
+    expect(sources.length).toBeGreaterThan(100);
   });
 
   it("has no Windows-1252 mojibake", () => {
-    const hits = files.flatMap((file) =>
-      badLines(file, readFileSync(file, "utf8"), (line) => MOJIBAKE.test(line)),
-    );
+    const hits = sources.flatMap((src) => badLines(src, (line) => MOJIBAKE.test(line)));
     expect(hits).toEqual([]);
   });
 
   it("has no invalid UTF-8 bytes", () => {
-    const hits = files.flatMap((file) =>
-      badLines(file, readFileSync(file, "utf8"), (line) => line.includes(REPLACEMENT_CHAR)),
-    );
+    const hits = sources.flatMap((src) => badLines(src, (line) => line.includes(REPLACEMENT_CHAR)));
     expect(hits).toEqual([]);
   });
 
   it("has no leading byte-order mark", () => {
-    const hits = files
-      .filter((file) => readFileSync(file, "utf8").startsWith(BOM))
-      .map((file) => relative(REPO_ROOT, file).split(sep).join("/"));
+    const hits = sources.filter((src) => src.contents.startsWith(BOM)).map((src) => src.label);
     expect(hits).toEqual([]);
   });
 });

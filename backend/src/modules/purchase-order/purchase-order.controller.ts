@@ -7,7 +7,7 @@ import { actorFrom } from "../../utils/actor.js";
 import { asyncHandler } from "../../utils/async-handler.js";
 import { sendCsv } from "../../utils/csv-response.js";
 import { param, queryInt, queryStr } from "../../utils/request.js";
-import type { DeclareHireLostBody, RecoverHireLossBody } from "./purchase-order.validation.js";
+import type { DeclareHireLostBody, DismissCustodyExitBody, RecoverHireLossBody } from "./purchase-order.validation.js";
 import type {
   CreatePurchaseOrderInput,
   CreatePurchaseOrdersSplitInput,
@@ -261,6 +261,17 @@ export const recoverHireLoss = asyncHandler(async (req, res) => {
   const body = req.body as RecoverHireLossBody;
   const result = await hireLossService.recoverHireLoss(
     { exitId: param(req, "exitId"), quantity: body.quantity, notes: body.notes ?? null },
+    actorFrom(req),
+  );
+  res.json(result);
+});
+
+// POST /purchase-orders/:id/custody-exits/:exitId/dismiss
+// "Nothing is owed on this damage report." Raises no supplier document — see the service.
+export const dismissCustodyExit = asyncHandler(async (req, res) => {
+  const body = req.body as DismissCustodyExitBody;
+  const result = await hireLossService.dismissCustodyExit(
+    { exitId: param(req, "exitId"), reason: body.reason },
     actorFrom(req),
   );
   res.json(result);

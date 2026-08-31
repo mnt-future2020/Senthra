@@ -292,17 +292,23 @@ describe("computeProgress", () => {
 });
 
 describe("resolveLineApprovals (approve sourcing + hard-block)", () => {
+  // Every line here is COMPANY stock — this suite covers the IRM sourcing rules, and the rental arm
+  // has its own dedicated suite (van-stock-request.rental.test.ts). `source` is stated explicitly
+  // rather than left to a default so these read clearly beside the rental cases.
   const reqLines = [
-    { id: "L1", irmItemId: "I1", itemName: "Cable Ties", requestedQty: 2 },
-    { id: "L2", irmItemId: "I2", itemName: "CAT6", requestedQty: 2 },
+    { id: "L1", source: "irm", irmItemId: "I1", rentalItemId: null, itemName: "Cable Ties", requestedQty: 2 },
+    { id: "L2", source: "irm", irmItemId: "I2", rentalItemId: null, itemName: "CAT6", requestedQty: 2 },
   ];
+  // The rental resolver, injected but never consulted on an all-IRM request. An empty map is the
+  // honest stand-in: no rental line reaches it, so a lookup here would mean the source split is wrong.
+  const noRentals = async () => new Map<string, number>();
   const wh = { id: "PRIMARY", name: "Primary WH", code: "WH-1" };
   const activeWarehouse = async (id: string) => (id === "PRIMARY" ? wh : id === "LONDON" ? { id: "LONDON", name: "London", code: "WH-2" } : null);
 
   it("falls back to the primary warehouse when a line carries no source of its own", async () => {
     // Legacy requests (raised before the engineer picked per line) and walk-ins/returns.
     const balances = [{ irmItemId: "I1", warehouseId: "PRIMARY", quantityOnHand: 5 }, { irmItemId: "I2", warehouseId: "PRIMARY", quantityOnHand: 5 }];
-    const out = await resolveLineApprovals(reqLines, [], wh, activeWarehouse, async () => balances);
+    const out = await resolveLineApprovals(reqLines, [], wh, activeWarehouse, async () => balances, noRentals);
     expect(out.every((l) => l.sourceWarehouseId === "PRIMARY")).toBe(true);
     expect(out.map((l) => l.approvedQty)).toEqual([2, 2]);
   });
@@ -319,7 +325,7 @@ describe("resolveLineApprovals (approve sourcing + hard-block)", () => {
       { irmItemId: "I1", warehouseId: "LONDON", quantityOnHand: 5 },
       { irmItemId: "I2", warehouseId: "PRIMARY", quantityOnHand: 5 },
     ];
-    const out = await resolveLineApprovals(chosen, [], wh, activeWarehouse, async () => balances);
+    const out = await resolveLineApprovals(chosen, [], wh, activeWarehouse, async () => balances, noRentals);
     expect(out.find((l) => l.lineId === "L1")!.sourceWarehouseId).toBe("LONDON");
     expect(out.find((l) => l.lineId === "L2")!.sourceWarehouseId).toBe("PRIMARY");
   });
@@ -330,24 +336,24 @@ describe("resolveLineApprovals (approve sourcing + hard-block)", () => {
       { irmItemId: "I1", warehouseId: "PRIMARY", quantityOnHand: 5 },
       { irmItemId: "I2", warehouseId: "LONDON", quantityOnHand: 5 },
     ];
-    const out = await resolveLineApprovals(chosen, [{ lineId: "L1", approvedQty: 2, sourceWarehouseId: "PRIMARY" }], wh, activeWarehouse, async () => balances);
+    const out = await resolveLineApprovals(chosen, [{ lineId: "L1", approvedQty: 2, sourceWarehouseId: "PRIMARY" }], wh, activeWarehouse, async () => balances, noRentals);
     expect(out.find((l) => l.lineId === "L1")!.sourceWarehouseId).toBe("PRIMARY");
   });
 
   it("uses an explicit per-line source when provided", async () => {
     const balances = [{ irmItemId: "I1", warehouseId: "PRIMARY", quantityOnHand: 5 }, { irmItemId: "I2", warehouseId: "LONDON", quantityOnHand: 5 }];
-    const out = await resolveLineApprovals(reqLines, [{ lineId: "L2", approvedQty: 2, sourceWarehouseId: "LONDON" }], wh, activeWarehouse, async () => balances);
+    const out = await resolveLineApprovals(reqLines, [{ lineId: "L2", approvedQty: 2, sourceWarehouseId: "LONDON" }], wh, activeWarehouse, async () => balances, noRentals);
     expect(out.find((l) => l.lineId === "L2")!.sourceWarehouseId).toBe("LONDON");
   });
 
   it("hard-blocks: throws when a line's source has less than approvedQty", async () => {
     const balances = [{ irmItemId: "I1", warehouseId: "PRIMARY", quantityOnHand: 5 }, { irmItemId: "I2", warehouseId: "PRIMARY", quantityOnHand: 0 }];
-    await expect(resolveLineApprovals(reqLines, [], wh, activeWarehouse, async () => balances)).rejects.toThrow(/CAT6/);
+    await expect(resolveLineApprovals(reqLines, [], wh, activeWarehouse, async () => balances, noRentals)).rejects.toThrow(/CAT6/);
   });
 
   it("excluded line (approvedQty 0) skips source + availability", async () => {
     const balances = [{ irmItemId: "I1", warehouseId: "PRIMARY", quantityOnHand: 5 }]; // I2 has NO stock anywhere
-    const out = await resolveLineApprovals(reqLines, [{ lineId: "L2", approvedQty: 0 }], wh, activeWarehouse, async () => balances);
+    const out = await resolveLineApprovals(reqLines, [{ lineId: "L2", approvedQty: 0 }], wh, activeWarehouse, async () => balances, noRentals);
     const l2 = out.find((l) => l.lineId === "L2")!;
     expect(l2.approvedQty).toBe(0);
     expect(l2.sourceWarehouseId).toBeNull(); // excluded ⇒ no source
@@ -355,7 +361,7 @@ describe("resolveLineApprovals (approve sourcing + hard-block)", () => {
 
   it("rejects an inactive/unknown source warehouse", async () => {
     const balances = [{ irmItemId: "I1", warehouseId: "PRIMARY", quantityOnHand: 5 }, { irmItemId: "I2", warehouseId: "PRIMARY", quantityOnHand: 5 }];
-    await expect(resolveLineApprovals(reqLines, [{ lineId: "L2", approvedQty: 2, sourceWarehouseId: "GONE" }], wh, activeWarehouse, async () => balances)).rejects.toThrow(/no longer exists|not active|warehouse/i);
+    await expect(resolveLineApprovals(reqLines, [{ lineId: "L2", approvedQty: 2, sourceWarehouseId: "GONE" }], wh, activeWarehouse, async () => balances, noRentals)).rejects.toThrow(/no longer exists|not active|warehouse/i);
   });
 });
 

@@ -168,6 +168,44 @@ describe("scanLookup (return) — where van-sourced stock may be handed back", (
   });
 });
 
+// A reconcile write-off booked against a job before it named its kit line (jobKitLineId=null) drained
+// the engineer's balance but stayed invisible to the per-kit-line split — so the return scanner
+// advertised a phantom capacity. The IRM branch credits it; the CUSTOMER branch must too (same helper,
+// same attribution). Old behaviour: heldByEngineer = 4 (phantom); fixed: 0.
+describe("scanLookup (return) — customer-stock write-off attribution", () => {
+  const CUST_CODE = "CUSTBARCODE01";
+  beforeEach(() => {
+    mockJob.mockResolvedValue({
+      id: JOB_ID, status: "accepted", assignedEngineerId: "c".repeat(24),
+      kitLines: [{ id: "kc", lineType: "customer_stock", customerStockEntryId: CSE_ID, warehouseId: WH_ID, itemName: "Customer Router", qty: 4 }],
+    });
+    mockIrm.mockResolvedValue(null); // not an IRM code → fall through to the customer-stock branch
+    mockCseByBarcode.mockResolvedValue({ id: CSE_ID, itemName: "Customer Router", uom: "Each", quantity: 10 });
+    // Engineer still shows the item globally (e.g. held on another job) — so the LINE cap is what must
+    // clear the phantom, exactly as in the IRM live proof (JOB-2026-0015).
+    (repo.findCustomerHolding as ReturnType<typeof vi.fn>).mockResolvedValue({ quantityOnHand: 4 });
+  });
+
+  it("credits a null-kit-line customer write-off, so no phantom capacity is advertised", async () => {
+    mockMoves.mockResolvedValue([
+      { status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "kc", qty: 4, condition: "good", customerStockEntryId: CSE_ID }] },
+      // The reconcile loss, written before it named its kit line: it left the engineer's balance already.
+      { status: "posted", direction: "consume", warehouseId: null, items: [{ jobKitLineId: null, qty: 4, condition: "lost", customerStockEntryId: CSE_ID }] },
+    ]);
+    const m = await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: WH_ID, code: CUST_CODE });
+    expect(m).toMatchObject({ source: "customer", customerStockEntryId: CSE_ID, heldByEngineer: 0 });
+  });
+
+  it("leaves a genuine outstanding customer holding untouched", async () => {
+    // Only 4 issued, no write-off → still 4 out. The credit must not eat real outstanding quantity.
+    mockMoves.mockResolvedValue([
+      { status: "posted", direction: "issue", warehouseId: WH_ID, items: [{ jobKitLineId: "kc", qty: 4, condition: "good", customerStockEntryId: CSE_ID }] },
+    ]);
+    const m = await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: WH_ID, code: CUST_CODE });
+    expect(m).toMatchObject({ heldByEngineer: 4 });
+  });
+});
+
 describe("scanLookup (issue)", () => {
   it("resolves an IRM code to its kit line and reports remaining + available", async () => {
     const m = await scanLookup({ jobId: JOB_ID, direction: "issue", warehouseId: WH_ID, code: "IRM-0004" });
@@ -2472,5 +2510,173 @@ describe("closeReconcile — writing off stock the engineer never brought back",
     stage("partially_issued", daysAgo(30)); // overdue at 14 days, NOT at 60
     await expect(writeOff()).rejects.toThrow(/can only be reconciled/i);
     (getOverdueAfterDays as ReturnType<typeof vi.fn>).mockResolvedValue(14);
+  });
+});
+
+// ── THE SCANNER MUST NOT ADVERTISE UNITS A WRITE-OFF ALREADY REMOVED ────────────────────────────
+//
+// `scanLookup`'s return cap is `min(line outstanding, the engineer's global balance)`, and the line
+// outstanding is `issued − used − returned` matched on `jobKitLineId`. A reconcile write-off written
+// before it named its line was invisible to that — and unlike the reconcile screen there is no clamp
+// here that happens to mask it: the global balance is the engineer's TOTAL of the item across all
+// their work, so it clears an inflated line easily.
+//
+// Live proof, JOB-2026-0015 (both written off by GM-0113 months ago):
+//   IRS-0007  issued 8, consume 4, write-off 4 (no kit line), balance 4  → offered 4, owes 0
+//   IRM-0004  issued 3, consume 1, write-off 2 (no kit line), balance 28 → offered 2, owes 0
+//
+// The posting floor stops those units actually moving, so nothing was corrupted — but a scanner that
+// advertises stock reconciliation says does not exist sends a warehouse hunting for boxes that are not
+// there. The cap now reads through the same attribution the tallies and the reconcile gate use.
+describe("scanLookup (return) — a write-off is spent quantity", () => {
+  const OTHER_WH = "e".repeat(24);
+  const IRM_2 = "9".repeat(24);
+  const mockEngBal = engineerStockRepo.findEngineerBalance as ReturnType<typeof vi.fn>;
+  const mockVanSources = transferRepo.findVanSourcesByKitLines as ReturnType<typeof vi.fn>;
+
+  const mv = (direction: string, items: Record<string, unknown>[], status = "posted") =>
+    ({ status, direction, warehouseId: WH_ID, items });
+  /** A reconcile write-off as it was written before it named its kit line. */
+  const lost = (qty: number, irmItemId = IRM_ID, jobKitLineId: string | null = null) =>
+    ({ jobKitLineId, qty, condition: "lost", irmItemId });
+
+  beforeEach(() => {
+    // Plenty of the item on the van from other work — so the global bound cannot hide an inflated line.
+    mockEngBal.mockResolvedValue({ quantityOnHand: 28 });
+  });
+
+  // 1 + 2 + 7. The reported shape, and the number the reconcile screen gives for the same line.
+  it("does not offer the written-off units back", async () => {
+    mockMoves.mockResolvedValue([
+      mv("issue", [{ jobKitLineId: "k1", qty: 8, condition: "good", irmItemId: IRM_ID }]),
+      mv("consume", [{ jobKitLineId: "k1", qty: 4, condition: "good", irmItemId: IRM_ID }]),
+      mv("consume", [lost(4)]),
+    ]);
+    const m = await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: WH_ID, code: "IRM-0004" });
+    expect(m).toMatchObject({ source: "irm", jobKitLineId: "k1", heldByEngineer: 0 });
+  });
+
+  it("still offers the part the write-off did not cover", async () => {
+    mockMoves.mockResolvedValue([
+      mv("issue", [{ jobKitLineId: "k1", qty: 8, condition: "good", irmItemId: IRM_ID }]),
+      mv("consume", [{ jobKitLineId: "k1", qty: 2, condition: "good", irmItemId: IRM_ID }]),
+      mv("return", [{ jobKitLineId: "k1", qty: 1, condition: "good", irmItemId: IRM_ID }]),
+      mv("consume", [lost(3)]),
+    ]);
+    const m = await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: WH_ID, code: "IRM-0004" });
+    expect(m).toMatchObject({ jobKitLineId: "k1", heldByEngineer: 2 }); // 8 − 2 used − 1 back − 3 lost
+  });
+
+  // 3. What closeReconcile writes from now on: it names the line, so the ordinary path counts it — and
+  // the unattributed sweep must not credit the same units a second time.
+  it("counts an ATTRIBUTED write-off exactly once", async () => {
+    mockMoves.mockResolvedValue([
+      mv("issue", [{ jobKitLineId: "k1", qty: 8, condition: "good", irmItemId: IRM_ID }]),
+      mv("consume", [lost(3, IRM_ID, "k1")]),
+    ]);
+    const m = await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: WH_ID, code: "IRM-0004" });
+    expect(m).toMatchObject({ jobKitLineId: "k1", heldByEngineer: 5 });
+  });
+
+  // 5. Same catalogue item on two kit lines: the credit lands on the line that was short, not on both.
+  it("does not cross-bleed between two kit lines of the same item", async () => {
+    mockJob.mockResolvedValue({
+      id: JOB_ID, status: "accepted", assignedEngineerId: "c".repeat(24),
+      kitLines: [
+        { id: "k1", lineType: "irm", irmItemId: IRM_ID, warehouseId: WH_ID, itemName: "CAT6", qty: 10 },
+        { id: "k2", lineType: "irm", irmItemId: IRM_ID, warehouseId: OTHER_WH, itemName: "CAT6", qty: 10 },
+      ],
+    });
+    // k1 issued 2 (all written off), k2 issued 3 and untouched. The write-off is spread in kit-line
+    // order and capped at each line's own remainder, so it settles k1 and stops.
+    mockMoves.mockResolvedValue([
+      mv("issue", [{ jobKitLineId: "k1", qty: 2, condition: "good", irmItemId: IRM_ID }]),
+      mv("issue", [{ jobKitLineId: "k2", qty: 3, condition: "good", irmItemId: IRM_ID }]),
+      mv("consume", [lost(2)]),
+    ]);
+    expect(await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: WH_ID, code: "IRM-0004" }))
+      .toMatchObject({ jobKitLineId: "k1", heldByEngineer: 0 });
+    expect(await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: OTHER_WH, code: "IRM-0004" }))
+      .toMatchObject({ jobKitLineId: "k2", heldByEngineer: 3 });
+  });
+
+  it("leaves a DIFFERENT item's line alone", async () => {
+    mockJob.mockResolvedValue({
+      id: JOB_ID, status: "accepted", assignedEngineerId: "c".repeat(24),
+      kitLines: [{ id: "k1", lineType: "irm", irmItemId: IRM_ID, warehouseId: WH_ID, itemName: "CAT6", qty: 10 }],
+    });
+    mockMoves.mockResolvedValue([
+      mv("issue", [{ jobKitLineId: "k1", qty: 4, condition: "good", irmItemId: IRM_ID }]),
+      mv("consume", [lost(4, IRM_2)]), // a write-off of a different catalogue item
+    ]);
+    const m = await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: WH_ID, code: "IRM-0004" });
+    expect(m).toMatchObject({ jobKitLineId: "k1", heldByEngineer: 4 });
+  });
+
+  // 6. Another job's write-off cannot reach this one — the movements read is per job, and a line filed
+  // against a kit line this job does not own is ignored.
+  it("ignores a write-off filed against a kit line this job does not own", async () => {
+    mockMoves.mockResolvedValue([
+      mv("issue", [{ jobKitLineId: "k1", qty: 4, condition: "good", irmItemId: IRM_ID }]),
+      mv("consume", [lost(4, IRM_ID, "kX")]),
+    ]);
+    const m = await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: WH_ID, code: "IRM-0004" });
+    expect(m).toMatchObject({ jobKitLineId: "k1", heldByEngineer: 4 });
+    expect(mockMoves).toHaveBeenCalledWith(JOB_ID);
+  });
+
+  it("ignores a lost line on a DRAFT movement", async () => {
+    mockMoves.mockResolvedValue([
+      mv("issue", [{ jobKitLineId: "k1", qty: 4, condition: "good", irmItemId: IRM_ID }]),
+      mv("consume", [lost(4)], "draft"),
+    ]);
+    const m = await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: WH_ID, code: "IRM-0004" });
+    expect(m).toMatchObject({ jobKitLineId: "k1", heldByEngineer: 4 });
+  });
+
+  // The AWAY-from-home arm reads the same credit — unreachable in live data today (no kit line has both
+  // a van source and a write-off), but the two arms must not disagree about spent quantity.
+  it("credits the write-off on the away-from-home cap too", async () => {
+    mockEngBal.mockResolvedValue({ quantityOnHand: 28 });
+    mockMoves.mockResolvedValue([
+      mv("issue", [{ jobKitLineId: "k1", qty: 4, condition: "good", irmItemId: IRM_ID }]),
+      mv("consume", [lost(3)]),
+    ]);
+    mockVanSources.mockResolvedValue(new Map([["k1", [{ transferCode: "ENG-0026", engineerName: "sahul FE", quantity: 4, status: "completed" }]]]));
+
+    const m = await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: OTHER_WH, code: "IRM-0004" });
+    expect(m).toMatchObject({ jobKitLineId: "k1", heldByEngineer: 1 }); // van 4 − 3 written off
+  });
+
+  // 8. The ordinary path is untouched: no write-off, no change.
+  it("leaves a line with no write-off exactly as it was", async () => {
+    mockMoves.mockResolvedValue([
+      mv("issue", [{ jobKitLineId: "k1", qty: 6, condition: "good", irmItemId: IRM_ID }]),
+      mv("consume", [{ jobKitLineId: "k1", qty: 1, condition: "good", irmItemId: IRM_ID }]),
+      mv("return", [{ jobKitLineId: "k1", qty: 2, condition: "good", irmItemId: IRM_ID }]),
+    ]);
+    const m = await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: WH_ID, code: "IRM-0004" });
+    expect(m).toMatchObject({ jobKitLineId: "k1", heldByEngineer: 3 });
+  });
+
+  it("still bounds the cap by the engineer's real global balance", async () => {
+    // The write-off credit narrows the line; the global bound is still the other half of the rule.
+    mockEngBal.mockResolvedValue({ quantityOnHand: 1 });
+    mockMoves.mockResolvedValue([
+      mv("issue", [{ jobKitLineId: "k1", qty: 6, condition: "good", irmItemId: IRM_ID }]),
+      mv("consume", [lost(2)]),
+    ]);
+    const m = await scanLookup({ jobId: JOB_ID, direction: "return", warehouseId: WH_ID, code: "IRM-0004" });
+    expect(m).toMatchObject({ jobKitLineId: "k1", heldByEngineer: 1 });
+  });
+
+  // The ISSUE leg reads `remainingIssuable` off the plan, not the write-off — unchanged by design.
+  it("leaves the ISSUE leg's remaining-to-issue untouched", async () => {
+    mockMoves.mockResolvedValue([
+      mv("issue", [{ jobKitLineId: "k1", qty: 4, condition: "good", irmItemId: IRM_ID }]),
+      mv("consume", [lost(4)]),
+    ]);
+    const m = await scanLookup({ jobId: JOB_ID, direction: "issue", warehouseId: WH_ID, code: "IRM-0004" });
+    expect(m).toMatchObject({ jobKitLineId: "k1", plannedQty: 10, alreadyIssued: 4, remainingIssuable: 6 });
   });
 });

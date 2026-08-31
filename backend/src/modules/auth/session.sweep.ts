@@ -8,7 +8,7 @@ import { purgeExpiredSessions } from "./session.service.js";
  * It introduces NO new period. A session row is born with `expiresAt` set from SESSION_TTL_MS, and
  * from that moment the application treats an elapsed row as no session at all: `findActive` refuses
  * it (and deletes the one it touched), `listSessions` filters it out of the device list, and
- * `startSession` excludes it from the 2-device cap. This sweep deletes exactly those rows — data the
+ * `startSession` excludes it from the device cap. This sweep deletes exactly those rows — data the
  * app already refuses to act on. Nothing about login, logout, refresh or the device cap changes.
  *
  * What it fixes is that the existing pruning is LAZY. A row is only reconsidered when its sid is

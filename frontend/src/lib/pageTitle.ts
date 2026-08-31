@@ -20,6 +20,8 @@
 const TITLES: Record<string, string> = {
   "/dashboard": "Dashboard",
 
+  "/dashboard/finance": "Finance",
+
   // Admin suite.
   "/dashboard/users": "Users & Roles",
   // Role create/edit are their own routes but belong to the Users & Roles module.
@@ -36,6 +38,12 @@ const TITLES: Record<string, string> = {
   // its own heading card was the thing removed when page titles moved into the top bar.
   "/dashboard/inventory/history": "Stock movements",
   "/dashboard/settings": "Settings",
+  "/dashboard/reports": "Reports & Audit",
+  // The CUSTOMER portal's own reports screen (FLOW 9) — a different route and a different audience
+  // from the staff hub above.
+  "/dashboard/portal/reports": "Reports",
+  // The audit page keeps its own route and title — it is still directly linkable (the warehouse
+  // detail's audit tab and the worklist both reach it), it has simply stopped being a sidebar row.
   "/dashboard/audit": "Audit Log",
   // No nav entry (the shortcut was removed) but still reachable by deep link and from a PO.
   "/dashboard/goods-in": "Goods In",

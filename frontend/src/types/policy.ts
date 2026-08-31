@@ -23,6 +23,22 @@ export interface PublishedVersionSummary {
 }
 
 /** The management view: the working draft, what is live, and the history behind it. */
+/**
+ * One published version WITH its immutable body — the "View" read.
+ *
+ * Mirrors the backend's `PublishedVersionDetail`. Deliberately a separate shape from the summary the
+ * history list uses: the body is fetched on demand, not shipped with every row.
+ */
+export interface PublishedVersionDetail extends PublishedVersionSummary {
+  /** The immutable stored text, byte for byte. */
+  body: string;
+  /** Server-parsed, by the SAME parser the public page renders through — so what is shown is what
+   *  was served. A second parser in the browser would be a second answer to the same question. */
+  blocks: PolicyBlock[];
+  /** True when this is the version /privacy is serving right now. */
+  isCurrent: boolean;
+}
+
 export interface AdminPolicy {
   key: string;
   draftBody: string;

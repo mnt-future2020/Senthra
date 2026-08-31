@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { AlertTriangle, PackageX, Receipt, RotateCcw, Undo2 } from "lucide-react";
+import { AlertTriangle, Ban, PackageX, Receipt, RotateCcw, Undo2 } from "lucide-react";
 
 import * as rentalService from "@/services/rental.service";
 import { useDashboard } from "@/hooks/useDashboard";
@@ -85,6 +85,33 @@ const SETTLEMENT_LABEL: Record<string, string> = {
   dismissed: "Nothing owed",
 };
 
+/**
+ * The settlement tag a record shows — and, when the two disagree, what the EQUIPMENT is doing.
+ *
+ * "Nothing owed" alone is a half-truth on a dismissed damage report, and the dangerous half. It says
+ * the money question is closed, and a reader carries that straight over to the kit: dismissed sounds
+ * like withdrawn, withdrawn puts units back into the issuable pool, so "Nothing owed" on its own reads
+ * as "fixed, back on the shelf". It is not — `fieldDamageQty` still counts that unit and
+ * `hireIssuable` still subtracts it, exactly as before the charge was dropped.
+ *
+ * That gap matters more here than anywhere else in the panel, because the Damaged Stock pane filters
+ * on `unsettled` and so drops a dismissed row (just as it already drops a charged one). This timeline
+ * is unfiltered by design, which makes it the ONE screen that still lists these units — so it is the
+ * one screen that has to say what state they are in.
+ *
+ * Only `dismissed` is qualified. `unsettled` and `settled` both already imply a live record, and a
+ * dismissed report whose units have been WITHDRAWN or RECOVERED genuinely owes nothing and holds
+ * nothing — those are the cases where "Nothing owed" is the whole truth.
+ */
+export const settlementTag = (e: Pick<HireCustodyExit, "settlementState" | "custodyState">): string => {
+  if (e.settlementState !== "dismissed") return SETTLEMENT_LABEL[e.settlementState] ?? e.settlementState;
+  if (e.custodyState === "held_damaged") return "No charge · still damaged";
+  // Gone back to the provider broken, with nothing charged for it. The units are not ours to account
+  // for any more, so "still damaged" would be describing equipment we do not have.
+  if (e.custodyState === "returned_to_supplier") return "No charge · returned damaged";
+  return SETTLEMENT_LABEL.dismissed;
+};
+
 /** How many rows the panel shows before it asks. Enough to see the shape, few enough to stay short. */
 const COLLAPSED = 4;
 
@@ -135,6 +162,23 @@ export const awaitingQuote = (e: HireCustodyExit): boolean =>
 export const needsCredit = (e: HireCustodyExit): boolean =>
   e.custodyState === "recovered" && e.settlementState === "settled";
 
+/**
+ * Can this record be answered with "nothing is owed"?
+ *
+ * The third outcome beside charging it and withdrawing the note behind it, and the only one a
+ * JOB-reported damage record can reach — its source is a return movement, not a document, so there is
+ * nothing to withdraw and the charge was previously its only exit.
+ *
+ * `isOpen` carries the settlement half (unsettled, and not already withdrawn or recovered — none of
+ * which is waiting for an answer). What this adds is DAMAGE ONLY: a loss written off without charging
+ * is a decision about the whole hire rather than about one report, and the server refuses it — so the
+ * button must not be offered for one.
+ *
+ * Exported and shared with the panel for the same reason `isOpen` is: a condition written twice is a
+ * condition that eventually disagrees with itself.
+ */
+export const canDismiss = (e: HireCustodyExit): boolean => isOpen(e) && e.kind === "damage";
+
 const pillCls = (active: boolean) =>
   `rounded-md px-2.5 py-1 text-[11px] font-bold transition-colors ${
     active ? "bg-[var(--surface)] text-[var(--ink)] shadow-sm" : "text-[var(--muted)] hover:text-[var(--ink)]"
@@ -146,13 +190,19 @@ const quietTagCls = "shrink-0 rounded-full bg-[var(--surface-2)] px-2 py-0.5 tex
 // `neg` is for taking a record BACK, and it is deliberately the quietest of the three: withdrawing a
 // report or a charge is a correction, not a step forward, and it should not compete with the action
 // the panel exists to prompt.
-const rowBtnCls = (tone: "accent" | "pos" | "neg") =>
+// `plain` is the NEUTRAL tone, and dismissal is the reason it exists: answering a report with
+// "nothing is owed" is neither the money action (accent), nor equipment coming back (pos), nor an undo
+// (neg). Giving it any of those three would colour it as one of them on the one row where the whole
+// point is that it is a different kind of answer.
+const rowBtnCls = (tone: "accent" | "pos" | "neg" | "plain") =>
   `inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--border)] px-2 py-1 text-[11px] font-bold text-[var(--muted)] transition-colors disabled:opacity-50 ${
     tone === "accent"
       ? "hover:border-[var(--accent)] hover:text-[var(--accent)]"
       : tone === "pos"
         ? "hover:border-[var(--pos)] hover:text-[var(--pos)]"
-        : "hover:border-[var(--neg)] hover:text-[var(--neg)]"
+        : tone === "plain"
+          ? "hover:border-[var(--ink)] hover:text-[var(--ink)]"
+          : "hover:border-[var(--neg)] hover:text-[var(--neg)]"
   }`;
 
 export function HireCustodyTimeline({
@@ -211,6 +261,16 @@ export function HireCustodyTimeline({
    */
   const [undoing, setUndoing] = React.useState<{ exit: HireCustodyExit; kind: "report" | "charge" } | null>(null);
   const [undoReason, setUndoReason] = React.useState("");
+  /**
+   * The damage report being answered with "nothing is owed", and why.
+   *
+   * A THIRD state and not a mode of `undoing`, because it is not an undo. Withdrawing says the damage
+   * never happened and puts units back on the shelf; this says the damage DID happen, the equipment is
+   * still broken, and nobody is being billed for it. Folding them together is how a dismissal would
+   * end up quietly restoring stock.
+   */
+  const [dismissing, setDismissing] = React.useState<HireCustodyExit | null>(null);
+  const [dismissReason, setDismissReason] = React.useState("");
   /**
    * The loss being booked back in, and where it turned up.
    *
@@ -278,6 +338,40 @@ export function HireCustodyTimeline({
   };
 
   /**
+   * Answer a report with "nothing is owed".
+   *
+   * The third outcome, and the one a JOB-reported record could not reach: it has no note behind it, so
+   * there is nothing to withdraw, and the only action it was offered raised a provider document. This
+   * closes it without one.
+   *
+   * The list is refetched rather than patched locally: the server decides the resulting state, and the
+   * header counts read it back through the same predicates every other action here refreshes.
+   */
+  const doDismiss = async () => {
+    if (!dismissing || saving) return;
+    const reason = dismissReason.trim();
+    if (!reason) {
+      pushToast("Say why nothing is being charged.", "alert");
+      return;
+    }
+    setSaving(true);
+    try {
+      await rentalService.dismissCustodyExit(purchaseOrderId, dismissing.id, { reason });
+      pushToast("Marked as no charge.", "success");
+      setDismissing(null);
+      setDismissReason("");
+      setDetail(null);
+      const refreshed = await rentalService.listOrderCustodyExits(purchaseOrderId);
+      setExits(refreshed.exits);
+      onChanged?.();
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : "Could not dismiss that.", "alert");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  /**
    * Withdraw one of the two notes behind a record.
    *
    * Restores what moving damage notes out of the movements list took away. That list was the ONLY
@@ -337,6 +431,19 @@ export function HireCustodyTimeline({
     setDetail(null);
     setUndoReason("");
     setUndoing({ exit, kind });
+  };
+
+  /**
+   * `setDetail(null)` FIRST, like every sibling above, and it is not cosmetic. The detail Modal and the
+   * ConfirmDialog each install a document-level focus trap; leaving both mounted puts two on the page,
+   * so Tab is yanked back to the textarea and the confirm button cannot be reached from the keyboard,
+   * while Escape closes both at once. A helper rather than an inline handler for exactly that reason —
+   * the ordering is the contract, and it belongs where the other three keep it.
+   */
+  const openDismiss = (exit: HireCustodyExit) => {
+    setDetail(null);
+    setDismissReason("");
+    setDismissing(exit);
   };
 
   const openCharge = (e: HireCustodyExit, mode: "raise" | "quote" = "raise") => {
@@ -518,7 +625,7 @@ export function HireCustodyTimeline({
                 </span>
               ) : (
                 <span className={open ? openTagCls : quietTagCls}>
-                  {SETTLEMENT_LABEL[e.settlementState] ?? e.settlementState}
+                  {settlementTag(e)}
                 </span>
               )}
 
@@ -588,7 +695,7 @@ export function HireCustodyTimeline({
                 {CUSTODY_LABEL[detail.custodyState] ?? detail.custodyState}
               </span>
               <span className={isOpen(detail) ? openTagCls : quietTagCls}>
-                {SETTLEMENT_LABEL[detail.settlementState] ?? detail.settlementState}
+                {settlementTag(detail)}
               </span>
             </div>
 
@@ -694,6 +801,23 @@ export function HireCustodyTimeline({
                 >
                   <Receipt className="h-3.5 w-3.5" />
                   Record charge
+                </button>
+              )}
+              {/* THE OTHER ANSWER, and it belongs beside the charge rather than under the undos.
+                  Both buttons close the same question — "what does the provider get for this?" — and
+                  the two answers are "an invoice" and "nothing". Putting this among the withdrawals
+                  would file it as a correction, which it is not: nothing here was entered wrongly.
+
+                  DAMAGE only. A loss dismissed without a charge is a decision about the whole hire,
+                  not about one report, and the server refuses it — so the button is not offered. */}
+              {canDismiss(detail) && canSettle && (
+                <button
+                  type="button"
+                  onClick={() => openDismiss(detail)}
+                  className={rowBtnCls("plain")}
+                >
+                  <Ban className="h-3.5 w-3.5" />
+                  No charge
                 </button>
               )}
               {!isOpen(detail) && awaitingQuote(detail) && canSettle && (
@@ -940,6 +1064,51 @@ export function HireCustodyTimeline({
             />
             <p className="mt-1.5 text-[11px] text-[var(--faint)]">
               The note is kept and marked reversed — nothing is deleted.
+            </p>
+          </>
+        }
+      />
+
+      {/* SPELLS OUT THE HALF THAT IS COUNTER-INTUITIVE. "No charge" sounds like the record goes away,
+          and the equipment is the thing people assume follows the money. It does not: the tester is
+          still broken, still off the issuable pool, and still has to go back to the provider. Saying
+          so here is what stops this being used as a tidy-up button on the damaged list.
+
+          Not `danger`. Nothing is destroyed and nothing is reversed — this is one of the two ordinary
+          answers to an open report, and colouring it red would read as an undo. */}
+      <ConfirmDialog
+        open={Boolean(dismissing)}
+        title="No supplier charge"
+        confirmLabel="Mark as no charge"
+        busy={saving}
+        onClose={() => setDismissing(null)}
+        onConfirm={doDismiss}
+        message={
+          <>
+            Close this report with nothing owed to the provider? No damage note is raised and the{" "}
+            {dismissing?.qty === 1 ? "unit is" : "units are"} not billed
+            {/* Where the equipment actually is decides the second half of the sentence, exactly as it
+                does on the withdrawal above — promising kit stays on our shelf when the provider has
+                already collected it would be describing units we do not have. */}
+            {dismissing?.custodyState === "returned_to_supplier"
+              ? " — the equipment has already gone back to them."
+              : ` — but ${dismissing?.qty === 1 ? "it stays" : "they stay"} recorded as damaged and out of what can be sent out.`}
+          </>
+        }
+        field={
+          <>
+            {/* Required, and it is the ONLY record of the decision: a charge leaves its note behind
+                and a withdrawal leaves a reversal reason, while this leaves neither. */}
+            <textarea
+              className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+              rows={3}
+              value={dismissReason}
+              maxLength={500}
+              placeholder="Why is nothing being charged? (required)"
+              onChange={(e) => setDismissReason(e.target.value)}
+            />
+            <p className="mt-1.5 text-[11px] text-[var(--faint)]">
+              The engineer&rsquo;s report, photo and quantity are kept exactly as they are.
             </p>
           </>
         }

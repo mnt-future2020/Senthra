@@ -47,6 +47,34 @@ export function formatDateTime(iso: string | null | undefined): string {
 }
 
 /**
+ * "01 Sept 2026, 06:00 BST" — an instant rendered in a NAMED zone, with that zone shown.
+ *
+ * `formatDateTime` above renders in the VIEWER's zone, which is right for a ledger entry ("when did
+ * this happen, my time") and wrong for a scheduled report ("when will this fire"). A schedule is
+ * configured as a wall-clock time in the COMPANY timezone, so a viewer in another zone saw a row that
+ * read "Monthly on the 1st at 06:00 · Europe/London" beside "Next run: 01 Sept 2026, 10:30" — two
+ * different times for the same event, on the same row.
+ *
+ * The zone abbreviation is appended rather than left implied. It is what makes 06:00 unambiguous, and
+ * it also surfaces the DST half of the year: the same schedule reads BST in September and GMT in
+ * December, from one stored UTC instant. Nothing about storage or scheduling changes here — this
+ * formats, it does not compute.
+ *
+ * An unusable `timeZone` would make Intl throw and take the table down with it, so it falls back to
+ * the viewer's zone rather than crashing on a value that only reaches here from the database.
+ */
+export function formatDateTimeIn(iso: string | null | undefined, timeZone: string | null | undefined): string {
+  const d = parse(iso);
+  if (!d) return EMPTY;
+  if (!timeZone) return formatDateTime(iso);
+  try {
+    return d.toLocaleString("en-GB", { ...TIME_OPTS, timeZone, timeZoneName: "short" });
+  } catch {
+    return formatDateTime(iso);
+  }
+}
+
+/**
  * "03 Aug 2026" for a CALENDAR DAY — pinned to UTC.
  *
  * The variant the note at the top of this file warns is needed. A calendar day (a hire deadline, a

@@ -3,6 +3,8 @@
 import * as React from "react";
 import { Check, ChevronDown, X } from "lucide-react";
 
+import { multiSelectKey } from "./multiSelectKeys";
+
 export interface MultiSelectOption {
   value: string;
   label: string;
@@ -78,25 +80,44 @@ export function MultiSelect({
   const removeChip = (value: string) => onChange(values.filter((v) => v !== value));
 
   const onKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      if (!open) openMenu();
-      else setActiveIndex(Math.min(active + 1, filtered.length - 1));
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setActiveIndex(Math.max(active - 1, 0));
-    } else if (e.key === "Enter") {
-      if (open && filtered[active]) {
-        e.preventDefault();
-        toggle(filtered[active].value);
-      }
-    } else if (e.key === "Escape") {
-      if (open) {
-        e.preventDefault();
+    const { action, preventDefault, stopPropagation } = multiSelectKey(e.key, {
+      open,
+      active,
+      count: filtered.length,
+      query,
+      selectedCount: values.length,
+    });
+    if (preventDefault) e.preventDefault();
+    // Escape while the menu is open stops HERE — see multiSelectKeys.ts. Without it <Modal>'s own
+    // document-level Escape listener also fires and the dialog closes with the form still in it.
+    //
+    // Both calls are needed. React's synthetic stopPropagation halts React handlers above this one,
+    // but the App Router hydrates onto `document`, so React's delegated listener and Modal's own
+    // addEventListener sit on the SAME target — and same-target listeners are only stopped by
+    // stopImmediatePropagation.
+    if (stopPropagation) {
+      e.stopPropagation();
+      e.nativeEvent.stopImmediatePropagation();
+    }
+
+    switch (action.type) {
+      case "open":
+        openMenu();
+        break;
+      case "move":
+        setActiveIndex(action.index);
+        break;
+      case "toggle":
+        toggle(filtered[active]!.value);
+        break;
+      case "close":
         setOpen(false);
-      }
-    } else if (e.key === "Backspace" && query === "" && values.length > 0) {
-      removeChip(values[values.length - 1]);
+        break;
+      case "removeLast":
+        removeChip(values[values.length - 1]!);
+        break;
+      default:
+        break;
     }
   };
 

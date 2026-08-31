@@ -8,28 +8,26 @@ import { PolicyBlocks } from "@/components/policy/PolicyBlocks";
  * The public privacy notice.
  *
  * Renders the PUBLISHED policy and nothing else. The content is managed in the dashboard
- * (Settings → Legal) and published by someone holding `policy.publish`; no policy text is shipped
+ * (Settings → Privacy Policy) and published by someone holding `policy.publish`; no policy text is shipped
  * in this file, and there is no fallback that could put an unapproved draft on screen — when
  * nothing is published this page says so.
  *
- * ── THE TWO MANUAL SWITCHES ────────────────────────────────────────────────────────────────────
- * Publishing does NOT make this page discoverable, deliberately. Once the client has approved the
- * published version, two edits are required — both by hand, so that going public is a decision
- * someone takes rather than a side effect of a database write:
+ * Publicly reachable and indexable, on purpose. This page is linked from the sign-in screen
+ * (components/auth/AuthLayout.tsx) because that is the point of collection, and a data-protection
+ * notice that cannot be found is not serving its purpose.
  *
- *   1. HERE — delete the `robots` line from the metadata below.
- *   2. In `components/auth/AuthLayout.tsx` — restore the sign-in footer link (the exact markup is
- *      in the comment that replaced it).
+ * It carried `robots: { index: false, follow: false }` while the page still rendered hardcoded draft
+ * text, so an unapproved document could not be surfaced by a search engine. That guard belonged to a
+ * page that no longer exists: the content is now whatever an operator holding `policy.publish` chose
+ * to publish, and nothing is on screen that somebody did not deliberately put there.
  *
- * Until both are done the notice is reachable only by direct URL, which is what allows it to be
- * reviewed without being announced.
+ * If this page shows "no policy published", the fix is to publish one in Settings → Privacy Policy —
+ * not to unlink or de-index the page.
  */
 
 export const metadata: Metadata = {
   title: "Privacy Notice",
   description: "How this service collects and uses personal information.",
-  // MANUAL SWITCH 1 of 2 — remove once the client has approved the published policy. See above.
-  robots: { index: false, follow: false },
 };
 
 function formatDate(iso: string): string {

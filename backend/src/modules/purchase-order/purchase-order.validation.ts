@@ -345,3 +345,21 @@ export const recoverHireLossSchema = z.object({
   notes: z.string().trim().max(2000).optional(),
 });
 export type RecoverHireLossBody = z.infer<typeof recoverHireLossSchema>;
+
+/**
+ * Answering a damage report with "nothing is owed".
+ *
+ * The reason is REQUIRED, and it is the only field. Dismissal leaves no document behind it — a charge
+ * has its note and a withdrawal has the reversal reason on the note it reverses — so these words are
+ * the whole record of the decision, and `min(1)` after the trim is what stops a whitespace answer
+ * satisfying it. Deliberately free text and not an enum: "the provider agreed to absorb it on the
+ * phone" is the commonest reason and no list would have it.
+ */
+export const dismissCustodyExitSchema = z.object({
+  reason: z
+    .string()
+    .trim()
+    .min(1, "Say why nothing is being charged for this damage.")
+    .max(2000),
+});
+export type DismissCustodyExitBody = z.infer<typeof dismissCustodyExitSchema>;

@@ -35,9 +35,13 @@ export const DASHBOARD_SECTIONS: { path: string; anyOf: string[] }[] = [
   // Engineer Portal — kept after the admin modules so a staff user with real module access lands there
   // first; an engineer-only user (no other sections) falls through to their own portal dashboard.
   { path: "/dashboard/engineer", anyOf: ["engineer.dashboard.view"] },
-  // Audit log — a trailing utility section (e.g. a compliance/auditor role); a user lands here only
-  // when it's their sole section, never ahead of a real operational module or the engineer portal.
-  { path: "/dashboard/audit", anyOf: ["audit.view"] },
+  // Finance — a read-only analytical section, and the Finance Director's landing page. Kept in
+  // lockstep with the NAV row: finance-only, because `reports.view` gates the general Reports hub.
+  { path: "/dashboard/finance", anyOf: ["reports.finance.view"] },
+  // Reports & Audit — a trailing utility section (e.g. a compliance/auditor role); a user lands here
+  // only when it's their sole section, never ahead of a real operational module or the engineer
+  // portal. Kept in lockstep with the NAV row.
+  { path: "/dashboard/reports", anyOf: ["reports.view", "reports.finance.view", "audit.view"] },
 ];
 
 // The customer portal's landing inside the shared dashboard shell — the portal
