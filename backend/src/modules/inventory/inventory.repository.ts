@@ -3,6 +3,7 @@ import { Prisma, type InventoryBalance, type InventoryTransaction, type StockTra
 import { prisma, withTransaction } from "../../lib/prisma.js";
 import { conflict } from "../../utils/http-error.js";
 import { escapeRegex } from "../../utils/search.js";
+import { isEmptyWindow, type DayWindow } from "../../utils/filter-date.js";
 import { positionStatus } from "./stock-position.js";
 
 // Data-access for the Warehouse Inventory module: the inventory PRIMITIVES (on-hand balance +
@@ -258,6 +259,13 @@ export interface StockTransferListFilters {
   search?: string;
   irmItemId?: string;
   warehouseId?: string; // matches either from or to
+  /** Source warehouse only. Distinct from `warehouseId`, which matches either end — "what left
+   *  London" and "anything London touched" are different questions and the list offers both. */
+  fromWarehouseId?: string;
+  /** Destination warehouse only. */
+  toWarehouseId?: string;
+  /** Half-open window on `movementDate` — a CALENDAR DAY, so built with `calendarDayWindow`. */
+  movedWindow?: DayWindow;
   // Warehouse-access scope: undefined = unrestricted; otherwise the row must touch (from OR to) an
   // assigned warehouse. ANDed on top of any single-warehouse filter.
   warehouseIds?: string[];
@@ -267,6 +275,9 @@ function buildTransferWhere(filters: StockTransferListFilters): Prisma.StockTran
   const and: Prisma.StockTransferWhereInput[] = [{ deletedAt: null }];
   if (filters.irmItemId) and.push({ irmItemId: filters.irmItemId });
   if (filters.warehouseId) and.push({ OR: [{ fromWarehouseId: filters.warehouseId }, { toWarehouseId: filters.warehouseId }] });
+  if (filters.fromWarehouseId) and.push({ fromWarehouseId: filters.fromWarehouseId });
+  if (filters.toWarehouseId) and.push({ toWarehouseId: filters.toWarehouseId });
+  if (filters.movedWindow && !isEmptyWindow(filters.movedWindow)) and.push({ movementDate: filters.movedWindow });
   if (filters.warehouseIds !== undefined) and.push({ OR: [{ fromWarehouseId: { in: filters.warehouseIds } }, { toWarehouseId: { in: filters.warehouseIds } }] });
   if (filters.search) {
     const s = escapeRegex(filters.search);

@@ -16,8 +16,13 @@ import { CELL_ONE_LINE, colClass, colClassAt, tableMinWidth, type ColPriority } 
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { AttentionBar } from "@/components/dashboard/shell/AttentionBar";
-import { HireStateBadge, PO_DERIVED_STATUS_OPTIONS, PO_STATUS_LABELS, PoPriorityLabel, PoStatusBadge, formatDate, formatMoney } from "./poStatus";
-import type { PoStatus, PurchaseOrder } from "@/types/purchase-order";
+import { HireStateBadge, PO_DERIVED_STATUS_OPTIONS, PO_PRIORITY_LABELS, PO_STATUS_LABELS, PoPriorityLabel, PoStatusBadge, formatDate, formatMoney } from "./poStatus";
+import { FilterPopover } from "@/components/ui/FilterPopover";
+import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
+import { useReferenceData } from "@/hooks/useReferenceData";
+import { listSuppliers, type PagedSuppliers } from "@/services/supplier.service";
+import { listWarehouses, type PagedWarehouses } from "@/services/warehouse.service";
+import type { PoPriority, PoStatus, PurchaseOrder } from "@/types/purchase-order";
 
 const PAGE_SIZE = 20;
 
@@ -165,6 +170,15 @@ export function PurchaseOrdersView() {
   // "Awaiting my action" — the PM worklist (orders in pm_review assigned to me). Overrides the
   // status filter while active; only offered to users who can actually send (i.e. act as a PM).
   const awaitingMine = searchParams.get("awaiting") === "1";
+  const supplierFilter = searchParams.get("supplier") ?? "";
+  const warehouseFilter = searchParams.get("warehouse") ?? "";
+  const priorityFilter = searchParams.get("priority") ?? "";
+  // `orderDate` is an INSTANT; `expectedDeliveryDate` is a calendar day the buyer typed. The server
+  // knows the difference and windows each correctly — both arrive here as plain calendar days.
+  const orderedFrom = searchParams.get("orderedFrom") ?? "";
+  const orderedTo = searchParams.get("orderedTo") ?? "";
+  const expectedFrom = searchParams.get("expectedFrom") ?? "";
+  const expectedTo = searchParams.get("expectedTo") ?? "";
   const search = searchParams.get("q") ?? "";
   const page = Math.max(1, Number(searchParams.get("page")) || 1);
 
@@ -214,12 +228,40 @@ export function PurchaseOrdersView() {
   // The filters WITHOUT paging — one definition, used by the list (which adds the page) and by the
   // CSV export (which must not). Two copies is how a download quietly stops matching the screen it
   // was taken from, and nothing about the resulting file looks wrong.
+  // Filter dropdown sources. Both degrade to an empty list, which renders as "All …" — a PO user
+  // need not hold `suppliers.view`, and a control that 403s on use is worse than one that cannot
+  // narrow.
+  const [supplierOptions, setSupplierOptions] = React.useState<{ value: string; label: string }[]>([]);
+  const [warehouseOptions, setWarehouseOptions] = React.useState<{ value: string; label: string }[]>([]);
+  useReferenceData([
+    {
+      label: "po-suppliers",
+      load: () => listSuppliers({ status: "active", pageSize: 200 }),
+      onData: (r: PagedSuppliers) => setSupplierOptions(r.suppliers.map((x) => ({ value: x.id, label: x.name }))),
+    },
+    {
+      label: "po-warehouses",
+      load: () => listWarehouses({ status: "active", pageSize: 200 }),
+      onData: (r: PagedWarehouses) => setWarehouseOptions(r.warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))),
+    },
+  ]);
+
   const exportParams = React.useMemo(
-    () =>
-      awaitingMine
-        ? { search: search || undefined, status: "pm_review", pm: "me" }
-        : { search: search || undefined, status: statusFilter === "all" ? undefined : statusFilter },
-    [awaitingMine, search, statusFilter],
+    () => ({
+      // The PM worklist pins status+pm; every other filter still narrows within it.
+      ...(awaitingMine
+        ? { status: "pm_review", pm: "me" }
+        : { status: statusFilter === "all" ? undefined : statusFilter }),
+      search: search || undefined,
+      supplier: supplierFilter || undefined,
+      warehouse: warehouseFilter || undefined,
+      priority: priorityFilter || undefined,
+      orderedFrom: orderedFrom || undefined,
+      orderedTo: orderedTo || undefined,
+      expectedFrom: expectedFrom || undefined,
+      expectedTo: expectedTo || undefined,
+    }),
+    [awaitingMine, search, statusFilter, supplierFilter, warehouseFilter, priorityFilter, orderedFrom, orderedTo, expectedFrom, expectedTo],
   );
 
   React.useEffect(() => {
@@ -307,6 +349,45 @@ export function PurchaseOrdersView() {
             Awaiting my action
           </button>
         )}
+        {/* Supplier, warehouse, priority and the two date windows fold away behind one count. All
+            five were already accepted by the API and simply never offered here — this list could be
+            narrowed to a status and nothing else. */}
+        <FilterPopover
+          activeCount={
+            (supplierFilter ? 1 : 0) +
+            (warehouseFilter ? 1 : 0) +
+            (priorityFilter ? 1 : 0) +
+            (orderedFrom || orderedTo ? 1 : 0) +
+            (expectedFrom || expectedTo ? 1 : 0)
+          }
+          onClear={() =>
+            patchParams(
+              { supplier: null, warehouse: null, priority: null, orderedFrom: null, orderedTo: null, expectedFrom: null, expectedTo: null },
+              true,
+            )
+          }
+        >
+          <Select size="sm" value={supplierFilter} onChange={(v) => patchParams({ supplier: v || null }, true)} options={[{ value: "", label: "All suppliers" }, ...supplierOptions]} ariaLabel="Filter by supplier" />
+          <Select size="sm" value={warehouseFilter} onChange={(v) => patchParams({ warehouse: v || null }, true)} options={[{ value: "", label: "All warehouses" }, ...warehouseOptions]} ariaLabel="Filter by warehouse" />
+          <Select size="sm" value={priorityFilter} onChange={(v) => patchParams({ priority: v || null }, true)} options={[{ value: "", label: "Any priority" }, ...(Object.keys(PO_PRIORITY_LABELS) as PoPriority[]).map((p) => ({ value: p, label: PO_PRIORITY_LABELS[p] }))]} ariaLabel="Filter by priority" />
+          {/* Two SEPARATE windows because they answer different questions: when we placed the order,
+              and when the supplier said it lands. Overdue stays in the status list — it is derived
+              from the server's own clock, not a range a browser can express. */}
+          <DateRangeFilter
+            label="Order date"
+            showLabel
+            from={orderedFrom}
+            to={orderedTo}
+            onChange={({ from, to }) => patchParams({ orderedFrom: from || null, orderedTo: to || null }, true)}
+          />
+          <DateRangeFilter
+            label="Expected"
+            showLabel
+            from={expectedFrom}
+            to={expectedTo}
+            onChange={({ from, to }) => patchParams({ expectedFrom: from || null, expectedTo: to || null }, true)}
+          />
+        </FilterPopover>
         {/* Before "New order" and outside its ml-auto, so the primary action stays hard right. */}
         {can("purchase_orders.export") && (
           <>

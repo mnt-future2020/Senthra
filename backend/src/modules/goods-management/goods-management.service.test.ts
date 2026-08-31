@@ -437,7 +437,9 @@ describe("listQueue", () => {
   it("trims + forwards the search term to the DB query", async () => {
     mockFindActive.mockResolvedValue([]);
     await listQueue({ warehouseId: WH_ID, search: "  CAT6  " });
-    expect(mockFindActive).toHaveBeenCalledWith(WH_ID, "CAT6");
+    // The queue's JOB-level filters all travel together in one object so they reach the DB rather
+    // than being applied over the candidate set in memory.
+    expect(mockFindActive).toHaveBeenCalledWith(WH_ID, expect.objectContaining({ search: "CAT6" }));
   });
 
   it("rejects an invalid status filter", async () => {
@@ -1566,7 +1568,7 @@ describe("listDamaged", () => {
   });
 
   it("filters by warehouseId and returns rows without cost/value", async () => {
-    const rows = await listDamaged({ warehouseId: WH_ID });
+    const { rows } = await listDamaged({ warehouseId: WH_ID });
     expect(mockFindDamagedByWarehouse).toHaveBeenCalledWith(WH_ID);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ id: "dmg1", warehouseId: WH_ID, ownerType: "company", irmItemId: IRM_ID, quantity: 3 });
@@ -1578,14 +1580,14 @@ describe("listDamaged", () => {
   it("filters by customerId and returns customer-owned damaged rows", async () => {
     const customerDamagedRow = { ...damagedRow, id: "dmg2", ownerType: "customer", customerId: "cust1", irmItemId: null, customerStockEntryId: CSE_ID, itemName: "SFP-LX", quantity: 1 };
     mockFindDamagedByCustomer.mockResolvedValue([customerDamagedRow]);
-    const rows = await listDamaged({ customerId: "cust1" });
+    const { rows } = await listDamaged({ customerId: "cust1" });
     expect(mockFindDamagedByCustomer).toHaveBeenCalledWith("cust1");
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ id: "dmg2", ownerType: "customer", customerStockEntryId: CSE_ID, quantity: 1 });
   });
 
   it("returns all damaged rows for a global actor when no filter given", async () => {
-    const rows = await listDamaged({});
+    const { rows } = await listDamaged({});
     expect(mockFindAllDamaged).toHaveBeenCalled();
     expect(rows).toHaveLength(1);
   });

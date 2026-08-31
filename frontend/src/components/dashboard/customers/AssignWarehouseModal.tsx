@@ -10,6 +10,7 @@ import { Modal } from "@/components/ui/Modal";
 import { Select } from "@/components/ui/Select";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import { NumberInput } from "@/components/ui/NumberInput";
+import { shouldPrefillAssignment } from "@/lib/preferredWarehouse";
 import type { StockRequest } from "@/types/customer";
 
 interface Row {
@@ -35,8 +36,26 @@ export function AssignWarehouseModal({
   const [error, setError] = React.useState<string | null>(null);
 
   const { isLoading: refLoading } = useReferenceData([
-    { label: "warehouses", load: () => listWarehouses({ status: "active", pageSize: 200 }), onData: (r: PagedWarehouses) => setWarehouses(r.warehouses.map((w) => ({ id: w.id, name: w.name, code: w.code }))) },
+    {
+      label: "warehouses",
+      load: () => listWarehouses({ status: "active", pageSize: 200 }),
+      onData: (r: PagedWarehouses) => {
+        const list = r.warehouses.map((w) => ({ id: w.id, name: w.name, code: w.code }));
+        setWarehouses(list);
+        // Pre-fill the first row with the customer's PREFERENCE — a starting point, nothing more.
+        // Gated on the warehouse still being in the ACTIVE list we just loaded, so a warehouse
+        // deactivated since submission is never pre-selected into an assignment.
+        //
+        // Only ever touches the untouched initial row: this fires once the reference data lands,
+        // and overwriting a warehouse the reviewer had already chosen would be the modal fighting
+        // them. Everything after this point is entirely theirs to change or split.
+        const preferred = request.preferredWarehouseId;
+        setRows((p) => (shouldPrefillAssignment(preferred, list, p) ? [{ ...p[0], warehouseId: preferred! }] : p));
+      },
+    },
   ]);
+
+  const preferredName = request.preferredWarehouseName;
 
   const addRow = () => setRows((p) => [...p, { warehouseId: "", quantity: "" }]);
   const removeRow = (i: number) => setRows((p) => p.filter((_, idx) => idx !== i));
@@ -105,6 +124,15 @@ export function AssignWarehouseModal({
       }
     >
       <form id="assign-form" onSubmit={submit} className="space-y-4">
+        {/* States whose choice this was, and that it isn't binding. Shown even when the preferred
+            warehouse is inactive (and so wasn't pre-filled) — the reviewer still needs to know what
+            the customer asked for before they pick something else. */}
+        {preferredName && (
+          <p className="text-[11px] text-[var(--muted)]">
+            <span className="font-semibold text-[var(--faint)]">Customer preferred:</span> {preferredName}
+            {" — a preference only. Assign any warehouse, or split across several."}
+          </p>
+        )}
         {rows.map((row, i) => (
           <div key={i} className="flex items-end gap-2">
             <div className="flex-1">

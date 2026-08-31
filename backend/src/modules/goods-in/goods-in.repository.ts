@@ -3,6 +3,7 @@ import { Prisma, type GoodsReceipt, type GoodsReceiptAttachment } from "@prisma/
 import { prisma, withTransaction } from "../../lib/prisma.js";
 import { conflict } from "../../utils/http-error.js";
 import { escapeRegex } from "../../utils/search.js";
+import { isEmptyWindow, type DayWindow } from "../../utils/filter-date.js";
 
 // Friendly message when the DB serial-uniqueness backstop fires (a concurrent receipt grabbed the
 // same serial between our app-level check and our write).
@@ -130,6 +131,8 @@ export interface GoodsReceiptListFilters {
    *  `supplierId` snapshot on the receipt (there is no FK; it is resolved from the PO at creation),
    *  which is what `@@index([supplierId])` on GoodsReceipt exists to serve. */
   supplierId?: string;
+  /** Half-open window on `receivedDate` — a CALENDAR DAY, so built with `calendarDayWindow`. */
+  receivedWindow?: DayWindow;
 }
 
 function buildWhere(filters: GoodsReceiptListFilters): Prisma.GoodsReceiptWhereInput {
@@ -139,6 +142,7 @@ function buildWhere(filters: GoodsReceiptListFilters): Prisma.GoodsReceiptWhereI
   if (filters.warehouseIds !== undefined) where.warehouseId = { ...(where.warehouseId ? { equals: where.warehouseId as string } : {}), in: filters.warehouseIds };
   if (filters.purchaseOrderId) where.purchaseOrderId = filters.purchaseOrderId;
   if (filters.supplierId) where.supplierId = filters.supplierId;
+  if (filters.receivedWindow && !isEmptyWindow(filters.receivedWindow)) where.receivedDate = filters.receivedWindow;
   if (filters.search) {
     const q = escapeRegex(filters.search);
     where.OR = [

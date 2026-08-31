@@ -12,6 +12,9 @@ import type { WarehouseManager } from "@/types/warehouse";
 import { useAuth } from "@/hooks/useAuth";
 import { ExportButton } from "@/components/ui/ExportButton";
 import { FilterPopover } from "@/components/ui/FilterPopover";
+import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
+import { SitePicker, siteOptionLabel } from "@/components/ui/SitePicker";
+import { listCustomerProjects } from "@/services/customer.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
 import { useJobSocket } from "@/hooks/useJobSocket";
@@ -21,7 +24,7 @@ import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { AttentionBar } from "@/components/dashboard/shell/AttentionBar";
-import { JOB_STATUS_LABELS, JOB_LINE_TYPE_LABELS, JobStatusChip, GoodsStatusChip, formatDate } from "./jobStatus";
+import { JOB_STATUS_LABELS, JOB_LINE_TYPE_LABELS, JOB_PRIORITIES, JOB_PRIORITY_LABELS, JobStatusChip, GoodsStatusChip, formatDate } from "./jobStatus";
 import { CELL_ONE_LINE, colClass, colClassAt, tableMinWidth, type ColPriority } from "@/components/ui/tableLayout";
 import type { Job, JobStatus } from "@/types/job";
 
@@ -133,6 +136,13 @@ export function JobsView() {
   const statusFilter = (searchParams.get("status") ?? "all") as "all" | "overdue" | JobStatus;
   const customer = searchParams.get("customer") ?? "";
   const engineer = searchParams.get("engineer") ?? "";
+  const site = searchParams.get("site") ?? "";
+  const project = searchParams.get("project") ?? "";
+  const priority = searchParams.get("priority") ?? "";
+  // The DUE date — `Job.completionDate`, the field every overdue badge in this app is built on.
+  // Sent as calendar days; the server owns what day that is.
+  const dueFrom = searchParams.get("dueFrom") ?? "";
+  const dueTo = searchParams.get("dueTo") ?? "";
   const page = Math.max(1, Number(searchParams.get("page")) || 1);
 
   // Local input box; debounce-writes to ?q.
@@ -155,6 +165,16 @@ export function JobsView() {
   const [deleting, setDeleting] = React.useState(false);
   const [customers, setCustomers] = React.useState<{ id: string; name: string }[]>([]);
   const [engineers, setEngineers] = React.useState<{ id: string; name: string }[]>([]);
+  const [projects, setProjects] = React.useState<{ id: string; name: string }[]>([]);
+  // The picked site's label. A search result is not a complete set, so a selected id cannot be
+  // looked up in the options — it is remembered here when the user picks it.
+  const [siteLabel, setSiteLabel] = React.useState<string | null>(null);
+  // Bound to the customer filter when one is set: sites belong to a company, and narrowing the
+  // search to the customer already chosen is what makes the list short enough to read.
+  const searchSites = React.useCallback(
+    (term: string) => jobService.searchJobSites(term, customer || undefined).then((r) => r.sites),
+    [customer],
+  );
 
   // ── URL patch helper ────────────────────────────────────────────────────────
   // Preserves ALL existing params so hosting pages' ?tab etc. are never clobbered.
@@ -193,8 +213,13 @@ export function JobsView() {
       status: statusFilter === "all" ? undefined : statusFilter,
       customer: customer || undefined,
       engineer: engineer || undefined,
+      site: site || undefined,
+      project: project || undefined,
+      priority: priority || undefined,
+      dueFrom: dueFrom || undefined,
+      dueTo: dueTo || undefined,
     }),
-    [search, statusFilter, customer, engineer],
+    [search, statusFilter, customer, engineer, site, project, priority, dueFrom, dueTo],
   );
 
   React.useEffect(() => {
@@ -208,6 +233,20 @@ export function JobsView() {
     { label: "customers", load: () => listCustomers({ status: "active", pageSize: 200 }), onData: (r: PagedCustomers) => setCustomers(r.customers.map((c) => ({ id: c.id, name: c.name }))) },
     { label: "engineers", load: () => listEngineerOptions(), onData: (us: WarehouseManager[]) => setEngineers(us.map((u) => ({ id: u.id, name: u.name }))) },
   ]);
+
+  // Projects belong to a customer, so the picker only has a bounded set to offer once one is chosen.
+  // Without a customer it stays empty and reads as "All projects", which is honest: there is no
+  // company-wide project list to narrow by.
+  React.useEffect(() => {
+    let alive = true;
+    // No customer → resolve to an empty list through the SAME async path rather than clearing state
+    // synchronously in the effect body (a cascading render the React-Compiler lint rejects).
+    const load = customer
+      ? listCustomerProjects(customer, { pageSize: 200 }).then((r) => r.projects.map((pr) => ({ id: pr.id, name: pr.name })))
+      : Promise.resolve([] as { id: string; name: string }[]);
+    void load.then((rows) => { if (alive) setProjects(rows); }).catch(() => { if (alive) setProjects([]); });
+    return () => { alive = false; };
+  }, [customer]);
 
   React.useEffect(() => {
     let active = true;
@@ -267,12 +306,40 @@ export function JobsView() {
             they are the two widest controls in the row (a customer name and a full engineer name).
             The trigger carries the ACTIVE count so a list narrowed to one engineer can never be
             mistaken for a quiet week. */}
+        {/* ENGINEER stays out in the open beside status. It is the question this list is read by on
+            a dispatch day — "what is Dave on" — and burying the answer behind a menu makes the
+            commonest use of the screen a two-click one. */}
+        <Select size="sm" value={engineer} onChange={(v) => patchParams({ engineer: v || null }, true)} options={[{ value: "", label: "All engineers" }, ...engineers.map((u) => ({ value: u.id, label: u.name }))]} ariaLabel="Filter by engineer" />
+        {/* SITE is its own control rather than a Select: a customer can hold thousands of sites, so
+            the options are searched server-side. See SitePicker for why a dropdown is wrong here. */}
+        <SitePicker
+          value={site}
+          selectedLabel={siteLabel}
+          search={searchSites}
+          onChange={(id, option) => {
+            setSiteLabel(option ? siteOptionLabel(option) : null);
+            patchParams({ site: id || null }, true);
+          }}
+        />
         <FilterPopover
-          activeCount={(customer ? 1 : 0) + (engineer ? 1 : 0)}
-          onClear={() => patchParams({ customer: null, engineer: null }, true)}
+          activeCount={
+            (customer ? 1 : 0) + (project ? 1 : 0) + (priority ? 1 : 0) + (dueFrom || dueTo ? 1 : 0)
+          }
+          onClear={() => patchParams({ customer: null, project: null, priority: null, dueFrom: null, dueTo: null }, true)}
         >
-          <Select size="sm" value={customer} onChange={(v) => patchParams({ customer: v || null }, true)} options={[{ value: "", label: "All customers" }, ...customers.map((c) => ({ value: c.id, label: c.name }))]} ariaLabel="Filter by customer" />
-          <Select size="sm" value={engineer} onChange={(v) => patchParams({ engineer: v || null }, true)} options={[{ value: "", label: "All engineers" }, ...engineers.map((u) => ({ value: u.id, label: u.name }))]} ariaLabel="Filter by engineer" />
+          <Select size="sm" value={customer} onChange={(v) => patchParams({ customer: v || null, site: null }, true)} options={[{ value: "", label: "All customers" }, ...customers.map((c) => ({ value: c.id, label: c.name }))]} ariaLabel="Filter by customer" />
+          <Select size="sm" value={project} onChange={(v) => patchParams({ project: v || null }, true)} options={[{ value: "", label: "All projects" }, ...projects.map((p) => ({ value: p.id, label: p.name }))]} ariaLabel="Filter by project" />
+          <Select size="sm" value={priority} onChange={(v) => patchParams({ priority: v || null }, true)} options={[{ value: "", label: "Any priority" }, ...JOB_PRIORITIES.map((p) => ({ value: p, label: JOB_PRIORITY_LABELS[p] }))]} ariaLabel="Filter by priority" />
+          {/* The DUE date range. "Overdue" is not here — it lives in the status list beside it,
+              because it is a derived state the server resolves against ITS clock, not a range a
+              browser can express. */}
+          <DateRangeFilter
+            label="Due date"
+            showLabel
+            from={dueFrom}
+            to={dueTo}
+            onChange={({ from, to }) => patchParams({ dueFrom: from || null, dueTo: to || null }, true)}
+          />
         </FilterPopover>
         {/* Breakdown of the sidebar's Jobs badge — rejected jobs to reassign, overdue work, jobs
             awaiting acceptance, kit requests to review. It sat in a row of its own above this card, costing a

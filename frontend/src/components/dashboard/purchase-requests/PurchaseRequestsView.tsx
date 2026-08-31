@@ -11,6 +11,7 @@ import { listWarehouses } from "@/services/warehouse.service";
 import { useAuth } from "@/hooks/useAuth";
 import { ExportButton } from "@/components/ui/ExportButton";
 import { FilterPopover } from "@/components/ui/FilterPopover";
+import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
 import { useDashboard } from "@/hooks/useDashboard";
 import { usePurchaseRequestSocket } from "@/hooks/usePurchaseRequestSocket";
 import { useReferenceData } from "@/hooks/useReferenceData";
@@ -167,6 +168,11 @@ export function PurchaseRequestsView() {
   const statusFilter = (searchParams.get("status") as "all" | "rework" | PrfStatus) ?? "all";
   const supplierFilter = searchParams.get("supplier") ?? "";
   const warehouseFilter = searchParams.get("warehouse") ?? "";
+  // Both are CALENDAR DAYS somebody typed on the request form — no timezone conversion applies.
+  const requiredFrom = searchParams.get("requiredFrom") ?? "";
+  const requiredTo = searchParams.get("requiredTo") ?? "";
+  const validFrom = searchParams.get("validFrom") ?? "";
+  const validTo = searchParams.get("validTo") ?? "";
   const search = searchParams.get("q") ?? "";
   const page = Math.max(1, Number(searchParams.get("page")) || 1);
 
@@ -230,8 +236,12 @@ export function PurchaseRequestsView() {
       status: statusFilter === "all" ? undefined : statusFilter,
       supplier: supplierFilter || undefined,
       warehouse: warehouseFilter || undefined,
+      requiredFrom: requiredFrom || undefined,
+      requiredTo: requiredTo || undefined,
+      validFrom: validFrom || undefined,
+      validTo: validTo || undefined,
     }),
-    [search, statusFilter, supplierFilter, warehouseFilter],
+    [search, statusFilter, supplierFilter, warehouseFilter, requiredFrom, requiredTo, validFrom, validTo],
   );
 
   React.useEffect(() => {
@@ -313,12 +323,35 @@ export function PurchaseRequestsView() {
             is what makes folding them safe. A narrowed list must never be mistakable for a short one.
             Search stays outside; it is the one people touch on every visit. */}
         <FilterPopover
-          activeCount={(statusFilter !== "all" ? 1 : 0) + (supplierFilter ? 1 : 0) + (warehouseFilter ? 1 : 0)}
-          onClear={() => patchParams({ status: null, supplier: null, warehouse: null }, true)}
+          activeCount={
+            (requiredFrom || requiredTo ? 1 : 0) +
+            (validFrom || validTo ? 1 : 0) +
+            (statusFilter !== "all" ? 1 : 0) +
+            (supplierFilter ? 1 : 0) +
+            (warehouseFilter ? 1 : 0)
+          }
+          onClear={() => patchParams({ status: null, supplier: null, warehouse: null, requiredFrom: null, requiredTo: null, validFrom: null, validTo: null }, true)}
         >
           <Select size="sm" value={statusFilter} onChange={(v) => patchParams({ status: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All statuses" }, ...PRF_DERIVED_STATUS_OPTIONS, ...(Object.keys(PRF_STATUS_LABELS) as PrfStatus[]).map((s) => ({ value: s, label: PRF_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
           <Select size="sm" value={supplierFilter || "all"} onChange={(v) => patchParams({ supplier: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All suppliers" }, ...suppliers.map((s) => ({ value: s.id, label: s.name }))]} ariaLabel="Filter by supplier" />
           <Select size="sm" value={warehouseFilter || "all"} onChange={(v) => patchParams({ warehouse: v === "all" ? null : v }, true)} options={[{ value: "all", label: "All warehouses" }, ...warehouses.map((w) => ({ value: w.id, label: w.name }))]} ariaLabel="Filter by warehouse" />
+          {/* WHEN THE GOODS ARE NEEDED — the question a buyer prioritises by, and the field the
+              generated PO inherits its expected delivery date from. */}
+          <DateRangeFilter
+            label="Required by"
+            showLabel
+            from={requiredFrom}
+            to={requiredTo}
+            onChange={({ from, to }) => patchParams({ requiredFrom: from || null, requiredTo: to || null }, true)}
+          />
+          {/* The quote's expiry — the "Valid Until" column, which had no way to be filtered on. */}
+          <DateRangeFilter
+            label="Quote valid until"
+            showLabel
+            from={validFrom}
+            to={validTo}
+            onChange={({ from, to }) => patchParams({ validFrom: from || null, validTo: to || null }, true)}
+          />
         </FilterPopover>
         {/* Before "New request" and outside its ml-auto, so the primary action stays hard right. */}
         {can("purchase_requests.export") && (

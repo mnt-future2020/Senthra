@@ -12,6 +12,8 @@ import { Select } from "@/components/ui/Select";
 import { primaryBtn } from "@/components/ui/styles";
 import { WorkspaceToolbar } from "@/components/ui/WorkspaceToolbar";
 import { FilterPopover } from "@/components/ui/FilterPopover";
+import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
+import { listEngineerOptions } from "@/services/warehouse.service";
 import { EmptyState, fmtDateTime } from "@/components/dashboard/portal/portalUi";
 import { VAN_STOCK_PRIORITY_OPTIONS, readPriorityParam, VanRequestItemsSummary, VanRequestLinesTable, VanRequestListSkeleton, VanStockCompletionBadge, VanStockTypeBadge, VanStockWalkInBadge, linesForWarehouse, warehouseCaption, warehouseStatus } from "./vanRequestUi";
 
@@ -79,6 +81,11 @@ export function VanRequestsBoard({
   const createdVia = searchParams.get("vOrigin") ?? "";
   const sort = searchParams.get("vSort") ?? "newest";
   const urlSearch = searchParams.get("vSearch") ?? "";
+  // The engineer who RAISED the request, and when. `createdAt` is an instant — the server windows it
+  // in company time, so a reviewer in another zone still gets the depot's day.
+  const engineerFilter = searchParams.get("vEngineer") ?? "";
+  const raisedFrom = searchParams.get("vFrom") ?? "";
+  const raisedTo = searchParams.get("vTo") ?? "";
   const page = Math.max(1, Number(searchParams.get("vPage")) || 1);
 
   const patch = React.useCallback(
@@ -95,6 +102,16 @@ export function VanRequestsBoard({
   const setPage = React.useCallback((p: number) => patch({ vPage: p > 1 ? String(p) : null }), [patch]);
   // A filter/sort change also resets to page 1, so you're never stranded on a now-empty page.
   const onFilter = (key: string) => (v: string) => patch({ [key]: v || null, vPage: null });
+
+  // Engineer options — degrades to empty, which renders as "All engineers".
+  const [engineerOptions, setEngineerOptions] = React.useState<{ value: string; label: string }[]>([]);
+  React.useEffect(() => {
+    let alive = true;
+    listEngineerOptions()
+      .then((us) => alive && setEngineerOptions(us.map((u) => ({ value: u.id, label: u.name }))))
+      .catch(() => alive && setEngineerOptions([]));
+    return () => { alive = false; };
+  }, []);
 
   const [requests, setRequests] = React.useState<VanStockRequest[] | null>(null);
   const [meta, setMeta] = React.useState({ total: 0, totalPages: 1 });
@@ -114,7 +131,21 @@ export function VanRequestsBoard({
 
   const load = React.useCallback(() => {
     vanStockSvc
-      .listVanStockRequests({ status: status || undefined, type: type || undefined, priority: priority || undefined, createdVia: createdVia || undefined, search: urlSearch || undefined, warehouseId: warehouse.id, page, pageSize: PAGE_SIZE, sort: sort as "newest" | "oldest" })
+      .listVanStockRequests({
+        status: status || undefined,
+        type: type || undefined,
+        priority: priority || undefined,
+        createdVia: createdVia || undefined,
+        search: urlSearch || undefined,
+        engineerId: engineerFilter || undefined,
+        raisedFrom: raisedFrom || undefined,
+        raisedTo: raisedTo || undefined,
+        // The warehouse is the PAGE's, never the query string's — the server also re-checks access.
+        warehouseId: warehouse.id,
+        page,
+        pageSize: PAGE_SIZE,
+        sort: sort as "newest" | "oldest",
+      })
       .then((r) => {
         // A filter change resets to page 1, but a DATA change (another reviewer fulfils the last
         // pending request on this page) doesn't — totalPages drops below `page`, the server returns
@@ -127,7 +158,7 @@ export function VanRequestsBoard({
         setError(null);
       })
       .catch((err) => { setRequests([]); setMeta({ total: 0, totalPages: 1 }); setError(err instanceof Error ? err.message : "Could not load the queue."); });
-  }, [status, type, priority, createdVia, sort, urlSearch, page, warehouse.id, setPage]);
+  }, [status, type, priority, createdVia, engineerFilter, raisedFrom, raisedTo, sort, urlSearch, page, warehouse.id, setPage]);
 
   React.useEffect(() => load(), [load]);
   React.useEffect(() => subscribe(["van_stock_request:updated"], load), [load]);
@@ -147,12 +178,29 @@ export function VanRequestsBoard({
                 would say something is hidden when nothing is. */}
             <Select size="sm" ariaLabel="Filter by status" value={status} onChange={onFilter("vStatus")} options={STATUS_OPTIONS} />
             <FilterPopover
-              activeCount={(type ? 1 : 0) + (priority ? 1 : 0) + (createdVia ? 1 : 0)}
-              onClear={() => patch({ vType: null, vPriority: null, vOrigin: null, vSort: null, vPage: null })}
+              activeCount={
+                (type ? 1 : 0) +
+                (priority ? 1 : 0) +
+                (createdVia ? 1 : 0) +
+                (engineerFilter ? 1 : 0) +
+                (raisedFrom || raisedTo ? 1 : 0)
+              }
+              onClear={() =>
+                patch({ vType: null, vPriority: null, vOrigin: null, vEngineer: null, vFrom: null, vTo: null, vSort: null, vPage: null })
+              }
             >
               <Select size="sm" ariaLabel="Filter by type" value={type} onChange={onFilter("vType")} options={TYPE_OPTIONS} />
               <Select size="sm" ariaLabel="Filter by priority" value={priority} onChange={onFilter("vPriority")} options={PRIORITY_FILTER_OPTIONS} />
               <Select size="sm" ariaLabel="Filter by origin" value={createdVia} onChange={onFilter("vOrigin")} options={ORIGIN_OPTIONS} />
+              <Select size="sm" ariaLabel="Filter by engineer" value={engineerFilter} onChange={onFilter("vEngineer")} options={[{ value: "", label: "All engineers" }, ...engineerOptions]} />
+              {/* WHEN it was raised. A reviewer clearing a backlog works a day at a time. */}
+              <DateRangeFilter
+                label="Requested"
+                showLabel
+                from={raisedFrom}
+                to={raisedTo}
+                onChange={({ from, to }) => patch({ vFrom: from || null, vTo: to || null, vPage: null })}
+              />
               <Select size="sm" ariaLabel="Sort order" value={sort} onChange={onFilter("vSort")} options={SORT_OPTIONS} />
             </FilterPopover>
           </>

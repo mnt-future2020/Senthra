@@ -172,8 +172,55 @@ export interface EngineerInventoryDetail {
 }
 
 /** Every active field engineer with a roll-up of holdings + active jobs. */
-export function listEngineerInventory(): Promise<EngineerOverviewRow[]> {
-  return api<EngineerOverviewRow[]>("/inventory/engineers");
+export interface EngineerLensParams {
+  /** Engineer name or email. */
+  search?: string;
+  /** Only engineers actually holding something. */
+  holding?: boolean;
+  page?: number;
+  pageSize?: number;
+}
+
+export interface PagedEngineerOverview {
+  rows: EngineerOverviewRow[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+/**
+ * The engineer lens — filtered, counted and PAGED at the server.
+ *
+ * It used to return a bare array of EVERY engineer with no way to narrow it and no ceiling. The
+ * response is an object now; `listEngineerOptions` below is the shape the pickers want.
+ */
+export function listEngineerInventoryPaged(params: EngineerLensParams = {}): Promise<PagedEngineerOverview> {
+  const q = new URLSearchParams();
+  if (params.search) q.set("search", params.search);
+  if (params.holding) q.set("holding", "1");
+  if (params.page) q.set("page", String(params.page));
+  if (params.pageSize) q.set("pageSize", String(params.pageSize));
+  return api<PagedEngineerOverview>(`/inventory/engineers${q.size ? `?${q}` : ""}`);
+}
+
+/** One engineer as a filter OPTION — an id and a name; the roll-up numbers belong to the lens. */
+export interface EngineerOption {
+  engineerId: string;
+  name: string;
+  email: string;
+}
+
+/**
+ * The COMPLETE field-engineer roster, for filter pickers.
+ *
+ * Its own endpoint, not a page of the lens. Briefly this was `listEngineerInventoryPaged({ pageSize:
+ * 100 })`, which silently made every engineer picker in the app "the first 100 engineers" — and the
+ * server clamps pageSize to 100, so there was no way to ask for more. An option list that omits
+ * people without saying so is worse than a slow one: the missing engineer simply cannot be picked.
+ */
+export function listEngineerOptions(): Promise<EngineerOption[]> {
+  return api<{ engineers: EngineerOption[] }>("/inventory/engineer-options").then((r) => r.engineers);
 }
 
 /** One engineer's current holdings and active jobs. */

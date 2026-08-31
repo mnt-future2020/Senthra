@@ -11,6 +11,7 @@ import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { toolbarActionsCls, toolbarBtn, toolbarInputCls, toolbarPrimaryBtn } from "@/components/ui/styles";
 import { StockRequestModal } from "@/components/dashboard/stock/StockRequestModal";
+import { preferenceOutcome, type PreferenceOutcome } from "@/lib/preferredWarehouse";
 import type { PagedStockRequests } from "@/services/customer.service";
 import type { PortalStockRequest, PortalWarehouseAssignment } from "@/types/customer";
 import type { Msg } from "@/components/ui/types";
@@ -81,8 +82,31 @@ function ShortfallBadge({ assignments }: { assignments: PortalWarehouseAssignmen
 // submission split across two warehouses told the customer 2 of 25 arrived without saying where —
 // and it's the warehouse that decides which of their sites the stock can serve. The data was
 // already in the payload; there was simply nowhere to put it.
+// What became of the customer's preferred warehouse, in their own words. Keyed by the outcome so
+// the copy for each state lives in one place. Deliberately points at "Where it went" rather than
+// naming the actual warehouses again — that section already lists them with received counts, and
+// repeating them here would be a second version of the truth to keep in sync.
+const PREFERENCE_HINT: Record<PreferenceOutcome, string> = {
+  // Before approval there is no assignment to report — this is the ONLY place the customer can see
+  // the warehouse they asked for, so it must read as recorded-and-pending, not as decided.
+  pending: "Your account team confirms the final destination.",
+  // A rejected submission also has no assignments, and must NOT borrow the pending wording: nothing
+  // is being confirmed, and saying otherwise leaves the customer waiting on a decision already made.
+  rejected: "This submission was rejected — no stock was booked.",
+  honoured: "Your stock was booked here.",
+  split: "Also booked to other warehouses — see below.",
+  // The override case. Said plainly: the alternative is a customer reading "Where it went" and
+  // silently concluding their choice was lost or ignored.
+  changed: "Your account team used a different warehouse — see below.",
+};
+
 function SubmissionModal({ request, onClose }: { request: PortalStockRequest; onClose: () => void }) {
   const legs = request.warehouseAssignments;
+  const outcome = preferenceOutcome(
+    request.preferredWarehouseName,
+    legs.map((l) => l.warehouseName),
+    request.status,
+  );
   return (
     <Modal
       open
@@ -94,6 +118,17 @@ function SubmissionModal({ request, onClose }: { request: PortalStockRequest; on
       <DetailGrid>
         <DetailRow label="Status" value={<RequestStatusChip value={request.status} />} />
         <DetailRow label="Quantity submitted" value={<span className="font-bold">{request.quantity ?? "—"}</span>} />
+        {/* Shown from the moment of submission — a `pending` row is the whole point: until a
+            reviewer assigns warehouses there is no "Where it went" section, so without this the
+            customer's own choice is invisible to them everywhere in the portal. Omitted entirely
+            when they expressed no preference, rather than rendering an empty dash. */}
+        {outcome && (
+          <DetailRow
+            label="Preferred warehouse"
+            value={request.preferredWarehouseName}
+            hint={PREFERENCE_HINT[outcome]}
+          />
+        )}
       </DetailGrid>
 
       {/* The account team renamed this. Shown because the customer submitted the OTHER name and

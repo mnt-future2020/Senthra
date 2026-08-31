@@ -194,6 +194,15 @@ const stockRequestBase = z.object({
     .max(1_000_000),
   reason: z.string().trim().max(1000).optional(),
   notes: z.string().trim().max(2000).optional(),
+  // The customer's PREFERRED receiving warehouse. Optional, and advisory only — the reviewer
+  // still assigns the real destination. Shape-checked here; ELIGIBILITY (exists / active /
+  // allowed for this customer) is enforced in the service, which is the only layer that can
+  // ask the question. A well-formed id from another customer's warehouse fails there, not here.
+  preferredWarehouseId: z
+    .string()
+    .trim()
+    .regex(/^[a-f0-9]{24}$/i, "Invalid warehouse.")
+    .optional(),
 });
 
 const hasNameOrLink = (v: { name?: string; linkedStockEntryId?: string }) =>

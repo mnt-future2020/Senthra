@@ -85,16 +85,25 @@ export interface MineParams {
   status?: string;
   sort?: "oldest" | "newest";
   search?: string;
+  /** Inclusive calendar days ("YYYY-MM-DD") on when the transfer was RAISED. Resolved against the
+   *  company timezone SERVER-side — the browser clock never decides a day boundary. */
+  raisedFrom?: string;
+  raisedTo?: string;
   page?: number;
   pageSize?: number;
 }
 
 export interface AllTransfersParams {
   status?: string;
+  /** Matches EITHER side of the transfer — the server ORs from/to. */
   engineerId?: string;
   ownership?: string;
   sort?: "oldest" | "newest";
   search?: string;
+  /** Inclusive calendar days ("YYYY-MM-DD") on when the transfer was RAISED. Resolved against the
+   *  company timezone SERVER-side — the browser clock never decides a day boundary. */
+  raisedFrom?: string;
+  raisedTo?: string;
   page?: number;
   pageSize?: number;
 }

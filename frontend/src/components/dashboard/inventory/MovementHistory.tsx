@@ -5,6 +5,10 @@ import { useRouter } from "next/navigation";
 import { ArrowLeft, ArrowLeftRight, Search } from "lucide-react";
 
 import * as inventoryService from "@/services/inventory.service";
+import { listWarehouses } from "@/services/warehouse.service";
+import { Select } from "@/components/ui/Select";
+import { FilterPopover } from "@/components/ui/FilterPopover";
+import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
 import { useAuth } from "@/hooks/useAuth";
 import { toolbarActionsCls, toolbarPrimaryBtn } from "@/components/ui/styles";
 import { Pagination } from "@/components/ui/Pagination";
@@ -52,6 +56,22 @@ export function MovementHistory() {
 
   const [search, setSearch] = React.useState("");
   const [debounced, setDebounced] = React.useState("");
+  // `movementDate` is a CALENDAR DAY — the day the move was stated to happen, typed on the transfer
+  // form. No timezone conversion applies, and applying one would move the boundary off that date.
+  const [movedFrom, setMovedFrom] = React.useState("");
+  const [movedTo, setMovedTo] = React.useState("");
+  // SOURCE and DESTINATION as separate questions. "What left London" and "what arrived at London"
+  // are different, and a single warehouse filter (which matches either end) answers neither.
+  const [fromWarehouse, setFromWarehouse] = React.useState("");
+  const [toWarehouse, setToWarehouse] = React.useState("");
+  const [warehouseOptions, setWarehouseOptions] = React.useState<{ value: string; label: string }[]>([]);
+  React.useEffect(() => {
+    let alive = true;
+    listWarehouses({ status: "active", pageSize: 200 })
+      .then((r) => alive && setWarehouseOptions(r.warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))))
+      .catch(() => alive && setWarehouseOptions([]));
+    return () => { alive = false; };
+  }, []);
   const [page, setPage] = React.useState(1);
   const [data, setData] = React.useState<inventoryService.PagedTransfers | null>(null);
   const [loading, setLoading] = React.useState(true);
@@ -67,7 +87,15 @@ export function MovementHistory() {
     (async () => {
       setLoading(true);
       try {
-        const res = await inventoryService.listTransfers({ search: debounced || undefined, page, pageSize: PAGE_SIZE });
+        const res = await inventoryService.listTransfers({
+          search: debounced || undefined,
+          fromWarehouse: fromWarehouse || undefined,
+          toWarehouse: toWarehouse || undefined,
+          movedFrom: movedFrom || undefined,
+          movedTo: movedTo || undefined,
+          page,
+          pageSize: PAGE_SIZE,
+        });
         if (active) { setData(res); setError(null); }
       } catch (e) {
         if (active) setError(e instanceof Error ? e.message : "Could not load movement history.");
@@ -76,11 +104,11 @@ export function MovementHistory() {
       }
     })();
     return () => { active = false; };
-  }, [debounced, page]);
+  }, [debounced, fromWarehouse, toWarehouse, movedFrom, movedTo, page]);
 
   const rows = data?.transfers ?? [];
   const showSkeleton = loading && rows.length === 0;
-  const isFiltered = Boolean(debounced);
+  const isFiltered = Boolean(debounced || fromWarehouse || toWarehouse || movedFrom || movedTo);
 
   return (
     <div className="stack flex h-full flex-col">
@@ -92,6 +120,33 @@ export function MovementHistory() {
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} placeholder="Search TRF, item or warehouse…" className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]" />
         </div>
+
+        <FilterPopover
+          activeCount={(fromWarehouse ? 1 : 0) + (toWarehouse ? 1 : 0) + (movedFrom || movedTo ? 1 : 0)}
+          onClear={() => { setFromWarehouse(""); setToWarehouse(""); setMovedFrom(""); setMovedTo(""); setPage(1); }}
+        >
+          <Select
+            size="sm"
+            value={fromWarehouse}
+            onChange={(v) => { setFromWarehouse(v); setPage(1); }}
+            options={[{ value: "", label: "From: anywhere" }, ...warehouseOptions]}
+            ariaLabel="Filter by source warehouse"
+          />
+          <Select
+            size="sm"
+            value={toWarehouse}
+            onChange={(v) => { setToWarehouse(v); setPage(1); }}
+            options={[{ value: "", label: "To: anywhere" }, ...warehouseOptions]}
+            ariaLabel="Filter by destination warehouse"
+          />
+          <DateRangeFilter
+            label="Movement date"
+            showLabel
+            from={movedFrom}
+            to={movedTo}
+            onChange={({ from, to }) => { setMovedFrom(from); setMovedTo(to); setPage(1); }}
+          />
+        </FilterPopover>
 
         {/* The page's action, at the right-hand end of the search row rather than in the top bar —
             up there it sat against the browser's own chrome, a screen's width from the list. The row

@@ -2,6 +2,7 @@ import { Prisma, type PurchaseOrder, type PurchaseOrderAttachment } from "@prism
 
 import { isWriteConflict, prisma, withTransaction } from "../../lib/prisma.js";
 import { escapeRegex } from "../../utils/search.js";
+import { isEmptyWindow, type DayWindow } from "../../utils/filter-date.js";
 import { effectiveEta, isDeliveryOverdue } from "./po-overdue.js";
 import {
   atWarehouses,
@@ -130,6 +131,18 @@ export interface PurchaseOrderListFilters {
   // The assigned PM — feeds the "Awaiting my action" worklist (pm_review + pmUserId = me).
   pmUserId?: string;
   jobId?: string;
+  /**
+   * Half-open window on `orderDate` — an INSTANT (it defaults to now on create), so the caller
+   * builds this with `instantDayWindow` and the company timezone.
+   */
+  orderedWindow?: DayWindow;
+  /**
+   * Half-open window on `expectedDeliveryDate` — a CALENDAR DAY, so `calendarDayWindow`.
+   *
+   * AND'd rather than assigned, so it composes with the `overdue` pseudo-status (which constrains
+   * the same column through its own OR) instead of one silently replacing the other.
+   */
+  expectedWindow?: DayWindow;
   /** Start of "today" in the COMPANY timezone. REQUIRED whenever `status === "overdue"`. */
   overdueBefore?: Date;
   // Restricts the pm_review HALF of the "awaiting_send" pseudo-status to one PM, leaving the
@@ -213,6 +226,11 @@ export function awaitingClosePoWhere(): Prisma.PurchaseOrderWhereInput {
   };
 }
 
+/** Append one clause to a where's AND list, creating/normalising it — never clobbering what is there. */
+function andWhere(where: Prisma.PurchaseOrderWhereInput, clause: Prisma.PurchaseOrderWhereInput): void {
+  where.AND = [...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []), clause];
+}
+
 export function buildWhere(filters: PurchaseOrderListFilters): Prisma.PurchaseOrderWhereInput {
   const where: Prisma.PurchaseOrderWhereInput = { deletedAt: null };
   if (filters.status === "overdue") {
@@ -277,6 +295,11 @@ export function buildWhere(filters: PurchaseOrderListFilters): Prisma.PurchaseOr
   if (filters.warehouseId) where.warehouseId = filters.warehouseId;
   if (filters.pmUserId) where.pmUserId = filters.pmUserId;
   if (filters.jobId) where.jobId = filters.jobId;
+  // Date windows go through the AND list, never a direct assignment: the `overdue` branch above
+  // already constrains expectedDeliveryDate inside its own AND, and "overdue orders expected in
+  // August" must mean both, not whichever was written last.
+  if (filters.orderedWindow && !isEmptyWindow(filters.orderedWindow)) andWhere(where, { orderDate: filters.orderedWindow });
+  if (filters.expectedWindow && !isEmptyWindow(filters.expectedWindow)) andWhere(where, { expectedDeliveryDate: filters.expectedWindow });
   // Warehouse-access scoping — AND with any explicit warehouse filter above. When a scoped actor
   // also filters by a specific warehouse, both must hold (an out-of-scope pick correctly matches none).
   if (filters.warehouseIds !== undefined) {
@@ -1243,7 +1266,14 @@ export interface HireExtensionListFilters {
   /** Order code, supplier or item. */
   search?: string;
   purchaseOrderId?: string;
-  /** Inclusive bounds on when the extension was AGREED — the reporting period. */
+  /**
+   * HALF-OPEN bounds on when the extension was AGREED — the reporting period.
+   *
+   * `dateTo` is EXCLUSIVE: the service resolves both edges as company-timezone day boundaries
+   * (`instantDayWindow`), so the upper bound is the start of the day after "to". An inclusive `lte`
+   * here would need a 23:59:59.999 value and would drift by the UTC offset — the bug this pair was
+   * changed to fix.
+   */
   dateFrom?: Date;
   dateTo?: Date;
 }
@@ -1252,7 +1282,7 @@ function buildExtensionWhere(f: HireExtensionListFilters): Prisma.HireExtensionW
   const where: Prisma.HireExtensionWhereInput = {};
   if (f.purchaseOrderId) where.purchaseOrderId = f.purchaseOrderId;
   if (f.dateFrom || f.dateTo) {
-    where.createdAt = { ...(f.dateFrom ? { gte: f.dateFrom } : {}), ...(f.dateTo ? { lte: f.dateTo } : {}) };
+    where.createdAt = { ...(f.dateFrom ? { gte: f.dateFrom } : {}), ...(f.dateTo ? { lt: f.dateTo } : {}) };
   }
   if (f.search) {
     // escapeRegex, always: Prisma injects `contains` into a Mongo $regex unescaped, so a bare "(" in
@@ -1424,6 +1454,15 @@ export async function listOnHire(args: {
   rentalItemId?: string;
   /** Item, order code or supplier — the same free-text box every other register in the app carries. */
   search?: string;
+  /** Narrow to ONE supplier — the order's supplier, matched through the parent PO. */
+  supplierId?: string;
+  /**
+   * Half-open window on `hireEndDate` — a CALENDAR DAY, so built with `calendarDayWindow`.
+   *
+   * The register's most-asked question after "what is overdue": what comes back this week. Served by
+   * `@@index([hireStatus, hireEndDate])`, which the ordering below already relies on.
+   */
+  endsWindow?: DayWindow;
 }) {
   const base = onHireFilter(args.status, args.todayStart);
   // Every hire on an order addressed to this warehouse — including the lines carrying their own
@@ -1448,6 +1487,10 @@ export async function listOnHire(args: {
     // `OR` written there would sit BESIDE them instead of inside, and a search for "Fibre" would
     // return every matching hire on every order, overdue or not.
     ...(args.search ? { AND: [{ OR: searchArms(args.search) }] } : {}),
+    // Both narrow the window the status pill already chose; neither can widen it. The supplier lives
+    // on the parent order, so it is asked for through the relation rather than denormalised here.
+    ...(args.supplierId ? { purchaseOrder: { is: { supplierId: args.supplierId } } } : {}),
+    ...(args.endsWindow && !isEmptyWindow(args.endsWindow) ? { hireEndDate: args.endsWindow } : {}),
   };
   const [rows, total] = await Promise.all([
     prisma.purchaseOrderRentalLine.findMany({

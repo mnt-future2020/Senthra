@@ -9,6 +9,9 @@ import { ExportButton } from "@/components/ui/ExportButton";
 import { Notice } from "@/components/ui/Notice";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
+import { FilterPopover } from "@/components/ui/FilterPopover";
+import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
+import { SitePicker, siteOptionLabel } from "@/components/ui/SitePicker";
 import { toolbarBtn, toolbarInputCls } from "@/components/ui/styles";
 import type { PagedPortalJobs } from "@/services/job.service";
 import type { JobType } from "@/types/job";
@@ -63,6 +66,11 @@ export function PortalJobs() {
   const search = searchParams.get("q") ?? "";
   const status = searchParams.get("status") ?? "";
   const sort = searchParams.get("sort") ?? "newest";
+  // The DUE date, and one of the customer's OWN sites. Both are resolved server-side against the
+  // SESSION's customer — the site id is never a scope, only a narrowing within their own jobs.
+  const dueFrom = searchParams.get("dueFrom") ?? "";
+  const dueTo = searchParams.get("dueTo") ?? "";
+  const site = searchParams.get("site") ?? "";
   const page = Math.max(1, Number(searchParams.get("page")) || 1);
 
   const [paged, setPaged] = React.useState<PagedPortalJobs | null>(null);
@@ -75,6 +83,11 @@ export function PortalJobs() {
     setPrevSearch(search);
     setSearchInput(search);
   }
+
+  // The picked site's label — a search result is not a complete set, so a selected id cannot be
+  // looked up in the options afterwards.
+  const [siteLabel, setSiteLabel] = React.useState<string | null>(null);
+  const searchSites = React.useCallback((term: string) => jobService.searchOwnJobSites(term).then((r) => r.sites), []);
 
   const patchParams = React.useCallback(
     (updates: Record<string, string | null>, resetPage = false) => {
@@ -104,6 +117,9 @@ export function PortalJobs() {
         const r = await jobService.getOwnJobs({
           q: search || undefined,
           status: status || undefined,
+          dueFrom: dueFrom || undefined,
+          dueTo: dueTo || undefined,
+          site: site || undefined,
           // "newest" is the server's default; sending it would only make the URL noisier.
           sort: sort !== "newest" ? sort : undefined,
           page,
@@ -122,7 +138,7 @@ export function PortalJobs() {
     return () => {
       active = false;
     };
-  }, [search, status, sort, page]);
+  }, [search, status, sort, dueFrom, dueTo, site, page]);
 
   const jobs = paged?.jobs ?? [];
   // Only what HIDES rows counts as filtering — the sort order hides nothing, so it isn't part of
@@ -171,6 +187,29 @@ export function PortalJobs() {
             options={SORT_OPTIONS}
             ariaLabel="Sort order"
           />
+          {/* Sites belong to this company and can number in the thousands after an import, so this is
+              a SEARCH. The endpoint behind it is session-scoped: it can only ever return their own. */}
+          <SitePicker
+            value={site}
+            selectedLabel={siteLabel}
+            search={searchSites}
+            onChange={(id, option) => {
+              setSiteLabel(option ? siteOptionLabel(option) : null);
+              patchParams({ site: id || null }, true);
+            }}
+          />
+          <FilterPopover
+            activeCount={dueFrom || dueTo ? 1 : 0}
+            onClear={() => patchParams({ dueFrom: null, dueTo: null }, true)}
+          >
+            <DateRangeFilter
+              label="Due date"
+              showLabel
+              from={dueFrom}
+              to={dueTo}
+              onChange={({ from, to }) => patchParams({ dueFrom: from || null, dueTo: to || null }, true)}
+            />
+          </FilterPopover>
           {filtered && (
             <button type="button" onClick={() => patchParams({ q: null, status: null }, true)} className={toolbarBtn}>
               Clear
@@ -180,7 +219,18 @@ export function PortalJobs() {
               was the one portal list without a download, which made the portal inconsistent about
               whether a customer can take their own data away. */}
           <ExportButton
-            onExport={() => jobService.exportOwnJobsCsv({ q: search || undefined, status: status || undefined, sort: sort !== "newest" ? sort : undefined })}
+            onExport={() =>
+              // EVERY filter on the row — an export that quietly holds more than the screen it was
+              // taken from gives no sign of it.
+              jobService.exportOwnJobsCsv({
+                q: search || undefined,
+                status: status || undefined,
+                dueFrom: dueFrom || undefined,
+                dueTo: dueTo || undefined,
+                site: site || undefined,
+                sort: sort !== "newest" ? sort : undefined,
+              })
+            }
             disabled={jobs.length === 0}
             title="Export your jobs to CSV"
           />

@@ -28,6 +28,9 @@ import {
 } from "lucide-react";
 
 import * as customerService from "@/services/customer.service";
+import { listWarehouses } from "@/services/warehouse.service";
+import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
+import { FilterPopover } from "@/components/ui/FilterPopover";
 import { useAuth } from "@/hooks/useAuth";
 import { ExportButton } from "@/components/ui/ExportButton";
 import { useDashboard } from "@/hooks/useDashboard";
@@ -46,9 +49,10 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { primaryBtn, secondaryBtn, toolbarBtn, toolbarInputCls } from "@/components/ui/styles";
-import { searchStockEntries } from "@/lib/stockEntrySearch";
 import {
   ALL as ALL_SUBMISSION_STATUSES,
+  NEEDS_YOU,
+  OPEN as OPEN_SUBMISSIONS,
   DEFAULT_SUBMISSION_FILTERS,
   effectiveSubmissionFilters,
   filterSubmissions,
@@ -880,18 +884,49 @@ function StockEntriesTab({
     [router],
   );
 
-  // --- stock entries list (service returns a plain array — paginate client-side) ---
-  const [entries, setEntries] = React.useState<CustomerStockEntry[] | null>(null);
+  // --- URL-persisted warehouse + received-date filters ------------------------
+  const stockWarehouse = searchParams.get("stock_wh") ?? "";
+  const receivedFrom = searchParams.get("stock_from") ?? "";
+  const receivedTo = searchParams.get("stock_to") ?? "";
+  const [warehouses, setWarehouses] = React.useState<{ value: string; label: string }[]>([]);
+  React.useEffect(() => {
+    let alive = true;
+    // Degrades to "All warehouses" rather than failing the tab: `customers.view` does not imply
+    // `warehouse.view`, and a control that 403s on use is worse than one that cannot narrow.
+    listWarehouses({ status: "active", pageSize: 200 })
+      .then((r) => alive && setWarehouses(r.warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))))
+      .catch(() => alive && setWarehouses([]));
+    return () => { alive = false; };
+  }, []);
+
+  // --- stock entries: filtered, counted and PAGED at the SERVER ---------------
+  //
+  // This tab used to fetch every entry the customer had ever consigned and then search and page them
+  // in the browser. A consignment history grows for the life of the account, so the whole set was
+  // transferred on every visit and the controls only ever hid rows already paid for.
+  const [paged, setPaged] = React.useState<customerService.PagedAdminStockEntries | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = React.useState(0);
+  const load = React.useCallback(() => setRefreshKey((k) => k + 1), []);
 
-  const load = React.useCallback(() => {
+  React.useEffect(() => {
+    let alive = true;
     customerService
-      .listCustomerStockEntries(customer.id, stockFilter || undefined)
-      .then((rows) => { setEntries(rows); })
-      .catch((e) => setError(e instanceof Error ? e.message : "Could not load stock entries."));
-  }, [customer.id, stockFilter]);
+      .listCustomerStockEntries(customer.id, {
+        status: stockFilter || undefined,
+        search: stockSearch || undefined,
+        warehouseId: stockWarehouse || undefined,
+        receivedFrom: receivedFrom || undefined,
+        receivedTo: receivedTo || undefined,
+        page,
+        pageSize: STOCK_PAGE_SIZE,
+      })
+      .then((r) => { if (alive) { setPaged(r); setError(null); } })
+      .catch((e) => alive && setError(e instanceof Error ? e.message : "Could not load stock entries."));
+    return () => { alive = false; };
+  }, [customer.id, stockFilter, stockSearch, stockWarehouse, receivedFrom, receivedTo, page, refreshKey]);
 
-  React.useEffect(() => { load(); }, [load]);
+  const entries = paged?.entries ?? null;
 
   /**
    * Remove a stock entry that never held anything, or no longer does.
@@ -914,21 +949,11 @@ function StockEntriesTab({
     }
   };
 
-  // Memoised derived values — client-side slice for the current page + totals.
-  // Wrapping in useMemo prevents React Compiler from bailing on
-  // "Existing memoization could not be preserved".
-  const { pageEntries, entryCount, totalPages } = React.useMemo(() => {
-    const all = searchStockEntries(entries ?? [], stockSearch);
-    const count = all.length;
-    const pages = Math.max(1, Math.ceil(count / STOCK_PAGE_SIZE));
-    const safePage = Math.min(page, pages);
-    const start = (safePage - 1) * STOCK_PAGE_SIZE;
-    return {
-      pageEntries: all.slice(start, start + STOCK_PAGE_SIZE),
-      entryCount: count,
-      totalPages: pages,
-    };
-  }, [entries, page, stockSearch]);
+  // The page IS the response now — the server filtered, counted and sliced, in that order.
+  const pageEntries = paged?.entries ?? [];
+  const entryCount = paged?.total ?? 0;
+  const totalPages = paged?.totalPages ?? 1;
+  const activeStockFilters = (stockWarehouse ? 1 : 0) + (receivedFrom || receivedTo ? 1 : 0);
 
   return (
     <div className="stack flex h-full flex-col">
@@ -1004,14 +1029,44 @@ function StockEntriesTab({
                   ]}
                   ariaLabel="Filter by status"
                 />
+                {/* Warehouse and the received window fold away behind a count: they are set once a
+                    week, while search and status are touched on nearly every visit. The count is what
+                    makes hiding them safe — a narrowed list must never read as a short one. */}
+                <FilterPopover
+                  activeCount={activeStockFilters}
+                  onClear={() => patch({ stock_wh: "", stock_from: "", stock_to: "", stockPage: "" })}
+                >
+                  <Select
+                    size="sm"
+                    value={stockWarehouse}
+                    onChange={(v) => patch({ stock_wh: v, stockPage: "" })}
+                    options={[{ value: "", label: "All warehouses" }, ...warehouses]}
+                    ariaLabel="Filter by warehouse"
+                  />
+                  <DateRangeFilter
+                    label="Received"
+                    showLabel
+                    from={receivedFrom}
+                    to={receivedTo}
+                    onChange={({ from, to }) => patch({ stock_from: from, stock_to: to, stockPage: "" })}
+                  />
+                </FilterPopover>
                 <span className="ml-1 text-xs text-[var(--muted)]">
                   {entryCount} {entryCount === 1 ? "entry" : "entries"}
                 </span>
-                {/* The status filter goes to the server; the search box filters the loaded rows in
-                    memory (searchStockEntries above), so it is NOT sent — the export is "every entry
-                    matching the STATUS I picked", which is what the count beside it means too. */}
+                {/* Every filter on the row goes to the server, so the export is exactly the set the
+                    count beside it describes — search included, which it was not while the box
+                    filtered the loaded rows in memory. */}
                 <ExportButton
-                  onExport={() => customerService.exportCustomerStockCsv(customer.id, { status: stockFilter || undefined })}
+                  onExport={() =>
+                    customerService.exportCustomerStockCsv(customer.id, {
+                      status: stockFilter || undefined,
+                      q: stockSearch || undefined,
+                      warehouseId: stockWarehouse || undefined,
+                      receivedFrom: receivedFrom || undefined,
+                      receivedTo: receivedTo || undefined,
+                    })
+                  }
                   disabled={entryCount === 0}
                   title="Export this customer's stock to CSV"
                 />
@@ -1171,35 +1226,81 @@ function StockSubmissionsTab({
   const [assignReq, setAssignReq] = React.useState<StockRequest | null>(null);
   const [showCreate, setShowCreate] = React.useState(false);
 
-  // Search / status / page. Submissions accumulate for the life of the account and this is the only
-  // admin-side surface for reviewing them, so the whole list was previously rendered at once.
+  // Search / status / date / page — every one resolved at the SERVER now.
+  //
+  // The whole submission history used to ride along inside the customer detail payload and be
+  // searched, filtered and paged in the browser. Submissions accumulate for the life of an account,
+  // so that transferred the lot on every visit to the tab and the controls only hid rows already
+  // fetched. `customer.stockRequests` is still the parent's copy (the attention counts read it), but
+  // the table is driven by the paged read below.
   const [filters, setFilters] = React.useState<SubmissionFilters>(DEFAULT_SUBMISSION_FILTERS);
+  const [dateRange, setDateRange] = React.useState({ from: "", to: "" });
   const [page, setPage] = React.useState(1);
+  const [paged, setPaged] = React.useState<customerService.PagedAdminStockRequests | null>(null);
+  const [loadError, setLoadError] = React.useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = React.useState(0);
+  const reload = React.useCallback(() => setRefreshKey((k) => k + 1), []);
   const patchFilters = (next: Partial<SubmissionFilters>) => {
     setFilters((prev) => ({ ...prev, ...next }));
     setPage(1); // a narrower list makes the old page number meaningless
   };
+  const patchDates = (next: { from: string; to: string }) => {
+    setDateRange(next);
+    setPage(1);
+  };
 
-  const allSubmissions = customer.stockRequests;
-  const statusOptions = React.useMemo(() => submissionStatusOptions(allSubmissions), [allSubmissions]);
+  // Menu and counts come from the page's METADATA, not from an embedded collection. The detail
+  // payload no longer carries the submissions at all — this tab is the only thing that read them,
+  // and it read them only to build these two numbers.
+  const statusCounts = React.useMemo(() => paged?.statusCounts ?? {}, [paged]);
+  const statusOptions = React.useMemo(() => submissionStatusOptions(statusCounts), [statusCounts]);
+  /** How many submissions this account has at all, under the current SEARCH — the empty-state copy. */
+  const allCount = React.useMemo(
+    () => Object.values(statusCounts).reduce((n, c) => n + c, 0),
+    [statusCounts],
+  );
   // A status whose last row was just approved away would otherwise strand the tab on an empty list.
   const effective = React.useMemo(
     () => effectiveSubmissionFilters(filters, statusOptions),
     [filters, statusOptions],
   );
+
+  // "Open" and "Needs you" are DERIVED views over several real statuses, and the server only knows
+  // the real ones plus the `open` pseudo-status it already serves the portal. So the query asks for
+  // the widest set the view can contain and `filterSubmissions` — the same pure helper as before —
+  // narrows the page. Search, the date window and paging are all server-side.
+  const serverStatus =
+    effective.status === NEEDS_YOU || effective.status === OPEN_SUBMISSIONS ? OPEN_SUBMISSIONS : effective.status === ALL_SUBMISSION_STATUSES ? undefined : effective.status;
+
+  React.useEffect(() => {
+    let alive = true;
+    customerService
+      .listStockRequests(customer.id, {
+        status: serverStatus,
+        search: effective.search.trim() || undefined,
+        raisedFrom: dateRange.from || undefined,
+        raisedTo: dateRange.to || undefined,
+        page,
+        pageSize: SUBMISSION_PAGE_SIZE,
+      })
+      .then((r) => { if (alive) { setPaged(r); setLoadError(null); } })
+      .catch((e) => alive && setLoadError(e instanceof Error ? e.message : "Could not load submissions."));
+    return () => { alive = false; };
+  }, [customer.id, serverStatus, effective.search, dateRange.from, dateRange.to, page, refreshKey]);
+
   const matched = React.useMemo(
-    () => filterSubmissions(allSubmissions, effective),
-    [allSubmissions, effective],
+    () => filterSubmissions(paged?.requests ?? [], effective),
+    [paged, effective],
   );
-  const totalPages = Math.max(1, Math.ceil(matched.length / SUBMISSION_PAGE_SIZE));
-  // Clamped, not stored: approving the last row on the last page shrinks the list under the cursor.
-  const safePage = Math.min(page, totalPages);
-  const pageRows = matched.slice((safePage - 1) * SUBMISSION_PAGE_SIZE, safePage * SUBMISSION_PAGE_SIZE);
-  const anyFilter = hasActiveSubmissionFilter(effective);
+  const totalPages = paged?.totalPages ?? 1;
+  const safePage = paged?.page ?? page;
+  const pageRows = matched;
+  const anyFilter = hasActiveSubmissionFilter(effective) || Boolean(dateRange.from || dateRange.to);
 
   const onCreated = (created: StockRequest) => {
     onChange((p) => ({ ...p, stockRequests: [created, ...p.stockRequests] }));
     setShowCreate(false);
+    reload();
     pushToast(`Submission created for "${created.name}".`, "success");
   };
 
@@ -1212,6 +1313,7 @@ function StockSubmissionsTab({
         stockRequests: p.stockRequests.map((x) => (x.id === updated.id ? updated : x)),
       }));
       pushToast(`Approved "${req.name}".`, "success");
+      reload();
     } catch (err) {
       pushToast(err instanceof Error ? err.message : "Could not approve the request.", "alert");
     } finally {
@@ -1226,6 +1328,7 @@ function StockSubmissionsTab({
       onChange((p) => ({ ...p, stockRequests: p.stockRequests.filter((x) => x.id !== req.id) }));
       setRejectingId(null);
       setRejectNote("");
+      reload();
     } catch (err) {
       pushToast(err instanceof Error ? err.message : "Could not reject the request.", "alert");
     } finally {
@@ -1239,6 +1342,7 @@ function StockSubmissionsTab({
       stockRequests: p.stockRequests.map((x) => (x.id === updated.id ? updated : x)),
     }));
     setEditApproveReq(null);
+    reload();
     pushToast(`Approved "${updated.editedName ?? updated.name}".`, "success");
   };
 
@@ -1262,9 +1366,9 @@ function StockSubmissionsTab({
           left a band of dead space beside the filters. `ml-auto` on the button parks it at the
           right edge whether or not the filters are there — so the empty-list case (button only)
           still lines up without a second rule. */}
-      {(stockReq.approve || allSubmissions.length > 0) && (
+      {(stockReq.approve || allCount > 0) && (
         <div className="flex shrink-0 flex-wrap items-center gap-2">
-          {allSubmissions.length > 0 && (
+          {allCount > 0 && (
             <>
               <div className="relative w-full sm:max-w-[16rem]">
                 <SearchIcon className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
@@ -1284,10 +1388,19 @@ function StockSubmissionsTab({
                 options={statusOptions}
                 ariaLabel="Filter submissions by status"
               />
+              {/* WHEN the customer submitted. Folded away behind the count like every other
+                  set-once filter — the status pill is what a reviewer changes on nearly every visit,
+                  a date window is what they set when reconciling a period. */}
+              <FilterPopover
+                activeCount={dateRange.from || dateRange.to ? 1 : 0}
+                onClear={() => patchDates({ from: "", to: "" })}
+              >
+                <DateRangeFilter label="Submitted" showLabel from={dateRange.from} to={dateRange.to} onChange={patchDates} />
+              </FilterPopover>
               {anyFilter && (
                 <button
                   type="button"
-                  onClick={() => { setFilters(DEFAULT_SUBMISSION_FILTERS); setPage(1); }}
+                  onClick={() => { setFilters(DEFAULT_SUBMISSION_FILTERS); setDateRange({ from: "", to: "" }); setPage(1); }}
                   className={toolbarBtn}
                 >
                   Clear
@@ -1307,32 +1420,34 @@ function StockSubmissionsTab({
         </div>
       )}
 
-      {matched.length === 0 ? (
+      {loadError ? (
+        <p className="py-12 text-center text-sm font-semibold text-[var(--neg)]">{loadError}</p>
+      ) : matched.length === 0 ? (
         <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface)] py-16 text-center">
           <ClipboardList className="h-7 w-7 text-[var(--faint)]" />
           {/* THREE cases, not two. The default view is "Open", so an empty table can also mean
               "nothing outstanding, but there IS history" — saying "No stock submissions" there
               would flatly contradict the finished ones sitting one filter away. */}
           <p className="text-sm font-semibold text-[var(--ink)]">
-            {anyFilter ? "No matching submissions" : allSubmissions.length > 0 ? "Nothing outstanding" : "No stock submissions"}
+            {anyFilter ? "No matching submissions" : allCount > 0 ? "Nothing outstanding" : "No stock submissions"}
           </p>
           <p className="text-xs text-[var(--muted)]">
             {anyFilter
-              ? `${allSubmissions.length} submission${allSubmissions.length === 1 ? "" : "s"} here, none match these filters.`
-              : allSubmissions.length > 0
-                ? `All ${allSubmissions.length} submission${allSubmissions.length === 1 ? " is" : "s are"} finished — switch to “All statuses” to review them.`
+              ? `${allCount} submission${allCount === 1 ? "" : "s"} here, none match these filters.`
+              : allCount > 0
+                ? `All ${allCount} submission${allCount === 1 ? " is" : "s are"} finished — switch to “All statuses” to review them.`
                 : "Stock the customer submits from their portal — or that you add on their behalf — appears here for review."}
           </p>
           {anyFilter ? (
             <button
               type="button"
-              onClick={() => { setFilters(DEFAULT_SUBMISSION_FILTERS); setPage(1); }}
+              onClick={() => { setFilters(DEFAULT_SUBMISSION_FILTERS); setDateRange({ from: "", to: "" }); setPage(1); }}
               className={`${secondaryBtn} mt-1`}
             >
               Clear filters
             </button>
           ) : (
-            allSubmissions.length > 0 && (
+            allCount > 0 && (
               // One click to the history rather than making the user find the menu.
               <button
                 type="button"
@@ -1348,7 +1463,7 @@ function StockSubmissionsTab({
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)]">
           <div className="flex shrink-0 items-center gap-2 border-b border-[var(--border)] px-3 py-2 text-[11px] font-bold uppercase tracking-wider text-[var(--muted)]">
             <ClipboardList className="h-3.5 w-3.5" />
-            Stock submissions ({matched.length}{anyFilter ? ` of ${allSubmissions.length}` : ""})
+            Stock submissions ({matched.length}{anyFilter ? ` of ${allCount}` : ""})
           </div>
           {/* The ONLY scroller in the tab. */}
           <div className="min-h-0 flex-1 divide-y divide-[var(--border)] overflow-auto">
@@ -1389,6 +1504,19 @@ function StockSubmissionsTab({
                     {req.reason && (
                       <p className="mt-1 text-xs text-[var(--muted)]">
                         <span className="font-semibold text-[var(--faint)]">Reason:</span> {req.reason}
+                      </p>
+                    )}
+                    {/* The customer's PREFERENCE — deliberately styled as a quiet provenance line,
+                        NOT like the warehouse assignment rows below it. Those are the real
+                        destination; this is only what was asked for, and the reviewer overrides or
+                        splits it freely. Anything that looked like an assignment badge here would
+                        imply the choice had already been made. */}
+                    {req.preferredWarehouseName && (
+                      <p className="mt-1 text-[11px] text-[var(--faint)]">
+                        Customer preferred: {req.preferredWarehouseName}
+                        {/* Says so plainly rather than dropping the line: the reviewer needs to know
+                            the request exists AND that it can no longer be honoured as-is. */}
+                        {!req.preferredWarehouseActive && " (no longer available)"}
                       </p>
                     )}
                   </div>

@@ -29,6 +29,8 @@ import { Avatar } from "@/components/ui/Avatar";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
+import { FilterPopover } from "@/components/ui/FilterPopover";
+import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { TempPasswordModal } from "@/components/ui/TempPasswordModal";
 
@@ -232,6 +234,10 @@ export function UsersView() {
   const statusFilter = (searchParams.get("status") ?? "all") as "all" | UserStatus;
   const roleFilter = searchParams.get("role") ?? "all";
   const sort = (searchParams.get("sort") ?? "newest") as "newest" | "oldest" | "name";
+  // `createdAt` is an INSTANT, so which calendar day it falls on is a COMPANY-timezone question —
+  // resolved server-side, like every other day boundary in this app.
+  const addedFrom = searchParams.get("addedFrom") ?? "";
+  const addedTo = searchParams.get("addedTo") ?? "";
   const page = Math.max(1, Number(searchParams.get("page")) || 1);
 
   // Local state for the search text box so it stays responsive while debouncing.
@@ -291,10 +297,12 @@ export function UsersView() {
       search: search || undefined,
       status: statusFilter === "all" ? undefined : statusFilter,
       roleId: roleFilter === "all" ? undefined : roleFilter,
+      addedFrom: addedFrom || undefined,
+      addedTo: addedTo || undefined,
       // "newest" is the server default → omit it so the cache key matches the seed.
       sort: sort === "newest" ? undefined : sort,
     }),
-    [search, statusFilter, roleFilter, sort],
+    [search, statusFilter, roleFilter, addedFrom, addedTo, sort],
   );
 
   React.useEffect(() => {
@@ -442,6 +450,19 @@ export function UsersView() {
             { value: "name", label: "Name (A–Z)" },
           ]}
         />
+        {/* WHEN the account was added — the "Added" column, which had no way to be filtered on. */}
+        <FilterPopover
+          activeCount={addedFrom || addedTo ? 1 : 0}
+          onClear={() => patch({ addedFrom: null, addedTo: null })}
+        >
+          <DateRangeFilter
+            label="Added"
+            showLabel
+            from={addedFrom}
+            to={addedTo}
+            onChange={({ from, to }) => patch({ addedFrom: from || null, addedTo: to || null })}
+          />
+        </FilterPopover>
         {/* Before "New user" and outside its ml-auto, so the primary action stays hard right. */}
         {can("users.export") && (
           <ExportButton

@@ -33,6 +33,7 @@ import {
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
 import { paginate } from "../../utils/pagination.js";
+import { calendarDayWindow } from "../../utils/filter-date.js";
 import { diffProcurementChanges } from "../../utils/procurement-diff.js";
 import type {
   CreatePurchaseRequestInput,
@@ -465,6 +466,12 @@ export interface ListPurchaseRequestsParams {
   supplier?: string;
   warehouse?: string;
   job?: string;
+  /** Inclusive calendar days on when the goods are NEEDED ON SITE (`requiredByDate`). */
+  requiredFrom?: string;
+  requiredTo?: string;
+  /** Inclusive calendar days on the quote's expiry (`quoteValidUntil`). */
+  validFrom?: string;
+  validTo?: string;
   page?: number;
   pageSize?: number;
   sort?: string;
@@ -479,6 +486,10 @@ export async function listPurchaseRequests(params: ListPurchaseRequestsParams = 
     statuses: params.statuses,
     supplierId: params.supplier,
     warehouseId: params.warehouse,
+    // Both are CALENDAR DAYS the requester typed on a form, stored at UTC midnight — no timezone
+    // conversion applies, and applying one would move the boundary off the date they chose.
+    requiredByWindow: calendarDayWindow(params.requiredFrom, params.requiredTo),
+    quoteValidWindow: calendarDayWindow(params.validFrom, params.validTo),
     jobId: params.job,
     warehouseIds: warehouseScopeFilter(actor),
   };

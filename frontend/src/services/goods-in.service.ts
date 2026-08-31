@@ -12,6 +12,10 @@ export interface GrnListParams {
   purchaseOrder?: string;
   /** Narrows to one supplier's receipts — the supplier detail page's Goods In tab. */
   supplier?: string;
+  /** Inclusive calendar days ("YYYY-MM-DD"), as the user picked them. The SERVER decides which
+   *  day that is for a timestamp column, in the company timezone. */
+  receivedFrom?: string;
+  receivedTo?: string;
   page?: number;
   pageSize?: number;
   sort?: string;
@@ -67,6 +71,8 @@ function qs(params: GrnListParams): string {
   if (params.warehouse) sp.set("warehouse", params.warehouse);
   if (params.purchaseOrder) sp.set("purchaseOrder", params.purchaseOrder);
   if (params.supplier) sp.set("supplier", params.supplier);
+  if (params.receivedFrom) sp.set("receivedFrom", params.receivedFrom);
+  if (params.receivedTo) sp.set("receivedTo", params.receivedTo);
   if (params.sort) sp.set("sort", params.sort);
   if (params.page) sp.set("page", String(params.page));
   if (params.pageSize) sp.set("pageSize", String(params.pageSize));
@@ -76,11 +82,19 @@ function qs(params: GrnListParams): string {
 
 const listCache = new Map<string, PagedGoodsReceipts>();
 registerClientCache(() => listCache.clear());
-const listCacheKey = (p: GrnListParams): string =>
-  // EVERY filter must appear here. `supplier` was once missing while being sent to the API, so two
-  // suppliers' Goods In tabs — identical but for the supplier — hashed to the same key and each
-  // overwrote the other's cached page. A filter in `qs()` but not in the key is a silent wrong answer.
-  `${p.page ?? 1}|${p.pageSize ?? ""}|${p.search ?? ""}|${p.status ?? ""}|${p.warehouse ?? ""}|${p.purchaseOrder ?? ""}|${p.supplier ?? ""}|${p.sort ?? ""}`;
+/**
+ * Cache identity = the QUERY STRING actually sent.
+ *
+ * A hand-written key is a SECOND copy of the parameter list, kept in step with the serialiser by
+ * memory — and memory failed: Goods In sent `receivedFrom`/`receivedTo` and keyed neither, so a
+ * date-filtered read and an unfiltered one hashed identically and overwrote each other's page.
+ *
+ * Deriving the key from the serialiser removes the second list entirely: a parameter that affects
+ * the response is in the key BECAUSE it is in the request, so the two can never drift again.
+ * `URLSearchParams` preserves insertion order and the serialiser sets keys in a fixed order, so
+ * equivalent filters always produce byte-identical keys.
+ */
+export const listCacheKey = (p: GrnListParams): string => qs(p);
 
 export const getCachedGoodsReceipts = (params: GrnListParams = {}): PagedGoodsReceipts | undefined => listCache.get(listCacheKey(params));
 

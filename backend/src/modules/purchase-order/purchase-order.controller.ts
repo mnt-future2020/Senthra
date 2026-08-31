@@ -28,7 +28,8 @@ import type {
 // rows on screen — a second copy of this parsing is a second place for a filter to be forgotten,
 // and the symptom (an export quietly wider or narrower than the list) is not visible in the file.
 function listParamsFrom(req: Request, actor: ReturnType<typeof actorFrom>): poService.ListPurchaseOrdersParams {
-  const { search, status, statuses, priority, supplier, warehouse, pm, job, sort, page, pageSize } = req.query;
+  const { search, status, statuses, priority, supplier, warehouse, pm, job, orderedFrom, orderedTo, expectedFrom, expectedTo, sort, page, pageSize } =
+    req.query;
   return {
     search: queryStr(search),
     status: queryStr(status),
@@ -39,6 +40,10 @@ function listParamsFrom(req: Request, actor: ReturnType<typeof actorFrom>): poSe
     // pm=me resolves to the signed-in user — the PM's "Awaiting my action" worklist.
     pm: typeof pm === "string" ? (pm === "me" ? actor.id ?? undefined : pm) : undefined,
     job: queryStr(job),
+    orderedFrom: queryStr(orderedFrom),
+    orderedTo: queryStr(orderedTo),
+    expectedFrom: queryStr(expectedFrom),
+    expectedTo: queryStr(expectedTo),
     sort: queryStr(sort),
     page: queryInt(page),
     pageSize: queryInt(pageSize),
@@ -187,21 +192,32 @@ export const extendHire = asyncHandler(async (req, res) => {
   res.json({ purchaseOrder });
 });
 
+// The on-hire register's filters, parsed ONCE and shared with its CSV export.
+//
+// They were parsed twice, and the two copies had already drifted: the export sent only `status` and
+// `search`, so a warehouse's receiving pane (warehouseId) or a rental item's own page (rentalItemId)
+// downloaded the WHOLE company's register while the screen showed a handful of rows — with nothing
+// in the file to say so. That is the exact failure one shared parser exists to prevent.
+function onHireParamsFrom(req: Request) {
+  return {
+    status: queryStr(req.query.status),
+    // Set only by a warehouse's own receiving pane. The list is company-wide otherwise, because a
+    // hire is chased by the PM on the order rather than by whoever holds the warehouse.
+    warehouseId: queryStr(req.query.warehouseId),
+    // Set by a rental item's own page — the live hires of that one item.
+    rentalItemId: queryStr(req.query.rentalItemId),
+    search: queryStr(req.query.search),
+    supplierId: queryStr(req.query.supplierId),
+    endsFrom: queryStr(req.query.endsFrom),
+    endsTo: queryStr(req.query.endsTo),
+  };
+}
+
 // GET /purchase-orders/rental-lines/on-hire
 export const listOnHire = asyncHandler(async (req, res) => {
   res.json(
     await poService.listOnHire(
-      {
-        status: queryStr(req.query.status),
-        page: queryInt(req.query.page),
-        pageSize: queryInt(req.query.pageSize),
-        // Set only by a warehouse's own receiving pane. The list is company-wide otherwise, because a
-        // hire is chased by the PM on the order rather than by whoever holds the warehouse.
-        warehouseId: queryStr(req.query.warehouseId),
-        // Set by a rental item's own page — the live hires of that one item.
-        rentalItemId: queryStr(req.query.rentalItemId),
-        search: queryStr(req.query.search),
-      },
+      { ...onHireParamsFrom(req), page: queryInt(req.query.page), pageSize: queryInt(req.query.pageSize) },
       actorFrom(req),
     ),
   );
@@ -239,10 +255,7 @@ export const exportOnHireCsv = asyncHandler(async (req, res) => {
     "rentals-on-hire",
     // The SAME filters the screen carries. A download that quietly holds more rows than the list it
     // was taken from gives no sign of it.
-    await poService.exportOnHireCsv(
-      { status: queryStr(req.query.status), search: queryStr(req.query.search) },
-      actorFrom(req),
-    ),
+    await poService.exportOnHireCsv(onHireParamsFrom(req), actorFrom(req)),
   );
 });
 

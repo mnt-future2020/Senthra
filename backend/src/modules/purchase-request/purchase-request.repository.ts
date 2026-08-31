@@ -1,5 +1,6 @@
 import { Prisma, type PurchaseRequest, type PurchaseRequestAttachment } from "@prisma/client";
 
+import { isEmptyWindow, type DayWindow } from "../../utils/filter-date.js";
 import { prisma, withTransaction } from "../../lib/prisma.js";
 import { escapeRegex } from "../../utils/search.js";
 
@@ -150,6 +151,10 @@ export interface PurchaseRequestListFilters {
   supplierId?: string;
   warehouseId?: string;
   jobId?: string;
+  /** Half-open window on `requiredByDate` — a CALENDAR DAY (`calendarDayWindow`). */
+  requiredByWindow?: DayWindow;
+  /** Half-open window on `quoteValidUntil` — a CALENDAR DAY (`calendarDayWindow`). */
+  quoteValidWindow?: DayWindow;
   // Warehouse-access scope (from warehouseScopeFilter): `undefined` = unrestricted.
   warehouseIds?: string[];
 }
@@ -166,6 +171,8 @@ export function buildWhere(filters: PurchaseRequestListFilters): Prisma.Purchase
   if (filters.supplierId) where.supplierId = filters.supplierId;
   if (filters.warehouseId) where.warehouseId = filters.warehouseId;
   if (filters.jobId) where.jobId = filters.jobId;
+  if (filters.requiredByWindow && !isEmptyWindow(filters.requiredByWindow)) where.requiredByDate = filters.requiredByWindow;
+  if (filters.quoteValidWindow && !isEmptyWindow(filters.quoteValidWindow)) where.quoteValidUntil = filters.quoteValidWindow;
   if (filters.warehouseIds !== undefined) {
     where.AND = [...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []), { warehouseId: { in: filters.warehouseIds } }];
   }

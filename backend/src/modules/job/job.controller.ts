@@ -14,13 +14,20 @@ import type { AssignJobInput, CancelJobInput, CreateJobInput, UpdateJobInput } f
 // on screen — a second copy is a second place for a filter to be forgotten, and the resulting file
 // gives no sign that it is wider or narrower than the list it came from.
 function listParamsFrom(req: Request): jobService.ListJobsParams {
-  const { search, status, customer, engineer, project, sort, page, pageSize } = req.query;
+  const { search, status, customer, engineer, project, site, priority, dueFrom, dueTo, createdFrom, createdTo, sort, page, pageSize } =
+    req.query;
   return {
     search: queryStr(search),
     status: queryStr(status),
     customer: queryStr(customer),
     engineer: queryStr(engineer),
     project: queryStr(project),
+    site: queryStr(site),
+    priority: queryStr(priority),
+    dueFrom: queryStr(dueFrom),
+    dueTo: queryStr(dueTo),
+    createdFrom: queryStr(createdFrom),
+    createdTo: queryStr(createdTo),
     sort: queryStr(sort),
     page: queryInt(page),
     pageSize: queryInt(pageSize),
@@ -29,6 +36,17 @@ function listParamsFrom(req: Request): jobService.ListJobsParams {
 
 export const listJobs = asyncHandler(async (req, res) => {
   res.json(await jobService.listJobs(listParamsFrom(req), actorFrom(req)));
+});
+
+// GET /jobs/site-options?q=&customer= — type-ahead options for the list's SITE filter.
+//
+// Sites are customer-owned and bulk-imported in the thousands, so this is a SEARCH, not a dump: a
+// flat 200-row dropdown would silently truncate, which is worse than offering no filter at all.
+// Gated on `jobs.view` rather than `customers.view` because it returns nothing a job row does not
+// already show (site name, code, postcode) — and a jobs user who could not load the options would
+// be left with a filter control that 403s on use.
+export const listJobSiteOptions = asyncHandler(async (req, res) => {
+  res.json({ sites: await jobService.searchSiteOptions(queryStr(req.query.q), queryStr(req.query.customer)) });
 });
 
 // GET /jobs/export.csv — the same filtered list as a download (paging ignored).
@@ -79,13 +97,25 @@ function customerId(req: import("express").Request): string {
   return req.principal.customerId;
 }
 
-// GET /customer/jobs?q=&status=&sort=&page=&pageSize=
+// The portal list's filters, parsed ONCE and shared with its CSV export — same bargain as
+// listParamsFrom above. The two used to read the query string separately, which is precisely how a
+// newly added filter ends up narrowing the screen and not the download.
+function portalListParamsFrom(req: Request): jobService.ListCustomerJobsParams {
+  return {
+    search: queryStr(req.query.q),
+    status: queryStr(req.query.status),
+    sort: queryStr(req.query.sort),
+    dueFrom: queryStr(req.query.dueFrom),
+    dueTo: queryStr(req.query.dueTo),
+    site: queryStr(req.query.site),
+  };
+}
+
+// GET /customer/jobs?q=&status=&sort=&dueFrom=&dueTo=&site=&page=&pageSize=
 export const getOwnJobs = asyncHandler(async (req, res) => {
   res.json(
     await jobService.listJobsForCustomer(customerId(req), {
-      search: queryStr(req.query.q),
-      status: queryStr(req.query.status),
-      sort: queryStr(req.query.sort),
+      ...portalListParamsFrom(req),
       page: queryInt(req.query.page),
       pageSize: queryInt(req.query.pageSize),
     }),
@@ -94,15 +124,14 @@ export const getOwnJobs = asyncHandler(async (req, res) => {
 
 // GET /customer/jobs/export.csv — the customer's own jobs, honouring the list's filters.
 export const exportOwnJobsCsv = asyncHandler(async (req, res) => {
-  sendCsv(
-    res,
-    "my-jobs",
-    await jobService.exportOwnJobsCsv(customerId(req), {
-      search: queryStr(req.query.q),
-      status: queryStr(req.query.status),
-      sort: queryStr(req.query.sort),
-    }),
-  );
+  sendCsv(res, "my-jobs", await jobService.exportOwnJobsCsv(customerId(req), portalListParamsFrom(req)));
+});
+
+// GET /customer/jobs/site-options?q= — the signed-in customer's OWN sites, for the list's site
+// picker. Session-scoped like every other portal read: the customerId is never taken from the query
+// string, so this can only ever return the caller's own sites.
+export const getOwnJobSiteOptions = asyncHandler(async (req, res) => {
+  res.json({ sites: await jobService.searchSiteOptions(queryStr(req.query.q), customerId(req)) });
 });
 
 // GET /customer/jobs/:id

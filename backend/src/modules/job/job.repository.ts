@@ -2,7 +2,7 @@ import { Prisma, type Job, type JobAttachment } from "@prisma/client";
 
 import { prisma, withTransaction } from "../../lib/prisma.js";
 import { escapeRegex } from "../../utils/search.js";
-import { startOfDayIn } from "../../utils/filter-date.js";
+import { isEmptyWindow, startOfDayIn, type DayWindow } from "../../utils/filter-date.js";
 import { OVERDUE_ELIGIBLE_STATUSES } from "./job-overdue.js";
 
 // Data-access layer for Jobs (field-work job header + kit lines). The ONLY place Prisma is touched
@@ -111,6 +111,18 @@ export interface JobListFilters {
   customerId?: string;
   assignedEngineerId?: string;
   projectId?: string;
+  siteId?: string;
+  priority?: string;
+  /**
+   * Half-open window on `completionDate` — the DUE date. A calendar-day column (stored at UTC
+   * midnight of the date somebody typed), so the caller builds this with `calendarDayWindow`, not
+   * with the company timezone: there is no instant here to convert.
+   *
+   * Composes with `status === "overdue"` rather than fighting it — see buildWhere.
+   */
+  dueWindow?: DayWindow;
+  /** Half-open window on `createdAt` — an INSTANT, so the caller builds it with `instantDayWindow`. */
+  createdWindow?: DayWindow;
   /**
    * Start of "today" in the COMPANY timezone. Supplied by the caller for the same reason as on the
    * engineer side (buildEngineerWhere): the repository holds no business decisions and reads no
@@ -119,7 +131,25 @@ export interface JobListFilters {
   overdueBefore?: Date;
 }
 
-function buildWhere(filters: JobListFilters): Prisma.JobWhereInput {
+/**
+ * Fold the due-date window and the derived "overdue" status into ONE `completionDate` clause.
+ *
+ * They both constrain the same column, so assigning one after the other would silently drop
+ * whichever ran first: "overdue jobs due in August" would come back as every overdue job, or every
+ * August job, depending on statement order. Overdue narrows the upper bound to whichever is
+ * tighter, and never widens it.
+ */
+function completionDateClause(w: DayWindow | undefined, overdueBefore: Date | undefined): Prisma.DateTimeNullableFilter | undefined {
+  const clause: Prisma.DateTimeNullableFilter = {};
+  if (w?.gte) clause.gte = w.gte;
+  const uppers = [w?.lt, overdueBefore].filter((d): d is Date => d instanceof Date);
+  if (uppers.length) clause.lt = new Date(Math.min(...uppers.map((d) => d.getTime())));
+  return Object.keys(clause).length ? clause : undefined;
+}
+
+// Exported for unit testing — a pure where-clause builder with no Prisma I/O, the same contract the
+// purchase-order and purchase-request repositories already expose theirs under.
+export function buildWhere(filters: JobListFilters): Prisma.JobWhereInput {
   const where: Prisma.JobWhereInput = { deletedAt: null };
   if (filters.status === "overdue") {
     // Same derived pseudo-status the engineer list and the dashboard overdue card use — an ACTIVE job
@@ -129,11 +159,18 @@ function buildWhere(filters: JobListFilters): Prisma.JobWhereInput {
     // side: a quiet default reports "nothing overdue", which is invisible and wrong.
     if (!filters.overdueBefore) throw new Error("buildWhere: overdueBefore is required for the overdue filter.");
     where.status = { in: [...ACTIVE_JOB_STATUSES] };
-    where.completionDate = { lt: filters.overdueBefore };
   } else if (filters.status) where.status = filters.status;
+  const completionDate = completionDateClause(
+    filters.dueWindow,
+    filters.status === "overdue" ? filters.overdueBefore : undefined,
+  );
+  if (completionDate) where.completionDate = completionDate;
+  if (filters.createdWindow && !isEmptyWindow(filters.createdWindow)) where.createdAt = filters.createdWindow;
   if (filters.customerId) where.customerId = filters.customerId;
   if (filters.assignedEngineerId) where.assignedEngineerId = filters.assignedEngineerId;
   if (filters.projectId) where.projectId = filters.projectId;
+  if (filters.siteId) where.siteId = filters.siteId;
+  if (filters.priority) where.priority = filters.priority;
   if (filters.search) {
     const q = escapeRegex(filters.search);
     where.OR = [
@@ -229,7 +266,25 @@ export type GoodsQueueJob = Prisma.JobGetPayload<{ select: typeof goodsQueueSele
 // isn't homed here; without it the queue could never find a van return away from its nominal home.
 // It's an indexed boolean lookup, NOT a growing job-id list, so it stays O(1) as history grows. The
 // service then confirms per line that van stock is actually still returnable before showing the row.
-export function findActiveForGoodsManagement(warehouseId: string, search?: string): Promise<GoodsQueueJob[]> {
+/**
+ * The goods queue's own filters, applied at the DB rather than over the candidate set in memory.
+ *
+ * Every one of these narrows the JOB, which is the row the queue lists — so pushing them down here
+ * means the service's per-job enrichment (goods status, movements, balances) runs over the filtered
+ * set instead of over every active job at the warehouse. The queue's OTHER filters (goods status,
+ * activity window) genuinely cannot come here: they live on JobStockSummary, not on Job.
+ */
+export interface GoodsQueueFilters {
+  search?: string;
+  assignedEngineerId?: string;
+  customerId?: string;
+  siteId?: string;
+  /** Half-open window on `completionDate` — a calendar-day column, so `calendarDayWindow`. */
+  dueWindow?: DayWindow;
+}
+
+export function findActiveForGoodsManagement(warehouseId: string, filters: GoodsQueueFilters = {}): Promise<GoodsQueueJob[]> {
+  const { search, assignedEngineerId, customerId, siteId, dueWindow } = filters;
   const candidateOr: Prisma.JobWhereInput[] = [
     { kitLines: { some: { OR: [{ warehouseId }, { lineType: "misc" }] } } },
     { kitLines: { some: { hasVanSource: true } } },
@@ -241,6 +296,10 @@ export function findActiveForGoodsManagement(warehouseId: string, search?: strin
   const where: Prisma.JobWhereInput = {
     deletedAt: null,
     status: { in: ["accepted", "in_progress", "completed", "cancelled"] },
+    ...(assignedEngineerId && { assignedEngineerId }),
+    ...(customerId && { customerId }),
+    ...(siteId && { siteId }),
+    ...(dueWindow && !isEmptyWindow(dueWindow) && { completionDate: dueWindow }),
     AND: [
       { OR: candidateOr },
       ...(search
@@ -473,6 +532,9 @@ export function findActiveByEngineerWithKitLines(engineerId: string): Promise<En
 export interface EngineerJobFilters {
   status?: string;
   search?: string;
+  /** Half-open window on `completionDate` (a calendar-day column). Composes with "overdue" below. */
+  dueWindow?: DayWindow;
+  siteId?: string;
   /**
    * Start of today, for the derived "overdue" status. Supplied by the SERVICE rather than computed
    * here: "what day is it" depends on the company timezone (a settings read), and a repository is a
@@ -481,7 +543,8 @@ export interface EngineerJobFilters {
    */
   overdueBefore?: Date;
 }
-function buildEngineerWhere(engineerId: string, filters: EngineerJobFilters): Prisma.JobWhereInput {
+/** Exported for unit testing — pure, no Prisma I/O. */
+export function buildEngineerWhere(engineerId: string, filters: EngineerJobFilters): Prisma.JobWhereInput {
   const where: Prisma.JobWhereInput = { assignedEngineerId: engineerId, deletedAt: null };
   if (filters.status === "overdue") {
     // "Overdue" is a DERIVED pseudo-status (never stored): an active job whose completion date has
@@ -495,10 +558,17 @@ function buildEngineerWhere(engineerId: string, filters: EngineerJobFilters): Pr
     // of their work. Throwing surfaces it the moment the call is wrong.
     if (!filters.overdueBefore) throw new Error("buildEngineerWhere: overdueBefore is required for the overdue filter.");
     where.status = { in: ["assigned", "accepted", "in_progress"] };
-    where.completionDate = { lt: filters.overdueBefore };
   } else if (filters.status) {
     where.status = filters.status;
   }
+  // Same merge as the office list: overdue and an explicit due range both constrain completionDate,
+  // so they are folded into one clause rather than overwriting each other.
+  const completionDate = completionDateClause(
+    filters.dueWindow,
+    filters.status === "overdue" ? filters.overdueBefore : undefined,
+  );
+  if (completionDate) where.completionDate = completionDate;
+  if (filters.siteId) where.siteId = filters.siteId;
   if (filters.search) {
     where.OR = [
       { jobNumber: { contains: escapeRegex(filters.search), mode: "insensitive" } },
@@ -688,9 +758,14 @@ export interface PortalJobFilters {
   /** Underlying statuses to narrow to. Must be a subset of PORTAL_JOB_STATUSES — the service maps a
    *  customer-facing stage to these; anything else is a wiring bug, not user input. */
   statuses?: readonly string[];
+  /** Half-open window on `completionDate` (a calendar-day column). */
+  dueWindow?: DayWindow;
+  /** One of the customer's OWN sites — tenant-safe because customerId is pinned from the session. */
+  siteId?: string;
 }
 
-function buildCustomerWhere(customerId: string, f: PortalJobFilters): Prisma.JobWhereInput {
+/** Exported for unit testing — pure, no Prisma I/O. The tenant bound is the thing under test. */
+export function buildCustomerWhere(customerId: string, f: PortalJobFilters): Prisma.JobWhereInput {
   // Both bounds are always applied: the customer's own id AND the visible-status allow-list. The
   // status filter can only ever narrow within that list — it can never widen it back to `draft`.
   const allowed = f.statuses?.length ? f.statuses.filter((s) => (PORTAL_JOB_STATUSES as readonly string[]).includes(s)) : null;
@@ -699,6 +774,11 @@ function buildCustomerWhere(customerId: string, f: PortalJobFilters): Prisma.Job
     deletedAt: null,
     status: { in: allowed && allowed.length > 0 ? [...allowed] : [...PORTAL_JOB_STATUSES] },
   };
+  if (f.dueWindow && !isEmptyWindow(f.dueWindow)) where.completionDate = f.dueWindow;
+  // The site id still has to belong to this customer, and it does by construction: `customerId` is
+  // already pinned on the same `where` from the SESSION, so a borrowed site id from another company
+  // simply matches no row here rather than reaching across the tenant boundary.
+  if (f.siteId) where.siteId = f.siteId;
   if (f.search) {
     const q = escapeRegex(f.search);
     where.OR = [

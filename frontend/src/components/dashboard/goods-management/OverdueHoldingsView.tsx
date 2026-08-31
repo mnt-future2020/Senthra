@@ -19,6 +19,10 @@ import { useDashboard } from "@/hooks/useDashboard";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { Pagination } from "@/components/ui/Pagination";
 import { WorkspaceToolbar } from "@/components/ui/WorkspaceToolbar";
+import { Select } from "@/components/ui/Select";
+import { FilterPopover } from "@/components/ui/FilterPopover";
+import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
+import { listEngineerOptions } from "@/services/warehouse.service";
 import { WriteOffLostModal, type WriteOffTarget } from "./WriteOffLostModal";
 import { hireList } from "./hireOutstanding";
 import type { OverdueRow } from "@/types/goodsManagement";
@@ -70,6 +74,11 @@ export function OverdueHoldingsView({ warehouseId }: { warehouseId?: string }) {
   // Namespaced `gmOv*` params, matching how the host tab persists its own filters — a refresh or a
   // shared link restores the same page and search without clobbering the page's ?tab.
   const urlSearch = searchParams.get("gmOvq") ?? "";
+  // The engineer still holding it, and when it went out. This queue exists to CHASE people, so the
+  // engineer is the dimension it is read by; `issuedAt` is an instant, windowed in company time.
+  const engineerFilter = searchParams.get("gmOvEng") ?? "";
+  const issuedFrom = searchParams.get("gmOvFrom") ?? "";
+  const issuedTo = searchParams.get("gmOvTo") ?? "";
   const page = Math.max(1, Number(searchParams.get("gmOvPage")) || 1);
   const [searchInput, setSearchInput] = React.useState(urlSearch);
 
@@ -113,7 +122,15 @@ export function OverdueHoldingsView({ warehouseId }: { warehouseId?: string }) {
   React.useEffect(() => {
     let active = true;
     gmService
-      .listOverdue({ warehouseId, search: urlSearch || undefined, page, pageSize: PAGE_SIZE })
+      .listOverdue({
+        warehouseId,
+        search: urlSearch || undefined,
+        engineerId: engineerFilter || undefined,
+        issuedFrom: issuedFrom || undefined,
+        issuedTo: issuedTo || undefined,
+        page,
+        pageSize: PAGE_SIZE,
+      })
       .then((data) => {
         if (!active) return;
         setError(null);
@@ -135,7 +152,17 @@ export function OverdueHoldingsView({ warehouseId }: { warehouseId?: string }) {
     return () => {
       active = false;
     };
-  }, [warehouseId, urlSearch, page, tick]);
+  }, [warehouseId, urlSearch, engineerFilter, issuedFrom, issuedTo, page, tick]);
+
+  // Engineer options for the filter. Degrades to an empty list, which reads as "All engineers".
+  const [engineerOptions, setEngineerOptions] = React.useState<{ value: string; label: string }[]>([]);
+  React.useEffect(() => {
+    let alive = true;
+    listEngineerOptions()
+      .then((us) => alive && setEngineerOptions(us.map((u) => ({ value: u.id, label: u.name }))))
+      .catch(() => alive && setEngineerOptions([]));
+    return () => { alive = false; };
+  }, []);
 
   // Step ONE of the write-off: preview. Calling close with no payload never acts — it reports what the
   // engineer still holds and leaves the job open — so the modal can show exactly what is about to be
@@ -246,6 +273,30 @@ export function OverdueHoldingsView({ warehouseId }: { warehouseId?: string }) {
           placeholder: "Search job no., name or engineer…",
           ariaLabel: "Search overdue holdings",
         }}
+        filters={
+          <>
+            {/* The engineer stays out in the open — this list is worked one engineer at a time. */}
+            <Select
+              size="sm"
+              ariaLabel="Filter by engineer"
+              value={engineerFilter}
+              onChange={(v) => patch({ gmOvEng: v || null })}
+              options={[{ value: "", label: "All engineers" }, ...engineerOptions]}
+            />
+            <FilterPopover
+              activeCount={issuedFrom || issuedTo ? 1 : 0}
+              onClear={() => patch({ gmOvFrom: null, gmOvTo: null })}
+            >
+              <DateRangeFilter
+                label="Issued"
+                showLabel
+                from={issuedFrom}
+                to={issuedTo}
+                onChange={({ from, to }) => patch({ gmOvFrom: from || null, gmOvTo: to || null })}
+              />
+            </FilterPopover>
+          </>
+        }
       />
 
       {body}

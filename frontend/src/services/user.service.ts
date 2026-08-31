@@ -9,6 +9,10 @@ export interface UserListParams {
   search?: string;
   status?: string;
   roleId?: string;
+  /** Inclusive calendar days ("YYYY-MM-DD"), as the user picked them. The SERVER decides which
+   *  day that is for a timestamp column, in the company timezone. */
+  addedFrom?: string;
+  addedTo?: string;
   page?: number;
   pageSize?: number;
   sort?: string;
@@ -77,6 +81,8 @@ function qs(params: UserListParams): string {
   if (params.search) sp.set("search", params.search);
   if (params.status) sp.set("status", params.status);
   if (params.roleId) sp.set("roleId", params.roleId);
+  if (params.addedFrom) sp.set("addedFrom", params.addedFrom);
+  if (params.addedTo) sp.set("addedTo", params.addedTo);
   if (params.sort) sp.set("sort", params.sort);
   if (params.page) sp.set("page", String(params.page));
   if (params.pageSize) sp.set("pageSize", String(params.pageSize));
@@ -89,8 +95,19 @@ function qs(params: UserListParams): string {
 // the previous page instantly instead of flashing a skeleton while it refetches.
 const usersListCache = new Map<string, PagedUsers>();
 registerClientCache(() => usersListCache.clear());
-const listCacheKey = (p: UserListParams): string =>
-  `${p.page ?? 1}|${p.pageSize ?? ""}|${p.search ?? ""}|${p.status ?? ""}|${p.roleId ?? ""}|${p.sort ?? ""}`;
+/**
+ * Cache identity = the QUERY STRING actually sent.
+ *
+ * A hand-written key is a SECOND copy of the parameter list, kept in step with the serialiser by
+ * memory — and memory failed: Goods In sent `receivedFrom`/`receivedTo` and keyed neither, so a
+ * date-filtered read and an unfiltered one hashed identically and overwrote each other's page.
+ *
+ * Deriving the key from the serialiser removes the second list entirely: a parameter that affects
+ * the response is in the key BECAUSE it is in the request, so the two can never drift again.
+ * `URLSearchParams` preserves insertion order and the serialiser sets keys in a fixed order, so
+ * equivalent filters always produce byte-identical keys.
+ */
+export const listCacheKey = (p: UserListParams): string => qs(p);
 
 export const getCachedUsers = (params: UserListParams = {}): PagedUsers | undefined =>
   usersListCache.get(listCacheKey(params));

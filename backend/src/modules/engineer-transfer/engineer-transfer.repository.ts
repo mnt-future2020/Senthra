@@ -1,5 +1,6 @@
 import { Prisma, type EngineerStockTransfer, type EngineerStockTransferLine } from "@prisma/client";
 
+import { isEmptyWindow, type DayWindow } from "../../utils/filter-date.js";
 import { prisma, withTransaction } from "../../lib/prisma.js";
 import { conflict } from "../../utils/http-error.js";
 import { escapeRegex } from "../../utils/search.js";
@@ -195,6 +196,8 @@ export interface ListForEngineerParams {
   status?: string;
   sort?: string;
   search?: string;
+  /** Half-open window on `createdAt` — an INSTANT, resolved in the company timezone by the service. */
+  raisedWindow?: DayWindow;
   page?: number;
   pageSize?: number;
 }
@@ -249,8 +252,12 @@ function transferOrderBy(sort?: string): Prisma.EngineerStockTransferOrderByWith
 }
 
 export async function listForEngineer(engineerId: string, params: ListForEngineerParams = {}): Promise<{ transfers: TransferWithLines[]; total: number }> {
-  const { role, status, sort, search, page = 1, pageSize = 20 } = params;
-  const where = engineerWhere(engineerId, role, status, search);
+  const { role, status, sort, search, page = 1, pageSize = 20, raisedWindow } = params;
+  const base = engineerWhere(engineerId, role, status, search);
+  // AND'd rather than assigned: engineerWhere already builds an AND/OR shape for the incoming vs
+  // outgoing sides, and writing createdAt straight onto it would sit alongside — or replace — that.
+  const where: Prisma.EngineerStockTransferWhereInput =
+    raisedWindow && !isEmptyWindow(raisedWindow) ? { AND: [base, { createdAt: raisedWindow }] } : base;
   const skip = (page - 1) * pageSize;
   const [transfers, total] = await Promise.all([
     prisma.engineerStockTransfer.findMany({ where, include: { lines: true }, orderBy: transferOrderBy(sort), skip, take: pageSize }),
@@ -261,18 +268,22 @@ export async function listForEngineer(engineerId: string, params: ListForEnginee
 
 export interface ListAllParams {
   status?: string;
+  /** Matches EITHER side of the transfer — see the OR below. */
   engineerId?: string;
   ownership?: string;
   sort?: string;
   search?: string;
+  /** Half-open window on `createdAt` — an INSTANT, resolved in the company timezone by the service. */
+  raisedWindow?: DayWindow;
   page?: number;
   pageSize?: number;
 }
 
 export async function listAll(params: ListAllParams = {}): Promise<{ transfers: TransferWithLines[]; total: number }> {
-  const { status, engineerId, ownership, sort, search, page = 1, pageSize = 20 } = params;
+  const { status, engineerId, ownership, sort, search, page = 1, pageSize = 20, raisedWindow } = params;
   const and: Prisma.EngineerStockTransferWhereInput[] = [{ deletedAt: null }];
   if (status) and.push({ status });
+  if (raisedWindow && !isEmptyWindow(raisedWindow)) and.push({ createdAt: raisedWindow });
   if (engineerId) and.push({ OR: [{ fromEngineerId: engineerId }, { toEngineerId: engineerId }] });
   if (ownership) and.push({ lines: { some: { ownership } } });
   if (search?.trim()) and.push({ OR: searchOr(search.trim()) });

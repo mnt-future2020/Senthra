@@ -13,6 +13,7 @@ import { Notice } from "@/components/ui/Notice";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { FilterPopover } from "@/components/ui/FilterPopover";
+import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
 import { toolbarActionsCls, toolbarBtn, toolbarPrimaryBtn } from "@/components/ui/styles";
 import { EmptyState, fmtDateTime } from "@/components/dashboard/portal/portalUi";
 import { singlePickup, VanRequestItemsSummary, VanRequestLinesTable, VanRequestListSkeleton, VanStockAttachments, VanStockCompletionBadge, VanStockPostings, VanStockWalkInBadge, warehouseCaption } from "@/components/dashboard/van-requests/vanRequestUi";
@@ -96,6 +97,9 @@ export function EngineerVanStock() {
   const createdVia = searchParams.get("origin") ?? "";
   const sort = searchParams.get("sort") ?? "newest";
   const urlSearch = searchParams.get("q") ?? "";
+  // WHEN it was raised — an instant, windowed in company time by the server.
+  const raisedFrom = searchParams.get("from") ?? "";
+  const raisedTo = searchParams.get("to") ?? "";
   const page = Math.max(1, Number(searchParams.get("page")) || 1);
 
   const patchParams = React.useCallback(
@@ -142,6 +146,8 @@ export function EngineerVanStock() {
         type: type || undefined,
         createdVia: createdVia || undefined,
         search: urlSearch || undefined,
+        raisedFrom: raisedFrom || undefined,
+        raisedTo: raisedTo || undefined,
         sort: sort as "newest" | "oldest",
         page,
         pageSize: PAGE_SIZE,
@@ -158,7 +164,7 @@ export function EngineerVanStock() {
         setError(null);
       })
       .catch((err) => { setRequests([]); setMeta({ total: 0, totalPages: 1 }); setError(err instanceof Error ? err.message : "Could not load your requests."); });
-  }, [status, type, createdVia, urlSearch, sort, page, setPage]);
+  }, [status, type, createdVia, urlSearch, raisedFrom, raisedTo, sort, page, setPage]);
 
   React.useEffect(() => load(), [load]);
   // Live-refresh when the warehouse reviews or fulfils one of this engineer's requests.
@@ -214,7 +220,14 @@ export function EngineerVanStock() {
         >
           <Select size="sm" ariaLabel="Filter by type" value={type} onChange={onFilter("type")} options={TYPE_OPTIONS} />
           <Select size="sm" ariaLabel="Filter by origin" value={createdVia} onChange={onFilter("origin")} options={ORIGIN_OPTIONS} />
-          <Select size="sm" ariaLabel="Sort order" value={sort} onChange={onFilter("sort")} options={SORT_OPTIONS} />
+          <DateRangeFilter
+        label="Requested"
+        showLabel
+        from={raisedFrom}
+        to={raisedTo}
+        onChange={({ from, to }) => patchParams({ from: from || null, to: to || null }, true)}
+      />
+      <Select size="sm" ariaLabel="Sort order" value={sort} onChange={onFilter("sort")} options={SORT_OPTIONS} />
         </FilterPopover>
 
         {/* The page's actions, at the right-hand end of the row rather than in the top bar. Up there

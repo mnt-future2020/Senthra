@@ -329,14 +329,35 @@ describe("every extension agreed in a period", () => {
     countExtensions.mockReset().mockResolvedValue(1);
   });
 
-  // `agreedAt` is a TIMESTAMP, not a calendar day like a movement date. An upper bound of the last
-  // day's midnight would drop every extension agreed after midnight on that day — which is all of
-  // them, so a July report would silently lose the whole of the 31st.
-  it("includes the whole of the last day of the period", async () => {
+  // `createdAt` is a TIMESTAMP, not a calendar day like a movement date, so "July" is a question
+  // about the COMPANY's July — July is BST, so the month starts an hour before UTC midnight and ends
+  // an hour before the UTC 1st. It used to widen to the UTC day, which silently shifted the whole
+  // report by an hour: the first hour of 1 July was missing and the last hour belonged to August.
+  //
+  // The upper bound is EXCLUSIVE (the start of 1 August), which is what includes the whole of the
+  // 31st. An inclusive bound would need a 23:59:59.999 value and drift by the offset all over again.
+  it("covers the company's whole period, both edges", async () => {
     await listHireExtensions({ from: "2026-07-01", to: "2026-07-31" });
     const f = findExtensions.mock.calls[0][0];
-    expect(f.dateFrom).toEqual(new Date("2026-07-01T00:00:00.000Z"));
-    expect(f.dateTo).toEqual(new Date("2026-07-31T23:59:59.999Z"));
+    expect(f.dateFrom).toEqual(new Date("2026-06-30T23:00:00.000Z"));
+    expect(f.dateTo).toEqual(new Date("2026-07-31T23:00:00.000Z"));
+  });
+
+  // GMT, not BST — the same period logic must not hardcode an offset.
+  it("uses the winter offset for a winter period", async () => {
+    await listHireExtensions({ from: "2026-01-01", to: "2026-01-31" });
+    const f = findExtensions.mock.calls[0][0];
+    expect(f.dateFrom).toEqual(new Date("2026-01-01T00:00:00.000Z"));
+    expect(f.dateTo).toEqual(new Date("2026-02-01T00:00:00.000Z"));
+  });
+
+  // An extension agreed at 23:30 UK time on the 31st is 22:30Z — inside July. One agreed at 00:30 on
+  // 1 August is 23:30Z on the 31st, and must NOT be: that is the row the old UTC window swept in.
+  it("puts a late-evening extension in the month it was agreed, not the next one", async () => {
+    await listHireExtensions({ from: "2026-07-01", to: "2026-07-31" });
+    const upper = findExtensions.mock.calls[0][0].dateTo as Date;
+    expect(new Date("2026-07-31T22:30:00.000Z") < upper).toBe(true);
+    expect(new Date("2026-07-31T23:30:00.000Z") < upper).toBe(false);
   });
 
   it("ignores a period it cannot read rather than answering with an empty month", async () => {

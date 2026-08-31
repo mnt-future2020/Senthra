@@ -23,7 +23,7 @@ import {
 
 const PAGE_SIZE = 25;
 
-const EMPTY_FACETS: AuditFacets = { actions: [], actorTypes: [], targetTypes: [] };
+const EMPTY_FACETS: AuditFacets = { actions: [], actorTypes: [], targetTypes: [], actors: [] };
 
 const selectCls =
   "rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2.5 text-xs font-bold text-[var(--ink)] outline-none focus:border-[var(--accent)]";
@@ -62,6 +62,9 @@ export function AuditLogPanel() {
   const [debounced, setDebounced] = React.useState("");
   const [action, setAction] = React.useState("");
   const [actorType, setActorType] = React.useState("");
+  // WHO did it. `actorType` answers staff-vs-customer-vs-system; this answers "what did Karen do",
+  // which is the question an audit log is actually opened with and had no way to be asked.
+  const [actorEmail, setActorEmail] = React.useState("");
   const [targetType, setTargetType] = React.useState("");
   const [from, setFrom] = React.useState("");
   const [to, setTo] = React.useState("");
@@ -90,11 +93,12 @@ export function AuditLogPanel() {
       search: debounced || undefined,
       action: action || undefined,
       actorType: actorType || undefined,
+      actorEmail: actorEmail || undefined,
       targetType: targetType || undefined,
       from: from || undefined,
       to: to || undefined,
     }),
-    [debounced, action, actorType, targetType, from, to],
+    [debounced, action, actorType, actorEmail, targetType, from, to],
   );
 
   // Re-fetch on any query change.
@@ -159,10 +163,11 @@ export function AuditLogPanel() {
           />
         </div>
         <FilterPopover
-          activeCount={(action ? 1 : 0) + (targetType ? 1 : 0) + (actorType ? 1 : 0) + (from ? 1 : 0) + (to ? 1 : 0)}
+          activeCount={(action ? 1 : 0) + (targetType ? 1 : 0) + (actorType ? 1 : 0) + (actorEmail ? 1 : 0) + (from ? 1 : 0) + (to ? 1 : 0)}
           onClear={() => {
             setAction("");
             setActorType("");
+            setActorEmail("");
             setTargetType("");
             setFrom("");
             setTo("");
@@ -198,6 +203,19 @@ export function AuditLogPanel() {
           }}
           options={[{ value: "", label: "All actors" }, ...facets.actorTypes.map((t) => ({ value: t, label: humanizeType(t) }))]}
           ariaLabel="Actor type filter"
+        />
+        {/* WHO. Options come from the log itself (a facet), so the filter can never offer a person
+            who has no entries — and a departed user stays selectable under the email the entries were
+            recorded with, which is what makes their history reachable at all. */}
+        <Select
+          size="sm"
+          value={actorEmail}
+          onChange={(v) => {
+            setActorEmail(v);
+            setPage(1);
+          }}
+          options={[{ value: "", label: "Anyone" }, ...facets.actors.map((a) => ({ value: a, label: a }))]}
+          ariaLabel="Filter by who acted"
         />
         <label className="flex items-center gap-1.5 text-xs font-bold text-[var(--muted)]">
           From

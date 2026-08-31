@@ -61,8 +61,19 @@ function qs(params: WarehouseListParams): string {
 // after a mutation renders instantly instead of flashing a skeleton. Cleared on logout.
 const listCache = new Map<string, PagedWarehouses>();
 registerClientCache(() => listCache.clear());
-const listCacheKey = (p: WarehouseListParams): string =>
-  `${p.page ?? 1}|${p.pageSize ?? ""}|${p.search ?? ""}|${p.status ?? ""}|${p.type ?? ""}|${p.sort ?? ""}`;
+/**
+ * Cache identity = the QUERY STRING actually sent.
+ *
+ * A hand-written key is a SECOND copy of the parameter list, kept in step with the serialiser by
+ * memory — and memory failed: Goods In sent `receivedFrom`/`receivedTo` and keyed neither, so a
+ * date-filtered read and an unfiltered one hashed identically and overwrote each other's page.
+ *
+ * Deriving the key from the serialiser removes the second list entirely: a parameter that affects
+ * the response is in the key BECAUSE it is in the request, so the two can never drift again.
+ * `URLSearchParams` preserves insertion order and the serialiser sets keys in a fixed order, so
+ * equivalent filters always produce byte-identical keys.
+ */
+export const listCacheKey = (p: WarehouseListParams): string => qs(p);
 
 export const getCachedWarehouses = (params: WarehouseListParams = {}): PagedWarehouses | undefined =>
   listCache.get(listCacheKey(params));

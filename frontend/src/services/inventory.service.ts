@@ -29,7 +29,13 @@ export interface PagedInventory {
 export interface TransferListParams {
   search?: string;
   irmItem?: string;
+  /** Matches EITHER end of the move. Distinct from the directional pair below. */
   warehouse?: string;
+  fromWarehouse?: string;
+  toWarehouse?: string;
+  /** Inclusive calendar days on the move's own stated date (`movementDate`). */
+  movedFrom?: string;
+  movedTo?: string;
   page?: number;
   pageSize?: number;
 }
@@ -77,6 +83,10 @@ function listQs(params: InventoryListParams): string {
 
 function transferQs(params: TransferListParams): string {
   const sp = new URLSearchParams();
+  if (params.fromWarehouse) sp.set("fromWarehouse", params.fromWarehouse);
+  if (params.toWarehouse) sp.set("toWarehouse", params.toWarehouse);
+  if (params.movedFrom) sp.set("movedFrom", params.movedFrom);
+  if (params.movedTo) sp.set("movedTo", params.movedTo);
   if (params.search) sp.set("search", params.search);
   if (params.irmItem) sp.set("irmItem", params.irmItem);
   if (params.warehouse) sp.set("warehouse", params.warehouse);
@@ -90,8 +100,19 @@ function transferQs(params: TransferListParams): string {
 // instantly instead of flashing a skeleton. Cleared on logout and after a transfer mutates stock.
 const listCache = new Map<string, PagedInventory>();
 registerClientCache(() => listCache.clear());
-const listCacheKey = (p: InventoryListParams): string =>
-  `${p.page ?? 1}|${p.pageSize ?? ""}|${p.search ?? ""}|${p.warehouse ?? ""}|${p.category ?? ""}|${p.status ?? ""}`;
+/**
+ * Cache identity = the QUERY STRING actually sent.
+ *
+ * A hand-written key is a SECOND copy of the parameter list, kept in step with the serialiser by
+ * memory — and memory failed: Goods In sent `receivedFrom`/`receivedTo` and keyed neither, so a
+ * date-filtered read and an unfiltered one hashed identically and overwrote each other's page.
+ *
+ * Deriving the key from the serialiser removes the second list entirely: a parameter that affects
+ * the response is in the key BECAUSE it is in the request, so the two can never drift again.
+ * `URLSearchParams` preserves insertion order and the serialiser sets keys in a fixed order, so
+ * equivalent filters always produce byte-identical keys.
+ */
+export const listCacheKey = (p: InventoryListParams): string => listQs(p);
 
 export const getCachedInventory = (params: InventoryListParams = {}): PagedInventory | undefined => listCache.get(listCacheKey(params));
 

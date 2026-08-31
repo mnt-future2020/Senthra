@@ -553,4 +553,31 @@ export interface CompleteJobPayload {
 export interface ListDamagedParams {
   warehouseId?: string;
   customerId?: string;
+  /**
+   * "company" | "customer" — which owned pool. Applied SERVER-side, after the warehouse scope, and
+   * validated strictly there: an unknown value is rejected rather than silently ignored.
+   *
+   * Hired kit is not in this pool at all: it comes from the custody-exit endpoint and the screen
+   * merges the two. No date filter here — see the service's DamagedFilters for why.
+   */
+  ownerType?: "company" | "customer";
+  /** Item name, latest reason, or warehouse. */
+  search?: string;
+  /**
+   * Ask for the COUNTS without the rows — what the screen wants while the reader is looking at the
+   * HIRE pool, whose rows come from a different endpoint but whose switcher still has to show what
+   * the owned pools hold.
+   */
+  countsOnly?: boolean;
+}
+
+/** Per-pool totals for the searched, scoped set — computed BEFORE `ownerType` narrows the rows. */
+export interface DamagedCounts {
+  company: number;
+  customer: number;
+}
+
+export interface DamagedListResult {
+  rows: DamagedRow[];
+  counts: DamagedCounts;
 }

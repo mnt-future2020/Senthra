@@ -55,8 +55,23 @@ export const getAvailability = asyncHandler(async (req, res) => {
 
 // GET /inventory/transfers (movement history)
 export const listTransfers = asyncHandler(async (req, res) => {
-  const { search, irmItem, warehouse, page, pageSize } = req.query;
-  res.json(await inventoryService.listTransfers({ search: queryStr(search), irmItem: queryStr(irmItem), warehouse: queryStr(warehouse), page: queryInt(page), pageSize: queryInt(pageSize) }, actorFrom(req)));
+  const { search, irmItem, warehouse, fromWarehouse, toWarehouse, movedFrom, movedTo, page, pageSize } = req.query;
+  res.json(
+    await inventoryService.listTransfers(
+      {
+        search: queryStr(search),
+        irmItem: queryStr(irmItem),
+        warehouse: queryStr(warehouse),
+        fromWarehouse: queryStr(fromWarehouse),
+        toWarehouse: queryStr(toWarehouse),
+        movedFrom: queryStr(movedFrom),
+        movedTo: queryStr(movedTo),
+        page: queryInt(page),
+        pageSize: queryInt(pageSize),
+      },
+      actorFrom(req),
+    ),
+  );
 });
 
 // POST /inventory/transfers (move stock)
@@ -95,17 +110,23 @@ export const listPurchases = asyncHandler(async (req, res) => {
 // GET /inventory/positions
 export const listPositions = asyncHandler(async (req, res) => {
   const q = req.query;
-  const result = await aggregation.listStockPositions({
-    ownership: q.ownership as Ownership | undefined,
-    locationType: q.location as LocationType | undefined,
-    warehouseId: q.warehouse as string | undefined,
-    categoryName: q.category as string | undefined,
-    search: q.search as string | undefined,
-    status: q.status as StockPositionStatus | undefined,
-    customerId: q.customer as string | undefined,
-    page: queryInt(q.page),
-    pageSize: queryInt(q.pageSize),
-  });
+  // `actorFrom(req)` is what applies the warehouse scope — the same argument the CSV export of this
+  // data has always passed. Without it a warehouse-restricted user could read any warehouse's
+  // positions, with or without the ?warehouse filter.
+  const result = await aggregation.listStockPositions(
+    {
+      ownership: q.ownership as Ownership | undefined,
+      locationType: q.location as LocationType | undefined,
+      warehouseId: q.warehouse as string | undefined,
+      categoryName: q.category as string | undefined,
+      search: q.search as string | undefined,
+      status: q.status as StockPositionStatus | undefined,
+      customerId: q.customer as string | undefined,
+      page: queryInt(q.page),
+      pageSize: queryInt(q.pageSize),
+    },
+    actorFrom(req),
+  );
   res.json(result);
 });
 
@@ -171,8 +192,25 @@ export const exportAllPositionsCsv = asyncHandler(async (req, res) => {
 });
 
 // GET /inventory/engineers (engineer lens overview)
-export const listEngineers = asyncHandler(async (_req, res) => {
-  res.json(await aggregation.listEngineerInventory());
+// GET /inventory/engineer-options — the COMPLETE field-engineer roster for filter pickers.
+//
+// Separate from /inventory/engineers, which is the paged LENS. A picker must offer everyone; a list
+// must not load everyone. Conflating the two is what capped the pickers at 100.
+export const listEngineerOptions = asyncHandler(async (_req, res) => {
+  res.json({ engineers: await aggregation.listEngineerOptions() });
+});
+
+export const listEngineers = asyncHandler(async (req, res) => {
+  // Paged and filterable now — the raw array had no ceiling and no way to narrow it. The response
+  // is an OBJECT, so callers that only wanted the whole list read `.rows`.
+  res.json(
+    await aggregation.listEngineerInventoryPaged({
+      search: queryStr(req.query.search),
+      holdingOnly: queryStr(req.query.holding) === "1",
+      page: queryInt(req.query.page),
+      pageSize: queryInt(req.query.pageSize),
+    }),
+  );
 });
 
 // GET /inventory/engineers/:engineerId (one engineer's holdings + active jobs)

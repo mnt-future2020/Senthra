@@ -9,6 +9,7 @@ import {
 
 import { prisma, withTransaction } from "../../lib/prisma.js";
 import { escapeRegex } from "../../utils/search.js";
+import { isEmptyWindow, type DayWindow } from "../../utils/filter-date.js";
 
 // Repo functions in the customer-receive path accept an optional transaction client so the
 // caller can run the assignment update, request-status update and stock-entry write atomically
@@ -28,8 +29,21 @@ type Db = Prisma.TransactionClient | typeof prisma;
 // Projects tabs read them through the PAGED queries below instead.
 export type CustomerWithChildren = Customer & {
   users: CustomerUser[];
-  stockRequests: CustomerStockRequest[];
+  // Carries the preferred warehouse alongside each submission — the admin detail is the screen the
+  // reviewer works from, so the preference has to arrive with the row, not via a second lookup.
+  stockRequests: (CustomerStockRequest & { preferredWarehouse?: { id: string; name: string; code: string; status: string; deletedAt: Date | null } | null })[];
 };
+
+// Every read of a submission carries the preferred warehouse's name so the reviewer can see WHICH
+// warehouse the customer asked for without a second round trip. Selected (not the whole row) —
+// a customer must never receive a warehouse's address, contact or notes through their own request.
+// `deletedAt` is selected alongside `status` because they are INDEPENDENT: warehouseRepo.softDelete
+// stamps deletedAt and leaves status "active". Deriving usability from status alone reported a
+// deleted warehouse as fine, so the reviewer saw no warning while the assign modal silently refused
+// to pre-fill it. Both flags, one answer — see toStockRequest.
+const preferredWarehouseInclude = {
+  preferredWarehouse: { select: { id: true, name: true, code: true, status: true, deletedAt: true } },
+} as const;
 
 const childInclude = {
   users: { orderBy: { fullName: "asc" } },
@@ -47,7 +61,7 @@ const childInclude = {
   stockRequests: {
     // Assignments keep CREATION order — that's a stable reading order for the warehouses under one
     // submission, and it shouldn't reshuffle just because one of them was received.
-    include: { warehouseAssignments: { include: { warehouse: { select: { id: true, name: true, code: true } } }, orderBy: { createdAt: "asc" } } },
+    include: { ...preferredWarehouseInclude, warehouseAssignments: { include: { warehouse: { select: { id: true, name: true, code: true } } }, orderBy: { createdAt: "asc" } } },
     // LAST TOUCHED first, not last created. Sorting on createdAt meant acting on an older submission
     // (receiving it, approving it, closing it short) left it sitting wherever it was first raised —
     // so the thing you just did was the thing you then had to scroll to find, while the Audit Log
@@ -583,6 +597,44 @@ export function findSitesByCustomerPaged(customerId: string, f: PortalChildFilte
 export function countSitesByCustomer(customerId: string, f: PortalChildFilters = {}): Promise<number> {
   return prisma.customerSite.count({ where: siteListWhere(customerId, f) });
 }
+
+/**
+ * Type-ahead search across sites, for the Jobs list's SITE filter.
+ *
+ * A SEARCH rather than a listing, and that is the whole point: sites are bulk-imported in the
+ * thousands, so the picker that filters by one cannot be fed a flat dropdown — it would truncate
+ * silently, and a filter that quietly omits the site you wanted is worse than no filter.
+ *
+ * `customerId` narrows to one company when the caller has one. On the PORTAL that argument is not
+ * optional in practice: it comes from the session, and passing it is what keeps a customer inside
+ * their own tenant. Staff pass it only when they have already picked a customer.
+ *
+ * Ordered by name so the options read alphabetically rather than by import order, and capped —
+ * a type-ahead shows a shortlist, it does not page.
+ */
+export function searchSites(
+  term: string | undefined,
+  customerId: string | undefined,
+  take: number,
+): Promise<{ id: string; name: string; code: string | null; postcode: string | null; customerName: string | null }[]> {
+  const q = term?.trim() ? escapeRegex(term.trim()) : undefined;
+  return prisma.customerSite.findMany({
+    where: {
+      ...(customerId && { customerId }),
+      ...(q && {
+        OR: [
+          { name: { contains: q, mode: "insensitive" } },
+          { code: { contains: q, mode: "insensitive" } },
+          { postcode: { contains: q, mode: "insensitive" } },
+          { city: { contains: q, mode: "insensitive" } },
+        ],
+      }),
+    },
+    select: { id: true, name: true, code: true, postcode: true, customer: { select: { name: true } } },
+    orderBy: { name: "asc" },
+    take,
+  }).then((rows) => rows.map((r) => ({ id: r.id, name: r.name, code: r.code, postcode: r.postcode, customerName: r.customer?.name ?? null })));
+}
 function projectListWhere(customerId: string, f: PortalChildFilters): Prisma.CustomerProjectWhereInput {
   const q = f.search ? escapeRegex(f.search) : undefined;
   return {
@@ -745,14 +797,18 @@ export interface StockRequestData {
   notes?: string | null;
   // Existing stock line this submission tops up (resolved + validated in the service).
   linkedStockEntryId?: string | null;
+  // The customer's PREFERRED receiving warehouse — eligibility-checked in the service.
+  // Advisory only: it pre-fills the reviewer's assign step and is read nowhere else.
+  preferredWarehouseId?: string | null;
 }
+
 
 export function createStockRequest(
   customerId: string,
   requestedByUserId: string | null,
   requestedByName: string | null,
   data: StockRequestData,
-): Promise<CustomerStockRequest> {
+) {
   return prisma.customerStockRequest.create({
     data: {
       customerId,
@@ -763,8 +819,10 @@ export function createStockRequest(
       reason: data.reason ?? null,
       notes: data.notes ?? null,
       linkedStockEntryId: data.linkedStockEntryId ?? null,
+      preferredWarehouseId: data.preferredWarehouseId ?? null,
       status: "pending",
     },
+    include: preferredWarehouseInclude,
   });
 }
 
@@ -783,13 +841,16 @@ export const OPEN_REQUEST_STATUSES: string[] = ["pending", "approved", "assigned
 export interface StockRequestFilters {
   status?: string;
   search?: string;
+  /** Half-open window on `createdAt` — an INSTANT, resolved in the company timezone by the service. */
+  raisedWindow?: DayWindow;
 }
 
 function stockRequestListWhere(customerId: string, filters: StockRequestFilters = {}): Prisma.CustomerStockRequestWhereInput {
-  const { status, search } = filters;
+  const { status, search, raisedWindow } = filters;
   const q = search ? escapeRegex(search) : undefined;
   return {
     customerId,
+    ...(raisedWindow && !isEmptyWindow(raisedWindow) && { createdAt: raisedWindow }),
     ...(status === "open"
       ? { status: { in: OPEN_REQUEST_STATUSES } }
       : status
@@ -816,6 +877,7 @@ export function findStockRequestsByCustomer(
   return prisma.customerStockRequest.findMany({
     where: stockRequestListWhere(customerId, filters),
     include: {
+      ...preferredWarehouseInclude,
       warehouseAssignments: {
         include: { warehouse: { select: { id: true, name: true, code: true } } },
         orderBy: { createdAt: "asc" },
@@ -829,6 +891,29 @@ export function findStockRequestsByCustomer(
 }
 // MUST take the same filters as the find above — counting a different set than you page through gives
 // a paginator that walks off the end of the list.
+/**
+ * Per-status totals for the SAME filtered set the list pages through, in one grouped query.
+ *
+ * The tab's status menu used to be derived from the whole submission collection, which is why the
+ * customer detail payload had to carry every submission an account had ever made. This is that
+ * metadata as metadata — bounded by the number of statuses, not by the account's history.
+ *
+ * Callers pass the filters WITHOUT a status — the menu must say what the other statuses hold, or
+ * picking one would empty the menu that offers the rest. Stated at the call site rather than
+ * stripped here, so the rule is visible where the decision is made.
+ */
+export async function countStockRequestsByStatus(
+  customerId: string,
+  filters: StockRequestFilters = {},
+): Promise<Record<string, number>> {
+  const rows = await prisma.customerStockRequest.groupBy({
+    by: ["status"],
+    where: stockRequestListWhere(customerId, filters),
+    _count: { _all: true },
+  });
+  return Object.fromEntries(rows.map((r) => [r.status, r._count._all]));
+}
+
 export function countStockRequestsByCustomer(customerId: string, filters: StockRequestFilters = {}): Promise<number> {
   return prisma.customerStockRequest.count({ where: stockRequestListWhere(customerId, filters) });
 }
@@ -848,7 +933,7 @@ export interface StockReviewData {
   reviewedAt: Date;
 }
 
-export function reviewStockRequest(id: string, data: StockReviewData): Promise<CustomerStockRequest> {
+export function reviewStockRequest(id: string, data: StockReviewData) {
   return prisma.customerStockRequest.update({
     where: { id },
     data: {
@@ -857,6 +942,7 @@ export function reviewStockRequest(id: string, data: StockReviewData): Promise<C
       adminResponse: data.adminResponse ?? null,
       reviewedAt: data.reviewedAt,
     },
+    include: preferredWarehouseInclude,
   });
 }
 
@@ -871,7 +957,7 @@ export interface StockRequestEditData {
   reviewedAt: Date;
 }
 
-export function editAndApproveStockRequest(id: string, data: StockRequestEditData): Promise<CustomerStockRequest> {
+export function editAndApproveStockRequest(id: string, data: StockRequestEditData) {
   return prisma.customerStockRequest.update({
     where: { id },
     data: {
@@ -882,6 +968,7 @@ export function editAndApproveStockRequest(id: string, data: StockRequestEditDat
       reviewedBy: data.reviewedBy,
       reviewedAt: data.reviewedAt,
     },
+    include: preferredWarehouseInclude,
   });
 }
 
@@ -1008,6 +1095,7 @@ export function findStockRequestWithAssignments(id: string) {
   return prisma.customerStockRequest.findUnique({
     where: { id },
     include: {
+      ...preferredWarehouseInclude,
       warehouseAssignments: {
         include: { warehouse: { select: { id: true, name: true, code: true } } },
       },
@@ -1166,16 +1254,16 @@ export function findStockEntryById(id: string, client: Db = prisma) {
 // Shared where for a customer's stock-entry list — optional status + free-text search over the
 // fields the picker/list shows (item name, SKU, serial, barcode). `search` is escaped (the Mongo
 // `contains` gotcha) before it feeds any $regex.
-function stockEntryListWhere(
-  customerId: string,
-  status?: string,
-  search?: string,
-  warehouseId?: string,
-): Prisma.CustomerStockEntryWhereInput {
+function stockEntryListWhere(customerId: string, f: StockEntryFilters = {}): Prisma.CustomerStockEntryWhereInput {
+  const { status, search, warehouseId, receivedWindow } = f;
   const q = search ? escapeRegex(search) : undefined;
   return {
     customerId,
     ...(status ? { status } : {}),
+    // `receivedAt` is an INSTANT and NULLABLE — an entry not yet physically received has none, so it
+    // cannot fall inside any window and is excluded rather than passed through. Same rule the goods
+    // queue applies to a job with no activity.
+    ...(receivedWindow && !isEmptyWindow(receivedWindow) ? { receivedAt: receivedWindow } : {}),
     // Filtered by ID, not by warehouse NAME: a name is editable and non-unique, so a link built on one
     // silently stops matching the day someone renames a site. The id is what the entry actually holds.
     ...(warehouseId ? { warehouseId } : {}),
@@ -1198,6 +1286,50 @@ export interface StockEntryFilters {
   status?: string;
   search?: string;
   warehouseId?: string;
+  /** Half-open window on `receivedAt` — an INSTANT, resolved in the company timezone by the service. */
+  receivedWindow?: DayWindow;
+}
+
+/**
+ * A customer's stock as PICKER OPTIONS — five scalar columns and the warehouse name, nothing else.
+ *
+ * Deliberately UNPAGED, and that is a correctness requirement rather than a shortcut. The job form
+ * groups these into item → warehouse and SUMS the on-hand per warehouse; a partial set therefore
+ * produces wrong QUANTITIES, not merely missing options — and the quantity is what the form's
+ * per-line cap is enforced against. Paging this would be silently incorrect unless the grouping
+ * moved with it.
+ *
+ * It is still far cheaper than the read it replaced, which returned whole entry rows (base64 barcode
+ * image and three joined relations included) for the same purpose.
+ */
+export function findStockOptionsByCustomer(customerId: string): Promise<
+  { id: string; itemName: string; sku: string | null; quantity: number; warehouseId: string; warehouseName: string }[]
+> {
+  return prisma.customerStockEntry
+    .findMany({
+      // `warehouseId` is REQUIRED on this model, so there is no "unplaced entry" case to exclude —
+      // every active entry is pickable. Only `active` is filtered: a draft has not been received yet.
+      where: { customerId, status: "active" },
+      select: {
+        id: true,
+        itemName: true,
+        sku: true,
+        quantity: true,
+        warehouseId: true,
+        warehouse: { select: { name: true } },
+      },
+      orderBy: { itemName: "asc" },
+    })
+    .then((rows) =>
+      rows.map((r) => ({
+        id: r.id,
+        itemName: r.itemName,
+        sku: r.sku,
+        quantity: r.quantity,
+        warehouseId: r.warehouseId,
+        warehouseName: r.warehouse.name,
+      })),
+    );
 }
 
 export function findStockEntriesByCustomer(
@@ -1207,7 +1339,7 @@ export function findStockEntriesByCustomer(
 ) {
   const { skip, take } = page ?? {};
   return prisma.customerStockEntry.findMany({
-    where: stockEntryListWhere(customerId, filters.status, filters.search, filters.warehouseId),
+    where: stockEntryListWhere(customerId, filters),
     // Drop the heavy base64 barcode image from list reads — list views only show the
     // short `barcode` string; the full image is fetched only on the single-entry detail.
     omit: { barcodeDataUri: true },
@@ -1229,7 +1361,7 @@ export function findStockEntriesByCustomer(
 // pages and the last page comes back empty.
 export function countStockEntriesByCustomer(customerId: string, filters: StockEntryFilters = {}): Promise<number> {
   return prisma.customerStockEntry.count({
-    where: stockEntryListWhere(customerId, filters.status, filters.search, filters.warehouseId),
+    where: stockEntryListWhere(customerId, filters),
   });
 }
 

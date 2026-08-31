@@ -9,6 +9,8 @@ import type { PagedOwnJobs } from "@/services/engineer.service";
 import { useJobSocket } from "@/hooks/useJobSocket";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
+import { FilterPopover } from "@/components/ui/FilterPopover";
+import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
 import { EmptyState, fmtDate, JobStatusChip, TableCard, TableCardSkeleton } from "@/components/dashboard/portal/portalUi";
 
 // Engineer Portal — My assigned jobs. Filtered + PAGED like every other list (an engineer's job
@@ -37,6 +39,9 @@ export function EngineerJobs() {
   const status = searchParams.get("status") ?? "";
   const sortOldest = searchParams.get("sort") === "oldest"; // default: newest first (matches every other list)
   const search = searchParams.get("q") ?? "";
+  // The DUE date — a calendar day on the job, and the question an engineer opens this list with.
+  const dueFrom = searchParams.get("dueFrom") ?? "";
+  const dueTo = searchParams.get("dueTo") ?? "";
   const page = Math.max(1, Number(searchParams.get("page")) || 1);
 
   const [paged, setPaged] = React.useState<PagedOwnJobs | null>(null);
@@ -83,6 +88,8 @@ export function EngineerJobs() {
         const r = await engineerService.getOwnJobs({
           status: status || undefined,
           q: search || undefined,
+          dueFrom: dueFrom || undefined,
+          dueTo: dueTo || undefined,
           sort: sortOldest ? "oldest" : undefined,
           page,
           pageSize: 20,
@@ -98,7 +105,7 @@ export function EngineerJobs() {
       }
     })();
     return () => { active = false; };
-  }, [status, sortOldest, search, page, refreshKey]);
+  }, [status, sortOldest, search, dueFrom, dueTo, page, refreshKey]);
 
   // Live updates: a newly-assigned job (job:new) refreshes the current page without a manual reload.
   const reload = React.useCallback(() => setRefreshKey((k) => k + 1), []);
@@ -138,6 +145,20 @@ export function EngineerJobs() {
           ]}
           ariaLabel="Sort order"
         />
+        <FilterPopover
+          activeCount={dueFrom || dueTo ? 1 : 0}
+          onClear={() => patchParams({ dueFrom: null, dueTo: null }, true)}
+        >
+          {/* "Overdue" is not here — it is a derived state in the status list beside this, resolved
+              against the SERVER's clock rather than the phone's. */}
+          <DateRangeFilter
+            label="Due date"
+            showLabel
+            from={dueFrom}
+            to={dueTo}
+            onChange={({ from, to }) => patchParams({ dueFrom: from || null, dueTo: to || null }, true)}
+          />
+        </FilterPopover>
       </div>
 
       {loading ? (

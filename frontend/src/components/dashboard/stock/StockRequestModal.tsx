@@ -6,8 +6,14 @@ import { Loader2 } from "lucide-react";
 import * as customerService from "@/services/customer.service";
 import { Modal } from "@/components/ui/Modal";
 import { NumberInput } from "@/components/ui/NumberInput";
+import { Select } from "@/components/ui/Select";
+import {
+  autoSelectedWarehouseId,
+  preferredWarehouseOptions,
+  shouldShowPreferredWarehouse,
+} from "@/lib/preferredWarehouse";
 import { RequiredMark } from "@/components/ui/FormScaffold";
-import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
+import { ghostBtn, hintCls, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import {
   StockItemPicker,
   toStockItemOptions,
@@ -34,6 +40,10 @@ export function StockRequestModal({
   const [itemQuery, setItemQuery] = React.useState("");
   const [quantity, setQuantity] = React.useState("");
   const [notes, setNotes] = React.useState("");
+  // Preferred warehouse — its own state, so changing it never touches item / quantity / notes.
+  const [warehouses, setWarehouses] = React.useState<{ id: string; name: string; code: string }[]>([]);
+  const [warehousesLoaded, setWarehousesLoaded] = React.useState(false);
+  const [preferredWarehouseId, setPreferredWarehouseId] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [errors, setErrors] = React.useState<{ name?: string; quantity?: string }>({});
   const [error, setError] = React.useState<string | null>(null);
@@ -59,6 +69,32 @@ export function StockRequestModal({
     };
   }, [itemQuery]);
 
+  // The warehouses a customer may express a preference for: every active, non-deleted one.
+  // Fetched ONCE (no query dependency) — the list is small and never filtered. An empty list makes
+  // the field hide itself rather than block a submission, because the preference is optional.
+  React.useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const list = await customerService.getOwnSubmissionWarehouses();
+        if (!alive) return;
+        setWarehouses(list);
+        // Auto-select the only option, matching how the app treats a single-choice reference list
+        // elsewhere (firstActiveId). With two or more, the customer chooses — never guess.
+        setPreferredWarehouseId(autoSelectedWarehouseId(list));
+      } catch {
+        // A failed lookup must not cost the customer their submission: an OPTIONAL preference
+        // simply becomes unavailable, and the reviewer assigns the warehouse as they do today.
+        if (alive) setWarehouses([]);
+      } finally {
+        if (alive) setWarehousesLoaded(true);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     const errs: typeof errors = {};
@@ -78,6 +114,7 @@ export function StockRequestModal({
         quantity: qty,
         notes: notes.trim() || undefined,
         linkedStockEntryId: item.entryId ?? undefined,
+        preferredWarehouseId: preferredWarehouseId || undefined,
       });
       onSubmitted(request);
     } catch (err) {
@@ -106,6 +143,22 @@ export function StockRequestModal({
     >
       <form id="stock-request-form" onSubmit={submit} className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-2">
+          {/* Hidden entirely when there is nothing to choose from — an empty dropdown reads as a
+              broken field, and the preference is optional, so there is nothing to explain. */}
+          {shouldShowPreferredWarehouse(warehousesLoaded, warehouses) && (
+            <div className="sm:col-span-2">
+              <label className={labelCls}>Preferred warehouse</label>
+              <Select
+                value={preferredWarehouseId}
+                onChange={setPreferredWarehouseId}
+                // Includes the app's standard clearable "" entry — without it a customer who
+                // picks a warehouse has no way back to expressing no preference.
+                options={preferredWarehouseOptions(warehouses)}
+                placeholder="No preference"
+              />
+              <p className={hintCls}>Your preferred warehouse. Our team confirms the final destination.</p>
+            </div>
+          )}
           <div className="sm:col-span-2">
             <label className={labelCls}>
               Item<RequiredMark />

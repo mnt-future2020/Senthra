@@ -2,7 +2,7 @@ import type { Prisma } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 
 import { daysBetween, toCalendarDay } from "../../utils/calendar-day.js";
-import { parseFilterDate } from "../../utils/filter-date.js";
+import { calendarDayWindow, resolveInstantWindow } from "../../utils/filter-date.js";
 import { computeNotifyOnDate, isIssuableHire, isTerminalHireStatus } from "./rentalHire.predicate.js";
 import { hireIssuable } from "./rentalHire.allocation.js";
 import { emitHireUpdated } from "./rentalHire.realtime.js";
@@ -596,6 +596,12 @@ export interface ListPurchaseOrdersParams {
   warehouse?: string;
   pm?: string; // assigned PM user id — the "Awaiting my action" worklist
   job?: string;
+  /** Inclusive calendar days on when the order was PLACED (`orderDate`, an instant). */
+  orderedFrom?: string;
+  orderedTo?: string;
+  /** Inclusive calendar days on the PROMISED delivery day (`expectedDeliveryDate`, a calendar day). */
+  expectedFrom?: string;
+  expectedTo?: string;
   page?: number;
   pageSize?: number;
   sort?: string;
@@ -620,6 +626,10 @@ export async function listPurchaseOrders(params: ListPurchaseOrdersParams = {}, 
     warehouseId: params.warehouse,
     pmUserId: params.pm,
     jobId: params.job,
+    // orderDate is an INSTANT (it defaults to now on create), so its window is the COMPANY's day.
+    // expectedDeliveryDate is a CALENDAR DAY the buyer typed, so its window is plain date arithmetic.
+    orderedWindow: await resolveInstantWindow(params.orderedFrom, params.orderedTo, () => getCompanyTimezone()),
+    expectedWindow: calendarDayWindow(params.expectedFrom, params.expectedTo),
     // Unrestricted actor → undefined → no filter (unchanged). Scoped actor → their warehouse ids.
     warehouseIds: warehouseScopeFilter(actor),
     // "Overdue" is derived, not stored — the service owns settings, so the company-timezone day
@@ -2412,6 +2422,10 @@ export async function listOnHire(
     warehouseId?: string;
     rentalItemId?: string;
     search?: string;
+    supplierId?: string;
+    /** Inclusive calendar days on when the hire ENDS (`hireEndDate`). */
+    endsFrom?: string;
+    endsTo?: string;
     /**
      * Raises the 200-row page cap for a SERVER-INITIATED read — only the CSV export sets it.
      * Not reachable from the wire: the controller builds these params field by field out of
@@ -2453,6 +2467,10 @@ export async function listOnHire(
     // A box holding only spaces is not a filter — it would narrow the list to nothing while the
     // screen showed an empty-looking search.
     search: params.search?.trim() ? params.search.trim() : undefined,
+    // Same id guard as rentalItemId above: a malformed ObjectId reaches Prisma as a 500 otherwise.
+    supplierId: /^[a-f0-9]{24}$/i.test(params.supplierId ?? "") ? params.supplierId : undefined,
+    // `hireEndDate` is a CALENDAR DAY (the hire period the buyer agreed), so no timezone applies.
+    endsWindow: calendarDayWindow(params.endsFrom, params.endsTo),
   });
   // Who is holding each row's issued units, batched for the whole page — a per-row lookup would be a
   // round trip per row on a remote cluster, which is the reason the repository query is batched at all.
@@ -2582,6 +2600,12 @@ export interface PublicHireExtension {
   agreedAt: string;
 }
 
+/** The agreed-on window for hire extensions, resolved in the company timezone. Half-open. */
+async function agreedWindow(from: string | undefined, to: string | undefined): Promise<{ dateFrom?: Date; dateTo?: Date }> {
+  const w = await resolveInstantWindow(from, to, () => getCompanyTimezone());
+  return { dateFrom: w.gte, dateTo: w.lt };
+}
+
 export interface ListHireExtensionsParams {
   search?: string;
   purchaseOrder?: string;
@@ -2650,8 +2674,10 @@ export async function listHireExtensions(
     // uses — including the audit log, whose `createdAt` is a timestamp exactly like `agreedAt` here.
     // The "end" edge widens to 23:59:59.999, which is what stops a To date from dropping every
     // extension agreed after midnight on the last day of the period — i.e. all of them.
-    dateFrom: parseFilterDate(params.from, "start"),
-    dateTo: parseFilterDate(params.to, "end"),
+    // `createdAt` on a HireExtension is a real INSTANT, so "agreed on the 3rd" is the COMPANY's 3rd.
+    // It used to widen to the UTC day, which is an hour out for every BST date — see the same fix in
+    // audit.service. The repository's bound is exclusive, matching the half-open window.
+    ...(await agreedWindow(params.from, params.to)),
   };
   const total = await poRepo.countExtensions(filters);
   const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total, params.maxPageSize);

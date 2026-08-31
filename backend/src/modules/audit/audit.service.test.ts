@@ -7,6 +7,7 @@ vi.mock("./audit.repository.js", () => ({
   distinctActions: vi.fn(),
   distinctActorTypes: vi.fn(),
   distinctTargetTypes: vi.fn(),
+  distinctActors: vi.fn(),
 }));
 
 // The CSV export renders timestamps in the COMPANY timezone, so it reads Settings — which goes to
@@ -31,6 +32,7 @@ beforeEach(() => {
   vi.mocked(repo.distinctActions).mockResolvedValue([]);
   vi.mocked(repo.distinctActorTypes).mockResolvedValue([]);
   vi.mocked(repo.distinctTargetTypes).mockResolvedValue([]);
+  vi.mocked(repo.distinctActors).mockResolvedValue([]);
 });
 
 // The service is the ONLY place the actor's warehouse scope is turned into a repo filter, so it
@@ -110,6 +112,9 @@ describe("listFacets applies the actor's warehouse scope", () => {
     expect(vi.mocked(repo.distinctActions).mock.calls[0]![0]).toEqual(["w1", "w2"]);
     expect(vi.mocked(repo.distinctActorTypes).mock.calls[0]![0]).toEqual(["w1", "w2"]);
     expect(vi.mocked(repo.distinctTargetTypes).mock.calls[0]![0]).toEqual(["w1", "w2"]);
+    // The ACTOR facet too — it feeds a "who did this" picker, so an unscoped one would name people
+    // whose entries this reader is not allowed to see.
+    expect(vi.mocked(repo.distinctActors).mock.calls[0]![0]).toEqual(["w1", "w2"]);
   });
 
   it("passes NO scope for an unrestricted actor", async () => {

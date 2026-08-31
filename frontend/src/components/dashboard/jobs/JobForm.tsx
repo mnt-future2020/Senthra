@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { ExternalLink, FileText, Globe, Image as ImageIcon, Link as LinkIcon, Loader2, Lock, Plus, Trash2, Upload } from "lucide-react";
 
 import * as jobService from "@/services/job.service";
-import { listCustomers, listCustomerProjects, listCustomerSites, listCustomerStockEntries } from "@/services/customer.service";
+import { listCustomers, listCustomerProjects, listCustomerSites, listCustomerStockOptions, type CustomerStockOption } from "@/services/customer.service";
 import { listEngineerOptions, listWarehouseOptions, type WarehouseOption } from "@/services/warehouse.service";
 import { listIrmItems } from "@/services/irm.service";
 import { getAvailability, listItemWarehouseStock } from "@/services/inventory.service";
@@ -32,7 +32,7 @@ import {
   JOB_TYPES,
   JOB_TYPE_LABELS,
 } from "./jobStatus";
-import type { CustomerProject, CustomerSite, CustomerStockEntry } from "@/types/customer";
+import type { CustomerProject, CustomerSite } from "@/types/customer";
 import type { Job, JobLineType } from "@/types/job";
 import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 import { isHttpUrl } from "@/lib/validation";
@@ -199,7 +199,10 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
   const [suppliers, setSuppliers] = React.useState<Opt[]>([]);
   const [irmItems, setIrmItems] = React.useState<Opt[]>([]);
   const [warehouses, setWarehouses] = React.useState<WarehouseOption[]>([]);
-  const [stockEntries, setStockEntries] = React.useState<CustomerStockEntry[]>([]);
+  // The lean OPTION shape, not the full entry row. Typing it as the entry made it natural to feed
+  // from the paged list read, which capped the picker at 100 and — because the grouping SUMS
+  // quantities per warehouse — silently understated the cap this form enforces.
+  const [stockEntries, setStockEntries] = React.useState<CustomerStockOption[]>([]);
   // Cache of warehouses that hold a given IRM item (id → resolution), so the kit picker's warehouse
   // dropdown only offers sites that actually stock the item. Lazily filled when an item is picked.
   // The status matters: "ready" with an EMPTY list means the item is stocked nowhere (show that, do
@@ -254,7 +257,7 @@ export function JobForm({ mode, job }: { mode: "create" | "edit"; job?: Job | nu
       ([p, s]) => { if (active) { setProjects(p.projects); setSites(s.sites); setLoadingProjects(false); } },
       () => { if (active) { setProjects([]); setSites([]); setLoadingProjects(false); } },
     );
-    listCustomerStockEntries(customerId, "active").then(
+    listCustomerStockOptions(customerId).then(
       (rows) => {
         if (!active) return;
         setStockEntries(rows);

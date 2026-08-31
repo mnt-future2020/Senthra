@@ -15,6 +15,8 @@ import type {
   CloseReconcilePayload,
   CloseReconcileResult,
   ListDamagedParams,
+  DamagedCounts,
+  DamagedListResult,
   DemandEntry,
   WarehouseDemandRow,
 } from "@/types/goodsManagement";
@@ -58,6 +60,14 @@ export interface GetQueueParams {
    * about. Resolved against the SERVER's clock, so every manager sees the same "today".
    */
   due?: "overdue" | "today" | "week";
+  /** Inclusive calendar days ("YYYY-MM-DD"). The SERVER resolves which day that is, in the
+   *  company timezone — the browser clock never decides a boundary here. */
+  dueFrom?: string;
+  dueTo?: string;
+  /** The job's ASSIGNED engineer — the person kit is handed to or chased from. */
+  engineerId?: string;
+  customerId?: string;
+  siteId?: string;
   /** Row order; defaults to "newest" server-side. Applied across the whole result, not just the page. */
   sort?: QueueSort;
   page?: number;
@@ -72,6 +82,11 @@ export function getQueue(params: GetQueueParams): Promise<QueuePage> {
   if (params.activityFrom) q.set("activityFrom", params.activityFrom);
   if (params.activityTo) q.set("activityTo", params.activityTo);
   if (params.due) q.set("due", params.due);
+  if (params.dueFrom) q.set("dueFrom", params.dueFrom);
+  if (params.dueTo) q.set("dueTo", params.dueTo);
+  if (params.engineerId) q.set("engineerId", params.engineerId);
+  if (params.customerId) q.set("customerId", params.customerId);
+  if (params.siteId) q.set("siteId", params.siteId);
   if (params.sort) q.set("sort", params.sort);
   if (params.page) q.set("page", String(params.page));
   if (params.pageSize) q.set("pageSize", String(params.pageSize));
@@ -141,12 +156,17 @@ export function closeReconcile(jobId: string, writeOff?: CloseReconcilePayload):
  * List damaged-stock rows. Pass either warehouseId (warehouse tab) or customerId (customer page).
  * No price/cost fields are returned by the backend.
  */
-export function listDamaged(params: ListDamagedParams = {}): Promise<DamagedRow[]> {
+export function listDamaged(params: ListDamagedParams = {}): Promise<DamagedListResult> {
   const sp = new URLSearchParams();
+  if (params.countsOnly) sp.set("countsOnly", "1");
   if (params.warehouseId) sp.set("warehouseId", params.warehouseId);
   if (params.customerId) sp.set("customerId", params.customerId);
+  if (params.ownerType) sp.set("ownerType", params.ownerType);
+  if (params.search) sp.set("search", params.search);
   const qs = sp.toString();
-  return api<{ damaged: DamagedRow[] }>(`/goods-management/damaged${qs ? `?${qs}` : ""}`).then((r) => r.damaged);
+  return api<{ damaged: DamagedRow[]; counts: DamagedCounts }>(
+    `/goods-management/damaged${qs ? `?${qs}` : ""}`,
+  ).then((r) => ({ rows: r.damaged, counts: r.counts }));
 }
 
 /**
@@ -207,12 +227,20 @@ export function listOverdue(params: {
   warehouseId?: string;
   /** Job number, job name or engineer name. */
   search?: string;
+  /** The engineer still HOLDING the kit — the issue movement's engineer, not the job's assignee. */
+  engineerId?: string;
+  /** Inclusive calendar days on when the kit was ISSUED. Server-resolved in company time. */
+  issuedFrom?: string;
+  issuedTo?: string;
   page?: number;
   pageSize?: number;
 } = {}): Promise<OverduePage> {
   const q = new URLSearchParams();
   if (params.warehouseId) q.set("warehouseId", params.warehouseId);
   if (params.search?.trim()) q.set("search", params.search.trim());
+  if (params.engineerId) q.set("engineerId", params.engineerId);
+  if (params.issuedFrom) q.set("issuedFrom", params.issuedFrom);
+  if (params.issuedTo) q.set("issuedTo", params.issuedTo);
   if (params.page) q.set("page", String(params.page));
   if (params.pageSize) q.set("pageSize", String(params.pageSize));
   const qs = q.toString();
