@@ -3326,6 +3326,25 @@ export interface OverdueRow {
   lines: { source: string; irmItemId: string | null; customerStockEntryId: string | null; itemName: string; qty: number }[];
 }
 
+/** One issue movement as the overdue pipeline selects it, before it becomes a row or a group. */
+type OverdueMovement = Awaited<ReturnType<typeof goodsManagementRepo.findOldIssueMovementsForJobs>>[number];
+
+/**
+ * The overdue SELECTION — every job whose first issue is older than the window and still has stock
+ * out, after the caller's own narrowing, plus the clock it was measured against.
+ *
+ * Split out of `listOverdueWithin` so the paged list, the count and the dashboard's drill-down are
+ * three views of ONE computation. A second implementation of this pipeline is precisely how a card
+ * reading 6 and a breakdown summing to 5 come about — the failure this module already documents for
+ * the two overdue counters it deleted.
+ */
+interface OverdueSelection {
+  matched: OverdueMovement[];
+  goodsStatusByJob: Map<string, string>;
+  /** `Date.now()` at selection time — every `daysOut` is measured from it, never from a second clock. */
+  now: number;
+}
+
 // `warehouseId` scopes the read to one warehouse's issues. The per-warehouse Goods Management tab
 // passes it; without it the tab showed every warehouse the actor could reach, so an admin standing
 // in Warehouse A's tab was chasing Warehouse B's overdue jobs. The actor's own warehouse-access
@@ -3340,11 +3359,10 @@ export interface OverdueRow {
  * "overdue" means one thing everywhere. If an audit report ever needs a different window, add a
  * parameter then, deliberately, with the window shown on whatever renders it.
  */
-async function listOverdueWithin(days: number, actor?: AuditActor, opts: OverdueParams = {}): Promise<OverduePage> {
+async function selectOverdue(days: number, actor?: AuditActor, opts: OverdueParams = {}): Promise<OverdueSelection> {
   const now = Date.now();
   const cutoff = new Date(now - days * 24 * 60 * 60 * 1000);
-  const pageSize = Math.min(Math.max(Math.trunc(opts.pageSize ?? DEFAULT_OVERDUE_PAGE_SIZE), 1), MAX_OVERDUE_PAGE_SIZE);
-  const empty = (): OverduePage => ({ rows: [], total: 0, page: 1, pageSize, totalPages: 1 });
+  const empty = (): OverdueSelection => ({ matched: [], goodsStatusByJob: new Map(), now });
 
   // 1) Start from OPEN jobs, not from the ledger. This is the read's cost ceiling: work in flight,
   // rather than every issue movement ever posted. Reversing these two steps is what used to make the
@@ -3437,6 +3455,14 @@ async function listOverdueWithin(days: number, actor?: AuditActor, opts: Overdue
       [m.job?.jobNumber, m.job?.name, m.engineerName].some((f) => f?.toLowerCase().includes(term)),
     );
 
+  return { matched, goodsStatusByJob, now };
+}
+
+/** One page of the selection above — the Overdue tab's list. */
+async function listOverdueWithin(days: number, actor?: AuditActor, opts: OverdueParams = {}): Promise<OverduePage> {
+  const pageSize = Math.min(Math.max(Math.trunc(opts.pageSize ?? DEFAULT_OVERDUE_PAGE_SIZE), 1), MAX_OVERDUE_PAGE_SIZE);
+  const { matched, goodsStatusByJob, now } = await selectOverdue(days, actor, opts);
+
   const total = matched.length;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const page = Math.min(Math.max(Math.trunc(opts.page ?? 1), 1), totalPages);
@@ -3505,6 +3531,91 @@ export async function getOverdueView(
 ): Promise<{ days: number } & OverduePage> {
   const days = await getOverdueAfterDays();
   return { days, ...(await listOverdueWithin(days, actor, opts)) };
+}
+
+// ── Overdue drill-down: "where is it, and who has it?" ────────────────────────────────────────
+//
+// The dashboard's Overdue Holdings card is a company-wide number spanning every warehouse the actor
+// can reach, and the work is done inside ONE warehouse's Goods tab. Sending the card to the bare
+// warehouse list navigated somewhere that does not contain the rows it counted — the exact failure
+// the attention catalog refuses an href for. This is the fan-out that makes the card openable: the
+// same number, split by the two dimensions anyone chasing stock actually asks about.
+//
+// BOUNDED BY CONSTRUCTION. It returns one entry per warehouse and per engineer, never per job, so a
+// backlog of 500 holdings is still a handful of rows. Runs the selection ONCE and groups it in
+// memory — no extra query per group, and no possibility of the groups disagreeing with the count.
+
+export interface OverdueGroup {
+  /** warehouseId / engineerId. `unassigned` for the (rare) issue with no warehouse recorded. */
+  id: string;
+  label: string;
+  /** Warehouse code — what the deep link addresses. Null for engineers and for `unassigned`. */
+  code: string | null;
+  /** Jobs with stock still out in this group. Groups can overlap across dimensions, never within one. */
+  count: number;
+  /** Longest-outstanding job in the group, in whole days — what sorts the list. */
+  oldestDaysOut: number;
+}
+
+export interface OverdueGroupsResult {
+  /** The window the selection ran with — from Settings, reported so the screen can't print a guess. */
+  days: number;
+  /** Total jobs, identical to getOverdueSummary().count for the same actor: one selection, two reads. */
+  total: number;
+  byWarehouse: OverdueGroup[];
+  byEngineer: OverdueGroup[];
+}
+
+/** Fold the selection into `id → group`, largest first, then oldest, then by name for a stable order. */
+function groupOverdue(
+  matched: OverdueMovement[],
+  now: number,
+  key: (m: OverdueMovement) => { id: string; label: string; code: string | null },
+): OverdueGroup[] {
+  const out = new Map<string, OverdueGroup>();
+  for (const m of matched) {
+    const k = key(m);
+    const daysOut = Math.max(0, Math.floor((now - m.createdAt.getTime()) / 86_400_000));
+    const row = out.get(k.id);
+    if (row) {
+      row.count += 1;
+      row.oldestDaysOut = Math.max(row.oldestDaysOut, daysOut);
+    } else {
+      out.set(k.id, { id: k.id, label: k.label, code: k.code, count: 1, oldestDaysOut: daysOut });
+    }
+  }
+  return [...out.values()].sort(
+    (a, b) => b.count - a.count || b.oldestDaysOut - a.oldestDaysOut || a.label.localeCompare(b.label),
+  );
+}
+
+/**
+ * The overdue backlog broken down by warehouse and by engineer, for the dashboard drill-down.
+ *
+ * `opts` is the SAME OverdueParams the list takes, so a drill-down can be narrowed exactly as the
+ * list is. Scoped by `actor` like every other read here — a warehouse-restricted user's breakdown
+ * contains only their own doors, and the total equals the card they clicked.
+ *
+ * The two dimensions are separate answers to "where is it", NOT a decomposition of each other: one
+ * engineer holding kit from two warehouses appears once under each. Each dimension on its own sums
+ * to `total` (one job has exactly one first issue, hence one warehouse and one engineer).
+ */
+export async function getOverdueGroups(actor?: AuditActor, opts: OverdueParams = {}): Promise<OverdueGroupsResult> {
+  const days = await getOverdueAfterDays();
+  const { matched, now } = await selectOverdue(days, actor, opts);
+  return {
+    days,
+    total: matched.length,
+    byWarehouse: groupOverdue(matched, now, (m) => ({
+      // A `consume` movement carries no warehouse, but this list is built from ISSUES, which always
+      // do — the fallback is here so a legacy row with a null id groups visibly instead of crashing
+      // the breakdown, and it deliberately gets no code, so it renders without a link.
+      id: m.warehouseId ?? "unassigned",
+      label: m.warehouseName ?? "Unassigned",
+      code: m.warehouseCode ?? null,
+    })),
+    byEngineer: groupOverdue(matched, now, (m) => ({ id: m.engineerId, label: m.engineerName, code: null })),
+  };
 }
 
 // ── Close & reconcile ─────────────────────────────────────────────────────────────────────────

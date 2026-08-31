@@ -189,11 +189,58 @@ function EngineerDetail({ engineer, onBack }: { engineer: EngineerOverviewRow; o
   );
 }
 
+/**
+ * Whether the field-stock export may run, and what its tooltip says — ONE decision, so the label a
+ * user reads and the state they can click cannot disagree.
+ *
+ * `holdingCount`, not the rows on screen. They are different numbers: an engineer carrying nothing is
+ * a legitimate ROW on this list and ZERO rows in the file, so disabling on the visible count would
+ * still let a header-only CSV out — the thing every other export in this dashboard refuses to do.
+ *
+ * The tooltip names the SEARCH when there is one because it is the only place the file's scope is
+ * stated: the label collapses to an icon below `xl`, and the export honours the search now, so the
+ * old fixed "every item currently held by an engineer" had stopped being true.
+ */
+export function fieldStockExportState(lens: { engineerSearch?: string; holdingCount: number }): {
+  disabled: boolean;
+  title: string;
+} {
+  if (lens.holdingCount === 0) {
+    return {
+      disabled: true,
+      title: lens.engineerSearch
+        ? "No engineer matching this search is holding anything to export"
+        : "No engineer is holding anything to export",
+    };
+  }
+  return {
+    disabled: false,
+    title: lens.engineerSearch
+      ? `Export the field stock of the engineers matching “${lens.engineerSearch}” — one row per item they hold`
+      : "Export the field stock of the engineers in this list — one row per item they hold",
+  };
+}
+
 // ── engineers list ─────────────────────────────────────────────────────────────
 function EngineersList({
   onSelect,
+  onFiltersChange,
 }: {
   onSelect: (e: EngineerOverviewRow) => void;
+  /**
+   * Reports the ACTIVE search — and how many rows the export will actually hold — up to the toolbar,
+   * which owns the export button.
+   *
+   * The filters live here because the list is what they narrow; the button lives up there because
+   * that is where the toolbar is. With no channel between the two the download sent neither: search
+   * one engineer, press "Export field stock", get every engineer's holdings with nothing in the file
+   * to say so. This is that channel, not lifted state — the list stays the owner, the parent reads.
+   *
+   * `holdingCount` rather than the row count on screen, because they are not the same number: an
+   * engineer holding nothing is a legitimate ROW here and ZERO rows in the file. Disabling on the
+   * visible count would still hand out a header-only CSV for a one-row screen.
+   */
+  onFiltersChange: (f: { engineerSearch?: string; holdingCount: number }) => void;
 }) {
   // Search, "holding only", and PAGING — all resolved at the server. This list took no parameters
   // at all: every engineer, every time, with no way to narrow it and no ceiling as the field team
@@ -236,15 +283,33 @@ function EngineersList({
           setRows(r.rows);
           setTotal(r.total);
           setTotalPages(r.totalPages);
+          // Published FROM THE RESPONSE, not from local state: the count and the search then
+          // describe the same server answer, so the button can never be enabled on a stale one.
+          onFiltersChange({ engineerSearch: debounced || undefined, holdingCount: r.holdingCount });
         }
       } catch {
-        if (active) { setRows([]); setTotal(0); setTotalPages(1); }
+        if (active) {
+          setRows([]); setTotal(0); setTotalPages(1);
+          // A failed load exports nothing either — leaving the previous count would offer a download
+          // for rows this screen could not fetch.
+          onFiltersChange({ engineerSearch: debounced || undefined, holdingCount: 0 });
+        }
       }
     })();
     return () => {
       active = false;
     };
-  }, [debounced, holdingOnly, page]);
+  }, [debounced, holdingOnly, page, onFiltersChange]);
+
+  // Hand the toolbar a neutral state when this list goes away — switching to the Transfers sub-view
+  // unmounts it, and the toolbar above it does not go with it.
+  //
+  // Without this the export button outlives the list that owns its filters. It is not a one-frame
+  // race: the count is published FROM the fetch, so on returning to Engineers the parent holds the
+  // previous search and count for a whole network round trip while the screen shows a loading list.
+  // A click landing there downloads the PREVIOUS search's rows. Reporting zero disables the button
+  // until the new fetch answers, which is also the correct state while it is in flight.
+  React.useEffect(() => () => onFiltersChange({ holdingCount: 0 }), [onFiltersChange]);
 
   return (
     <div className="flex h-full flex-col gap-3">
@@ -357,6 +422,11 @@ export function EngineersOverview() {
   const canExport = can("inventory.export");
 
   const [selected, setSelected] = React.useState<EngineerOverviewRow | null>(null);
+  // The list's live search, and how many rows its export would actually hold. See EngineersList's
+  // `onFiltersChange`. Starts at zero so the button is disabled until the list has answered — an
+  // export offered before anything is on screen can only produce a file nobody asked for.
+  const [lens, setLens] = React.useState<{ engineerSearch?: string; holdingCount: number }>({ holdingCount: 0 });
+  const onFiltersChange = React.useCallback((f: { engineerSearch?: string; holdingCount: number }) => setLens(f), []);
 
   // Sub-view (Engineers / Transfers) lives in ?view= so it survives a refresh and is the landing
   // spot after creating a transfer (the composer returns to ?tab=engineer&view=transfers).
@@ -410,14 +480,19 @@ export function EngineersOverview() {
               It reuses the positions export filtered to `location=engineer` rather than adding an
               endpoint — same rows, same permission, and no second definition of "engineer-held stock"
               to drift from the one the Inventory Hub already uses.
+
+              The GRANULARITY differs from the screen on purpose; the SCOPE must not. Both of the
+              list's filters go with it, resolved server-side by the same predicate the list itself
+              runs — so a search for one engineer downloads that engineer's items, not everyone's.
               `ml-auto` rather than the row's `justify-between`, so it still sits hard right when the
               Transfers toggle isn't there to push it. */}
           {view === "list" && canExport && (
             <div className="ml-auto">
               <ExportButton
                 label="Export field stock"
-                title="Export every item currently held by an engineer to CSV"
-                onExport={() => svc.exportPositionsCsv({ location: "engineer" })}
+                // Both from one place — see fieldStockExportState.
+                {...fieldStockExportState(lens)}
+                onExport={() => svc.exportPositionsCsv({ location: "engineer", engineerSearch: lens.engineerSearch })}
               />
             </div>
           )}
@@ -425,7 +500,7 @@ export function EngineersOverview() {
       )}
 
       {view === "list" ? (
-        <EngineersList onSelect={setSelected} />
+        <EngineersList onSelect={setSelected} onFiltersChange={onFiltersChange} />
       ) : (
         <AdminTransferBoard />
       )}

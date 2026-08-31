@@ -534,40 +534,46 @@ export async function createNegativeAdjustmentWithCode(
 // --- Dashboard read-model — not a generic reporting API ---
 
 /**
- * Low-stock + critical counts for the Overview KPI. An item is "low" when it tracks inventory,
- * has a reorderLevel set, and its total on-hand across the scoped warehouses is ≤ reorderLevel
- * (this INCLUDES out-of-stock — the most severe low). "Critical" is the same on-hand tested against
- * criticalLevel. Reuses positionStatus so the low-stock rule stays defined in exactly one place.
- * Warehouse-scoped: undefined = all warehouses.
+ * Low-stock + critical counts for the Overview KPI.
+ *
+ * Counts STOCK POSITIONS — one row per item × warehouse — exactly as the Inventory Hub's stock
+ * table renders them, through the same `positionStatus` rule. "Low" is `positionStatus !== in_stock`
+ * against the item's reorderLevel, i.e. at-or-below the level INCLUDING out of stock, which is what
+ * `?status=below_reorder` opens. "Critical" is the same rows tested against criticalLevel, and keeps
+ * the `!= null` guard so an item with no critical level set never turns an empty shelf red.
+ *
+ * IT USED TO COUNT ITEMS, summing on-hand across the scoped warehouses first, and that was wrong in
+ * both directions:
+ *   • It counted every active tracked item with NO balance row anywhere as out of stock, so for an
+ *     unscoped admin the number was dominated by catalogue entries the company has simply never
+ *     stocked — none of which any list can show. That is the same defect the attention catalog
+ *     records for "Critical stock · 1" opening an empty list.
+ *   • Summing across warehouses hid real replenishment work: two depots each three units under the
+ *     level netted to "fine", while the Reorder workbench — which applies reorderLevel PER
+ *     item|warehouse, as does the stock table and the inventory list — flagged both.
+ * Every other surface in this codebase reads reorderLevel as a per-warehouse threshold. This one was
+ * the outlier, and the outlier was also the one with no list behind it.
+ *
+ * The base predicate is `findAllBalancesForAggregation`'s (live item, live warehouse) so the count
+ * and the positions list select from the same population. Warehouse-scoped: undefined = all.
  */
 export async function lowStockCounts(warehouseIds?: string[]): Promise<{ count: number; criticalCount: number }> {
-  const items = await prisma.irmItem.findMany({
-    where: { trackInventory: true, status: "active", deletedAt: null },
-    select: { id: true, reorderLevel: true, criticalLevel: true },
-  });
-  if (items.length === 0) return { count: 0, criticalCount: 0 };
-
   const balances = await prisma.inventoryBalance.findMany({
-    where: { irmItemId: { in: items.map((i) => i.id) }, ...(warehouseIds ? { warehouseId: { in: warehouseIds } } : {}) },
-    select: { irmItemId: true, quantityOnHand: true },
+    where: {
+      irmItem: { is: { deletedAt: null } },
+      warehouse: { is: { deletedAt: null, ...(warehouseIds ? { id: { in: warehouseIds } } : {}) } },
+    },
+    select: { quantityOnHand: true, irmItem: { select: { reorderLevel: true, criticalLevel: true } } },
   });
-  const onHand = new Map<string, number>();
-  for (const b of balances) onHand.set(b.irmItemId, (onHand.get(b.irmItemId) ?? 0) + b.quantityOnHand);
-
-  // When warehouse-scoped, only items the scoped warehouses actually hold a balance row for are in
-  // scope — an item never stocked here has no reorder position here, so it must NOT be counted as
-  // low/out (otherwise the whole global catalogue leaks in as "out of stock" for a scoped user).
-  // Unscoped (all warehouses) keeps the full catalogue: a globally-untracked item is genuinely out.
-  const inScope = warehouseIds ? (id: string) => onHand.has(id) : () => true;
 
   let count = 0;
   let criticalCount = 0;
-  for (const it of items) {
-    if (!inScope(it.id)) continue;
-    const qty = onHand.get(it.id) ?? 0;
-    // low = low_stock OR out_of_stock (reuse the canonical rule for the reorderLevel test)
-    if (it.reorderLevel != null && positionStatus(qty, it.reorderLevel) !== "in_stock") count += 1;
-    if (it.criticalLevel != null && positionStatus(qty, it.criticalLevel) !== "in_stock") criticalCount += 1;
+  for (const b of balances) {
+    const qty = b.quantityOnHand ?? 0;
+    // low = low_stock OR out_of_stock — the canonical rule, and the one the row badge renders.
+    if (positionStatus(qty, b.irmItem?.reorderLevel ?? null) !== "in_stock") count += 1;
+    const critical = b.irmItem?.criticalLevel ?? null;
+    if (critical != null && qty <= critical) criticalCount += 1;
   }
   return { count, criticalCount };
 }

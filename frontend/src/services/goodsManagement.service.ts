@@ -10,6 +10,7 @@ import type {
   DamagedHistory,
   ReportDamagePayload,
   ReportDamageResult,
+  OverdueGroupsResult,
   OverduePage,
   PostMovementPayload,
   CloseReconcilePayload,
@@ -245,6 +246,31 @@ export function listOverdue(params: {
   if (params.pageSize) q.set("pageSize", String(params.pageSize));
   const qs = q.toString();
   return api<OverduePage>(`/goods-management/overdue${qs ? `?${qs}` : ""}`);
+}
+
+/**
+ * The SAME overdue selection, folded per warehouse and per engineer — what the Overview's "Overdue
+ * Holdings" card opens.
+ *
+ * That card is a company-wide number and the work is done inside one warehouse's Goods tab, so there
+ * is no single list behind it; this is the fan-out that makes it openable. `total` here is the card's
+ * own count (one selection, two reads), and the response reports the Settings window it ran with.
+ */
+export function listOverdueGroups(params: {
+  warehouseId?: string;
+  search?: string;
+  engineerId?: string;
+  issuedFrom?: string;
+  issuedTo?: string;
+} = {}): Promise<OverdueGroupsResult> {
+  const q = new URLSearchParams();
+  if (params.warehouseId) q.set("warehouseId", params.warehouseId);
+  if (params.search?.trim()) q.set("search", params.search.trim());
+  if (params.engineerId) q.set("engineerId", params.engineerId);
+  if (params.issuedFrom) q.set("issuedFrom", params.issuedFrom);
+  if (params.issuedTo) q.set("issuedTo", params.issuedTo);
+  const qs = q.toString();
+  return api<OverdueGroupsResult>(`/goods-management/overdue/groups${qs ? `?${qs}` : ""}`);
 }
 
 /**

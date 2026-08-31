@@ -39,6 +39,12 @@ export interface GoodsReceivedCard {
   count: number;
   /** Completed GRNs per week over the sparkline window. */
   weeklyReceived: number[];
+  /**
+   * The `YYYY-MM-DD` lower bound `count` was taken with, in the COMPANY timezone — what the card's
+   * link passes as the Goods In list's `receivedFrom`, so the two describe one set of receipts.
+   * A lower bound only, matching the count (which has no upper bound either).
+   */
+  receivedSince: string;
 }
 export interface OverdueHoldingsCard {
   /** Unreconciled jobs with stock issued more than `days` days ago. */

@@ -106,7 +106,7 @@ function lineCreateData(l: JobKitLineRow): Prisma.JobKitLineUncheckedCreateWitho
 // --- filters / reads -------------------------------------------------------------------------
 export interface JobListFilters {
   search?: string;
-  /** a real status, or the DERIVED pseudo-status "overdue" (see buildWhere) */
+  /** a real status, or a DERIVED pseudo-status — "overdue" | "active" (see buildWhere) */
   status?: string;
   customerId?: string;
   assignedEngineerId?: string;
@@ -158,6 +158,15 @@ export function buildWhere(filters: JobListFilters): Prisma.JobWhereInput {
     // opens is worse than no badge. Loud on a missing boundary for the same reason as the engineer
     // side: a quiet default reports "nothing overdue", which is invisible and wrong.
     if (!filters.overdueBefore) throw new Error("buildWhere: overdueBefore is required for the overdue filter.");
+    where.status = { in: [...ACTIVE_JOB_STATUSES] };
+  } else if (filters.status === "active") {
+    // DERIVED pseudo-status: work in flight. The same three statuses `countActive` counts for the
+    // dashboard's "Active Jobs" card, and the same ones "overdue" narrows within — so the card, the
+    // overdue filter and this list all mean one thing by "active".
+    //
+    // The card used to open `/dashboard/jobs` with no filter at all: "Active Jobs 18" landed on a
+    // list of every job ever raised, completed and cancelled ones included, and nothing on the
+    // screen said which 18 were meant.
     where.status = { in: [...ACTIVE_JOB_STATUSES] };
   } else if (filters.status) where.status = filters.status;
   const completionDate = completionDateClause(

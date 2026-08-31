@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { RefreshCw } from "lucide-react";
+import { ArrowUpRight, RefreshCw } from "lucide-react";
 
 import { relativeTime } from "@/components/dashboard/audit/auditDisplay";
 import { formatMoney } from "@/components/dashboard/purchase-orders/poStatus";
@@ -14,6 +14,10 @@ import { PipelineBars } from "./PipelineBars";
 import { WorklistPanel } from "./WorklistPanel";
 import { ActivityFeed } from "./ActivityFeed";
 import { QuickActions } from "./QuickActions";
+import { OverdueHoldingsDrillDown } from "./OverdueHoldingsDrillDown";
+// Every card destination lives in one file — see the drift table at the top of it.
+import { CARD_DESTINATIONS, expectedThisWeekActions, goodsReceivedHref } from "./cardDestinations";
+import Link from "next/link";
 
 // How often the summary silently refreshes while the tab is visible, and how often the
 // "Updated X ago" caption re-renders. An ops dashboard left open must not go stale.
@@ -41,6 +45,10 @@ export function OverviewView() {
   // failures won't re-surface it — but a genuinely new failure (different set) shows again.
   const [dismissedErrorSig, setDismissedErrorSig] = React.useState<string | null>(null);
   const [spendPeriod, setSpendPeriod] = React.useState<SpendPeriod>("12m");
+  // Overdue Holdings is the one card whose count has no single list behind it — see
+  // OverdueHoldingsDrillDown. It opens this panel instead of navigating somewhere that does not
+  // contain the jobs it counted.
+  const [overdueOpen, setOverdueOpen] = React.useState(false);
 
   // Re-render the "Updated X ago" caption without refetching.
   const [, setCaptionTick] = React.useState(0);
@@ -189,7 +197,13 @@ export function OverviewView() {
       {hasCards ? (
         <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {cards.pendingPrfs ? (
-            <StatCard title="Pending PRFs" count={cards.pendingPrfs.count} spark={cards.pendingPrfs.weeklyCreated} href="/dashboard/purchase-requests?status=submitted" />
+            <StatCard
+              title="Pending PRFs"
+              count={cards.pendingPrfs.count}
+              spark={cards.pendingPrfs.weeklyCreated}
+              href={CARD_DESTINATIONS.pendingPrfs}
+              opens="Opens purchase requests awaiting Finance approval."
+            />
           ) : null}
           {cards.openPos ? (
             <StatCard
@@ -197,7 +211,11 @@ export function OverviewView() {
               count={cards.openPos.count}
               secondary={`${formatMoney(cards.openPos.valuePence / 100)} committed`}
               spark={cards.openPos.weeklyCreated}
-              href="/dashboard/purchase-orders"
+              // `?status=open` is the derived pseudo-status resolving to the very statuses
+              // openSummary counts. It was the bare module list, which also held every closed and
+              // cancelled order — so the count named one set and the screen showed another.
+              href={CARD_DESTINATIONS.openPos}
+              opens="Opens purchase orders still in flight."
             />
           ) : null}
           {jobs ? (
@@ -218,7 +236,10 @@ export function OverviewView() {
                   "Nothing due this week"
                 )
               }
-              href="/dashboard/jobs"
+              // `?status=active` — the same three in-flight statuses countActive measures. It was
+              // the unfiltered list, which included every completed and cancelled job.
+              href={CARD_DESTINATIONS.activeJobs}
+              opens="Opens jobs in flight — assigned, accepted or in progress."
             />
           ) : null}
           {cards.lowStock ? (
@@ -232,7 +253,11 @@ export function OverviewView() {
                   "All above reorder level"
                 )
               }
-              href="/dashboard/inventory?status=low_stock"
+              // Company stock in a warehouse, at or below its reorder level — the three dimensions
+              // the count is taken over. `?status=low_stock` alone dropped the out-of-stock rows,
+              // which are the most severe ones the number is made of.
+              href={CARD_DESTINATIONS.lowStock}
+              opens="Opens company warehouse stock at or below its reorder level."
             />
           ) : null}
           {cards.reorderNeeded ? (
@@ -253,21 +278,39 @@ export function OverviewView() {
                   </>
                 )
               }
-              href="/dashboard/inventory?tab=reorder"
+              href={CARD_DESTINATIONS.reorderNeeded}
+              opens="Opens the reorder workbench, which lists these rows."
             />
           ) : null}
           {cards.expectedThisWeek ? (
             <StatCard
               title="Expected This Week"
               count={cards.expectedThisWeek.dueThisWeek}
-              secondary={
-                cards.expectedThisWeek.overdue > 0 ? (
-                  <span className="font-semibold text-[var(--neg)]">{cards.expectedThisWeek.overdue} overdue — chase the supplier</span>
-                ) : (
-                  "Open POs due in the next 7 days"
-                )
+              // The overdue half is DISJOINT from the half this card opens, so it cannot be reached by
+              // following the card — it needs a destination of its own or it is a dead end that reads
+              // "9 overdue" above an empty list. Rendered as `secondaryAction` (outside the card's
+              // primary control, with its own accessible name) rather than as text.
+              //
+              // Only when there ARE overdue orders: an action that opens an empty list is the same
+              // broken promise pointing the other way.
+              secondaryAction={
+                expectedThisWeekActions(cards.expectedThisWeek).overdueHref ? (
+                  <Link
+                    href={expectedThisWeekActions(cards.expectedThisWeek).overdueHref!}
+                    aria-label={`${cards.expectedThisWeek.overdue} deliveries overdue. Opens purchase orders whose delivery date has passed.`}
+                    className="inline-flex items-center gap-1 rounded font-semibold text-[var(--neg)] underline decoration-transparent underline-offset-2 transition-colors hover:decoration-[var(--neg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--neg)]/40"
+                  >
+                    {cards.expectedThisWeek.overdue} overdue — chase the supplier
+                    <ArrowUpRight aria-hidden className="h-3 w-3 shrink-0" />
+                  </Link>
+                ) : undefined
               }
-              href="/dashboard/purchase-orders?status=sent"
+              secondary={cards.expectedThisWeek.overdue > 0 ? undefined : "Open POs due in the next 7 days"}
+              // `?status=due_this_week` — receivable orders whose ETA is inside the window and has
+              // not passed, the exact half expectedDeliveries counts. `?status=sent` was one of the
+              // three receivable statuses and took no notice of a date at all.
+              href={expectedThisWeekActions(cards.expectedThisWeek).href}
+              opens="Opens purchase orders due for delivery in the next 7 days."
             />
           ) : null}
           {cards.goodsReceived ? (
@@ -276,7 +319,11 @@ export function OverviewView() {
               count={cards.goodsReceived.count}
               secondary="Completed GRNs · last 7 days"
               spark={cards.goodsReceived.weeklyReceived}
-              href="/dashboard/goods-in"
+              // The window travels WITH the number (`receivedSince`, resolved in the company
+              // timezone) rather than being re-derived here off the browser's clock — the card and
+              // the list would otherwise disagree for any viewer in another zone.
+              href={goodsReceivedHref(cards.goodsReceived.receivedSince)}
+              opens={`Opens completed goods receipts booked in since ${cards.goodsReceived.receivedSince}.`}
             />
           ) : null}
           {cards.overdueHoldings ? (
@@ -292,7 +339,12 @@ export function OverviewView() {
                   `No stock out > ${cards.overdueHoldings.days} days`
                 )
               }
-              href="/dashboard/warehouses"
+              // NOT a link. This count spans every warehouse the viewer can reach and the work is
+              // done inside one warehouse's Goods tab, so no single list holds it — see
+              // OverdueHoldingsDrillDown. It pointed at the bare warehouse list, which contains none
+              // of the jobs it counted.
+              onOpen={() => setOverdueOpen(true)}
+              opens="Opens a breakdown of the overdue stock by warehouse and engineer."
             />
           ) : null}
         </section>
@@ -316,6 +368,13 @@ export function OverviewView() {
       ) : null}
 
       {activity ? <ActivityFeed items={activity} /> : null}
+
+      {/* Mounted UNCONDITIONALLY, not under `cards.overdueHoldings`. The dashboard refetches every 60
+          seconds and a section that throws is dropped from the payload by design (see `settle`), so
+          gating the panel on that key closed an OPEN drill-down mid-read and threw away the focus it
+          restores to the card. It costs nothing while shut: it renders no markup and fetches only
+          once opened, which can only happen from a card that section rendered. */}
+      <OverdueHoldingsDrillDown open={overdueOpen} onClose={() => setOverdueOpen(false)} />
     </div>
   );
 }

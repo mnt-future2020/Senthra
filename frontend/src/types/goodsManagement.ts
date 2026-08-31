@@ -413,6 +413,28 @@ export interface DamagedHistory {
 // One page of overdue rows. Paged and searched SERVER-side: this list is not guaranteed small — a busy
 // operation can have hundreds of jobs overdue at once — and `total` counts the searched set, so the
 // pager never offers a page that isn't there.
+// The same overdue selection folded per warehouse and per engineer — the dashboard card's drill-down.
+// Bounded by ENTITY count, never by job count, so a backlog of hundreds is still a handful of rows.
+export interface OverdueGroup {
+  /** warehouseId / engineerId. `unassigned` for a legacy issue with no warehouse recorded. */
+  id: string;
+  label: string;
+  /** Warehouse code — what the deep link addresses. Null for engineers, and for `unassigned`, which
+   *  is why a row with no code renders as plain text rather than a link that goes nowhere. */
+  code: string | null;
+  count: number;
+  oldestDaysOut: number;
+}
+
+export interface OverdueGroupsResult {
+  /** The Settings window the selection ran with — print this, never a hardcoded number. */
+  days: number;
+  /** Identical to the Overview card's count for the same actor: one selection, two reads. */
+  total: number;
+  byWarehouse: OverdueGroup[];
+  byEngineer: OverdueGroup[];
+}
+
 export interface OverduePage {
   days: number;
   rows: OverdueRow[];

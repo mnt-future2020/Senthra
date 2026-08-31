@@ -1543,6 +1543,17 @@ function portalRaisedWindow(params: { raisedFrom?: string; raisedTo?: string }) 
   return resolveInstantWindow(params.raisedFrom, params.raisedTo, () => settingsService.getCompanyTimezone());
 }
 
+/**
+ * The RECEIVED date window, resolved the one way — company-timezone calendar days over an instant.
+ *
+ * `receivedAt` is a timestamp, not a calendar date, so its bounds are start-of-day and end-of-day IN
+ * COMPANY TIME rather than UTC; `resolveInstantWindow` is the shared engine that already knows this
+ * and is what both stock lists call. Named here so the export cannot resolve it a second way.
+ */
+function portalReceivedWindow(params: { receivedFrom?: string; receivedTo?: string }) {
+  return resolveInstantWindow(params.receivedFrom, params.receivedTo, () => settingsService.getCompanyTimezone());
+}
+
 export interface PortalListParams {
   search?: string;
   status?: string;
@@ -2819,7 +2830,7 @@ export async function listCustomerStockEntries(
     status: params.status,
     search: params.search,
     warehouseId: params.warehouseId,
-    receivedWindow: await resolveInstantWindow(params.receivedFrom, params.receivedTo, () => settingsService.getCompanyTimezone()),
+    receivedWindow: await portalReceivedWindow(params),
   };
   const total = await customerRepo.countStockEntriesByCustomer(customerId, filters);
   const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
@@ -2843,7 +2854,7 @@ export async function listCustomerStockEntriesPaged(customerId: string, params: 
     status: params.status,
     search: params.search,
     warehouseId: params.warehouseId,
-    receivedWindow: await resolveInstantWindow(params.receivedFrom, params.receivedTo, () => settingsService.getCompanyTimezone()),
+    receivedWindow: await portalReceivedWindow(params),
   };
   const total = await customerRepo.countStockEntriesByCustomer(customerId, filters);
   const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total);
@@ -2867,7 +2878,17 @@ export async function exportOwnStockCsv(
 ): Promise<{ csv: string; capped: boolean }> {
   const rows = await customerRepo.findStockEntriesByCustomer(
     customerId,
-    { status: params.status, search: params.search, warehouseId: params.warehouseId },
+    // The SAME filters object the two list functions build — the received-date window INCLUDED.
+    // It was omitted here while both lists applied it, so the admin Stock tab's date range narrowed
+    // the screen and not the download: filter to one week, export, and the file held the customer's
+    // entire consignment history with nothing in it to say so. The submissions export next door
+    // already passed its own window; this one simply never did.
+    {
+      status: params.status,
+      search: params.search,
+      warehouseId: params.warehouseId,
+      receivedWindow: await portalReceivedWindow(params),
+    },
     { skip: 0, take: PORTAL_EXPORT_MAX },
   );
   const entries = rows.map((e) => toPortalStockEntry(e as StockEntryRow));
