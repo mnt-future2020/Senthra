@@ -152,14 +152,35 @@ export interface NoteFile {
  */
 export async function findSettlementSummaries(
   ids: string[],
-): Promise<Map<string, { code: string; chargePence: number | null; attachments: NoteFile[] }>> {
+): Promise<
+  Map<
+    string,
+    {
+      code: string;
+      chargePence: number | null;
+      /**
+       * The charge on each HIRE LINE of the note, keyed by that line.
+       *
+       * A record must be told what was charged for ITS OWN hire, not what the whole note came to. A
+       * note covering two hire lines settles a record on each, and handing both the note total made
+       * every reader that sums records report the money twice. The note total stays available above
+       * for the places that describe the DOCUMENT.
+       */
+      chargeByHireLine: Map<string, number | null>;
+      /** The date the note itself carries — the day its filer said the damage was noticed. */
+      notedAt: Date | null;
+      attachments: NoteFile[];
+    }
+  >
+> {
   if (ids.length === 0) return new Map();
   const rows = await prisma.rentalReceipt.findMany({
     where: { id: { in: ids } },
     select: {
       id: true,
       code: true,
-      lines: { select: { damageChargePence: true } },
+      deliveryDate: true,
+      lines: { select: { damageChargePence: true, purchaseOrderRentalLineId: true } },
       // The whole file, not just its address: the panes that show these render a THUMBNAIL and open it
       // — a photograph is the thing somebody needs to look at, and a filename is not one — and the
       // shared attachment list needs the type and size to do that.
@@ -179,6 +200,8 @@ export async function findSettlementSummaries(
         {
           code: r.code,
           chargePence: quoted.length === 0 ? null : quoted.reduce((n, l) => n + (l.damageChargePence ?? 0), 0),
+          chargeByHireLine: new Map(r.lines.map((l) => [l.purchaseOrderRentalLineId, l.damageChargePence ?? null])),
+          notedAt: r.deliveryDate ?? null,
           attachments: r.attachments,
         },
       ];

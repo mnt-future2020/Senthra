@@ -869,11 +869,20 @@ export async function reportHireDamage(
   if (posted.length === 0) throw badRequest("Enter how many units are damaged on at least one line.");
 
   const byId = new Map(po.rentalItems.map((r) => [r.id, r]));
+  // WHAT IS ALREADY REPORTED AND UNPRICED on the lines this note touches — one grouped query for the
+  // whole note, never one per line. Subtracted from what this note may report, so a message can name
+  // the figure. NOT the authoritative cap: that is re-read inside the transaction below.
+  const capsByLine = await custodyExitRepo.damageCapFiguresByLines(posted.map((l) => l.purchaseOrderRentalLineId));
   const lines: receiptRepo.NewReceiptLine[] = [];
   const hireUpdates: HireUpdate[] = [];
   // Built alongside the note's own lines and written once the note has an id — a custody exit is
   // keyed on the document that justifies it, and that id does not exist until the note is created.
   const exitsToOpen: (Omit<custodyExitRepo.NewCustodyExit, "sourceId"> & { sourceType: string })[] = [];
+  // What the cap below decided, kept so the SAME arithmetic can be re-run inside the note's own
+  // transaction. `ceiling` is the half that cannot move behind us — it is built from `receivedQuantity`
+  // and `damagedQuantity`, and every hire line carries `expect: { damagedQuantity }` so a concurrent
+  // move of either aborts the write anyway. Only `quarantinedNotTallied` is re-read. See the reassert.
+  const capChecks: { lineId: string; itemName: string; ceiling: number; want: number }[] = [];
   const actorLabelForExits = actor?.email ?? null;
 
   for (const [i, l] of posted.entries()) {
@@ -906,19 +915,39 @@ export async function reportHireDamage(
     const held = (hire.receivedQuantity ?? 0) - (hire.returnedQuantity ?? 0) - (hire.lostQuantity ?? 0);
     if (held <= 0) throw conflict(`${hire.itemName}: nothing from this line is still with us.`);
     const alreadyDamaged = hire.damagedQuantity ?? 0;
-    // Two ceilings, and the lower wins: only kit HELD can be broken here, and only units never
-    // recorded damaged are left to record. The second is netted against what was RECEIVED, not what
-    // is held — a unit that went back damaged is off the site but still on the record, and netting it
-    // against the holding would quietly refuse an undamaged unit standing behind it.
-    const reportable = Math.min(held, (hire.receivedQuantity ?? 0) - alreadyDamaged);
+    const caps = capsByLine.get(hire.id) ?? { quarantinedNotTallied: 0 };
+    const alreadyReported = caps.quarantinedNotTallied;
+    // MORE DAMAGE WAS FOUND — the only thing this note can mean. Three ceilings and the lowest wins:
+    // only kit HELD can be broken here, only units never recorded damaged are left to record, and —
+    // the term this cap was missing — only units that no report is ALREADY holding out of the pool.
+    //
+    // That third term is the whole double-quarantine guard, and it is what let the choice go away. The
+    // guard used to be enforced by CONSUMING the open report, which is precisely why a new fault could
+    // not be told from an old one. Enforced as arithmetic instead, both facts can be true at once — 1
+    // unit reported by the engineer, 1 more found here, 2 units broken — and this endpoint cannot
+    // quarantine one physical unit twice however it is called.
+    //
+    // `quarantinedNotTallied` counts DISMISSED reports too: dismissing drops the claim, not the damage,
+    // so the unit is still broken, still on the shelf and still out of the pool.
+    //
+    // `received - alreadyDamaged` is netted against what was RECEIVED, not what is held — a unit that
+    // went back damaged is off the site but still on the record, and netting it against the holding
+    // would quietly refuse an undamaged unit standing behind it.
+    const ceiling = Math.min(held, (hire.receivedQuantity ?? 0) - alreadyDamaged);
+    const reportable = ceiling - alreadyReported;
+    capChecks.push({ lineId: hire.id, itemName: hire.itemName, ceiling, want: l.damagedQuantity });
     if (reportable <= 0) {
+      // Says where the rest went, and sends them to the record that owns it rather than offering to
+      // absorb it here. See the note on `damageLineSchema`.
       throw conflict(
-        `${hire.itemName}: all ${held} unit${held === 1 ? "" : "s"} with us ${held === 1 ? "is" : "are"} already reported damaged.`,
+        alreadyReported > 0
+          ? `${hire.itemName}: every unit with us is already recorded as damaged — ${alreadyReported} of them on ${alreadyReported === 1 ? "a report" : "reports"} you can charge or dismiss from the order's damage list.`
+          : `${hire.itemName}: all ${held} unit${held === 1 ? "" : "s"} with us ${held === 1 ? "is" : "are"} already reported damaged.`,
       );
     }
     if (l.damagedQuantity > reportable) {
       throw conflict(
-        `${hire.itemName}: only ${reportable} of the ${held} with us ${reportable === 1 ? "is" : "are"} not already reported damaged.`,
+        `${hire.itemName}: only ${reportable} of the ${held} with us ${reportable === 1 ? "is" : "are"} not already recorded as damaged${alreadyReported > 0 ? ` (${alreadyReported} ${alreadyReported === 1 ? "is" : "are"} on an existing report)` : ""}.`,
       );
     }
 
@@ -1001,17 +1030,31 @@ export async function reportHireDamage(
     // them; born together so no window exists in which a damage note is on file and its equipment is
     // still being offered to the next engineer.
     async (tx, receiptId) => {
+      // THE CAP, RE-ASSERTED WHERE IT IS AUTHORITATIVE. The preflight read above shapes the form's
+      // refusal message; this one decides. Between the two, an engineer scanning a damaged return can
+      // open a `held_damaged` exit — which moves `quarantinedNotTallied` WITHOUT touching
+      // `damagedQuantity`, the only figure the hire lines' optimistic `expect` watches — so a note
+      // built on the stale figure could quarantine one physical unit twice.
+      //
+      // Throwing here aborts the whole transaction: no receipt, no note lines, no tally move, no
+      // custody rows and no charge. A half-written damage claim is the one outcome worse than a
+      // refused one, and this is the seam that guarantees there cannot be one.
+      const capsNow = await custodyExitRepo.damageCapFiguresByLinesTx(tx, capChecks.map((c) => c.lineId));
+      for (const c of capChecks) {
+        const roomNow = c.ceiling - (capsNow.get(c.lineId)?.quarantinedNotTallied ?? 0);
+        if (c.want > roomNow) {
+          throw conflict(
+            `${c.itemName}: more damage was reported on this line while you were filling this in — only ${Math.max(0, roomNow)} of the units with us ${roomNow === 1 ? "is" : "are"} not already recorded as damaged. Reload the order and check the damage list before filing.`,
+          );
+        }
+      }
       const settledAt = new Date();
       for (const e of exitsToOpen) {
-        // SETTLE WHAT IS ALREADY OPEN FIRST. Most damage on a note was reported days earlier by the
-        // engineer who found it, and that report already took the unit out of the issuable pool.
-        // Opening a second exit for the same tester would quarantine one physical unit twice.
-        const covered = await custodyExitRepo.settleOpenDamageAgainstNoteTx(tx, e.purchaseOrderRentalLineId, e.qty, receiptId, settledAt);
-        const fresh = e.qty - covered;
-        if (fresh <= 0) continue;
-        // Only what this note reports BEYOND the open reports gets a row of its own — damage found at
-        // the warehouse that no engineer had raised.
-        const exit = await custodyExitRepo.createExitTx(tx, { ...e, qty: fresh, sourceId: receiptId });
+        // ITS OWN EVENT, ALWAYS. Its date, its words, its evidence and its charge stay on it, and no
+        // report already on file is read, settled or re-dated. The re-assert directly above guaranteed
+        // — in this transaction — that there are unquarantined units for it to be about, so nothing
+        // here has to negotiate with the past.
+        const exit = await custodyExitRepo.createExitTx(tx, { ...e, sourceId: receiptId });
         await custodyExitRepo.moveSettlementStateTx(tx, exit.id, custodyExitRepo.SETTLE_UNSETTLED, custodyExitRepo.SETTLE_SETTLED, {
           settledByReceiptId: receiptId,
           settledAt,
@@ -1031,8 +1074,11 @@ export async function reportHireDamage(
     metadata: {
       receipt: receipt.code,
       reportedDate: input.reportedDate.toISOString(),
-      changes: lines.map((l) => ({
-        label: `${l.itemName}: ${l.damagedQuantity} damaged in service · ${receipt.code}`,
+      // NEWLY FOUND, said so. This action can no longer mean anything else — settling damage already
+      // on file is `rental_damage.charged` or `rental_damage.dismissed`, each naming its own record —
+      // so the trail keeps the three as three.
+      changes: exitsToOpen.map((e) => ({
+        label: `${e.itemName}: ${e.qty} newly found damaged in service · ${receipt.code}`,
       })),
     },
   });
@@ -1308,7 +1354,7 @@ export async function recordDamageCharge(
  * Uncapped, and safely so: every writer of that tally leaves `damagedQuantity + open damage exits ≤
  * received` true, so an exit that still stands open has room reserved for it by construction. The two
  * notes that could have taken it both refuse to — a warehouse report CONSUMES open exits
- * (settleOpenDamageAgainstNoteTx) and a collection note NETS them out of its cap
+ * (`damageCapFiguresByLines`) and a collection note NETS them out of its cap
  * (openDamageQtyByLines). Capping here as well would be unreachable, and reaching it would strand the
  * exit on the worklist with no document able to clear it.
  */

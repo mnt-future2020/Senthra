@@ -202,8 +202,13 @@ export interface HoldingOption {
   hireEndDate: string | null;
   overdue: boolean;
   poCodes: string[];
-  /** Depot NAMES the hired units were collected from (rental only; empty for company stock). */
-  depots: string[];
+  /**
+   * The depot(s) these hired units were collected from — the hire's own order warehouse (rental only;
+   * empty for company stock). The ID travels with the name because for hired kit the return warehouse
+   * is not a choice: the composer SETS the destination from this rather than asking the engineer to
+   * match a name. Same shape the kit-request availability DTO uses for its rental depots.
+   */
+  depots: { warehouseId: string; warehouseName: string; qty: number }[];
 }
 
 export interface WarehouseLite {

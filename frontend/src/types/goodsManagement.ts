@@ -343,6 +343,25 @@ export interface ReportDamageResult {
 
 // ── Damaged history (drill-down behind one damaged row) ───────────────────────
 
+/**
+ * Where ONE rental damage/loss event now stands — RENTAL entries only.
+ *
+ * A hire carries two independent dimensions (`custodyState`: where the units are; `settlementState`:
+ * where the money is), and a reader of the history needs the resolved answer rather than the pair.
+ * `active` is the only value that still counts toward the row's current damaged quantity — see
+ * `countsAsCurrentDamage`.
+ *
+ * Owned (company/customer) entries never carry this: the owned pool has no settlement lifecycle, and
+ * its `type` (write_off | restore) already says everything there is to say about an entry.
+ */
+export type RentalDamageStatus =
+  | "active" // still damaged/lost here, and still owed an answer — the only status that counts
+  | "charged" // settled on a provider note
+  | "no_charge" // dismissed — looked at, nothing owed
+  | "withdrawn" // the report itself was taken back; it never happened of record
+  | "returned" // handed back to the provider damaged
+  | "recovered"; // a declared loss turned up and was booked back in
+
 export interface DamagedHistoryEntry {
   id: string;
   date: string;
@@ -355,6 +374,27 @@ export interface DamagedHistoryEntry {
   sourceType: string;
   sourceCode: string | null;
   actor: string | null;
+  /**
+   * RENTAL entries only — undefined on owned ones, exactly as `DamagedRow`'s rental context fields are.
+   *
+   * Money lives here and ONLY here. The owned damaged pool is our own write-off with nobody to bill, so
+   * it has no charge to report and must never be given one; a hire is the provider's equipment and its
+   * damage is a charge they raise. Both are read back through this one modal, so the difference has to
+   * be carried by optional fields rather than by a second type.
+   */
+  status?: RentalDamageStatus;
+  /**
+   * Whether this event still counts toward the row's current damaged quantity.
+   *
+   * Set from the same predicate the damaged LIST is built with, so `balanceAfter` on the newest entry
+   * can never contradict the quantity on the card above it. Undefined on owned entries, whose
+   * `balanceAfter` comes from the ledger's own stored running balance.
+   */
+  countsToTotal?: boolean;
+  /** The provider charge settled against this event, in POUNDS. Null when the note carries no figure yet. */
+  settledCharge?: number | null;
+  /** The note that charge lives on (HDM-#### / HLS-####) — what an accountant looks it up by. */
+  settledByCode?: string | null;
 }
 
 export interface DamagedHistory {

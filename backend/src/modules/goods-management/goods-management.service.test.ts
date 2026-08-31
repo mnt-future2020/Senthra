@@ -1690,6 +1690,29 @@ describe("getDamagedHistory", () => {
       expect(Object.keys(e)).not.toContain("value");
     }
   });
+
+  /**
+   * THE OWNED POOL HAS NO CHARGE AND MUST NEVER GROW ONE.
+   *
+   * Company and customer damage is our own write-off — there is nobody to bill, so there is no figure
+   * to report. A hire is the provider's equipment and its damage IS a charge, and the two are read back
+   * through the same drill-down modal on the same screen. That shared modal now renders a settlement
+   * state and a charge for the rental branch, which is exactly the pressure that would put those fields
+   * on this DTO "for symmetry" — and doing so would invent money against stock that has none, on a
+   * screen a customer's own page also embeds.
+   *
+   * Named field-by-field rather than by a shape assertion so the failure says which one leaked.
+   */
+  it("exposes no settlement or charge fields — owned damage has nobody to bill", async () => {
+    const res = await getDamagedHistory(COMPANY_KEY);
+    expect(res.entries).not.toHaveLength(0); // a vacuous loop would pass this test forever
+    for (const e of res.entries) {
+      const keys = Object.keys(e);
+      for (const forbidden of ["settledCharge", "settledByCode", "status", "countsToTotal", "chargePence", "damageChargePence"]) {
+        expect(keys).not.toContain(forbidden);
+      }
+    }
+  });
 });
 
 // ── reportWarehouseDamage (damage found on stock already in the warehouse) ────────────────────

@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { Check, Loader2, Plus, Upload, X } from "lucide-react";
+import { Ban, Check, Loader2, Plus, Upload, X } from "lucide-react";
 
 import * as vanStockSvc from "@/services/vanStockRequest.service";
 import type {
@@ -25,6 +25,7 @@ import { uploadDirectForUrl } from "@/lib/upload";
 import { formatHireDate, splitItemKeys, toLinePayload } from "@/components/dashboard/van-requests/vanStockLine";
 
 import { openLineAdvisory } from "./openLineAdvisory";
+import { canAddRental, effectiveReturnWarehouse, refusedRentalRows, returnDepotFor, returnWarehouseOptions, unitsAtDepot } from "./returnDepot";
 
 // Full-page composers for the engineer's NON-job field-stock flow, on the shared FormScaffold
 // (sticky header + sectioned main column + sticky summary aside) so they read exactly like the
@@ -491,26 +492,106 @@ export function ReturnComposerPage() {
   const inCart = React.useMemo(() => new Set(cart.map((c) => c.key)), [cart]);
   const totalQty = cart.reduce((s, c) => s + c.qty, 0);
 
-  const add = (h: HoldingOption) =>
+  // WHERE THIS RETURN GOES, decided from the cart rather than asked for. Hired kit must go back to the
+  // warehouse of its own order (the model cannot record it coming back elsewhere, and the server
+  // refuses it at create/scan/post), so once a hire is in the cart the destination is a consequence,
+  // not a choice. Company stock keeps the free picker it has always had. See returnDepot.ts.
+  const depot = React.useMemo(() => returnDepotFor(cart), [cart]);
+  // The options the picker may offer. Narrowed to the hire's depot(s) so an invalid destination is not
+  // reachable by clicking; the server stays the authority either way.
+  const warehouseOptions = React.useMemo(
+    () => returnWarehouseOptions(depot, warehouses.map((w) => ({ value: w.id, label: w.code ? `${w.name} (${w.code})` : w.name }))),
+    [warehouses, depot],
+  );
+
+  // The destination this return will actually be created with — DERIVED from the cart, never copied
+  // into state. A hire fixes it; a multi-depot cart keeps the engineer's pick only while the cart still
+  // permits it; an IRM-only cart is whatever they chose. Deriving means removing the last hire hands the
+  // field straight back to a normal picker with no stale value to clear, and there is no second source
+  // of truth for the submit to disagree with.
+  const effectiveWarehouseId = React.useMemo(() => effectiveReturnWarehouse(depot, warehouseId), [depot, warehouseId]);
+
+  /**
+   * THE CART AS THE TABLE SEES IT, with each hired row capped at the depot actually chosen.
+   *
+   * A hired row's quantity is summed across every hire its units sit on, and those hires can be at
+   * different depots. One return goes to one counter, so a 5-unit row that is 2 at Bristol and 3 at
+   * Leeds is postable to neither: it was offered at 5, filled in, and refused at create with nothing on
+   * screen having said to split it. Capping here is the whole fix — `VanStockCartTable` already clamps
+   * typing to `maxQty`, so the unpostable number simply cannot be entered.
+   *
+   * Derived, never written back into the cart: the depot can still change, and a cap folded into state
+   * would leave a quantity narrowed by a choice the engineer has since abandoned.
+   */
+  const cappedCart = React.useMemo(
+    () => cart.map((c) => {
+      const atDepot = unitsAtDepot(c, effectiveWarehouseId);
+      if (atDepot === null) return c;
+      const max = Math.min(c.maxQty ?? atDepot, atDepot);
+      return { ...c, maxQty: max, qty: Math.min(c.qty, max) };
+    }),
+    [cart, effectiveWarehouseId],
+  );
+  // An already-typed quantity that the chosen depot cannot take. Caught rather than silently rewritten,
+  // the same way the request composer handles a line that outruns its warehouse: the number came from
+  // the engineer, so the form says it is wrong instead of changing it behind them.
+  const overDepot = cart.find((c) => {
+    const atDepot = unitsAtDepot(c, effectiveWarehouseId);
+    return atDepot !== null && c.qty > atDepot;
+  });
+
+  // WHY A ROW IS GREYED OUT — said ON the row, not at the foot of the form. The cross-depot refusal
+  // used to arrive as a banner below the REASON box, several hundred pixels under the list that had
+  // just been tapped: off-screen on a phone, so the tap read as having simply done nothing. Feedback
+  // belongs where the action is, and a row that cannot be added should not invite the tap at all —
+  // the same treatment the already-added rows have always had. `add` keeps its own guard as the
+  // backstop for any non-click path.
+  const blockedRows = React.useMemo(
+    () => refusedRentalRows(cart, holdings ?? [], vanStockItemKey, (key) => inCart.has(key)),
+    [holdings, cart, inCart],
+  );
+
+  const add = (h: HoldingOption) => {
+    // ONE RETURN HAS ONE WAREHOUSE, and a hire may only go back to the depot of its own order. So two
+    // hires owed to different depots cannot travel together. The server refuses such a cart at create;
+    // refusing the ADD is what stops the engineer filling in a form that was doomed the moment the
+    // second row went in. The cart it already has is left exactly as it was.
+    //
+    // The picker disables these rows and states the reason on the row itself, so this branch is not how
+    // the engineer normally meets the rule — it is the backstop for any other route into the cart.
+    const verdict = canAddRental(cart, h);
+    if (!verdict.ok) { setMsg({ type: "warn", text: verdict.reason }); return; }
+    setMsg(null);
     setCart((c) => {
       const key = vanStockItemKey(h);
       if (c.some((x) => x.key === key)) return c;
       // The hire deadline travels onto the cart row so the return list keeps showing WHY this one is
       // urgent — it is the only thing distinguishing a tester that must go back from a cable that need
       // not. Which hire each unit goes back on is the warehouse's scan to resolve, never the engineer's.
+      // `depots` rides along too: it is what decides this return's destination (see returnDepot.ts).
       return [...c, {
         key, source: h.source, irmItemId: h.irmItemId, rentalItemId: h.rentalItemId,
         name: h.name, code: h.code, qty: h.quantityOnHand, maxQty: h.quantityOnHand,
-        hireEndDate: h.hireEndDate, overdue: h.overdue,
+        hireEndDate: h.hireEndDate, overdue: h.overdue, depots: h.depots,
       }];
     });
+  };
   const setQty = (key: string, qty: number) => setCart((c) => c.map((x) => (x.key === key ? { ...x, qty } : x)));
   const remove = (key: string) => setCart((c) => c.filter((x) => x.key !== key));
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (cart.length === 0) { setMsg({ type: "error", text: "Pick at least one item to return." }); return; }
-    if (!warehouseId) { setMsg({ type: "error", text: "Pick the warehouse you'll return the stock to." }); return; }
+    // `unknown` means a hire whose depot we could not resolve — the field shows why, and there is no
+    // safe destination to submit, so the guard below stops it here rather than at the counter.
+    if (!effectiveWarehouseId) { setMsg({ type: "error", text: "Pick the warehouse you'll return the stock to." }); return; }
+    // One counter, one depot's units. The cap above stops this being typed; this stops a quantity that
+    // was already typed before the depot was chosen from riding to a server that can only refuse it.
+    if (overDepot) {
+      const atDepot = unitsAtDepot(overDepot, effectiveWarehouseId) ?? 0;
+      setMsg({ type: "error", text: `Only ${atDepot} of ${overDepot.name} was collected from that depot. Lower the quantity, and return the rest on a separate request to the other depot.` });
+      return;
+    }
     if (!reason.trim()) { setReasonError("Say why you're returning this stock."); focusFirstInvalid(); return; }
     setReasonError(undefined);
     setSubmitting(true);
@@ -518,7 +599,7 @@ export function ReturnComposerPage() {
     try {
       // No per-line warehouse on a return: one destination governs the whole request.
       const lines: VanStockLinePayload[] = cart.map((c) => toLinePayload(c));
-      await vanStockSvc.createVanStockRequest({ type: "return", reason: reason.trim(), warehouseId, lines });
+      await vanStockSvc.createVanStockRequest({ type: "return", reason: reason.trim(), warehouseId: effectiveWarehouseId, lines });
       pushToast("Return raised — drive in and the warehouse will scan it in.", "success");
       router.push(LIST_URL);
     } catch (err) {
@@ -567,9 +648,18 @@ export function ReturnComposerPage() {
                 {holdings.map((h) => {
                   const key = vanStockItemKey(h);
                   const added = inCart.has(key);
+                  const blockedWhy = blockedRows.get(key);
                   const isRental = h.source === "rental";
+                  // Amber border rather than the added row's opacity-60: the reason is TEXT on this row,
+                  // and text at 60% is the thing least worth dimming. Surface stays as it was, so a
+                  // refused row still reads as recessive next to the ones that can be tapped.
+                  const rowCls = added
+                    ? "cursor-default border-[var(--border)] bg-[var(--surface-2)] opacity-60"
+                    : blockedWhy
+                      ? "cursor-default border-amber-500/30 bg-[var(--surface-2)]"
+                      : "border-[var(--border)] bg-[var(--surface-2)] hover:border-[var(--accent)]";
                   return (
-                    <button key={key} type="button" disabled={added} onClick={() => add(h)} className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left transition-all ${added ? "cursor-default border-[var(--border)] bg-[var(--surface-2)] opacity-60" : "border-[var(--border)] bg-[var(--surface-2)] hover:border-[var(--accent)]"}`}>
+                    <button key={key} type="button" disabled={added || blockedWhy !== undefined} onClick={() => add(h)} className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left transition-all ${rowCls}`}>
                       <span className="min-w-0">
                         <span className="flex min-w-0 items-center gap-1.5">
                           <span className="truncate text-sm font-semibold text-[var(--ink)]">{h.name}</span>
@@ -593,8 +683,22 @@ export function ReturnComposerPage() {
                             carry none. Muted 11px, the register the code line above already uses,
                             so the item name stays the loudest thing in the row. */}
                         {isRental && h.depots.length > 0 && (
-                          <span className="block truncate text-[11px] text-[var(--muted)]" title={h.depots.join(", ")}>
-                            Collected from {h.depots.length === 1 ? h.depots[0] : h.depots.join(" · ")}
+                          // When this row is refused, this line IS the reason — it names the depot the
+                          // cart cannot reach — so it turns amber and carries the consequence instead
+                          // of a second line repeating the depot in other words.
+                          <span
+                            className={`block truncate text-[11px] ${blockedWhy === "other-depot" ? "font-semibold text-amber-600" : "text-[var(--muted)]"}`}
+                            title={h.depots.map((d) => d.warehouseName).join(", ")}
+                          >
+                            Collected from {h.depots.map((d) => d.warehouseName).join(" · ")}
+                            {blockedWhy === "other-depot" && " · needs its own return"}
+                          </span>
+                        )}
+                        {blockedWhy === "unknown-depot" && (
+                          // No depot line to hang it on, so the refusal gets its own. Never guess a
+                          // depot: a return posted to the wrong counter is what the server refuses.
+                          <span className="block truncate text-[11px] font-semibold text-amber-600">
+                            Depot unknown — refresh and try again
                           </span>
                         )}
                         {isRental && h.hireEndDate && (
@@ -604,7 +708,13 @@ export function ReturnComposerPage() {
                           </span>
                         )}
                       </span>
-                      {added ? <Check className="h-4 w-4 shrink-0 text-[var(--pos)]" /> : <Plus className="h-4 w-4 shrink-0 text-[var(--accent)]" />}
+                      {added ? (
+                        <Check className="h-4 w-4 shrink-0 text-[var(--pos)]" />
+                      ) : blockedWhy ? (
+                        <Ban className="h-4 w-4 shrink-0 text-amber-600" />
+                      ) : (
+                        <Plus className="h-4 w-4 shrink-0 text-[var(--accent)]" />
+                      )}
                     </button>
                   );
                 })}
@@ -613,7 +723,7 @@ export function ReturnComposerPage() {
           </FormSection>
 
           <FormSection title={`Selected items${cart.length ? ` (${cart.length})` : ""}`} description="Set the quantity you're bringing back.">
-            <VanStockCartTable cart={cart} onQty={setQty} onRemove={remove} />
+            <VanStockCartTable cart={cappedCart} onQty={setQty} onRemove={remove} />
             <AdvisoryStack>
               <DuplicateWarning cart={cart} openLines={openLines} kind="return" />
             </AdvisoryStack>
@@ -625,9 +735,17 @@ export function ReturnComposerPage() {
                 <label className={labelCls} id="return-warehouse-label">Return to warehouse <RequiredMark /></label>
                 <Select
                   ariaLabel="Return warehouse"
-                  value={warehouseId}
+                  value={effectiveWarehouseId}
                   onChange={setWarehouseId}
-                  options={[{ value: "", label: "Pick a warehouse…" }, ...warehouses.map((w) => ({ value: w.id, label: w.code ? `${w.name} (${w.code})` : w.name }))]}
+                  // FIXED, not disabled, when hired kit decides it. A disabled control is skipped by the
+                  // keyboard and read as unavailable, but this field is neither — it holds the answer and
+                  // must stay reachable and announced. So the options collapse to the one valid depot:
+                  // the value is visible, focusable and read out, and there is nothing wrong to choose.
+                  options={
+                    depot.kind === "fixed"
+                      ? warehouseOptions
+                      : [{ value: "", label: "Pick a warehouse…" }, ...warehouseOptions]
+                  }
                 />
                 {/* Shown ONLY when the cart actually holds hired kit. The label is already accurate —
                     this is where the stock is booked in — so the field is not renamed; what was
@@ -635,7 +753,28 @@ export function ReturnComposerPage() {
                     otherwise discovered as a refusal after filling the form in. States the existing
                     rule at the point of choosing, and names nothing the picker above does not
                     already show on each hired row. */}
-                {cart.some((c) => c.source === "rental") && (
+                {/* One line, in the hint register the rest of the form already uses — no new pattern, no
+                    colour, no oversized notice. It says why the field is not a free choice, which is the
+                    one thing the engineer could not see before. */}
+                {depot.kind === "fixed" && (
+                  <p className={hintCls}>Set by the hired kit in this return — it goes back to the depot it was collected from.</p>
+                )}
+                {depot.kind === "restricted" && (
+                  <p className={hintCls}>
+                    Only depots the hired kit in this return can go back to are listed. Quantities are
+                    capped at what was collected from the depot you pick — anything left goes back on its
+                    own return.
+                  </p>
+                )}
+                {/* Never guess a destination. Without a resolvable depot there is no way to know which
+                    counter can take the hire, so say so and let them recover rather than build a request
+                    the warehouse must refuse. */}
+                {depot.kind === "unknown" && (
+                  <p className="mt-1 text-[11px] font-semibold text-[var(--neg)]">
+                    We couldn&apos;t work out which depot this hired kit goes back to. Refresh and try again, or ask the office to check the order.
+                  </p>
+                )}
+                {depot.kind === "free" && cart.some((c) => c.source === "rental") && (
                   <p className={hintCls}>Hired kit goes back to the depot it was collected from — shown on each hired item above.</p>
                 )}
               </div>
@@ -667,7 +806,7 @@ export function ReturnComposerPage() {
               <dl className="space-y-2.5 text-xs">
                 <div className="flex justify-between gap-2">
                   <dt className="text-[var(--muted)]">Return to</dt>
-                  <dd className="text-right font-semibold text-[var(--ink)]">{warehouses.find((w) => w.id === warehouseId)?.name ?? "—"}</dd>
+                  <dd className="text-right font-semibold text-[var(--ink)]">{warehouses.find((w) => w.id === effectiveWarehouseId)?.name ?? warehouseOptions.find((o) => o.value === effectiveWarehouseId)?.label ?? "—"}</dd>
                 </div>
                 <div className="flex justify-between gap-2">
                   <dt className="text-[var(--muted)]">Items</dt>

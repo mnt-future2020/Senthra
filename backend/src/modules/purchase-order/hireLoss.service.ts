@@ -339,9 +339,9 @@ export async function recoverHireLoss(input: RecoverHireLossInput, actor?: Audit
 //       units stay out of `hireIssuable`.
 //     • `reconcileDamageCustodyTx` carries settlement across its splits and never filters on it, so a
 //       dismissed unit still follows the shelf back to the provider.
-//     • `settleOpenAgainstNoteTx` ABSORBS dismissed rows in its second phase — see the long note
-//       there. This is the one that had to change: filtering them out let a later warehouse note mint
-//       a second quarantine row for the same physical unit.
+//     • `damageCapFiguresByLines` COUNTS dismissed rows toward `quarantinedNotTallied`. This is the
+//       one that had to change: filtering them out let a later warehouse note mint a second
+//       quarantine row for the same physical unit.
 //
 //   FINANCIAL — "does the provider owe us for this?" No, and these correctly drop it:
 //     • `OPEN_EXIT_WHERE` takes it off the settle worklist and its badge — the office has answered it.
@@ -521,6 +521,18 @@ export interface PublicCustodyExit {
   settledByCode: string | null;
   settledCharge: number | null;
   /**
+   * The date the settling NOTE carries — the day its filer said the damage was noticed.
+   *
+   * A second date, deliberately, because two true dates exist and a screen showing only one of them
+   * was read as showing the wrong one: `declaredAt` is when the damage was FOUND (27 Aug, by the
+   * engineer), and this is when it was WRITTEN UP (31 Aug, by the office). Collapsing them would mean
+   * either losing the filer's own date or overwriting the day the fault actually happened, and the
+   * second is the date a supplier's charge is argued against.
+   *
+   * Null when nothing has settled this record, and null on a note carrying no date of its own.
+   */
+  settledNotedAt: string | null;
+  /**
    * The NOTE this record was raised from, when that note is a warehouse damage report.
    *
    * Two different undos hang off a record and they are not interchangeable: withdrawing the REPORT
@@ -546,6 +558,25 @@ export interface PublicCustodyExit {
   attachmentsReceiptId: string | null;
 }
 
+/**
+ * What was charged for THIS record's hire line on the note that settled it.
+ *
+ * `undefined` from the map means the note has no line for this hire — a shape a settled record should
+ * not be in — and only then does the document total stand in. A stored `null` means the line exists and
+ * carries no figure yet, which is "awaiting a quote" and must survive as such.
+ */
+/** Pence to pounds, keeping `null` as "no figure" rather than flattening it to zero. */
+const pounds = (pence: number | null): number | null => (pence == null ? null : pence / 100);
+
+function settledChargePence(
+  hireLineId: string,
+  settlement?: { chargePence: number | null; chargeByHireLine: Map<string, number | null> },
+): number | null {
+  if (!settlement) return null;
+  const own = settlement.chargeByHireLine.get(hireLineId);
+  return own === undefined ? settlement.chargePence : own;
+}
+
 function toPublicExit(
   e: {
   id: string; purchaseOrderRentalLineId: string; purchaseOrderId: string; poCode: string | null; warehouseId: string;
@@ -555,7 +586,13 @@ function toPublicExit(
   settledAt: Date | null; recoveredBy: string | null; recoveredAt: Date | null; recoveryNotes: string | null;
   sourceId: string;
   },
-  settlement?: { code: string; chargePence: number | null; attachments: receiptRepo.NoteFile[] },
+  settlement?: {
+    code: string;
+    chargePence: number | null;
+    chargeByHireLine: Map<string, number | null>;
+    notedAt: Date | null;
+    attachments: receiptRepo.NoteFile[];
+  },
   /** The note this record was RAISED from, when that is a different document from the one that settled it. */
   source?: { code: string; attachments: receiptRepo.NoteFile[] },
   attachmentsReceiptId?: string | null,
@@ -572,7 +609,13 @@ function toPublicExit(
     sourceReceiptId: source ? e.sourceId : null,
     sourceCode: source?.code ?? null,
     // Pounds on the wire, like every other money field the client renders.
-    settledCharge: settlement?.chargePence == null ? null : settlement.chargePence / 100,
+    //
+    // THIS RECORD'S OWN LINE, not the note's total. A note settling records on two hire lines used to
+    // hand each of them the whole document total, so anything summing records counted the money once
+    // per record. Falls back to the note total only when the note carries no line for this hire, which
+    // a settled record should never be in — and `null` there stays "not quoted", never a fabricated 0.
+    settledCharge: pounds(settledChargePence(e.purchaseOrderRentalLineId, settlement)),
+    settledNotedAt: settlement?.notedAt?.toISOString() ?? null,
     // Deduped by url: a warehouse report is BOTH the source and the settlement of its own record, so
     // its files would otherwise arrive twice.
     attachments: [...new Map([...(source?.attachments ?? []), ...(settlement?.attachments ?? [])].map((a) => [a.id, a])).values()],

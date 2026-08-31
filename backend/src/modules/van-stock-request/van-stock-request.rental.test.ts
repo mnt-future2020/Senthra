@@ -775,12 +775,11 @@ describe("myHoldings — what is field-returnable", () => {
   });
 
   it("names the depot each hire was collected from, and never its id", async () => {
-    // Context for the return picker: a hire goes back where it came from, so the row has to say
-    // where that is. NAMES only — an id is not a place anyone can drive to.
+    // Context for the return picker: a hire goes back where it came from, so the row has to say where
+    // that is — and the composer SETS the return warehouse from it, so the id travels with the name.
     vi.mocked(rentalCustodyRepo.findRentalHoldingsByEngineer).mockResolvedValue([holding()] as never);
     const row = (await myHoldings(ENG)).find((h) => h.source === "rental")!;
-    expect(row.depots).toEqual(["Leeds"]);
-    expect(JSON.stringify(row)).not.toContain(WH);
+    expect(row.depots).toEqual([{ warehouseId: WH, warehouseName: "Leeds", qty: 2 }]);
   });
 
   it("lists every depot when one item sits on hires from more than one", async () => {
@@ -793,7 +792,12 @@ describe("myHoldings — what is field-returnable", () => {
       { id: HIRE_LATER, rentalItemId: RENTAL, warehouseId: OTHER_WH, warehouseName: "Manchester" },
     ] as never);
     const row = (await myHoldings(ENG)).find((h) => h.source === "rental")!;
-    expect(row.depots).toEqual(["Leeds", "Manchester"]);
+    // Each depot carries ITS OWN returnable count, not the row's roll-up. That split is what stops the
+    // composer offering all 2 against whichever depot is picked — one return goes to one counter.
+    expect(row.depots).toEqual([
+      { warehouseId: OTHER_WH, warehouseName: "Manchester", qty: 1 },
+      { warehouseId: WH, warehouseName: "Leeds", qty: 1 },
+    ].sort((a, b) => a.warehouseName.localeCompare(b.warehouseName)));
   });
 
   it("lists only the FIELD-origin depot for a mixed-origin item", async () => {
@@ -810,7 +814,77 @@ describe("myHoldings — what is field-returnable", () => {
     ] as never);
     vi.mocked(gmService.committedByEngineer).mockResolvedValue({ irm: new Map(), rental: new Map([[RENTAL, 1]]), rentalFieldByHire: new Map([[HIRE_LATER, 1]]) } as never);
     const row = (await myHoldings(ENG)).find((h) => h.source === "rental")!;
-    expect(row.depots).toEqual(["Manchester"]);
+    expect(row.depots).toEqual([{ warehouseId: OTHER_WH, warehouseName: "Manchester", qty: 1 }]);
+  });
+
+  // THE MULTI-DEPOT INVARIANT, END TO END — the chain the return composer's quantity cap rests on.
+  //
+  //   per-depot returnable  <=  that depot's FIELD-ORIGIN units  <=  what the engineer may hand back
+  //
+  // Three different quantities, and conflating any two of them puts an unpostable number on the form:
+  //
+  //   held             — what is on the van, per hire. A roll-up across hires hides which depot owns
+  //                      which units, and one return goes to ONE counter.
+  //   field origin     — of those, the ones that came in through the Field Stock door. Job-origin units
+  //                      go back through the job's own scan-in, never here, so they must not be offered.
+  //   after commitment — `quantityOnHand`, the roll-up minus what is committed to live jobs.
+  //
+  // THE THIRD RELATION IS NOT FREE, and this pins the reason. Job commitment is subtracted per ITEM,
+  // not per depot, so the per-depot figure alone CAN exceed what the engineer may hand back — 5 across
+  // two depots with 4 committed to a job is 3 returnable, not 5. The composer therefore takes the
+  // MINIMUM of the two (`Math.min(quantityOnHand, unitsAtDepot(...))`), which is what this asserts for
+  // BOTH depots. Reading either figure on its own is the bug; the minimum is the contract.
+  it("keeps per-depot returnable within field origin, and the composer's cap within the engineer's holding", async () => {
+    // One item on two hires at two depots:
+    //   Leeds      — 3 held, all 3 through the field door
+    //   Manchester — 4 held, only 2 through the field door (the other 2 arrived on a job)
+    vi.mocked(rentalCustodyRepo.findRentalHoldingsByEngineer).mockResolvedValue([
+      holding({ purchaseOrderRentalLineId: HIRE_SOON, quantityOnHand: 3 }),
+      holding({ purchaseOrderRentalLineId: HIRE_LATER, quantityOnHand: 4 }),
+    ] as never);
+    vi.mocked(poRepo.findHireDepotsByIds).mockResolvedValue([
+      { id: HIRE_SOON, rentalItemId: RENTAL, warehouseId: WH, warehouseName: "Leeds" },
+      { id: HIRE_LATER, rentalItemId: RENTAL, warehouseId: OTHER_WH, warehouseName: "Manchester" },
+    ] as never);
+    const FIELD_ORIGIN = { [HIRE_SOON]: 3, [HIRE_LATER]: 2 };
+    // 4 of the 7 on the van are committed to live jobs, so only 3 may be handed back here at all.
+    vi.mocked(gmService.committedByEngineer).mockResolvedValue({
+      irm: new Map(),
+      rental: new Map([[RENTAL, 4]]),
+      rentalFieldByHire: new Map(Object.entries(FIELD_ORIGIN)),
+    } as never);
+
+    const row = (await myHoldings(ENG)).find((h) => h.source === "rental")!;
+    expect(row.quantityOnHand).toBe(3); // 7 held − 4 committed
+
+    const leeds = row.depots.find((d) => d.warehouseId === WH)!;
+    const manchester = row.depots.find((d) => d.warehouseId === OTHER_WH)!;
+
+    // LINK ONE — a depot never offers more than its own field-origin units. Manchester is the case that
+    // matters: 4 held there, but 2 of them came in on a job and go back through it.
+    expect(leeds.qty).toBe(3);
+    expect(leeds.qty).toBeLessThanOrEqual(FIELD_ORIGIN[HIRE_SOON]);
+    expect(manchester.qty).toBe(2);
+    expect(manchester.qty).toBeLessThanOrEqual(FIELD_ORIGIN[HIRE_LATER]);
+
+    // …and never more than what is physically on that hire either, whatever the field-door history says.
+    expect(leeds.qty).toBeLessThanOrEqual(3);
+    expect(manchester.qty).toBeLessThanOrEqual(4);
+
+    // LINK TWO — the composer's cap, for EACH selectable depot. Mirrors VanStockComposer's
+    // `Math.min(c.maxQty ?? atDepot, atDepot)` exactly. Note Leeds alone (3) equals the whole
+    // allowance and Manchester alone (2) is under it, yet TOGETHER they are 5 — which is why the
+    // per-depot figure can never be read without this minimum.
+    for (const depot of [leeds, manchester]) {
+      const composerCap = Math.min(row.quantityOnHand, depot.qty);
+      expect(composerCap).toBeLessThanOrEqual(depot.qty);
+      expect(composerCap).toBeLessThanOrEqual(row.quantityOnHand);
+      expect(composerCap).toBeGreaterThan(0);
+    }
+    expect(Math.min(row.quantityOnHand, leeds.qty)).toBe(3);
+    expect(Math.min(row.quantityOnHand, manchester.qty)).toBe(2);
+    // The sum of the depots deliberately OUTRUNS the allowance — the fact the minimum exists to absorb.
+    expect(leeds.qty + manchester.qty).toBeGreaterThan(row.quantityOnHand);
   });
 
   it("omits a depot it could not resolve rather than inventing one", async () => {
@@ -1470,5 +1544,84 @@ describe("scanLookup (return) — the panel shows the FIELD-origin hire", () => 
     const out = await scanLookup({ requestId: REQ_ID, warehouseId: WH, code: "RNT-0007" } as never, admin);
     expect(out).toMatchObject({ source: "rental", available: 3 });
     expect(out.hires[0]).toMatchObject({ purchaseOrderRentalLineId: HIRE_SOON, poCode: "PO-0042", qty: 2 });
+  });
+});
+
+// ── A CRAFTED MIXED-DEPOT RETURN IS REFUSED AT CREATE ───────────────────────────────────────────
+//
+// One return carries ONE warehouse, and a hire may only go back to the depot of its own order. The
+// composer now refuses to put two such hires in one cart, but the form is not the authority: a crafted
+// body can name both lines directly. The create guard already judges EVERY rental line against the
+// request's single warehouse, so the second line's depot has nothing here — these pin that, so a
+// later change to the guard cannot quietly let a doomed request be persisted.
+describe("create (return) — two hires from different depots cannot share one request", () => {
+  const RENTAL_2 = "c2".padEnd(24, "0");
+  const SECOND_ITEM = { id: RENTAL_2, code: "RNT-0099", name: "OTDR", baseUnit: "Each", status: "active", deletedAt: null };
+
+  beforeEach(() => {
+    // Fibre Tester on a hire from WH (Leeds); OTDR on a hire from OTHER_WH (Manchester).
+    vi.mocked(rentalCustodyRepo.findRentalHoldingsByEngineer).mockResolvedValue([
+      holding({ purchaseOrderRentalLineId: HIRE_SOON, rentalItemId: RENTAL, quantityOnHand: 1 }),
+      holding({ purchaseOrderRentalLineId: HIRE_LATER, rentalItemId: RENTAL_2, itemName: "OTDR", quantityOnHand: 1 }),
+    ] as never);
+    fieldOrigin({ [HIRE_SOON]: 1, [HIRE_LATER]: 1 });
+    vi.mocked(poRepo.findHireDepotsByIds).mockResolvedValue([
+      { id: HIRE_SOON, rentalItemId: RENTAL, warehouseId: WH, warehouseName: "Leeds" },
+      { id: HIRE_LATER, rentalItemId: RENTAL_2, warehouseId: OTHER_WH, warehouseName: "Manchester" },
+    ] as never);
+    vi.mocked(rentalItemRepo.findById).mockImplementation((async (id: string) => (id === RENTAL_2 ? SECOND_ITEM : RENTAL_ITEM)) as never);
+    // The shared fixture answers every id with Leeds; these tests turn on WHICH warehouse was asked
+    // for, so resolve it honestly or `create` would judge both cases against the same depot.
+    vi.mocked(warehouseRepo.findById).mockImplementation((async (id: string) =>
+      id === OTHER_WH
+        ? { id: OTHER_WH, name: "Manchester", code: "MAN", status: "active" }
+        : { id: WH, name: "Leeds", code: "LDS", status: "active" }) as never);
+  });
+
+  const bothLines = (warehouseId: string) => ({
+    type: "return", reason: "bringing both back", priority: "normal", warehouseId,
+    lines: [
+      { source: "rental", rentalItemId: RENTAL, itemName: "Fibre Tester", qty: 1 },
+      { source: "rental", rentalItemId: RENTAL_2, itemName: "OTDR", qty: 1 },
+    ],
+  });
+
+  it("refuses the cross-depot line and names where it must go instead", async () => {
+    await expect(create(bothLines(WH) as never, engineerActor)).rejects.toThrow(/OTDR.*different depot.*Manchester/i);
+    expect(vsrRepo.createRequest).not.toHaveBeenCalled();
+  });
+
+  it("refuses the other way round too — neither depot can take both", async () => {
+    await expect(create(bothLines(OTHER_WH) as never, engineerActor)).rejects.toThrow(/Fibre Tester.*different depot.*Leeds/i);
+    expect(vsrRepo.createRequest).not.toHaveBeenCalled();
+  });
+
+  it("persists NOTHING — no dead-end request is left behind", async () => {
+    await expect(create(bothLines(WH) as never, engineerActor)).rejects.toThrow();
+    expect(vsrRepo.createRequest).not.toHaveBeenCalled();
+  });
+
+  it("still accepts each hire on its OWN depot's request", async () => {
+    await create({
+      type: "return", reason: "just the tester", priority: "normal", warehouseId: WH,
+      lines: [{ source: "rental", rentalItemId: RENTAL, itemName: "Fibre Tester", qty: 1 }],
+    } as never, engineerActor);
+    expect(vsrRepo.createRequest).toHaveBeenCalled();
+  });
+
+  it("leaves an IRM line free to ride along to the hire's depot", async () => {
+    // Company stock has a balance at every warehouse, so it can be booked in wherever the hire goes.
+    vi.mocked(engineerStockRepo.findEngineerBalances).mockResolvedValue([
+      { irmItemId: IRM, quantityOnHand: 5, irmItem: { code: "IRM-0002", name: "CAT6", baseUnit: "m", trackSerialNumbers: false, trackBatchNumbers: false } },
+    ] as never);
+    vi.mocked(irmRepo.findById).mockResolvedValue({ id: IRM, code: "IRM-0002", name: "CAT6", baseUnit: "m", sku: null, status: "active", trackSerialNumbers: false, trackBatchNumbers: false } as never);
+    await create({
+      type: "return", reason: "tester plus cable", priority: "normal", warehouseId: WH,
+      lines: [
+        { source: "rental", rentalItemId: RENTAL, itemName: "Fibre Tester", qty: 1 },
+        { source: "irm", irmItemId: IRM, itemName: "CAT6", qty: 2 },
+      ],
+    } as never, engineerActor);
+    expect(vsrRepo.createRequest).toHaveBeenCalled();
   });
 });

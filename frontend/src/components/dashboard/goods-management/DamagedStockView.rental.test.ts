@@ -30,6 +30,7 @@ const exit = (over: Partial<HireCustodyExit> = {}): HireCustodyExit => ({
   recoveryNotes: null,
   settledByCode: null,
   settledCharge: null,
+  settledNotedAt: null,
   attachments: [],
   attachmentsReceiptId: null,
   sourceReceiptId: null,
@@ -124,18 +125,27 @@ describe("hireHistory", () => {
     expect(entry!.notes).not.toContain("Damaged while on hire");
     expect(entry!.notes).toContain("JOB-2026-0041");
     expect(entry!.notes).toContain("Kansha M");
-    // The money question belongs on the entry — it is the one an accountant reads this for.
-    expect(entry!.notes).toContain("not yet charged");
+  });
+
+  // The money question is the one an accountant reads this for, and it used to be appended to `notes`
+  // as prose. It is now a VALUE — the same fact, but one the modal can colour, count and exclude from
+  // the running total, none of which a sentence inside a free-text line can be asked to do.
+  it("carries where the record stands as a status, not as prose in the notes", () => {
+    const [entry] = hireHistory(row, [exit()]).entries;
+    expect(entry!.status).toBe("active");
+    // Not said twice: the badge renders the status, so repeating it in the notes printed one fact in
+    // two places on the same entry.
+    expect(entry!.notes).not.toContain("not yet charged");
   });
 
   it("says so when the provider has already been charged", () => {
     const [entry] = hireHistory(row, [exit({ settlementState: "settled" })]).entries;
-    expect(entry!.notes).toContain("charged to the provider");
+    expect(entry!.status).toBe("charged");
   });
 
   it("says so when a lost unit was later found", () => {
-    const [entry] = hireHistory(row, [exit({ kind: "loss", reason: "site_theft", recoveredAt: "2026-09-01T00:00:00.000Z" })]).entries;
-    expect(entry!.notes).toContain("later found and booked back in");
+    const [entry] = hireHistory(row, [exit({ kind: "loss", reason: "site_theft", custodyState: "recovered", recoveredAt: "2026-09-01T00:00:00.000Z" })]).entries;
+    expect(entry!.status).toBe("recovered");
     expect(entry!.reason).toBe("Stolen from site or van");
   });
 

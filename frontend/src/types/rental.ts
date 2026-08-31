@@ -507,7 +507,13 @@ export interface HireCustodyExit {
    * different fact from a charge of zero and must not be shown as one.
    */
   settledByCode: string | null;
+  /** What was charged for THIS record's hire line on that note — never the whole document total. */
   settledCharge: number | null;
+  /**
+   * The date the settling note carries: when the damage was WRITTEN UP, as against `declaredAt`, which
+   * is when it was FOUND. Both are true and they are days apart on anything written up in a batch.
+   */
+  settledNotedAt: string | null;
   /**
    * The NOTE this record was raised from, when that note is a warehouse damage report.
    *
