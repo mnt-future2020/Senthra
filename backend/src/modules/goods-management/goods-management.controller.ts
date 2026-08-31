@@ -32,6 +32,12 @@ export const listQueue = asyncHandler(async (req, res) => {
         activityTo: queryStr(req.query["activityTo"])?.trim() || undefined,
         // Due window on the job's completion date — validated in the service against QUEUE_DUE_FILTERS.
         due: queryStr(req.query["due"])?.trim() || undefined,
+        // The EXACT due range, alongside the bucket above — both narrow completionDate.
+        dueFrom: queryStr(req.query["dueFrom"])?.trim() || undefined,
+        dueTo: queryStr(req.query["dueTo"])?.trim() || undefined,
+        engineerId: queryStr(req.query["engineerId"])?.trim() || undefined,
+        customerId: queryStr(req.query["customerId"])?.trim() || undefined,
+        siteId: queryStr(req.query["siteId"])?.trim() || undefined,
         sort: queryStr(req.query["sort"])?.trim() || undefined,
         page: queryInt(req.query["page"]),
         pageSize: queryInt(req.query["pageSize"]),
@@ -62,9 +68,19 @@ export const closeReconcile = asyncHandler(async (req, res) => {
 });
 
 export const listDamaged = asyncHandler(async (req, res) => {
-  const warehouseId = req.query["warehouseId"] as string | undefined;
-  const customerId = req.query["customerId"] as string | undefined;
-  res.json({ damaged: await service.listDamaged({ warehouseId, customerId }, actorFrom(req)) });
+  const { rows, counts } = await service.listDamaged(
+    {
+      warehouseId: queryStr(req.query["warehouseId"]),
+      customerId: queryStr(req.query["customerId"]),
+      ownerType: queryStr(req.query["ownerType"]),
+      search: queryStr(req.query["search"]),
+      countsOnly: queryStr(req.query["countsOnly"]) === "1",
+    },
+    actorFrom(req),
+  );
+  // `counts` rides along with every read so the screen's pool switcher never needs a second call —
+  // and never has to derive its own navigation from the rows it just filtered away.
+  res.json({ damaged: rows, counts });
 });
 
 // GET /goods-management/damaged/history — every damage report + restore behind ONE damaged row.
@@ -112,6 +128,9 @@ export const listOverdue = asyncHandler(async (req, res) => {
     await service.getOverdueView(actorFrom(req), {
       warehouseId: queryStr(req.query["warehouseId"])?.trim() || undefined,
       search: queryStr(req.query["search"]) ?? undefined,
+      engineerId: queryStr(req.query["engineerId"])?.trim() || undefined,
+      issuedFrom: queryStr(req.query["issuedFrom"])?.trim() || undefined,
+      issuedTo: queryStr(req.query["issuedTo"])?.trim() || undefined,
       page: queryInt(req.query["page"]),
       pageSize: queryInt(req.query["pageSize"]),
     }),

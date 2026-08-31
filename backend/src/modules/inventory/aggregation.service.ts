@@ -54,10 +54,36 @@ async function assembleAll(filters: PositionFilters): Promise<StockPosition[]> {
   return positions;
 }
 
+/**
+ * Narrow assembled positions to what this actor is allowed to see. THE authorization boundary for
+ * the Hub's position reads, and deliberately its own function so the list and the export cannot
+ * answer it differently.
+ *
+ * They used to. `exportAllPositionsCsv` scoped its rows; `listStockPositions` took no actor at all,
+ * so a warehouse-restricted user holding `inventory.view` could read every warehouse's positions
+ * from the list endpoint while its own CSV of the same data came back correctly narrowed. Adding a
+ * warehouse FILTER on top of that would have turned a latent gap into a one-click one — a filter
+ * must only ever narrow what authorization already allows, never reach past it.
+ *
+ * A scoped actor sees WAREHOUSE-located rows (and their damaged counterparts) for their own
+ * warehouses only. Engineer- and customer-held positions carry no warehouseId to test, so they are
+ * excluded rather than passed through: handing a warehouse-restricted user the company-wide field
+ * ledger would be a wider leak than the one the scope exists to prevent. This is exactly the rule
+ * `selectLedgers` already applies to the movement feed.
+ */
+function scopePositions(all: StockPosition[], actor?: WarehouseScopedActor): StockPosition[] {
+  const scope = warehouseScopeFilter(actor);
+  if (scope === undefined) return all;
+  return all.filter((p) => (p.locationType === "warehouse" || p.locationType === "damaged") && scope.includes(p.locationId));
+}
+
 export async function listStockPositions(
   params: PositionFilters & { page?: number; pageSize?: number } = {},
+  actor?: WarehouseScopedActor,
 ) {
-  const all = await assembleAll(params);
+  // Order matters and is the whole point: permission scope, THEN the user's filters, THEN sort, THEN
+  // the page. Filtering first would let a filter widen the set the scope was meant to bound.
+  const all = scopePositions(await assembleAll(params), actor);
   const filtered = sortPositions(filterPositions(all, params));
   const { slice, total, page, pageSize, totalPages } = paginate(filtered, params.page, params.pageSize ?? 25);
   return { positions: slice, total, page, pageSize, totalPages };
@@ -211,12 +237,8 @@ export async function exportAllPositionsCsv(
   filters: PositionFilters,
   actor?: WarehouseScopedActor,
 ): Promise<AllPositionsCsvResult> {
-  const scope = warehouseScopeFilter(actor);
-  const assembled = await assembleAll(filters);
-  const all =
-    scope === undefined
-      ? assembled
-      : assembled.filter((p) => (p.locationType === "warehouse" || p.locationType === "damaged") && scope.includes(p.locationId));
+  // Same boundary as the list — see scopePositions for why this is shared rather than repeated.
+  const all = scopePositions(await assembleAll(filters), actor);
   // Capped like every other export. This one alone rendered EVERY matching row into one string: the
   // set grows with the business and an unfiltered request would eventually be asked to hold all of
   // it in memory. It also reported a `count` header nothing on the client read, while the flag that
@@ -268,6 +290,73 @@ export interface EngineerOverviewRow {
 }
 
 // Every active field engineer with a roll-up of what they're holding + how many active jobs they have.
+/**
+ * The engineer lens's filters + paging. The list took NO parameters at all: every engineer, every
+ * time, with no way to narrow it and no ceiling as the field team grows.
+ *
+ * Filtering and paging both happen after the roll-up because the numbers a reader filters ON
+ * (`itemsHeld`, `totalQty`, `activeJobs`) are computed here, not stored — so `total` counts exactly
+ * the rows the pager walks, which is the property that keeps a paginator from running off the end.
+ */
+export interface EngineerLensParams {
+  /** Engineer name or email. */
+  search?: string;
+  /** Only engineers actually holding something — the operational reading of this list. */
+  holdingOnly?: boolean;
+  page?: number;
+  pageSize?: number;
+}
+
+export interface PagedEngineerOverview {
+  rows: EngineerOverviewRow[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+const ENGINEER_LENS_PAGE_SIZE = 25;
+
+/** One engineer, as a filter option. Deliberately narrower than EngineerOverviewRow — a picker
+ *  needs an id and a name, and the roll-up numbers are the LIST view's business, not an option's. */
+export interface EngineerOption {
+  engineerId: string;
+  name: string;
+  email: string;
+}
+
+/**
+ * Every field engineer, for the OPTION PICKERS (movement feed, custom reports, transfer composer).
+ *
+ * COMPLETE and unpaged, deliberately. This started as `listEngineerInventory()`, which returned the
+ * whole roster; making the lens paged briefly turned the pickers into "the first 100 engineers", and
+ * an option list that silently omits people is worse than one that is slow — an engineer past the
+ * cap simply could not be picked, with nothing on screen saying so.
+ *
+ * It is also far cheaper than what it replaced: one indexed user query returning three columns, with
+ * none of the balance/holding/job roll-ups the lens needs. Bounded by the size of the field team,
+ * which is the same bound the identical picker on the jobs side has always had.
+ */
+export async function listEngineerOptions(): Promise<EngineerOption[]> {
+  const users = await engineerRepo.findEngineers();
+  return users
+    .map((e) => ({ engineerId: e.id, name: engineerName(e), email: e.email }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export async function listEngineerInventoryPaged(params: EngineerLensParams = {}): Promise<PagedEngineerOverview> {
+  const all = await listEngineerInventory();
+  const term = params.search?.trim().toLowerCase();
+  const matched = all
+    .filter((r) => !params.holdingOnly || r.itemsHeld > 0)
+    .filter((r) => !term || [r.name, r.email].some((f) => f?.toLowerCase().includes(term)));
+  const total = matched.length;
+  const pageSize = Math.min(Math.max(Math.trunc(params.pageSize ?? ENGINEER_LENS_PAGE_SIZE), 1), 100);
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const page = Math.min(Math.max(Math.trunc(params.page ?? 1), 1), totalPages);
+  return { rows: matched.slice((page - 1) * pageSize, page * pageSize), total, page, pageSize, totalPages };
+}
+
 export async function listEngineerInventory(): Promise<EngineerOverviewRow[]> {
   const [engineers, engBalances, custHoldings, jobCounts] = await Promise.all([
     engineerRepo.findEngineers(),

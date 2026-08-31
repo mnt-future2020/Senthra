@@ -4,7 +4,10 @@ import * as React from "react";
 import { Loader2 } from "lucide-react";
 
 import * as customerService from "@/services/customer.service";
+import { listWarehouses } from "@/services/warehouse.service";
 import { Modal } from "@/components/ui/Modal";
+import { Select } from "@/components/ui/Select";
+import { preferredWarehouseOptions, shouldShowPreferredWarehouse } from "@/lib/preferredWarehouse";
 import { RequiredMark } from "@/components/ui/FormScaffold";
 import { ghostBtn, hintCls, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import { NumberInput } from "@/components/ui/NumberInput";
@@ -35,6 +38,12 @@ export function AdminStockSubmissionModal({
   const [loadingItems, setLoadingItems] = React.useState(true);
   const [quantity, setQuantity] = React.useState("");
   const [requestedByName, setRequestedByName] = React.useState("");
+  // What the customer asked for on the phone. Same PREFERENCE semantics as the portal field — the
+  // reviewer still assigns the real destination — so it is optional and never pre-selected here:
+  // an admin who wasn't told a warehouse must not have one guessed on the customer's behalf.
+  const [warehouses, setWarehouses] = React.useState<{ id: string; name: string; code: string }[]>([]);
+  const [warehousesLoaded, setWarehousesLoaded] = React.useState(false);
+  const [preferredWarehouseId, setPreferredWarehouseId] = React.useState("");
   const [notes, setNotes] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [errors, setErrors] = React.useState<{ name?: string; quantity?: string }>({});
@@ -44,7 +53,7 @@ export function AdminStockSubmissionModal({
   React.useEffect(() => {
     let alive = true;
     customerService
-      .listCustomerStockEntries(customerId)
+      .listCustomerStockOptions(customerId)
       .then((entries) => alive && setOptions(toStockItemOptions(entries)))
       .catch(() => alive && setOptions([]))
       .finally(() => alive && setLoadingItems(false));
@@ -52,6 +61,19 @@ export function AdminStockSubmissionModal({
       alive = false;
     };
   }, [customerId]);
+
+  // Active, non-deleted warehouses — the same set the portal offers, read through the staff service
+  // this screen already has permission for. A failed lookup costs only the optional field.
+  React.useEffect(() => {
+    let alive = true;
+    listWarehouses({ status: "active", pageSize: 200 })
+      .then((r) => alive && setWarehouses(r.warehouses.map((w) => ({ id: w.id, name: w.name, code: w.code }))))
+      .catch(() => alive && setWarehouses([]))
+      .finally(() => alive && setWarehousesLoaded(true));
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -73,6 +95,7 @@ export function AdminStockSubmissionModal({
         requestedByName: requestedByName.trim() || undefined,
         notes: notes.trim() || undefined,
         linkedStockEntryId: item.entryId ?? undefined,
+        preferredWarehouseId: preferredWarehouseId || undefined,
       });
       onCreated(request);
     } catch (err) {
@@ -101,6 +124,20 @@ export function AdminStockSubmissionModal({
     >
       <form id="admin-submission-form" onSubmit={submit} className="space-y-4">
         <div className="grid gap-4 sm:grid-cols-2">
+          {/* Mirrors the portal's own Submit stock form — same field, same position, same wording —
+              so a reviewer reading either submission sees the preference expressed the same way. */}
+          {shouldShowPreferredWarehouse(warehousesLoaded, warehouses) && (
+            <div className="sm:col-span-2">
+              <label className={labelCls}>Preferred warehouse</label>
+              <Select
+                value={preferredWarehouseId}
+                onChange={setPreferredWarehouseId}
+                options={preferredWarehouseOptions(warehouses)}
+                placeholder="No preference"
+              />
+              <p className={hintCls}>What the customer asked for. You still assign the final destination.</p>
+            </div>
+          )}
           <div className="sm:col-span-2">
             <label className={labelCls}>
               Item<RequiredMark />

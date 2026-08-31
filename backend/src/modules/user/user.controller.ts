@@ -19,11 +19,13 @@ import type {
 // on screen — a second copy is a second place for a filter to be forgotten, and the resulting file
 // gives no sign that it is wider or narrower than the list it came from.
 function listParamsFrom(req: Request): userService.ListUsersParams {
-  const { search, status, roleId, sort, page, pageSize } = req.query;
+  const { search, status, roleId, addedFrom, addedTo, sort, page, pageSize } = req.query;
   return {
     search: queryStr(search),
     status: queryStr(status),
     roleId: queryStr(roleId),
+    addedFrom: queryStr(addedFrom),
+    addedTo: queryStr(addedTo),
     sort: queryStr(sort),
     page: queryInt(page),
     pageSize: queryInt(pageSize),

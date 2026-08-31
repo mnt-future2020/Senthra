@@ -11,6 +11,10 @@ import { ExportButton } from "@/components/ui/ExportButton";
 import { useDashboard } from "@/hooks/useDashboard";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
+import { FilterPopover } from "@/components/ui/FilterPopover";
+import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
+import { listSuppliers } from "@/services/supplier.service";
+import { listWarehouses } from "@/services/warehouse.service";
 import { CELL_ONE_LINE, colClass, colClassAt, tableMinWidth, type ColPriority } from "@/components/ui/tableLayout";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
@@ -125,6 +129,12 @@ export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { wa
   // Filters derived from URL — survive a browser refresh.
   const search = searchParams.get("q") ?? "";
   const statusFilter = (searchParams.get("status") ?? "all") as "all" | GrnStatus;
+  // `receivedDate` is a CALENDAR DAY (the form sends "YYYY-MM-DD"), so no timezone applies to it.
+  const receivedFrom = searchParams.get("receivedFrom") ?? "";
+  const receivedTo = searchParams.get("receivedTo") ?? "";
+  // Only offered on the GLOBAL register — inside a warehouse page the scope is already the warehouse.
+  const supplierFilter = searchParams.get("supplier") ?? "";
+  const warehouseFilter = searchParams.get("warehouse") ?? "";
   const page = Math.max(1, Number(searchParams.get("page")) || 1);
 
   // Local input state for debounced search; seeded from URL.
@@ -172,13 +182,40 @@ export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { wa
   // The filters WITHOUT paging — one definition, used by the list (which adds the page) and by the
   // CSV export (which must not). Two copies is how a download quietly stops matching the screen it
   // was taken from, and nothing about the resulting file looks wrong.
+  // Option lists for the folded filters — both degrade to empty, rendering as "All …".
+  const [supplierOptions, setSupplierOptions] = React.useState<{ value: string; label: string }[]>([]);
+  const [warehouseOptions, setWarehouseOptions] = React.useState<{ value: string; label: string }[]>([]);
+  React.useEffect(() => {
+    let alive = true;
+    void Promise.all([
+      listSuppliers({ status: "active", pageSize: 200 })
+        .then((r) => r.suppliers.map((s) => ({ value: s.id, label: s.name })))
+        .catch(() => []),
+      warehouseId
+        ? Promise.resolve([])
+        : listWarehouses({ status: "active", pageSize: 200 })
+            .then((r) => r.warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` })))
+            .catch(() => []),
+    ]).then(([sup, wh]) => {
+      if (!alive) return;
+      setSupplierOptions(sup);
+      setWarehouseOptions(wh);
+    });
+    return () => { alive = false; };
+  }, [warehouseId]);
+
   const exportParams = React.useMemo(
     () => ({
       search: debounced || undefined,
       status: statusFilter === "all" ? undefined : (statusFilter as GrnStatus),
-      warehouse: warehouseId,
+      // The warehouse PROP wins: inside a warehouse page this list is that warehouse's register and
+      // the picker is not offered at all, so a query param must not be able to widen it.
+      warehouse: warehouseId ?? (warehouseFilter || undefined),
+      supplier: supplierFilter || undefined,
+      receivedFrom: receivedFrom || undefined,
+      receivedTo: receivedTo || undefined,
     }),
-    [debounced, statusFilter, warehouseId],
+    [debounced, statusFilter, warehouseId, warehouseFilter, supplierFilter, receivedFrom, receivedTo],
   );
 
   React.useEffect(() => {
@@ -242,6 +279,37 @@ export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { wa
           <input value={searchInput} onChange={(e) => setSearchInput(e.target.value)} placeholder="Search GRN, PO or delivery note…" className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-2)] py-2.5 pl-9 pr-3 text-xs text-[var(--ink)] outline-none transition-all focus:border-[var(--accent)]" />
         </div>
         <Select size="sm" value={statusFilter} onChange={(v) => patch({ status: v === "all" ? null : v })} options={[{ value: "all", label: "All statuses" }, ...(Object.keys(GRN_STATUS_LABELS) as GrnStatus[]).map((s) => ({ value: s, label: GRN_STATUS_LABELS[s] }))]} ariaLabel="Filter by status" />
+        <FilterPopover
+          activeCount={(warehouseId ? 0 : (warehouseFilter ? 1 : 0)) + (supplierFilter ? 1 : 0) + (receivedFrom || receivedTo ? 1 : 0)}
+          onClear={() => patch({ warehouse: null, supplier: null, receivedFrom: null, receivedTo: null })}
+        >
+          {/* No warehouse picker inside a warehouse page: the list IS that warehouse's register, and
+              offering a control that could only ever contradict the page is worse than none. */}
+          {!warehouseId && (
+            <Select
+              size="sm"
+              value={warehouseFilter}
+              onChange={(v) => patch({ warehouse: v || null })}
+              options={[{ value: "", label: "All warehouses" }, ...warehouseOptions]}
+              ariaLabel="Filter by warehouse"
+            />
+          )}
+          <Select
+            size="sm"
+            value={supplierFilter}
+            onChange={(v) => patch({ supplier: v || null })}
+            options={[{ value: "", label: "All suppliers" }, ...supplierOptions]}
+            ariaLabel="Filter by supplier"
+          />
+          {/* WHEN THE GOODS ARRIVED — the register's own axis, and the one it is reconciled along. */}
+          <DateRangeFilter
+            label="Received"
+            showLabel
+            from={receivedFrom}
+            to={receivedTo}
+            onChange={({ from, to }) => patch({ receivedFrom: from || null, receivedTo: to || null })}
+          />
+        </FilterPopover>
         {/* The two receiving queues, selected by KEY rather than by nav row — they badge different
             rows (drafts roll up to Warehouses, since GRN has no nav row of its own;
             deliveries-to-receive badges Purchase Orders, because that is the list it opens) and the

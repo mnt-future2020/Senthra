@@ -12,13 +12,15 @@ import type { CreateGoodsReceiptInput, GRNCancelInput, UpdateGoodsReceiptInput }
 // on screen — a second copy is a second place for a filter to be forgotten, and the resulting file
 // gives no sign that it is wider or narrower than the list it came from.
 function listParamsFrom(req: Request): grnService.ListGoodsReceiptsParams {
-  const { search, status, warehouse, purchaseOrder, supplier, sort, page, pageSize } = req.query;
+  const { search, status, warehouse, purchaseOrder, supplier, receivedFrom, receivedTo, sort, page, pageSize } = req.query;
   return {
     search: queryStr(search),
     status: queryStr(status),
     warehouse: queryStr(warehouse),
     purchaseOrder: queryStr(purchaseOrder),
     supplier: queryStr(supplier),
+    receivedFrom: queryStr(receivedFrom),
+    receivedTo: queryStr(receivedTo),
     sort: queryStr(sort),
     page: queryInt(page),
     pageSize: queryInt(pageSize),

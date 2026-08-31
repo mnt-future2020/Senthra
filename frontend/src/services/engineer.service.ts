@@ -20,6 +20,9 @@ export function getOwnStock(): Promise<EngineerStockItem[]> {
 // owns) — the engineer's own id is resolved server-side from the principal, never passed here.
 
 export interface OwnJobsParams {
+  /** Inclusive calendar days on the DUE date. The SERVER resolves which day that is. */
+  dueFrom?: string;
+  dueTo?: string;
   status?: string;
   q?: string;
   sort?: string;
@@ -38,6 +41,8 @@ export function getOwnJobs(params: OwnJobsParams = {}): Promise<PagedOwnJobs> {
   if (params.status) qs.set("status", params.status);
   if (params.q) qs.set("q", params.q);
   if (params.sort) qs.set("sort", params.sort);
+  if (params.dueFrom) qs.set("dueFrom", params.dueFrom);
+  if (params.dueTo) qs.set("dueTo", params.dueTo);
   if (params.page) qs.set("page", String(params.page));
   if (params.pageSize) qs.set("pageSize", String(params.pageSize));
   const suffix = qs.size ? `?${qs.toString()}` : "";

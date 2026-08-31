@@ -21,6 +21,9 @@ import { useGoodsSocket } from "@/hooks/useGoodsSocket";
 import { TableSkeletonRows } from "./hubUi";
 import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
+import { FilterPopover } from "@/components/ui/FilterPopover";
+import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
+import { listEngineerOptions } from "@/services/warehouse.service";
 import { tableMinWidth } from "@/components/ui/tableLayout";
 import { inputCls, labelCls, primaryBtn, secondaryBtn } from "@/components/ui/styles";
 import type { EngineerTransfer, PagedTransfers } from "@/services/engineerTransfer.service";
@@ -276,6 +279,16 @@ export function AdminTransferBoard() {
   const canManage = can("engineer_stock.transfer");
   const router = useRouter();
 
+  // Engineer options — degrades to empty, which reads as "All engineers".
+  const [engineerOptions, setEngineerOptions] = React.useState<{ value: string; label: string }[]>([]);
+  React.useEffect(() => {
+    let alive = true;
+    listEngineerOptions()
+      .then((us) => alive && setEngineerOptions(us.map((u) => ({ value: u.id, label: u.name }))))
+      .catch(() => alive && setEngineerOptions([]));
+    return () => { alive = false; };
+  }, []);
+
   const [transfers, setTransfers] = React.useState<PagedTransfers | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [refreshKey, setRefreshKey] = React.useState(0);
@@ -286,6 +299,12 @@ export function AdminTransferBoard() {
   const statusFilter = searchParams.get("status") ?? "";
   const sortOldest = searchParams.get("sort") === "oldest"; // default: newest first (matches every other list)
   const search = searchParams.get("q") ?? "";
+  // The engineer on EITHER side of the transfer — the server ORs from/to, which is the only reading
+  // that answers "everything that passed through Dave". Accepted by the API all along; never offered.
+  const engineerFilter = searchParams.get("engineer") ?? "";
+  const ownershipFilter = searchParams.get("ownership") ?? "";
+  const raisedFrom = searchParams.get("from") ?? "";
+  const raisedTo = searchParams.get("to") ?? "";
   const page = Math.max(1, Number(searchParams.get("page")) || 1);
 
   // The text box keeps its own immediate value; the debounced result is written to ?q.
@@ -330,6 +349,10 @@ export function AdminTransferBoard() {
       try {
         const r = await transferSvc.listAllTransfers({
           status: statusFilter || undefined,
+          engineerId: engineerFilter || undefined,
+          ownership: ownershipFilter || undefined,
+          raisedFrom: raisedFrom || undefined,
+          raisedTo: raisedTo || undefined,
           sort: sortOldest ? "oldest" : "newest",
           search: search || undefined,
           page,
@@ -343,7 +366,7 @@ export function AdminTransferBoard() {
       }
     })();
     return () => { active = false; };
-  }, [statusFilter, sortOldest, search, page, refreshKey]);
+  }, [statusFilter, engineerFilter, ownershipFilter, raisedFrom, raisedTo, sortOldest, search, page, refreshKey]);
 
   return (
     <>
@@ -383,6 +406,38 @@ export function AdminTransferBoard() {
             ]}
             ariaLabel="Sort order"
           />
+          {/* ENGINEER out in the open: this board is read one engineer at a time when chasing a
+              hand-over. Ownership and the raised window fold away — both are set once. */}
+          <Select
+            size="sm"
+            value={engineerFilter}
+            onChange={(v) => patchParams({ engineer: v || null }, true)}
+            options={[{ value: "", label: "All engineers" }, ...engineerOptions]}
+            ariaLabel="Filter by engineer"
+          />
+          <FilterPopover
+            activeCount={(ownershipFilter ? 1 : 0) + (raisedFrom || raisedTo ? 1 : 0)}
+            onClear={() => patchParams({ ownership: null, from: null, to: null }, true)}
+          >
+            <Select
+              size="sm"
+              value={ownershipFilter}
+              onChange={(v) => patchParams({ ownership: v || null }, true)}
+              options={[
+                { value: "", label: "Any ownership" },
+                { value: "company", label: "Company (IRM)" },
+                { value: "customer", label: "Customer" },
+              ]}
+              ariaLabel="Filter by ownership"
+            />
+            <DateRangeFilter
+              label="Raised"
+              showLabel
+              from={raisedFrom}
+              to={raisedTo}
+              onChange={({ from, to }) => patchParams({ from: from || null, to: to || null }, true)}
+            />
+          </FilterPopover>
         </div>
         {canManage && (
           <button type="button" onClick={() => router.push("/dashboard/inventory/engineer-transfer/new")} className={primaryBtn}>

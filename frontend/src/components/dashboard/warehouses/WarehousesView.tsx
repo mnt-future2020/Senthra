@@ -14,6 +14,7 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Select } from "@/components/ui/Select";
+import { listWarehouseTypes } from "@/services/warehouse-type.service";
 import { CELL_ONE_LINE, colClass, tableMinWidth } from "@/components/ui/tableLayout";
 import { EntityCountPill } from "@/components/dashboard/shell/TabCount";
 import { useEntityAttention } from "@/hooks/useEntityAttention";
@@ -226,6 +227,7 @@ export function WarehousesView() {
   const search = searchParams.get("q") ?? "";
   const statusFilter = (searchParams.get("status") ?? "all") as "all" | WarehouseStatus;
   const sort = (searchParams.get("sort") as Sort) ?? "newest";
+  const typeFilter = searchParams.get("type") ?? "";
   const page = Math.max(1, Number(searchParams.get("page")) || 1);
 
   // Local state — not user-facing filters
@@ -266,13 +268,26 @@ export function WarehousesView() {
   // The filters WITHOUT paging — one definition, used by the list (which adds the page) and by the
   // CSV export (which must not). Two copies is how a download quietly stops matching the screen it
   // was taken from, and nothing about the resulting file looks wrong.
+
+  // The type list. Degrades to an empty array — which renders as "All types" alone — because the
+  // master-data read is its own permission and a list user need not hold it.
+  const [types, setTypes] = React.useState<{ id: string; name: string }[]>([]);
+  React.useEffect(() => {
+    let alive = true;
+    listWarehouseTypes()
+      .then((rows) => alive && setTypes(rows.filter((t) => t.status !== "inactive").map((t) => ({ id: t.id, name: t.name }))))
+      .catch(() => alive && setTypes([]));
+    return () => { alive = false; };
+  }, []);
+
   const exportParams = React.useMemo(
     () => ({
       search: search || undefined,
       status: statusFilter === "all" ? undefined : statusFilter,
+      type: typeFilter || undefined,
       sort: sort === "newest" ? undefined : sort,
     }),
-    [search, statusFilter, sort],
+    [search, statusFilter, typeFilter, sort],
   );
 
   React.useEffect(() => {
@@ -382,6 +397,14 @@ export function WarehousesView() {
             { value: "code", label: "Code" },
           ]}
           ariaLabel="Sort"
+        />
+        {/* Warehouse TYPE — accepted by the API since the module was written, never offered here. */}
+        <Select
+          size="sm"
+          value={typeFilter}
+          onChange={(v) => patch({ type: v || null })}
+          options={[{ value: "", label: "All types" }, ...types.map((t) => ({ value: t.id, label: t.name }))]}
+          ariaLabel="Filter by warehouse type"
         />
         {/* Before "New warehouse" and outside its ml-auto, so the primary action stays hard right. */}
         {can("warehouse.export") && (

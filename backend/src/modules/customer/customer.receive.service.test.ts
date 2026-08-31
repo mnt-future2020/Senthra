@@ -39,7 +39,9 @@ const LINKED_ID = "d".repeat(24);
 
 const repo = vi.mocked(customerRepo);
 
-function assignmentRow(over: { linkedStockEntryId?: string | null; editedName?: string | null } = {}) {
+function assignmentRow(
+  over: { linkedStockEntryId?: string | null; editedName?: string | null; preferredWarehouseId?: string | null } = {},
+) {
   return {
     id: ASSIGN_ID,
     warehouseId: WH_ID,
@@ -56,6 +58,9 @@ function assignmentRow(over: { linkedStockEntryId?: string | null; editedName?: 
       quantity: 10,
       status: "assigned",
       linkedStockEntryId: over.linkedStockEntryId ?? null,
+      // The customer's PREFERENCE rides along on the request row the receive path loads. It must
+      // stay inert here — see the "preference is not the destination" suite below.
+      preferredWarehouseId: over.preferredWarehouseId ?? null,
     },
   } as unknown as Awaited<ReturnType<typeof customerRepo.findAssignmentById>>;
 }
@@ -213,5 +218,54 @@ describe("receiveStockAssignment — stockEntryStatus", () => {
     const res = await receiveStockAssignment(ASSIGN_ID, { receivedQuantity: 10 });
 
     expect(res.stockEntryStatus).toBe("draft");
+  });
+});
+
+// ── The preference must never reach the receiving warehouse ───────────────────────────────────
+// The whole design rests on one rule: CustomerStockWarehouseAssignment.warehouseId is the
+// destination, and CustomerStockRequest.preferredWarehouseId is not. These are the regression
+// tests for that rule — if the preference ever leaks into the receive path, stock lands in the
+// warehouse the CUSTOMER named instead of the one a reviewer assigned and staff physically hold.
+describe("receiveStockAssignment — customer preference is not the destination", () => {
+  it("creates the stock entry at the ASSIGNED warehouse when the customer preferred a different one", async () => {
+    repo.findAssignmentById.mockResolvedValue(assignmentRow({ preferredWarehouseId: OTHER_WH_ID }));
+    repo.findStockEntriesByAssignment.mockResolvedValue([]);
+    repo.createStockEntry.mockResolvedValue({ id: "new" } as never);
+    repo.findAssignmentsByRequest.mockResolvedValue([{ status: "received" }] as never);
+
+    await receiveStockAssignment(ASSIGN_ID, { receivedQuantity: 10 });
+
+    // PM changed the destination from the customer's preference → stock lands where PM said.
+    expect(repo.createStockEntry).toHaveBeenCalledWith(
+      expect.objectContaining({ warehouseId: WH_ID }),
+      TX,
+    );
+    expect(repo.createStockEntry).not.toHaveBeenCalledWith(
+      expect.objectContaining({ warehouseId: OTHER_WH_ID }),
+      TX,
+    );
+  });
+
+  it("resolves a TOP-UP against the assigned warehouse, not the preferred one", async () => {
+    // A top-up already keys on the receiving warehouse (CustomerStockEntry is warehouse-specific).
+    // The preference pointing elsewhere must not change which line is topped up.
+    repo.findAssignmentById.mockResolvedValue(
+      assignmentRow({ linkedStockEntryId: LINKED_ID, preferredWarehouseId: OTHER_WH_ID }),
+    );
+    repo.findStockEntriesByAssignment.mockResolvedValue([]);
+    repo.findStockEntryById.mockResolvedValue(linkedEntry());
+    repo.findStockEntryForTopUp.mockResolvedValue({ id: "target" } as never);
+    repo.addStockEntryQuantity.mockResolvedValue({ id: "target" } as never);
+    repo.findAssignmentsByRequest.mockResolvedValue([{ status: "received" }] as never);
+
+    await receiveStockAssignment(ASSIGN_ID, { receivedQuantity: 10 });
+
+    expect(repo.findStockEntryForTopUp).toHaveBeenCalledWith(
+      CUST_ID,
+      WH_ID, // the ASSIGNMENT's warehouse
+      expect.anything(),
+      expect.anything(),
+      TX,
+    );
   });
 });

@@ -218,6 +218,13 @@ adminRouter.get(
   requireAnyPermission("customer_stock.view", "stock_requests.view"),
   customerController.listCustomerStockEntries,
 );
+// The job form's picker. SAME gate as the list above — it is that data in option form, not a wider
+// reach. Declared alongside it; the paths differ in their last segment so neither shadows the other.
+adminRouter.get(
+  "/:id/stock-options",
+  requireAnyPermission("customer_stock.view", "stock_requests.view"),
+  customerController.listCustomerStockOptions,
+);
 // Same gate as the list it downloads — this is that list in a file, not a wider reach. Declared
 // after it because the paths differ in their LAST segment, so neither can shadow the other.
 adminRouter.get(
@@ -264,6 +271,9 @@ portalRouter.get("/stock", customerController.getOwnStock);
 portalRouter.get("/stock-entries", customerController.getOwnStockEntries);
 portalRouter.get("/stock-entries/export.csv", exportLimiter, customerController.exportOwnStockCsv);
 portalRouter.get("/stock-warehouses", customerController.getOwnStockWarehouses);
+// Warehouses selectable as a PREFERENCE on a new submission: every active, non-deleted warehouse
+// (id/code/name only). Read-only, and behind requireAuth like every other portal route.
+portalRouter.get("/submission-warehouses", customerController.getOwnSubmissionWarehouses);
 portalRouter.get("/stock-requests", customerController.getOwnStockRequests);
 portalRouter.get("/stock-requests/export.csv", exportLimiter, customerController.exportOwnStockRequestsCsv);
 portalRouter.post(

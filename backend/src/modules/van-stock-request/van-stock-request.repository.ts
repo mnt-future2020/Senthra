@@ -1,5 +1,6 @@
 import { Prisma, type VanStockRequest, type VanStockRequestLine, type VanStockFulfilment, type VanStockFulfilmentLine } from "@prisma/client";
 
+import { isEmptyWindow, type DayWindow } from "../../utils/filter-date.js";
 import { prisma, withTransaction } from "../../lib/prisma.js";
 import { conflict, notFound } from "../../utils/http-error.js";
 import { escapeRegex } from "../../utils/search.js";
@@ -225,6 +226,8 @@ export function belongsToWarehouses(ids: string[]): Prisma.VanStockRequestWhereI
 }
 
 export interface ListParams {
+  /** Half-open window on `createdAt` — see listRequests. */
+  raisedWindow?: DayWindow;
   status?: string;
   type?: string;
   engineerId?: string;
@@ -241,7 +244,7 @@ export interface ListParams {
 }
 
 export async function listRequests(params: ListParams = {}): Promise<{ requests: RequestWithLines[]; total: number }> {
-  const { status, type, engineerId, priority, createdVia, search, sort, page = 1, pageSize = 20, warehouseId, warehouseScope } = params;
+  const { status, type, engineerId, priority, createdVia, search, sort, page = 1, pageSize = 20, warehouseId, warehouseScope, raisedWindow } = params;
   const and: Prisma.VanStockRequestWhereInput[] = [{ deletedAt: null }];
   // "collectible" is a composite the Engineer dashboard links to: the two states an engineer still has
   // stock to physically pick up in (approved + partially_fulfilled). It mirrors countCollectibleRestocks
@@ -254,6 +257,9 @@ export async function listRequests(params: ListParams = {}): Promise<{ requests:
   // queue's Urgent filter returns everything the queue actually shows as urgent.
   if (priority) and.push({ priority: { in: priorityFilterValues(priority) } });
   if (createdVia) and.push({ createdVia });
+  // `createdAt` is an INSTANT, so the caller resolves "which day is that" in the COMPANY timezone
+  // before this ever sees it — a repository holds no business decisions and reads no settings.
+  if (raisedWindow && !isEmptyWindow(raisedWindow)) and.push({ createdAt: raisedWindow });
   if (search?.trim()) and.push({ OR: searchOr(search.trim()) });
   if (warehouseId) and.push(belongsToWarehouses([warehouseId]));
   if (warehouseScope) and.push(belongsToWarehouses(warehouseScope));

@@ -9,6 +9,8 @@ export interface AuditListParams {
   search?: string;
   action?: string;
   actorType?: string;
+  /** One acting principal's email snapshot — "what did this person do". */
+  actorEmail?: string;
   targetType?: string;
   targetId?: string;
   from?: string;
@@ -21,6 +23,7 @@ function qs(params: AuditListParams): string {
   const sp = new URLSearchParams();
   if (params.search) sp.set("search", params.search);
   if (params.action) sp.set("action", params.action);
+  if (params.actorEmail) sp.set("actorEmail", params.actorEmail);
   if (params.actorType) sp.set("actorType", params.actorType);
   if (params.targetType) sp.set("targetType", params.targetType);
   if (params.targetId) sp.set("targetId", params.targetId);

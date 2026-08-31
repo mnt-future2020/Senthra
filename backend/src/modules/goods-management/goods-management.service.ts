@@ -1,6 +1,6 @@
 import type { AuditActor } from "#modules/audit/audit.service.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
-import { parseFilterDate, startOfDayIn } from "../../utils/filter-date.js";
+import { calendarDayWindow, resolveInstantWindow, startOfDayIn } from "../../utils/filter-date.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { getCompanyTimezone, getOverdueAfterDays } from "#modules/settings/settings.service.js";
 import * as jobRepo from "#modules/job/job.repository.js";
@@ -1842,6 +1842,19 @@ export interface QueueParams {
   activityFrom?: string;
   activityTo?: string;
   due?: string; // one of QUEUE_DUE_FILTERS — active queue only
+  /**
+   * EXACT window on the job's due date (`Job.completionDate`), as calendar days.
+   *
+   * Composes with `due` rather than replacing it: the buckets answer "what is late / due this week"
+   * and this answers "what is due between these two dates", and a manager reconciling a period wants
+   * the second. Both narrow the same column, so both apply.
+   */
+  dueFrom?: string;
+  dueTo?: string;
+  /** The job's ASSIGNED engineer — the person the warehouse is handing kit to or chasing it from. */
+  engineerId?: string;
+  customerId?: string;
+  siteId?: string;
   sort?: string; // one of QUEUE_SORTS; defaults to "newest"
   page?: number;
   pageSize?: number;
@@ -2014,7 +2027,15 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
   // and is returnable at ANY of them, so a van return must be findable here even though its kit line
   // is homed elsewhere. Widening adds candidates, not noise: step 2c keeps such a job only while it
   // still has van stock out here.
-  const jobs = await jobRepo.findActiveForGoodsManagement(params.warehouseId, search);
+  // Every filter that lives on the JOB goes to the DB, so the per-job enrichment below (goods status,
+  // movements, balances) runs over the narrowed set rather than over every active job here.
+  const jobs = await jobRepo.findActiveForGoodsManagement(params.warehouseId, {
+    search,
+    assignedEngineerId: params.engineerId?.trim() || undefined,
+    customerId: params.customerId?.trim() || undefined,
+    siteId: params.siteId?.trim() || undefined,
+    dueWindow: calendarDayWindow(params.dueFrom, params.dueTo),
+  });
 
   // 2) goodsStatus per job (one batched query) → active / closed / exact-status filter.
   const summaries = await goodsManagementRepo.getSummariesByJobs(jobs.map((j) => j.id));
@@ -2026,15 +2047,22 @@ export async function listQueue(params: QueueParams, actor?: AuditActor): Promis
   // pushed into the job query: the timestamp lives on JobStockSummary, not Job. A job with no summary
   // (or no movement yet) has no activity at all, so it can't fall inside any window — excluded rather
   // than passed through, otherwise "reconciled in July" would also hand back never-touched jobs.
-  const activityFrom = parseFilterDate(params.activityFrom, "start");
-  const activityTo = parseFilterDate(params.activityTo, "end");
+  //
+  // `lastMovementAt` is a real INSTANT, so the window's edges are COMPANY-timezone day boundaries —
+  // the same clock the due filter below and every "today" in this app use. It previously widened to
+  // the UTC day, which is an hour out for every BST date: "closed in July" quietly missed the first
+  // hour of 1 July and swept in the last hour of 31 July. Half-open (`< activityTo`), so consecutive
+  // months tile exactly instead of overlapping on the midnight between them.
+  const activityWindow = await resolveInstantWindow(params.activityFrom, params.activityTo, () => getCompanyTimezone());
+  const activityFrom = activityWindow.gte;
+  const activityTo = activityWindow.lt;
   const activityByJob = new Map(summaries.map((s) => [s.jobId, s.lastMovementAt]));
   const inActivityWindow = (jobId: string) => {
     if (!activityFrom && !activityTo) return true;
     const at = activityByJob.get(jobId);
     if (!at) return false;
     if (activityFrom && at < activityFrom) return false;
-    if (activityTo && at > activityTo) return false;
+    if (activityTo && at >= activityTo) return false;
     return true;
   };
 
@@ -3024,10 +3052,62 @@ export interface DamagedRow {
   photoUrl: string | null; // from latest DamagedStockTransaction
 }
 
+/**
+ * Filters for the damaged pool. `ownerType` and `search` are applied HERE, after the warehouse scope
+ * and before anything is returned — the screen used to fetch every row and narrow them in the
+ * browser, which meant a "filter" that only ever hid data already transferred.
+ *
+ * NO date filter, deliberately. The rows are rolling BALANCES whose only timestamp is
+ * `DamagedStockBalance.updatedAt` ("when this balance last moved"), while the operationally useful
+ * date is when the damage was REPORTED — which lives on DamagedStockTransaction, a different table
+ * and a different query. Which of the two a date filter should mean is a business decision that has
+ * not been made, and guessing it would give a filter that looks right and answers the wrong
+ * question. See the audit's section J.
+ */
+/** The two OWNED pools. Hired kit is a different source entirely (custody exits), never this one. */
+export const DAMAGED_OWNER_TYPES = ["company", "customer"] as const;
+export type DamagedOwnerType = (typeof DAMAGED_OWNER_TYPES)[number];
+
+export interface DamagedFilters {
+  warehouseId?: string;
+  customerId?: string;
+  /**
+   * Narrow to ONE owned pool. Validated strictly against DAMAGED_OWNER_TYPES — an unknown value is
+   * rejected, not silently ignored, so a typo can never quietly widen the list.
+   *
+   * There is deliberately no value here meaning "neither pool". A caller looking at the HIRE pool
+   * wants counts without rows, and asks for that with `countsOnly` below rather than by inventing an
+   * ownerType that matches nothing — a fake enum member is a filter that breaks the moment anyone
+   * validates the real ones.
+   */
+  ownerType?: string;
+  /** Item name, the latest report's reason, or the warehouse. */
+  search?: string;
+  /**
+   * Return the COUNTS but no rows.
+   *
+   * The screen shows a pool switcher whose pills carry per-pool counts. Those counts must not depend
+   * on which pool is selected — deriving them from the filtered rows made the switcher delete itself
+   * (every other pool read zero, and the row only renders when more than one pool is non-empty).
+   * So counts are always computed across BOTH owned pools, and a caller who needs only the counts
+   * says so instead of transferring rows it will not draw.
+   */
+  countsOnly?: boolean;
+}
+
+export interface DamagedResult {
+  rows: DamagedRow[];
+  /**
+   * Per-pool totals for the SEARCHED, SCOPED set — computed BEFORE `ownerType` is applied, so they
+   * are stable whichever pool is selected. This is what makes the pool switcher navigable.
+   */
+  counts: Record<DamagedOwnerType, number>;
+}
+
 export async function listDamaged(
-  filter: { warehouseId?: string; customerId?: string },
+  filter: DamagedFilters,
   actor?: AuditActor,
-): Promise<DamagedRow[]> {
+): Promise<DamagedResult> {
   const scopeIds = warehouseScopeFilter(actor);
 
   // Step 1: collect raw balance rows (now includes warehouse relation).
@@ -3077,7 +3157,27 @@ export async function listDamaged(
     };
   });
 
-  return rows;
+  // Applied AFTER the warehouse scope above, never instead of it: a filter may only ever narrow what
+  // the actor is already allowed to see.
+  const owner = filter.ownerType?.trim() || undefined;
+  if (owner && !(DAMAGED_OWNER_TYPES as readonly string[]).includes(owner)) {
+    throw badRequest(`Invalid owner filter "${owner}".`);
+  }
+  const term = filter.search?.trim().toLowerCase();
+  const searched = rows.filter(
+    (r) => !term || [r.itemName, r.reason, r.warehouseName].some((f) => f?.toLowerCase().includes(term)),
+  );
+
+  // Counts span BOTH pools regardless of `ownerType` — see DamagedFilters.countsOnly for why.
+  const counts: Record<DamagedOwnerType, number> = { company: 0, customer: 0 };
+  for (const r of searched) {
+    if (r.ownerType === "company" || r.ownerType === "customer") counts[r.ownerType] += 1;
+  }
+
+  return {
+    rows: filter.countsOnly ? [] : searched.filter((r) => !owner || r.ownerType === owner),
+    counts,
+  };
 }
 
 // ── Damaged history (drill-down behind one damaged row) ───────────────────────────────────────
@@ -3184,6 +3284,15 @@ export interface OverdueParams {
   warehouseId?: string;
   /** Job number, job name or engineer name. */
   search?: string;
+  /**
+   * The engineer STILL HOLDING the kit — `JobStockMovement.engineerId` on the first issue, which is
+   * the row this list is built from. Deliberately NOT the job's assigned engineer: a job can be
+   * reassigned after issue, and the person to chase is whoever the stock actually went out to.
+   */
+  engineerId?: string;
+  /** Inclusive calendar days on when the kit was ISSUED (`JobStockMovement.createdAt`, an instant). */
+  issuedFrom?: string;
+  issuedTo?: string;
   page?: number;
   pageSize?: number;
 }
@@ -3314,8 +3423,15 @@ async function listOverdueWithin(days: number, actor?: AuditActor, opts: Overdue
   // the hazard escapeRegex exists to neutralise. If this ever moves DB-side, it must move BELOW the
   // still-out filter, which means denormalising outstanding quantity first.
   const term = opts.search?.trim().toLowerCase();
+  // The issue timestamp is a real INSTANT, so its day boundaries come from the COMPANY timezone —
+  // the same clock `days` above is measured against. Half-open, like every other window here.
+  const issuedWindow = await resolveInstantWindow(opts.issuedFrom, opts.issuedTo, () => getCompanyTimezone());
+  const engineerId = opts.engineerId?.trim() || undefined;
   const matched = [...firstIssueByJob.values()]
     .filter((m) => stillOut.has(m.jobId))
+    .filter((m) => !engineerId || m.engineerId === engineerId)
+    .filter((m) => !issuedWindow.gte || m.createdAt >= issuedWindow.gte)
+    .filter((m) => !issuedWindow.lt || m.createdAt < issuedWindow.lt)
     .filter((m) =>
       !term ||
       [m.job?.jobNumber, m.job?.name, m.engineerName].some((f) => f?.toLowerCase().includes(term)),

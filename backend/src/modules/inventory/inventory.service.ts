@@ -19,6 +19,7 @@ import type { AuditActor } from "#modules/audit/audit.service.js";
 import { emitAttentionChanged } from "../../lib/realtime.js";
 import { assertWarehouseAccess, warehouseScopeFilter } from "../../lib/warehouse-access.js";
 import { badRequest, conflict, notFound } from "../../utils/http-error.js";
+import { calendarDayWindow } from "../../utils/filter-date.js";
 import type { AddStockInput, AdjustStockInput, CreateTransferInput } from "./inventory.validation.js";
 import { csvEscape, EXPORT_MAX } from "../../utils/csv.js";
 import { getRegionalSettings } from "#modules/settings/settings.service.js";
@@ -757,6 +758,12 @@ export interface ListTransfersParams {
   search?: string;
   irmItem?: string;
   warehouse?: string;
+  /** Source / destination, as distinct questions from `warehouse` (which matches either end). */
+  fromWarehouse?: string;
+  toWarehouse?: string;
+  /** Inclusive calendar days on the movement's own stated date (`movementDate`). */
+  movedFrom?: string;
+  movedTo?: string;
   page?: number;
   pageSize?: number;
 }
@@ -769,7 +776,17 @@ export interface PagedTransfers {
 }
 export async function listTransfers(params: ListTransfersParams = {}, actor?: AuditActor): Promise<PagedTransfers> {
   const pageSize = clamp(params.pageSize ?? 20, 1, 100);
-  const filters = { search: params.search?.trim() || undefined, irmItemId: params.irmItem, warehouseId: params.warehouse, warehouseIds: warehouseScopeFilter(actor) };
+  const filters = {
+    search: params.search?.trim() || undefined,
+    irmItemId: params.irmItem,
+    warehouseId: params.warehouse,
+    fromWarehouseId: params.fromWarehouse,
+    toWarehouseId: params.toWarehouse,
+    // `movementDate` is the day the move was STATED to happen — a calendar day the user typed on the
+    // transfer form, stored at UTC midnight. No timezone conversion applies.
+    movedWindow: calendarDayWindow(params.movedFrom, params.movedTo),
+    warehouseIds: warehouseScopeFilter(actor),
+  };
   const total = await inventoryRepo.countTransfers(filters);
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const page = clamp(params.page ?? 1, 1, totalPages);

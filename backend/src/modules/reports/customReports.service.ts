@@ -267,10 +267,15 @@ async function runProjectActivity(
     const job = jobs.get(m.sourceId);
     if (!job) return [];
     if (f.projectId && job.projectId !== f.projectId) return [];
+    // Site is the third level under customer → project, and the one a field manager actually asks
+    // about. Filtered here beside the project for the same reason: both live on the JOB the movement
+    // belongs to, which is resolved in the batched read above rather than per row.
+    if (f.siteId && job.siteId !== f.siteId) return [];
     return [
       {
         date: m.date.slice(0, 10),
         projectName: job.projectName,
+        siteName: job.siteName ?? "",
         jobNumber: job.jobNumber,
         itemName: m.itemName,
         quantity: m.quantityDelta,

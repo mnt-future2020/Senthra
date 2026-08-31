@@ -5,6 +5,9 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowLeft, ArrowRightLeft, Briefcase, ChevronRight, PackageOpen, Truck } from "lucide-react";
 
 import * as svc from "@/services/stockPosition.service";
+import { WorkspaceToolbar } from "@/components/ui/WorkspaceToolbar";
+import { Select } from "@/components/ui/Select";
+import { Pagination } from "@/components/ui/Pagination";
 import type { EngineerInventoryDetail, EngineerOverviewRow } from "@/services/stockPosition.service";
 import { CELL_ONE_LINE, tableMinWidth } from "@/components/ui/tableLayout";
 import { useAuth } from "@/hooks/useAuth";
@@ -18,6 +21,9 @@ import { AdminTransferBoard } from "./AdminTransferBoard";
 // the long values there.
 const HOLDINGS_MIN_WIDTH = tableMinWidth(["wide", "normal", "narrow", "normal", "wide", "narrow"]);
 const ENGINEERS_MIN_WIDTH = tableMinWidth(["wide", "narrow", "narrow", "narrow"]);
+/** One page of engineers. Enough to scan; small enough that the roll-up stays cheap. */
+const ENGINEER_PAGE_SIZE = 25;
+
 const TH = "px-4 py-3 text-[11px] font-bold uppercase tracking-wider text-[var(--faint)]";
 const TD = "px-4 py-3";
 
@@ -189,28 +195,82 @@ function EngineersList({
 }: {
   onSelect: (e: EngineerOverviewRow) => void;
 }) {
+  // Search, "holding only", and PAGING — all resolved at the server. This list took no parameters
+  // at all: every engineer, every time, with no way to narrow it and no ceiling as the field team
+  // grows. The two numbers it is read by (items held, on-van qty) are computed in the same roll-up
+  // the filter runs over, so `total` counts exactly the rows the pager walks.
   const [rows, setRows] = React.useState<EngineerOverviewRow[] | null>(null);
+  const [total, setTotal] = React.useState(0);
+  const [totalPages, setTotalPages] = React.useState(1);
+  const [page, setPage] = React.useState(1);
+  const [search, setSearch] = React.useState("");
+  const [debounced, setDebounced] = React.useState("");
+  const [holdingOnly, setHoldingOnly] = React.useState(false);
+
+  React.useEffect(() => {
+    const t = setTimeout(() => setDebounced(search.trim()), 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  // A narrower list makes the old page number meaningless. Adjusted DURING RENDER rather than in an
+  // effect: a synchronous setState in an effect body is a cascading render, and the React-Compiler
+  // lint rejects it. Same pattern the Jobs list uses to re-seed its search box.
+  const filterKey = `${debounced}|${holdingOnly}`;
+  const [prevFilterKey, setPrevFilterKey] = React.useState(filterKey);
+  if (prevFilterKey !== filterKey) {
+    setPrevFilterKey(filterKey);
+    setPage(1);
+  }
 
   React.useEffect(() => {
     let active = true;
     void (async () => {
       try {
-        const r = await svc.listEngineerInventory();
-        if (active) setRows(r);
+        const r = await svc.listEngineerInventoryPaged({
+          search: debounced || undefined,
+          holding: holdingOnly || undefined,
+          page,
+          pageSize: ENGINEER_PAGE_SIZE,
+        });
+        if (active) {
+          setRows(r.rows);
+          setTotal(r.total);
+          setTotalPages(r.totalPages);
+        }
       } catch {
-        if (active) setRows([]);
+        if (active) { setRows([]); setTotal(0); setTotalPages(1); }
       }
     })();
     return () => {
       active = false;
     };
-  }, []);
+  }, [debounced, holdingOnly, page]);
 
   return (
     <div className="flex h-full flex-col gap-3">
       <p className="shrink-0 text-xs text-[var(--muted)]">
         Field engineers and what they&apos;re carrying. Select an engineer to see their stock and active jobs.
       </p>
+      <WorkspaceToolbar
+        search={{
+          value: search,
+          onChange: setSearch,
+          placeholder: "Search engineer name or email…",
+          ariaLabel: "Search engineers",
+        }}
+        filters={
+          <Select
+            size="sm"
+            value={holdingOnly ? "holding" : "all"}
+            onChange={(v) => setHoldingOnly(v === "holding")}
+            options={[
+              { value: "all", label: "All engineers" },
+              { value: "holding", label: "Holding stock" },
+            ]}
+            ariaLabel="Filter by whether the engineer holds stock"
+          />
+        }
+      />
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
         <div className="min-h-0 flex-1 overflow-auto">
           <table className="w-full text-left text-sm" style={{ minWidth: ENGINEERS_MIN_WIDTH }}>
@@ -258,7 +318,12 @@ function EngineersList({
                     <td colSpan={5} className="px-4 py-16">
                       <div className="flex flex-col items-center gap-2 text-center">
                         <Truck className="h-7 w-7 text-[var(--faint)]" />
-                        <p className="text-sm font-semibold text-[var(--ink)]">No field engineers yet</p>
+                        {/* Two different empty states: nothing matches the filters, versus nothing
+                            exists. Saying "no engineers yet" to someone who has typed a search would
+                            flatly contradict the roster one keystroke away. */}
+                        <p className="text-sm font-semibold text-[var(--ink)]">
+                          {debounced || holdingOnly ? "No engineers match these filters" : "No field engineers yet"}
+                        </p>
                       </div>
                     </td>
                   </tr>
@@ -267,6 +332,14 @@ function EngineersList({
             )}
           </table>
         </div>
+        <Pagination
+          embedded
+          page={page}
+          totalPages={totalPages}
+          total={total}
+          label="engineers"
+          onPage={setPage}
+        />
       </div>
     </div>
   );

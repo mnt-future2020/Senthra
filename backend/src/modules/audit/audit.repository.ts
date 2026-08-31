@@ -15,8 +15,15 @@ export interface AuditListFilters {
   actorType?: string;
   targetType?: string;
   targetId?: string;
+  /**
+   * Half-open window on `createdAt`. `lt`, not `lte`: `createdAt` is a real INSTANT and the service
+   * resolves the day boundaries in the COMPANY timezone, so the upper bound is the start of the day
+   * AFTER "to" rather than an inclusive 23:59:59.999 — the form that cannot drift.
+   */
   from?: Date;
   to?: Date;
+  /** One acting principal, matched on the email snapshot the list already displays. */
+  actorEmail?: string;
   /** Warehouse SECURITY scope. When set (a warehouse-scoped actor), the result is hard-limited to
    *  warehouse-target entries for exactly these warehouse ids — this OVERRIDES any client-supplied
    *  targetType/targetId so a crafted query can't widen the view, and an empty array matches nothing.
@@ -36,10 +43,11 @@ export function buildAuditWhere(filters: AuditListFilters): Prisma.AuditLogWhere
   if (filters.actorType) where.actorType = filters.actorType;
   if (filters.targetType) where.targetType = filters.targetType;
   if (filters.targetId) where.targetId = filters.targetId;
+  if (filters.actorEmail) where.actorEmail = filters.actorEmail;
   if (filters.from || filters.to) {
     where.createdAt = {};
     if (filters.from) where.createdAt.gte = filters.from;
-    if (filters.to) where.createdAt.lte = filters.to;
+    if (filters.to) where.createdAt.lt = filters.to;
   }
   if (filters.search) {
     const q = escapeRegex(filters.search);
@@ -132,6 +140,24 @@ export async function distinctActions(scopeWarehouseIds?: string[]): Promise<str
 // Distinct actor types actually present (admin | user | customer | system). The
 // UI offers only these, so a value no event ever produces (e.g. "system" until
 // system-generated events exist) never shows as a dead filter option. Scoped as above.
+/**
+ * The distinct ACTORS present, for the "who did this" filter.
+ *
+ * Matched on `actorEmail` — the snapshot the list already displays — rather than `actorId`, so a
+ * deleted user's history stays reachable under the identity it was recorded with. Capped: an install
+ * has tens of staff, and a facet list is a picker, not a report.
+ */
+export async function distinctActors(scopeWarehouseIds?: string[]): Promise<string[]> {
+  const rows = await prisma.auditLog.findMany({
+    where: { ...facetScopeWhere(scopeWarehouseIds), actorEmail: { not: null } },
+    distinct: ["actorEmail"],
+    select: { actorEmail: true },
+    orderBy: { actorEmail: "asc" },
+    take: 200,
+  });
+  return rows.map((r) => r.actorEmail).filter((e): e is string => Boolean(e));
+}
+
 export async function distinctActorTypes(scopeWarehouseIds?: string[]): Promise<string[]> {
   const rows = await prisma.auditLog.findMany({
     where: facetScopeWhere(scopeWarehouseIds),

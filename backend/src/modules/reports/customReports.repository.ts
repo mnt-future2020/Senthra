@@ -19,15 +19,23 @@ import { prisma } from "../../lib/prisma.js";
  */
 export async function findMovementJobProjects(
   movementIds: string[],
-): Promise<Map<string, { jobNumber: string; projectId: string; projectName: string }>> {
-  const map = new Map<string, { jobNumber: string; projectId: string; projectName: string }>();
+): Promise<Map<string, { jobNumber: string; projectId: string; projectName: string; siteId: string | null; siteName: string | null }>> {
+  const map = new Map<string, { jobNumber: string; projectId: string; projectName: string; siteId: string | null; siteName: string | null }>();
   if (movementIds.length === 0) return map;
   for (let i = 0; i < movementIds.length; i += 500) {
     const rows = await prisma.jobStockMovement.findMany({
       where: { id: { in: movementIds.slice(i, i + 500) } },
       select: {
         id: true,
-        job: { select: { jobNumber: true, projectId: true, projectName: true, project: { select: { name: true } } } },
+        // `siteId` + the snapshotted `siteName` — the report filters on the id and prints the name,
+        // and the snapshot is what keeps a row readable after a site is renamed or removed.
+        job: {
+          select: {
+            jobNumber: true, projectId: true, projectName: true, siteId: true, siteName: true,
+            project: { select: { name: true } },
+            site: { select: { name: true } },
+          },
+        },
       },
     });
     for (const r of rows) {
@@ -36,6 +44,8 @@ export async function findMovementJobProjects(
         jobNumber: r.job.jobNumber,
         projectId: r.job.projectId,
         projectName: r.job.project?.name ?? r.job.projectName ?? "(deleted project)",
+        siteId: r.job.siteId ?? null,
+        siteName: r.job.site?.name ?? r.job.siteName ?? null,
       });
     }
   }

@@ -227,6 +227,12 @@ export interface ListParams {
   sort?: "oldest" | "newest";
   // Reviewer list only: narrow to one warehouse's queue (final warehouse, or pending preferring it).
   warehouseId?: string;
+  /** Reviewer list only: the engineer who RAISED the request. */
+  engineerId?: string;
+  /** Inclusive calendar days ("YYYY-MM-DD"). The SERVER resolves which day that is, in the
+   *  company timezone — the browser clock never decides a boundary here. */
+  raisedFrom?: string;
+  raisedTo?: string;
   page?: number;
   pageSize?: number;
 }

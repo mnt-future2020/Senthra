@@ -111,16 +111,23 @@ export function isActionable(row: SubmissionLike): boolean {
   return ACTIONABLE_STATUSES.includes(row.status);
 }
 
-export function submissionStatusOptions(rows: SubmissionLike[]): SubmissionOption[] {
-  const counts = new Map<string, number>();
-  for (const r of rows) counts.set(r.status, (counts.get(r.status) ?? 0) + 1);
+/**
+ * Build the status menu from per-status COUNTS rather than from the rows themselves.
+ *
+ * It used to take the whole submission collection, which is the only reason the customer detail
+ * payload had to carry every submission an account had ever made. The counts are page metadata now:
+ * bounded by the number of statuses, and correct regardless of which page or status is in view.
+ */
+export function submissionStatusOptions(statusCounts: Record<string, number>): SubmissionOption[] {
+  const counts = new Map<string, number>(Object.entries(statusCounts).filter(([, n]) => n > 0));
+  const totalAll = [...counts.values()].reduce((n, c) => n + c, 0);
 
   const known = STATUS_ORDER.filter((s) => counts.has(s));
   const unknown = [...counts.keys()]
     .filter((s) => !STATUS_ORDER.includes(s as (typeof STATUS_ORDER)[number]))
     .sort();
 
-  const openCount = rows.filter((r) => OPEN_STATUSES.includes(r.status)).length;
+  const openCount = OPEN_STATUSES.reduce((n, s) => n + (counts.get(s) ?? 0), 0);
 
   // When only ONE open status has rows, "Open" and that status select exactly the same rows — two
   // menu entries, one outcome, which reads as a bug ("Open (2)" next to "Partially received (2)").
@@ -132,7 +139,9 @@ export function submissionStatusOptions(rows: SubmissionLike[]): SubmissionOptio
   const presentOpen = OPEN_STATUSES.filter((s) => counts.has(s));
   const redundantOpenStatus = presentOpen.length === 1 ? presentOpen[0] : null;
 
-  const needsYouCount = rows.filter(isActionable).length;
+  // "Needs you" is pending + approved — the two ACTIONABLE statuses (see isActionable, which the
+  // row-level filter still uses). Summed from the same counts so the menu and the rows agree.
+  const needsYouCount = ACTIONABLE_STATUSES.reduce((n, s) => n + (counts.get(s) ?? 0), 0);
   // Same rule as Open's: two entries selecting the same rows read as a bug. When every open row is
   // also actionable, "Needs you" and "Open" are the same list — keep Open, since it is the default
   // and where Clear returns to, and bring this back the moment the two differ.
@@ -147,7 +156,7 @@ export function submissionStatusOptions(rows: SubmissionLike[]): SubmissionOptio
     ...(needsYouCount > 0 && !needsYouRedundant
       ? [{ value: NEEDS_YOU, label: `Needs you (${needsYouCount})` }]
       : []),
-    { value: ALL, label: `All statuses (${rows.length})` },
+    { value: ALL, label: `All statuses (${totalAll})` },
     ...[...known, ...unknown]
       .filter((s) => s !== redundantOpenStatus)
       .map((s) => ({

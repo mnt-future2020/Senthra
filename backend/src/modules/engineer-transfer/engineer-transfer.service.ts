@@ -11,6 +11,8 @@ import * as irmRepo from "#modules/irm/irm.repository.js";
 import * as customerStockRepo from "#modules/goods-management/goods-management.repository.js";
 import { badRequest, conflict, forbidden, notFound } from "../../utils/http-error.js";
 import * as transferRepo from "./engineer-transfer.repository.js";
+import { getCompanyTimezone } from "#modules/settings/settings.service.js";
+import { resolveInstantWindow } from "../../utils/filter-date.js";
 import type { CreateTransferInput, TransferLineInput } from "./engineer-transfer.validation.js";
 import type { CreateTransferData, CreateTransferLineData, TransferWithLines } from "./engineer-transfer.repository.js";
 import { randomUUID } from "node:crypto";
@@ -352,10 +354,11 @@ export async function createTransfer(input: CreateTransferInput, actor: AuditAct
 
 // ---- listMine ---------------------------------------------------------------------------------
 
-export async function listMine(engineerId: string, params: { role?: "incoming" | "outgoing" | "all"; status?: string; sort?: string; search?: string; page?: number; pageSize?: number }): Promise<PagedTransfers> {
+export async function listMine(engineerId: string, params: { role?: "incoming" | "outgoing" | "all"; status?: string; sort?: string; search?: string; raisedFrom?: string; raisedTo?: string; page?: number; pageSize?: number }): Promise<PagedTransfers> {
   const pageSize = Math.min(Math.max(params.pageSize ?? 20, 1), 100);
   const page = Math.max(params.page ?? 1, 1);
-  const { transfers, total } = await transferRepo.listForEngineer(engineerId, { ...params, page, pageSize });
+  const raisedWindow = await raisedWindowFor(params.raisedFrom, params.raisedTo);
+  const { transfers, total } = await transferRepo.listForEngineer(engineerId, { ...params, raisedWindow, page, pageSize });
   return {
     transfers: transfers.map(toPublic),
     total,
@@ -372,10 +375,18 @@ export function countAwaitingSignature(engineerId: string): Promise<number> {
 
 // ---- listAll (admin / oversight) -------------------------------------------------------------
 
-export async function listAll(params: { status?: string; engineerId?: string; ownership?: string; sort?: string; search?: string; page?: number; pageSize?: number }, _actor: AuditActor): Promise<PagedTransfers> {
+// A transfer's `createdAt` is a real instant, so "raised on the 3rd" is the COMPANY's 3rd. Resolved
+// here rather than in the repository for the usual reason: reading settings is a service's job.
+async function raisedWindowFor(from: string | undefined, to: string | undefined) {
+  if (!from && !to) return undefined;
+  return resolveInstantWindow(from, to, () => getCompanyTimezone());
+}
+
+export async function listAll(params: { status?: string; engineerId?: string; ownership?: string; sort?: string; search?: string; raisedFrom?: string; raisedTo?: string; page?: number; pageSize?: number }, _actor: AuditActor): Promise<PagedTransfers> {
   const pageSize = Math.min(Math.max(params.pageSize ?? 20, 1), 100);
   const page = Math.max(params.page ?? 1, 1);
-  const { transfers, total } = await transferRepo.listAll({ ...params, page, pageSize });
+  const raisedWindow = await raisedWindowFor(params.raisedFrom, params.raisedTo);
+  const { transfers, total } = await transferRepo.listAll({ ...params, raisedWindow, page, pageSize });
   return {
     transfers: transfers.map(toPublic),
     total,

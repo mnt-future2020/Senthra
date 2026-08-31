@@ -13,6 +13,8 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { downloadCsv } from "@/lib/csvExport";
 import { toolbarActionsCls, toolbarBtn, toolbarDateCls, toolbarPrimaryBtn } from "@/components/ui/styles";
 import { FilterPopover } from "@/components/ui/FilterPopover";
+import { SitePicker, siteOptionLabel } from "@/components/ui/SitePicker";
+import { searchJobSites } from "@/services/job.service";
 import { CELL_ONE_LINE, tableMinWidth, type ColWidth } from "@/components/ui/tableLayout";
 import { useProjectOptions, useReportFilterOptions, type Option } from "./reportFilterOptions";
 
@@ -32,6 +34,7 @@ const FILTER_LABEL: Record<string, string> = {
   dateTo: "To",
   customerId: "Customer",
   projectId: "Project",
+  siteId: "Site",
   warehouseId: "Warehouse",
   irmItemId: "Item",
   engineerId: "Engineer",
@@ -84,6 +87,14 @@ export function CustomReportsView() {
 
   const lists = useReportFilterOptions();
   const projects = useProjectOptions(searchParams.get("customerId") || undefined);
+  // The picked site's label — a search result is not a complete set, so a selected id cannot be
+  // looked up in the options afterwards.
+  const [siteLabel, setSiteLabel] = React.useState<string | null>(null);
+  const customerForSites = searchParams.get("customerId") || undefined;
+  const searchSites = React.useCallback(
+    (term: string) => searchJobSites(term, customerForSites).then((r) => r.sites),
+    [customerForSites],
+  );
 
   // The period is PRIMARY — it is the axis a report is read along and it is set on every run.
   // Everything else is set occasionally and folds behind the Filters trigger.
@@ -235,6 +246,23 @@ export function CustomReportsView() {
         />
       );
     }
+    // SITE is a type-ahead, not a Select: sites are customer-owned and bulk-imported in the
+    // thousands, so a bounded option list would silently truncate. Narrowed to the customer already
+    // chosen, which is what makes the shortlist readable.
+    if (f === "siteId") {
+      return (
+        <SitePicker
+          value={searchParams.get(f) ?? ""}
+          selectedLabel={siteLabel}
+          search={searchSites}
+          onChange={(id, option) => {
+            setSiteLabel(option ? siteOptionLabel(option) : null);
+            patch({ [f]: id || null });
+          }}
+          ariaLabel={label}
+        />
+      );
+    }
     if (f === "itemKind") {
       return (
         <Select
@@ -255,7 +283,8 @@ export function CustomReportsView() {
           value={searchParams.get(f) ?? ""}
           onChange={(v) => {
             // Changing the customer invalidates the project chosen under the old one.
-            if (f === "customerId") patch({ customerId: v || null, projectId: null });
+            // Changing the customer invalidates BOTH children chosen under the old one.
+            if (f === "customerId") patch({ customerId: v || null, projectId: null, siteId: null });
             else patch({ [f]: v || null });
           }}
           options={[{ value: "", label: placeholder }, ...options]}

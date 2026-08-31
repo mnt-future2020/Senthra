@@ -6,7 +6,6 @@ import { asyncHandler } from "../../utils/async-handler.js";
 import { sendCsv } from "../../utils/csv-response.js";
 import { param, queryInt, queryStr } from "../../utils/request.js";
 import { unauthorized } from "../../utils/http-error.js";
-import { principalGrants } from "../../types/principal.js";
 import type {
   AdminStockRequestInput,
   BulkSiteInput,
@@ -58,7 +57,10 @@ export const exportCustomersCsv = asyncHandler(async (req, res) => {
 // stock_requests.view — customers.view alone never exposes it (it has its own route).
 export const getCustomer = asyncHandler(async (req, res) => {
   const customer = await customerService.getCustomer(param(req, "id"), {
-    includeStockRequests: principalGrants(req.principal, "stock_requests.view"),
+    // The Submissions tab pages this from /customers/:id/stock-requests and builds its menu from
+    // that endpoint's statusCounts, so the detail payload no longer carries the collection. It used
+    // to ship every submission an account had ever made on every visit to any tab.
+    includeStockRequests: false,
   });
   res.json({ customer });
 });
@@ -188,14 +190,21 @@ export const sendCustomerUserResetLink = asyncHandler(async (req, res) => {
 });
 
 // --- nested: stock requests (admin review queue) ---
-// GET /customers/:id/stock-requests?status=
+// GET /customers/:id/stock-requests?status=&search=&raisedFrom=&raisedTo=&page=&pageSize=
+// Paged at the DB — submissions accumulate for the life of an account and this tab used to render
+// every one of them.
 export const listStockRequests = asyncHandler(async (req, res) => {
-  const { status } = req.query;
-  const requests = await customerService.listStockRequests(
-    param(req, "id"),
-    queryStr(status),
+  const { status, search, raisedFrom, raisedTo, page, pageSize } = req.query;
+  res.json(
+    await customerService.listStockRequests(param(req, "id"), {
+      status: queryStr(status),
+      search: queryStr(search),
+      raisedFrom: queryStr(raisedFrom),
+      raisedTo: queryStr(raisedTo),
+      page: queryInt(page),
+      pageSize: queryInt(pageSize),
+    }),
   );
-  res.json({ requests });
 });
 
 // POST /customers/:id/stock-requests — admin creates a submission on behalf of the
@@ -338,13 +347,32 @@ export const exportCustomerStockCsv = asyncHandler(async (req, res) => {
   sendCsv(res, "customer-stock", await customerService.exportCustomerStockCsv(param(req, "id"), portalListParams(req)));
 });
 
+// The tab's filters, parsed ONCE and shared with the customer-stock CSV export below, so a filter
+// added to the screen cannot be silently absent from the download.
+function stockEntryParamsFrom(req: import("express").Request): customerService.ListStockEntriesParams {
+  return {
+    status: queryStr(req.query.status),
+    search: queryStr(req.query.search),
+    warehouseId: queryStr(req.query.warehouseId),
+    receivedFrom: queryStr(req.query.receivedFrom),
+    receivedTo: queryStr(req.query.receivedTo),
+  };
+}
+
+// GET /customers/:id/stock-options — the job form's customer-stock picker. Complete by design; see
+// the service for why paging it would be incorrect rather than merely inconvenient.
+export const listCustomerStockOptions = asyncHandler(async (req, res) => {
+  res.json({ options: await customerService.listCustomerStockOptions(param(req, "id")) });
+});
+
 export const listCustomerStockEntries = asyncHandler(async (req, res) => {
-  const { status } = req.query;
-  const entries = await customerService.listCustomerStockEntries(
-    param(req, "id"),
-    queryStr(status),
+  res.json(
+    await customerService.listCustomerStockEntries(param(req, "id"), {
+      ...stockEntryParamsFrom(req),
+      page: queryInt(req.query.page),
+      pageSize: queryInt(req.query.pageSize),
+    }),
   );
-  res.json({ entries });
 });
 
 // GET /warehouses/:id/stock-entries — list stock entries for a warehouse.
@@ -404,6 +432,12 @@ const portalListParams = (req: Request) => ({
   // pinned to `customerId(req)` from the session, so an id for someone else's warehouse just matches
   // none of this customer's rows.
   warehouseId: queryStr(req.query.warehouseId),
+  // Stock lists only — inclusive calendar days on when we received it.
+  receivedFrom: queryStr(req.query.receivedFrom),
+  receivedTo: queryStr(req.query.receivedTo),
+  // Submissions only — inclusive calendar days on when the customer submitted.
+  raisedFrom: queryStr(req.query.raisedFrom),
+  raisedTo: queryStr(req.query.raisedTo),
   page: queryInt(req.query.page),
   pageSize: queryInt(req.query.pageSize),
 });
@@ -417,6 +451,15 @@ export const getOwnStockEntries = asyncHandler(async (req, res) => {
 // actually hold this customer's stock).
 export const getOwnStockWarehouses = asyncHandler(async (req, res) => {
   res.json({ warehouses: await customerService.listOwnStockWarehouses(customerId(req)) });
+});
+
+// GET /customer/submission-warehouses — the warehouses a customer may pick as their PREFERRED
+// destination on a stock submission: every active, non-deleted one. Kept separate from
+// getOwnStockWarehouses above, which is the "My stock" list's filter facet scoped to warehouses
+// actually holding their stock: same shape, different question, and merging them would mean a
+// change to one silently redefining the other.
+export const getOwnSubmissionWarehouses = asyncHandler(async (_req, res) => {
+  res.json({ warehouses: await customerService.listSelectableWarehouses() });
 });
 
 // GET /customer/stock-entries/export.csv — the customer's stock, honouring the list's filters

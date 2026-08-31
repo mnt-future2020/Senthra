@@ -22,7 +22,7 @@ import { notify } from "#modules/notification/notification.service.js";
 import { roleGrants } from "#modules/role/permissions.js";
 import { emitAttentionChanged, emitToUser, emitToRoom, OFFICE_JOBS_ROOM } from "../../lib/realtime.js";
 import { conflict, forbidden, notFound, badRequest } from "../../utils/http-error.js";
-import { startOfDayIn } from "../../utils/filter-date.js";
+import { calendarDayWindow, instantDayWindow, startOfDayIn } from "../../utils/filter-date.js";
 import { jobOverdue } from "./job-overdue.js";
 import { safeHttpUrls } from "../../utils/http-url.js";
 import { getCompanyTimezone, getRegionalSettings } from "#modules/settings/settings.service.js";
@@ -553,6 +553,14 @@ export interface ListJobsParams {
   customer?: string;
   engineer?: string;
   project?: string;
+  site?: string;
+  priority?: string;
+  /** Inclusive calendar days on the DUE date (`completionDate`), as the user typed them. */
+  dueFrom?: string;
+  dueTo?: string;
+  /** Inclusive calendar days on when the job was RAISED (`createdAt`), in the company timezone. */
+  createdFrom?: string;
+  createdTo?: string;
   page?: number;
   pageSize?: number;
   sort?: string;
@@ -568,13 +576,21 @@ export async function listJobs(params: ListJobsParams = {}, _actor?: AuditActor)
   // `overdue` flag so the table can mark late work in place. Before that, the count in the badge was
   // the only way to know any job was late: the Due date column rendered every date in the same grey,
   // so "Jobs overdue 4" could only be resolved by clicking it. One settings read, already memoised.
-  const dayStart = startOfDayIn(await getCompanyTimezone(), new Date());
+  const timeZone = await getCompanyTimezone();
+  const dayStart = startOfDayIn(timeZone, new Date());
   const filters = {
     search: params.search,
     status: params.status,
     customerId: params.customer,
     assignedEngineerId: params.engineer,
     projectId: params.project,
+    siteId: params.site,
+    priority: params.priority,
+    // completionDate is a CALENDAR DAY (stored at UTC midnight of what the form sent), so its window
+    // is plain date arithmetic. createdAt is an INSTANT, so its window is the company's day, not the
+    // UTC one — the same boundary `dayStart` above uses, and the reason the two use different helpers.
+    dueWindow: calendarDayWindow(params.dueFrom, params.dueTo),
+    createdWindow: instantDayWindow(params.createdFrom, params.createdTo, timeZone),
     overdueBefore: params.status === "overdue" ? dayStart : undefined,
   };
   const total = await jobRepo.count(filters);
@@ -1452,6 +1468,11 @@ export interface ListEngineerJobsParams {
   status?: string;
   search?: string;
   sort?: string;
+  /** Inclusive calendar days on the DUE date. */
+  dueFrom?: string;
+  dueTo?: string;
+  /** One of the engineer's own jobs' sites. Safe by construction — the where is pinned to them. */
+  site?: string;
   page?: number;
   pageSize?: number;
 }
@@ -1466,6 +1487,8 @@ export async function listJobsForEngineer(engineerId: string, params: ListEngine
   const filters = {
     status: params.status,
     search: params.search,
+    dueWindow: calendarDayWindow(params.dueFrom, params.dueTo),
+    siteId: params.site,
     overdueBefore: params.status === "overdue" ? dayStart : undefined,
   };
   const total = await jobRepo.countByEngineer(engineerId, filters);
@@ -1855,6 +1878,11 @@ export interface ListCustomerJobsParams {
   status?: string;
   search?: string;
   sort?: string;
+  /** Inclusive calendar days on the DUE date. */
+  dueFrom?: string;
+  dueTo?: string;
+  /** One of the customer's OWN sites — the where is pinned to their customerId from the session. */
+  site?: string;
   page?: number;
   pageSize?: number;
   /** Internal only — see EXPORT_PAGING. Controllers never read this from the query string. */
@@ -1870,7 +1898,12 @@ export interface ListCustomerJobsParams {
  * jobs" is a statement about their account, not about a typo in a query string.
  */
 export async function listJobsForCustomer(customerId: string, params: ListCustomerJobsParams = {}): Promise<PagedPortalJobs> {
-  const filters = { search: params.search, statuses: params.status ? FILTERABLE_STATUSES[params.status] : undefined };
+  const filters = {
+    search: params.search,
+    statuses: params.status ? FILTERABLE_STATUSES[params.status] : undefined,
+    dueWindow: calendarDayWindow(params.dueFrom, params.dueTo),
+    siteId: params.site,
+  };
   const total = await jobRepo.countByCustomerPortal(customerId, filters);
   const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total, params.maxPageSize);
   const rows = await jobRepo.findManyByCustomerPortal(customerId, filters, skip, pageSize, params.sort);
@@ -2094,3 +2127,28 @@ async function reconcileAttachments(
 }
 
 
+
+
+// ── Site options for the list filter ───────────────────────────────────────────────────────────
+//
+// The Jobs list filters by `Job.siteId`, and a site is a CustomerSite. There is no bounded list to
+// hand a <Select>: a single customer can import thousands, so this answers a type-ahead instead.
+//
+// `customerId` is how the portal stays inside its tenant — the controller passes the SESSION's
+// customer there, never a query-string value. Staff pass whichever customer the list is already
+// filtered to, or nothing.
+
+/** How many options a type-ahead offers at once. A shortlist, not a page — see searchSites. */
+const SITE_OPTION_LIMIT = 50;
+
+export interface SiteOption {
+  id: string;
+  name: string;
+  code: string | null;
+  postcode: string | null;
+  customerName: string | null;
+}
+
+export function searchSiteOptions(term: string | undefined, customerId?: string): Promise<SiteOption[]> {
+  return customerRepo.searchSites(term, customerId, SITE_OPTION_LIMIT);
+}
