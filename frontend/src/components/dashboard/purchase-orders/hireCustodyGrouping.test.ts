@@ -30,6 +30,7 @@ const exit = (over: Partial<HireCustodyExit> = {}): HireCustodyExit => ({
   recoveryNotes: null,
   settledByCode: null,
   settledCharge: null,
+  settledNotedAt: null,
   attachments: [],
   attachmentsReceiptId: null,
   sourceReceiptId: null,

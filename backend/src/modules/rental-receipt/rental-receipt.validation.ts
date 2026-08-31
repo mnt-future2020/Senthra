@@ -175,6 +175,27 @@ export type CreateRentalReturnInput = z.infer<typeof createRentalReturnSchema>;
 
 // ── DAMAGE: found broken while we have it ───────────────────────────────────────────────────────
 
+/**
+ * THIS ENDPOINT REPORTS DAMAGE NOBODY HAS RECORDED YET. It has no second mode, and deliberately so.
+ *
+ * A hire line is a COUNT, not a set of identified units: `HireCustodyExit` carries a quantity and no
+ * serial, and the supplier's asset tags are stored on the note as evidence text, never matched on. So
+ * "1 damaged" on this line and "1 damaged" already open on the same line are indistinguishable to the
+ * data, and the service used to resolve that by assuming they were the same fault — absorbing a
+ * genuinely new broken unit into an older report. One exit for two broken units, the second still
+ * offered to the next engineer, and the supplier told 1 instead of 2.
+ *
+ * The fix is NOT to ask which fault it was. Damage already on file is acted on through its OWN record,
+ * by id, and each of those operations already exists: charge it (POST
+ * /rental-receipts/custody-exits/:exitId/charge), decide nothing is owed (POST
+ * /purchase-orders/:id/custody-exits/:exitId/dismiss), or withdraw the note behind it. Those target one
+ * record exactly. A quantity posted here could only ever be matched by guesswork, and a second
+ * mechanism doing the same job less precisely is how the two disagree.
+ *
+ * So a request here can only mean "more damage was found", and the cap in the service is what keeps it
+ * honest: units an open or dismissed report is already holding are subtracted, so this endpoint cannot
+ * quarantine one physical unit twice however it is called.
+ */
 const damageLineSchema = z.object({
   ...noteLineBase,
   damagedQuantity: z.coerce.number().int("Use whole units.").min(0, "Damaged can't be negative."),

@@ -16,7 +16,7 @@ import * as rentalService from "@/services/rental.service";
 import * as stockPositionService from "@/services/stockPosition.service";
 import { useAuth } from "@/hooks/useAuth";
 import { ExportButton } from "@/components/ui/ExportButton";
-import type { DamagedHistory, DamagedRow } from "@/types/goodsManagement";
+import type { DamagedHistory, DamagedRow, RentalDamageStatus } from "@/types/goodsManagement";
 import type { HireCustodyExit } from "@/types/rental";
 import { ImageLightbox } from "@/components/ui/ImageLightbox";
 import { Modal } from "@/components/ui/Modal";
@@ -28,6 +28,9 @@ import { Pagination } from "@/components/ui/Pagination";
 // the centre of the panel rather than in a filter row; toolbarInputCls for the list search box.
 import { ghostBtn, secondaryBtn, toolbarInputCls } from "@/components/ui/styles";
 import { formatDate as fmtDate, formatDateTime as fmtDateTime } from "@/lib/formatDate";
+// The SAME money formatter the order page prints a hire charge with. A second one here would be a
+// second way for the same figure to look, on two screens describing the same note.
+import { formatMoney } from "@/components/dashboard/purchase-orders/poStatus";
 
 const PAGE_SIZE = 20;
 
@@ -141,6 +144,49 @@ export function toDamagedRows(exits: HireCustodyExit[]): DamagedRow[] {
 }
 
 /**
+ * Does this custody event still count toward the row's CURRENT damaged quantity?
+ *
+ * A HAND-MIRRORED COPY of the server filter the damaged list is built with —
+ * `findOpenByWarehouses` in `backend/src/modules/purchase-order/hireCustodyExit.repository.ts`. The
+ * card's quantity comes from that query; the history modal is handed EVERY event on the hire line and
+ * has to reach the same number from the larger set, so the rule has to be stated identically in both
+ * places or the two disagree. `DamagedStockView.rentalHistory.test.ts` writes the server's rule out
+ * longhand rather than importing this, so widening one without the other fails there.
+ *
+ * Both dimensions matter, and for different reasons:
+ *   • `settlementState` must be `unsettled` — a charged or dismissed report has been answered, and the
+ *     list is the worklist of what still needs one.
+ *   • `withdrawn` / `recovered` / `returned_to_supplier` are excluded on CUSTODY grounds — the report
+ *     never happened, the unit came back, or the provider has collected it. None is broken equipment
+ *     standing in this building, which is what this pool counts.
+ */
+export function countsAsCurrentDamage(e: Pick<HireCustodyExit, "custodyState" | "settlementState">): boolean {
+  return (
+    e.settlementState === "unsettled" &&
+    e.custodyState !== "withdrawn" &&
+    e.custodyState !== "recovered" &&
+    e.custodyState !== "returned_to_supplier"
+  );
+}
+
+/**
+ * The two independent state columns, resolved into the one word a reader of the history needs.
+ *
+ * CUSTODY IS READ FIRST, deliberately. A withdrawn report and a unit the provider has collected are
+ * facts nothing else on the entry carries, whereas the money is printed beside it anyway (the charge
+ * and its note code have their own line). Reading settlement first would label a withdrawn report
+ * "No charge", which states the least important half of a record that was retracted outright.
+ */
+export function rentalEntryStatus(e: Pick<HireCustodyExit, "custodyState" | "settlementState">): RentalDamageStatus {
+  if (e.custodyState === "withdrawn") return "withdrawn";
+  if (e.custodyState === "recovered") return "recovered";
+  if (e.custodyState === "returned_to_supplier") return "returned";
+  if (e.settlementState === "settled") return "charged";
+  if (e.settlementState === "dismissed") return "no_charge";
+  return "active";
+}
+
+/**
  * A hire's custody events, shaped as the damaged-stock history the modal already renders.
  *
  * Same adapter idea as `toDamagedRows`, one level down: the question ("everything that ever happened to
@@ -155,13 +201,20 @@ export function hireHistory(row: DamagedRow, exits: HireCustodyExit[]): DamagedH
   // report agree with itself and none of them agree with the card: three reports of one unit each
   // printed "Total after this: 1" three times, under a heading that said 3.
   //
+  // ONLY EVENTS THAT STILL COUNT ADVANCE IT, and that is the half this got wrong. The card is built
+  // from the OPEN events at this warehouse; the modal is handed EVERY event on the hire line. Summing
+  // all of them made the same number mean two different things: a hire with one open report beside two
+  // already charged printed "Total after this: 3 damaged" under a heading that said 1. The heading was
+  // right. A charged, dismissed, withdrawn or collected event is history — it is listed, labelled with
+  // what became of it, and contributes nothing to a total that describes what is broken here NOW.
+  //
   // Accumulated oldest-first and then read back by id, so the arithmetic does not depend on the order
-  // the list happens to arrive in (newest-first today). The last entry lands on `row.quantity`, which
-  // is the same plain sum the card is built from — the two cannot disagree.
+  // the list happens to arrive in (newest-first today). The newest counting entry lands on
+  // `row.quantity`, which is the same sum the card is built from — the two cannot disagree.
   const running = new Map<string, number>();
   let total = 0;
   for (const e of [...exits].sort((a, b) => Date.parse(a.declaredAt) - Date.parse(b.declaredAt))) {
-    total += e.qty;
+    if (countsAsCurrentDamage(e)) total += e.qty;
     running.set(e.id, total);
   }
 
@@ -177,17 +230,20 @@ export function hireHistory(row: DamagedRow, exits: HireCustodyExit[]): DamagedH
       date: e.declaredAt,
       type: "write_off" as const,
       quantityDelta: e.qty,
-      balanceAfter: running.get(e.id) ?? e.qty,
+      balanceAfter: running.get(e.id) ?? 0,
       reason: LOSS_REASON_LABEL[e.reason] ?? e.reason,
       // The context that makes an entry readable months later, folded into the notes line the modal
-      // already prints — who was holding it, on what job, and where it stands with the provider.
+      // already prints — who was holding it and on what job.
+      //
+      // WHERE IT STANDS IS NO LONGER RETYPED HERE. It used to be appended as prose ("charged to the
+      // provider", "nothing owed"), which the badge beside it now says in its own words; keeping both
+      // printed the same fact twice on one entry. It moved to `status` — a value the modal can colour,
+      // count and test, rather than a sentence it can only display.
       notes: [
         // NOT the kind — the badge above already says it, and the row is narrowed to one kind anyway.
         // What belongs here is the context nothing else carries.
         e.jobNumber,
         e.engineerName,
-        e.settlementState === "settled" ? "charged to the provider" : e.settlementState === "dismissed" ? "nothing owed" : "not yet charged",
-        e.recoveredAt ? "later found and booked back in" : null,
         e.notes,
       ]
         .filter(Boolean)
@@ -196,10 +252,31 @@ export function hireHistory(row: DamagedRow, exits: HireCustodyExit[]): DamagedH
       sourceType: "rental_hire",
       sourceCode: e.poCode,
       actor: e.declaredBy,
+      status: rentalEntryStatus(e),
+      countsToTotal: countsAsCurrentDamage(e),
+      // Straight off the payload the API already sends. Both were arriving and being dropped here,
+      // which left the one screen a warehouse reads unable to say what a fault had cost — while the
+      // order page two clicks away printed the figure and its note code.
+      settledCharge: e.settledCharge,
+      settledByCode: e.settledByCode,
     })),
     truncated: false,
   };
 }
+
+/**
+ * Labels for `RentalDamageStatus`. `active` is deliberately absent: what an event that still counts
+ * should be called depends on its KIND ("Damage reported" / "Declared lost"), which is the wording the
+ * modal already used before any of these existed and is resolved at the call site.
+ */
+const RENTAL_STATUS_LABEL: Record<Exclude<RentalDamageStatus, "active">, string> = {
+  charged: "Charged to provider",
+  no_charge: "No charge",
+  withdrawn: "Report withdrawn",
+  returned: "Returned to provider",
+  recovered: "Found and booked back in",
+};
+
 
 /**
  * A LOSS carries one of the shared write-off reasons, so the row prints the words rather than the
@@ -666,12 +743,32 @@ export function DamagedStockView({
                 const isRestore = e.type === "restore";
                 const units = Math.abs(e.quantityDelta);
                 const isLast = i === history.entries.length - 1;
-                // Green = units came BACK to usable, red = units went INTO the damaged pool.
-                const dotCls = isRestore ? "bg-[var(--pos)]" : "bg-[var(--neg)]";
+                /**
+                 * A RENTAL event that has been answered — charged, dismissed, withdrawn or collected.
+                 *
+                 * It is still history and still listed, but it is not what is broken here now, so it
+                 * loses the alarm colouring: a withdrawn report rendered in the same red as a live one
+                 * says the equipment is broken when the record says it never was. Undefined on owned
+                 * entries, which have no settlement lifecycle and keep exactly the colours they had.
+                 */
+                const historic = e.status != null && e.status !== "active";
+                // Green = units came BACK to usable, red = units went INTO the damaged pool, grey =
+                // a rental event that no longer describes current damage.
+                const dotCls = isRestore
+                  ? "bg-[var(--pos)]"
+                  : historic
+                    ? "bg-[var(--faint)]"
+                    : "bg-[var(--neg)]";
                 const badgeCls = isRestore
                   ? "bg-[var(--pos)]/12 text-[var(--pos)]"
-                  : "bg-[var(--neg)]/12 text-[var(--neg)]";
-                const qtyCls = isRestore ? "text-[var(--pos)]" : "text-[var(--neg)]";
+                  : historic
+                    ? "bg-[var(--surface-2)] text-[var(--muted)]"
+                    : "bg-[var(--neg)]/12 text-[var(--neg)]";
+                const qtyCls = isRestore
+                  ? "text-[var(--pos)]"
+                  : historic
+                    ? "text-[var(--muted)]"
+                    : "text-[var(--neg)]";
                 return (
                   <li key={e.id} className="relative flex gap-3 pb-5 last:pb-0">
                     {/* Connector + dot */}
@@ -715,20 +812,49 @@ export function DamagedStockView({
                               contradiction — an increase labelled as a removal — so the quantity is
                               spelled out and the running total is stated rather than arrowed. */}
                           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                            {/* WORDS, not a colour, carry the difference — the badge reads the same to
+                                somebody who cannot tell the grey from the red. A rental event that has
+                                been answered says what became of it; everything else keeps the wording
+                                it always had. */}
                             <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${badgeCls}`}>
-                              {isRestore ? "Restored to usable" : historyRow?.exitKind === "loss" ? "Declared lost" : "Damage reported"}
+                              {isRestore
+                                ? "Restored to usable"
+                                : historic
+                                  ? RENTAL_STATUS_LABEL[e.status as Exclude<RentalDamageStatus, "active">]
+                                  : historyRow?.exitKind === "loss"
+                                    ? "Declared lost"
+                                    : "Damage reported"}
                             </span>
                             <span className={`text-sm font-bold ${qtyCls}`}>
                               {units} unit{units === 1 ? "" : "s"}
                             </span>
                           </div>
 
-                          <p className="text-xs text-[var(--muted)]">
-                            Total after this:{" "}
-                            <span className="font-semibold text-[var(--ink)]">
-                              {e.balanceAfter} {historyRow?.exitKind === "loss" ? "lost" : "damaged"}
-                            </span>
-                          </p>
+                          {/* THE RUNNING TOTAL IS A CLAIM ABOUT NOW, so an event that no longer counts
+                              must not appear to have moved it. Owned entries never set `countsToTotal`
+                              and keep the line unchanged — their `balanceAfter` is the ledger's own
+                              stored balance, which a restore genuinely does move. */}
+                          {e.countsToTotal === false ? (
+                            <p className="text-xs text-[var(--muted)]">No longer in the damaged total</p>
+                          ) : (
+                            <p className="text-xs text-[var(--muted)]">
+                              Total after this:{" "}
+                              <span className="font-semibold text-[var(--ink)]">
+                                {e.balanceAfter} {historyRow?.exitKind === "loss" ? "lost" : "damaged"}
+                              </span>
+                            </p>
+                          )}
+
+                          {/* WHAT IT COST AND ON WHICH DOCUMENT — rental only, and the reason this
+                              modal can now answer an accountant. A note raised before the provider has
+                              quoted carries no figure, which is a different fact from a charge of zero
+                              and is said in words rather than shown as "£0.00". */}
+                          {e.settledByCode && (
+                            <p className="text-xs text-[var(--muted)]">
+                              {e.settledCharge != null ? formatMoney(e.settledCharge) : "Awaiting a quote"} ·{" "}
+                              <span className="font-mono text-[11px] text-[var(--ink)]">{e.settledByCode}</span>
+                            </p>
+                          )}
 
                           {e.notes && <p className="wrap-break-word text-xs text-[var(--muted)]">{e.notes}</p>}
 

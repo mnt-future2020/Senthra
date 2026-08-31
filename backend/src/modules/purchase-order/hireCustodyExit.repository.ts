@@ -306,12 +306,12 @@ export function findOpenByWarehouses(warehouseIds: string[] | undefined, kind?: 
 /**
  * Damage still owed a note, per hire line — units already reported but not yet on any provider paper.
  *
- * THE OTHER HALF OF THE DOUBLE-COUNT `settleOpenDamageAgainstNoteTx` GUARDS. That one stops a second
+ * THE OTHER HALF OF THE DOUBLE-COUNT `damageCapFiguresByLines` GUARDS. That one stops a second
  * CUSTODY row being opened for one fault; this one stops the provider-facing TALLY being advanced
  * twice for it.
  *
  * A job return opens a damage exit and deliberately leaves `damagedQuantity` alone — the tally moves
- * when the exit is settled, either by a warehouse note (which consumes it) or by `chargeCustodyExit`.
+ * when that exit is charged, by `chargeCustodyExit` naming the record itself.
  * A collection note in the gap knew nothing about that pending claim: its own cap is against units
  * NEVER recorded damaged, and an unsettled exit has recorded nothing yet. So the office could name the
  * same broken unit on the collection note AND charge its still-open exit afterwards, and one fault
@@ -348,168 +348,106 @@ export function findByHireLines(lineIds: string[]): Promise<HireCustodyExit[]> {
   });
 }
 
+// THE NOTE-SETTLING ALLOCATOR IS GONE, and its absence is the point.
+//
+// Until now a warehouse damage note could ALLOCATE its quantity against damage already reported on
+// the same hire line: oldest report first, settling what it covered and opening a row only for the
+// surplus. That existed to stop one physical unit being quarantined twice — but a hire line is a
+// count with no unit identity, so the allocator could not tell "the fault the engineer already
+// reported" from "a second unit that has just broken", and it always assumed the first. A genuinely
+// new fault was absorbed into an older event.
+//
+// Two things replaced it, and between them nothing is lost:
+//
+//   • the double-quarantine guard is now ARITHMETIC — `damageCapFiguresByLines` below subtracts
+//     every unit an open OR dismissed report is holding from what a note may report, so a note
+//     cannot over-quarantine however it is called;
+//   • damage already on file is acted on through its OWN record, by id — charge it, decide nothing
+//     is owed, or withdraw the note behind it. Those name one record exactly, which allocation by
+//     quantity never could.
+//
+// `reconcileDamageCustodyTx` further down still partitions oldest-first, and is unrelated: it is
+// deciding which records describe units the provider has since collected, where the ordering is a
+// deliberately stable guess rather than anybody's intent. It shares no code with what was removed.
+
+
+/** What a damage note may do about damage that is already on file, per hire line. */
+export interface DamageCapFigures {
+  /**
+   * Units physically quarantined that the hire's provider-facing `damagedQuantity` does NOT yet count:
+   * open reports, plus DISMISSED ones — a dismissed report leaves the unit `held_damaged` (it is still
+   * broken; only the claim was dropped) while taking its quantity back out of the tally.
+   *
+   * This is the term the "newly found damage" cap was missing, and it is the entire double-quarantine
+   * guard: netting it off what a note may report makes "one physical unit, one quarantine" a property
+   * of the arithmetic rather than a side effect of consuming another event.
+   *
+   * Read TWICE per note — once to shape the form's refusal message, once again inside the note's own
+   * transaction, because this figure is the one a concurrent writer can move without touching anything
+   * the note's optimistic guards watch. See `damageCapFiguresByLinesTx`.
+   */
+  quarantinedNotTallied: number;
+}
+
+/** The one population both readers below count. Kept in one place so they can never diverge. */
+function damageCapWhere(lineIds: string[]) {
+  return {
+    purchaseOrderRentalLineId: { in: lineIds },
+    kind: "damage",
+    custodyState: CUSTODY_HELD_DAMAGED,
+    settlementState: { in: [SETTLE_UNSETTLED, SETTLE_DISMISSED] },
+  } satisfies Prisma.HireCustodyExitWhereInput;
+}
+
+function tallyDamageCaps(rows: { purchaseOrderRentalLineId: string; qty: number }[]): Map<string, DamageCapFigures> {
+  const figures = new Map<string, DamageCapFigures>();
+  for (const r of rows) {
+    const at = figures.get(r.purchaseOrderRentalLineId) ?? { quarantinedNotTallied: 0 };
+    at.quarantinedNotTallied += r.qty;
+    figures.set(r.purchaseOrderRentalLineId, at);
+  }
+  return figures;
+}
+
 /**
- * Settle up to `qty` units of a hire's ALREADY-OPEN damage against a note being raised now, and return
- * how many were covered.
+ * The damage-cap figure for a set of hire lines, in ONE grouped read.
  *
- * THE DOUBLE-COUNT THIS EXISTS TO PREVENT. An engineer brings a tester back broken: the return scan
- * opens an exit and the unit leaves the issuable pool. The office then raises the provider's damage
- * note for that same tester. Creating a second exit for it would quarantine ONE physical unit twice —
- * the hire would lose two units of availability for one fault, and no screen would explain why.
- *
- * So a note CONSUMES the open reports first and only opens a row for whatever it reports beyond them.
- * Oldest first, because the earliest report is the one that has been waiting.
- *
- * Custody is deliberately untouched: a unit with an agreed charge on it is still broken and still on
- * the shelf, so it stays `held_damaged` and stays out of the issuable pool. Only the settlement moves.
- *
- * A row larger than what is left to cover is SPLIT rather than partly settled — one row cannot be half
- * on a note. The remainder keeps standing as an open report, which is the honest reading of a note that
- * accepts one of the two units someone reported.
- *
- * "COVERED" MEANS "ALREADY ACCOUNTED FOR", NOT "SETTLED ONTO THIS NOTE". The two differ for a
- * DISMISSED report, whose unit is still physically quarantined while its claim is closed: the note
- * cannot settle it, but it must not open a second row for it either. See phase two in the body — that
- * distinction is the whole reason this returns a number instead of void.
+ * Deliberately NOT built on `openDamageQtyByLines`, which also counts `returned_to_supplier`: that
+ * figure guards the provider-facing TALLY, this one guards what a note may newly QUARANTINE. Using the
+ * wider one here would recreate the cap/consumption mismatch this pass removes.
  */
-export async function settleOpenDamageAgainstNoteTx(
-  tx: Prisma.TransactionClient,
-  lineId: string,
-  qty: number,
-  receiptId: string,
-  settledAt: Date,
-): Promise<number> {
-  return settleOpenAgainstNoteTx(tx, lineId, "damage", qty, receiptId, settledAt);
-}
-
-async function settleOpenAgainstNoteTx(
-  tx: Prisma.TransactionClient,
-  lineId: string,
-  kind: ExitKind,
-  qty: number,
-  receiptId: string,
-  settledAt: Date,
-): Promise<number> {
-  if (qty <= 0) return 0;
-  // The custody state a still-open exit of this kind is in. A damaged unit withdrawn, or a lost one
-  // recovered, is not physically quarantined at all and must never be swept onto a note.
-  const heldState = kind === "loss" ? CUSTODY_LOST : CUSTODY_HELD_DAMAGED;
-  const open = await tx.hireCustodyExit.findMany({
-    where: {
-      purchaseOrderRentalLineId: lineId,
-      kind,
-      custodyState: heldState,
-      settlementState: SETTLE_UNSETTLED,
-    },
-    orderBy: { declaredAt: "asc" },
+export async function damageCapFiguresByLines(lineIds: string[]): Promise<Map<string, DamageCapFigures>> {
+  if (lineIds.length === 0) return new Map();
+  const rows = await prisma.hireCustodyExit.findMany({
+    where: damageCapWhere(lineIds),
+    select: { purchaseOrderRentalLineId: true, qty: true },
   });
-
-  let left = qty;
-  for (const row of open) {
-    if (left <= 0) break;
-    if (row.qty <= left) {
-      const moved = await moveSettlementStateTx(tx, row.id, SETTLE_UNSETTLED, SETTLE_SETTLED, { settledByReceiptId: receiptId, settledAt });
-      if (!moved) continue; // someone settled it in the window; the note simply covers less
-      left -= row.qty;
-      continue;
-    }
-    // Bigger than what is left: split off the settled part and leave the rest open.
-    //
-    // The slice's key carries WHICH slice it is. One exit can be split more than once — two partial
-    // damage notes a week apart against the same engineer-reported damage — and keyed on `sourceId`
-    // alone the second one repeats the first's key exactly. The unique index then refuses the insert
-    // as a raw P2002, outside `createExitTx`'s catch, so the whole note 500s and no further damage
-    // note can ever be raised on that hire.
-    const slices = await tx.hireCustodyExit.count({ where: { sourceId: row.id } });
-    const reduced = await tx.hireCustodyExit.updateMany({
-      where: { id: row.id, qty: row.qty, settlementState: SETTLE_UNSETTLED },
-      data: { qty: row.qty - left },
-    });
-    if (reduced.count !== 1) continue;
-    await tx.hireCustodyExit.create({
-      data: {
-        purchaseOrderRentalLineId: row.purchaseOrderRentalLineId,
-        purchaseOrderId: row.purchaseOrderId,
-        poCode: row.poCode,
-        warehouseId: row.warehouseId,
-        kind,
-        qty: left,
-        itemName: row.itemName,
-        custodyState: row.custodyState,
-        settlementState: SETTLE_SETTLED,
-        reason: row.reason,
-        notes: row.notes,
-        photoUrl: row.photoUrl,
-        jobId: row.jobId,
-        jobNumber: row.jobNumber,
-        engineerId: row.engineerId,
-        engineerName: row.engineerName,
-        movementLineId: row.movementLineId,
-        declaredBy: row.declaredBy,
-        declaredAt: row.declaredAt,
-        settledByReceiptId: receiptId,
-        settledAt,
-        // Keyed on the SPLIT so it cannot collide with the parent row's own key.
-        sourceType: `${kind}_split_${slices}`,
-        sourceId: row.id,
-      },
-    });
-    left = 0;
-  }
-
-  // ── PHASE TWO: units already quarantined that this note can no longer settle ──────────────────
-  //
-  // THE SPLIT THIS FUNCTION EXISTS ON. It does two different jobs in one pass, and they do not have
-  // the same filter:
-  //
-  //   • FINANCIAL — move an open claim onto the note being raised. That is `unsettled` rows only,
-  //     which is the loop above.
-  //   • PHYSICAL  — make sure ONE broken unit is not quarantined twice. That is every row physically
-  //     holding a unit off the shelf, whatever the office decided about the money.
-  //
-  // A DISMISSED row is the case where the two answers differ. "Nothing is owed" closes the claim; it
-  // does not un-break the tester, so the unit is still `held_damaged` and still out of the issuable
-  // pool. Phase one cannot see it — correctly, because settling a dismissed row would silently charge
-  // the provider for a report the office had already dropped. But when the note reported that same
-  // physical unit, phase one returned "covered 0", the caller opened a SECOND exit for it, and
-  // `recomputeCountersTx` — which counts `custodyState` and ignores settlement — then read TWO held
-  // rows for ONE unit. On a 1-unit hire that is `fieldDamageQty: 2`, and the next
-  // `reconcileDamageCustodyTx` derives `gone = total − shelf = 1` and sends the older row to
-  // `returned_to_supplier`, recording a collection that never happened.
-  //
-  // So the leftover is ABSORBED against dismissed rows: it counts as covered, and NOTHING is written.
-  // Not settled (the office dropped that claim and a later note must not silently reopen it), not
-  // reduced, not split — the row is already the record of that unit being off the shelf, and the note
-  // adds nothing to it. Only the RETURN VALUE moves, which is what stops the caller minting a
-  // duplicate.
-  //
-  // Runs AFTER phase one deliberately: live claims are worth more on a note than closed ones, so the
-  // note settles everything it actually can before the remainder is written off as already-accounted.
-  //
-  // The provider still gets charged for what they were sent — the note carries its own
-  // `damagedQuantity` and the caller advances the hire's provider-facing tally from it. What does not
-  // happen is a second quarantine of one physical unit.
-  if (left > 0) {
-    const alreadyHeld = await tx.hireCustodyExit.findMany({
-      where: {
-        purchaseOrderRentalLineId: lineId,
-        kind,
-        custodyState: heldState,
-        settlementState: SETTLE_DISMISSED,
-      },
-      orderBy: { declaredAt: "asc" },
-      select: { qty: true },
-    });
-    for (const row of alreadyHeld) {
-      if (left <= 0) break;
-      // Partial absorption needs no split: nothing about the row changes either way, so there is no
-      // second state for a slice of it to carry.
-      left -= Math.min(left, row.qty);
-    }
-  }
-
-  return qty - left;
+  return tallyDamageCaps(rows);
 }
+
+/**
+ * THE SAME FIGURE, READ INSIDE THE CALLER'S TRANSACTION — and the only place the cap is authoritative.
+ *
+ * A preflight read cannot be, because the population it counts moves by a route none of the note's
+ * other guards watch. An engineer's damaged return opens a `held_damaged` exit and deliberately leaves
+ * `damagedQuantity` alone, so it slips straight past the note's optimistic `expect: { damagedQuantity }`
+ * — and between the preflight read and the write, one physical unit could be quarantined twice.
+ *
+ * Re-asserting here closes that window: a note that has gone stale aborts its own transaction, so no
+ * receipt, no line, no tally move and no custody row survive it. See `reportHireDamage`.
+ */
+export async function damageCapFiguresByLinesTx(
+  tx: Prisma.TransactionClient,
+  lineIds: string[],
+): Promise<Map<string, DamageCapFigures>> {
+  if (lineIds.length === 0) return new Map();
+  const rows = await tx.hireCustodyExit.findMany({
+    where: damageCapWhere(lineIds),
+    select: { purchaseOrderRentalLineId: true, qty: true },
+  });
+  return tallyDamageCaps(rows);
+}
+
 
 /**
  * The `sourceType` on a slice this reconciliation cut off a bigger record. See below for why it counts.
@@ -539,7 +477,7 @@ const CUSTODY_SPLIT = "damage_custody_split";
  * records come back to `held_damaged` on their own. A decrementing version would need to know what it
  * had already done.
  *
- * OLDEST GOES FIRST when only some of them can have gone, matching `settleOpenAgainstNoteTx`. Which
+ * OLDEST GOES FIRST when only some of them can have gone. Which
  * physical unit went back is genuinely unknowable and every ordering is a guess; what matters is that
  * the guess is the same one twice, or a second run would shuffle the records for no reason.
  *

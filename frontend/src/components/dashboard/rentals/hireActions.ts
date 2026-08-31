@@ -374,4 +374,63 @@ export function noteReversalBlocker(
   return null;
 }
 
+/** Damage already on file for one hire line, as the damage form needs it. See damageReportCap. */
+export interface OpenDamageOnLine {
+  /**
+   * Units a report is physically holding out of the pool: open ones PLUS dismissed ones.
+   *
+   * The ONLY figure the cap needs. A separate "awaiting a note" count used to sit beside it, from when
+   * a report could be filed AGAINST an open one and had to be capped by it. Nothing settles by quantity
+   * any more — damage on file is acted on through its own record — so it was a number nothing read.
+   */
+  quarantined: number;
+}
 
+/**
+ * HOW MUCH DAMAGE THIS REPORT MAY CLAIM: the ordinary cap, MINUS whatever a report already on file is
+ * holding out of the pool.
+ *
+ * MIRRORS reportHireDamage EXACTLY, and that subtraction is the whole double-quarantine guard. The bug
+ * it closes was a mismatch between two caps: the form offered units never TALLIED as damaged while the
+ * service allocated against units with an OPEN REPORT. Different populations, and a genuinely new
+ * broken unit fell into the gap — absorbed into an older report, so one quarantine covered two broken
+ * units and the second stayed issuable.
+ *
+ * `quarantined` counts DISMISSED reports too: dismissing drops the claim, not the damage, so the unit
+ * is still broken and still off the shelf. Subtracting both makes over-quarantining arithmetically
+ * impossible, which is what let the "is this the same damage?" question go away — a report here can
+ * only ever mean "more damage was found", and damage already on file is acted on through its own
+ * record.
+ *
+ * `remainder` is `damageableNow` for the line — the caller already has it.
+ */
+export function damageReportCap(remainder: number, open: OpenDamageOnLine | undefined): number {
+  return Math.max(0, remainder - (open?.quarantined ?? 0));
+}
+
+/**
+ * A postal address with its repeated parts removed.
+ *
+ * The server composes these from a line address, an order override or a warehouse, and the parts it
+ * joins can legitimately carry the same text twice — a site whose building and estate are recorded in
+ * both address lines printed "Unit 4, Industrial Estate, Unit 4, Industrial Estate, London, …", which
+ * reads as a data fault to anyone looking at it and costs a line of screen to say nothing.
+ *
+ * Deduped by SEGMENT and case-insensitively, keeping first appearance so the order still reads
+ * outwards. Deliberately not consecutive-only: the duplication that actually occurs is a repeated
+ * PAIR, which a neighbour comparison walks straight past.
+ */
+export function tidyAddress(address: string | null | undefined): string | null {
+  if (!address) return null;
+  const seen = new Set<string>();
+  const parts: string[] = [];
+  for (const raw of address.split(",")) {
+    const part = raw.trim();
+    if (!part) continue;
+    const key = part.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    parts.push(part);
+  }
+  return parts.length > 0 ? parts.join(", ") : null;
+}

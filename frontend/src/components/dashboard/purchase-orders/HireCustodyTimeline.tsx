@@ -7,7 +7,7 @@ import * as rentalService from "@/services/rental.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useAuth } from "@/hooks/useAuth";
 import { canSettleHires } from "@/components/dashboard/rentals/hireActions";
-import { formatDate } from "@/lib/formatDate";
+import { formatCalendarDay, formatDate } from "@/lib/formatDate";
 import { formatMoney } from "./poStatus";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { Modal } from "@/components/ui/Modal";
@@ -114,6 +114,58 @@ export const settlementTag = (e: Pick<HireCustodyExit, "settlementState" | "cust
 
 /** How many rows the panel shows before it asks. Enough to see the shape, few enough to stay short. */
 const COLLAPSED = 4;
+
+/**
+ * WHAT THIS ORDER HAS ACTUALLY BEEN CHARGED for damage and loss.
+ *
+ * COUNTED PER NOTE LINE, NOT PER RECORD, and that is the whole point. `settledCharge` is what the
+ * settling note charged for a record's HIRE LINE, and one note line can settle more than one record on
+ * that line — two separate engineer reports of a unit each, answered by a single note. Summing it per
+ * record then reported the same money once per record: £1 charged, £2 on the header, with no row
+ * disagreeing with any other.
+ *
+ * Keyed on (note, hire line) rather than the note alone, because a note covering two hire lines really
+ * does carry two charges and both are owed.
+ */
+/**
+ * THE DAY A RECORD WAS WRITTEN UP — or nothing, when that is the day it was already showing.
+ *
+ * Two dates, two different KINDS of date, and both halves of that were wrong here.
+ *
+ * `declaredAt` is an INSTANT (the moment, or midday for a day picked on a form). `settledNotedAt` is a
+ * CALENDAR DAY, stored at UTC midnight like every `<input type="date">` value in this app. So:
+ *
+ *   • the old guard compared `Date.parse` of the two. An instant is never equal to a UTC midnight, so
+ *     the "same day, don't say it twice" case could not fire — every warehouse-raised record printed
+ *     "Found 31 Aug · noted 31 Aug", and ", written up 31 Aug" beneath it.
+ *   • the noted day was rendered with `formatDate`, which formats in the VIEWER's zone. UTC midnight
+ *     read in any zone behind UTC is the day before, so a note written on the 31st showed as the 30th
+ *     — on the pair of dates a provider's charge is argued against.
+ *
+ * Both are fixed by comparing what is actually PRINTED: the found date as an instant in the viewer's
+ * zone, the noted day pinned to UTC as its own formatter requires. If the two render the same text
+ * there is nothing to add, whatever the underlying offsets were — which is also what keeps it right
+ * across a DST boundary, where an hour of arithmetic could otherwise move a day.
+ */
+export function notedDayIfDifferent(declaredAt: string, settledNotedAt: string | null | undefined): string | null {
+  if (!settledNotedAt) return null;
+  const noted = formatCalendarDay(settledNotedAt);
+  return noted === formatDate(declaredAt) ? null : noted;
+}
+
+export function chargedTotal(exits: readonly HireCustodyExit[]): number {
+  const counted = new Set<string>();
+  let total = 0;
+  for (const e of exits) {
+    if (e.settledCharge == null) continue;
+    // An unsettled record cannot share a note with anything, so its own id is a safe stand-in key.
+    const pair = `${e.settledByReceiptId ?? e.id}::${e.purchaseOrderRentalLineId}`;
+    if (counted.has(pair)) continue;
+    counted.add(pair);
+    total += e.settledCharge;
+  }
+  return total;
+}
 
 /**
  * Is this record still owed an answer from the office?
@@ -502,7 +554,11 @@ export function HireCustodyTimeline({
   const counts = { all: exits.length, job: 0, here: 0, loss: 0 };
   let toCharge = 0;
   let toCredit = 0;
-  let charged = 0;
+  // MONEY IS COUNTED PER NOTE LINE, NOT PER RECORD — the rule lives in `chargedTotal`, and this reads
+  // it rather than repeating it. The dedupe was written out a second time inside the loop below, which
+  // meant the figure on screen came from a copy no test ever ran: `chargedTotal` could be corrected or
+  // broken and this header would not move. One rule, one implementation, one thing to test.
+  const charged = chargedTotal(exits);
   for (const e of exits) {
     counts[sourceOf(e)] += 1;
     // The WORK: a record nobody has put to the provider yet. A withdrawn report and a recovered loss
@@ -513,7 +569,6 @@ export function HireCustodyTimeline({
     if (isOpen(e) || awaitingQuote(e)) toCharge += 1;
     // The OTHER work, and the one that goes unnoticed: money paid for equipment that came back.
     if (needsCredit(e)) toCredit += 1;
-    if (e.settledCharge != null) charged += e.settledCharge;
   }
   const visible = expanded ? shown : shown.slice(0, COLLAPSED);
 
@@ -703,7 +758,17 @@ export function HireCustodyTimeline({
             <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-[var(--muted)]">
               {detail.jobNumber && <span className="font-mono">{detail.jobNumber}</span>}
               {detail.engineerName && <span>{detail.engineerName}</span>}
-              <span>{formatDate(detail.declaredAt)}</span>
+              {/* TWO TRUE DATES, LABELLED. This record's own date is when the damage was FOUND; the
+                  note that settled it carries the day it was WRITTEN UP, and on anything written up in
+                  a batch they are days apart. Showing only the first was read as showing the wrong one
+                  — an office filing on the 31st saw its record dated the 27th and no explanation. The
+                  found date stays first and stays unchanged: it is the date a provider's charge is
+                  argued against, and a note must never overwrite it. */}
+              <span>Found {formatDate(detail.declaredAt)}</span>
+              {(() => {
+                const noted = notedDayIfDifferent(detail.declaredAt, detail.settledNotedAt);
+                return noted && <span>noted {noted}</span>;
+              })()}
               {detail.declaredBy && <span className="text-[var(--faint)]">recorded by {detail.declaredBy}</span>}
             </div>
 
@@ -761,6 +826,10 @@ export function HireCustodyTimeline({
             {detail.settledByCode && (
               <p className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-[11px] text-[var(--muted)]">
                 Put to the provider on <span className="font-mono text-[var(--ink)]">{detail.settledByCode}</span>
+                {(() => {
+                  const noted = notedDayIfDifferent(detail.declaredAt, detail.settledNotedAt);
+                  return noted && <>, written up {noted}</>;
+                })()}
                 {detail.settledCharge != null
                   ? ` — ${formatMoney(detail.settledCharge)} charged.`
                   : " — no figure quoted yet."}

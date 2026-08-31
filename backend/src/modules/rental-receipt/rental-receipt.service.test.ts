@@ -46,8 +46,9 @@ vi.mock("#modules/purchase-order/hireCustodyExit.repository.js", () => ({
   moveCustodyStateTx: vi.fn(async () => true),
   recomputeCountersTx: vi.fn(async () => ({ fieldDamageQty: 0, lostQuantity: 0 })),
   findById: vi.fn(),
-  settleOpenDamageAgainstNoteTx: vi.fn(async () => 0),
   openDamageQtyByLines: vi.fn(async () => new Map<string, number>()),
+  damageCapFiguresByLines: vi.fn(async () => new Map<string, { quarantinedNotTallied: number }>()),
+  damageCapFiguresByLinesTx: vi.fn(async () => new Map<string, { quarantinedNotTallied: number }>()),
   findByReceiptTx: vi.fn(async () => []),
   findBySourceTx: vi.fn(async () => []),
   CUSTODY_HELD_DAMAGED: "held_damaged",
@@ -62,6 +63,7 @@ import * as custodyExitRepo from "#modules/purchase-order/hireCustodyExit.reposi
 import * as poRepo from "#modules/purchase-order/purchase-order.repository.js";
 import { recomputeRentalReceiptStatus } from "#modules/purchase-order/purchase-order.service.js";
 import * as audit from "#modules/audit/audit.service.js";
+import { assertWarehouseAccess } from "../../lib/warehouse-access.js";
 import * as attachmentService from "#modules/attachment/attachment.service.js";
 import { emitAttentionChanged, emitToRoom } from "../../lib/realtime.js";
 import {
@@ -843,6 +845,274 @@ describe("damage is a count of UNITS, and both notes that record it share the co
     );
     const [, , updates] = createWithCode.mock.calls[0]!;
     expect(updates[0]!.data).toMatchObject({ damagedQuantity: 3 });
+  });
+});
+
+/**
+ * REPORT DAMAGE MEANS "MORE DAMAGE WAS FOUND". It has no second meaning, and that is the fix.
+ *
+ * A hire line is a COUNT. `HireCustodyExit` carries a quantity and no serial, and the supplier's asset
+ * tags live on the note as evidence text that nothing matches on. So "1 damaged" on a note and "1
+ * damaged" already open on the same line are the same number and two different facts, and the service
+ * used to read them as the same fault: it allocated the note against the open report, oldest first, and
+ * created no event when the quantity was covered.
+ *
+ * The cost was not cosmetic. A genuinely new broken unit produced ONE quarantine for TWO broken units
+ * — the second stayed issuable and went out to the next engineer — and the provider was told 1 instead
+ * of 2, with the new report's photograph and charge filed against the older fault.
+ *
+ * Damage already on file is now acted on through its OWN record, by id: charge it, decide nothing is
+ * owed, or withdraw the note behind it. This endpoint only ever adds. The double-quarantine guard it
+ * used to get from allocation it now gets from the cap, which subtracts every unit an open or dismissed
+ * report is holding — so the protection survives without the ambiguity that came with it.
+ *
+ * Every test here fails against the consume-first code.
+ */
+describe("reportHireDamage — new damage only", () => {
+  const onHire = (over: Record<string, unknown> = {}) =>
+    hire({ receivedQuantity: 3, fullyReceived: true, hireStatus: "on_hire", ...over });
+  const createExit = vi.mocked(custodyExitRepo.createExitTx);
+  const caps = vi.mocked(custodyExitRepo.damageCapFiguresByLines);
+  const capsInTx = vi.mocked(custodyExitRepo.damageCapFiguresByLinesTx);
+
+  /**
+   * `open` reports awaiting a note, plus `dismissed` ones still holding their unit — as BOTH reads see
+   * them. The two are separate mocks precisely so a test can make them disagree; see the race below.
+   */
+  const alreadyOnFile = (open: number, dismissed = 0) => {
+    const figures = new Map([[LINE_ID, { quarantinedNotTallied: open + dismissed }]]);
+    caps.mockResolvedValue(figures);
+    capsInTx.mockResolvedValue(figures);
+  };
+
+  const damage = (over: Record<string, unknown> = {}, line: Record<string, unknown> = {}) =>
+    ({
+      purchaseOrderId: PO_ID,
+      reportedDate: new Date("2026-08-31T00:00:00Z"),
+      conditionNotes: "Cracked casing found on the shelf.",
+      lines: [{ purchaseOrderRentalLineId: LINE_ID, damagedQuantity: 1, ...line }],
+      ...over,
+    }) as never;
+
+  /** Run the posting callback createWithCode was handed, so the custody writes actually happen. */
+  const post = async (call = 0) => {
+    const cb = createWithCode.mock.calls[call]![3];
+    await cb!(TX, RECEIPT_ID);
+  };
+
+  beforeEach(() => {
+    findPo.mockResolvedValue(po({ rentalItems: [onHire()] }));
+    createWithCode.mockResolvedValue(receiptRow({ code: "HDM-0014", direction: "damage", condition: "damaged" }));
+    caps.mockResolvedValue(new Map());
+    capsInTx.mockResolvedValue(new Map());
+  });
+
+  /**
+   * THE DOUBLE-QUARANTINE RACE, and why the cap is re-read inside the transaction.
+   *
+   * The preflight read shapes the form's refusal message. It cannot be the guard, because the figure it
+   * reads moves by a route none of the note's other guards watch: an engineer scanning a damaged return
+   * opens a `held_damaged` exit and deliberately leaves `damagedQuantity` alone, so the hire lines'
+   * optimistic `expect: { damagedQuantity }` sees nothing and lets the stale note through. Two writers,
+   * one physical unit, two quarantines.
+   *
+   * Both tests below drive the SAME endpoint. The only thing that changes is what the in-transaction
+   * read returns — which is exactly the concurrent scan landing in the window.
+   */
+  describe("a concurrent damage report landing mid-note", () => {
+    it("REFUSES the note, and writes nothing at all", async () => {
+      // 3 received, nothing on file when the form was built: the whole 3 look reportable.
+      alreadyOnFile(0);
+      // …but by the time the note's own transaction opens, an engineer's return has quarantined all 3.
+      capsInTx.mockResolvedValue(new Map([[LINE_ID, { quarantinedNotTallied: 3 }]]));
+
+      await reportHireDamage(damage({}, { damagedQuantity: 3 }), ACTOR);
+      // The refusal comes from INSIDE the posting callback, so it aborts the transaction that would
+      // otherwise have carried the receipt, its lines, the tally move and the custody rows.
+      await expect(post()).rejects.toThrow(/while you were filling this in/i);
+      expect(createExit).not.toHaveBeenCalled();
+      expect(vi.mocked(custodyExitRepo.moveSettlementStateTx)).not.toHaveBeenCalled();
+    });
+
+    it("still posts when the window closed on units it never claimed", async () => {
+      // 3 received, 1 newly quarantined behind us, and this note only claims 1 — 3 - 1 still leaves
+      // room. A guard that refused on ANY movement would block a legitimate note here.
+      alreadyOnFile(0);
+      capsInTx.mockResolvedValue(new Map([[LINE_ID, { quarantinedNotTallied: 1 }]]));
+
+      await reportHireDamage(damage({}, { damagedQuantity: 1 }), ACTOR);
+      await expect(post()).resolves.toBeUndefined();
+      expect(createExit).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ── IT ALWAYS CREATES A NEW EVENT ───────────────────────────────────────────────────────────────
+
+  it("creates its own event even when an open report stands on the same line", async () => {
+    alreadyOnFile(1);
+    await reportHireDamage(damage(), ACTOR);
+    await post();
+    expect(createExit).toHaveBeenCalledTimes(1);
+    expect(createExit.mock.calls[0]![1]).toMatchObject({ qty: 1, purchaseOrderRentalLineId: LINE_ID });
+  });
+
+  it("settles ONLY the event it just created — no older record is moved", async () => {
+    // THE BUG, DIRECTLY. The old code allocated against the open report first and created nothing when
+    // it covered the quantity. Now the one settlement this note performs is against its own new row,
+    // and nothing else on the hire is touched.
+    alreadyOnFile(1);
+    await reportHireDamage(damage(), ACTOR);
+    await post();
+    const move = vi.mocked(custodyExitRepo.moveSettlementStateTx);
+    expect(move).toHaveBeenCalledTimes(1);
+    expect(move.mock.calls[0]![1]).toBe("x1"); // the id createExitTx returned
+    expect(vi.mocked(custodyExitRepo.moveCustodyStateTx)).not.toHaveBeenCalled();
+  });
+
+  it("does not merge into the OLDEST of several open reports", async () => {
+    // Two distinct faults already on file — 26 Aug cracked casing, 29 Aug broken connector. A third
+    // fault reported here used to disappear into the 26 Aug one purely because it was first.
+    alreadyOnFile(2);
+    await reportHireDamage(damage(), ACTOR);
+    await post();
+    expect(createExit).toHaveBeenCalledTimes(1);
+    expect(createExit.mock.calls[0]![1]).toMatchObject({ qty: 1 });
+  });
+
+  it("ignores a crafted `scope` — the field is gone and cannot reopen the merging path", async () => {
+    // A legacy or hand-rolled client may still send it. The schema strips it and the service has no
+    // branch to reach, so the only possible outcome is a new event.
+    alreadyOnFile(1);
+    await reportHireDamage(damage({}, { scope: "existing" }), ACTOR);
+    await post();
+    expect(createExit).toHaveBeenCalledTimes(1);
+  });
+
+  it("cannot be made to settle another record by naming one", async () => {
+    alreadyOnFile(1);
+    await reportHireDamage(damage({}, { exitId: "f".repeat(24), settledByReceiptId: "e".repeat(24) }), ACTOR);
+    await post();
+    // The note settles only the event it just created, identified by the receipt the server minted.
+    expect(createExit).toHaveBeenCalledTimes(1);
+    expect(createExit.mock.calls[0]![1]).toMatchObject({ sourceId: RECEIPT_ID });
+  });
+
+  // ── TRACEABILITY ────────────────────────────────────────────────────────────────────────────────
+
+  it("gives the new event this report's OWN date and words", async () => {
+    alreadyOnFile(1);
+    await reportHireDamage(damage({ conditionNotes: "Second unit, snapped clip." }), ACTOR);
+    await post();
+    const written = createExit.mock.calls[0]![1] as unknown as { declaredAt: Date; reason: string };
+    expect(written.reason).toBe("Second unit, snapped clip.");
+    expect(written.declaredAt.toISOString()).toContain("2026-08-31");
+  });
+
+  it("counts the new event in the provider-facing tally without touching the open one", async () => {
+    // The open report advances the tally when IT is settled, on its own record. Two events, two units.
+    alreadyOnFile(1);
+    await reportHireDamage(damage(), ACTOR);
+    const [, , updates] = createWithCode.mock.calls[0]!;
+    expect(updates).toEqual([{ id: LINE_ID, expect: { damagedQuantity: 0 }, data: { damagedQuantity: 1 } }]);
+  });
+
+  // ── QUANTITY ────────────────────────────────────────────────────────────────────────────────────
+
+  it("refuses damage beyond what is genuinely unreported, instead of borrowing the open report", async () => {
+    // 3 received, 1 already tallied, 1 standing open → 1 unit left that nobody has reported.
+    findPo.mockResolvedValue(po({ rentalItems: [onHire({ damagedQuantity: 1 })] }));
+    alreadyOnFile(1);
+    await expect(reportHireDamage(damage({}, { damagedQuantity: 2 }), ACTOR)).rejects.toThrow(
+      /only 1 of the 3 with us is not already recorded as damaged/i,
+    );
+  });
+
+  it("says how much is on an existing report, so the other path is discoverable", async () => {
+    findPo.mockResolvedValue(po({ rentalItems: [onHire({ damagedQuantity: 1 })] }));
+    alreadyOnFile(1);
+    await expect(reportHireDamage(damage({}, { damagedQuantity: 2 }), ACTOR)).rejects.toThrow(
+      /1 is on an existing report/i,
+    );
+  });
+
+  it("cannot quarantine a unit an open report is already holding", async () => {
+    // One unit on hire, one open report about it. There is no second unit to be about, and the old
+    // code answered this case by silently merging.
+    findPo.mockResolvedValue(po({ rentalItems: [onHire({ receivedQuantity: 1 })] }));
+    alreadyOnFile(1);
+    await expect(reportHireDamage(damage(), ACTOR)).rejects.toThrow(
+      /already recorded as damaged — 1 of them on a report you can charge or dismiss/i,
+    );
+  });
+
+  it("cannot silently consume a DISMISSED report either", async () => {
+    // Dismissing drops the CLAIM, not the damage: the unit stays held_damaged and out of the pool.
+    findPo.mockResolvedValue(po({ rentalItems: [onHire({ receivedQuantity: 1 })] }));
+    alreadyOnFile(0, 1);
+    await expect(reportHireDamage(damage(), ACTOR)).rejects.toThrow(/already recorded as damaged/i);
+  });
+
+  it("still allows the units nobody has reported, beside both kinds of existing report", async () => {
+    // 3 received, 1 open, 1 dismissed → exactly 1 unit left, and it is reportable.
+    alreadyOnFile(1, 1);
+    await reportHireDamage(damage(), ACTOR);
+    await post();
+    expect(createExit).toHaveBeenCalledTimes(1);
+  });
+
+  // ── UNCHANGED GUARDS ────────────────────────────────────────────────────────────────────────────
+
+  it("still refuses a hire line that is not on the authorized order", async () => {
+    alreadyOnFile(1);
+    await expect(
+      reportHireDamage(damage({}, { purchaseOrderRentalLineId: "f".repeat(24) }), ACTOR),
+    ).rejects.toThrow(/not on this purchase order/i);
+  });
+
+  it("keeps the warehouse-access check", async () => {
+    const denied = new Error("nope");
+    vi.mocked(assertWarehouseAccess).mockImplementationOnce(() => {
+      throw denied;
+    });
+    await expect(reportHireDamage(damage(), ACTOR)).rejects.toThrow(denied);
+  });
+
+  it("keeps the hire lifecycle refusals", async () => {
+    findPo.mockResolvedValue(po({ rentalItems: [onHire({ hireStatus: "returned" })] }));
+    alreadyOnFile(1);
+    await expect(reportHireDamage(damage(), ACTOR)).rejects.toThrow(/gone back/i);
+  });
+
+  // ── AUDIT ───────────────────────────────────────────────────────────────────────────────────────
+
+  it("records one unambiguous business event in the trail", async () => {
+    alreadyOnFile(1);
+    await reportHireDamage(damage(), ACTOR);
+    const meta = vi.mocked(audit.record).mock.calls.at(-1)![0].metadata as unknown as {
+      changes: { label: string }[];
+    };
+    expect(meta.changes[0]!.label).toMatch(/newly found damaged/i);
+    // Settling an existing record is `rental_damage.charged` / `.dismissed`, each naming its own
+    // record. This action can no longer stand for either of them.
+    expect(meta.changes[0]!.label).not.toMatch(/settled/i);
+  });
+
+  it("reads the cap figures ONCE for the whole note, not once per line", async () => {
+    findPo.mockResolvedValue(
+      po({
+        rentalItems: [onHire(), hire({ id: LINE_2, receivedQuantity: 3, fullyReceived: true, hireStatus: "on_hire" })],
+      }),
+    );
+    await reportHireDamage(
+      damage({
+        lines: [
+          { purchaseOrderRentalLineId: LINE_ID, damagedQuantity: 1 },
+          { purchaseOrderRentalLineId: LINE_2, damagedQuantity: 1 },
+        ],
+      }),
+    );
+    expect(caps).toHaveBeenCalledTimes(1);
+    expect(caps.mock.calls[0]![0]).toEqual([LINE_ID, LINE_2]);
   });
 });
 
