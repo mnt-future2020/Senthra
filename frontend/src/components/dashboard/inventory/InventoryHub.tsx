@@ -15,7 +15,7 @@ import { RestoreDamagedDialog } from "./RestoreDamagedDialog";
 import { IrmPanel, IRM_TABS, type IrmTab } from "@/components/dashboard/irm/IrmPanel";
 import { RentalPanel, RENTAL_TABS, type RentalTab } from "@/components/dashboard/rentals/RentalPanel";
 import { TabCount } from "@/components/dashboard/shell/TabCount";
-import { AttentionBar } from "@/components/dashboard/shell/AttentionBar";
+import { AttentionMenu } from "@/components/dashboard/shell/AttentionMenu";
 import { ArrowRight, RotateCcw } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/hooks/useAuth";
@@ -197,8 +197,14 @@ export function InventoryHub() {
           ))}
         </div>
         {/* Outside the scroller: these are the page's alerts, and scrolling them out of sight is the
-            one thing they must never do. */}
-        <AttentionBar nav="/dashboard/inventory" className="flex shrink-0 flex-wrap items-center gap-1.5 pb-1.5" />
+            one thing they must never do.
+            One FIXED-WIDTH trigger, not the chip row that used to live here. As chips this was up to
+            four sentence-long pills taking their `shrink-0` width out of the tab strip beside them —
+            so the tabs, which are this page's primary navigation, were the thing that scrolled
+            instead. Folded, it costs ~150px and the lenses get their row back.
+            Hub-level on purpose: these queues belong to Inventory, not to whichever lens is open, so
+            they cannot live in a lens's own toolbar. */}
+        <AttentionMenu nav="/dashboard/inventory" className="mb-1.5 flex shrink-0 items-center gap-1.5" />
       </div>
 
       {/* IRM lens action bar — toggle on the left; Adjust (In stock) or catalogue sub-tabs (Catalogue) on the right */}

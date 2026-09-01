@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { clearedQuery, isChipActive } from "./attentionChip";
+import { clearedQuery, clearedQueryAll, isChipActive } from "./attentionChip";
 
 const url = (qs: string) => new URLSearchParams(qs);
 
@@ -58,5 +58,27 @@ describe("clearedQuery", () => {
 
   it("leaves the screen alone when the chip has no destination", () => {
     expect(clearedQuery(undefined, url("status=active&q=x"))).toBe("status=active&q=x");
+  });
+});
+
+describe("clearedQueryAll", () => {
+  it("removes the params of EVERY applied chip, leaving unrelated ones", () => {
+    expect(
+      clearedQueryAll(["/dashboard/jobs?status=overdue", "/dashboard/jobs?assignee=me"], url("status=overdue&assignee=me&q=acme")),
+    ).toBe("q=acme");
+  });
+
+  it("drops the page too, for the same reason clearedQuery does", () => {
+    expect(clearedQueryAll(["/dashboard/jobs?status=overdue"], url("status=overdue&page=4"))).toBe("");
+  });
+
+  // The trigger renders a Clear only when something is applied, but the function must not invent a
+  // change when handed nothing — clearing "no filters" has to be a no-op, not a reset.
+  it("leaves the screen alone when nothing is applied", () => {
+    expect(clearedQueryAll([], url("status=draft&q=x"))).toBe("status=draft&q=x");
+  });
+
+  it("ignores a chip with no destination", () => {
+    expect(clearedQueryAll([undefined], url("status=draft"))).toBe("status=draft");
   });
 });
