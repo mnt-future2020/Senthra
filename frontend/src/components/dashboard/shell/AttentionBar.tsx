@@ -12,12 +12,22 @@ import type { AttentionItem, AttentionTone } from "@/services/attention.service"
 // the warehouse table has no column that explains it. This bar is the answer — it names every queue
 // behind the number, shows each one's size, and opens it.
 //
-// Two modes, one component so wording, colours and arithmetic can never diverge between them:
-//   <AttentionBar />                              → every queue (the dashboard worklist strip)
-//   <AttentionBar nav="/dashboard/warehouses" />  → that sidebar row's queues (module page)
+// ── Which of the two to use ───────────────────────────────────────────────────────────────────
 //
-// In module mode the chips account for EXACTLY the badge on that row — same payload, same rollup — so
-// 30 is always traceable to the nine things that make it up.
+// This one is the WORKLIST-PANEL form: a full-width block with no controls competing for the row, so
+// every queue can be on screen at once. That is the dashboard's "Awaiting Your Action" panel, and it
+// is the only place it is used.
+//
+// LIST SCREENS use <AttentionMenu> instead — same payload, same queues, same URL rules, folded behind
+// one fixed-width trigger. A chip is a full sentence plus a number and a module can have ten of them:
+// an unbounded row of alerts inside a toolbar wrapped on Jobs and starved the tab strip on Inventory.
+// Don't reintroduce the bar there.
+//
+// It takes no props but `className`. It USED to accept `nav` and `keys` to narrow itself to one
+// sidebar row's queues or a hand-picked set — the two modes the list screens needed. Those screens
+// are the menu's now, and the panel wants every queue the actor has, so both went with them rather
+// than sitting here as options nothing selects. <AttentionMenu> carries them, and is where to add
+// another.
 //
 // "Account for", not "add up to": a chip declared as a SUBSET of another (`subsetOf` — "Critical
 // stock" is the urgent slice of "Items to reorder", never a separate five items of work) is already
@@ -56,31 +66,13 @@ const TONE_STATIC: Record<AttentionTone, string> = {
   info: "bg-[var(--accent)]/12 text-[var(--accent)]",
 };
 
-export function AttentionBar({
-  nav,
-  keys,
-  className,
-}: {
-  /** Limit to one sidebar row's queues. Omit for every queue the actor has. */
-  nav?: string;
-  /**
-   * Limit to specific catalog keys. For screens that own only PART of a nav row — the GRN list is
-   * one of nine queues rolled up under Warehouses, so showing the other eight there would be noise.
-   * Takes precedence over `nav`.
-   */
-  keys?: readonly string[];
-  className?: string;
-}) {
+export function AttentionBar({ className }: { className?: string }) {
   const { attention } = useAttention();
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
-  const items = keys
-    ? attention.items.filter((i) => keys.includes(i.key))
-    : nav
-      ? attention.items.filter((i) => i.nav === nav)
-      : attention.items;
+  const items = attention.items;
   if (items.length === 0) return null;
 
   // Server-sorted by tone then size, so the leftmost chip is the most urgent thing here.
@@ -105,9 +97,9 @@ export function AttentionBar({
       </span>
       {shown.map((item) => {
         const active = isActive(item);
-        // Named so the chip can say what it is a slice OF. Absent when the parent is filtered out of
-        // this bar (a `keys` subset that kept the child) — the tooltip degrades to the plain form
-        // rather than printing a key.
+        // Named so the chip can say what it is a slice OF. Looked up in `shown`, not `items`, so a
+        // child that survived the MAX_CHIPS cut while its parent did not degrades to the plain
+        // tooltip rather than printing a key nobody can see on screen.
         const parent = item.subsetOf ? shown.find((i) => i.key === item.subsetOf) : undefined;
         const subsetNote = parent ? ` — ${item.count} of the ${parent.count} in “${parent.label}”, not work on top of them` : "";
         const chip = (

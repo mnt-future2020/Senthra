@@ -15,7 +15,7 @@ import { Select } from "@/components/ui/Select";
 import { CELL_ONE_LINE, colClass, colClassAt, tableMinWidth, type ColPriority } from "@/components/ui/tableLayout";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
-import { AttentionBar } from "@/components/dashboard/shell/AttentionBar";
+import { AttentionMenu } from "@/components/dashboard/shell/AttentionMenu";
 import { HireStateBadge, PO_DERIVED_STATUS_OPTIONS, PO_PRIORITY_LABELS, PO_STATUS_LABELS, PoPriorityLabel, PoStatusBadge, formatDate, formatMoney } from "./poStatus";
 import { FilterPopover } from "@/components/ui/FilterPopover";
 import { DateRangeFilter } from "@/components/ui/DateRangeFilter";
@@ -322,12 +322,12 @@ export function PurchaseOrdersView() {
           layout's 20px flex gap on top of their own height. Not inlined into the filter row (as on
           Jobs) because this row carries up to six chips — enough to wrap the filters onto a second
           line, which would cost more than it saved. */}
-      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs">
-        <AttentionBar
-          nav="/dashboard/purchase-orders"
-          className="flex flex-wrap items-center gap-1.5 border-b border-[var(--border)] pb-3"
-        />
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+      {/* WRAPS, like the Jobs / PRF / GRN toolbars. This row carries the most controls in the app —
+          search, status, Awaiting my action, Filters, the attention trigger, two exports and New
+          order — and all but the search and the Select are `shrink-0`, so without a wrap they add up
+          to more than the content width of a 1024px laptop and push the row into overflow rather than
+          onto a second line. It was the only one of the five toolbars missing this. */}
+      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:flex-wrap sm:items-center">
         <div className="relative w-full sm:max-w-xs">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input
@@ -388,6 +388,13 @@ export function PurchaseOrdersView() {
             onChange={({ from, to }) => patchParams({ expectedFrom: from || null, expectedTo: to || null }, true)}
           />
         </FilterPopover>
+        {/* Breakdown of the sidebar's Purchase Orders badge — approvals, sends, supplier acceptances,
+            overdue deliveries and receipts ready to close. Folded behind ONE trigger, beside the other
+            folded control rather than in a chip row of its own above this card: as chips this list runs
+            to six sentence-long pills, which is why it could never be inlined here and had to pay a
+            whole band (chip row + rule + gap, ~60px) on a card that is already the tallest thing above
+            the table. Every one of them narrows THIS list, so it belongs with the filters. */}
+        <AttentionMenu nav="/dashboard/purchase-orders" />
         {/* Before "New order" and outside its ml-auto, so the primary action stays hard right. */}
         {can("purchase_orders.export") && (
           <>
@@ -414,7 +421,6 @@ export function PurchaseOrdersView() {
             <Plus className="h-4 w-4" /> New order
           </button>
         )}
-        </div>
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">

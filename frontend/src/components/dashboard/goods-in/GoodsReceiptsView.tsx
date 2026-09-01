@@ -18,7 +18,7 @@ import { listWarehouses } from "@/services/warehouse.service";
 import { CELL_ONE_LINE, colClass, colClassAt, tableMinWidth, type ColPriority } from "@/components/ui/tableLayout";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
-import { AttentionBar } from "@/components/dashboard/shell/AttentionBar";
+import { AttentionMenu } from "@/components/dashboard/shell/AttentionMenu";
 import { GRN_STATUS_LABELS, GrnStatusBadge, formatDate } from "./grnStatus";
 import { lineSummary } from "./acceptedWording";
 import type { GoodsReceipt, GrnStatus } from "@/types/goods-in";
@@ -316,10 +316,13 @@ export function GoodsReceiptsView({ warehouseId, warehouseCode, embedded }: { wa
             other warehouse queues belong to other screens entirely. Draft receipts are stock that has
             physically arrived but hasn't posted; deliveries-to-receive is what should become a GRN
             next. Both deep-link to a filtered list, so both stay clickable.
-            In the toolbar row rather than a block above it: two chips beside one Select leave the row
-            far from full, so they cost no vertical space at all here. Hidden when embedded in a
-            warehouse detail, which supplies its own context. */}
-        {!embedded && <AttentionBar keys={["wh.grn_drafts", "wh.goods_in_waiting"]} className="flex flex-wrap items-center gap-1.5" />}
+            Folded behind ONE trigger like every other list screen, even though only two queues land
+            here. Two chips are ~340px in a row that already carries search, a filter control, two
+            exports and the primary action — and more to the point, "needs attention" must look and
+            behave the same on every list in the product. A second presentation of one concept is how
+            this ended up with four different layouts in the first place.
+            Hidden when embedded in a warehouse detail, which supplies its own context. */}
+        {!embedded && <AttentionMenu keys={["wh.grn_drafts", "wh.goods_in_waiting"]} />}
         {/* Embedded in a warehouse, this is the Received (history) view — receiving lives in the
             sibling "Expected deliveries" worklist, so no create action here. The Global GRN page
             (not embedded) keeps its Receive delivery button. */}

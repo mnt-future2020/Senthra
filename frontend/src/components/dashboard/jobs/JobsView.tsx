@@ -23,7 +23,7 @@ import { Pagination } from "@/components/ui/Pagination";
 import { Select } from "@/components/ui/Select";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
-import { AttentionBar } from "@/components/dashboard/shell/AttentionBar";
+import { AttentionMenu } from "@/components/dashboard/shell/AttentionMenu";
 import { JOB_DERIVED_STATUS_OPTIONS, JOB_STATUS_LABELS, JOB_LINE_TYPE_LABELS, JOB_PRIORITIES, JOB_PRIORITY_LABELS, JobStatusChip, GoodsStatusChip, formatDate } from "./jobStatus";
 import { CELL_ONE_LINE, colClass, colClassAt, tableMinWidth, type ColPriority } from "@/components/ui/tableLayout";
 import type { Job, JobStatus } from "@/types/job";
@@ -344,11 +344,14 @@ export function JobsView() {
           />
         </FilterPopover>
         {/* Breakdown of the sidebar's Jobs badge — rejected jobs to reassign, overdue work, jobs
-            awaiting acceptance, kit requests to review. It sat in a row of its own above this card, costing a
-            chip row plus the flex gap for two chips; the toolbar's free space between the filters and
-            the New job button (which claims the rest with ml-auto) holds them at no vertical cost.
+            awaiting acceptance, kit requests to review. Folded behind ONE trigger.
+            As chips they were inlined here to avoid a row of their own, on the reasoning that the
+            toolbar's free space cost them nothing. It didn't hold: three sentence-long pills plus a
+            "NEEDS ATTENTION" label is ~600px, so on a 1024px laptop they wrapped anyway — paying the
+            second line the inlining was meant to save AND crowding the filters they wrapped beneath.
+            One fixed-width control fits the gap the original reasoning assumed.
             They belong here on the concept too: every one of them narrows THIS list. */}
-        <AttentionBar nav="/dashboard/jobs" className="flex flex-wrap items-center gap-1.5" />
+        <AttentionMenu nav="/dashboard/jobs" />
         {/* Before "New job" and outside its ml-auto, so the primary action stays hard right. */}
         {can("jobs.export") && (
           <ExportButton

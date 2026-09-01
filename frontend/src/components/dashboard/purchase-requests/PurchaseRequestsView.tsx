@@ -20,7 +20,7 @@ import { Select } from "@/components/ui/Select";
 import { CELL_ONE_LINE, colClass, colClassAt, tableMinWidth, type ColPriority } from "@/components/ui/tableLayout";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
-import { AttentionBar } from "@/components/dashboard/shell/AttentionBar";
+import { AttentionMenu } from "@/components/dashboard/shell/AttentionMenu";
 import { PRF_DERIVED_STATUS_OPTIONS, PRF_STATUS_LABELS, PrfStatusBadge, formatDate, formatMoney } from "./prfStatus";
 import type { PrfStatus, PurchaseRequest } from "@/types/purchase-request";
 import type { Supplier } from "@/types/supplier";
@@ -299,16 +299,11 @@ export function PurchaseRequestsView() {
           Generate-PO, or on rework after a rejection. Inside the toolbar card rather than a block of
           its own above it: these chips narrow this list exactly as the controls below do, and as a
           separate block they paid the layout's 20px flex gap on top of their own height. */}
-      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs">
-        <AttentionBar
-          nav="/dashboard/purchase-requests"
-          className="flex flex-wrap items-center gap-1.5 border-b border-[var(--border)] pb-3"
-        />
-        {/* Stacks only below `sm`, not below `lg`. At the old cutoff a 768px tablet got the PHONE
-            layout — seven full-width blocks, ~380px of a shrink-0 panel, before the first request
-            appeared. With the filters folded and the export labels collapsed there is easily room for
-            search + one filter chip + three buttons from 640px up. */}
-        <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
+      {/* Stacks only below `sm`, not below `lg`. At the old cutoff a 768px tablet got the PHONE
+          layout — seven full-width blocks, ~380px of a shrink-0 panel, before the first request
+          appeared. With the filters folded and the export labels collapsed there is easily room for
+          search + one filter chip + three buttons from 640px up. */}
+      <div className="flex shrink-0 flex-col gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xs sm:flex-row sm:flex-wrap sm:items-center">
         <div className="relative w-full sm:max-w-xs sm:flex-1">
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-[var(--faint)]" />
           <input
@@ -353,6 +348,12 @@ export function PurchaseRequestsView() {
             onChange={({ from, to }) => patchParams({ validFrom: from || null, validTo: to || null }, true)}
           />
         </FilterPopover>
+        {/* Breakdown of the sidebar's Purchase Requests badge — what is waiting on approval, on a
+            Generate-PO, or on rework after a rejection. Folded behind ONE trigger, beside the other
+            folded control rather than in a chip row of its own above this card: as chips they cost a
+            whole band (chip row + rule + gap) on the tallest thing above the table. Every one of them
+            narrows THIS list, so it belongs with the filters. */}
+        <AttentionMenu nav="/dashboard/purchase-requests" />
         {/* Before "New request" and outside its ml-auto, so the primary action stays hard right. */}
         {can("purchase_requests.export") && (
           <>
@@ -378,7 +379,6 @@ export function PurchaseRequestsView() {
             <Plus className="h-4 w-4" /> New request
           </button>
         )}
-        </div>
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">

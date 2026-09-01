@@ -40,3 +40,20 @@ export function clearedQuery(href: string | undefined, current: URLSearchParams)
   next.delete("page");
   return next.toString();
 }
+
+/**
+ * The same, for every queue applied at once — what the folded menu's "Clear" undoes.
+ *
+ * Two chips can in principle both be applied, and un-applying only the first would leave the list
+ * still narrowed by the second while the control claimed it had been cleared. Folding over
+ * `clearedQuery` rather than reimplementing it keeps the "only my own params, and `page`" rule in
+ * exactly one place.
+ *
+ * An empty list is a no-op: the menu offers Clear only when something is applied, and a function that
+ * quietly reset the screen when handed nothing would be a trap for the next caller.
+ */
+export function clearedQueryAll(hrefs: readonly (string | undefined)[], current: URLSearchParams): string {
+  return hrefs
+    .reduce((qs, href) => new URLSearchParams(clearedQuery(href, qs)), new URLSearchParams(current.toString()))
+    .toString();
+}
