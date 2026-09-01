@@ -47,8 +47,16 @@ export interface PrfItem {
   irmItem: { id: string; code: string; name: string; status: string } | null;
 }
 
+/**
+ * The two groups a purchase request keeps its documents in — the supplier's quotation package, and
+ * the supporting documents behind the request. Mirrors PRF_DOCUMENT_TYPES on the server.
+ */
+export type PrfDocumentType = "quote" | "other";
+
 export interface PrfAttachment {
   id: string;
+  /** Always one of the two — the server resolves a legacy row with no stored group to `quote`. */
+  documentType: PrfDocumentType;
   label: string | null;
   fileName: string;
   fileType: string;

@@ -5,11 +5,20 @@ import { useRouter } from "next/navigation";
 import { AlertTriangle, Eye, Loader2, Plus, Trash2 } from "lucide-react";
 
 import * as prfService from "@/services/purchase-request.service";
-import { listSuppliers } from "@/services/supplier.service";
+import { getSupplier, listSupplierOptions, type SupplierOption } from "@/services/supplier.service";
+import { withHistoricalOption } from "@/lib/historicalOption";
+import { supplierDetailNotice } from "@/lib/supplierPanel";
 import { listWarehouses } from "@/services/warehouse.service";
 import { listIrmItems } from "@/services/irm.service";
 import { listRentalItems } from "@/services/rental.service";
+import { RentalItemPicker } from "@/components/dashboard/rentals/RentalItemPicker";
+import { mergeById, missingIds } from "@/lib/cataloguePicker";
+import { useRentalItemsByIds } from "@/hooks/useRentalItemsByIds";
 import { packHint } from "./packHint";
+import { DOCUMENT_GROUPS, filesInGroup, removeDocument, type PrfDocumentGroup } from "./documentGroups";
+import { IrmItemPicker } from "@/components/dashboard/irm/IrmItemPicker";
+import { mergeIrmItems } from "@/components/dashboard/irm/irmItemPickerModel";
+import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
@@ -26,7 +35,7 @@ import { uploadDirect } from "@/lib/upload";
 import { FieldError, FormAsideCard, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import { Notice } from "@/components/ui/Notice";
 import { formatMoney } from "./prfStatus";
-import type { PurchaseRequest } from "@/types/purchase-request";
+import type { PrfDocumentType, PurchaseRequest } from "@/types/purchase-request";
 import type { Supplier } from "@/types/supplier";
 import type { Warehouse } from "@/types/warehouse";
 import type { IrmItem } from "@/types/irm";
@@ -64,12 +73,18 @@ const PRF_LIST = "/dashboard/purchase-requests";
 // the supplier's QUOTED price (£ in the form, pence on the wire).
 type LineRow = { _key: string; irmItemId: string; quantity: string; unitPrice: string; vatRate: string; notes: string };
 
-// A quote file selected on the CREATE form and held client-side (as a data URI) until the PRF
-// exists — the attachment API needs the new PRF's id, so we upload right AFTER create. On edit,
-// files go straight to the detail page's Attachments tab instead (the PRF already exists).
-// A quote file picked before the PRF exists. Holds the FILE, not a base64 copy of it: the upload
-// posts the file straight to Cloudinary, and the preview opens it as a blob — neither needs a string.
-type PendingFile = { _key: string; fileType: string; file: File };
+// A document selected on the CREATE form and held client-side until the PRF exists — the attachment
+// API needs the new PRF's id, so we upload right AFTER create. On edit, files go straight to the
+// detail page's Attachments tab instead (the PRF already exists).
+//
+// Holds the FILE, not a base64 copy of it: the upload posts the file straight to Cloudinary, and
+// the preview opens it as a blob — neither needs a string.
+//
+// `documentType` rides on the row rather than being inferred from which list it ended up in. It is
+// what the finalize call sends, so the group survives the trip in one piece: the two pickers are a
+// UI arrangement, and this is the fact.
+type PendingFile = { _key: string; documentType: PrfDocumentType; fileType: string; file: File };
+
 const ATTACH_EXT: Record<string, string> = { pdf: "pdf", docx: "docx", png: "png", jpg: "jpg", jpeg: "jpg" };
 const MAX_ATTACH_BYTES = 10 * 1024 * 1024;
 
@@ -89,6 +104,7 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
   const router = useRouter();
   const guard = useNavigationGuard();
   const { pushToast } = useDashboard();
+  const { can } = useAuth();
 
   const r = request;
   const [supplierId, setSupplierId] = React.useState(r?.supplierId ?? "");
@@ -118,7 +134,14 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
     return [blankLine()];
   });
 
-  const [suppliers, setSuppliers] = React.useState<Supplier[]>([]);
+  // The COMPLETE active set, lean. The one supplier the aside panel describes in full is fetched
+  // by id below — a paged list here hid every supplier past page 1 and, worse, rendered an
+  // already-saved one as "none selected".
+  const [suppliers, setSuppliers] = React.useState<SupplierOption[]>([]);
+  // The full record for the CHOSEN supplier only (contacts, payment terms). The request itself
+  // carries just a lean {id, code, name} reference, so on EDIT this is loaded once alongside the
+  // other reference data — one request, not a page of suppliers the form will never show.
+  const [supplierDetail, setSupplierDetail] = React.useState<Supplier | null>(null);
   const [warehouses, setWarehouses] = React.useState<Warehouse[]>([]);
   const [items, setItems] = React.useState<IrmItem[]>([]);
   const todayForNotice = React.useSyncExternalStore(subscribeNever, today, serverToday);
@@ -148,8 +171,11 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
         }))
       : [],
   );
-  // Quote files picked on the create form, held until the PRF exists (create only — on edit the
-  // detail page owns attachments).
+  // Documents picked on the create form, held until the PRF exists (create only — on edit the
+  // detail page owns attachments). ONE list, with each row carrying its own group: the sections
+  // read their own slice, and every add/remove is keyed, so touching one group cannot disturb the
+  // other — nor can it disturb the supplier, the lines, the quotation fields or anything else on
+  // the form, none of which this state is wired to.
   const [pendingFiles, setPendingFiles] = React.useState<PendingFile[]>([]);
   const [dirty, setDirty] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
@@ -165,7 +191,11 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
   const touch = () => setDirty(true);
 
   const { isLoading: refLoading } = useReferenceData([
-    { label: "suppliers", load: () => listSuppliers({ status: "active", pageSize: 100 }), onData: (s) => setSuppliers(s.suppliers) },
+    { label: "suppliers", load: listSupplierOptions, onData: (o: SupplierOption[]) => setSuppliers(o) },
+    // EDIT only: the panel and the payment-terms prefill describe the supplier already chosen.
+    ...(r?.supplierId
+      ? [{ label: "the supplier", load: () => getSupplier(r.supplierId), onData: (full: Supplier) => setSupplierDetail(full), onError: (err: unknown) => setSupplierNotice(supplierDetailNotice(err)) }]
+      : []),
     { label: "delivery warehouses", load: () => listWarehouses({ status: "active", pageSize: 100 }), onData: (w) => setWarehouses(w.warehouses) },
     { label: "the item catalogue", load: () => listIrmItems({ status: "active", pageSize: 100 }), onData: (i) => setItems(i.items) },
     { label: "the rental catalogue", load: () => listRentalItems({ status: "active", pageSize: 100 }), onData: (r) => setRentalItems(r.items) },
@@ -173,20 +203,62 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
 
   useReportDirty("prf-form", dirty && !saved);
 
-  const supplierPanel = suppliers.find((s) => s.id === supplierId) ?? r?.supplier ?? null;
+  // The panel describes the SELECTED supplier in full; the dropdown only needs id/code/name.
+  const supplierPanel = supplierDetail && supplierDetail.id === supplierId ? supplierDetail : null;
+  // Non-null when the SELECTED supplier's record could not be read — see supplierDetailNotice.
+  const [supplierNotice, setSupplierNotice] = React.useState<string | null>(null);
+  // Ticket for the supplier-detail fetch, so a slow answer for a supplier the user has moved on from
+  // cannot write that supplier's payment terms onto the one now chosen.
+  const supplierSeq = React.useRef(0);
+
+  /**
+   * A saved rental line can name an item outside the page loaded at mount, and unlike a PRF ITEM
+   * line the saved rental line carries no code — only `itemName` — so there is nothing to build a
+   * proper label from locally. Resolve them by id instead, all of them in ONE request: a request
+   * with several rental lines must not become several lookups. Until they land the picker is told
+   * it is loading, so a line that IS set never reads as empty.
+   */
+  const resolvingRentalItems = useRentalItemsByIds(
+    missingIds(rentalRows.map((row) => row.rentalItemId), rentalItems),
+    (found) => setRentalItems((prev) => mergeById(prev, found)),
+  );
 
   // Picking a supplier pre-fills the (still-empty) payment-terms field from that supplier's
   // default. Done in the event handler rather than an effect so a user's own edit is never
   // clobbered and we avoid a cascading render.
   const onPickSupplier = (id: string) => {
     setSupplierId(id);
-    if (!paymentTerms.trim()) {
-      const picked = suppliers.find((s) => s.id === id) ?? (id === r?.supplierId ? r?.supplier : null);
-      const resolved = resolveSupplierPaymentTerms(picked);
-      if (resolved) setPaymentTerms(resolved);
-    }
     touch();
     clearError("supplierId");
+    if (!id) {
+      // Bumped here too, so an in-flight answer cannot repopulate a panel the user has just cleared.
+      supplierSeq.current++;
+      setSupplierDetail(null);
+      setSupplierNotice(null);
+      return;
+    }
+    // ONE fetch for the supplier actually chosen — not a page of records the form will never show.
+    // The payment-terms prefill waits for it, and still never clobbers a value the user has typed.
+    //
+    // Every pick takes a ticket, and a stale answer is dropped. Two picks in quick succession are
+    // two requests in flight: the panel happens to be safe because it re-checks the id it holds, but
+    // the payment-terms prefill has no such check, so supplier A answering after B was chosen wrote
+    // A'S TERMS onto an order for B — a real commercial fact, silently wrong, on a field the user
+    // had every reason to trust.
+    const seq = ++supplierSeq.current;
+    void getSupplier(id).then(
+      (full) => {
+        if (seq !== supplierSeq.current) return;
+        setSupplierDetail(full);
+        setSupplierNotice(null);
+        setPaymentTerms((cur) => (cur.trim() ? cur : (resolveSupplierPaymentTerms(full) ?? cur)));
+      },
+      (err) => {
+        if (seq !== supplierSeq.current) return;
+        setSupplierDetail(null);
+        setSupplierNotice(supplierDetailNotice(err));
+      },
+    );
   };
 
   // Selected warehouse + its composed address, shown read-only so the requester can see
@@ -223,21 +295,26 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
     touch();
     clearError("items");
   };
-  const onPickItem = (idx: number, irmItemId: string) => {
-    const item = itemOptions.map.get(irmItemId);
+  // The picker hands back the WHOLE item rather than its id, and it is merged into `items` before
+  // the line is set. A search result — or an item just created from inside the picker — is not in
+  // the page loaded at mount, and the price prefill, the pack hint and the supplier's own item code
+  // all read from that list. Without the merge the row would select an item the form can't describe.
+  const onPickItem = (idx: number, item: IrmItem) => {
+    setItems((prev) => mergeIrmItems(prev, [item]));
     updateLine(idx, {
-      irmItemId,
-      unitPrice: item?.standardCost != null ? item.standardCost.toFixed(2) : "",
-      vatRate: item?.vatRatePercent != null ? String(item.vatRatePercent) : "20",
+      irmItemId: item.id,
+      unitPrice: item.standardCost != null ? item.standardCost.toFixed(2) : "",
+      vatRate: item.vatRatePercent != null ? String(item.vatRatePercent) : "20",
     });
   };
   const addLine = () => { setLineRows((rows) => [...rows, blankLine()]); touch(); };
   const removeLine = (idx: number) => { setLineRows((rows) => rows.filter((_, i) => i !== idx)); touch(); };
 
-  // Quote-file picker (create form). Validates type + size like the detail-page uploader, then
-  // holds the file as a data URI until the PRF is created. Same allowed types (pdf/docx/png/jpg)
-  // and 10 MB cap enforced by the backend attachment schema.
-  const onPickFile = (fileList: FileList | null) => {
+  // Document picker (create form). Validates type + size like the detail-page uploader, then holds
+  // the file until the PRF is created. Same allowed types (pdf/docx/png/jpg) and 10 MB cap the
+  // backend attachment schema enforces — BOTH groups run through this one function, so neither can
+  // drift to a laxer rule than the other.
+  const onPickFile = (documentType: PrfDocumentType, fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return;
     for (const rawFile of Array.from(fileList)) {
       const ext = rawFile.name.split(".").pop()?.toLowerCase() ?? "";
@@ -260,7 +337,7 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
             pushToast(`"${file.name}" is over 10 MB.`, "alert");
             return;
           }
-          setPendingFiles((prev) => [...prev, { _key: crypto.randomUUID(), fileType, file }]);
+          setPendingFiles((prev) => [...prev, { _key: crypto.randomUUID(), documentType, fileType, file }]);
           touch();
         } catch {
           pushToast(`Couldn't read "${rawFile.name}".`, "alert");
@@ -270,7 +347,9 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
       })();
     }
   };
-  const removePendingFile = (key: string) => { setPendingFiles((prev) => prev.filter((f) => f._key !== key)); touch(); };
+  // Removal is BY KEY, never by index into a rendered slice — that is what makes "remove one quote
+  // file" leave every other document, in either group, exactly where it was.
+  const removePendingFile = (key: string) => { setPendingFiles((prev) => removeDocument(prev, key)); touch(); };
   const viewPendingFile = (f: PendingFile) => {
     if (!viewFileInNewTab(f.file)) pushToast(`Couldn't preview "${f.file.name}".`, "alert");
   };
@@ -389,7 +468,7 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
       if (mode === "create") {
         const created = await prfService.createPurchaseRequest(buildPayload());
         setSaved(true);
-        // Upload any quote files the user attached BEFORE saving, now that the PRF exists. The PRF
+        // Upload any documents the user attached BEFORE saving, now that the PRF exists. The PRF
         // itself is already safely created — if a file fails to upload (e.g. Cloudinary hiccup) we
         // KEEP the PRF and just warn which file(s) to retry from the Attachments tab; the typed data
         // is never discarded over a transient file glitch. Uploaded sequentially so a mid-batch
@@ -402,7 +481,15 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
             // The SAME call the detail page makes. Straight to Cloudinary, then finalize attaches it
             // through the request's own service — one attach path for the module instead of two, and
             // the bytes no longer make a detour through our API as a base64 string 1.33× their size.
-            await uploadDirect({ purpose: "prf_attachment", file: f.file, targetId: created.id });
+            await uploadDirect({
+              purpose: "prf_attachment",
+              file: f.file,
+              targetId: created.id,
+              // The group the user picked it under, carried to the server rather than re-guessed
+              // there. The server re-validates it against its own enum — this is a claim, not a
+              // decision.
+              documentType: f.documentType,
+            });
           } catch {
             failed.push(f.file.name);
           }
@@ -459,13 +546,13 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className={labelCls}>Supplier<RequiredMark /></label>
-                <Select value={supplierId} onChange={onPickSupplier} options={suppliers.map((s) => ({ value: s.id, label: `${s.name} (${s.code})` }))} placeholder={refLoading && !supplierId ? "Loading suppliers…" : "— Select a supplier —"} disabled={refLoading && !supplierId} ariaLabel="Supplier" invalid={Boolean(errors.supplierId)} />
+                <Select value={supplierId} onChange={onPickSupplier} options={withHistoricalOption(suppliers.map((s) => ({ value: s.id, label: `${s.name} (${s.code})` })), supplierId, r?.supplier?.name)} placeholder={refLoading && !supplierId ? "Loading suppliers…" : "— Select a supplier —"} disabled={refLoading && !supplierId} ariaLabel="Supplier" invalid={Boolean(errors.supplierId)} />
                 <FieldError id="err-supplierId" message={errors.supplierId} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">The supplier this quotation came from.</p>
               </div>
               <div>
                 <label className={labelCls}>Delivery warehouse<RequiredMark /></label>
-                <Select value={warehouseId} onChange={(v) => { setWarehouseId(v); touch(); clearError("warehouseId"); }} options={warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})${w.isDefault ? " — default" : ""}` }))} placeholder={refLoading && !warehouseId ? "Loading warehouses…" : "— Select a warehouse —"} disabled={refLoading && !warehouseId} ariaLabel="Delivery warehouse" invalid={Boolean(errors.warehouseId)} />
+                <Select value={warehouseId} onChange={(v) => { setWarehouseId(v); touch(); clearError("warehouseId"); }} options={withHistoricalOption(warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})${w.isDefault ? " — default" : ""}` })), warehouseId, r?.warehouse?.name)} placeholder={refLoading && !warehouseId ? "Loading warehouses…" : "— Select a warehouse —"} disabled={refLoading && !warehouseId} ariaLabel="Delivery warehouse" invalid={Boolean(errors.warehouseId)} />
                 <FieldError id="err-warehouseId" message={errors.warehouseId} />
                 <p className="mt-1.5 text-[11px] text-[var(--faint)]">Where the goods would be delivered once ordered.</p>
               </div>
@@ -498,8 +585,8 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
             title="Quotation"
             description={
               mode === "create"
-                ? "Details of the supplier's quote this request is based on. Attach the quote document below — it uploads when you create the draft."
-                : "Details of the supplier's quote this request is based on. The quote document is managed from the Attachments tab."
+                ? "Details of the supplier's quote this request is based on."
+                : "Details of the supplier's quote this request is based on. Documents are managed from the Attachments tab."
             }
           >
             <div className="grid gap-4 sm:grid-cols-3">
@@ -517,40 +604,54 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
                 <FieldError id="err-quoteValidUntil" message={errors.quoteValidUntil} />
               </div>
             </div>
-            {/* Quote-document attach — CREATE only. On edit the detail page's Attachments tab owns files. */}
-            {mode === "create" && (
-              <div className="mt-4">
-                <label className={labelCls}>Quote document(s)</label>
-                <div className="flex flex-wrap items-center gap-2">
-                  <label className={`${ghostBtn} cursor-pointer`}>
-                    <input type="file" accept=".pdf,.docx,.png,.jpg,.jpeg" multiple className="hidden" onChange={(e) => { onPickFile(e.target.files); e.target.value = ""; }} />
-                    Choose file(s)
-                  </label>
-                  <span className="text-[11px] text-[var(--faint)]">PDF, DOCX, PNG or JPG · max 10 MB each</span>
-                </div>
-                {pendingFiles.length > 0 && (
-                  <ul className="mt-3 space-y-2">
-                    {pendingFiles.map((f) => (
-                      <li key={f._key} className="flex items-center justify-between rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/40 px-3 py-2">
-                        <span className="min-w-0 truncate text-sm text-[var(--ink)]">
-                          {f.file.name} <span className="text-[11px] text-[var(--faint)]">· {f.fileType.toUpperCase()} · {(f.file.size / 1024).toFixed(0)} KB</span>
-                        </span>
-                        <span className="ml-3 flex shrink-0 items-center gap-3">
-                          {/* Preview the picked file before it's saved — opens in a new tab via a blob: URL. */}
-                          <button type="button" onClick={() => viewPendingFile(f)} className="inline-flex items-center gap-1 text-xs font-bold text-[var(--accent)] hover:underline" aria-label={`View ${f.file.name}`}>
-                            <Eye className="h-3.5 w-3.5" /> View
-                          </button>
-                          <button type="button" onClick={() => removePendingFile(f._key)} className="text-[var(--muted)] hover:text-[var(--neg)]" aria-label={`Remove ${f.file.name}`}>
-                            <Trash2 className="h-4 w-4" />
-                          </button>
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            )}
           </FormSection>
+
+          {/* Both groups in ONE section, side by side — and the pairing is the point twice over.
+              Visually: two pickers stacked in full-width rows spent 295px of height on controls that
+              need about a third of the row's width, on a form that is already long. Side by side
+              they cost one section instead of two and leave the quotation card as just the quote
+              figures.
+
+              Editorially: a reviewer has to tell the supplier's PRICE from the EVIDENCE behind the
+              ask, and putting the two side by side states that they are peers — two kinds of
+              paperwork on one request — where stacking them under the quotation implied the second
+              was a footnote to the first. Neither is hidden behind a toggle: both areas, and
+              whatever is already in them, stay on screen at once.
+
+              The description says only what the two group labels cannot: the file rule (identical for
+              both, so stating it per-column was the same sentence twice), and when the files actually
+              leave the browser. That the groups are kept apart is shown by the layout — writing it
+              out as well is a caption on a picture of itself.
+
+              CREATE only. On edit the detail page's Attachments tab owns every file. */}
+          {mode === "create" && (
+            <FormSection
+              title="Documents"
+              description="PDF, DOCX, PNG or JPG · max 10 MB each. Both upload when you create the draft."
+            >
+              {/* `xl`, not `md`, and the difference is not taste. This form sits beside the financial
+                  summary aside, so the column these two share is far narrower than the viewport: at a
+                  1024px window it is ~450px, which splits into two 190px columns — narrow enough that
+                  a real filename wraps to eight lines and the "compact" two-column layout ends up
+                  TALLER than simply stacking. Splitting at `xl` gives each group ~460px, which is
+                  where the pairing actually pays. Below that they stack full-width, which is also
+                  what every phone and tablet gets.
+
+                  `items-start` so a group with three files picked does not stretch the empty one. */}
+              <div className="grid items-start gap-x-6 gap-y-6 xl:grid-cols-2">
+                {DOCUMENT_GROUPS.map((g) => (
+                  <DocumentGroupPicker
+                    key={g.type}
+                    group={g}
+                    files={filesInGroup(pendingFiles, g.type)}
+                    onPick={onPickFile}
+                    onRemove={removePendingFile}
+                    onView={viewPendingFile}
+                  />
+                ))}
+              </div>
+            </FormSection>
+          )}
 
           <FormSection title="Terms" description="Commercial terms for this request. These carry onto the generated purchase order.">
             <div className="grid gap-4 sm:grid-cols-2">
@@ -566,6 +667,18 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
               </div>
             </div>
           </FormSection>
+
+          {/* The panel could not be loaded — say so, rather than rendering exactly like "no supplier
+              chosen". `/suppliers/options` is wider than `suppliers.view`, so a purchaser can pick a
+              supplier and then be refused this follow-up read; silence left them believing the
+              supplier simply had no details or terms on file. */}
+          {!supplierPanel && supplierNotice && supplierId && (
+            <FormSection title="Supplier information" description="Read-only — pulled from the supplier record.">
+              <p className="rounded-xl border border-dashed border-[var(--border)] px-3 py-4 text-xs text-[var(--muted)]">
+                {supplierNotice}
+              </p>
+            </FormSection>
+          )}
 
           {supplierPanel && (
             <FormSection title="Supplier information" description="Read-only — pulled from the supplier record.">
@@ -587,6 +700,13 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
                 // Surface the selected supplier's own code for this item (read-only). Lookup is
                 // local — the item list already carries each item's supplier links + codes.
                 const pickedItem = row.irmItemId ? itemOptions.map.get(row.irmItemId) : undefined;
+                // On EDIT, a saved line's item may sit outside the page loaded at mount, leaving
+                // `pickedItem` undefined — which used to render as an empty picker on a line that
+                // is in fact set, inviting someone to "fix" it by re-picking. The request carries
+                // its own name + code for exactly this, so fall back to that for the label.
+                const savedItemRef = !pickedItem && row.irmItemId
+                  ? (r?.items.find((i) => i.irmItemId === row.irmItemId)?.irmItem ?? null)
+                  : null;
                 const supplierLink = pickedItem && supplierId ? pickedItem.suppliers.find((s) => s.supplierId === supplierId) : undefined;
                 const hint = packHint(pickedItem?.packSize ?? null, row.quantity);
                 return (
@@ -594,7 +714,18 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
                     <div className="space-y-3">
                       <div className="min-w-0">
                         <label className={labelCls}>Item</label>
-                        <Select value={row.irmItemId} onChange={(v) => onPickItem(idx, v)} options={itemOptions.list.map((i) => ({ value: i.id, label: `${i.name} (${i.code})` }))} placeholder={refLoading && !row.irmItemId ? "Loading items…" : "— Select an item —"} disabled={refLoading && !row.irmItemId} ariaLabel="Item" />
+                        <IrmItemPicker
+                          value={row.irmItemId}
+                          selectedItem={pickedItem ?? savedItemRef}
+                          seed={itemOptions.list}
+                          onSelect={(item) => onPickItem(idx, item)}
+                          canCreate={can("irm.create")}
+                          // This request is built on one supplier's quote, so a new item created
+                          // from here is almost certainly bought from them — pre-select it.
+                          defaultSupplierId={supplierId}
+                          disabled={refLoading && !row.irmItemId}
+                          loading={refLoading}
+                        />
                         {pickedItem && supplierId && supplierLink?.supplierSku && (
                           <p className="mt-1.5 text-[11px] text-[var(--muted)]">Supplier item code: <span className="font-mono text-[var(--ink)]">{supplierLink.supplierSku}</span></p>
                         )}
@@ -677,14 +808,20 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
                     <div className="grid grid-cols-1 gap-3 @sm:grid-cols-2 @xl:grid-cols-4 @3xl:grid-cols-12">
                       <div className="min-w-0 @sm:col-span-2 @xl:col-span-4 @3xl:col-span-4">
                         <label className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-[var(--faint)]">Rental item</label>
-                        <Select
+                        <RentalItemPicker
                           value={row.rentalItemId}
+                          selectedItem={picked ?? null}
+                          seed={rentalItems}
                           // No price is prefilled: the catalogue holds none. What a hire costs is
                           // agreed for THIS request, so it is typed in below alongside the period.
-                          onChange={(v) => setRow({ rentalItemId: v })}
-                          options={rentalItems.map((r) => ({ value: r.id, label: `${r.name} (${r.code})` }))}
-                          placeholder="— Select a rental item —"
-                          ariaLabel="Rental item"
+                          // Only the id changes here — quantity, dates, basis, rate and VAT on this
+                          // row are deliberately left exactly as the user set them.
+                          onSelect={(item) => {
+                            setRentalItems((prev) => mergeById(prev, [item]));
+                            setRow({ rentalItemId: item.id });
+                          }}
+                          canCreate={can("rentals.create")}
+                          loading={refLoading || resolvingRentalItems}
                           // The item is the field most likely to be the mistake — the same kit picked
                           // twice — and marking it points at the row to delete rather than at the row
                           // it collides with.
@@ -992,5 +1129,80 @@ export function PurchaseRequestForm({ mode, request }: { mode: "create" | "edit"
         </aside>
       </div>
     </form>
+  );
+}
+
+
+/**
+ * One document group's picker and its selected files.
+ *
+ * Both groups render through this, which is the point: the accepted types, the size hint, the
+ * remove control and the keyboard/screen-reader wiring are written once, so "other documents"
+ * cannot end up a second-class copy of the quote picker.
+ *
+ * Accessibility: the visible group label is tied to the file input by `id`/`htmlFor` (the input is
+ * visually hidden, not `display:none`, so it stays focusable and the label is announced with it),
+ * the helper text is referenced with `aria-describedby`, and the selected list is a labelled region
+ * — so the two groups are told apart by name, never by position or colour alone.
+ */
+function DocumentGroupPicker({
+  group,
+  files,
+  onPick,
+  onRemove,
+  onView,
+}: {
+  group: PrfDocumentGroup;
+  files: PendingFile[];
+  onPick: (documentType: PrfDocumentType, fileList: FileList | null) => void;
+  onRemove: (key: string) => void;
+  onView: (f: PendingFile) => void;
+}) {
+  const inputId = `prf-docs-${group.type}`;
+  const helpId = `${inputId}-help`;
+  return (
+    <div>
+      <label className={labelCls} htmlFor={inputId}>{group.formLabel}</label>
+      <div className="flex flex-wrap items-center gap-2">
+        {/* `sr-only` rather than `hidden`: a hidden input is unreachable by keyboard, which would
+            leave the only way to add a document a mouse click on its label. */}
+        <input
+          id={inputId}
+          type="file"
+          accept=".pdf,.docx,.png,.jpg,.jpeg"
+          multiple
+          aria-describedby={helpId}
+          className="sr-only"
+          onChange={(e) => { onPick(group.type, e.target.files); e.target.value = ""; }}
+        />
+        <label htmlFor={inputId} className={`${ghostBtn} cursor-pointer`}>Choose file(s)</label>
+      </div>
+      <p id={helpId} className="mt-1.5 text-[11px] text-[var(--faint)]">{group.help}</p>
+      {files.length > 0 && (
+        <ul className="mt-3 space-y-2" aria-label={`${group.formLabel} selected`}>
+          {files.map((f) => (
+            <li key={f._key} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-2)]/40 px-3 py-2">
+              {/* `min-w-0` + `break-words` on the name: a long filename must wrap inside the row
+                  rather than widen it, which on a 360px screen would scroll the whole page — but it
+                  wraps at the breaks the name already offers (its hyphens) instead of mid-word.
+                  `break-all` did the latter, turning one readable name into "supplier-qu /
+                  otation-revi / sion-3-final", which is a filename nobody can check at a glance. */}
+              <span className="min-w-0 flex-1 break-words text-sm text-[var(--ink)]">
+                {f.file.name} <span className="text-[11px] text-[var(--faint)]">· {f.fileType.toUpperCase()} · {(f.file.size / 1024).toFixed(0)} KB</span>
+              </span>
+              <span className="flex shrink-0 items-center gap-3">
+                {/* Preview the picked file before it's saved — opens in a new tab via a blob: URL. */}
+                <button type="button" onClick={() => onView(f)} className="inline-flex items-center gap-1 text-xs font-bold text-[var(--accent)] hover:underline" aria-label={`View ${f.file.name}`}>
+                  <Eye className="h-3.5 w-3.5" /> View
+                </button>
+                <button type="button" onClick={() => onRemove(f._key)} className="text-[var(--muted)] hover:text-[var(--neg)]" aria-label={`Remove ${f.file.name} from ${group.formLabel}`}>
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }

@@ -7,6 +7,12 @@ import type { IrmItem, IrmStatus } from "@/types/irm";
 
 export interface IrmListParams {
   search?: string;
+  /**
+   * Resolve exactly these ids in ONE request — narrowing only, and the way to load an
+   * already-selected item that the current search or first page does not contain. Server-side it is
+   * ANDed with every other filter, so it can never widen what the caller is allowed to see.
+   */
+  ids?: string[];
   status?: string;
   type?: string;
   category?: string;
@@ -54,14 +60,13 @@ export interface IrmItemPayload {
   currency?: string;
   vatRatePercent?: number | string;
   trackInventory?: boolean;
-  trackSerialNumbers?: boolean;
-  trackBatchNumbers?: boolean;
   notes?: string;
 }
 
 function qs(params: IrmListParams): string {
   const sp = new URLSearchParams();
   if (params.search) sp.set("search", params.search);
+  if (params.ids?.length) sp.set("ids", params.ids.join(","));
   if (params.status) sp.set("status", params.status);
   if (params.type) sp.set("type", params.type);
   if (params.category) sp.set("category", params.category);

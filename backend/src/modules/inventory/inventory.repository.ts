@@ -27,8 +27,6 @@ const irmItemSelect = {
   packSize: true,
   standardCostPence: true,
   currency: true,
-  trackSerialNumbers: true,
-  trackBatchNumbers: true,
   trackInventory: true,
   irmCategory: { select: { id: true, name: true } },
 } satisfies Prisma.IrmItemSelect;
@@ -118,7 +116,7 @@ export function findInStockBalancesByWarehouse(warehouseId: string, take: number
     // Exclude serial/batch-tracked items IN THE QUERY (not just in the caller) so `take` applies AFTER
     // they're filtered out — otherwise a warehouse whose most-recent balances are serial/batch could
     // return a short/empty browse list even with plenty of issuable non-serial stock on the shelf.
-    where: { warehouseId, quantityOnHand: { gt: 0 }, irmItem: { is: { deletedAt: null, status: "active", trackSerialNumbers: false, trackBatchNumbers: false } } },
+    where: { warehouseId, quantityOnHand: { gt: 0 }, irmItem: { is: { deletedAt: null, status: "active" } } },
     include: withBalanceRelations,
     orderBy: { updatedAt: "desc" },
     take,

@@ -1,4 +1,5 @@
 import { api } from "./api";
+import type { PrfDocumentType } from "@/types/purchase-request";
 import { shrinkImage } from "./image";
 
 // ── Direct browser upload ──────────────────────────────────────────────────────────────────────
@@ -88,6 +89,18 @@ export interface UploadOptions {
   /** The record this attaches to, for purposes that attach rather than stage in a form. */
   targetId?: string;
   label?: string;
+  /**
+   * Which document group a purchase-request attachment joins — "quote" or "other".
+   *
+   * Sent only at FINALIZE. The signature has no use for it: what it authorises is an upload of a
+   * given size, type and folder, none of which the group changes. Sending it there too would put a
+   * value in the signed payload that nothing checks, which reads as a guarantee it isn't.
+   *
+   * Ignored by every other purpose, and validated as an enum on the server — the two upload areas
+   * on screen are not what makes the category true. Typed rather than left as `string` so a typo is
+   * a build failure here instead of a 400 the user discovers after the file has already uploaded.
+   */
+  documentType?: PrfDocumentType;
   /** 0–100. Real progress, which the old base64 round trip could not report. */
   onProgress?: (percent: number) => void;
   /**
@@ -213,6 +226,7 @@ export async function uploadDirect(opts: UploadOptions): Promise<UploadResult> {
       // whose resource type disagrees with the one the signature was minted for.
       mediaType: mediaTypeFor(file),
       ...(opts.label ? { label: opts.label } : {}),
+      ...(opts.documentType ? { documentType: opts.documentType } : {}),
       ...(opts.targetId ? { targetId: opts.targetId } : {}),
     },
   });

@@ -180,8 +180,6 @@ function Overview({ grn }: { grn: GoodsReceipt }) {
                   <td className="cell-y px-4">
                     <div className="font-semibold text-[var(--ink)]">{i.itemName}</div>
                     {i.sku && <div className="text-[11px] text-[var(--faint)]">{i.sku}</div>}
-                    {i.serials.length > 0 && <div className="mt-1 text-[11px] text-[var(--muted)]">Serials: {i.serials.map((s) => s.serialNumber).join(", ")}</div>}
-                    {i.batches.length > 0 && <div className="mt-1 text-[11px] text-[var(--muted)]">Batches: {i.batches.map((b) => `${b.batchNumber} (${b.quantity}${b.expiryDate ? `, exp ${formatDate(b.expiryDate)}` : ""})`).join("; ")}</div>}
                     {i.notes && <div className="mt-1 text-[11px] italic text-[var(--faint)]">{i.notes}</div>}
                   </td>
                   <td className="cell-y px-4 text-[var(--muted)]">{i.orderedQuantity}</td>

@@ -43,7 +43,12 @@ import type {
   UpdatePurchaseRequestInput,
 } from "./purchase-request.validation.js";
 import { incotermLabel } from "#modules/purchase-order/purchase-order.validation.js";
-import { PRF_ATTACHMENT_MAX_COUNT, PRF_ATTACHMENT_MAX_TOTAL_BYTES } from "./purchase-request.validation.js";
+import {
+  PRF_ATTACHMENT_MAX_COUNT,
+  PRF_ATTACHMENT_MAX_TOTAL_BYTES,
+  normalisePrfDocumentType,
+  type PrfDocumentType,
+} from "./purchase-request.validation.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 
@@ -133,6 +138,12 @@ export interface PublicPrfRentalLine {
 }
 export interface PublicPrfAttachment {
   id: string;
+  /**
+   * Which of the two document groups this file belongs to. ALWAYS one of the two — a legacy row
+   * with no stored value reads as `quote`, which is what it is (see normalisePrfDocumentType), so
+   * no consumer has to know that the column is nullable or decide what null means for itself.
+   */
+  documentType: PrfDocumentType;
   label: string | null;
   fileName: string;
   fileType: string;
@@ -340,6 +351,7 @@ function toPublic(prf: PurchaseRequestWithRelations): PublicPurchaseRequest {
     })),
     attachments: prf.attachments.map((a) => ({
       id: a.id,
+      documentType: normalisePrfDocumentType(a.documentType),
       label: a.label,
       fileName: a.fileName,
       fileType: a.fileType,
@@ -1126,6 +1138,18 @@ export async function convertPurchaseRequest(id: string, actor?: AuditActor): Pr
           // "carries every attachment field the PRF row holds onto the PO row", in
           // purchase-request.service.test.ts.
           live.attachments.map((a) => ({
+            // Carried so the order shows the buyer the same two groups the reviewer approved —
+            // dropping it would flatten a quotation package and its supporting evidence into one
+            // undifferentiated list the moment the PO exists.
+            //
+            // NORMALISED here, and this is the one place it must be. On a purchase request an
+            // absent group means `quote`; on a purchase order it means "uncategorised", because an
+            // order's own uploads have no group picker. Copying the raw column across would carry a
+            // LEGACY request's quote document — which the request itself displays under Quotation —
+            // onto the order wearing no label at all, so the same file would answer the same
+            // question differently on the two screens. The row is known to come from a request at
+            // exactly this point, and nowhere downstream, which is what makes this the boundary.
+            documentType: normalisePrfDocumentType(a.documentType),
             label: a.label,
             fileName: a.fileName,
             fileType: a.fileType,
@@ -1468,6 +1492,12 @@ export async function assertCanAttach(prfId: string, fileSizeBytes: number, acto
 
 /** One already-stored asset, recorded against this request. */
 export interface AttachAssetInput {
+  /**
+   * Which group the uploader put this file in. Optional, and an absent value stores `quote` — the
+   * group every attachment belonged to before there were two, and the one a caller with no picker
+   * (the older upload path) still means.
+   */
+  documentType?: string | null;
   label?: string | null;
   fileName: string;
   fileType: string;
@@ -1496,9 +1526,14 @@ export async function attachUploadedAsset(
 ): Promise<PublicPurchaseRequest> {
   const prf = await loadOrThrow(prfId, actor);
   await assertCanAttach(prfId, input.fileSizeBytes, actor);
+  const documentType = normalisePrfDocumentType(input.documentType);
   await prfRepo.addAttachment(
     {
       purchaseRequestId: prfId,
+      // Written EXPLICITLY, always — including the `quote` that an absent input resolves to. The
+      // nullable column exists for rows that predate the second group, not as a place for new ones
+      // to land: a row this code wrote and left blank would be indistinguishable from one of those.
+      documentType,
       label: trimToNull(input.label),
       fileName: input.fileName.trim(),
       fileType: input.fileType,
@@ -1515,7 +1550,7 @@ export async function attachUploadedAsset(
   // conflict, a failed pending-row delete) would leave an "attachment_added" entry describing an
   // attachment that no longer exists. The transactional caller records it after the commit instead;
   // the event itself is still defined once, in `recordAttachmentAudit` below.
-  if (!tx) recordAttachmentAudit(prf, actor);
+  if (!tx) recordAttachmentAudit(prf, actor, documentType);
   return getPurchaseRequest(prfId, actor);
 }
 
@@ -1526,8 +1561,29 @@ export async function attachUploadedAsset(
  * restating the action key, target type or label — the drift this module's single-write-point design
  * exists to prevent.
  */
-export function recordAttachmentAudit(prf: { id: string; code: string }, actor?: AuditActor): void {
-  audit.record({ actor, action: "purchase_request.attachment_added", targetType: "purchase_request", targetId: prf.id, targetLabel: prf.code });
+export function recordAttachmentAudit(prf: { id: string; code: string }, actor?: AuditActor, documentType?: string | null): void {
+  // The action key is unchanged — an existing trail, and any saved filter over it, keeps working —
+  // and WHICH group the file joined rides in `metadata`, the same channel every other enriched event
+  // in this module uses. A second action key per group would have split one event in two for a
+  // distinction that is an attribute of it.
+  //
+  // Takes the RAW value and normalises here rather than demanding a resolved `PrfDocumentType`, and
+  // that is deliberate: the caller that matters is the direct-upload finalize, which fires this
+  // AFTER its transaction has committed and therefore holds only the string the browser sent. Asking
+  // it for a resolved type would have meant either a cast or a second interpreter of "absent means
+  // quote" — and the version of this that took `PrfDocumentType | undefined` simply got passed
+  // nothing, so every real upload recorded no group at all.
+  //
+  // Always recorded, never conditional. Every PRF attachment belongs to a group, so an entry without
+  // one would read as "the group is unknown" when it is in fact known to be `quote`.
+  audit.record({
+    actor,
+    action: "purchase_request.attachment_added",
+    targetType: "purchase_request",
+    targetId: prf.id,
+    targetLabel: prf.code,
+    metadata: { documentType: normalisePrfDocumentType(documentType) },
+  });
 }
 
 export async function removeAttachment(prfId: string, attachmentId: string, actor?: AuditActor): Promise<PublicPurchaseRequest> {
@@ -1536,7 +1592,16 @@ export async function removeAttachment(prfId: string, attachmentId: string, acto
   const att = await prfRepo.findAttachment(attachmentId);
   if (!att || att.purchaseRequestId !== prfId) throw notFound("Attachment not found.");
   await prfRepo.removeAttachment(attachmentId);
-  audit.record({ actor, action: "purchase_request.attachment_removed", targetType: "purchase_request", targetId: prfId, targetLabel: prf.code });
+  audit.record({
+    actor,
+    action: "purchase_request.attachment_removed",
+    targetType: "purchase_request",
+    targetId: prfId,
+    targetLabel: prf.code,
+    // Read off the row BEFORE it was deleted — after this point nothing can say which group the
+    // file was in, which is precisely when the trail is asked.
+    metadata: { documentType: normalisePrfDocumentType(att.documentType), fileName: att.fileName },
+  });
 
   // ── Cleanup, and the one race releaseAsset's reference count cannot see ──────────────────────
   //

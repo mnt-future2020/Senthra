@@ -17,6 +17,7 @@ import { paginate } from "../../utils/pagination.js";
 import { EXPORT_MAX, EXPORT_PAGING, toCsv } from "../../utils/csv.js";
 import type { CreateIrmItemInput, SupplierRowInput, UpdateIrmItemInput } from "./irm.validation.js";
 import { buildSkuCandidate, normalizeSku, withSuffix } from "./sku.js";
+import { roleGrants } from "#modules/role/permissions.js";
 
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 // How many times a GENERATED SKU is re-derived after losing a race to the unique index. Two rivals
@@ -76,8 +77,6 @@ export interface PublicIrmItem {
   vatRatePercent: number | null;
   // Tracking flags.
   trackInventory: boolean;
-  trackSerialNumbers: boolean;
-  trackBatchNumbers: boolean;
   // Operations.
   notes: string | null;
   // Stock rollups — ZERO until the inventory ledger module is built (master-data only).
@@ -149,8 +148,6 @@ function toPublic(i: IrmItemWithRelations | IrmItemListRow): PublicIrmItem {
     currency: i.currency ?? "GBP",
     vatRatePercent: i.vatRatePercent,
     trackInventory: i.trackInventory ?? true,
-    trackSerialNumbers: i.trackSerialNumbers ?? false,
-    trackBatchNumbers: i.trackBatchNumbers ?? false,
     notes: i.notes,
     onHand: 0,
     available: 0,
@@ -278,15 +275,86 @@ function irmColumns(
     currency: input.currency ?? "GBP",
     vatRatePercent: input.vatRatePercent ?? 20,
     trackInventory: input.trackInventory ?? true,
-    trackSerialNumbers: input.trackSerialNumbers ?? false,
-    trackBatchNumbers: input.trackBatchNumbers ?? false,
     notes: trimToNull(input.notes),
     status: input.status ?? "active",
   };
 }
 
+/** Upper bound on a single id lookup. Well past any real caller (a receipt's lines, a form's
+ *  selected rows) and short of a request that could be used to sweep the catalogue in one query. */
+export const MAX_IRM_IDS = 200;
+
+/**
+ * Who may READ the catalogue — wider than `irm.view`, and deliberately so.
+ *
+ * A role assembled in Users & Roles from the jobs capability alone holds neither `irm.view` nor
+ * `rentals.view`, yet building a job kit is choosing IRM items. Before this the picker was simply
+ * empty, with no error and nothing to say a permission was missing: the same silent failure that
+ * `/rental-items`, `/suppliers/options` and `/customers/options` were widened to prevent.
+ *
+ * Reading the catalogue is not the same as reading what it COST, and that distinction is why this
+ * list is safe. See `IRM_COST_PERMISSIONS`.
+ */
+export const IRM_PICKER_PERMISSIONS = [
+  "irm.view",
+  "purchase_requests.create",
+  "purchase_requests.edit",
+  "purchase_orders.create",
+  "purchase_orders.edit",
+  "goods_in.create",
+  "jobs.create",
+  "jobs.edit",
+] as const;
+
+/**
+ * Who may additionally see an item's COST.
+ *
+ * The rental catalogue could be widened outright because its public shape carries no commercial
+ * data at all. An IRM item carries `standardCost`, so widening the route the same way would have
+ * handed item costs to every role that can open the job form — a new exposure wearing a bug fix's
+ * clothes. Cost therefore rides on a second check.
+ *
+ * These are the callers who already see the figure on the document they are filling in: a purchase
+ * request prices its own lines, an order carries the price it commits to, and a goods receipt is
+ * matched against that order. Nothing is revealed that the same user could not already read. Job
+ * planning is absent because a kit line is a quantity of an item, not a price.
+ */
+export const IRM_COST_PERMISSIONS = [
+  "irm.view",
+  "purchase_requests.create",
+  "purchase_requests.edit",
+  "purchase_orders.create",
+  "purchase_orders.edit",
+  "goods_in.create",
+] as const;
+
+/** Whether this caller's permissions include any that carry item cost. */
+export function canReadIrmCost(permissions: string[]): boolean {
+  return IRM_COST_PERMISSIONS.some((p) => roleGrants(permissions, p));
+}
+
+/**
+ * Fold a caller's id list into something safe to hand Prisma: valid ObjectIds only, de-duplicated,
+ * and bounded.
+ *
+ * Returning an EMPTY array for "nothing valid was asked for" is deliberate and load-bearing — it
+ * becomes `id: { in: [] }`, which matches nothing. Returning `undefined` would drop the filter and
+ * answer a lookup for garbage ids with the whole first page of the catalogue.
+ */
+export function sanitiseIrmIds(ids: string[]): string[] {
+  return [...new Set(ids.filter((id) => OBJECT_ID_RE.test(id)))].slice(0, MAX_IRM_IDS);
+}
+
 export interface ListIrmItemsParams {
   search?: string;
+  /**
+   * Whether the caller may see `standardCost`. Defaults to TRUE so every existing caller — the
+   * catalogue page, the CSV export, the internal reads — is unchanged; only the widened route passes
+   * `false`, and only for a caller who holds none of `IRM_COST_PERMISSIONS`.
+   */
+  includeCost?: boolean;
+  /** Restrict to these ids (narrowing only). Sanitised by `sanitiseIrmIds` before it reaches Prisma. */
+  ids?: string[];
   status?: string;
   type?: string;
   category?: string;
@@ -303,15 +371,28 @@ export async function listIrmItems(params: ListIrmItemsParams = {}): Promise<Pag
     params.status && (STATUSES as readonly string[]).includes(params.status) ? params.status : undefined;
   const filters = {
     search: params.search,
+    ids: params.ids ? sanitiseIrmIds(params.ids) : undefined,
     status,
     typeId: params.type,
     categoryId: params.category,
     supplierId: params.supplier,
   };
   const total = await irmRepo.count(filters);
-  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total, params.maxPageSize);
+  // An ID LOOKUP is not a browse, and must not be clamped like one. `paginate` bounds an ordinary
+  // request at 100, which is right for paging a catalogue and silently wrong for "resolve exactly
+  // these rows": a caller holding 150 saved lines got 100 back with nothing to say 50 were missing,
+  // and GoodsReceiptForm read that short page as "these items track no serials". The set is already
+  // bounded — `sanitiseIrmIds` caps it at MAX_IRM_IDS — so raising the ceiling to that same bound
+  // grants no more than the filter itself allows. An explicit maxPageSize (the CSV export's) wins.
+  const maxPageSize = params.maxPageSize ?? (filters.ids ? MAX_IRM_IDS : undefined);
+  const { page, pageSize, totalPages, skip } = paginate(params.page, params.pageSize, total, maxPageSize);
   const rows = await irmRepo.findMany(filters, skip, pageSize, params.sort);
-  return { items: rows.map(toPublic), total, page, pageSize, totalPages };
+  // Blanked, never zeroed. A 0 is a real price, and an item listed at £0.00 reads as free rather
+  // than as withheld — the silent wrong answer this whole pass is about.
+  const items = rows.map(toPublic).map((i) =>
+    params.includeCost === false ? { ...i, standardCost: null, standardCostPence: null } : i,
+  );
+  return { items, total, page, pageSize, totalPages };
 }
 
 /**
@@ -326,7 +407,14 @@ export async function exportIrmItemsCsv(
   // EXPORT_PAGING, not a bare pageSize: `paginate` clamps anything a client could ask for to 100,
   // so without its maxPageSize every export silently stopped at 100 rows AND reported itself
   // complete (capped was measured on the same clamped length). See utils/csv.
-  const { items } = await listIrmItems({ ...params, ...EXPORT_PAGING });
+  // includeCost is forced ON, and the order matters — it must land AFTER the caller's params.
+  //
+  // The export shares `listParamsFrom` with the list route, so it arrives carrying whatever cost
+  // flag that route computed. It must not act here: this endpoint has its own dedicated permission
+  // (`irm.export`), granted deliberately over this catalogue, and was no part of the picker
+  // widening. Honouring the flag would hand an exporter a file with a silently blank "Standard Cost"
+  // column and nothing to say the figure was withheld rather than simply absent.
+  const { items } = await listIrmItems({ ...params, ...EXPORT_PAGING, includeCost: true });
   const rows = items.slice(0, EXPORT_MAX);
 
   const csv = toCsv(
@@ -510,8 +598,6 @@ export async function updateIrmItem(id: string, input: UpdateIrmItemInput, actor
   if (input.currency !== undefined) data.currency = input.currency;
   if (input.vatRatePercent !== undefined) data.vatRatePercent = input.vatRatePercent;
   if (input.trackInventory !== undefined) data.trackInventory = input.trackInventory;
-  if (input.trackSerialNumbers !== undefined) data.trackSerialNumbers = input.trackSerialNumbers;
-  if (input.trackBatchNumbers !== undefined) data.trackBatchNumbers = input.trackBatchNumbers;
   if (input.notes !== undefined) data.notes = trimToNull(input.notes);
 
   // Cost: pounds → pence.

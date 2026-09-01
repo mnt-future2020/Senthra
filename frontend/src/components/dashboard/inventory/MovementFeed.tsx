@@ -8,6 +8,10 @@ import type { MovementFilters } from "@/services/stockPosition.service";
 import { listWarehouses } from "@/services/warehouse.service";
 import { listCustomers } from "@/services/customer.service";
 import { listIrmItems } from "@/services/irm.service";
+import type { IrmItem } from "@/types/irm";
+import { IrmItemPicker } from "@/components/dashboard/irm/IrmItemPicker";
+import { mergeIrmItems, missingIrmIds } from "@/components/dashboard/irm/irmItemPickerModel";
+import { useIrmItemsByIds } from "@/hooks/useIrmItemsByIds";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboard } from "@/hooks/useDashboard";
 import { Select, type SelectOption } from "@/components/ui/Select";
@@ -63,7 +67,8 @@ interface OptionLists {
   warehouses: SelectOption[];
   customers: SelectOption[];
   engineers: SelectOption[];
-  items: SelectOption[];
+  /** Whole rows, not {value,label}: the picker seeds from these and labels the selected one. */
+  items: IrmItem[];
 }
 
 // `lockedWarehouse` is the feed's fixed scope, not a user choice, so it must NOT count as an active
@@ -86,6 +91,8 @@ function FilterBar({
   onChange,
   onClear,
   lists,
+  selectedFilterItem,
+  onItemFound,
   canExport,
   exporting,
   onExport,
@@ -96,6 +103,9 @@ function FilterBar({
   onChange: (next: MovementFilters) => void;
   onClear: () => void;
   lists: OptionLists;
+  /** The item the filter is currently set to — it may be outside the loaded page. */
+  selectedFilterItem: IrmItem | null;
+  onItemFound: (item: IrmItem) => void;
   canExport: boolean;
   exporting: boolean;
   onExport: () => void;
@@ -125,7 +135,19 @@ function FilterBar({
       <FilterPopover activeCount={active} onClear={onClear}>
         {scope === "admin" && (
           <>
-            <Select size="sm" ariaLabel="Filter by item" value={value.irmItem ?? ""} onChange={(v) => set({ irmItem: v || undefined })} options={[{ value: "", label: "All items" }, ...lists.items]} />
+            {/* Searchable rather than a fixed page of options: an item past the first page used to
+                have no row here at all, so it simply could not be filtered for. No create action —
+                this is a read-only filter, and inventing a catalogue item to filter by is nonsense. */}
+            <IrmItemPicker
+              size="sm"
+              ariaLabel="Filter by item"
+              value={value.irmItem ?? ""}
+              selectedItem={selectedFilterItem}
+              seed={lists.items}
+              onSelect={(i) => { onItemFound(i); set({ irmItem: i.id }); }}
+              onClear={() => set({ irmItem: undefined })}
+              canCreate={false}
+            />
             {/* Both hidden when the feed is locked to one warehouse. The warehouse picker would let the
                 user navigate out of the page they're on; the LOCATION picker is worse than redundant —
                 "Warehouse" is already implied, and picking "Engineer van" asks the server for the
@@ -240,6 +262,13 @@ export function MovementFeed({
   const [exporting, setExporting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [lists, setLists] = React.useState<OptionLists>(EMPTY_LISTS);
+  // The filter can be set to an item outside the loaded page (a saved view, a link). Resolve it by
+  // id so the control shows the item's name instead of falling back to "All items", which would
+  // read as "no filter applied" on a feed that is in fact filtered.
+  const selectedFilterItem = lists.items.find((i) => i.id === filters.irmItem) ?? null;
+  useIrmItemsByIds(missingIrmIds([filters.irmItem], lists.items), (found) =>
+    setLists((prev) => ({ ...prev, items: mergeIrmItems(prev.items, found) })),
+  );
   const reqId = React.useRef(0);
 
   // Admin lookup option lists — loaded once. Bounded entities (warehouse/customer/engineer) load fully;
@@ -252,11 +281,9 @@ export function MovementFeed({
         listWarehouses({ status: "active", pageSize: 200 }).then((r) => r.warehouses.map((w) => ({ value: w.id, label: `${w.name} (${w.code})` }))).catch(() => []),
         listCustomers({ pageSize: 200 }).then((r) => r.customers.map((c) => ({ value: c.id, label: c.name }))).catch(() => []),
         svc.listEngineerOptions().then((r) => r.map((e) => ({ value: e.engineerId, label: e.name }))).catch(() => []),
-        listIrmItems({ status: "active", pageSize: 200 }).then((r) =>
-          r.items
-            .map((i) => ({ value: i.id, label: i.code ? `${i.code} — ${i.name}` : i.name }))
-            .sort((a, b) => a.label.localeCompare(b.label)),
-        ).catch(() => []),
+        // A bounded first page for the filter to show before anything is typed; the picker
+        // searches the rest server-side, so an item past it is still filterable.
+        listIrmItems({ status: "active", pageSize: 200 }).then((r) => r.items).catch(() => []),
       ]);
       if (active) setLists({ warehouses: wh, customers: cust, engineers: eng, items });
     })();
@@ -330,6 +357,8 @@ export function MovementFeed({
         // this one.
         onClear={() => setFilters(lockedWarehouse ? { warehouse: lockedWarehouse } : {})}
         lists={lists}
+        selectedFilterItem={selectedFilterItem}
+        onItemFound={(i) => setLists((prev) => ({ ...prev, items: mergeIrmItems(prev.items, [i]) }))}
         canExport={canExport}
         exporting={exporting}
         onExport={() => void onExport()}

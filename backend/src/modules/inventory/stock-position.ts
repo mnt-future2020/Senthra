@@ -95,7 +95,7 @@ export function fromInventoryBalance(row: any): StockPosition {
     value: (onHand * unitCostPence) / 100,
     currency: CURRENCY,
     status: positionStatus(onHand, row.irmItem?.reorderLevel ?? null),
-    flags: { serialized: !!row.irmItem?.trackSerialNumbers },
+    flags: {},
     lastMovementAt: iso(row.updatedAt),
     inventoryBalanceId: row.id,
   };

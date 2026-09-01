@@ -15,8 +15,9 @@ import { DetailHeader } from "@/components/ui/DetailHeader";
 import { actionLabel, actionTone, changeLabels, relativeTime, TONE_CLASSES } from "@/components/dashboard/audit/auditDisplay";
 import { AuditTrailSkeleton } from "@/components/dashboard/audit/AuditTrailSkeleton";
 import { PrfStatusBadge, formatDate, formatMoney } from "./prfStatus";
+import { DOCUMENT_GROUPS, filesInGroup, type PrfDocumentGroup } from "./documentGroups";
 import type { AuditEntry } from "@/types/audit";
-import type { PurchaseRequest } from "@/types/purchase-request";
+import type { PrfAttachment, PrfDocumentType, PurchaseRequest } from "@/types/purchase-request";
 import { uploadDirect } from "@/lib/upload";
 import { shrinkImage } from "@/lib/image";
 import { returnLegSummary } from "@/lib/rentalReturn";
@@ -504,22 +505,29 @@ function Overview({ prf }: { prf: PurchaseRequest }) {
             <Field label="Currency">{prf.currency}</Field>
             <Field label="Delivery terms">{prf.deliveryTermsLabel}</Field>
             <Field label="Payment terms">{prf.paymentTerms}</Field>
-            {prf.attachments.length > 0 && (
-              <div className="col-span-2">
-                <Field label="Attached documents">
-                  <ul className="space-y-1">
-                    {prf.attachments.map((a) => (
-                      <li key={a.id}>
-                        <a href={a.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 text-sm font-bold text-[var(--accent)] hover:underline">
-                          <Paperclip className="h-3.5 w-3.5 shrink-0" />
-                          <span className="truncate">{a.label || a.fileName}</span>
-                        </a>
-                      </li>
-                    ))}
-                  </ul>
-                </Field>
-              </div>
-            )}
+            {/* Grouped, not flattened. This block sits under the quotation figures, where a reviewer
+                is deciding whether the price is right — a supporting spec listed alongside the
+                supplier's quote reads as part of the offer, and it is not. */}
+            {DOCUMENT_GROUPS.map((g) => {
+              const files = filesInGroup(prf.attachments, g.type);
+              if (files.length === 0) return null;
+              return (
+                <div key={g.type} className="col-span-2">
+                  <Field label={g.detailLabel}>
+                    <ul className="space-y-1">
+                      {files.map((a) => (
+                        <li key={a.id}>
+                          <a href={a.url} target="_blank" rel="noopener noreferrer" className="inline-flex max-w-full items-center gap-1.5 text-sm font-bold text-[var(--accent)] hover:underline">
+                            <Paperclip className="h-3.5 w-3.5 shrink-0" />
+                            <span className="truncate">{a.label || a.fileName}</span>
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
+                  </Field>
+                </div>
+              );
+            })}
           </div>
         </Card>
         <Card title="Request">
@@ -588,18 +596,19 @@ function Overview({ prf }: { prf: PurchaseRequest }) {
 
 function Attachments({ prf, setPrf, canEdit }: { prf: PurchaseRequest; setPrf: (p: PurchaseRequest) => void; canEdit: boolean }) {
   const { pushToast } = useDashboard();
-  const [uploading, setUploading] = React.useState(false);
+  // Keyed by group, so a slow quote upload does not put the OTHER section's button in a spinner —
+  // a shared boolean would have made the two areas look like one control with two labels.
+  const [uploading, setUploading] = React.useState<PrfDocumentType | null>(null);
   const [confirm, setConfirm] = React.useState<{ open: boolean; id: string | null }>({ open: false, id: null });
   const [deleting, setDeleting] = React.useState(false);
-  const inputRef = React.useRef<HTMLInputElement>(null);
 
-  const onFile = (rawFile: File) => {
+  const onFile = (documentType: PrfDocumentType, rawFile: File) => {
     const ext = rawFile.name.split(".").pop()?.toLowerCase() ?? "";
     if (!EXT_TYPE[ext]) {
       pushToast("Unsupported file. Use PDF, DOCX, PNG or JPG.", "alert");
       return;
     }
-    setUploading(true);
+    setUploading(documentType);
     // Straight to Cloudinary, then finalize attaches it through the request's own service — same
     // permissions, same caps, same audit event, same DTO back.
     void (async () => {
@@ -612,17 +621,22 @@ function Attachments({ prf, setPrf, canEdit }: { prf: PurchaseRequest; setPrf: (
           pushToast("File must be 10 MB or smaller.", "alert");
           return;
         }
-        const result = await uploadDirect({ purpose: "prf_attachment", file, targetId: prf.id });
+        const result = await uploadDirect({ purpose: "prf_attachment", file, targetId: prf.id, documentType });
         if ("attachment" in result) setPrf(result.attachment as typeof prf);
         pushToast("Attachment added.", "success");
       } catch (e) {
         pushToast(e instanceof Error ? e.message : "Upload failed.", "alert");
       } finally {
-        setUploading(false);
-        if (inputRef.current) inputRef.current.value = "";
+        setUploading(null);
       }
     })();
   };
+
+  // Editable: both groups, always — an empty card is the place the first file goes. Locked: only
+  // the groups that hold something.
+  const visibleGroups = canEdit
+    ? DOCUMENT_GROUPS
+    : DOCUMENT_GROUPS.filter((g) => filesInGroup(prf.attachments, g.type).length > 0);
 
   const onDelete = async () => {
     if (!confirm.id || deleting) return;
@@ -639,24 +653,103 @@ function Attachments({ prf, setPrf, canEdit }: { prf: PurchaseRequest; setPrf: (
   };
 
   return (
-    <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5">
-      {canEdit && (
-        <div className="mb-4">
-          <input ref={inputRef} type="file" accept=".pdf,.docx,.png,.jpg,.jpeg" className="hidden" onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])} />
-          <button type="button" onClick={() => inputRef.current?.click()} disabled={uploading} className="flex items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 disabled:opacity-60">
-            {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />} Upload file
-          </button>
-          <p className="mt-1.5 text-[11px] text-[var(--faint)]">The supplier quotation or supporting document — PDF, DOCX, PNG or JPG (max 10 MB). Attachments are locked once the request leaves draft.</p>
+    <div className="space-y-4">
+      {/* One card per group. A reviewer must be able to see, without reading filenames, which files
+          are the supplier's quotation and which are the evidence behind the request.
+
+          While the request is EDITABLE both cards show whatever their state — an empty one is where
+          you go to add the first file, so it has a job. Once it is read-only an empty card has no
+          job left, and two of them stacked on a request that simply has no paperwork is worse than
+          the single "No attachments yet" this replaced. So a locked request shows only the groups
+          that actually hold something, and falls back to one empty state when none do. */}
+      {visibleGroups.map((g) => (
+        <AttachmentGroup
+          key={g.type}
+          group={g}
+          files={filesInGroup(prf.attachments, g.type)}
+          canEdit={canEdit}
+          uploading={uploading === g.type}
+          busy={uploading !== null}
+          onFile={onFile}
+          onRequestRemove={(id) => setConfirm({ open: true, id })}
+        />
+      ))}
+      {visibleGroups.length === 0 && (
+        <div className="flex flex-col items-center justify-center gap-2 rounded-2xl border border-[var(--border)] bg-[var(--surface)] py-12 text-center">
+          <Paperclip className="h-7 w-7 text-[var(--faint)]" />
+          <p className="text-sm font-semibold text-[var(--ink)]">No attachments</p>
         </div>
       )}
-      {prf.attachments.length === 0 ? (
-        <div className="flex flex-col items-center justify-center gap-2 py-12 text-center">
-          <Paperclip className="h-7 w-7 text-[var(--faint)]" />
-          <p className="text-sm font-semibold text-[var(--ink)]">No attachments yet</p>
+      <ConfirmDialog open={confirm.open} danger busy={deleting} title="Remove attachment" message="Remove this attachment from the request?" confirmLabel="Remove" onConfirm={onDelete} onClose={() => { if (!deleting) setConfirm({ open: false, id: null }); }} />
+    </div>
+  );
+}
+
+/**
+ * One document group on the Attachments tab: its own heading, its own upload control, its own list.
+ *
+ * Written once and rendered per group so the two can never diverge in what they accept or in how a
+ * file is removed. The group is identified by a HEADING and by the button's accessible name, not by
+ * position or colour — a screen-reader user lands on "Quotation" or "Other documents" either way.
+ */
+function AttachmentGroup({
+  group,
+  files,
+  canEdit,
+  uploading,
+  busy,
+  onFile,
+  onRequestRemove,
+}: {
+  group: PrfDocumentGroup;
+  files: PrfAttachment[];
+  canEdit: boolean;
+  /** This group's own upload is in flight — show the spinner here, and only here. */
+  uploading: boolean;
+  /**
+   * SOME group's upload is in flight, not necessarily this one.
+   *
+   * Both buttons disable on it, and that is not cosmetic caution. Each upload answers with a FULL
+   * request DTO and the handler does `setPrf(...)` with it, so two in flight at once race: the
+   * response that lands second wins, and if that is the one fetched FIRST it describes a request
+   * that predates the other file — which then vanishes from the list until a reload. Splitting one
+   * upload button into two made that reachable for the first time; one shared gate closes it again.
+   */
+  busy: boolean;
+  onFile: (documentType: PrfDocumentType, file: File) => void;
+  onRequestRemove: (id: string) => void;
+}) {
+  const inputRef = React.useRef<HTMLInputElement>(null);
+  return (
+    <section className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5" aria-labelledby={`prf-att-${group.type}`}>
+      <h3 id={`prf-att-${group.type}`} className="text-xs font-extrabold uppercase tracking-wider text-[var(--faint)]">{group.detailLabel}</h3>
+      {canEdit && (
+        <div className="mt-3 mb-4">
+          <input
+            ref={inputRef}
+            type="file"
+            accept=".pdf,.docx,.png,.jpg,.jpeg"
+            className="sr-only"
+            aria-label={`Upload ${group.detailLabel}`}
+            onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) onFile(group.type, f); }}
+          />
+          {/* Disabled by `busy` (any upload), spinner driven by `uploading` (this one) — so the
+              other group's button greys out while this one visibly works, instead of staying live
+              and inviting the race described above. */}
+          <button type="button" onClick={() => inputRef.current?.click()} disabled={busy} className="flex items-center gap-1.5 rounded-xl bg-[var(--accent)] px-3.5 py-2.5 text-xs font-extrabold text-white transition-all hover:opacity-90 disabled:opacity-60">
+            {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />} Upload file
+          </button>
+          <p className="mt-1.5 text-[11px] text-[var(--faint)]">{group.help} PDF, DOCX, PNG or JPG (max 10 MB). Attachments are locked once the request leaves draft.</p>
+        </div>
+      )}
+      {files.length === 0 ? (
+        <div className="flex flex-col items-center justify-center gap-2 py-8 text-center">
+          <Paperclip className="h-6 w-6 text-[var(--faint)]" />
+          <p className="text-sm font-semibold text-[var(--ink)]">{group.emptyText}</p>
         </div>
       ) : (
         <ul className="divide-y divide-[var(--border-2)]">
-          {prf.attachments.map((a) => (
+          {files.map((a) => (
             <li key={a.id} className="flex items-center justify-between gap-3 py-3">
               <a href={a.url} target="_blank" rel="noopener noreferrer" className="flex min-w-0 items-center gap-2.5">
                 <Paperclip className="h-4 w-4 shrink-0 text-[var(--accent)]" />
@@ -666,7 +759,7 @@ function Attachments({ prf, setPrf, canEdit }: { prf: PurchaseRequest; setPrf: (
                 </span>
               </a>
               {canEdit && (
-                <button type="button" onClick={() => setConfirm({ open: true, id: a.id })} className="rounded-lg p-1.5 text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--neg)]" title="Remove" aria-label="Remove attachment">
+                <button type="button" onClick={() => onRequestRemove(a.id)} className="shrink-0 rounded-lg p-1.5 text-[var(--muted)] transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--neg)]" title="Remove" aria-label={`Remove ${a.fileName} from ${group.detailLabel}`}>
                   <Trash2 className="h-3.5 w-3.5" />
                 </button>
               )}
@@ -674,8 +767,7 @@ function Attachments({ prf, setPrf, canEdit }: { prf: PurchaseRequest; setPrf: (
           ))}
         </ul>
       )}
-      <ConfirmDialog open={confirm.open} danger busy={deleting} title="Remove attachment" message="Remove this attachment from the request?" confirmLabel="Remove" onConfirm={onDelete} onClose={() => { if (!deleting) setConfirm({ open: false, id: null }); }} />
-    </div>
+    </section>
   );
 }
 

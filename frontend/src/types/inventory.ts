@@ -29,8 +29,6 @@ export interface InventoryBalance {
   value: number; // pounds (valuePence / 100)
   currency: string;
   status: InventoryStatus;
-  trackSerialNumbers: boolean;
-  trackBatchNumbers: boolean;
   lastMovementAt: string;
 }
 

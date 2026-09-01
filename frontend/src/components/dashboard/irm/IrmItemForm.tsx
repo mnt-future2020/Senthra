@@ -7,14 +7,13 @@ import { Loader2, Plus, Trash2 } from "lucide-react";
 import * as irmService from "@/services/irm.service";
 import { listIrmTypes, createIrmType } from "@/services/irm-type.service";
 import { listIrmCategories, createIrmCategory } from "@/services/irm-category.service";
-import { listSuppliers } from "@/services/supplier.service";
+import { listSupplierOptions, type SupplierOption } from "@/services/supplier.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReferenceData } from "@/hooks/useReferenceData";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
 import type { IrmItem } from "@/types/irm";
 import type { IrmType } from "@/types/irm-type";
 import type { IrmCategory } from "@/types/irm-category";
-import type { Supplier } from "@/types/supplier";
 import { ghostBtn, inputCls, labelCls, primaryBtn } from "@/components/ui/styles";
 import { firstActiveId } from "@/lib/utils";
 import { useAuth } from "@/hooks/useAuth";
@@ -23,10 +22,12 @@ import { CreatableSelect } from "@/components/ui/CreatableSelect";
 import { UOM_SELECT_OPTIONS } from "@/lib/uom";
 import { Select } from "@/components/ui/Select";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { FieldError, FormAsideCard, FormField, FormPageHeader, FormSection, RequiredMark } from "@/components/ui/FormScaffold";
 import type { UserStatus } from "@/types/user";
 import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 import { buildSkuCandidate, categoryPrefix, findSkuPrefixMismatch, normalizeSku } from "@/lib/irmSku";
+import { irmItemFormSeeds } from "./irmItemFormSeeds";
 
 // The IRM catalogue now lives in the Inventory Hub (Inventory → IRM → Catalogue), so that's the
 // fallback "list" destination when there's no in-app history to go back to.
@@ -38,14 +39,53 @@ type SupplierRow = { supplierId: string; isPrimary: boolean; priority: string; s
 
 const numStr = (n: number | null | undefined): string => (n == null ? "" : String(n));
 
-export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: IrmItem | null }) {
+/**
+ * The ONE IRM item form. `/dashboard/irm/new` renders it as a page; the purchase-request flow
+ * renders the very same component inside a full-screen overlay (`IrmItemCreateOverlay`) so a
+ * catalogue item can be added without unmounting — and so destroying — the half-written request.
+ *
+ * EMBEDDED MODE is entered by passing `onCreated`. It changes three things and nothing else: where
+ * the form goes after a successful create, what Cancel does, and two optional seed values. Every
+ * field, label, hint, default, validation rule and payload is shared, because there is only one of
+ * them — a second "quick" item form would drift from this one within a release.
+ */
+export function IrmItemForm({
+  mode,
+  item,
+  initialName,
+  initialSupplierId,
+  onCreated,
+  onCancel,
+}: {
+  mode: "create" | "edit";
+  item?: IrmItem | null;
+  /** Seeds the name — what the user typed into the picker that found nothing. Create only. */
+  initialName?: string;
+  /** Seeds the first supplier row — the supplier the calling document is already about. Create only. */
+  initialSupplierId?: string;
+  /** Embedded: hand the created item back instead of navigating to its detail page. */
+  onCreated?: (created: IrmItem) => void;
+  /** Embedded: close the host instead of navigating back. */
+  onCancel?: () => void;
+}) {
   const router = useRouter();
   const guard = useNavigationGuard();
   const { pushToast } = useDashboard();
   const { can } = useAuth();
 
+  // Embedded when a caller wants the created item back. Derived rather than a separate flag so the
+  // two can never be set inconsistently.
+  const embedded = Boolean(onCreated);
+  // Resolved once, read by BOTH the initial state and the dirty baseline below — see the module
+  // comment on why those two must never be written separately.
+  const seeds = React.useMemo(
+    () => irmItemFormSeeds(mode, initialName, initialSupplierId),
+    [mode, initialName, initialSupplierId],
+  );
+  const [confirmClose, setConfirmClose] = React.useState(false);
+
   const o = item;
-  const [name, setName] = React.useState(o?.name ?? "");
+  const [name, setName] = React.useState(o?.name ?? seeds.name);
   const [typeId, setTypeId] = React.useState(o?.typeId ?? "");
   const [irmCategoryId, setIrmCategoryId] = React.useState(o?.irmCategoryId ?? "");
   const [description, setDescription] = React.useState(o?.description ?? "");
@@ -65,28 +105,32 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
   const [standardCost, setStandardCost] = React.useState(numStr(o?.standardCost));
   const [currency, setCurrency] = React.useState(o?.currency ?? "GBP");
   const [vatRatePercent, setVatRatePercent] = React.useState(o ? numStr(o.vatRatePercent) : "20");
-  // Tracking flags are code defaults (no UI): IRM items are inventory-tracked; serial/batch tracking
-  // isn't used here. Existing values are preserved on edit; new items default to inventory-tracked.
+  // A code default, with no UI: every IRM item is inventory-tracked. Preserved on edit.
   const trackInventory = o?.trackInventory ?? true;
-  const trackSerialNumbers = o?.trackSerialNumbers ?? false;
-  const trackBatchNumbers = o?.trackBatchNumbers ?? false;
   const [notes, setNotes] = React.useState(o?.notes ?? "");
 
   // Suppliers are optional, so an item with none starts with NO rows — the user adds one only if
   // the item is actually bought in.
-  const [supplierRows, setSupplierRows] = React.useState<SupplierRow[]>(() =>
-    (o?.suppliers ?? []).map((s) => ({
-      supplierId: s.supplierId,
-      isPrimary: s.isPrimary,
-      priority: numStr(s.priority),
-      supplierSku: s.supplierSku ?? "",
-      leadTimeDays: numStr(s.leadTimeDays),
-    })),
-  );
+  const [supplierRows, setSupplierRows] = React.useState<SupplierRow[]>(() => {
+    if (o) {
+      return o.suppliers.map((s) => ({
+        supplierId: s.supplierId,
+        isPrimary: s.isPrimary,
+        priority: numStr(s.priority),
+        supplierSku: s.supplierSku ?? "",
+        leadTimeDays: numStr(s.leadTimeDays),
+      }));
+    }
+    // Opened from a document already about one supplier (a purchase request built on their quote):
+    // start with that link filled in rather than making the user find them in the list again.
+    return seeds.supplierRows;
+  });
 
   const [types, setTypes] = React.useState<IrmType[]>([]);
   const [categories, setCategories] = React.useState<IrmCategory[]>([]);
-  const [suppliers, setSuppliers] = React.useState<Supplier[]>([]);
+  // The COMPLETE active set, lean. The supplier ROWS below need nothing but id/code/name, and a
+  // paged read hid every supplier past the page.
+  const [suppliers, setSuppliers] = React.useState<SupplierOption[]>([]);
   const [saving, setSaving] = React.useState(false);
   const [saved, setSaved] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -110,7 +154,7 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
           if (mode === "create") setIrmCategoryId((cur) => cur || firstActiveId(c));
         },
       },
-      { label: "suppliers", load: () => listSuppliers({ status: "active", pageSize: 100 }), onData: (r) => setSuppliers(r.suppliers) },
+      { label: "suppliers", load: listSupplierOptions, onData: (opts: SupplierOption[]) => setSuppliers(opts) },
     ],
     [mode],
   );
@@ -186,15 +230,34 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
   // Dirty detection — snapshot of every field captured on the first render.
   const liveKey = JSON.stringify({
     name, typeId, irmCategoryId, description, brand, manufacturer, mpn, status, sku: effectiveSku,
-    baseUnit, packSize, reorderLevel, maximumStock, criticalLevel, standardCost, currency, vatRatePercent, trackInventory, trackSerialNumbers, trackBatchNumbers,
+    baseUnit, packSize, reorderLevel, maximumStock, criticalLevel, standardCost, currency, vatRatePercent, trackInventory,
     notes, supplierRows,
   });
+  /**
+   * The SKU the form STARTS with.
+   *
+   * On create it is DERIVED — from the seeded name and the auto-preselected category — because
+   * that is exactly what `effectiveSku` shows on the first render. A flat "" here would mean the
+   * baseline disagreed with the box on screen, so a form opened with a seeded name reported
+   * unsaved changes before the user had touched it: Cancel challenged them over work they had not
+   * done, and the tab-close warning fired on an untouched form. Unseeded (the catalogue page) the
+   * name is empty, so this is "" and nothing changes there.
+   */
+  const baselineSku = React.useMemo(() => {
+    if (mode === "edit") return o?.sku ?? "";
+    if (!seeds.name.trim()) return "";
+    const catId = firstActiveId(categories);
+    return buildSkuCandidate(seeds.name, categories.find((c) => c.id === catId)?.name ?? null);
+  }, [mode, o, seeds.name, categories]);
+
   // Initial snapshot derived from the item prop (same shape/order as liveKey), so a
   // change to any field flips dirty. Computed from `o`, not a render-time ref read.
   const initialKey = React.useMemo(
     () =>
       JSON.stringify({
-        name: o?.name ?? "",
+        // Seeded values are part of the BASELINE, not edits: the name came from what the user
+        // already typed into the picker, and the supplier from the document they opened this from.
+        name: o?.name ?? seeds.name,
         // On create, Type/Category are auto-preselected to the first active option — the
         // baseline must mirror that default so the preselect alone isn't read as an edit.
         typeId: mode === "create" ? firstActiveId(types) : (o?.typeId ?? ""),
@@ -204,7 +267,7 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
         manufacturer: o?.manufacturer ?? "",
         mpn: o?.mpn ?? "",
         status: o?.status ?? "active",
-        sku: o?.sku ?? "",
+        sku: baselineSku,
         baseUnit: o?.baseUnit ?? "Each",
         packSize: numStr(o?.packSize),
         reorderLevel: numStr(o?.reorderLevel),
@@ -214,29 +277,39 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
         currency: o?.currency ?? "GBP",
         vatRatePercent: o ? numStr(o.vatRatePercent) : "20",
         trackInventory: o?.trackInventory ?? true,
-        trackSerialNumbers: o?.trackSerialNumbers ?? false,
-        trackBatchNumbers: o?.trackBatchNumbers ?? false,
         notes: o?.notes ?? "",
-        supplierRows: (o?.suppliers ?? []).map((s) => ({
-          supplierId: s.supplierId,
-          isPrimary: s.isPrimary,
-          priority: numStr(s.priority),
-          supplierSku: s.supplierSku ?? "",
-          leadTimeDays: numStr(s.leadTimeDays),
-        })),
+        supplierRows: o
+          ? o.suppliers.map((s) => ({
+              supplierId: s.supplierId,
+              isPrimary: s.isPrimary,
+              priority: numStr(s.priority),
+              supplierSku: s.supplierSku ?? "",
+              leadTimeDays: numStr(s.leadTimeDays),
+            }))
+          : seeds.supplierRows,
       }),
-    [o, mode, types, categories],
+    [o, mode, types, categories, seeds, baselineSku],
   );
   const isDirty = !saved && liveKey !== initialKey;
   useReportDirty("irm-form", isDirty);
 
-  const goBack = () =>
+  const goBack = () => {
+    if (onCancel) {
+      // Embedded: ask about THIS form only. `guard.attemptLeave` reports on every form registered
+      // in the app, and the document behind the overlay (a part-written purchase request) is
+      // essentially always dirty — routing the close through it would challenge the user every
+      // single time, including when they had typed nothing here at all.
+      if (isDirty) setConfirmClose(true);
+      else onCancel();
+      return;
+    }
     guard.attemptLeave(() => {
       // Return to wherever the user came from (the Inventory Hub IRM tab with its filters intact, or
       // the item detail when editing). Fall back to the IRM catalogue if opened by a direct link.
       if (window.history.length > 1) router.back();
       else router.push(IRM_LIST);
     });
+  };
   const clearError = (field: string) =>
     setErrors((prev) => {
       if (!prev[field]) return prev;
@@ -352,8 +425,6 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
     currency,
     vatRatePercent: vatRatePercent.trim(),
     trackInventory,
-    trackSerialNumbers,
-    trackBatchNumbers,
     notes: notes.trim(),
   });
 
@@ -374,7 +445,12 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
         const created = await irmService.createIrmItem(basePayload());
         setSaved(true);
         pushToast(`Item ${created.code} created.`, "success");
-        router.replace(`/dashboard/irm/${created.code}`);
+        // Embedded: the item is persisted exactly as it would be from the catalogue page — the same
+        // endpoint, the same schema, the same code/SKU allocation and audit entry. Only the
+        // DESTINATION differs: hand it to the caller instead of navigating to its detail page,
+        // which would unmount the document waiting behind this overlay.
+        if (onCreated) onCreated(created);
+        else router.replace(`/dashboard/irm/${created.code}`);
       } else if (o) {
         await irmService.updateIrmItem(o.id, basePayload());
         setSaved(true);
@@ -393,7 +469,13 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
     <form onSubmit={submit} className="space-y-6">
       <FormPageHeader
         title={mode === "create" ? "Add IRM item" : `Edit ${o?.name ?? "item"}`}
-        subtitle={mode === "edit" && o ? o.code : "A new internal stock item"}
+        subtitle={
+          mode === "edit" && o
+            ? o.code
+            : embedded
+              ? "A new internal stock item — the request you were filling in is kept open behind this"
+              : "A new internal stock item"
+        }
         onBack={goBack}
         actions={
           <>
@@ -762,6 +844,23 @@ export function IrmItemForm({ mode, item }: { mode: "create" | "edit"; item?: Ir
           </FormAsideCard>
         </aside>
       </div>
+
+      {/* Embedded only. The app-wide guard can't serve here (it answers for every mounted form, and
+          the document behind the overlay is always dirty), so closing a part-filled item form asks
+          its own question. Portals out and stops submit/reset at its panel, so it is safe inside
+          this <form>. */}
+      <ConfirmDialog
+        open={confirmClose}
+        title="Discard this new item?"
+        message="You've started filling in a catalogue item. Closing now discards it — nothing has been saved yet, and the request behind this is untouched either way."
+        confirmLabel="Discard item"
+        danger
+        onConfirm={() => {
+          setConfirmClose(false);
+          onCancel?.();
+        }}
+        onClose={() => setConfirmClose(false)}
+      />
     </form>
   );
 }

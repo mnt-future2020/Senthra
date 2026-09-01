@@ -221,6 +221,14 @@ export interface PublicPoItem {
 }
 export interface PublicPoAttachment {
   id: string;
+  /**
+   * The document group this file came from, when it came from a converted purchase request.
+   *
+   * NULL is meaningful here and is NOT normalised to "quote" the way the PRF's is: an order's own
+   * uploads have no two-group picker, so a null means "uncategorised", not "legacy quote". Only a
+   * row that carries a group gets labelled as one.
+   */
+  documentType: string | null;
   label: string | null;
   fileName: string;
   fileType: string;
@@ -505,6 +513,7 @@ function toPublic(po: PurchaseOrderWithRelations): PublicPurchaseOrder {
     })),
     attachments: po.attachments.map((a) => ({
       id: a.id,
+      documentType: a.documentType,
       label: a.label,
       fileName: a.fileName,
       fileType: a.fileType,

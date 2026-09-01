@@ -125,3 +125,22 @@ export function deleteSupplier(id: string): Promise<void> {
   });
 }
 
+
+/** Lean {id, code, name} for pickers. See `listSupplierOptions` on the server for why this exists. */
+export interface SupplierOption {
+  id: string;
+  code: string;
+  name: string;
+}
+
+/**
+ * The COMPLETE set of active suppliers, for dropdowns.
+ *
+ * Use this instead of `listSuppliers({ pageSize: N })` wherever the result feeds a selector: a paged
+ * read silently hides every supplier past the page, and the shared Select renders its placeholder
+ * for a value it cannot find, so a saved record reads as "none selected". The full supplier record
+ * (contacts, payment terms) is fetched by id with `getSupplier` once one is chosen.
+ */
+export function listSupplierOptions(): Promise<SupplierOption[]> {
+  return api<{ options: SupplierOption[] }>("/suppliers/options").then((r) => r.options);
+}

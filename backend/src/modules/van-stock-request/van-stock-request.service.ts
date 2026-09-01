@@ -465,7 +465,6 @@ async function resolveLines(
       const item = await irmRepo.findById(l.irmItemId!);
       if (!item) throw badRequest(`The IRM item for "${l.itemName}" no longer exists.`);
       if (item.status !== "active") throw badRequest(`"${item.name}" is not active.`);
-      if (item.trackSerialNumbers || item.trackBatchNumbers) throw badRequest(`"${item.name}" is serial/batch-tracked — not supported on van stock requests.`);
       return {
         source: "irm",
         irmItemId: item.id,
@@ -1173,7 +1172,6 @@ export async function scanLookup(input: ScanLookupInput, actor: AuditActor): Pro
   // manufacturer barcode or SKU on a hire master to match against.
   const item = await irmService.findActiveByCodeOrBarcode(input.code);
   if (!item) return rentalScanLookup(req, input, actor);
-  if (item.trackSerialNumbers || item.trackBatchNumbers) throw badRequest(`"${item.name}" is serial/batch-tracked — not supported here.`);
 
   const line = req.lines.find((l) => l.source !== "rental" && l.irmItemId === item.id);
   if (!line) throw badRequest(`"${item.name}" isn't on this request.`);
@@ -1925,7 +1923,6 @@ export async function myHoldings(engineerId: string): Promise<HoldingOption[]> {
   const rentalCommitted = jobCommitted.rental;
 
   const irm: HoldingOption[] = rows
-    .filter((b) => !b.irmItem.trackSerialNumbers && !b.irmItem.trackBatchNumbers)
     .map((b) => ({
       source: "irm",
       irmItemId: b.irmItemId,
@@ -2074,7 +2071,6 @@ export async function searchItems(q: string): Promise<VanStockItemOption[]> {
   if (term.length < 1) return [];
   const rows = await irmRepo.findMany({ search: term, status: "active" }, 0, 20, "name");
   return rows
-    .filter((r) => !r.trackSerialNumbers && !r.trackBatchNumbers)
     .map((r) => ({ irmItemId: r.id, code: r.code, name: r.name, sku: r.sku ?? null, uom: r.baseUnit ?? null }));
 }
 
@@ -2105,7 +2101,7 @@ export async function searchRequestableItems(q: string): Promise<WarehouseItemOp
   // two walked every active job and its movements twice per keystroke, and sequentially at that (the
   // rental options were awaited before the IRM demand was even requested).
   const [rows, rentalHits, demand] = await Promise.all([
-    irmRepo.findMany({ search: term, status: "active" }, 0, 20, "name").then((r) => r.filter((x) => !x.trackSerialNumbers && !x.trackBatchNumbers)),
+    irmRepo.findMany({ search: term, status: "active" }, 0, 20, "name"),
     rentalItemRepo.findMany({ search: term, status: "active", page: 1, pageSize: 20 }),
     getOpenDemand(),
   ]);
@@ -2312,7 +2308,6 @@ export async function searchWarehouseItems(actor: AuditActor, warehouseId: strin
         ).filter((it) => it.quantityOnHand > 0);
 
     return [...balances
-      .filter((b) => !b.irmItem.trackSerialNumbers && !b.irmItem.trackBatchNumbers)
       .map((b) => ({ source: "irm", irmItemId: b.irmItemId, rentalItemId: null, code: b.irmItem.code, name: b.irmItem.name, sku: b.irmItem.sku ?? null, uom: b.irmItem.baseUnit ?? null, quantityOnHand: Math.max(0, b.quantityOnHand - (browseDemand.get(b.irmItemId) ?? 0)), reorderLevel: b.irmItem.reorderLevel ?? null, hireEndDate: null, poCodes: [] }))
       .filter((it) => it.quantityOnHand > 0)
       .sort((a, b) => a.name.localeCompare(b.name)),
@@ -2327,7 +2322,7 @@ export async function searchWarehouseItems(actor: AuditActor, warehouseId: strin
   // BOTH catalogues, searched together — the counter types a name, not a pool. Active only on each
   // side, matching every other requestable search in the module.
   const [rows, rentalMatches] = await Promise.all([
-    irmRepo.findMany({ search: term, status: "active" }, 0, 20, "name").then((r) => r.filter((x) => !x.trackSerialNumbers && !x.trackBatchNumbers)),
+    irmRepo.findMany({ search: term, status: "active" }, 0, 20, "name"),
     rentalItemRepo.findMany({ search: term, status: "active", page: 1, pageSize: 20 }),
   ]);
   if (rows.length === 0 && rentalMatches.items.length === 0) return [];

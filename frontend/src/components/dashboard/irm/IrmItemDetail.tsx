@@ -255,8 +255,6 @@ function Overview({
       <Card title="Tracking">
         <div className="grid grid-cols-2 gap-3">
           <Field label="Track inventory">{i.trackInventory ? "Yes" : "No"}</Field>
-          <Field label="Serial numbers">{i.trackSerialNumbers ? "Yes" : "No"}</Field>
-          <Field label="Batch numbers">{i.trackBatchNumbers ? "Yes" : "No"}</Field>
           {i.notes && <div className="col-span-2"><Field label="Notes">{i.notes}</Field></div>}
         </div>
       </Card>

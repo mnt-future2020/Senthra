@@ -122,7 +122,7 @@ const LINE_ID = "l1".padEnd(24, "0");
 
 const engineerActor = { id: ENG, email: "kansha@x.com", type: "user" } as never;
 const RENTAL_ITEM = { id: RENTAL, code: "RNT-0014", name: "test fiber net 4", baseUnit: "Each", status: "active", deletedAt: null };
-const IRM_ITEM = { id: IRM, code: "IRM-0004", name: "CAT6 U/UTP Cable", baseUnit: "Box", sku: null, status: "active", trackSerialNumbers: false, trackBatchNumbers: false };
+const IRM_ITEM = { id: IRM, code: "IRM-0004", name: "CAT6 U/UTP Cable", baseUnit: "Box", sku: null, status: "active" };
 
 // ── fixtures, shaped exactly as the repositories return them ────────────────────────────────────
 
@@ -402,7 +402,7 @@ describe("IRM commitment is unchanged", () => {
 
   beforeEach(() => {
     vi.mocked(engineerStockRepo.findEngineerBalances).mockResolvedValue([
-      { irmItemId: IRM, quantityOnHand: 10, irmItem: { code: "IRM-0004", name: "CAT6 U/UTP Cable", baseUnit: "Box", trackSerialNumbers: false, trackBatchNumbers: false } },
+      { irmItemId: IRM, quantityOnHand: 10, irmItem: { code: "IRM-0004", name: "CAT6 U/UTP Cable", baseUnit: "Box" } },
     ] as never);
   });
 
@@ -449,7 +449,7 @@ describe("IRM: a write-off that named no kit line is settled quantity", () => {
 
   beforeEach(() => {
     vi.mocked(engineerStockRepo.findEngineerBalances).mockResolvedValue([
-      { irmItemId: IRM, quantityOnHand: 10, irmItem: { code: "IRM-0004", name: "CAT6 U/UTP Cable", baseUnit: "Box", trackSerialNumbers: false, trackBatchNumbers: false } },
+      { irmItemId: IRM, quantityOnHand: 10, irmItem: { code: "IRM-0004", name: "CAT6 U/UTP Cable", baseUnit: "Box" } },
     ] as never);
     vi.mocked(jobRepo.findActiveByEngineerWithKitLines).mockResolvedValue([jobRow(JOB_A, [irmKit()])] as never);
   });

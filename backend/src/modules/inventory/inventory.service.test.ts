@@ -76,8 +76,6 @@ function balRow(over: { onHand?: number; reserved?: number; item?: Record<string
       reorderLevel: 10,
       standardCostPence: 250,
       currency: "GBP",
-      trackSerialNumbers: false,
-      trackBatchNumbers: false,
       trackInventory: true,
       irmCategory: { id: "cat1", name: "Cabling" },
       ...over.item,
@@ -186,18 +184,6 @@ describe("transferStock — guards", () => {
     expect(mockCreateTransfer).not.toHaveBeenCalled();
   });
 
-  it("rejects a serial-tracked item", async () => {
-    mockFindPairRel.mockResolvedValue(balRow({ onHand: 100, item: { trackSerialNumbers: true } }));
-    await expect(transferStock(base)).rejects.toThrow(/serial-tracked|batch-tracked/i);
-    expect(mockCreateTransfer).not.toHaveBeenCalled();
-  });
-
-  it("rejects a batch-tracked item", async () => {
-    mockFindPairRel.mockResolvedValue(balRow({ onHand: 100, item: { trackBatchNumbers: true } }));
-    await expect(transferStock(base)).rejects.toThrow(/serial-tracked|batch-tracked/i);
-    expect(mockCreateTransfer).not.toHaveBeenCalled();
-  });
-
   it("rejects when quantity exceeds available (onHand − reserved)", async () => {
     mockFindPairRel.mockResolvedValue(balRow({ onHand: 6, reserved: 3 })); // available = 3
     await expect(transferStock({ ...base, quantity: 5 })).rejects.toThrow(/only 3 available/i);
@@ -265,7 +251,7 @@ describe("addStock — manual add (existing / opening stock)", () => {
   const actor = { email: "ops@x.com" } as never;
 
   // The slice requireActiveIrmItem returns (only the fields addStock reads).
-  const item = (over: Record<string, unknown> = {}) => ({ id: IRM_ID, name: "CAT6 Cable", trackInventory: true, trackSerialNumbers: false, trackBatchNumbers: false, ...over });
+  const item = (over: Record<string, unknown> = {}) => ({ id: IRM_ID, name: "CAT6 Cable", trackInventory: true, ...over });
 
   beforeEach(() => {
     mockReqItem.mockResolvedValue(item());
@@ -306,14 +292,6 @@ describe("addStock — manual add (existing / opening stock)", () => {
     expect(mockCreateAdjustment).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ["serial-tracked", { trackSerialNumbers: true }],
-    ["batch-tracked", { trackBatchNumbers: true }],
-  ])("rejects a %s item (must come via Goods In)", async (_label, over) => {
-    mockReqItem.mockResolvedValue(item(over));
-    await expect(addStock(base, actor)).rejects.toThrow(/Goods In/i);
-    expect(mockCreateAdjustment).not.toHaveBeenCalled();
-  });
 });
 
 // Moving stock OUT of a warehouse where a job has already planned it strands that job: the kit line

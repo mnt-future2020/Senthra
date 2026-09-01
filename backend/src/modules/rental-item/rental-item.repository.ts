@@ -18,12 +18,19 @@ export interface ListFilters {
   status?: string;
   categoryId?: string;
   search?: string;
+  /**
+   * Restrict to these ids. Purely NARROWING — ANDed with the live/status filters, so it can only
+   * shrink the authorised set, never widen it. Lets a caller holding a handful of ids (a request's
+   * saved rental lines) resolve them in ONE query instead of paging blindly hoping they appear.
+   */
+  ids?: string[];
   page: number;
   pageSize: number;
 }
 
 export async function findMany(filters: ListFilters): Promise<{ items: RentalItemWithCategory[]; total: number }> {
   const where: Prisma.RentalItemWhereInput = { ...LIVE };
+  if (filters.ids) where.id = { in: filters.ids };
   if (filters.status) where.status = filters.status;
   if (filters.categoryId) where.rentalCategoryId = filters.categoryId;
   if (filters.search) {

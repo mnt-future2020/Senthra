@@ -525,3 +525,8 @@ export const submitStockRequest = asyncHandler(async (req, res) => {
   );
   res.status(201).json({ request });
 });
+
+// GET /customers/options — the complete active set, lean, for pickers.
+export const listCustomerOptions = asyncHandler(async (_req, res) => {
+  res.json({ options: await customerService.listCustomerOptions() });
+});

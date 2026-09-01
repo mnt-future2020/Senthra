@@ -70,8 +70,6 @@ function iRow(over: Record<string, unknown> = {}) {
     currency: "GBP",
     vatRatePercent: 20,
     trackInventory: true,
-    trackSerialNumbers: false,
-    trackBatchNumbers: false,
     notes: null,
     deletedAt: null,
     createdBy: null,

@@ -51,10 +51,20 @@ export interface IrmListFilters {
   typeId?: string;
   categoryId?: string;
   supplierId?: string;
+  /**
+   * Restrict to these ids. Purely NARROWING — it is ANDed with `deletedAt: null` and every other
+   * filter, so it can only ever shrink the authorised set, never widen it.
+   *
+   * Exists so a caller holding a handful of ids (a receipt's lines, a form's already-selected rows)
+   * can resolve them in ONE request instead of a fetch per id, and without paging blindly through
+   * the catalogue hoping they appear. The service sanitises the list before it reaches here.
+   */
+  ids?: string[];
 }
 
 function buildWhere(filters: IrmListFilters): Prisma.IrmItemWhereInput {
   const where: Prisma.IrmItemWhereInput = { deletedAt: null };
+  if (filters.ids) where.id = { in: filters.ids };
   if (filters.status) where.status = filters.status;
   if (filters.typeId) where.typeId = filters.typeId;
   if (filters.categoryId) where.irmCategoryId = filters.categoryId;

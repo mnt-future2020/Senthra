@@ -183,6 +183,7 @@ const mockReqIrms = irmService.requireActiveIrmItems as ReturnType<typeof vi.fn>
 const irmRow = (id: string) => ({ id, name: "CAT6", sku: "C6", baseUnit: "Each", vatRatePercent: 20 });
 const mockAudit = audit.record as ReturnType<typeof vi.fn>;
 const auditActions = () => mockAudit.mock.calls.map((c) => c[0].action);
+const auditEntries = () => mockAudit.mock.calls.map((c) => c[0] as { action: string; metadata?: Record<string, unknown> });
 const mockSuggestions = inventoryService.getReorderSuggestions as ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
@@ -435,6 +436,7 @@ describe("convert — generate the PO from an approved PRF (one per PRF, transac
     rentalItems: [],
     attachments: [
       {
+        documentType: "quote",
         label: "Quote",
         fileName: "q.pdf",
         fileType: "pdf",
@@ -443,6 +445,19 @@ describe("convert — generate the PO from an approved PRF (one per PRF, transac
         // Conversion does NOT re-upload the file, so the PO's row must end up naming the very same
         // Cloudinary asset. That shared identity is what the delete path counts.
         publicId: "senthra/purchase-orders/quote-abc.pdf",
+        resourceType: "raw",
+        uploadedBy: "requester@x.co",
+      },
+      // A SUPPORTING document, so the conversion is exercised on a request that holds both groups —
+      // which is the only shape where flattening them would show up.
+      {
+        documentType: "other",
+        label: null,
+        fileName: "spec.pdf",
+        fileType: "pdf",
+        fileSizeBytes: 222,
+        url: "https://cdn/spec.pdf",
+        publicId: "senthra/purchase-orders/spec-def.pdf",
         resourceType: "raw",
         uploadedBy: "requester@x.co",
       },
@@ -514,6 +529,10 @@ describe("convert — generate the PO from an approved PRF (one per PRF, transac
   // unsafe — a PO attachment with no identity is a file nobody can delete, and one with the WRONG
   // identity is worse. If a field is added to the attachment record, add it here deliberately.
   const CARRIED_TO_PO = [
+    // The document group. Dropping it would silently flatten a request's quotation package and its
+    // supporting evidence into one list on the order — the exact distinction the two groups exist
+    // to keep, lost at the one moment nobody is looking.
+    "documentType",
     "label",
     "fileName",
     "fileType",
@@ -535,6 +554,38 @@ describe("convert — generate the PO from an approved PRF (one per PRF, transac
     }
     // …and nothing extra invented, so this list stays an honest description of the mapping.
     expect(Object.keys(attachments[0] as object).sort()).toEqual([...CARRIED_TO_PO].sort());
+  });
+
+  // BOTH groups travel. Which one is not this module's call to make: the conversion has always
+  // copied every attachment onto the order, and the buyer working the PO needs the spec the
+  // reviewer approved against just as much as the quote. What changes is that they arrive still
+  // told apart, rather than as one undifferentiated list.
+  it("carries BOTH document groups onto the PO, each keeping its own group", async () => {
+    await convertPurchaseRequest(PRF_ID, { type: "user", id: "u1", email: "fin@x.co", permissions: [] });
+    const [, , , , attachments] = mockCreatePoTx.mock.calls[0];
+    expect(attachments).toHaveLength(2);
+    expect(attachments.map((a: { fileName: string; documentType: string }) => [a.fileName, a.documentType])).toEqual([
+      ["q.pdf", "quote"],
+      ["spec.pdf", "other"],
+    ]);
+  });
+
+  // A LEGACY request's attachment has no stored group, and the request itself displays it under
+  // Quotation. Copying the raw null across would put that same file on the order wearing no label,
+  // so one document would answer the same question differently on two screens. Conversion is the
+  // last point that knows the row came from a request — after it, null is indistinguishable from an
+  // order's own uncategorised upload, which is a real and different thing.
+  it("resolves a legacy attachment's absent group to `quote` on the way to the PO", async () => {
+    mockFindForConvertTx.mockResolvedValue(
+      liveApproved({
+        attachments: [
+          { documentType: null, label: null, fileName: "old-quote.pdf", fileType: "pdf", fileSizeBytes: 1, url: "https://cdn/old.pdf", publicId: "p/old", resourceType: "raw", uploadedBy: null },
+        ],
+      }),
+    );
+    await convertPurchaseRequest(PRF_ID, { type: "user", id: "u1", email: "fin@x.co", permissions: [] });
+    const [, , , , attachments] = mockCreatePoTx.mock.calls[0];
+    expect(attachments[0]).toMatchObject({ fileName: "old-quote.pdf", documentType: "quote" });
   });
 
   // Conversion is the one action that changes BOTH surfaces, so it must notify BOTH rooms: an open
@@ -845,6 +896,70 @@ describe("PRF attachments — Cloudinary cleanup", () => {
       url: "https://cdn/q.pdf",
       publicId: "senthra/purchase-orders/q.pdf",
       resourceType: "raw",
+    });
+  });
+
+  // ── Document groups ───────────────────────────────────────────────────────────────────────
+  //
+  // The category is a persisted COLUMN, not a convention over the label or over which picker the
+  // file came out of. These pin the three things that makes true: it is written on every add, it is
+  // written explicitly even when it is the default, and a row that predates the column still reads
+  // as the group it was uploaded under.
+  describe("document groups", () => {
+    it("persists the group the uploader chose", async () => {
+      await attachUploadedAsset(PRF_ID, {
+        documentType: "other",
+        fileName: "spec.pdf",
+        fileType: "pdf",
+        fileSizeBytes: 9,
+        url: "https://cdn/spec.pdf",
+        publicId: "senthra/purchase-orders/spec.pdf",
+        resourceType: "raw",
+      });
+      expect(mockAddAtt.mock.calls[0][0]).toMatchObject({ documentType: "other" });
+    });
+
+    // The older upload path sends no group, and every file it ever sent was a quote — the field it
+    // came out of said so. Storing that EXPLICITLY (rather than leaving the column blank) is what
+    // keeps "no stored group" meaning "written before there were two", and nothing else.
+    it("stores an explicit `quote` when no group is sent", async () => {
+      await attachUploadedAsset(PRF_ID, {
+        fileName: "q.pdf",
+        fileType: "pdf",
+        fileSizeBytes: 9,
+        url: "https://cdn/q.pdf",
+        publicId: "senthra/purchase-orders/q.pdf",
+        resourceType: "raw",
+      });
+      expect(mockAddAtt.mock.calls[0][0]).toMatchObject({ documentType: "quote" });
+    });
+
+    // BACKWARD COMPATIBILITY. Nothing was backfilled, so the rows written before the second group
+    // existed have no value at all. They are quote documents — they were uploaded under a field
+    // labelled "Quote document(s)" — and the read side has to say so without a migration.
+    it("reads a legacy row with no stored group as a quote document", async () => {
+      mockFindById.mockResolvedValue(
+        prfRow({
+          status: "draft",
+          attachments: [
+            { id: "a1", documentType: null, label: null, fileName: "old.pdf", fileType: "pdf", fileSizeBytes: 1, url: "https://cdn/old.pdf", uploadedBy: null, createdAt: new Date() },
+            { id: "a2", documentType: "other", label: null, fileName: "new.pdf", fileType: "pdf", fileSizeBytes: 1, url: "https://cdn/new.pdf", uploadedBy: null, createdAt: new Date() },
+          ],
+        }),
+      );
+      const dto = await getPurchaseRequest(PRF_ID);
+      expect(dto.attachments.map((a) => [a.fileName, a.documentType])).toEqual([
+        ["old.pdf", "quote"],
+        ["new.pdf", "other"],
+      ]);
+    });
+
+    // The trail is asked WHICH document went, after the row that could answer is gone.
+    it("names the group in the removal audit entry", async () => {
+      mockFindAtt.mockResolvedValue({ ...ATT, documentType: "other", fileName: "spec.pdf" });
+      await removeAttachment(PRF_ID, "att1");
+      const entry = auditEntries().find((e) => e.action === "purchase_request.attachment_removed");
+      expect(entry?.metadata).toMatchObject({ documentType: "other", fileName: "spec.pdf" });
     });
   });
 

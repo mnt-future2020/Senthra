@@ -22,6 +22,11 @@ import type {
 
 export interface RentalListParams {
   search?: string;
+  /**
+   * Resolve exactly these ids in ONE request — narrowing only, and the way to load an
+   * already-selected rental item that the current search or first page does not contain.
+   */
+  ids?: string[];
   status?: string;
   categoryId?: string;
   page?: number;

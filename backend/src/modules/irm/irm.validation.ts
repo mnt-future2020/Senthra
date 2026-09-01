@@ -105,8 +105,6 @@ const sharedIrmFields = {
   currency: currencyField,
   vatRatePercent: vatField,
   trackInventory: z.boolean().optional(),
-  trackSerialNumbers: z.boolean().optional(),
-  trackBatchNumbers: z.boolean().optional(),
   notes: z.string().trim().max(2000).optional(),
   status: statusEnum.optional(),
 };

@@ -588,7 +588,7 @@ describe("postIssue — a hire goes out as CUSTODY, never as stock", () => {
     // actually this hired item's line; the IRM arm checked nothing, so a hand-built request could spend
     // a hire line's budget with an IRM movement and have every tally read it as the hired kit going out.
     mockJob.mockResolvedValue({ id: JOB_ID, jobNumber: "JOB-2026-0117", status: "accepted", assignedEngineerId: ENG_ID, assignedEngineerName: "Dave", assignedEngineerEmail: "dave@x.co", kitLines: [rentalKitLine] } as never);
-    vi.mocked(irmService.requireActiveIrmItem).mockResolvedValue({ id: IRM_ID, name: "Cat6 Cable", baseUnit: "Each", trackSerialNumbers: false, trackBatchNumbers: false } as never);
+    vi.mocked(irmService.requireActiveIrmItem).mockResolvedValue({ id: IRM_ID, name: "Cat6 Cable", baseUnit: "Each" } as never);
 
     await expect(
       postIssue(JOB_ID, {

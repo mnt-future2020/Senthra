@@ -14,8 +14,7 @@ describe("fromInventoryBalance", () => {
   const row: any = {
     id: "b1", irmItemId: "i1", warehouseId: "w1", quantityOnHand: 10, quantityReserved: 2,
     irmItem: { code: "IRM-0001", name: "Cable", sku: "SKU1", baseUnit: "Each", reorderLevel: 5,
-      standardCostPence: 100, trackSerialNumbers: false, trackBatchNumbers: false,
-      category: { name: "Tools" } },
+      standardCostPence: 100, category: { name: "Tools" } },
     warehouse: { name: "London Hub", code: "WH-0001" },
     updatedAt: new Date("2026-06-29T00:00:00Z"),
   };

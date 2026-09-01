@@ -38,6 +38,16 @@ adminRouter.use(requireAuth);
 
 adminRouter.get("/", requirePermission("customers.view"), customerController.listCustomers);
 // BEFORE any "/:id" route — otherwise "export.csv" is parsed as an id and 404s on lookup.
+// Static route BEFORE "/:id" so "options" is not parsed as an id.
+//
+// Wider than customers.view on purpose, and it grants no reach: only the id, code and name of
+// ACTIVE customers — the same names already shown on the jobs these callers create. A planner who
+// may raise a job but not administer the customer directory still has to be able to pick one.
+adminRouter.get(
+  "/options",
+  requireAnyPermission("customers.view", "jobs.create", "jobs.edit"),
+  customerController.listCustomerOptions,
+);
 adminRouter.get("/export.csv", requirePermission("customers.export"), exportLimiter, customerController.exportCustomersCsv);
 adminRouter.post(
   "/",

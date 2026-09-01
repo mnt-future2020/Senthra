@@ -6,6 +6,10 @@ import { ArrowLeftRight, Loader2 } from "lucide-react";
 
 import * as inventoryService from "@/services/inventory.service";
 import { listIrmItems } from "@/services/irm.service";
+import type { IrmItem } from "@/types/irm";
+import { IrmItemPicker } from "@/components/dashboard/irm/IrmItemPicker";
+import { mergeIrmItems, missingIrmIds } from "@/components/dashboard/irm/irmItemPickerModel";
+import { useIrmItemsByIds } from "@/hooks/useIrmItemsByIds";
 import { listWarehouses } from "@/services/warehouse.service";
 import { useDashboard } from "@/hooks/useDashboard";
 import { useReportDirty, useNavigationGuard } from "@/providers/NavigationGuardProvider";
@@ -19,7 +23,6 @@ import { focusFirstInvalid } from "@/lib/focusFirstInvalid";
 const INVENTORY_LIST = "/dashboard/inventory";
 const today = () => new Date().toISOString().slice(0, 10);
 
-type ItemOption = { id: string; code: string; name: string; sku: string | null; baseUnit: string | null };
 type WarehouseOption = { id: string; name: string; code: string };
 
 export function TransferForm() {
@@ -28,7 +31,7 @@ export function TransferForm() {
   const params = useSearchParams();
   const { pushToast } = useDashboard();
 
-  const [items, setItems] = React.useState<ItemOption[]>([]);
+  const [items, setItems] = React.useState<IrmItem[]>([]);
   const [warehouses, setWarehouses] = React.useState<WarehouseOption[]>([]);
 
   const [irmItemId, setIrmItemId] = React.useState(params.get("item") ?? "");
@@ -62,7 +65,8 @@ export function TransferForm() {
   React.useEffect(() => {
     let active = true;
     listIrmItems({ status: "active", pageSize: 200 }).then(
-      (r) => active && setItems(r.items.filter((i) => !i.trackSerialNumbers && !i.trackBatchNumbers).map((i) => ({ id: i.id, code: i.code, name: i.name, sku: i.sku, baseUnit: i.baseUnit }))),
+      // Bounded first page only; the picker searches the rest of the catalogue server-side.
+      (r) => active && setItems(r.items),
       () => {},
     );
     listWarehouses({ status: "active", pageSize: 100 }).then(
@@ -92,6 +96,12 @@ export function TransferForm() {
   }, [irmItemId, fromWarehouseId]);
 
   const selectedItem = items.find((i) => i.id === irmItemId) ?? null;
+  // ?item=<id> can name an item outside the page loaded at mount — resolve it by id so the picker
+  // shows what is actually selected.
+  // "Still looking" comes from the hook, not from "the id isn't in my list yet" — see AddStockForm.
+  const resolvingItem = useIrmItemsByIds(missingIrmIds([irmItemId], items), (found) =>
+    setItems((prev) => mergeIrmItems(prev, found)),
+  );
   const sourceWh = warehouses.find((w) => w.id === fromWarehouseId) ?? null;
   const destWh = warehouses.find((w) => w.id === toWarehouseId) ?? null;
   const available = availability?.available ?? null;
@@ -175,7 +185,16 @@ export function TransferForm() {
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="sm:col-span-2">
                 <label className={labelCls}>Item<RequiredMark /></label>
-                <Select value={irmItemId} onChange={(v) => { setIrmItemId(v); touch(); clearError("irmItemId"); clearError("quantity"); }} options={items.map((i) => ({ value: i.id, label: `${i.code} — ${i.name}${i.sku ? ` (${i.sku})` : ""}` }))} placeholder="— Select an item —" ariaLabel="Item" invalid={Boolean(errors.irmItemId)} />
+                <IrmItemPicker
+                  value={irmItemId}
+                  selectedItem={selectedItem}
+                  seed={items}
+                  onSelect={(i) => { setItems((prev) => mergeIrmItems(prev, [i])); setIrmItemId(i.id); touch(); clearError("irmItemId"); clearError("quantity"); }}
+                  canCreate={false}
+                  loading={resolvingItem}
+                  ariaLabel="Item"
+                  invalid={Boolean(errors.irmItemId)}
+                />
                 <FieldError message={errors.irmItemId} />
               </div>
               <div>

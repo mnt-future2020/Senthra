@@ -50,8 +50,25 @@ function toPublic(i: RentalItemWithCategory): PublicRentalItem {
   };
 }
 
+/** Upper bound on one id lookup — past any real caller, short of sweeping the catalogue in a query. */
+export const MAX_RENTAL_IDS = 200;
+
+/**
+ * Fold a caller's id list into something safe to hand Prisma: valid ObjectIds only, de-duplicated,
+ * bounded.
+ *
+ * An EMPTY result is deliberate and load-bearing — it becomes `id: { in: [] }`, matching nothing.
+ * Returning `undefined` would DROP the filter and answer a lookup for garbage ids with the whole
+ * first page of the catalogue.
+ */
+export function sanitiseRentalIds(ids: string[]): string[] {
+  return [...new Set(ids.filter((id) => OBJECT_ID_RE.test(id)))].slice(0, MAX_RENTAL_IDS);
+}
+
 export interface ListRentalItemsParams {
   status?: string;
+  /** Restrict to these ids (narrowing only); sanitised above before it reaches Prisma. */
+  ids?: string[];
   categoryId?: string;
   search?: string;
   page?: number;
@@ -76,6 +93,7 @@ export async function listRentalItems(
     status: params.status,
     categoryId: params.categoryId,
     search: params.search,
+    ids: params.ids ? sanitiseRentalIds(params.ids) : undefined,
     page,
     pageSize,
   });

@@ -18,7 +18,23 @@ import { commitAttachment, releasePending, stampPendingAsset, type VerifiedAsset
  */
 
 type PreCheck = (targetId: string, fileSizeBytes: number, label: string | undefined, actor?: AuditActor) => Promise<void>;
-type Attach = (targetId: string, asset: VerifiedAsset, label: string | undefined, actor?: AuditActor) => Promise<unknown>;
+/**
+ * `documentType` is LAST and optional on purpose: exactly one target has a document group to put it
+ * in, and appending it leaves the other three untouched rather than renumbering every call site for
+ * a value they have no use for. A target that ignores it is not losing information — it never had a
+ * picker to produce one.
+ *
+ * The pre-check does not take it. The caps it enforces (count, total bytes) are properties of the
+ * REQUEST, not of a group within it, and splitting them per group would quietly break the invariant
+ * that a PO must be able to absorb a whole PRF's documents — see PRF_ATTACHMENT_MAX_COUNT.
+ */
+type Attach = (
+  targetId: string,
+  asset: VerifiedAsset,
+  label: string | undefined,
+  actor?: AuditActor,
+  documentType?: string,
+) => Promise<unknown>;
 
 /**
  * Write inside the transaction, then read the DTO OUTSIDE it.
@@ -41,10 +57,16 @@ type Attach = (targetId: string, asset: VerifiedAsset, label: string | undefined
 const TARGETS: Partial<Record<UploadPurposeKey, { preCheck: PreCheck; attach: Attach }>> = {
   prf_attachment: {
     preCheck: (id, bytes, _label, actor) => prfService.assertCanAttach(id, bytes, actor),
-    attach: async (id, asset, label, actor) => {
-      await commitAttachment(asset, (tx) => prfService.attachUploadedAsset(id, { ...asset, label }, actor, tx));
+    attach: async (id, asset, label, actor, documentType) => {
+      await commitAttachment(asset, (tx) =>
+        prfService.attachUploadedAsset(id, { ...asset, label, documentType }, actor, tx),
+      );
       const dto = await prfService.getPurchaseRequest(id, actor);
-      prfService.recordAttachmentAudit(dto, actor);
+      // The group goes to the audit too. THIS is the call that fires on every real upload — the
+      // service's own `if (!tx)` branch never runs on this path, because finalize always passes a
+      // transaction — so omitting it here left the trail recording an attachment with no group,
+      // while removal recorded one. The tests passed because they exercise the tx-less path.
+      prfService.recordAttachmentAudit(dto, actor, documentType);
       return dto;
     },
   },
@@ -105,6 +127,7 @@ export async function attachTo(
   asset: VerifiedAsset,
   label: string | undefined,
   actor?: AuditActor,
+  documentType?: string,
 ): Promise<{ attachment: unknown } | { url: string }> {
   const mode = UPLOAD_PURPOSES[purpose].mode;
   if (mode === "deferred-attach") {
@@ -121,5 +144,5 @@ export async function attachTo(
   const target = TARGETS[purpose];
   if (!target) throw badRequest("That upload type can't be attached.");
   if (!targetId) throw badRequest("Select the record to attach this to.");
-  return { attachment: await target.attach(targetId, asset, label, actor) };
+  return { attachment: await target.attach(targetId, asset, label, actor, documentType) };
 }

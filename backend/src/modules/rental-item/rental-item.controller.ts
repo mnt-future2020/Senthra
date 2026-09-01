@@ -22,6 +22,8 @@ function listParamsFrom(req: Request) {
     status: str(q.status),
     categoryId: str(q.categoryId),
     search: str(q.search),
+    // ?ids=a,b,c — a narrowing lookup for callers that already hold the ids they need.
+    ids: str(q.ids)?.split(",").map((v) => v.trim()).filter(Boolean),
   };
 }
 

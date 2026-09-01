@@ -24,6 +24,16 @@ export interface ReferenceSource<T> {
   load: () => Promise<T>;
   // Receives the loaded value. Not called if the component unmounted first or the load failed.
   onData: (data: T) => void;
+  /**
+   * Optional. Receives the rejection, IN ADDITION to the toast — for a source whose absence leaves a
+   * visible hole the user is owed a durable explanation for.
+   *
+   * The toast is the alert; it is gone in seconds. A form that quietly drops a whole panel (the PRF
+   * and PO supplier section, when the caller may pick a supplier but not read one) needs the reason
+   * to still be on screen afterwards, and to read the same as it does when the user picks a supplier
+   * by hand rather than arriving on an edit.
+   */
+  onError?: (err: unknown) => void;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- heterogeneous sources; each is internally typed.
@@ -83,6 +93,7 @@ export function useReferenceData(sources: AnySource[], deps: React.DependencyLis
               ? `Couldn't load ${src.label} — you don't have permission to view ${src.label}.`
               : `Couldn't load ${src.label}. ${err instanceof Error ? err.message : "Please try again."}`;
             pushToast(msg, "alert");
+            src.onError?.(err);
           }
           settle();
         },

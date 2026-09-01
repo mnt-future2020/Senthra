@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { PRF_DOCUMENT_TYPES } from "#modules/purchase-request/purchase-request.validation.js";
+
 // The browser's half of a direct upload. Everything here is a CLAIM — the size and media type are used
 // to fail early and to pick a resource type, and neither is trusted: the signed preset caps the real
 // size at Cloudinary and finalize reads the stored file. What the client cannot send at all is the
@@ -36,6 +38,15 @@ export const finalizeRequestSchema = z.object({
   fileName: z.string().trim().min(1, "File name is required.").max(200),
   mediaType: z.string().trim().min(1).max(120),
   label: z.string().trim().max(80).optional(),
+  // Which document group a PRF attachment joins. Named here rather than left to the module because
+  // this is the boundary the value crosses, and it is the one place it can be REFUSED: the browser
+  // rendering two upload areas is a UI fact, not a permission to write an arbitrary category. An
+  // absent value is legitimate and means `quote` — that is what every purpose without a picker
+  // sends, and what the PRF's own read side already assumes of a row that has none.
+  //
+  // Ignored by every other purpose. A PO/GRN/job upload that sends one is simply not asked for it
+  // again; `attachTo` only forwards it to the target that has somewhere to put it.
+  documentType: z.enum(PRF_DOCUMENT_TYPES).optional(),
   targetId: z.string().regex(OBJECT_ID, "Select a valid record.").optional(),
 });
 export type FinalizeRequestInput = z.infer<typeof finalizeRequestSchema>;

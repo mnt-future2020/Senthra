@@ -416,3 +416,24 @@ export async function requireActiveSupplier(supplierId: string): Promise<Supplie
   }
   return s;
 }
+
+/**
+ * The COMPLETE set of selectable suppliers, as the lean shape a picker needs.
+ *
+ * Deliberately uncapped, and deliberately tiny. Every form that offers a supplier used to load a
+ * paged list (`pageSize: 100`) and hand it straight to a `<Select>`, so past that page a real
+ * supplier simply had no row — and, because the shared Select renders its PLACEHOLDER for a value it
+ * cannot find, an already-saved record would have read as "none selected". One request returning
+ * only id/code/name removes both problems for a set this size, and matches the existing
+ * `/warehouses/options` and `/warehouses/engineer-options` endpoints.
+ *
+ * ACTIVE only: an inactive supplier must not be newly selectable. A record that already REFERENCES
+ * one keeps showing it — the form appends the saved value marked "(inactive)", which is the
+ * convention IrmItemForm already uses for its type, category and supplier links.
+ *
+ * No contact details, addresses or notes: this feeds a dropdown, and the one supplier a form
+ * actually needs in full is fetched by id when it is chosen.
+ */
+export function listSupplierOptions(): Promise<{ id: string; code: string; name: string }[]> {
+  return supplierRepo.findOptions();
+}

@@ -9,8 +9,6 @@ vi.mock("./goods-in.repository.js", () => ({
   createWithCode: vi.fn(),
   replaceItemsAndChildren: vi.fn(),
   completeTx: vi.fn(),
-  findIrmTrackFlags: vi.fn(),
-  findSerialConflicts: vi.fn(),
   addAttachment: vi.fn(),
   findAttachment: vi.fn(),
   removeAttachment: vi.fn(),
@@ -70,9 +68,7 @@ function grnItem(over: Record<string, unknown> = {}) {
     damagedQuantity: 1,
     acceptedQuantity: 5,
     notes: null,
-    serials: [],
-    batches: [],
-    irmItem: { id: IRM_ID, code: "IRM-0001", name: "CAT6", status: "active", trackSerialNumbers: false, trackBatchNumbers: false, trackInventory: true },
+    irmItem: { id: IRM_ID, code: "IRM-0001", name: "CAT6", status: "active", trackInventory: true },
     ...over,
   };
 }
@@ -121,8 +117,6 @@ const mockUpdate = grnRepo.update as ReturnType<typeof vi.fn>;
 const mockSoftDelete = grnRepo.softDelete as ReturnType<typeof vi.fn>;
 const mockCreateWithCode = grnRepo.createWithCode as ReturnType<typeof vi.fn>;
 const mockCompleteTx = grnRepo.completeTx as ReturnType<typeof vi.fn>;
-const mockFlags = grnRepo.findIrmTrackFlags as ReturnType<typeof vi.fn>;
-const mockSerialConflicts = grnRepo.findSerialConflicts as ReturnType<typeof vi.fn>;
 const mockReqReceivable = poService.requireReceivablePurchaseOrder as ReturnType<typeof vi.fn>;
 const mockApplyReceipt = poService.applyGoodsReceipt as ReturnType<typeof vi.fn>;
 const mockApplyInbound = inventoryService.applyInbound as ReturnType<typeof vi.fn>;
@@ -134,8 +128,6 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockUpdate.mockImplementation((_id: string, data: Record<string, unknown>) => Promise.resolve(grnRow(data)));
   mockReqReceivable.mockResolvedValue(poForReceipt());
-  mockFlags.mockResolvedValue([{ id: IRM_ID, trackInventory: true, trackSerialNumbers: false, trackBatchNumbers: false }]);
-  mockSerialConflicts.mockResolvedValue([]);
   mockCreateWithCode.mockImplementation((header: Record<string, unknown>) => Promise.resolve(grnRow({ ...header, items: [] })));
 });
 
@@ -224,33 +216,6 @@ describe("createGoodsReceipt — quantity maths + snapshots", () => {
     expect(mockCreateWithCode).not.toHaveBeenCalled();
   });
 
-  it("requires exactly `accepted` serial numbers for a serial-tracked item", async () => {
-    mockFlags.mockResolvedValue([{ id: IRM_ID, trackInventory: true, trackSerialNumbers: true, trackBatchNumbers: false }]);
-    await expect(
-      createGoodsReceipt(
-        { purchaseOrderId: PO_ID, receivedDate: "2026-06-15", items: [{ purchaseOrderItemId: POI_ID, receivedQuantity: 5, acceptedQuantity: 5, serials: ["S1", "S2"] }] } as Parameters<typeof createGoodsReceipt>[0],
-      ),
-    ).rejects.toThrow(/serial/i);
-  });
-
-  it("requires batch quantities to total `accepted` for a batch-tracked item", async () => {
-    mockFlags.mockResolvedValue([{ id: IRM_ID, trackInventory: true, trackSerialNumbers: false, trackBatchNumbers: true }]);
-    await expect(
-      createGoodsReceipt(
-        { purchaseOrderId: PO_ID, receivedDate: "2026-06-15", items: [{ purchaseOrderItemId: POI_ID, receivedQuantity: 5, acceptedQuantity: 5, batches: [{ batchNumber: "B1", quantity: 4 }] }] } as Parameters<typeof createGoodsReceipt>[0],
-      ),
-    ).rejects.toThrow(/total 5/i);
-  });
-
-  it("blocks a serial already received elsewhere", async () => {
-    mockFlags.mockResolvedValue([{ id: IRM_ID, trackInventory: true, trackSerialNumbers: true, trackBatchNumbers: false }]);
-    mockSerialConflicts.mockResolvedValue([{ serialLower: "s1" }]);
-    await expect(
-      createGoodsReceipt(
-        { purchaseOrderId: PO_ID, receivedDate: "2026-06-15", items: [{ purchaseOrderItemId: POI_ID, receivedQuantity: 1, acceptedQuantity: 1, serials: ["S1"] }] } as Parameters<typeof createGoodsReceipt>[0],
-      ),
-    ).rejects.toThrow(/already received/i);
-  });
 });
 
 describe("completeGoodsReceipt — the only inventory-writing action", () => {
